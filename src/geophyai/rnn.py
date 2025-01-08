@@ -8,7 +8,17 @@ from .utils import EdgePadding
 
 class RNN(torch.nn.Module):
     
-    def __init__(self, equation, shape, dev, abcn=50, free_surface=False):
+    def __init__(self, 
+                 equation, 
+                 shape, 
+                 dev, 
+                 source_type: list=[],
+                 receiver_type: list=[],
+                 abcn=50, 
+                 free_surface=False, 
+                 dh=10., 
+                 dt=0.002, 
+                 **kwargs):
 
         super(RNN, self).__init__()
 
@@ -19,6 +29,11 @@ class RNN(torch.nn.Module):
         self.dev = dev
         self.abcn = abcn
         self.free_surface = free_surface
+        self._dh = dh
+        self._dt = dt
+
+        self.source_type = source_type
+        self.receiver_type = receiver_type
 
         self.setup_abc()
 
@@ -34,11 +49,8 @@ class RNN(torch.nn.Module):
         self.b = abc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
         self.b = torch.from_numpy(self.b).to(self.dev)
 
-    def auxillary(self, ):
-        self.register_buffer('h', torch.tensor(self.geom['h'], dtype=torch.float32))
-        self.register_buffer('dt', torch.tensor(self.geom['dt'], dtype=torch.float32))
-        self.source_type = self.geom['source_type']
-        self.receiver_type = self.geom['receiver_type']
+        self.register_buffer('h', torch.tensor(self._dh, dtype=torch.float32))
+        self.register_buffer('dt', torch.tensor(self._dt, dtype=torch.float32))
 
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -60,7 +72,6 @@ class RNN(torch.nn.Module):
             sources (torch.Tensor): Source coordinates (nshots, 2)
             receivers (torch.Tensor): Receiver coordinates (nshots, nreceivers, 2)
         """
-        self.auxillary()
 
         nt = wavelet.shape[0]
         nshots = sources.shape[0]

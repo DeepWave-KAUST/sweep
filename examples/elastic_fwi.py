@@ -32,6 +32,10 @@ model = RNN(Elastic(spatial_order=spatial_order, device=dev),
             shape=shape, 
             dev=dev, 
             abcn=abcn, 
+            dh=dh,
+            dt=dt,
+            source_type=['vz'],
+            receiver_type=['vx', 'vz'],
             free_surface=free_surface)
 
 # Set the true model, the order of the parameters should be 
@@ -52,11 +56,6 @@ receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nre
 print("(Number of shots, dimension)", sources.shape)
 print("(Number of shots, number of receivers, dimension)", receivers.shape)
 
-model.geom = dict(h=dh, 
-                  dt=dt, 
-                  spatial_order=spatial_order, 
-                  source_type = ['vz'],
-                  receiver_type = ['vx', 'vz'])
 
 start_event = torch.cuda.Event(enable_timing=True)
 end_event = torch.cuda.Event(enable_timing=True)

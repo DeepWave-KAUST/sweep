@@ -29,6 +29,10 @@ plt.close()
 model = RNN(Acoustic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
+            dh=dh,
+            dt=dt,
+            source_type=['h1'],
+            receiver_type=['h1'],
             abcn=abcn, 
             free_surface=free_surface)
 
@@ -46,11 +50,6 @@ receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nre
 
 print("(Number of shots, dimension)", sources.shape)
 print("(Number of shots, number of receivers, dimension)", receivers.shape)
-
-model.geom = dict(h=dh, 
-                  dt=dt, 
-                  source_type = ['h1'],
-                  receiver_type = ['h1'])
 
 start_event = torch.cuda.Event(enable_timing=True)
 end_event = torch.cuda.Event(enable_timing=True)
