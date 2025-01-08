@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geophyai"
+version = "0.0.1"
+authors = [
+  { name="Shaowen Wang", email="shaowen.wang@kaust.edu.sa" },
+]
+description = "A.D. based package for seismic inverse problem."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/GeophyAI/geophyai"
+Issues = "https://github.com/GeophyAI/geophyai/issues"
