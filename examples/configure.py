@@ -2,7 +2,7 @@
 nt = 2500
 dt = 0.002
 delay = 0.256
-fm = 3
+fm = 5
 true_path = 'marmousi_true.npy'
 smooth_path = 'marmousi_smooth.npy'
 dh = 25
@@ -12,7 +12,7 @@ abcn = 50
 free_surface = False
 use_habc = False
 
-src_step = 4
+src_step = 2
 rec_step = 1
 srcz = 1
 recz = 1

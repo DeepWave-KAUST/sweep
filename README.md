@@ -80,4 +80,8 @@ The ground truth model, observed data and the gradient of the velocity model are
 ![grad_vp](figures/grad_vp.png)
 
 # Examples
-Two examples are provided in the `examples` folder. The first example `acoustic_fwi.py` shows an example of a simple acoustic inversion with Marmousi model. The second example `elastic_fwi.py` shows an example of a simple elastic multi-parameters inversion with Marmousi model.
+Three examples are provided in the `examples` folder. 
+- The script `acoustic_fwi.py` shows an example of a simple acoustic inversion with Marmousi model. 
+- The script `elastic_fwi.py` shows an example of a simple elastic multi-parameters inversion with Marmousi model.
+- The script `acoustic_encoding_fwi.py` shows an example of the source encoding acoustic inversion with Marmousi model.
+For running the examples, please install the package and type `python xxx.py` in the terminal.

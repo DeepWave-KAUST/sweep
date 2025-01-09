@@ -64,7 +64,7 @@ class RNN(torch.nn.Module):
     def parameters(self, ):
         return [getattr(self, name) for name in self.model_names]
 
-    def forward(self, wavelet, sources, receivers, sill, rill):
+    def forward(self, wavelet, sources, receivers, sill, rill, source_encoding=False):
         """Forward pass of the wave equation
 
         Args:
@@ -75,8 +75,9 @@ class RNN(torch.nn.Module):
 
         nt = wavelet.shape[0]
         nshots = sources.shape[0]
-        shape_wavefield = (nshots, 1) + self.shape
 
+        batch_size = 1 if source_encoding else nshots
+        shape_wavefield = (batch_size, 1) + self.shape
         sources = sources.copy()
         receivers = receivers.copy()
 
@@ -90,14 +91,14 @@ class RNN(torch.nn.Module):
         sources = torch.from_numpy(sources).to(self.dev).long()
         receivers = torch.from_numpy(receivers).to(self.dev).long()
 
-        src = Source(sources, shape_wavefield, self.dev)
+        src = Source(sources, shape_wavefield, self.dev, source_encoding=source_encoding)
         rec = Receiver(receivers)
 
         # Memory allocation for wavefields
         for name in self.wavefield_names:
             setattr(self, name, torch.zeros(shape_wavefield, device=self.dev))
 
-        record = torch.zeros((sources.shape[0], nt, receivers.shape[1], len(self.receiver_type)), dtype=torch.float32, device=self.dev)
+        record = torch.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=torch.float32, device=self.dev)
         fixargs = [EdgePadding.apply(para, self.padding) for para in self.parameters()] +[self.dt, self.h, self.b]
 
         for i in range(nt):

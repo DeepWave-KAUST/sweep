@@ -1,7 +1,7 @@
 import torch
 
 class Source(torch.nn.Module):
-    def __init__(self, coords, shape, dev):
+    def __init__(self, coords, shape, dev, source_encoding=False):
         """Source class for the wave equation
 
         Args:
@@ -11,8 +11,8 @@ class Source(torch.nn.Module):
         super(Source, self).__init__()
         self.mask = torch.zeros(shape, dtype=torch.float32, device=dev)
         for i in range(coords.shape[0]):
-            self.mask[i, :, coords[i, 1], coords[i, 0]] = 1.
-        
+            index = 0 if source_encoding else i
+            self.mask[index, :, coords[i, 1], coords[i, 0]] = 1.
 
     def forward(self, wavefield, wavelet):
         """Forward pass of the source
