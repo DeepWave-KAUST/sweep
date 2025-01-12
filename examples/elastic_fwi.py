@@ -110,21 +110,27 @@ for epoch in tqdm.trange(epochs):
         syn = model(wave, sources[rand_shots_this_step], receivers[rand_shots_this_step], 0., 0.)
         loss = (syn-torch.from_numpy(obs[rand_shots_this_step]).to(dev)).pow(2).mean()
         loss.backward()
+        # for m in model.parameters():
+        #     m.grad /= m.grad.max() # Just for stability
     opt.step()
 
     # Save the model
     if epoch % show_every == 0:
         vmin_vp, vmax_vp = vp_true.min(), vp_true.max()
         vmin_vs, vmax_vs = vs_true.min(), vs_true.max()
-        fig, axes = plt.subplots(2, 2, figsize=(8, 6))
-        show_data = [vp_true, vs_true, model.vp.detach().cpu().numpy(), model.vs.detach().cpu().numpy()]
-        titles = ['True Vp', 'True Vs', 'Inverted Vp', 'Inverted Vs']
+        fig, axes = plt.subplots(3, 2, figsize=(8, 9))
+        show_data = [vp_true, vs_true, 
+                     model.vp.detach().cpu().numpy(), model.vs.detach().cpu().numpy(), 
+                     model.vp.grad.detach().cpu().numpy(), model.vs.grad.detach().cpu().numpy()]
+        titles = ['True Vp', 'True Vs', 'Inverted Vp', 'Inverted Vs', 'Gradient Vp', 'Gradient Vs']
         for ax, data, title in zip(axes.ravel(), show_data, titles):
             if 'vp' in title.lower():
                 vmin, vmax = vmin_vp, vmax_vp
             else:
                 vmin, vmax = vmin_vs, vmax_vs
-            ax.imshow(data, cmap='seismic', aspect='auto', extent=extent, vmin=vmin, vmax=vmax)
+            if 'gradient' in title.lower():
+                vmin, vmax = np.percentile(data, [2, 98])
+            plt.colorbar(ax.imshow(data, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
             ax.set_title(title)
             ax.set_xlabel('X (m)')
             ax.set_ylabel('Z (m)')

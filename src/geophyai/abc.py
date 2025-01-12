@@ -79,6 +79,9 @@ def habc_coefficients_2d(domain_shape,
 def abc_coefficients_2d(domain_shape, N=50, B=100., free_surface=False):
     Nx, Ny = domain_shape
 
+    if N == 0:
+        return np.zeros(domain_shape, dtype=np.float32)
+
     R = 10**(-((np.log10(N)-1)/np.log10(2))-3)
     # d0 = -(order+1)*cp/(2*abs_N)*np.log(R) # Origin
     R = 1e-6

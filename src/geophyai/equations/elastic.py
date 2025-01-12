@@ -1,13 +1,12 @@
 import torch
-from .operator import diff_using_roll
-from typing import Tuple, Optional, Union, List
-from geophyai.scalars import staggered_grid_coes
+from .operator import PartialDerivative
+from typing import Tuple, Optional, Union, List, Any
 
 class Elastic:
 
     def __init__(self, spatial_order=4, device='cpu'):
-        self.kernel = torch.from_numpy(staggered_grid_coes(int(spatial_order//2))).to(device)
-    
+        self.pd = torch.jit.script(PartialDerivative(spatial_order, device))
+
     @property
     def models(self):
         return ['vp', 'vs', 'rho']
@@ -18,7 +17,7 @@ class Elastic:
     
     def func(self, *args, **kwargs):
         
-        return Elastic.step(*args, coes=self.kernel, **kwargs)
+        return Elastic.step(*args, pd=self.pd, **kwargs)
 
     @torch.jit.script
     def step(vx: torch.Tensor, #
@@ -32,7 +31,7 @@ class Elastic:
              dt: torch.Tensor,    # time step
              h: torch.Tensor,     # grid spacing
              b: torch.Tensor,     # ABC coefficient
-             coes: torch.Tensor,# FD coefficients
+             pd: PartialDerivative,
              habc_masks: Optional[Union[None, List[torch.Tensor]]]=None)  -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
         ### PML
@@ -40,19 +39,19 @@ class Elastic:
         lame_mu = rho*(vs.pow(2))
         c = 0.5*dt*b
 
-        vx_x = diff_using_roll(vx, 3, coes)
-        vz_z = diff_using_roll(vz, 2, coes, False)
-        vx_z = diff_using_roll(vx, 2, coes)
-        vz_x = diff_using_roll(vz, 3, coes, False)
+        vx_x = pd.x_forward(vx)
+        vz_z = pd.z_backward(vz)
+        vx_z = pd.z_forward(vx)
+        vz_x = pd.x_backward(vz)
 
         y_txx  = (1+c)**-1*(dt*h**(-1)*((lame_lambda+2*lame_mu)*vx_x+lame_lambda*vz_z)+(1-c)*txx)
         y_tzz  = (1+c)**-1*(dt*h**(-1)*((lame_lambda+2*lame_mu)*vz_z+lame_lambda*vx_x)+(1-c)*tzz)
         y_txz = (1+c)**-1*(dt*lame_mu*h**(-1)*(vz_x+vx_z)+(1-c)*txz)
 
-        txx_x = diff_using_roll(y_txx, 3, coes, False)
-        txz_z = diff_using_roll(y_txz, 2, coes, False)
-        tzz_z = diff_using_roll(y_tzz, 2, coes)
-        txz_x = diff_using_roll(y_txz, 3, coes)
+        txx_x = pd.x_backward(y_txx)
+        txz_z = pd.z_backward(y_txz)
+        tzz_z = pd.z_forward(y_tzz)
+        txz_x = pd.x_forward(y_txz)
 
         y_vx = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txx_x+txz_z)+(1-c)*vx)
         y_vz = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txz_x+tzz_z)+(1-c)*vz)

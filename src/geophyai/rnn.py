@@ -39,10 +39,10 @@ class RNN(torch.nn.Module):
 
     def setup_abc(self, ):
         if self.free_surface:
-            self.padding = (0, )+(self.abcn, )*3
+            self.padding = (self.abcn, self.abcn, 0, self.abcn) # left, right. top, bottom, refer to torch.nn.functional.pad
             self.shape = (self.shape[0]+self.abcn, self.shape[1]+2*self.abcn)
         else:
-            self.padding = (self.abcn, )*4
+            self.padding = (self.abcn, )*4 # left, right. top, bottom, refer to  torch.nn.functional.pad
             self.shape = (self.shape[0]+2*self.abcn, self.shape[1]+2*self.abcn)
 
         # Absorbing boundary conditions
@@ -107,6 +107,9 @@ class RNN(torch.nn.Module):
 
             # Time step forward
             wavefield = self.equation.func(*wavefield, *fixargs)
+
+            # if i % 100 == 0:
+                # np.save(f'data/wavefield_{i:04d}.npy', np.stack([w.detach().cpu().numpy() for w in wavefield]))
 
             # Exchange wavefields
             for name, data in zip(self.wavefield_names, wavefield):
