@@ -64,13 +64,14 @@ class RNN(torch.nn.Module):
     def parameters(self, ):
         return [getattr(self, name) for name in self.model_names]
 
-    def forward(self, wavelet, sources, receivers, sill, rill, source_encoding=False):
+    def forward(self, wavelet, sources, receivers, sill=None, rill=None, source_encoding=False, models=None):
         """Forward pass of the wave equation
 
         Args:
             wavelet (torch.Tensor): Wavelet tensor (nt,)
             sources (torch.Tensor): Source coordinates (nshots, 2)
             receivers (torch.Tensor): Receiver coordinates (nshots, nreceivers, 2)
+            models (list): List of model parameters (Must be torch.Tensor)
         """
 
         nt = wavelet.shape[0]
@@ -99,7 +100,12 @@ class RNN(torch.nn.Module):
             setattr(self, name, torch.zeros(shape_wavefield, device=self.dev))
 
         record = torch.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=torch.float32, device=self.dev)
-        fixargs = [EdgePadding.apply(para, self.padding) for para in self.parameters()] +[self.dt, self.h, self.b]
+
+        # Get the model parameters
+        models = models if models is not None else self.parameters()
+        models = [EdgePadding.apply(para, self.padding) for para in models]
+        
+        fixargs = models+[self.dt, self.h, self.b]
 
         for i in range(nt):
 

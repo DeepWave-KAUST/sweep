@@ -64,8 +64,7 @@ start_event.record()
 with torch.no_grad():
     obs = model.forward(wave, 
                         sources, 
-                        receivers,
-                        0., 0.).cpu().numpy()
+                        receivers).cpu().numpy()
 end_event.record()
 torch.cuda.synchronize()
 elapsed_time = start_event.elapsed_time(end_event)
@@ -107,7 +106,7 @@ for epoch in tqdm.trange(epochs):
     # Accumulate the gradients, when the graph is too large to be kept in memory
     for step in range(step_per_epoch):
         rand_shots_this_step = rand_shots[batch_per_step*step:batch_per_step*(step+1)]
-        syn = model(wave, sources[rand_shots_this_step], receivers[rand_shots_this_step], 0., 0.)
+        syn = model(wave, sources[rand_shots_this_step], receivers[rand_shots_this_step])
         loss = (syn-torch.from_numpy(obs[rand_shots_this_step]).to(dev)).pow(2).mean()
         loss.backward()
         # for m in model.parameters():

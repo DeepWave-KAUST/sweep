@@ -58,8 +58,7 @@ start_event.record()
 with torch.no_grad():
     obs = model.forward(wave, 
                         sources, 
-                        receivers,
-                        0., 0.).cpu().numpy()
+                        receivers).cpu().numpy()
 end_event.record()
 torch.cuda.synchronize()
 elapsed_time = start_event.elapsed_time(end_event)
@@ -86,7 +85,7 @@ for epoch in tqdm.trange(epochs):
 
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
 
-    coding_syn = model(wave, sources[rand_shots], receivers, 0., 0., source_encoding=True)
+    coding_syn = model(wave, sources[rand_shots], receivers, source_encoding=True)
     coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
     loss = (coding_syn-coding_obs).pow(2).mean()
     loss.backward()
