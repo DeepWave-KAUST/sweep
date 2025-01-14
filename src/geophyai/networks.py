@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import torch.nn as nn
-import tinycudann as tc
+# import tinycudann as tc
 
 class SineMLP(nn.Module):
     def __init__(self, 
@@ -18,12 +18,12 @@ class SineMLP(nn.Module):
         self.use_hash = use_hash
 
         if use_hash:
-
+            raise NotImplementedError('Hashing not implemented yet')
             # self.enc = MultiResHashGrid(in_dim, 16, 2, 18, 64, 256)
 
-            self.enc = tc.Encoding(in_dim, hash_config, dtype=torch.float32)
-            in_dim = self.enc.n_output_dims
-            print('Reset in_dim to', in_dim)
+            # self.enc = tc.Encoding(in_dim, hash_config, dtype=torch.float32)
+            # in_dim = self.enc.n_output_dims
+            # print('Reset in_dim to', in_dim)
         self.first_layer = nn.Linear(in_dim, 
                                      features, 
                                      bias=use_bias)

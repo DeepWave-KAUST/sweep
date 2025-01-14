@@ -107,9 +107,17 @@ class RNN(torch.nn.Module):
         
         fixargs = models+[self.dt, self.h, self.b]
 
+        def save_grad(grad):
+            rill[:] += torch.sum(grad[..., self.abcn:-self.abcn, self.abcn:-self.abcn]**2, 0).squeeze()
+
         for i in range(nt):
 
             wavefield = [getattr(self, name) for name in self.wavefield_names]
+
+            if wavefield[0].requires_grad and rill is not None:
+                wavefield[0].register_hook(save_grad)
+            if sill is not None:
+                sill[:] += torch.sum(wavefield[0][..., self.abcn:-self.abcn, self.abcn:-self.abcn].detach()**2, 0).squeeze()
 
             # Time step forward
             wavefield = self.equation.func(*wavefield, *fixargs)

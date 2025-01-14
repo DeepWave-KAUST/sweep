@@ -1,4 +1,5 @@
 import sys, tqdm
+sys.path.append('../src')
 import torch
 torch.backends.cudnn.benchmark = True
 from geophyai.rnn import RNN
@@ -8,13 +9,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from configure import *
 
-t = np.arange(0, int(nt//2)*dt, dt)
+t = np.arange(0, int(nt)*dt, dt)
 
-vp_true = np.load(true_path)[::2, ::2]
+vp_true = np.load(true_path)#[::2, ::2]
 vs_true = vp_true/1.732
 rho_true = np.ones_like(vp_true)*1000
 
-vp_smooth = np.load(smooth_path)[::2, ::2]
+vp_smooth = np.load(smooth_path)#[::2, ::2]
 
 shape = vp_true.shape
 extent = [0, shape[1]*dh, shape[0]*dh, 0]
@@ -45,10 +46,10 @@ model.set_parameters([torch.from_numpy(vp_true).to(dev),
                       torch.from_numpy(rho_true).to(dev)])
 
 # Geometry
-src_x = np.arange(0,nx, src_step).reshape(-1, 1)
+src_x = np.arange(0,nx, src_step*2).reshape(-1, 1)
 src_z = np.ones_like(src_x)*srcz
 sources = np.concatenate([src_x, src_z], axis=1) # (nshots, 2)
-rec_x = np.arange(0, nx, rec_step).reshape(-1, 1)
+rec_x = np.arange(0, nx, rec_step*2).reshape(-1, 1)
 rec_z = np.ones_like(rec_x)*recz
 receivers = np.concatenate([rec_x, rec_z], axis=1)
 receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nreceivers, 2)
@@ -103,12 +104,19 @@ for epoch in tqdm.trange(epochs):
     opt.zero_grad()
 
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
+
+    # Source encoding for acceleration
+    coding_syn = model(wave, sources[rand_shots], receivers[0:1], source_encoding=True)
+    coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
+    
+    loss = (coding_syn-coding_obs).pow(2).mean()
+    loss.backward()
     # Accumulate the gradients, when the graph is too large to be kept in memory
-    for step in range(step_per_epoch):
-        rand_shots_this_step = rand_shots[batch_per_step*step:batch_per_step*(step+1)]
-        syn = model(wave, sources[rand_shots_this_step], receivers[rand_shots_this_step])
-        loss = (syn-torch.from_numpy(obs[rand_shots_this_step]).to(dev)).pow(2).mean()
-        loss.backward()
+    # for step in range(step_per_epoch):
+    #     rand_shots_this_step = rand_shots[batch_per_step*step:batch_per_step*(step+1)]
+    #     syn = model(wave, sources[rand_shots_this_step], receivers[rand_shots_this_step])
+    #     loss = (syn-torch.from_numpy(obs[rand_shots_this_step]).to(dev)).pow(2).mean()
+    #     loss.backward()
         # for m in model.parameters():
         #     m.grad /= m.grad.max() # Just for stability
     opt.step()
