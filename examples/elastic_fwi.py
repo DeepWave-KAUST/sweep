@@ -1,5 +1,5 @@
 import sys, tqdm
-sys.path.append('../src')
+# sys.path.append('../src')
 import torch
 torch.backends.cudnn.benchmark = True
 from geophyai.rnn import RNN

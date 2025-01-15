@@ -1,4 +1,5 @@
 import torch
+import geomloss
 
 class MSE(torch.nn.Module):
     """Mean Squared Error(L2) loss function.
@@ -31,3 +32,18 @@ class CosineSimilarity(torch.nn.Module):
 
     def forward(self, syn, obs):
         return (1-torch.nn.functional.cosine_similarity(syn, obs, dim=self.axis)).mean()
+    
+class Sinkhorn(torch.nn.Module):
+    def __init__(self, p=2, blur=0.01):
+        """Sinkhorn loss function.
+        Args:
+            p (int, optional): The p-norm. Defaults to 2.
+            blur (float, optional): The blur factor. Defaults to 0.01.
+        """
+        self.p = p
+        self.blur = blur
+        super(Sinkhorn, self).__init__()
+        self.creteria = geomloss.SamplesLoss("sinkhorn", p=self.p, blur=self.blur, debias=False)
+
+    def forward(self, syn, obs):
+        return self.creteria(syn.squeeze(), obs.squeeze()).mean()
