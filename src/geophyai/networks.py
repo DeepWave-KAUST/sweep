@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import torch.nn as nn
-# import tinycudann as tc
+import tinycudann as tc
 
 class SineMLP(nn.Module):
     def __init__(self, 
@@ -18,12 +18,12 @@ class SineMLP(nn.Module):
         self.use_hash = use_hash
 
         if use_hash:
-            raise NotImplementedError('Hashing not implemented yet')
+            # raise NotImplementedError('Hashing not implemented yet')
             # self.enc = MultiResHashGrid(in_dim, 16, 2, 18, 64, 256)
 
-            # self.enc = tc.Encoding(in_dim, hash_config, dtype=torch.float32)
-            # in_dim = self.enc.n_output_dims
-            # print('Reset in_dim to', in_dim)
+            self.enc = tc.Encoding(in_dim, hash_config, dtype=torch.float32)
+            in_dim = self.enc.n_output_dims
+            print('Reset in_dim to', in_dim)
         self.first_layer = nn.Linear(in_dim, 
                                      features, 
                                      bias=use_bias)
@@ -52,8 +52,8 @@ class SineMLP(nn.Module):
         shape = x.shape[:-1]
         omega = omega if omega is not None else self.omega
         if self.use_hash:
-            # x = self.enc(x.reshape(-1, 2)).view(*shape, -1)
-            x = self.enc(x)
+            x = self.enc(x.reshape(-1, 2)).view(*shape, -1)
+            # x = self.enc(x)
         x = torch.sin(omega * self.first_layer(x))
         for layer in self.layers:
             x = torch.sin(omega * layer(x))
@@ -65,8 +65,8 @@ class MLP(nn.Module):
     def __init__(self, 
                  layers: int, 
                  features: int, 
-                 out_dim: int, 
-                 in_dim: int, 
+                 out_dim: int=1, 
+                 in_dim: int=2, 
                  use_bias=True, 
                  use_hash=False, 
                  hash_config=None, 
@@ -96,8 +96,10 @@ class MLP(nn.Module):
 
 
     def forward(self, x):
+        shape = x.shape[:-1]
         if self.use_hash:
-            x = self.enc(x)
+            x = self.enc(x.reshape(-1, 2)).view(*shape, -1)
+            # x = self.enc(x)
         x = self.activation(self.first_layer(x))
         for layer in self.layers:
             x = self.activation(layer(x))

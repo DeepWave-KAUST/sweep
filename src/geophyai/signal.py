@@ -2,6 +2,8 @@ import torch
 import numpy as np
 from scipy import signal
 from torchaudio.functional import filtfilt
+from scipy.interpolate import RegularGridInterpolator
+
 
 def decide_filter_type(freq):
     """Summary: Decide the filter type
@@ -72,6 +74,25 @@ def frequency_analysis(d, dt=0.001, axis=0):
     amp = backend.sum(backend.abs(fft_freq), axis=sum_axis)[:size] 
     return amp, freqs
 
+def resize(d, ori_shape, new_shape):
+
+    nz, nx = ori_shape
+    newnz, newnx = new_shape
+
+    z = np.arange(nz)
+    x = np.arange(nx)
+
+    new_z = np.linspace(0, nz - 1, newnz)
+    new_x = np.linspace(0, nx - 1, newnx)
+
+    interpolator = RegularGridInterpolator((z, x), d)
+
+    new_z_mesh, new_x_mesh = np.meshgrid(new_z, new_x, indexing='ij')
+    new_points = np.array([new_z_mesh.ravel(), new_x_mesh.ravel()]).T
+    new_d = interpolator(new_points).reshape(newnz, newnx)
+    
+    return new_d
+
 def ricker(t, f=10.):
     """Ricker wavelet.
 
@@ -84,4 +105,6 @@ def ricker(t, f=10.):
     """
     r = (1 - 2 * (np.pi * f * t) ** 2) * np.exp(-(np.pi * f * t) ** 2)
     return r.astype(np.float32)
+
+
 

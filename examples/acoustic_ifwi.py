@@ -110,7 +110,7 @@ for epoch in tqdm.trange(epochs):
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
     vp = nnmlp(grid).view(shape)*1000+3000
     # Source Encoding
-    # coding_syn = model(wave, sources[rand_shots], receivers, 0., 0., source_encoding=True, models=[vp])
+    # coding_syn = model(wave, sources[rand_shots], receivers, models=[vp], source_encoding=True)
     # coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
     # loss = (coding_syn-coding_obs).pow(2).mean()
 

@@ -57,7 +57,7 @@ sources = np.array([[1, 1]]) # in grid, shape=(nshots, 2)
 receivers = np.array([[[99, 1]]]) # in grid, shape=(nshots, nreceivers, 2)
 
 # Forward modeling
-obs = model.forward(wave, sources, receivers, 0., 0.)
+obs = model.forward(wave, sources, receivers)
 # Backward propagation
 obs.pow(2).sum().backward()
 

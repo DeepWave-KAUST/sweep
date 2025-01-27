@@ -4,8 +4,8 @@ dt = 0.002
 delay = 0.256
 fm = 5
 true_path = 'marmousi_true.npy'
-# smooth_path = 'marmousi_smooth.npy'
-smooth_path = 'marmousi_linear.npy'
+smooth_path = 'marmousi_smooth.npy'
+# smooth_path = 'marmousi_linear.npy'
 dh = 25
 spatial_order = 8
 
