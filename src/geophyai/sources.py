@@ -29,12 +29,23 @@ class SourceTorch(SourceBase, torch.nn.Module):
         torch.nn.Module.__init__(self)
         super().__init__()
         self.mask = torch.zeros(shape, dtype=torch.float32, device=dev)
+        self.se = source_encoding
+        self.coords = coords
         for i in range(coords.shape[0]):
             index = 0 if source_encoding else i
             self.mask[index, :, coords[i, 1], coords[i, 0]] = 1.
 
+    def forward_source_encoding(self, wavefield, wavelet):
+        z = self.coords[..., 1]
+        x = self.coords[..., 0]
+        wavefield[0, 0, z, x] = wavefield[0, 0, z, x] + wavelet
+        return wavefield
+
     def forward(self, *args):
-        return super().forward(*args)
+        if self.se:
+            return self.forward_source_encoding(*args)
+        else:
+            return super().forward(*args)
     
 class SourceJax(SourceBase):
     def __init__(self, coords, shape, source_encoding=False):
@@ -46,9 +57,20 @@ class SourceJax(SourceBase):
         """
         super().__init__()
         self.mask = jax.numpy.zeros(shape, dtype=jax.numpy.float32)
+        self.se = source_encoding
+        self.coords = coords
         for i in range(coords.shape[0]):
             index = 0 if source_encoding else i
             self.mask = self.mask.at[index, 0, coords[i, 1], coords[i, 0]].set(1.)
+    
+    def forward_source_encoding(self, wavefield, wavelet):
+        wavefield = wavefield.at[0, 0, self.coords[..., 1], self.coords[..., 0]].add(wavelet)
+        return wavefield
 
     def __call__(self, *args):
-        return super().forward(*args)
+        if self.se:
+            return self.forward_source_encoding(*args)
+        else:
+            return super().forward(*args)
+        
+        

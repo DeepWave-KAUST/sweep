@@ -5,7 +5,7 @@ import numpy as np
 from .sources import SourceTorch, SourceJax
 from .receivers import ReceiverTorch, ReceiverJax
 from .abc import abc_coefficients_2d
-from .utils import EdgePadding
+from .utils import EdgePadding, edge_pad
 
 class RNNBase:
 
@@ -86,13 +86,13 @@ class RNNTorch(RNNBase, torch.nn.Module):
         """Forward pass of the wave equation
 
         Args:
-            wavelet (torch.Tensor): Wavelet tensor (nt,)
-            sources (torch.Tensor): SourceTorch coordinates (nshots, 2)
-            receivers (torch.Tensor): ReceiverTorch coordinates (nshots, nreceivers, 2)
+            wavelet (np.array): Wavelet tensor (nt,)
+            sources (np.array): Source coordinates (nshots, 2)
+            receivers (np.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
         """
 
-        nt = wavelet.shape[0]
+        nt = wavelet.shape[-1]
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
@@ -107,6 +107,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
             sources += self.abcn
             receivers += self.abcn
 
+        wavelet = torch.from_numpy(wavelet).to(self.dev).float()
         sources = torch.from_numpy(sources).to(self.dev).long()
         receivers = torch.from_numpy(receivers).to(self.dev).long()
 
@@ -149,7 +150,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
 
             # Add source
             for source_type in self.source_type:
-                setattr(self, source_type, src(getattr(self, source_type), wavelet[i]))
+                setattr(self, source_type, src(getattr(self, source_type), wavelet[..., i]))
 
             # Record wavefields
             for ic, receiver_type in enumerate(self.receiver_type):
@@ -179,7 +180,7 @@ class RNNJax(RNNBase):
         """
         padding_z = (padding[0], padding[1])
         padding_x = (padding[2], padding[3])
-        return jnp.pad(d, (padding_z, padding_x), mode='edge')
+        return edge_pad(d, (padding_z, padding_x))#jnp.pad(d, (padding_z, padding_x), mode='edge')
     
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -190,13 +191,13 @@ class RNNJax(RNNBase):
         """Forward pass of the wave equation
 
         Args:
-            wavelet (torch.Tensor): Wavelet tensor (nt,)
-            sources (torch.Tensor): SourceTorch coordinates (nshots, 2)
-            receivers (torch.Tensor): ReceiverTorch coordinates (nshots, nreceivers, 2)
+            wavelet (jnp.array): Wavelet tensor (nt,)
+            sources (jnp.array): Source coordinates (nshots, 2)
+            receivers (jnp.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
         """
 
-        nt = wavelet.shape[0]
+        nt = wavelet.shape[-1]
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
