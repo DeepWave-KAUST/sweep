@@ -197,6 +197,9 @@ class RNNJax(RNNBase):
             models (list): List of model parameters (Must be torch.Tensor)
         """
 
+        wavelet = jnp.array(wavelet, dtype=jnp.float32)
+        
+
         nt = wavelet.shape[-1]
         nshots = sources.shape[0]
 
