@@ -15,7 +15,7 @@ def laplace(u, h=1, kernel=None):
 class PartialDerivative:
 
     def __init__(self, spatial_order:int=4):
-        self.coes = jnp.array(staggered_grid_coes_torch(int(spatial_order//2)))
+        self.coes = jnp.array(staggered_grid_coes_torch(int(spatial_order//2)), dtype=jnp.float32)
         num_kernels = spatial_order // 2 # max length is 2*num_kernels+1
         self.kxf = self.create_x_kernels(num_kernels) # x partial derivatives, forward mode
         self.kxb = self.create_x_kernels(num_kernels) # x partial derivatives, backward mode
@@ -33,11 +33,11 @@ class PartialDerivative:
             self.kzb[i] = self.kzb[i].at[-1,:].set(1)
     
     def create_x_kernel(self, length: int):
-        kernel = jnp.zeros((1,length))
+        kernel = jnp.zeros((1,length), dtype=jnp.float32)
         return kernel
     
     def create_z_kernel(self, length: int):
-        kernel = jnp.zeros((length,1))
+        kernel = jnp.zeros((length,1), dtype=jnp.float32)
         return kernel
 
     def create_x_kernels(self, num_kernels: int):
@@ -47,25 +47,25 @@ class PartialDerivative:
         return [self.create_z_kernel(2*i+1) for i in range(1, num_kernels+1)]
     
     def x_forward(self, u):
-        results = jnp.zeros_like(u)
+        results = jnp.zeros_like(u, dtype=jnp.float32)
         for i in range(len(self.kxf)):
             results = results + batch_convolve2d(u, self.kxf[i])*self.coes[i]
         return results
     
     def x_backward(self, u):
-        results = jnp.zeros_like(u)
+        results = jnp.zeros_like(u, dtype=jnp.float32)
         for i in range(len(self.kxb)):
             results = results + batch_convolve2d(u, self.kxb[i])*self.coes[i]
         return results
     
     def z_forward(self, u):
-        results = jnp.zeros_like(u)
+        results = jnp.zeros_like(u, dtype=jnp.float32)
         for i in range(len(self.kzf)):
             results = results + batch_convolve2d(u, self.kzf[i])*self.coes[i]
         return results
     
     def z_backward(self, u):
-        results = jnp.zeros_like(u)
+        results = jnp.zeros_like(u, dtype=jnp.float32)
         for i in range(len(self.kzb)):
             results = results + batch_convolve2d(u, self.kzb[i])*self.coes[i]
         return results

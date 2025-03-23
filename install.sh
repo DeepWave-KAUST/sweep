@@ -1,2 +1,2 @@
 python -m build
-pip install dist/*.whl
+pip install dist/*.whl --force-reinstall

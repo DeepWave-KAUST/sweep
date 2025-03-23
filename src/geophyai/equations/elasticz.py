@@ -4,7 +4,7 @@ from .operator import PartialDerivative
 from .operator_jax import PartialDerivative as PartialDerivativeJax
 from typing import Tuple, Optional, Union, List, Any
 
-class Elastic:
+class ElasticZ:
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         if backend == 'torch':
@@ -14,17 +14,17 @@ class Elastic:
 
     @property
     def models(self):
-        return ['vp', 'vs', 'rho']
+        return ['vpz', 'vsz', 'rho']
     
     @property
     def wavefields(self):
         return ['vx', 'vz', 'txx', 'tzz', 'txz']
     
     def func(self, *args, **kwargs):
-        return Elastic.step(*args, pd=self.pd, **kwargs)
+        return ElasticZ.step(*args, pd=self.pd, **kwargs)
     
     def func_jax(self, *args, **kwargs):
-        return jax.checkpoint(Elastic.step_jax(*args, pd=self.pd, **kwargs))
+        return jax.checkpoint(ElasticZ.step_jax(*args, pd=self.pd, **kwargs))
 
     @torch.jit.script
     def step(vx: torch.Tensor, #
@@ -67,9 +67,12 @@ class Elastic:
 
     @partial(jax.jit, static_argnums=(11,))
     def step_jax(vx, vz, txx, tzz, txz,
-                 vp, vs, rho, 
+                 vpz, vsz, rho, 
                  dt, h, b, pd=None):
-
+        
+        vp = vpz/rho
+        vs = vsz/rho
+        
         lame_lambda = rho*(vp**2-2*vs**2)
         lame_mu = rho*vs**2
         c = 0.5*dt*b
