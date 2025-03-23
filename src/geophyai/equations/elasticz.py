@@ -24,7 +24,7 @@ class ElasticZ:
         return ElasticZ.step(*args, pd=self.pd, **kwargs)
     
     def func_jax(self, *args, **kwargs):
-        return jax.checkpoint(ElasticZ.step_jax(*args, pd=self.pd, **kwargs))
+        return ElasticZ.step_jax(*args, pd=self.pd, **kwargs)
 
     @torch.jit.script
     def step(vx: torch.Tensor, #

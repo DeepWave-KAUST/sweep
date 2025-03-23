@@ -24,7 +24,7 @@ class Elastic:
         return Elastic.step(*args, pd=self.pd, **kwargs)
     
     def func_jax(self, *args, **kwargs):
-        return jax.checkpoint(Elastic.step_jax(*args, pd=self.pd, **kwargs))
+        return Elastic.step_jax(*args, pd=self.pd, **kwargs)
 
     @torch.jit.script
     def step(vx: torch.Tensor, #

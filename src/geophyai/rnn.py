@@ -263,7 +263,7 @@ class RNNJax(RNNBase):
             return (wavefields, fixargs, _rec), None
         
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
-
+        step_fn = jax.checkpoint(step_fn)
         initial = (wavefields, tuple(fixargs), record)
         (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(nt))
         rec = final[-1]
