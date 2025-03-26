@@ -53,6 +53,9 @@ class RNNBase:
         else:
             self.padding = (self.abcn, )*4 # left, right. top, bottom, refer to  torch.nn.functional.pad
             self.shape = (self.shape[0]+2*self.abcn, self.shape[1]+2*self.abcn)
+
+        if getattr(self.equation, 'need_init', False):
+            self.equation.init(self.shape, self.dev, self._dh)
         self.b = abc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
 
     def get_parameters(self, key):
