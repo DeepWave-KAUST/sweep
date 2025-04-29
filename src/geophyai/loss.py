@@ -1,5 +1,38 @@
+import jax
 import torch
 import geomloss
+from .tensor import JaxTensor
+
+class Loss:
+
+    def __init__(self, loss_fn, *inputs):
+        """ Loss function wrapper for JAX.
+
+        Args:
+            loss_fn (func): The loss function to be used.
+            inputs (list [JaxTensor]): The list of JaxTensor objects to be used as inputs for the loss function.
+        """
+        self.inputs = inputs
+        self.loss_fn = loss_fn
+        self.value = None
+
+    def backward(self,):
+
+        raw_params = [p.value for p in self.inputs]
+
+        def wrapped_loss(raws):
+            tensors = [JaxTensor(val) for val in raws]
+            return self.loss_fn(*tensors)
+
+        loss, grads = jax.value_and_grad(wrapped_loss)(raw_params)
+
+        for p, g in zip(self.inputs, grads):
+            p.grad = g
+
+        self.value = loss
+    
+    def __repr__(self):
+        return f"Loss(value={self.value})"
 
 class MSE(torch.nn.Module):
     """Mean Squared Error(L2) loss function.

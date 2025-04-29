@@ -2,8 +2,11 @@ import sys, tqdm, os, jax, optax
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
-# sys.path.append('../src')
+sys.path.append('../src')
+
 from geophyai.rnn import RNNJax
+from geophyai.tensor import JaxTensor
+from geophyai.loss import Loss
 from geophyai.equations import Acoustic
 from geophyai.signal import ricker
 from functools import partial
@@ -80,23 +83,26 @@ opt_state = opt.init(model.vp)
 sources = jnp.array(sources)
 receivers = jnp.array(receivers)
 
+
+def criterion(syn, obs):
+    return jnp.mean((syn-obs)**2)
+
+
 @jax.jit
-def fwi_step(params, rand_shots):
-    # @jax.jit
-    def loss_fn(params, shot_nums):
-        # Forward modeling
-        syn = model(wave,
-                    sources=sources[shot_nums], 
-                    receivers=receivers[shot_nums], 
-                    models=[params])
-        _obs = obs[shot_nums]
+def fwi_step(vp, rand_shots):
 
-        _loss_ = jnp.mean((syn-_obs)**2)
+    f = partial(model, wavelet=wave, sources=sources[rand_shots], receivers=receivers[rand_shots])
 
-        return _loss_, (syn, _obs)
-    # Compute the gradient
-    (loss, data), gradients = jax.value_and_grad(loss_fn, has_aux=True)(params, rand_shots)
-    return loss, gradients
+    def loss_fn(*args):
+        syn = f(models=[p.value for p in args])
+        return criterion(syn, obs[rand_shots]) # Must be a scalar
+
+    vp = JaxTensor(vp)
+
+    loss = Loss(loss_fn, *[vp])
+    loss.backward()
+
+    return loss.value, vp.grad
 
 LOSS = []
 for epoch in tqdm.trange(epochs):
@@ -105,8 +111,8 @@ for epoch in tqdm.trange(epochs):
     rand_shots = random.randint(subkey, (batchsize,), 0, sources.shape[0])
 
     loss, grads = fwi_step(model.vp, rand_shots)
-    model.vp, opt_state = update_fn(model.vp, grads, opt_state)
 
+    model.vp, opt_state = update_fn(model.vp, grads, opt_state)
     print(f'Epoch: {epoch}, Loss: {loss}')
     LOSS.append(loss)
     # Save the model
