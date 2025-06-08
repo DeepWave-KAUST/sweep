@@ -10,7 +10,7 @@ dh = 25.
 spatial_order = 8
 
 abcn = 50
-free_surface = False
+free_surface = True
 use_habc = False
 
 src_step = 2

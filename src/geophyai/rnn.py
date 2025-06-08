@@ -181,8 +181,8 @@ class RNNJax(RNNBase):
         Args:
             padding (list): 4 elements list for padding the model parameters
         """
-        padding_z = (padding[0], padding[1])
-        padding_x = (padding[2], padding[3])
+        padding_z = (padding[2], padding[3])
+        padding_x = (padding[0], padding[1])
         return edge_pad(d, (padding_z, padding_x))#jnp.pad(d, (padding_z, padding_x), mode='edge')
     
     def set_parameters(self, model):
@@ -208,18 +208,19 @@ class RNNJax(RNNBase):
 
         batch_size = 1 if source_encoding else nshots
         shape_wavefield = (batch_size, 1) + self.shape
+        
         sources = sources.copy()
         receivers = receivers.copy()
 
-        if self.free_surface:
-            sources = sources.at[..., 0] + self.abcn
-            receivers = receivers.at[..., 0] + self.abcn
-        else:
-            sources = sources + self.abcn
-            receivers = receivers + self.abcn
-
         sources = jnp.array(sources, dtype=jnp.int32)
         receivers = jnp.array(receivers, dtype=jnp.int32)
+
+        if self.free_surface:
+            sources = sources.at[..., 0].add(self.abcn)
+            receivers = receivers.at[..., 0].add(self.abcn)
+        else:
+            sources = sources.at[...].add(self.abcn)
+            receivers = receivers.at[...].add(self.abcn)
 
         src = SourceJax(sources, shape_wavefield, source_encoding=source_encoding)
         rec = ReceiverJax(receivers)
@@ -228,12 +229,14 @@ class RNNJax(RNNBase):
         for name in self.wavefield_names:
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
 
+
         record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
         # Get the model parameters
         models = models if models is not None else self.parameters()
+
         models = [self.pad(para, self.padding) for para in models]
-        
+
         fixargs = models+[self._dt, self._dh, self.b]
 
         source_idx_at = []
@@ -254,6 +257,7 @@ class RNNJax(RNNBase):
 
             # Apply source
             wavefields = list(wavefields)
+
             for sidx in source_idx_at:
                 wavefields[sidx] = src(wavefields[sidx], wavelet[..., it])
             wavefields = tuple(wavefields)
