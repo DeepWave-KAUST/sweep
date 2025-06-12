@@ -2,6 +2,7 @@
 import jax, torch, inspect
 import jax.numpy as jnp
 import numpy as np
+from torch.utils.checkpoint import checkpoint as ckpt_torch
 from .sources import SourceTorch, SourceJax
 from .receivers import ReceiverTorch, ReceiverJax
 from .abc import abc_coefficients_2d
@@ -19,6 +20,7 @@ class RNNBase:
                  free_surface=False, 
                  dh=10., 
                  dt=0.002, 
+                 use_ckpt=True,
                  **kwargs):
         """Base class for the RNN
 
@@ -32,6 +34,7 @@ class RNNBase:
             free_surface (bool, optional): If the model has a free surface. Defaults to False.
             dh (float, optional): Grid spacing (meters). Defaults to 10..
             dt (float, optional): Time step (seconds). Defaults to 0.002.
+            use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
         """
         
         self.equation = equation
@@ -43,6 +46,7 @@ class RNNBase:
         self.free_surface = free_surface
         self._dh = dh
         self._dt = dt
+        self.use_ckpt = use_ckpt
 
         self.source_type = source_type
         self.receiver_type = receiver_type
@@ -129,20 +133,23 @@ class RNNTorch(RNNBase, torch.nn.Module):
         
         fixargs = models+[self.dt, self.h, self.b]
 
-        def save_grad(grad):
-            rill[:] += torch.sum(grad[..., self.abcn:-self.abcn, self.abcn:-self.abcn]**2, 0).squeeze()
+        # def save_grad(grad):
+        #     rill[:] += torch.sum(grad[..., self.abcn:-self.abcn, self.abcn:-self.abcn]**2, 0).squeeze()
 
         for i in range(nt):
 
             wavefield = [getattr(self, name) for name in self.wavefield_names]
 
-            if wavefield[0].requires_grad and rill is not None:
-                wavefield[0].register_hook(save_grad)
-            if sill is not None:
-                sill[:] += torch.sum(wavefield[0][..., self.abcn:-self.abcn, self.abcn:-self.abcn].detach()**2, 0).squeeze()
+            # if wavefield[0].requires_grad and rill is not None:
+                # wavefield[0].register_hook(save_grad)
+            # if sill is not None:
+                # sill[:] += torch.sum(wavefield[0][..., self.abcn:-self.abcn, self.abcn:-self.abcn].detach()**2, 0).squeeze()
 
             # Time step forward
-            wavefield = self.equation.func(*wavefield, *fixargs)
+            if self.use_ckpt:
+                wavefield = ckpt_torch(self.equation.func, *wavefield, *fixargs)
+            else:
+                wavefield = self.equation.func(*wavefield, *fixargs)
 
             # if i % 100 == 0:
                 # np.save(f'data/wavefield_{i:04d}.npy', np.stack([w.detach().cpu().numpy() for w in wavefield]))
@@ -270,7 +277,10 @@ class RNNJax(RNNBase):
             return (wavefields, fixargs, _rec), None
         
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
-        step_fn = jax.checkpoint(step_fn)
+
+        step_fn = jax.checkpoint(step_fn) if self.use_ckpt else step_fn
+
+        # step_fn = step_fn
         initial = (wavefields, tuple(fixargs), record)
         (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(nt))
         rec = final[-1]

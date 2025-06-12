@@ -1,4 +1,8 @@
-import sys, tqdm, os, jax, optax
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+import sys, tqdm, jax, optax
+
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
@@ -38,7 +42,8 @@ model = RNNJax(Acoustic(spatial_order=spatial_order, backend='jax'),
                 source_type=['h1'],
                 receiver_type=['h1'],
                 abcn=abcn, 
-                free_surface=free_surface)
+                free_surface=free_surface, 
+                use_ckpt=False)
 
 # Set the true model
 model.set_parameters([jnp.array(true_model)])
