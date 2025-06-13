@@ -62,12 +62,36 @@ class RNNBase:
             self.equation.init(self.shape, self.dev, self._dh)
         self.b = abc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
 
+    def crop(self, data):
+        """Crop the data to the original shape
+
+        Args:
+            data (torch.Tensor or jnp.ndarray): The data to be cropped
+
+        Returns:
+            torch.Tensor or jnp.ndarray: The cropped data
+        """
+        if self.free_surface:
+            return data[..., 0:-self.abcn, self.abcn:-self.abcn]
+        else:
+            return data[..., self.abcn:-self.abcn, self.abcn:-self.abcn]
+
     def get_parameters(self, key):
         assert key in self.model_names, f'Key must be in {self.model_names}, got {key}'
         yield getattr(self, key)
 
     def parameters(self, ):
         return [getattr(self, name) for name in self.model_names]
+    
+    @property
+    def dh(self):
+        """Grid spacing in meters"""
+        return self._dh
+    
+    @property
+    def dt(self):
+        """Time step in seconds"""
+        return self._dt
     
 class RNNTorch(RNNBase, torch.nn.Module):
     
@@ -182,22 +206,24 @@ class RNNJax(RNNBase):
         self.b = abc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
         self.b = jnp.array(self.b)
 
-    def pad(self, d, padding):
+    def pad(self, d, padding=None):
         """Padding the model parameters
 
         Args:
             padding (list): 4 elements list for padding the model parameters
         """
+        if padding is None:
+            padding = self.padding
         padding_z = (padding[2], padding[3])
         padding_x = (padding[0], padding[1])
-        return edge_pad(d, (padding_z, padding_x))#jnp.pad(d, (padding_z, padding_x), mode='edge')
+        return edge_pad(d, (padding_z, padding_x))#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
     
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
         for name, data in zip(self.model_names, model):
             setattr(self, name, jnp.array(data))
 
-    def forward(self, wavelet, sources, receivers, models=None, sill=None, rill=None, source_encoding=False):
+    def forward(self, wavelet, sources, receivers, models=None, sill=None, rill=None, source_encoding=False, return_wavefield=False, adj=False):
         """Forward pass of the wave equation
 
         Args:
@@ -209,13 +235,12 @@ class RNNJax(RNNBase):
 
         wavelet = jnp.array(wavelet, dtype=jnp.float32)
         
-
         nt = wavelet.shape[-1]
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
         shape_wavefield = (batch_size, 1) + self.shape
-        
+
         sources = sources.copy()
         receivers = receivers.copy()
 
@@ -229,13 +254,12 @@ class RNNJax(RNNBase):
             sources = sources.at[...].add(self.abcn)
             receivers = receivers.at[...].add(self.abcn)
 
-        src = SourceJax(sources, shape_wavefield, source_encoding=source_encoding)
+        src = SourceJax(sources, shape_wavefield, source_encoding, adj)
         rec = ReceiverJax(receivers)
 
         # Memory allocation for wavefields
         for name in self.wavefield_names:
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
-
 
         record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
@@ -243,6 +267,15 @@ class RNNJax(RNNBase):
         models = models if models is not None else self.parameters()
 
         models = [self.pad(para, self.padding) for para in models]
+
+        self.models_padded = models
+
+        has_aux = False
+        if return_wavefield:
+            has_aux = True
+            snapshots = jnp.zeros((nt,) + shape_wavefield, dtype=jnp.float32)
+        else:
+            snapshots = None
 
         fixargs = models+[self._dt, self._dh, self.b]
 
@@ -257,7 +290,7 @@ class RNNJax(RNNBase):
 
         def step_fn(carry, it):
 
-            wavefields, fixargs, _rec = carry
+            wavefields, fixargs, snapshots, _rec  = carry
 
             # Forward
             wavefields = self.equation.func_jax(*wavefields, *fixargs)
@@ -266,31 +299,38 @@ class RNNJax(RNNBase):
             wavefields = list(wavefields)
 
             for sidx in source_idx_at:
-                wavefields[sidx] = src(wavefields[sidx], wavelet[..., it])
+                time = it if not adj else nt - it
+                wavefields[sidx] = src(wavefields[sidx], wavelet[..., time])
             wavefields = tuple(wavefields)
+
+            # Snapshots
+            if snapshots is not None:
+                snapshots = snapshots.at[it].set(wavefields[0])
 
             # Measure probe(s)
             for channel, ridx in enumerate(receiver_idx_at):
                 rec_this_step = jnp.array(jnp.split(rec(wavefields[ridx]), batch_size))
                 _rec = _rec.at[:, it, :, channel:channel+1].set(rec_this_step)
             
-            return (wavefields, fixargs, _rec), None
+            return (wavefields, fixargs, snapshots, _rec), None
         
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
 
         step_fn = jax.checkpoint(step_fn) if self.use_ckpt else step_fn
-
         # step_fn = step_fn
-        initial = (wavefields, tuple(fixargs), record)
+        initial = (wavefields, tuple(fixargs), snapshots, record)
         (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(nt))
         rec = final[-1]
-
-        return rec
+        if not has_aux:
+            return rec
+        else:
+            return rec, final[-2]
     
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
     
 RNNJax.__init__.__doc__ = RNNBase.__init__.__doc__
+RNNJax.__call__.__doc__ = RNNJax.forward.__doc__
 RNNTorch.__init__.__doc__ = RNNBase.__init__.__doc__
 
 RNN = RNNTorch
