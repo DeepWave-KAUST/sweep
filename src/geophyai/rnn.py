@@ -88,10 +88,10 @@ class RNNBase:
         """Grid spacing in meters"""
         return self._dh
     
-    @property
-    def dt(self):
-        """Time step in seconds"""
-        return self._dt
+    # @property
+    # def dt(self):
+    #     """Time step in seconds"""
+    #     return self._dt
     
 class RNNTorch(RNNBase, torch.nn.Module):
     
