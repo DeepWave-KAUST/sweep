@@ -279,7 +279,7 @@ class RNNJax(RNNBase):
         else:
             snapshots = None
 
-        fixargs = models+[self._dt, self._dh, self.b]
+        fixargs = [self._dt, self._dh, self.b]
 
         source_idx_at = []
         receiver_idx_at = []
@@ -295,7 +295,7 @@ class RNNJax(RNNBase):
             wavefields, fixargs, snapshots, _rec  = carry
 
             # Forward
-            wavefields = self.equation.func_jax(*wavefields, *fixargs)
+            wavefields = self.equation.func_jax(*wavefields, *models, *fixargs)
 
             # Apply source
             wavefields = list(wavefields)
