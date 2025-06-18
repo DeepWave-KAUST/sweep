@@ -216,7 +216,9 @@ class RNNJax(RNNBase):
             padding = self.padding
         padding_z = (padding[2], padding[3])
         padding_x = (padding[0], padding[1])
-        return edge_pad(d, (padding_z, padding_x))#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
+        padding = (padding_z, padding_x)
+        if d.ndim == 4: padding = (((0,0),)*2+padding) # Model split case, the input velocity is 4D (batch, 1, nz, nx)
+        return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
     
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'

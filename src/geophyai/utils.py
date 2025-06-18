@@ -59,8 +59,8 @@ def edge_pad_bwd(res, g):
     Returns:
         jnp.array: The gradient of the input data.
     """
-    pad_left, pad_right = res[1]
-    pad_top, pad_bottom = res[0]
+    pad_left, pad_right = res[-1]
+    pad_top, pad_bottom = res[-2]
     # g = g.at[..., pad_top:-pad_bottom, pad_left:-pad_right].set(0.)
     return g[..., pad_top:-pad_bottom, pad_left:-pad_right], None
 
