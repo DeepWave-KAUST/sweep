@@ -48,6 +48,9 @@ class RNNBase:
         self._dt = dt
         self.use_ckpt = use_ckpt
 
+        if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM'] and self.free_surface:
+            raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
+
         self.source_type = source_type
         self.receiver_type = receiver_type
 
