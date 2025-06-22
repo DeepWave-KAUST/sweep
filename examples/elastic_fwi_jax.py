@@ -47,7 +47,7 @@ model = RNNJax(Elastic(spatial_order=spatial_order, backend='jax'),
             dt=dt,
             source_type=['vz'],
             receiver_type=['vx', 'vz'],
-            free_surface=free_surface, 
+            free_surface=False, 
             use_ckpt=True)
 
 # Set the true model, the order of the parameters should be 
