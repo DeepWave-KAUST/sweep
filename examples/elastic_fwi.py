@@ -1,4 +1,4 @@
-import sys, tqdm
+import sys, tqdm, os
 sys.path.append('../src')
 import torch
 torch.backends.cudnn.benchmark = True
@@ -8,6 +8,10 @@ from geophyai.signal import ricker
 import numpy as np
 import matplotlib.pyplot as plt
 from configure import *
+
+save_path = 'elastic_torch'
+if not os.path.exists(save_path):
+    os.makedirs(save_path)
 
 t = np.arange(0, int(nt)*dt, dt)
 
@@ -25,7 +29,7 @@ dev = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 wave = ricker(t-delay, f=fm)
 plt.plot(wave)
-plt.savefig('ricker.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
@@ -37,7 +41,8 @@ model = RNN(Elastic(spatial_order=spatial_order, device=dev),
             dt=dt,
             source_type=['vz'],
             receiver_type=['vx', 'vz'],
-            free_surface=free_surface)
+            free_surface=free_surface, 
+            use_ckpt=False)
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
@@ -76,13 +81,13 @@ vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
 plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
 plt.tight_layout()
-plt.savefig('elastic_vx.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
 plt.close()
 vmin, vmax = np.percentile(obs[-1][...,1], [2, 98])
 plt.imshow(obs[-1].squeeze()[...,1], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
 plt.tight_layout()
-plt.savefig('elastic_vz.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 
@@ -142,7 +147,7 @@ for epoch in tqdm.trange(epochs):
             ax.set_xlabel('X (m)')
             ax.set_ylabel('Z (m)')
         plt.tight_layout()
-        plt.savefig(f'epoch_{epoch}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'{save_path}/epoch_{epoch}.png', dpi=300, bbox_inches='tight')
         plt.close()
 
         

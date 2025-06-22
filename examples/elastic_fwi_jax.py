@@ -1,4 +1,5 @@
-import sys, tqdm
+import sys, tqdm, os
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 sys.path.append('../src')
 import torch, optax, jax
 import jax.numpy as jnp
@@ -13,6 +14,11 @@ import matplotlib.pyplot as plt
 from configure import *
 np.random.seed(0)
 key = random.PRNGKey(0)
+
+save_path = 'elastic_jax'
+if not os.path.exists(save_path):
+    os.makedirs(save_path)
+
 t = np.arange(0, int(nt)*dt, dt)
 
 vp_true = np.load(true_path)#[::2, ::2]
@@ -29,7 +35,7 @@ dev = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 wave = ricker(t-delay, f=fm)
 plt.plot(wave)
-plt.savefig('ricker.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
@@ -41,7 +47,8 @@ model = RNNJax(Elastic(spatial_order=spatial_order, backend='jax'),
             dt=dt,
             source_type=['vz'],
             receiver_type=['vx', 'vz'],
-            free_surface=free_surface)
+            free_surface=free_surface, 
+            use_ckpt=True)
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
@@ -70,13 +77,13 @@ vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
 plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
 plt.tight_layout()
-plt.savefig('elastic_vx.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
 plt.close()
 vmin, vmax = np.percentile(obs[-1][...,1], [2, 98])
 plt.imshow(obs[-1].squeeze()[...,1], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
 plt.tight_layout()
-plt.savefig('elastic_vz.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # ########## Inversion ##########
@@ -103,7 +110,6 @@ def fwi_step(vp, vs, rho, rand_shots):
                     receivers=receivers[0:1], 
                     source_encoding=True,
                     models=[vp, vs, rho])
-        
         _obs = jnp.sum(obs[shot_nums], axis=0)
         _loss_ = jnp.mean((syn-_obs)**2)
 
@@ -150,7 +156,7 @@ for epoch in tqdm.trange(epochs):
             ax.set_xlabel('X (m)')
             ax.set_ylabel('Z (m)')
         plt.tight_layout()
-        plt.savefig(f'epoch_{epoch}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'{save_path}/epoch_{epoch}.png', dpi=300, bbox_inches='tight')
         plt.close()
 
         
