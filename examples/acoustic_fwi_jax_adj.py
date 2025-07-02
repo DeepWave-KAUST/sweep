@@ -112,7 +112,8 @@ def fwi_step(vp, rand_shots):
     # Compute the laplace of the forward wavefield
     def body_fn(tstep, d):
         return d.at[tstep].set(laplace(d[tstep], model.dh, kernel)*model.models_padded[0]**2)
-
+    fwf = fwf[:, 0]
+    bwf = bwf[:, 0]
     fwf = jax.lax.fori_loop(0, nt, body_fn, fwf) # (ns, nrec, nz, nx)
     grad = jnp.sum(fwf*bwf[::-1]/model.models_padded[0]**3, axis=(0))#/np.prod(adj.shape[1:])
 

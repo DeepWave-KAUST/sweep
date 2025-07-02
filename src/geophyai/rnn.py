@@ -1,6 +1,6 @@
 
 import jax, inspect
-a=jax.numpy.array([2.0])
+# a=jax.numpy.array([2.0])
 import jax.numpy as jnp
 import torch
 import numpy as np
@@ -118,7 +118,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
         for name, data in zip(self.model_names, model):
             setattr(self, name, torch.nn.Parameter(data))
 
-    def forward(self, wavelet, sources, receivers, models=None, sill=None, rill=None, source_encoding=False):
+    def forward(self, wavelet, sources, receivers, models=None, sill=None, rill=None, source_encoding=False, adj=False, return_wavefield=False):
         """Forward pass of the wave equation
 
         Args:
@@ -147,8 +147,15 @@ class RNNTorch(RNNBase, torch.nn.Module):
         sources = torch.from_numpy(sources).to(self.dev).long()
         receivers = torch.from_numpy(receivers).to(self.dev).long()
 
-        src = SourceTorch(sources, shape_wavefield, self.dev, source_encoding=source_encoding)
+        src = SourceTorch(sources, shape_wavefield, self.dev, source_encoding, adj)
         rec = ReceiverTorch(receivers)
+
+        has_aux = False
+        if return_wavefield:
+            has_aux = True
+            snapshots = torch.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=torch.float32, device=torch.device('cpu'))
+        else:
+            snapshots = None
 
         # Memory allocation for wavefields
         for name in self.wavefield_names:
@@ -159,7 +166,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
         # Get the model parameters
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(para, self.padding) for para in models]
-        
+        self.models_padded = models
         fixargs = models+[self.dt, self.h, self.b]
 
         # def save_grad(grad):
@@ -180,8 +187,8 @@ class RNNTorch(RNNBase, torch.nn.Module):
             else:
                 wavefield = self.equation.func(*wavefield, *fixargs)
 
-            # if i % 100 == 0:
-                # np.save(f'data/wavefield_{i:04d}.npy', np.stack([w.detach().cpu().numpy() for w in wavefield]))
+            if return_wavefield:
+                snapshots[i] = torch.stack([w.detach().cpu() for w in wavefield], 0)
 
             # Exchange wavefields
             for name, data in zip(self.wavefield_names, wavefield):
@@ -189,13 +196,17 @@ class RNNTorch(RNNBase, torch.nn.Module):
 
             # Add source
             for source_type in self.source_type:
-                setattr(self, source_type, src(getattr(self, source_type), wavelet[..., i]))
+                time = i if not adj else nt - i - 1
+                setattr(self, source_type, src(getattr(self, source_type), wavelet[..., time]))
 
             # Record wavefields
             for ic, receiver_type in enumerate(self.receiver_type):
                 record[:, i, :, ic] = rec(getattr(self, receiver_type)).view(*receivers.shape[:-1])
 
-        return record
+        if not has_aux:
+            return record
+        else:
+            return record, snapshots
     
 class RNNJax(RNNBase):
 
