@@ -1,6 +1,8 @@
 
-import jax, torch, inspect
+import jax, inspect
+a=jax.numpy.array([2.0])
 import jax.numpy as jnp
+import torch
 import numpy as np
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 from .sources import SourceTorch, SourceJax
@@ -278,7 +280,7 @@ class RNNJax(RNNBase):
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = jnp.zeros((nt,) + shape_wavefield, dtype=jnp.float32)
+            snapshots = jnp.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=jnp.float32, device=jax.devices('cpu')[0])
         else:
             snapshots = None
 
@@ -310,7 +312,7 @@ class RNNJax(RNNBase):
 
             # Snapshots
             if snapshots is not None:
-                snapshots = snapshots.at[it].set(wavefields[0])
+                snapshots = snapshots.at[it].set(jnp.stack(wavefields, 0))
 
             # Measure probe(s)
             for channel, ridx in enumerate(receiver_idx_at):
