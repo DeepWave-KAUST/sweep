@@ -23,6 +23,7 @@ class RNNBase:
                  dh=10., 
                  dt=0.002, 
                  use_ckpt=True,
+                 ckpt_chunks=50,
                  **kwargs):
         """Base class for the RNN
 
@@ -49,6 +50,7 @@ class RNNBase:
         self._dh = dh
         self._dt = dt
         self.use_ckpt = use_ckpt
+        self.ckpt_chunks = ckpt_chunks
 
         if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM'] and self.free_surface:
             raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
@@ -306,43 +308,69 @@ class RNNJax(RNNBase):
         for receiver_type in self.receiver_type:
             receiver_idx_at.append(self.wavefield_names.index(receiver_type))
 
-        def step_fn(carry, it):
-
-            wavefields, fixargs, snapshots, _rec  = carry
-
-            # Forward
-            wavefields = self.equation.func_jax(*wavefields, *models, *fixargs)
-
-            # Apply source
-            wavefields = list(wavefields)
-
-            for sidx in source_idx_at:
-                time = it if not adj else nt - it
-                wavefields[sidx] = src(wavefields[sidx], wavelet[..., time])
-            wavefields = tuple(wavefields)
-
-            # Snapshots
-            if snapshots is not None:
-                snapshots = snapshots.at[it].set(jnp.stack(wavefields, 0))
-
-            # Measure probe(s)
-            for channel, ridx in enumerate(receiver_idx_at):
-                rec_this_step = jnp.array(jnp.split(rec(wavefields[ridx]), batch_size))
-                _rec = _rec.at[:, it, :, channel:channel+1].set(rec_this_step)
-            
-            return (wavefields, fixargs, snapshots, _rec), None
         
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
 
-        step_fn = jax.checkpoint(step_fn) if self.use_ckpt else step_fn
-        # step_fn = step_fn
+        chunk_size = self.ckpt_chunks
+
+        num_chunks = (nt + chunk_size - 1) // chunk_size
+        nt_padded = num_chunks * chunk_size
+        pad_len = nt_padded - nt
+
+        wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
+
+        def step_fn_single(carry, it):
+
+            def do_step(carry):
+                
+                wavefields, fixargs, snapshots, _rec = carry
+
+                time = it if not adj else nt - it
+                # Forward propagation
+                wavefields = self.equation.func_jax(*wavefields, *models, *fixargs)
+                wavefields = list(wavefields)
+
+                # Add source
+                for sidx in source_idx_at:
+                    wavefields[sidx] = src(wavefields[sidx], wavelet_padded[..., time])
+                wavefields = tuple(wavefields)
+
+                # Save snapshots
+                if snapshots is not None:
+                    snapshots = snapshots.at[it].set(jnp.stack(wavefields, 0))
+
+                # Record receivers
+                for channel, ridx in enumerate(receiver_idx_at):
+                    rec_this_step = jnp.array(jnp.split(rec(wavefields[ridx]), batch_size))
+                    _rec = _rec.at[:, it, :, channel:channel+1].set(rec_this_step)
+
+                return (wavefields, fixargs, snapshots, _rec)
+        
+            def skip_fn(carry):
+                return carry
+            
+            carry = jax.lax.cond(it < nt, do_step, skip_fn, carry)
+
+            return carry, None
+        
+
+        def chunked_step_fn(carry, chunk_idx):
+
+            def inner_step_fn(carry, it):
+                t = chunk_idx * chunk_size + it
+                return step_fn_single(carry, t)
+            return jax.checkpoint(lambda carry, idxs: 
+                jax.lax.scan(inner_step_fn, carry, jnp.arange(chunk_size))
+            )(carry, None)
+        
         initial = (wavefields, tuple(fixargs), snapshots, record)
-        (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(nt))
-        rec = final[-1]
-        if not has_aux:
-            return rec
-        else:
-            return rec, final[-2]
+        step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
+        num_steps = num_chunks if self.use_ckpt else nt
+        (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
+        rec = final[-1][:, :nt, ...]
+
+        return rec if not has_aux else (rec, final[-2])
+
     
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
