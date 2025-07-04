@@ -120,7 +120,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
         for name, data in zip(self.model_names, model):
             setattr(self, name, torch.nn.Parameter(data))
 
-    def forward(self, wavelet, sources, receivers, models=None, sill=None, rill=None, source_encoding=False, adj=False, return_wavefield=False):
+    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False):
         """Forward pass of the wave equation
 
         Args:
@@ -177,11 +177,6 @@ class RNNTorch(RNNBase, torch.nn.Module):
         for i in range(nt):
 
             wavefield = [getattr(self, name) for name in self.wavefield_names]
-
-            # if wavefield[0].requires_grad and rill is not None:
-                # wavefield[0].register_hook(save_grad)
-            # if sill is not None:
-                # sill[:] += torch.sum(wavefield[0][..., self.abcn:-self.abcn, self.abcn:-self.abcn].detach()**2, 0).squeeze()
 
             # Time step forward
             if self.use_ckpt:
@@ -243,7 +238,17 @@ class RNNJax(RNNBase):
         for name, data in zip(self.model_names, model):
             setattr(self, name, jnp.array(data))
 
-    def forward(self, wavelet, sources, receivers, models=None, sill=None, rill=None, source_encoding=False, return_wavefield=False, adj=False):
+    def forward(self, 
+                wavelet, 
+                sources, 
+                receivers, 
+                models=None, 
+                source_encoding=False, 
+                return_wavefield=False, 
+                adj=False, 
+                wave_equation=None, 
+                aux_args=tuple(),
+                **kwargs,):
         """Forward pass of the wave equation
 
         Args:
@@ -251,6 +256,11 @@ class RNNJax(RNNBase):
             sources (jnp.array): Source coordinates (nshots, 2)
             receivers (jnp.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
+            source_encoding (bool, optional): If True, the sources are encoded in the wavefield. Defaults to False.
+            return_wavefield (bool, optional): If True, return the wavefields. Defaults to False.
+            adj (bool, optional): If True, run the adjoint forward modeling. Defaults to False.
+            wave_equation (callable, optional): The wave equation function to use. If None, use the equation defined in the class. Defaults to None.
+            aux_args (tuple(list), optional): Auxiliary arguments for the wave equation function. Defaults to ().
         """
 
         wavelet = jnp.array(wavelet, dtype=jnp.float32)
@@ -318,7 +328,7 @@ class RNNJax(RNNBase):
         pad_len = nt_padded - nt
 
         wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
-
+        wave_equation = self.equation.func_jax if wave_equation is None else wave_equation
         def step_fn_single(carry, it):
 
             def do_step(carry):
@@ -327,7 +337,7 @@ class RNNJax(RNNBase):
 
                 time = it if not adj else nt - it
                 # Forward propagation
-                wavefields = self.equation.func_jax(*wavefields, *models, *fixargs)
+                wavefields = wave_equation(*wavefields, *models, *fixargs, *aux_args)
                 wavefields = list(wavefields)
 
                 # Add source
@@ -370,11 +380,11 @@ class RNNJax(RNNBase):
         rec = final[-1][:, :nt, ...]
 
         return rec if not has_aux else (rec, final[-2])
-
     
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
     
+
 RNNJax.__init__.__doc__ = RNNBase.__init__.__doc__
 RNNJax.__call__.__doc__ = RNNJax.forward.__doc__
 RNNTorch.__init__.__doc__ = RNNBase.__init__.__doc__
