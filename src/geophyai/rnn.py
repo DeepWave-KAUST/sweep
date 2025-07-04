@@ -325,9 +325,9 @@ class RNNJax(RNNBase):
 
         num_chunks = (nt + chunk_size - 1) // chunk_size
         nt_padded = num_chunks * chunk_size
-        pad_len = nt_padded - nt
+        # pad_len = nt_padded - nt
 
-        wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
+        # wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
         wave_equation = self.equation.func_jax if wave_equation is None else wave_equation
         def step_fn_single(carry, it):
 
@@ -342,7 +342,7 @@ class RNNJax(RNNBase):
 
                 # Add source
                 for sidx in source_idx_at:
-                    wavefields[sidx] = src(wavefields[sidx], wavelet_padded[..., time])
+                    wavefields[sidx] = src(wavefields[sidx], wavelet[..., time])
                 wavefields = tuple(wavefields)
 
                 # Save snapshots
@@ -377,7 +377,7 @@ class RNNJax(RNNBase):
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
         num_steps = num_chunks if self.use_ckpt else nt
         (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
-        rec = final[-1][:, :nt, ...]
+        rec = final[-1]
 
         return rec if not has_aux else (rec, final[-2])
     

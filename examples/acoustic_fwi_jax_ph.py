@@ -6,7 +6,7 @@ import sys, tqdm, jax, optax
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
-sys.path.append('../src')
+# sys.path.append('../src')
 from geophyai.rnn import RNNJax
 from geophyai.equations import Acoustic
 from geophyai.signal import ricker
@@ -44,7 +44,8 @@ model = RNNJax(Acoustic(spatial_order=spatial_order, backend='jax'),
                 receiver_type=['h1'],
                 abcn=abcn, 
                 free_surface=free_surface, 
-                use_ckpt=False)
+                use_ckpt=True, 
+                ckpt_chunks=100)
 
 # Set the true model
 model.set_parameters([jnp.array(true_model)])
