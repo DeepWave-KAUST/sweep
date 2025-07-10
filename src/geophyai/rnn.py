@@ -230,7 +230,8 @@ class RNNJax(RNNBase):
         padding_z = (padding[2], padding[3])
         padding_x = (padding[0], padding[1])
         padding = (padding_z, padding_x)
-        if d.ndim == 4: padding = (((0,0),)*2+padding) # Model split case, the input velocity is 4D (batch, 1, nz, nx)
+        # if d.ndim == 4: padding = (((0,0),)*2+padding) # Model split case, the input velocity is 4D (batch, 1, nz, nx)
+        padding = (((0,0),)*(d.ndim-2)+padding)
         return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
     
     def set_parameters(self, model):
