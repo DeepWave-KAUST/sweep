@@ -5,6 +5,7 @@ from .elasticP import ElasticP
 from .acoustic1st import Acoustic as Acoustic1st
 from .acoustic_lsrtm import AcousticLSRTM
 from .aec import AcousticElasticCoupled as AEC
+from .aec_lsrtm import AcousticElasticCoupledLSRTM as AECLSRTM
 from .elastic_lsrtm import ElasticLSRTM
 
 __all__ = ['Acoustic', 'Elastic', 'Acoustic1st', 'AcousticLSRTM', 'ElasticZ', 'ElasticP', 'AEC', 'ElasticLSRTM']
