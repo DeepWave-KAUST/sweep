@@ -36,7 +36,11 @@ def step(p, vx, vz, txx, tzz, txz,
     return y_p, y_vx, y_vz, y_txx, y_tzz, y_txz
 
 class AcousticElasticCoupled:
+    """
+    Parameter order:vp, vs, rho.
 
+    Wavefields: (p, vx, vz, txx, tzz, txz)
+    """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         if backend == 'torch':
             self.pd = torch.jit.script(PartialDerivative(spatial_order, device))

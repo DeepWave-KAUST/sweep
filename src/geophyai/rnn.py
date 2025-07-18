@@ -52,7 +52,7 @@ class RNNBase:
         self.use_ckpt = use_ckpt
         self.ckpt_chunks = ckpt_chunks
 
-        if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM'] and self.free_surface:
+        if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM', 'AcousticElasticCoupled', 'AcousticElasticCoupledLSRTM'] and self.free_surface:
             raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
 
         self.source_type = source_type
