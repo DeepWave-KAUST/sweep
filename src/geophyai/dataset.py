@@ -50,7 +50,10 @@ class DataLoader:
     @property
     def use_all_shots(self):
         """Check if all shots are used in the DataLoader."""
-        return self.batch_size is None or self.batch_size >= len(self)
+        if isinstance(self.batch_size, int):
+            return self.batch_size >= len(self)
+        elif isinstance(self.batch_size, (list, tuple)):
+            return max(self.batch_size) >= len(self)
     
     def get_batchsize(self, freq_idx):
         """Get the batch size based on the frequency index"""
