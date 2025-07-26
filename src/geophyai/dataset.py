@@ -27,6 +27,7 @@ class DataLoader:
         """Split the model parameters into different groups based on the geometry of the data."""
         if self.model_split:
             self.msplit, self.left, self.right, self.sources, self.receivers = split_model(self.models, self.sources, self.receivers, one_side_expand=50)
+            self.shape = self.msplit[0].shape[-2:]
         else:
             self.left, self.right = None, None
 
@@ -85,18 +86,21 @@ class DataLoader:
         self.rand_shots = rand_shots.reshape(self.steps_per_epoch, self.device_count, -1)
         self.shots_per_gpu = self.rand_shots.shape[-1]
 
+        if self.model_split:
+            self.split_models = [split_by_lr(m, self.left, self.right) for m in self.models]
+
     def next(self, step):
 
-        obs_batch = self.obs[self.rand_shots][step]
-        sources_batch = self.sources[self.rand_shots][step]
-        receivers_batch = self.receivers[self.rand_shots][step]
+        obs_batch = self.obs[self.rand_shots[step]]
+        sources_batch = self.sources[self.rand_shots[step]]
+        receivers_batch = self.receivers[self.rand_shots[step]]
         if self.mask is not None:
-            mask_batch = self.mask[self.rand_shots][step]
+            mask_batch = self.mask[self.rand_shots[step]]
         else:
             mask_batch = None
 
         if self.model_split:
-            models_batch = [split_by_lr(m, self.left, self.right)[self.rand_shots][step] for m in self.models]
+            models_batch = [self.split_models[i][self.rand_shots[step]] for i in range(len(self.split_models))]
         else:
             models_batch = [jnp.tile(m.reshape(1, 1, *m.shape), (self.device_count, self.shots_per_gpu, 1, 1)) for m in self.models]
 
