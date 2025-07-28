@@ -7,7 +7,7 @@ import numpy as np
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 from .sources import SourceTorch, SourceJax
 from .receivers import ReceiverTorch, ReceiverJax
-from .abc import abc_coefficients_2d
+from .abc import abc_coefficients_2d, abc_coefficients_3d, habc_coefficients_2d
 from .utils import EdgePadding, edge_pad
 
 class RNNBase:
@@ -24,6 +24,7 @@ class RNNBase:
                  dt=0.002, 
                  use_ckpt=True,
                  ckpt_chunks=50,
+                 use_habc=False,
                  **kwargs):
         """Base class for the RNN
 
@@ -51,6 +52,10 @@ class RNNBase:
         self._dt = dt
         self.use_ckpt = use_ckpt
         self.ckpt_chunks = ckpt_chunks
+        self.ndim = len(shape)
+        self.use_habc = use_habc
+
+        self.abc_func = {2: abc_coefficients_2d, 3: abc_coefficients_3d}[self.ndim]
 
         if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM', 'AcousticElasticCoupled', 'AcousticElasticCoupledLSRTM'] and self.free_surface:
             raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
@@ -59,15 +64,27 @@ class RNNBase:
         self.receiver_type = receiver_type
 
         if self.free_surface:
-            self.padding = (self.abcn, self.abcn, 0, self.abcn) # left, right. top, bottom, refer to torch.nn.functional.pad
-            self.shape = (self.shape[0]+self.abcn, self.shape[1]+2*self.abcn)
+            self.padding_z = (0, self.abcn)
+            # self.padding = (self.abcn, self.abcn, 0, self.abcn) # left, right. top, bottom, refer to torch.nn.functional.pad
+            # self.shape = (self.shape[0]+self.abcn, self.shape[1]+2*self.abcn)
+            shape_z = self.shape[0] + self.abcn
         else:
-            self.padding = (self.abcn, )*4 # left, right. top, bottom, refer to  torch.nn.functional.pad
-            self.shape = (self.shape[0]+2*self.abcn, self.shape[1]+2*self.abcn)
+            self.padding_z = (self.abcn, self.abcn)
+            # self.padding = (self.abcn, )*4 # left, right. top, bottom, refer to  torch.nn.functional.pad
+            # self.shape = (self.shape[0]+2*self.abcn, self.shape[1]+2*self.abcn)
+            shape_z = self.shape[0] + 2*self.abcn
+
+        self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
+        self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
+
+        # Coefficients for absorbing boundary conditions must be initialized after the shape is set
+        self.b = self.abc_func(self.shape, N=self.abcn, free_surface=self.free_surface)
+        ######### HABC
+        if self.use_habc:
+            self.b = habc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
 
         if getattr(self.equation, 'need_init', False):
             self.equation.init(self.shape, self.dev, self._dh)
-        self.b = abc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
 
     def crop(self, data):
         """Crop the data to the original shape
@@ -170,10 +187,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
         models = [EdgePadding.apply(para, self.padding) for para in models]
         self.models_padded = models
         fixargs = models+[self.dt, self.h, self.b]
-
-        # def save_grad(grad):
-        #     rill[:] += torch.sum(grad[..., self.abcn:-self.abcn, self.abcn:-self.abcn]**2, 0).squeeze()
-
+    
         for i in range(nt):
 
             wavefield = [getattr(self, name) for name in self.wavefield_names]
@@ -216,7 +230,6 @@ class RNNJax(RNNBase):
     def setup_abc(self, ):
 
         # Absorbing boundary conditions
-        self.b = abc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
         self.b = jnp.array(self.b)
 
     def pad(self, d, padding=None):
@@ -227,11 +240,12 @@ class RNNJax(RNNBase):
         """
         if padding is None:
             padding = self.padding
-        padding_z = (padding[2], padding[3])
-        padding_x = (padding[0], padding[1])
-        padding = (padding_z, padding_x)
+        # padding_z = (padding[-2], padding[-1])
+        # padding_x = (padding[0], padding[1])
+        # padding = (padding_z, padding_x)
+        padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
         # if d.ndim == 4: padding = (((0,0),)*2+padding) # Model split case, the input velocity is 4D (batch, 1, nz, nx)
-        padding = (((0,0),)*(d.ndim-2)+padding)
+        padding = (((0,0),)*(d.ndim-self.ndim)+padding)
         return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
     
     def set_parameters(self, model):
@@ -279,8 +293,8 @@ class RNNJax(RNNBase):
         receivers = jnp.array(receivers, dtype=jnp.int32)
 
         if self.free_surface:
-            sources = sources.at[..., 0].add(self.abcn)
-            receivers = receivers.at[..., 0].add(self.abcn)
+            sources = sources.at[..., :-1].add(self.abcn)
+            receivers = receivers.at[..., :-1].add(self.abcn)
         else:
             sources = sources.at[...].add(self.abcn)
             receivers = receivers.at[...].add(self.abcn)
@@ -291,6 +305,11 @@ class RNNJax(RNNBase):
         # Memory allocation for wavefields
         for name in self.wavefield_names:
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
+
+        ############# For HABC
+        if getattr(self.equation, 'init_habc', False):
+            self.equation.init_habc(self.shape, self.abcn, self.free_surface, batchsize=batch_size, use_habc=self.use_habc)
+        #############
 
         record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
@@ -325,11 +344,15 @@ class RNNJax(RNNBase):
         chunk_size = self.ckpt_chunks
 
         num_chunks = (nt + chunk_size - 1) // chunk_size
+
         nt_padded = num_chunks * chunk_size
         # pad_len = nt_padded - nt
 
         # wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
-        wave_equation = self.equation.func_jax if wave_equation is None else wave_equation
+        post_fix = '3d' if self.ndim == 3 else ''
+        wave_equation = getattr(self.equation, f'func_jax{post_fix}') if wave_equation is None else wave_equation
+        
+        # @jax.checkpoint
         def step_fn_single(carry, it):
 
             def do_step(carry):

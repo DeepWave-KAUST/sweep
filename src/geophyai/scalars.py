@@ -97,3 +97,39 @@ def generate_convolution_kernel(spatial_order):
     kernel[center, center] = -2*2*np.sum(constant)
 
     return kernel.reshape(1, 1, *kernel.shape)
+
+def generate_convolution_kernel3d(spatial_order):
+    """Generate convolution kernel
+
+    Args:
+        n (int): The order of the taylor expansion
+
+    Returns:
+        _type_: Tensor, the convolution kernel
+    """
+    constant = normal_grid_coes(spatial_order//2)
+    kernel_size = spatial_order + 1
+    kernel = np.zeros((kernel_size, kernel_size, kernel_size), dtype=np.float32)
+    center = spatial_order // 2
+    # Apply along z-axis
+    for i, c in enumerate(constant):
+        offset = i + 1
+        kernel[center - offset, center, center] = c
+        kernel[center + offset, center, center] = c
+
+    # Apply along y-axis
+    for i, c in enumerate(constant):
+        offset = i + 1
+        kernel[center, center - offset, center] = c
+        kernel[center, center + offset, center] = c
+
+    # Apply along x-axis
+    for i, c in enumerate(constant):
+        offset = i + 1
+        kernel[center, center, center - offset] = c
+        kernel[center, center, center + offset] = c
+
+    # Center value: minus sum of all non-center coefficients
+    kernel[center, center, center] = -2 * 3 * np.sum(constant)
+
+    return kernel

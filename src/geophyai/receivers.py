@@ -7,7 +7,7 @@ class ReceiverBase:
         pass
 
     def forward(self, wavefield):
-        return wavefield[self.bidx, :, self.z, self.x]
+        return wavefield[self.bidx, :, *self.coords_r]
 
 
 class ReceiverTorch(ReceiverBase, torch.nn.Module):
@@ -21,7 +21,7 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
         torch.nn.Module.__init__(self)
         super().__init__()
         batch, nreceivers, _ = coords.shape
-        self.x, self.z = coords[..., 0].flatten().to(torch.int64), coords[..., 1].flatten().to(torch.int64)
+        self.coords_r = [c.flatten().to(torch.int64) for c in torch.split(torch.flip(coords, (-1,)), 1, dim=-1)]
         self.bidx = torch.tensor([[i]*nreceivers for i in range(batch)], dtype=torch.int64).flatten()
 
     def forward(self, wavefield):
@@ -44,9 +44,8 @@ class ReceiverJax(ReceiverBase):
             coords (jax.numpy.ndarray): Receiver coordinates (nshots, nreceivers, 2)
         """
         super().__init__()
-        self.x, self.z = coords[..., 0].flatten(), coords[..., 1].flatten()
         batch, nreceivers, _ = coords.shape
-        # self.bidx = jax.numpy.repeat(jax.numpy.arange(coords.shape[0]), coords.shape[1])
+        self.coords_r = [c.flatten() for c in jnp.split(jnp.flip(coords, -1), coords.shape[-1], axis=-1)]
         self.bidx = jnp.array([[i]*nreceivers for i in range(batch)], dtype=jnp.int32).flatten()
 
     def __call__(self, *args):

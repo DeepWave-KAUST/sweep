@@ -130,3 +130,78 @@ def _corners(domain_shape, abs_N, d, dx, dy, free_surface=False):
                     else: d[i,j] = dx[i,j]
 
     return d
+
+def abc_coefficients_3d(domain_shape, N=50, B=100., free_surface=False):
+    nz, ny, nx = domain_shape
+
+    R = 1e-6
+    order = 2
+    cp = 1000.
+    d0 = (1.5 * cp / N) * np.log10(R**-1)
+    d_vals = d0 * np.linspace(0.0, 1.0, N) ** order
+    d_vals = d_vals[::-1]  # Flip the array
+
+    b_x = np.zeros((nz, ny, nx))
+    b_y = np.zeros((nz, ny, nx))
+    b_z = np.zeros((nz, ny, nx))
+
+    # z-direction (top and bottom)
+    b_z[0:N, :, :] = d_vals[:, np.newaxis, np.newaxis]
+    b_z[(nz - N):nz, :, :] = d_vals[::-1][:, np.newaxis, np.newaxis]
+
+    # y-direction (front and back)
+    b_y[:, 0:N, :] = d_vals[np.newaxis, :, np.newaxis]
+    b_y[:, (ny - N):ny, :] = d_vals[::-1][np.newaxis, :, np.newaxis]
+
+    # x-direction (left and right)
+    b_x[:, :, 0:N] = d_vals[np.newaxis, np.newaxis, :]
+    b_x[:, :, (nx - N):nx] = d_vals[::-1][np.newaxis, np.newaxis, :]
+
+    if free_surface:
+        b_z[0:N, :, :] = 0.0  # no damping at top surface if free surface
+
+    return np.sqrt(b_x ** 2 + b_y ** 2 + b_z ** 2)
+
+def habc_coefficients_2d(domain_shape, 
+                         N=50, 
+                         free_surface=False):
+
+    nz, nx = domain_shape
+
+    d = np.zeros(domain_shape, dtype=np.float32)
+
+    # d_vals = np.linspace(0.0, N, N)
+    # d_vals = np.flip(d_vals, [0])
+    # cosine 
+    d_vals = 1-np.cos(np.pi/2* (1+ (1-np.arange(1,N+1))/N ) )
+
+    tm, bm, lm, rm = bound_mask(*domain_shape, N, free_surface=free_surface)
+
+    if N > 0:
+        # Top
+        if not free_surface:
+            idx = tm==1
+            d[:N,:][idx] = (d_vals[:, np.newaxis].repeat(nx, 1).transpose(0, 1)*tm)[idx]
+
+        # Bottom
+        idx = bm==1 # Mask for equation left
+        d[-N:,:][idx] = (np.flip(d_vals, [0])[:, np.newaxis].repeat(nx, 1).transpose(0, 1)*bm)[idx]
+
+        # Left
+        idx = lm==1
+
+        if not free_surface:
+            d[:, :N][idx] = (d_vals[:, np.newaxis].repeat(nz, 1).T*lm)[idx]
+        if free_surface:
+            lm[:N] = 1.
+            d[:, :N][lm==1] = (d_vals[:, np.newaxis].repeat(nz, 1).T*lm)[lm==1]
+
+        # Right boundary
+        idx = rm==1
+        if not free_surface:
+            d[:, -N:][idx] = (np.flip(d_vals[:, np.newaxis], [0]).repeat(nz, 1).T*rm)[idx]
+        if free_surface:
+            rm[:N] = 1.
+            d[:, -N:][rm==1] = (np.flip(d_vals[:, np.newaxis], [0]).repeat(nz, 1).T*rm)[rm==1]
+            
+    return d.astype(np.float32)

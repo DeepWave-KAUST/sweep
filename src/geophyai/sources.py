@@ -35,7 +35,7 @@ class SourceTorch(SourceBase, torch.nn.Module):
         self.adj = adj
         for i in range(coords.shape[0]):
             index = 0 if source_encoding else i
-            self.mask[index, :, coords[i, 1], coords[i, 0]] = 1.
+            self.mask[index, :, *torch.flip(coords, [-1])[i]] = 1.
 
     def forward_source_encoding(self, wavefield, wavelet):
         z = self.coords[..., 1]
@@ -75,7 +75,7 @@ class SourceJax(SourceBase):
         self.adj = adj
         for i in range(coords.shape[0]): # Loop over each source
             index = 0 if source_encoding else i
-            self.mask = self.mask.at[index, 0, coords[i, 1], coords[i, 0]].set(1.)
+            self.mask = self.mask.at[index, 0,  *jax.numpy.flip(coords, [-1])[i]].set(1.)
     
     def forward_source_encoding(self, wavefield, wavelet):
         wavefield = wavefield.at[0, 0, self.coords[..., 1], self.coords[..., 0]].add(wavelet)
