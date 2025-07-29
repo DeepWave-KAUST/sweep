@@ -6,7 +6,7 @@ import sys, tqdm, jax, optax
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
-# sys.path.append('../src')
+sys.path.append('../src')
 from geophyai.rnn import RNNJax
 from geophyai.equations import Acoustic
 from geophyai.signal import ricker

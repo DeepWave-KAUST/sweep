@@ -71,6 +71,8 @@ class AcousticElasticCoupledLSRTM:
     Parameter order: mp, ms, vp, vs, rho.
 
     Wavefields: (p, vx, vz, txx, tzz, txz), (ps, vxs, vzs, txxs, tzzs, txzs)
+
+    Reference: Sun M.N., et. al, 10.1109/TGRS.2020.3047117
     """
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):

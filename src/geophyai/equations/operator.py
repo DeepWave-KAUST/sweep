@@ -9,6 +9,24 @@ def laplace(u: torch.Tensor,
     padding = kernel.shape[-1] // 2
     return torch.nn.functional.conv2d(u, kernel, padding=padding) / (h**2)
 
+@torch.jit.script
+def gradient(u: torch.Tensor, 
+             h: torch.Tensor, 
+             kernel: torch.Tensor) -> torch.Tensor:
+    """Gradient operator.
+
+    Args:
+        u (torch.Tensor): Wavefield (batch, 1, nz, nx).
+        h (torch.Tensor): Grid spacing.
+        kernel (torch.Tensor): Gradient kernel (FD coefficients).
+
+    Returns:
+        torch.Tensor: Gradient result
+    """
+    operator = (h) ** (-1) * kernel
+    padding = kernel.shape[-1] // 2
+    return torch.nn.functional.conv2d(u, operator, padding=padding)
+
 class PartialDerivative:
 
     def __init__(self, spatial_order:int=4, device:torch.device=torch.device('cpu')):

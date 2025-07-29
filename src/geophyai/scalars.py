@@ -1,4 +1,4 @@
-import torch
+import torch, math
 import numpy as np
 
 def normal_grid_coes(M):
@@ -73,7 +73,25 @@ def staggered_grid_coes(M):
     
     return a
 
-def generate_convolution_kernel(spatial_order):
+def fd_coefficients(derivative_order=2, accuracy_order=2):
+    
+    n = accuracy_order // 2
+    num_points = 2 * n + 1
+    points = np.arange(-n, n + 1, dtype=np.float64)
+
+    # Taylor expansion matrix
+    matrix = np.zeros((num_points, num_points))
+    for i in range(num_points):
+        matrix[i, :] = points ** i
+
+    rhs = np.zeros(num_points)
+    rhs[derivative_order] = math.factorial(derivative_order)
+
+    coefficients = np.linalg.solve(matrix, rhs)
+
+    return coefficients[-n:]
+
+def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', no_center=False, grid='normal', sign=1):
     """Generate convolution kernel
 
     Args:
@@ -82,19 +100,42 @@ def generate_convolution_kernel(spatial_order):
     Returns:
         Array: The convolution kernel with shape (spatial_order+1, spatial_order+1).
     """
+    assert mode in ['full', 'x', 'z'], "mode must be one of ['full', 'x', 'z']"
+    assert spatial_order % 2 == 0, "spatial_order must be even"
+    assert grid in ['normal', 'staggered'], "grid must be one of ['normal', 'staggered']"
 
-    constant = normal_grid_coes(spatial_order//2)
+    if grid == 'normal':
+        # constant = normal_grid_coes(spatial_order//2)
+        constant = fd_coefficients(derivative_order, spatial_order)
+    elif grid == 'staggered':
+        constant = staggered_grid_coes(spatial_order//2)
+
     kernel_size = spatial_order + 1
     kernel = np.zeros((kernel_size, kernel_size),dtype=np.float32)
     center = spatial_order // 2
-    # Z axis
-    kernel[center, center+1:] = constant
-    kernel[center, 0:center] = constant[::-1]
-    # X axis
-    kernel[center+1:, center] = constant
-    kernel[0:center, center] = constant[::-1]
-    # Center
-    kernel[center, center] = -2*2*np.sum(constant)
+    if mode=='full':
+        # X axis
+        kernel[center, center+1:] = constant
+        kernel[center, 0:center] = constant[::-1]
+        # Z axis
+        kernel[center+1:, center] = constant
+        kernel[0:center, center] = constant[::-1]
+        # Center
+        if not no_center:
+            kernel[center, center] = -2*2*np.sum(constant)
+    
+    if mode=='z':
+        # X axis
+        kernel[center+1:, center] = constant # down
+        kernel[0:center, center] = sign*constant[::-1] # up
+
+    if mode=='x':
+        # Z axis
+        kernel[center, center+1:] = constant # right
+        kernel[center, 0:center] = sign*constant[::-1] # left
+
+    if mode in ['x', 'z'] and not no_center:
+        kernel[center, center] = -2*np.sum(constant)
 
     return kernel.reshape(1, 1, *kernel.shape)
 

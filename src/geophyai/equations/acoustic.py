@@ -9,9 +9,10 @@ from typing import Tuple, Optional, Union, List
 from .habc_jax import habc, bound_mask
 from geophyai.scalars import generate_convolution_kernel, generate_convolution_kernel3d
 
-def step_pml(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask=None):
-    a = (dt**-2 + b * dt**-1)**(-1)
-    u_next = a*(2. / dt**2 * u_now - (dt**-2-b*dt**-1)*u_pre + vp**2*lap_u_now)
+def step_pml(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask=None):    
+    a = 1 / (1 + b * dt)
+    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * lap_u_now
+    u_next = a * u_next + (1 - a) * u_pre
     return u_next, u_now
 
 def step_habc(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask):
