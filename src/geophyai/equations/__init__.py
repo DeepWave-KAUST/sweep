@@ -7,8 +7,9 @@ from .acoustic_lsrtm import AcousticLSRTM
 from .aec import AcousticElasticCoupled as AEC
 from .aec_lsrtm import AcousticElasticCoupledLSRTM as AECLSRTM
 from .elastic_lsrtm import ElasticLSRTM
-from .acoustic_qP_tti import AcousticTTI
-from .acoustic_qP_vti import AcousticVTI
+from .qP_tti import AcousticTTI
+from .qP_vti import AcousticVTI
+from .qP_tariq import AcousticTariq
 from .visco_acoustic import ViscoAcoustic
 
 __all__ = ['Acoustic', 'Elastic', 'Acoustic1st', 'AcousticLSRTM', 'ElasticZ', 'ElasticP', 'AEC', 'ElasticLSRTM']
