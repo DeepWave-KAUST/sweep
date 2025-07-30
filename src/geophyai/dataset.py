@@ -86,9 +86,6 @@ class DataLoader:
         self.rand_shots = rand_shots.reshape(self.steps_per_epoch, self.device_count, -1)
         self.shots_per_gpu = self.rand_shots.shape[-1]
 
-        if self.model_split:
-            self.split_models = [split_by_lr(m, self.left, self.right) for m in self.models]
-
     def next(self, step):
 
         obs_batch = self.obs[self.rand_shots[step]]
@@ -100,7 +97,8 @@ class DataLoader:
             mask_batch = None
 
         if self.model_split:
-            models_batch = [self.split_models[i][self.rand_shots[step]] for i in range(len(self.split_models))]
+            rs = self.rand_shots[step].flatten()
+            models_batch = [jnp.stack([m[:, l:r] for l, r in zip(self.left[rs], self.right[rs])]).reshape(self.device_count, -1, *self.shape) for m in self.models]
         else:
             models_batch = [jnp.tile(m.reshape(1, 1, *m.shape), (self.device_count, self.shots_per_gpu, 1, 1)) for m in self.models]
 

@@ -9,6 +9,7 @@ from .aec_lsrtm import AcousticElasticCoupledLSRTM as AECLSRTM
 from .elastic_lsrtm import ElasticLSRTM
 from .acoustic_qP_tti import AcousticTTI
 from .acoustic_qP_vti import AcousticVTI
+from .visco_acoustic import ViscoAcoustic
 
 __all__ = ['Acoustic', 'Elastic', 'Acoustic1st', 'AcousticLSRTM', 'ElasticZ', 'ElasticP', 'AEC', 'ElasticLSRTM']
 supported_equations = { 'acoustic': {'fwi': [Acoustic, Acoustic1st],

@@ -87,7 +87,9 @@ for model_group, ax, title in zip([models_a, models_b, models_c], axes, titles):
     show_data = wavefields[600, 0, ...].squeeze()[abcn:-abcn, abcn:-abcn]
     vmin, vmax = np.percentile(show_data, [2, 98])
     ax.imshow(show_data, cmap='gray', aspect='auto')
-    ax.set_title(title, fontsize=12)
+    # ax.set_title(title, fontsize=12)
+    ax.text(150, 150, title, color='red', fontsize=12, ha='center', va='center')
+    ax.axis('off')
 plt.tight_layout()
 plt.savefig(f'{save_path}/wavefields_vti.png', dpi=300, bbox_inches='tight')
 plt.close()
@@ -99,7 +101,9 @@ for model_group, ax, title in zip([models_a, models_b, models_c], axes, titles):
     show_data = wavefields[600, 0, ...].squeeze()[abcn:-abcn, abcn:-abcn]
     vmin, vmax = np.percentile(show_data, [2, 98])
     ax.imshow(show_data, cmap='gray', aspect='auto')
-    ax.set_title(title, fontsize=12)
+    # ax.set_title(title, fontsize=12)
+    ax.text(150, 150, title, color='red', fontsize=12, ha='center', va='center')
+    ax.axis('off')
 plt.tight_layout()
 plt.savefig(f'{save_path}/wavefields_tti.png', dpi=300, bbox_inches='tight')
 plt.close()
