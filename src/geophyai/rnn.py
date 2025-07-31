@@ -39,6 +39,8 @@ class RNNBase:
             dh (float, optional): Grid spacing (meters). Defaults to 10..
             dt (float, optional): Time step (seconds). Defaults to 0.002.
             use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
+            ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 50.
+            use_habc (bool, optional): Use HABC instead of PML. Defaults to False.
         """
         
         self.equation = equation
