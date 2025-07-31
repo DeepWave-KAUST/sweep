@@ -35,6 +35,8 @@ class Elastic:
     """Parameter order: vp, vs, rho.
     
        Wavefields: (vx, vz, txx, tzz, txz)
+
+       Reference: Jean Virieux, 10.1190/1.1442147
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         if backend == 'torch':

@@ -27,7 +27,10 @@ def step(u_now, u_pre, f_now, f_next, # wavefields
 
 
 class AcousticTariq:
-    """This class is the implementation of the acoustic wave equation solver.
+    """Parameter order: vv, v, eta.
+    
+       Wavefields: (h1, h2, f1, f2)
+
        Reference: Alkhalifah Tariq, 10.1190/1.1444815
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):

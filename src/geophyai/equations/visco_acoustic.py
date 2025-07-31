@@ -47,8 +47,11 @@ def step(u_now, u_pre, # Wavefields
 
 
 class ViscoAcoustic:
-    """This class is the implementation of the acoustic wave equation solver with TTI media.
-       Reference: Liang K., et.al, 10.1190/geo2022-0292.1 (EQUATION A-7)
+    """Parameter order: vp, Q, omega.
+    
+       Wavefields: (h1, h2)
+
+       Reference: Wang Enjiang, Thesis.
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2, phase_shift=True, amplitude_damping=True):
         """Acoustic wave equation solver.

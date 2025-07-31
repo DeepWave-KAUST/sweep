@@ -42,8 +42,11 @@ def step(u_now, u_pre, # Wavefields
 
 
 class AcousticTTI:
-    """This class is the implementation of the acoustic wave equation solver with TTI media.
-       Reference: Liang K., et.al, 10.1190/geo2022-0292.1 (EQUATION A-7)
+    """Parameter order: vp, epsilon, delta, theta.
+    
+       Wavefields: (h1, h2)
+
+       Reference: Liang K., et.al, 10.1190/geo2022-0292.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.

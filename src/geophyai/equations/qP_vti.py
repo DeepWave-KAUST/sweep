@@ -30,12 +30,11 @@ def step(u_now, u_pre, # Wavefields
 
 
 class AcousticVTI:
-    """
-    Parameter order: (vp, epsilon, delta)
-
-    Wavefields: (u_now, u_pre)
+    """Parameter order: vp, epsilon, delta.
     
-    Reference: Liang K., et.al, 10.1190/geo2022-0292.1 (EQUATION A-7)
+       Wavefields: (h1, h2)
+
+       Reference: Liang K., et.al, 10.1190/geo2022-0292.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.

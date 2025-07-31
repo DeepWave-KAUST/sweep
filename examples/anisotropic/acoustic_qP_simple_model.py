@@ -81,13 +81,14 @@ titles = [r"$\delta= \epsilon$=0.3",
 
 # The model is padded for ABCs, so the images have shape (401, 401)
 fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+
 for model_group, ax, title in zip([models_a, models_b, models_c], axes, titles):
     solver_vti.set_parameters([jnp.array(m) for m in model_group])
     _, wavefields = solver_vti.forward(wave, sources, receivers, return_wavefield=True)
     show_data = wavefields[600, 0, ...].squeeze()[abcn:-abcn, abcn:-abcn]
     vmin, vmax = np.percentile(show_data, [2, 98])
     ax.imshow(show_data, cmap='gray', aspect='auto')
-    # ax.set_title(title, fontsize=12)
+    # add a, b, c text
     ax.text(150, 150, title, color='red', fontsize=12, ha='center', va='center')
     ax.axis('off')
 plt.tight_layout()

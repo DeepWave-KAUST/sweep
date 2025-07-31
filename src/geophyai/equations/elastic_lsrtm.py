@@ -64,6 +64,8 @@ class ElasticLSRTM:
     """Parameter order: mp, ms, vp, vs, rho.
     
        Wavefields: (vx, vz, txx, tzz, txz), (vxs, vzs, txxs, tzzs, txzs)
+
+       Reference: Feng & Schuster, 10.1190/geo2016-0254.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         if backend == 'torch':

@@ -40,6 +40,8 @@ class AcousticElasticCoupled:
     Parameter order:vp, vs, rho.
 
     Wavefields: (p, vx, vz, txx, tzz, txz)
+
+    Reference: Yu Pengfei, 10.1190/geo2015-0535.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         if backend == 'torch':
