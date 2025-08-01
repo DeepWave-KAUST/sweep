@@ -21,7 +21,13 @@ def step(p, vx, vz, vp, rho, dt, h, b, pd):
     return y_p, y_vx, y_vz
 
 class Acoustic:
+    """
+    Parameter order: vp, rho
 
+    Wavefields: (p, vx, vz).
+
+    References: 10.1190/GEO2011-0345.1
+    """
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         if backend == 'torch':
             self.pd = torch.jit.script(PartialDerivative(spatial_order, device))

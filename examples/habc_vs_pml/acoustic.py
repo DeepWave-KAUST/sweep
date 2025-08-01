@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 ### Configures
 nz, nx = 256, 256
 dt = 0.001
-nt = 501
+nt = 601
 dh = 5.0
 fm = 20
 delay = 0.1
@@ -66,10 +66,11 @@ for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PM
     end = time.time()
     print(f"Time taken for {titles} solver: {end - start:.2f} seconds")
     # Plot the data
-    show_d = wavefields[500,0].squeeze()[abcn:-abcn, abcn:-abcn]
+    show_d = wavefields[600,0].squeeze()#[abcn:-abcn, abcn:-abcn]
     vmin, vmax = np.percentile(show_d, [2, 98])
     axes[i].imshow(show_d, cmap='gray', vmin=vmin, vmax=vmax, aspect='auto')
-    axes[i].set_title(f'Wavefield at t={500*dt:.3f}s ({titles})')
+    axes[i].set_title(f'Wavefield at t={600*dt:.3f}s ({titles})')
+    axes[i].add_patch(plt.Rectangle((abcn, abcn), nx, nz, linewidth=1, edgecolor='black', facecolor='none'))
 plt.tight_layout()
 plt.savefig(f'{save_path}/wavefields.png', dpi=300, bbox_inches='tight')
 plt.close()

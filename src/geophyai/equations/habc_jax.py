@@ -121,3 +121,73 @@ def _habc(u_next, u_now, u_pre, c, b, dt, dh, w=50):
     hb_next = (u_one*b + (1-b) * u_next)
 
     return hb_next[:, :, :, :cut, :]
+
+def habc1st(y, h1, vp, vs, coes, dt, h, w=50, maskidx=None):
+
+    if vp.ndim == 2:
+        vp = vp[jnp.newaxis, jnp.newaxis, ...]  # Add batch and channel dimensions
+    if vs.ndim == 2:
+        vs = vs[jnp.newaxis, jnp.newaxis, ...]  # Add batch and channel dimensions
+
+    otherargs = [dt, h]
+    # # Calculate weighted one/two-wave-wavefield
+    tbargs = [stack(cutb(array, w), cutb(flipud(array), w)) for array in [y, h1, vp, vs, coes[jnp.newaxis, jnp.newaxis, ...]]]+otherargs
+
+    lrargs = [stack(cutb(rot90(array, -1), w), cutb(rot90(array, 1), w)) for array in [y, h1, vp, vs, coes[jnp.newaxis, jnp.newaxis, ...]]]+otherargs
+    
+    top, bottom = jnp.split(_habc1st(*tbargs, w=w), [1], axis=0)
+    left, right = jnp.split(_habc1st(*lrargs, w=w), [1], axis=0)
+    tmidx, bmidx, lmidx, rmidx = maskidx
+    free_surface = tmidx is None
+
+    # """Rotate"""
+    y_top = top.squeeze(0) # (batchsize, 1, nz, nx)
+    y_bottom = jnp.flip(bottom.squeeze(0), axis=[2])
+    y_left = rot90(left.squeeze(0))
+    y_right = rot90(right.squeeze(0), -1)#.squeeze()
+
+    # Top
+    if not free_surface:
+        updated_slice = jnp.where(tmidx[:, None, ...], y_top, y[:, :, :w, :])
+        y = y.at[:, :, :w, :].set(updated_slice)
+
+    # Bottom
+    updated_slice = jnp.where(bmidx[:, None, ...], y_bottom, y[:, :, -w:, :])
+    y = y.at[:, :, -w:, :].set(updated_slice)
+
+    # Left
+    updated_slice = jnp.where(lmidx[:, None, ...], y_left, y[..., :w])
+    y = y.at[..., :w].set(updated_slice)
+
+    # Right boundary
+    updated_slice = jnp.where(rmidx[:, None, ...], y_right, y[..., -w:])
+    y = y.at[..., -w:].set(updated_slice)
+
+    dix, diz = np.diag_indices(w)
+
+    if not free_surface:
+        # Top-Left corner
+        y = y.at[..., dix, diz].set(0.5*y_top[..., dix, diz] + 0.5*y_left[..., dix, diz])
+
+    #     # Top-Right corner
+    #     y = y.at[..., dix, -w+diz].set(0.5*y_top[..., dix, -w+diz] + 0.5*y_right[..., dix, -w+diz])
+
+    # # Bottom-Left corner
+    # y = y.at[..., -w+dix, diz].set(0.5*y_bottom[..., dix, diz] + 0.5*y_left[..., -w+dix, diz])
+
+    # # Bottom-Right corner
+    # y = y.at[..., -w+dix, -w+diz].set(0.5*y_bottom[..., dix, -w+diz] + 0.5*y_right[..., -w+dix, -w+diz])
+
+    return y
+
+def _habc1st(u_next, u_now, vp, vs, b, dt, dh, w=50):
+    cut = w
+    beta = (vp+vs)/2*vs
+
+    # Top
+    _u_now = jnp.roll(u_now, shift=-1, axis=3)
+    u_one = _u_now + dt*vp/(beta*dh) * (_u_now - u_now)
+
+    hb_next = (u_one*b + (1-b) * u_next)
+
+    return hb_next[:, :, :, :cut, :]
