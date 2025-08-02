@@ -12,26 +12,27 @@ def step(p, vx, vz, txx, tzz, txz,
     lame_mu = rho*vs**2
     c = 0.5*dt*b
 
-    txx_x = pd.x_forward(txx)
-    txz_z = pd.z_forward(txz)
-    tzz_z = pd.z_backward(tzz)
-    txz_x = pd.x_backward(txz)
-
-    p_x = pd.x_forward(p)
-    p_z = pd.z_backward(p)
-
-    y_vx = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txx_x+txz_z-p_x)+(1-c)*vx)
-    y_vz = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txz_x+tzz_z-p_z)+(1-c)*vz)
-
-    vx_x = pd.x_backward(y_vx)
-    vz_z = pd.z_forward(y_vz)
-    vx_z = pd.z_backward(y_vx)
-    vz_x = pd.x_forward(y_vz)
+    vx_x = pd.x_backward(vx)
+    vz_z = pd.z_forward(vz)
+    vx_z = pd.z_backward(vx)
+    vz_x = pd.x_forward(vz)
 
     y_txx = (1+c)**-1*(dt*lame_mu*h**(-1)*(vx_x-vz_z)+(1-c)*txx)
     y_tzz = (1+c)**-1*(dt*lame_mu*h**(-1)*(vz_z-vx_x)+(1-c)*tzz)
     y_txz = (1+c)**-1*(dt*lame_mu*h**(-1)*(vz_x+vx_z)+(1-c)*txz)
     y_p = (1+c)**-1*(-dt*(lame_lambda+lame_mu)*h**(-1)*(vx_x+vz_z)+(1-c)*p)
+
+    txx_x = pd.x_forward(y_txx)
+    txz_z = pd.z_forward(y_txz)
+    tzz_z = pd.z_backward(y_tzz)
+    txz_x = pd.x_backward(y_txz)
+
+    p_x = pd.x_forward(y_p)
+    p_z = pd.z_backward(y_p)
+
+    y_vx = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txx_x+txz_z-p_x)+(1-c)*vx)
+    y_vz = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txz_x+tzz_z-p_z)+(1-c)*vz)
+
 
     return y_p, y_vx, y_vz, y_txx, y_tzz, y_txz
 
