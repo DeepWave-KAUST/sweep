@@ -58,7 +58,7 @@ print("(Number of shots, number of receivers, dimension)", receivers.shape)
 
 fig, axes = plt.subplots(2,2, figsize=(8, 8))
 DATA = []
-for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC'])): #, 'PML'
+for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PML'])): #, 'PML'
     start = time.time()
     _, wavefields = solver.forward(wave, sources, receivers, models=[vp, vs, rho], return_wavefield=True)
     wavefields.block_until_ready()

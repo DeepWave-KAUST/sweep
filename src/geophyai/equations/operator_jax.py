@@ -34,10 +34,10 @@ class PartialDerivative:
         max_length = 2 * num_kernels + 1
         # self.coes = jnp.ones_like(self.coes)
 
-        self.kxf = pad_kernels(create_kernels(num_kernels, self.coes, axis='x', forward=True), (1, max_length))
-        self.kxb = pad_kernels(create_kernels(num_kernels, self.coes, axis='x', forward=False), (1, max_length))
-        self.kzf = pad_kernels(create_kernels(num_kernels, self.coes, axis='z', forward=True), (max_length, 1))
-        self.kzb = pad_kernels(create_kernels(num_kernels, self.coes, axis='z', forward=False), (max_length, 1))
+        self.kxf = -pad_kernels(create_kernels(num_kernels, self.coes, axis='x', forward=True), (1, max_length))
+        self.kxb = -pad_kernels(create_kernels(num_kernels, self.coes, axis='x', forward=False), (1, max_length))
+        self.kzf = -pad_kernels(create_kernels(num_kernels, self.coes, axis='z', forward=True), (max_length, 1))
+        self.kzb = -pad_kernels(create_kernels(num_kernels, self.coes, axis='z', forward=False), (max_length, 1))
     
     def x_forward(self, u):
         return apply_kernels(u, self.kxf)
