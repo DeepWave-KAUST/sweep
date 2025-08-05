@@ -10,9 +10,9 @@ from typing import Tuple, Optional, Union, List
 from .habc_jax import habc, bound_mask
 from geophyai.scalars import generate_convolution_kernel, generate_convolution_kernel3d
 
-def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, pd, habc_masks=None):
+def step(u_now, u_pre, vp, z, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, habc_masks=None):
     a = 1 / (1 + b * dt)
-    u_next = 2 * u_now - u_pre + vp**2*dt**2*lap_u_now + vp*(dvpdx*dpdx + dvpdz*dpdz)*dt**2 - 2*vp**2*(rx*dpdx + rz*dpdz)*dt**2
+    u_next = 2 * u_now - u_pre + vp**2*dt**2*lap_u_now + vp*(dvpdx*dpdx + dvpdz*dpdz)*dt**2 +vp**2*z*(z1_x*dpdx + z1_z*dpdz)*dt**2
     u_next = a * u_next + (1 - a) * u_pre
     return u_next, u_now
 
@@ -27,7 +27,7 @@ class Acoustic:
 
     Wavefields: (h1, h2)
 
-    Reference: Yu Pengfei, 10.1190/geo2015-0535.1
+    Reference: 10.3997/2214-4609.202010332
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.
@@ -55,7 +55,7 @@ class Acoustic:
 
     @property
     def models(self):
-        return ['vp', 'rx', 'rz']
+        return ['vp', 'z']
     
     @property
     def wavefields(self):
@@ -66,9 +66,11 @@ class Acoustic:
     #     return step_pml(*args, lap_u_now)
     
     def func_jax(self, *args, **kwargs):
-        lap_u_now = laplace(args[0], args[6], self.kernel)
-        dvpdx = jnp.gradient(args[2],args[6], axis=-1) # 2nd Center Difference
-        dvpdz = jnp.gradient(args[2],args[6], axis=-2)
-        dpdx = jnp.gradient(args[0], args[6], axis=-1)
-        dpdz = jnp.gradient(args[0], args[6], axis=-2)
-        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, self.pd, self.habc_masks)
+        lap_u_now = laplace(args[0], args[5], self.kernel)
+        dvpdx = jnp.gradient(args[2],args[5], axis=-1) # 2nd Center Difference
+        dvpdz = jnp.gradient(args[2],args[5], axis=-2)
+        dpdx = jnp.gradient(args[0], args[5], axis=-1)
+        dpdz = jnp.gradient(args[0], args[5], axis=-2)
+        z1_x = jnp.gradient(1/args[3], args[5], axis=-1)
+        z1_z = jnp.gradient(1/args[3], args[5], axis=-2)
+        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, self.habc_masks)

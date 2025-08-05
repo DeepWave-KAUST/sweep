@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as random
 sys.path.append('../../src')
 from geophyai.rnn import RNNJax
-from geophyai.equations import Elastic, AEC
+from geophyai.equations import Elastic, AEC, Acoustic1st
 from geophyai.signal import ricker
 from functools import partial
 import matplotlib.pyplot as plt
@@ -61,6 +61,7 @@ solver_kwargs = dict(shape=shape, dev=None, dh=dh, dt=dt, abcn=abcn, free_surfac
 eq_kwargs = dict(spatial_order=spatial_order, backend='jax')
 solver_elastic = RNNJax(Elastic(**eq_kwargs), source_type=['txx', 'tzz'], receiver_type=['vx', 'vz'], **solver_kwargs)
 solver_aec = RNNJax(AEC(**eq_kwargs), source_type=['p'], receiver_type=['p', 'vx', 'vz'],**solver_kwargs)
+solver_acoustic = RNNJax(Acoustic1st(**eq_kwargs), source_type=['p'], receiver_type=['p'], **solver_kwargs)
 # Set the true solver_all
 
 # Geometry
@@ -92,12 +93,18 @@ for idx, show_time in enumerate([800, 1000, 1200]):
     axes[1, idx].set_title(f'vx at time {show_time*dt:.2f}s')
     axes[2, idx].set_title(f'vz at time {show_time*dt:.2f}s')
 
+
+for ax in axes.ravel():
+    ax.axis('off')
+    ax.hlines(nz//3, 0, nx, colors='red', linestyles='dashed')
+    ax.hlines(nz*2//3, 0, nx, colors='red', linestyles='dashed')
 plt.tight_layout()
 plt.savefig(f'{save_path}/aec_wavefields.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 del wavefields
 
+# Show Elastic wavefields
 fig, axes = plt.subplots(3,3, figsize=(9, 9))
 _, wavefields = solver_elastic.forward(wave, sources, receivers, models=[vp, vs, rho], return_wavefield=True)
 
@@ -118,33 +125,37 @@ for idx, show_time in enumerate([800, 1000, 1200]):
     axes[0, idx].set_title(f'p at time {show_time*dt:.2f}s')
     axes[1, idx].set_title(f'vx at time {show_time*dt:.2f}s')
     axes[2, idx].set_title(f'vz at time {show_time*dt:.2f}s')
-
+for ax in axes.ravel():
+    ax.axis('off')
+    ax.hlines(nz//3, 0, nx, colors='red', linestyles='dashed')
+    ax.hlines(nz*2//3, 0, nx, colors='red', linestyles='dashed')
 plt.tight_layout()
 plt.savefig(f'{save_path}/elastic_wavefields.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-# fig, axes = plt.subplots(2,2, figsize=(8, 8))
-# DATA = []
-# for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PML'])): #, 'PML'
-#     start = time.time()
-#     _, wavefields = solver.forward(wave, sources, receivers, models=[vp, vs, rho], return_wavefield=True)
-#     wavefields.block_until_ready()
-#     end = time.time()
-#     print(f"Time taken for {titles} solver: {end - start:.2f} seconds")
-#     # Plot the data
-#     vx = wavefields[show_time,0].squeeze()#[abcn:-abcn, abcn:-abcn]
-#     vz = wavefields[show_time,1].squeeze()#[abcn:-abcn, abcn:-abcn]
-    
-#     vmin, vmax = np.percentile(vx, [0, 100])
-#     axes[i, 0].imshow(vx, cmap='seismic', vmin=vmin, vmax=vmax)
-#     vmin, vmax = np.percentile(vz, [0, 100])
-#     axes[i, 1].imshow(vz, cmap='seismic', vmin=vmin, vmax=vmax)
-#     axes[i, 0].set_title(f'vx ({titles})')
-#     axes[i, 1].set_title(f'vz ({titles})')
-#     # Draw the boundary of the ABC on image
-#     axes[i, 0].add_patch(plt.Rectangle((abcn, abcn), nx, nz, linewidth=1, edgecolor='black', facecolor='none'))
-#     axes[i, 1].add_patch(plt.Rectangle((abcn, abcn), nx, nz, linewidth=1, edgecolor='black', facecolor='none'))
+# Show Acoustic wavefields
+fig, axes = plt.subplots(3,3, figsize=(9, 9))
+_, wavefields = solver_acoustic.forward(-wave, sources, receivers, models=[vp, rho], return_wavefield=True)
 
-# plt.tight_layout()
-# plt.savefig(f'{save_path}/wavefields.png', dpi=300, bbox_inches='tight')
-# plt.close()
+for idx, show_time in enumerate([800, 1000, 1200]):
+    # Plot the data
+    p = wavefields[show_time,0].squeeze()[abcn:-abcn, abcn:-abcn]
+    vx = wavefields[show_time,1].squeeze()[abcn:-abcn, abcn:-abcn]
+    vz = wavefields[show_time,2].squeeze()[abcn:-abcn, abcn:-abcn]
+
+    vmin, vmax = np.percentile(p, [0, 100])
+    axes[0, idx].imshow(p, cmap='gray', vmin=vmin, vmax=vmax)
+    vmin, vmax = np.percentile(vx, [0, 100])
+    axes[1, idx].imshow(vx, cmap='gray', vmin=vmin, vmax=vmax)
+    vmin, vmax = np.percentile(vz, [0, 100])
+    axes[2, idx].imshow(vz, cmap='gray', vmin=vmin, vmax=vmax)
+    axes[0, idx].set_title(f'p at time {show_time*dt:.2f}s')
+    axes[1, idx].set_title(f'vx at time {show_time*dt:.2f}s')
+    axes[2, idx].set_title(f'vz at time {show_time*dt:.2f}s')
+for ax in axes.ravel():
+    ax.axis('off')
+    ax.hlines(nz//3, 0, nx, colors='red', linestyles='dashed')
+    ax.hlines(nz*2//3, 0, nx, colors='red', linestyles='dashed')
+plt.tight_layout()
+plt.savefig(f'{save_path}/acoustic_wavefields.png', dpi=300, bbox_inches='tight')
+plt.close()

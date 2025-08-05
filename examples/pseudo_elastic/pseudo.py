@@ -16,7 +16,7 @@ use_habc = False
 nt = 801
 dt = 0.001
 delay = 0.128
-fm = 10
+fm = 8
 
 save_path = 'pseudo_elastic'
 if not os.path.exists(save_path):
@@ -71,16 +71,25 @@ titles = ["Elastic", "Acoustic", "Pseudo Elastic"]
 fig, axes = plt.subplots(2, 3, figsize=(15, 8))
 idx = 0
 for solver, title in zip([esolver, asolver, ePsolver], titles):
+    if title == 'Acoustic':
+        vx_idx, vz_idx = 1, 2
+    else:
+        vx_idx, vz_idx = 0, 1
     _, wavefields = solver.forward(wave, sources, receivers, return_wavefield=True)
-    vx = wavefields[800, 0, ...].squeeze()[abcn:-abcn, abcn:-abcn]
-    vz = wavefields[800, 1, ...].squeeze()[abcn:-abcn, abcn:-abcn]
+    vx = wavefields[nt-1, vx_idx, ...].squeeze()[abcn:-abcn, abcn:-abcn]
+    vz = wavefields[nt-1, vz_idx, ...].squeeze()[abcn:-abcn, abcn:-abcn]
     vmin, vmax = np.percentile(vx, [1, 99])
-    axes[0, idx].imshow(vx, cmap='seismic', aspect='auto', vmin=vmin, vmax=vmax, interpolation='bilinear')
+    axes[0, idx].imshow(vx, cmap='gray', aspect='auto', vmin=vmin, vmax=vmax, interpolation='bilinear')
     axes[0, idx].set_title(f'{title} vx')
     vmin, vmax = np.percentile(vz, [1, 99])
-    axes[1, idx].imshow(vz, cmap='seismic', aspect='auto', vmin=vmin, vmax=vmax, interpolation='bilinear')
+    axes[1, idx].imshow(vz, cmap='gray', aspect='auto', vmin=vmin, vmax=vmax, interpolation='bilinear')
     axes[1, idx].set_title(f'{title} vz')
     idx += 1
+
+for ax in axes.ravel():
+    ax.axis('off')
+    ax.hlines(50, 0, nx-1, colors='red', linestyles='dashed')
+
 plt.tight_layout()
 plt.savefig(f'{save_path}/wavefields.png', dpi=300, bbox_inches='tight')
 plt.close()

@@ -73,12 +73,13 @@ class SourceJax(SourceBase):
         self.se = source_encoding
         self.coords = coords
         self.adj = adj
+        self.coords_r = [c.flatten() for c in jnp.split(jnp.flip(coords, -1), coords.shape[-1], axis=-1)]
         for i in range(coords.shape[0]): # Loop over each source
             index = 0 if source_encoding else i
             self.mask = self.mask.at[index, 0,  *jax.numpy.flip(coords, [-1])[i]].set(1.)
     
     def forward_source_encoding(self, wavefield, wavelet):
-        wavefield = wavefield.at[0, 0, self.coords[..., 1], self.coords[..., 0]].add(wavelet)
+        wavefield = wavefield.at[..., *self.coords_r].add(wavelet)
         return wavefield
     
     def forward_adjoint_modeling(self, wavefield, wavelet):

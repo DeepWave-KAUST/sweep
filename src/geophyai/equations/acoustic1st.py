@@ -10,13 +10,13 @@ def step(p, vx, vz, vp, rho, dt, h, b, pd):
     p_x = pd.x_backward(p)
     p_z = pd.z_backward(p)
 
-    y_vx = (1+c)**-1*(dt * rho**(-1)* p_x / h + (1-c)*vx)
-    y_vz = (1+c)**-1*(dt * rho**(-1)* p_z / h + (1-c)*vz)
+    y_vx = (1+c)**-1*(-dt * rho**(-1)* p_x / h + (1-c)*vx)
+    y_vz = (1+c)**-1*(-dt * rho**(-1)* p_z / h + (1-c)*vz)
 
     vx_x = pd.x_forward(y_vx)
     vz_z = pd.z_forward(y_vz)
 
-    y_p = (1+c)**-1*(vp**2*dt*rho / h*(vx_x+vz_z)+(1-c)*p)
+    y_p = (1+c)**-1*(-vp**2*dt*rho / h*(vx_x+vz_z)+(1-c)*p)
 
     return y_p, y_vx, y_vz
 

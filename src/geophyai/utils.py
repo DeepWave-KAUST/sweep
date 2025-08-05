@@ -49,20 +49,21 @@ def edge_pad_fwd(u, pad_width):
     u = jnp.pad(u, pad_width, mode='edge')
     return u, pad_width
 
-def edge_pad_bwd(res, g):
+def edge_pad_bwd(pad_width, g):
     """Backward function of edge_pad.
 
     Args:
-        res (jnp.array): The input data with shape (batch_size, 1, nz, nx).
+        pad_width (jnp.array): The padding width for each dimension.
         g (jnp.array): The gradient.
 
     Returns:
         jnp.array: The gradient of the input data.
-    """
-    pad_left, pad_right = res[-1]
-    pad_top, pad_bottom = res[-2]
-    return g[..., pad_top:-pad_bottom, pad_left:-pad_right], None
-    # return g[..., *tuple(slice(r[0], -r[1]) for r in res if sum(r)>0)], None
+    """    
+    slices = [
+        slice(p0, g.shape[i] - p1)
+        for i, (p0, p1) in enumerate(pad_width)
+    ]
+    return g[tuple(slices)], None
 
 edge_pad = jax.custom_vjp(edge_pad_base)
 edge_pad.defvjp(edge_pad_fwd, edge_pad_bwd)

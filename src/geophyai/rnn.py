@@ -309,7 +309,7 @@ class RNNJax(RNNBase):
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
 
         ############# For HABC
-        if getattr(self.equation, 'init_habc', False):
+        if getattr(self.equation, 'init_habc', False) and self.ndim==2:
             self.equation.init_habc(self.shape, self.abcn, self.free_surface, batchsize=batch_size, use_habc=self.use_habc)
         #############
 
@@ -325,7 +325,7 @@ class RNNJax(RNNBase):
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = jnp.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=jnp.float32, device=jax.devices('cpu')[0])
+            snapshots = jnp.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=jnp.float32) #, device=jax.devices('cpu')[0]
         else:
             snapshots = None
 

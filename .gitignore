@@ -3,3 +3,4 @@ dist
 tests
 *.egg-info
 examples/test_figures
+examples/models/models
