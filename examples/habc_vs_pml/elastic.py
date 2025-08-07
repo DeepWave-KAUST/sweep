@@ -49,8 +49,8 @@ solver_habc = RNNJax(Elastic(**eq_kwargs), use_habc=True, **solver_kwargs)
 # Set the true solver_all
 
 # Geometry
-sources = np.array([nz//2, nx//2]).reshape(1, 2)
-receivers = np.array([nz//2, nx//2]).reshape(1, 1, 2)
+sources = np.array([nx//2, nz//2]).reshape(1, 2)
+receivers = np.array([nx//2, nz//2]).reshape(1, 1, 2)
 
 print("(Number of shots, dimension)", sources.shape)
 print("(Number of shots, number of receivers, dimension)", receivers.shape)

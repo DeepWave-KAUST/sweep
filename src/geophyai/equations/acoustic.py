@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from .operator import laplace
 from .operator_jax import laplace as laplace_jax
 from .operator_jax import laplace3d as laplace3d_jax
+from .utils import to_backend
 import numpy as np
 
 from typing import Tuple, Optional, Union, List
@@ -12,7 +13,7 @@ from geophyai.scalars import generate_convolution_kernel, generate_convolution_k
 def step_pml(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask=None):    
     a = 1 / (1 + b * dt)
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * lap_u_now
-    u_next = a * u_next + (1 - a) * u_pre
+    u_next = a * u_next + (1 - a) * u_now
     return u_next, u_now
 
 def step_habc(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask):
@@ -30,10 +31,7 @@ class Acoustic:
         """
         
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel3d}[dim]
-        if backend == 'torch':
-            self.kernel = torch.from_numpy(kernel_func(spatial_order)).to(device)
-        else:
-            self.kernel = jnp.array(kernel_func(spatial_order), dtype=jnp.float32).squeeze()
+        self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
         habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)

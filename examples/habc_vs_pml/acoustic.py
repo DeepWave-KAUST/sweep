@@ -74,3 +74,34 @@ for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PM
 plt.tight_layout()
 plt.savefig(f'{save_path}/wavefields.png', dpi=300, bbox_inches='tight')
 plt.close()
+
+# Geometry
+nt = 5001
+t = np.arange(0, nt*dt, dt)
+wave = jnp.array(ricker(t-delay, f=fm))
+
+sources = np.array([nx//2, 0]).reshape(1, 2)
+recx = np.arange(nx).reshape(-1, 1)
+recz = np.zeros_like(recx)
+receivers = np.concatenate([recx, recz], axis=1).reshape(1, nx, 2)
+
+print("(Number of shots, dimension)", sources.shape)
+print("(Number of shots, number of receivers, dimension)", receivers.shape)
+
+
+fig, axes = plt.subplots(1,2, figsize=(8, 6))
+axes = axes.flatten()
+DATA = []
+for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PML'])):
+    start = time.time()
+    obs = solver.forward(wave, sources, receivers, models=[vp])
+    obs.block_until_ready()
+    end = time.time()
+    print(f"Time taken for {titles} solver: {end - start:.2f} seconds")
+    # Plot the data
+    vmin, vmax = np.percentile(obs, [1, 99])
+    axes[i].imshow(obs.squeeze(), cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
+    axes[i].set_title(f'Observed ({titles})')
+plt.tight_layout()
+plt.savefig(f'{save_path}/record.png', dpi=300, bbox_inches='tight')
+plt.close()

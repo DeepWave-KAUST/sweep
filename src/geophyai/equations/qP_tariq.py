@@ -20,7 +20,7 @@ def step(u_now, u_pre, f_now, f_next, # wavefields
     # Equation 26
     f_next = 2*f_now - f_next + dt**2*u_now
 
-    u_next = a * u_next + (1 - a) * u_pre
+    u_next = a * u_next + (1 - a) * u_now
     f_next = a * f_next + (1 - a) * f_now
 
     return u_next, u_now, f_next, f_now

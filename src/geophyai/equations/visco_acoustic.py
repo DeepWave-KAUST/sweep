@@ -41,7 +41,7 @@ def step(u_now, u_pre, # Wavefields
     u_next = jax.lax.cond(phase_shift, phase, linear, u_next)
     u_next = jax.lax.cond(amplitude_damping, amplitude, linear, u_next)
 
-    u_next = a * u_next + (1 - a) * u_pre
+    u_next = a * u_next + (1 - a) * u_now
 
     return u_next, u_now
 

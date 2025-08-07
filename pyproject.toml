@@ -11,12 +11,11 @@ authors = [
 description = "A.D. based package for seismic inverse problem."
 readme = "README.md"
 requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
+license = "MIT"
 
 [project.urls]
 Homepage = "https://github.com/GeophyAI/geophyai"
 Issues = "https://github.com/GeophyAI/geophyai/issues"
+
+[project.scripts]
+geophyai = "geophyai.cli:main"

@@ -13,7 +13,7 @@ from geophyai.scalars import generate_convolution_kernel, generate_convolution_k
 def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, pd, habc_masks=None):
     a = 1 / (1 + b * dt)
     u_next = 2 * u_now - u_pre + vp**2*dt**2*lap_u_now + vp*(dvpdx*dpdx + dvpdz*dpdz)*dt**2 - 2*vp**2*(rx*dpdx + rz*dpdz)*dt**2
-    u_next = a * u_next + (1 - a) * u_pre
+    u_next = a * u_next + (1 - a) * u_now
     return u_next, u_now
 
 # def step_habc(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask):
