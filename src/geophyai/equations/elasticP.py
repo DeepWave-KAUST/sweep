@@ -2,7 +2,6 @@ import torch, jax
 import jax.numpy as jnp
 import numpy as np
 from .operator import PartialDerivative
-from .operator_jax import PartialDerivative as PartialDerivativeJax
 from .utils import to_backend
 from typing import Tuple, Optional, Union, List, Any
 
@@ -64,10 +63,7 @@ class ElasticP:
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         self.backend = backend
-        if backend == 'torch':
-            self.pd = PartialDerivative(spatial_order, device)
-        else:
-            self.pd = PartialDerivativeJax(spatial_order)
+        self.pd = PartialDerivative(spatial_order, device, backend)
 
     @property
     def need_init(self):

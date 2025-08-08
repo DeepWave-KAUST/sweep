@@ -1,7 +1,6 @@
 import torch, jax
 from functools import partial
 from .operator import PartialDerivative
-from .operator_jax import PartialDerivative as PartialDerivativeJax
 from typing import Tuple, Optional, Union, List, Any
 
 def step(vx, vz, txx, tzz, txz,
@@ -38,10 +37,7 @@ def step(vx, vz, txx, tzz, txz,
 class ElasticZ:
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        if backend == 'torch':
-            self.pd = PartialDerivative(spatial_order, device)
-        else:
-            self.pd = PartialDerivativeJax(spatial_order)
+        self.pd = PartialDerivative(spatial_order, device, backend)
 
     @property
     def models(self):

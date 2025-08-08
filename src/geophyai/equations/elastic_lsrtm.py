@@ -1,7 +1,6 @@
 import torch, jax
 from functools import partial
 from .operator import PartialDerivative
-from .operator_jax import PartialDerivative as PartialDerivativeJax
 from typing import Tuple, Optional, Union, List, Any
 
 # 10.1190/GEO2016-0254.1
@@ -68,10 +67,7 @@ class ElasticLSRTM:
        Reference: Feng & Schuster, 10.1190/geo2016-0254.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        if backend == 'torch':
-            self.pd = PartialDerivative(spatial_order, device)
-        else:
-            self.pd = PartialDerivativeJax(spatial_order)
+        self.pd = PartialDerivative(spatial_order, device, backend)
 
     @property
     def models(self):

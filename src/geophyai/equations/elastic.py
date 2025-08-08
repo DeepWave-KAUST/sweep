@@ -2,7 +2,6 @@ import torch
 import jax.numpy as jnp
 import numpy as np
 from .operator import PartialDerivative
-from .operator_jax import PartialDerivative as PartialDerivativeJax
 from .habc_jax import habc1st, bound_mask
 
 
@@ -75,10 +74,7 @@ class Elastic:
        Reference: Jean Virieux, 10.1190/1.1442147
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        if backend == 'torch':
-            self.pd = PartialDerivative(spatial_order, device)
-        else:
-            self.pd = PartialDerivativeJax(spatial_order)
+        self.pd = PartialDerivative(spatial_order, device, backend)
         self.use_habc = False
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):

@@ -1,6 +1,5 @@
 import torch
 from .operator import PartialDerivative
-from .operator_jax import PartialDerivative as PartialDerivativeJax
 from typing import Tuple, Optional, Union, List, Any
 
 def step(p, vx, vz, vp, rho, dt, h, b, pd):
@@ -29,10 +28,8 @@ class Acoustic:
     References: 10.1190/GEO2011-0345.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
-        if backend == 'torch':
-            self.pd = PartialDerivative(spatial_order, device)
-        else:
-            self.pd = PartialDerivativeJax(spatial_order)    
+        self.pd = PartialDerivative(spatial_order, device, backend)
+
     @property
     def models(self):
         return ['vp', 'rho']

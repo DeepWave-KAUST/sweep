@@ -4,7 +4,7 @@ from .operator_jax import laplace
 from .operator_jax import laplace3d as laplace3d_jax
 import numpy as np
 from .utils import to_backend
-from .operator_jax import PartialDerivative as PartialDerivativeJax
+from .operator import PartialDerivative
 
 from typing import Tuple, Optional, Union, List
 from .habc_jax import habc, bound_mask
@@ -45,7 +45,7 @@ class Acoustic:
         self.gkernel_z = to_backend(gkernel_z, backend, device)
         self.kernel = to_backend(kernel, backend, device)
 
-        self.pd = PartialDerivativeJax(spatial_order)
+        self.pd = PartialDerivative(spatial_order, device, backend)
 
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
