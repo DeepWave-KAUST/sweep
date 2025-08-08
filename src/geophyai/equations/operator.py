@@ -1,6 +1,8 @@
 import torch
-from geophyai.scalars import staggered_grid_coes_torch
 from typing import List
+import numpy as np
+import torch.nn.functional as F
+from geophyai.scalars import staggered_grid_coes
 
 @torch.jit.script
 def laplace(u: torch.Tensor, 
@@ -29,58 +31,91 @@ def gradient(u: torch.Tensor,
 
 class PartialDerivative:
 
-    def __init__(self, spatial_order:int=4, device:torch.device=torch.device('cpu')):
-        self.dev = device
-        self.coes = staggered_grid_coes_torch(int(spatial_order//2)).to(self.dev)
+    def __init__(self, spatial_order:int=4, device='cpu'):
+        self.coes = staggered_grid_coes(int(spatial_order//2))
         num_kernels = spatial_order // 2 # max length is 2*num_kernels+1
-        self.kxf = self.create_x_kernels(num_kernels) # x partial derivatives, forward mode
-        self.kxb = self.create_x_kernels(num_kernels) # x partial derivatives, backward mode
-        self.kzf = self.create_z_kernels(num_kernels) # z partial derivatives, forward mode
-        self.kzb = self.create_z_kernels(num_kernels) # z partial derivatives, backward mode
-        for i in range(num_kernels):
-            self.kxf[i][..., 0] = -1
-            self.kxf[i][..., -2] = 1
-            self.kxb[i][..., 1] = -1
-            self.kxb[i][..., -1] = 1
-            self.kzf[i][:,:,0,:] = -1
-            self.kzf[i][:,:,-2,:] = 1
-            self.kzb[i][:,:,1,:] = -1
-            self.kzb[i][:,:,-1,:] = 1
+        max_length = 2 * num_kernels + 1
+        # self.coes = cp.ones_like(self.coes)
 
-    def create_x_kernel(self, length: int) -> torch.Tensor:
-        kernel = torch.zeros((1,1,1,length)).to(self.dev)
-        return kernel
-    
-    def create_z_kernel(self, length: int) -> torch.Tensor:
-        kernel = torch.zeros((1,1,length,1)).to(self.dev)
-        return kernel
+        self.kxf = -torch.from_numpy(pad_kernels(create_kernels(num_kernels, self.coes, axis='x', forward=True), (1, max_length))).cuda()
+        self.kxb = -torch.from_numpy(pad_kernels(create_kernels(num_kernels, self.coes, axis='x', forward=False), (1, max_length))).cuda()
+        self.kzf = -torch.from_numpy(pad_kernels(create_kernels(num_kernels, self.coes, axis='z', forward=True), (max_length, 1))).cuda()
+        self.kzb = -torch.from_numpy(pad_kernels(create_kernels(num_kernels, self.coes, axis='z', forward=False), (max_length, 1))).cuda()
 
-    def create_x_kernels(self, num_kernels: int) -> List[torch.Tensor]:
-        return [self.create_x_kernel(2*i+1) for i in range(1, num_kernels+1)]
+    def x_forward(self, u):
+        return apply_kernels(u, self.kxf)
+
+    def x_backward(self, u):
+        return apply_kernels(u, self.kxb)
     
-    def create_z_kernels(self, num_kernels: int) -> List[torch.Tensor]:
-        return [self.create_z_kernel(2*i+1) for i in range(1, num_kernels+1)]
+    def z_forward(self, u):
+        return apply_kernels(u, self.kzf)
     
-    def x_forward(self, u: torch.Tensor) -> torch.Tensor:
-        results = torch.zeros_like(u)
-        for i in range(len(self.kxf)):
-            results += torch.nn.functional.conv2d(u, self.kxf[i], padding='same')*self.coes[i]
-        return results
-    
-    def x_backward(self, u: torch.Tensor) -> torch.Tensor:
-        results = torch.zeros_like(u)
-        for i in range(len(self.kxb)):
-            results += torch.nn.functional.conv2d(u, self.kxb[i], padding='same')*self.coes[i]
-        return results
-    
-    def z_forward(self, u: torch.Tensor) -> torch.Tensor:
-        results = torch.zeros_like(u)
-        for i in range(len(self.kzf)):
-            results += torch.nn.functional.conv2d(u, self.kzf[i], padding='same')*self.coes[i]
-        return results
-    
-    def z_backward(self, u: torch.Tensor) -> torch.Tensor:
-        results = torch.zeros_like(u)
-        for i in range(len(self.kzb)):
-            results += torch.nn.functional.conv2d(u, self.kzb[i], padding='same')*self.coes[i]
-        return results
+    def z_backward(self, u):
+        return apply_kernels(u, self.kzb)
+
+def pad_kernels(kernels, target_shape):
+    # pads 2D kernels to same shape (H, W)
+    padded = []
+    for k in kernels:
+        pad_y = (target_shape[0] - k.shape[0]) // 2
+        pad_x = (target_shape[1] - k.shape[1]) // 2
+        padded.append(np.pad(k, ((pad_y, pad_y), (pad_x, pad_x))))
+    return np.stack(padded)
+
+def make_kernel(length, axis, flip=False):
+    k = np.zeros((length, 1) if axis == 'z' else (1, length), dtype=np.float32)
+    if not flip:
+        if axis == 'z':
+            k[0, 0] = -1
+            k[-2, 0] = 1
+        else:  # axis == 'x'
+            k[0, 0] = -1
+            k[0, -2] = 1
+    else:
+        if axis == 'z':
+            k[1, 0] = -1
+            k[-1, 0] = 1
+        else:  # axis == 'x'
+            k[0, 1] = -1
+            k[0, -1] = 1
+    return k
+
+def create_kernel(length, axis='x', forward=True):
+    if axis == 'x':
+        kernel = np.zeros((1, length), dtype=np.float32)
+        if forward:
+            kernel[..., 0] = -1
+            kernel[..., -2] = 1
+        else:
+            kernel[..., 1] = -1
+            kernel[..., -1] = 1
+    else:  # axis == 'z'
+        kernel = np.zeros((length, 1), dtype=np.float32)
+        if forward:
+            kernel[0, :] = -1
+            kernel[-2, :] = 1
+        else:
+            kernel[1, :] = -1
+            kernel[-1, :] = 1
+    return kernel
+
+def create_kernels(num_kernels, scale, axis='x', forward=True):
+    return [create_kernel(2 * i + 1, axis, forward)*scale[i-1] for i in range(1, num_kernels + 1)]
+
+def apply_kernels(u, kernels):
+    # u: (B, 1, H, W), torch.Tensor
+    # kernels: (K, kh, kw), torch.Tensor
+
+    B, C, H, W = u.shape
+    K, KH, KW = kernels.shape
+
+    kernels_exp = kernels.unsqueeze(1)  # (K, 1, kh, kw)
+
+    padding = (KH // 2, KW // 2) 
+
+    conv_out = F.conv2d(u, kernels_exp, padding=padding)  # (B, K, H, W)
+
+    out = conv_out.sum(dim=1, keepdim=True)  # (B, 1, H, W)
+
+    return out

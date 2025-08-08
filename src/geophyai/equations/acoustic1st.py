@@ -30,7 +30,7 @@ class Acoustic:
     """
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         if backend == 'torch':
-            self.pd = torch.jit.script(PartialDerivative(spatial_order, device))
+            self.pd = PartialDerivative(spatial_order, device)
         else:
             self.pd = PartialDerivativeJax(spatial_order)    
     @property

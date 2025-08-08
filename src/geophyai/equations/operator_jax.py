@@ -106,6 +106,6 @@ def apply_kernels(u, kernels):
             padding='SAME',
             dimension_numbers=('NCHW', 'OIHW', 'NCHW'), 
         )  # → (b, k, 1, h, w)
-    conv_out = single_conv()  # → (b, k, 1, h, w)
+    conv_out = single_conv()  # → (b, k, h, w)
     return jnp.sum(conv_out, axis=1, keepdims=True)  # → (b, 1, h, w)
 
