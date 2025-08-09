@@ -1,7 +1,4 @@
-import torch, jax
-from functools import partial
-from .operator import PartialDerivative
-from typing import Tuple, Optional, Union, List, Any
+from .base import FirstOrderEquation
 
 def step(vx, vz, txx, tzz, txz,
          vpz, vsz, rho, 
@@ -34,10 +31,10 @@ def step(vx, vz, txx, tzz, txz,
     return y_vx, y_vz, y_txx, y_tzz, y_txz
 
 
-class ElasticZ:
+class ElasticZ(FirstOrderEquation):
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        self.pd = PartialDerivative(spatial_order, device, backend)
+        super().__init__(spatial_order, device, backend)
 
     @property
     def models(self):
@@ -48,7 +45,4 @@ class ElasticZ:
         return ['vx', 'vz', 'txx', 'tzz', 'txz']
     
     def func(self, *args, **kwargs):
-        return step(*args, pd=self.pd, **kwargs)
-    
-    def func_jax(self, *args, **kwargs):
         return step(*args, pd=self.pd, **kwargs)

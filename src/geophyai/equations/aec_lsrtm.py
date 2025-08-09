@@ -1,7 +1,4 @@
-import torch, jax
-from functools import partial
-from .operator import PartialDerivative
-from typing import Tuple, Optional, Union, List, Any
+from .base import FirstOrderEquation
 
 def step(p, vx, vz, txx, tzz, txz,
          ps, vxs, vzs, txxs, tzzs, txzs,
@@ -65,7 +62,7 @@ def step(p, vx, vz, txx, tzz, txz,
 
     return y_p, y_vx, y_vz, y_txx, y_tzz, y_txz, y_ps, y_vxs, y_vzs, y_txxs, y_tzzs, y_txzs
 
-class AcousticElasticCoupledLSRTM:
+class AECLSRTM(FirstOrderEquation):
     """
     Parameter order: mp, ms, vp, vs, rho.
 
@@ -75,7 +72,7 @@ class AcousticElasticCoupledLSRTM:
     """
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        self.pd = PartialDerivative(spatial_order, device, backend)
+        super().__init__(spatial_order, device, backend)
 
     @property
     def models(self):
@@ -87,6 +84,3 @@ class AcousticElasticCoupledLSRTM:
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, **kwargs)
-    
-    def func_jax(self, *args, **kwargs):
-        return step(*args, self.pd, **kwargs)

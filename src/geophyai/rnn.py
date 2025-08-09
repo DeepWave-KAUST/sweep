@@ -50,8 +50,8 @@ class RNNBase:
         self.dev = dev
         self.abcn = abcn
         self.free_surface = free_surface
-        self._dh = dh
-        self._dt = dt
+        self._dh = float(dh)
+        self._dt = float(dt)
         self.use_ckpt = use_ckpt
         self.ckpt_chunks = ckpt_chunks
         self.ndim = len(shape)
@@ -352,7 +352,7 @@ class RNNJax(RNNBase):
 
         # wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
         post_fix = '3d' if self.ndim == 3 else ''
-        wave_equation = getattr(self.equation, f'func_jax{post_fix}') if wave_equation is None else wave_equation
+        wave_equation = getattr(self.equation, f'func{post_fix}') if wave_equation is None else wave_equation
         
         # @jax.checkpoint
         def step_fn_single(carry, it):
@@ -410,12 +410,33 @@ class RNNJax(RNNBase):
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
     
+class RNN:
+
+    def __init__(self, equation, *args, **kwargs):
+        backend = getattr(equation, 'backend', 'jax').lower()
+        if backend == 'torch':
+            self._impl = RNNTorch(equation, *args, **kwargs)
+        elif backend == 'jax':
+            self._impl = RNNJax(equation, *args, **kwargs)
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
+
+    def __getattr__(self, name):
+        return getattr(self._impl, name)
+
+    def __setattr__(self, name, value):
+        if name == '_impl':
+            super().__setattr__(name, value)
+        else:
+            setattr(self._impl, name, value)
+
+    def __call__(self, *args, **kwargs):
+        return self._impl(*args, **kwargs)
 
 RNNJax.__init__.__doc__ = RNNBase.__init__.__doc__
 RNNJax.__call__.__doc__ = RNNJax.forward.__doc__
 RNNTorch.__init__.__doc__ = RNNBase.__init__.__doc__
 
-RNN = RNNTorch
 RNN.__init__.__doc__ = RNNBase.__init__.__doc__
 
 __all__ = ["RNN", "RNNJax"]

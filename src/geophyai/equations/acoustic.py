@@ -1,14 +1,8 @@
-import torch, jax
-import jax.numpy as jnp
-from .operator import laplace
-from .operator_jax import laplace as laplace_jax
+from .base import SecondOrderEquation
 from .operator_jax import laplace3d as laplace3d_jax
-from .utils import to_backend
 import numpy as np
 
-from typing import Tuple, Optional, Union, List
 from .habc_jax import habc, bound_mask
-from geophyai.scalars import generate_convolution_kernel, generate_convolution_kernel3d
 
 def step_pml(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask=None):    
     a = 1 / (1 + b * dt)
@@ -21,7 +15,7 @@ def step_habc(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask):
     u_next = habc(u_next, u_now, u_pre, vp, b, dt, h, maskidx=habc_mask)
     return u_next, u_now
 
-class Acoustic:
+class Acoustic(SecondOrderEquation):
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.
@@ -29,9 +23,7 @@ class Acoustic:
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
-        
-        kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel3d}[dim]
-        self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
+        super().__init__(spatial_order, device, backend, dim=dim)
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
         habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
@@ -47,11 +39,7 @@ class Acoustic:
         return ['h1', 'h2']
 
     def func(self, *args, **kwargs):
-        lap_u_now = laplace(args[0], args[4], self.kernel)
-        return step_pml(*args, lap_u_now)
-    
-    def func_jax(self, *args, **kwargs):
-        lap_u_now = laplace_jax(args[0], args[4], self.kernel)
+        lap_u_now = self.laplace(args[0], args[4], self.kernel)
         step = step_habc if self.use_habc else step_pml
         return step(*args, lap_u_now, self.habc_masks)
 

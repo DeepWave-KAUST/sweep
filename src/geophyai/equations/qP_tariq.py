@@ -1,10 +1,5 @@
-import torch, math
 import numpy as np
-from .operator_jax import laplace
-import jax.numpy as jnp
-from typing import Tuple, Optional, Union, List
-from geophyai.scalars import generate_convolution_kernel
-from .utils import to_backend
+from .base import SecondOrderEquation
 from .habc_jax import habc, bound_mask
 
 def step(u_now, u_pre, f_now, f_next, # wavefields
@@ -26,7 +21,7 @@ def step(u_now, u_pre, f_now, f_next, # wavefields
     return u_next, u_now, f_next, f_now
 
 
-class AcousticTariq:
+class AcousticTariq(SecondOrderEquation):
     """Parameter order: vv, v, eta.
     
        Wavefields: (h1, h2, f1, f2)
@@ -39,15 +34,7 @@ class AcousticTariq:
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
-        
-        # Second order laplace kernel (Second derivative), Full kernel
-        lkernel_x = generate_convolution_kernel(spatial_order, mode='x', no_center=False, grid='normal')
-        lkernel_z = generate_convolution_kernel(spatial_order, mode='z', no_center=False, grid='normal')
-        # First order gradient kernel (first derivative)
-        self.lkernel_x = to_backend(lkernel_x, backend, device)
-        self.lkernel_z = to_backend(lkernel_z, backend, device)
-
-        self.backend = backend
+        super().__init__(spatial_order, device, backend, other_kernels=True)
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
         habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
@@ -62,9 +49,9 @@ class AcousticTariq:
     def wavefields(self):
         return ['h1', 'h2', 'f1', 'f2']
     
-    def func_jax(self, *args, **kwargs):
-        nabla_x = laplace(args[0], args[8], self.lkernel_x)
-        nabla_z = laplace(args[0], args[8], self.lkernel_z)
-        dpdx2 = laplace(args[2], args[8], self.lkernel_x)
-        dpdx2dz2 = laplace(dpdx2, args[8], self.lkernel_z)
+    def func(self, *args, **kwargs):
+        nabla_x = self.laplace(args[0], args[8], self.lkernel_x)
+        nabla_z = self.laplace(args[0], args[8], self.lkernel_z)
+        dpdx2 = self.laplace(args[2], args[8], self.lkernel_x)
+        dpdx2dz2 = self.laplace(dpdx2, args[8], self.lkernel_z)
         return step(*args, nabla_x, nabla_z, dpdx2dz2, **kwargs)

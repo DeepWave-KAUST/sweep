@@ -21,7 +21,7 @@ def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz
 #     u_next = habc(u_next, u_now, u_pre, vp, b, dt, h, maskidx=habc_mask)
 #     return u_next, u_now
 
-class Acoustic:
+class AcousticVRR:
     """
     Parameter order: vp, rx, rz
 

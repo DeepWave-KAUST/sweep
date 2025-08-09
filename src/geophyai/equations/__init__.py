@@ -1,22 +1,35 @@
-from .acoustic import Acoustic
-from .elastic import Elastic
-from .elasticz import ElasticZ
-from .elasticP import ElasticP
-from .acoustic1st import Acoustic as Acoustic1st
-from .acoustic_lsrtm import AcousticLSRTM
-from .aec import AcousticElasticCoupled as AEC
-from .aec_lsrtm import AcousticElasticCoupledLSRTM as AECLSRTM
-from .elastic_lsrtm import ElasticLSRTM
-from .qP_tti import AcousticTTI
-from .qP_vti import AcousticVTI
-from .qP_tariq import AcousticTariq
-from .visco_acoustic import ViscoAcoustic
-from .acoustic_vrr import Acoustic as AcousticVRR
-from .acoustic_vrz import Acoustic as AcousticVRZ
+# AUTO-GENERATED FILE - DO NOT EDIT MANUALLY
 
-__all__ = ['Acoustic', 'Elastic', 'Acoustic1st', 'AcousticLSRTM', 'ElasticZ', 'ElasticP', 'AEC', 'ElasticLSRTM']
-supported_equations = { 'acoustic': {'fwi': [Acoustic, Acoustic1st],
-                                     'lsrtm': [AcousticLSRTM]},
-                        'elastic': {'fwi': [Elastic, ElasticZ, ElasticP],
-                                    'lsrtm': []}
-                      }
+from .acoustic_lsrtm import AcousticLSRTM
+from .acoustic1st import Acoustic1st
+from .elasticz import ElasticZ
+from .acoustic_vrz import AcousticVRZ
+from .aec_lsrtm import AECLSRTM
+from .elastic_lsrtm import ElasticLSRTM
+from .elastic import Elastic
+from .acoustic_vrr import AcousticVRR
+from .qP_tti import AcousticTTI
+from .aec import AEC
+from .visco_acoustic import ViscoAcoustic
+from .qP_vti import AcousticVTI
+from .elasticP import ElasticP
+from .acoustic import Acoustic
+from .qP_tariq import AcousticTariq
+
+__all__ = [
+    'AcousticLSRTM',
+    'Acoustic1st',
+    'ElasticZ',
+    'AcousticVRZ',
+    'AECLSRTM',
+    'ElasticLSRTM',
+    'Elastic',
+    'AcousticVRR',
+    'AcousticTTI',
+    'AEC',
+    'ViscoAcoustic',
+    'AcousticVTI',
+    'ElasticP',
+    'Acoustic',
+    'AcousticTariq',
+]

@@ -4,14 +4,14 @@ import jax.numpy as jnp
 import torch.nn.functional as F
 from geophyai.scalars import staggered_grid_coes
 
-@torch.jit.script
+# @torch.jit.script
 def laplace(u: torch.Tensor, 
-            h: torch.Tensor, 
+            h: float | torch.Tensor, 
             kernel: torch.Tensor) -> torch.Tensor:
     padding = kernel.shape[-1] // 2
-    return torch.nn.functional.conv2d(u, kernel, padding=padding) / (h**2)
+    return torch.nn.functional.conv2d(u, kernel, padding=padding) / (h*h)
 
-@torch.jit.script
+# @torch.jit.script
 def gradient(u: torch.Tensor, 
              h: torch.Tensor, 
              kernel: torch.Tensor) -> torch.Tensor:

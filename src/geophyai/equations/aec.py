@@ -1,7 +1,4 @@
-import torch, jax
-from functools import partial
-from .operator import PartialDerivative
-from typing import Tuple, Optional, Union, List, Any
+from .base import FirstOrderEquation
 
 def step(p, vx, vz, txx, tzz, txz,
          vp, vs, rho, 
@@ -35,7 +32,7 @@ def step(p, vx, vz, txx, tzz, txz,
 
     return y_p, y_vx, y_vz, y_txx, y_tzz, y_txz
 
-class AcousticElasticCoupled:
+class AEC(FirstOrderEquation):
     """
     Parameter order:vp, vs, rho.
 
@@ -44,8 +41,8 @@ class AcousticElasticCoupled:
     Reference: Yu Pengfei, 10.1190/geo2015-0535.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        self.pd = PartialDerivative(spatial_order, device, backend)
-
+        super().__init__(spatial_order, device, backend)
+        
     @property
     def models(self):
         return ['vp', 'vs', 'rho']
@@ -56,6 +53,3 @@ class AcousticElasticCoupled:
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, **kwargs)
-    
-    def func_jax(self, *args, **kwargs):
-        return step(*args, self.pd, **kwargs)

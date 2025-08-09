@@ -1,7 +1,5 @@
-import torch
-import jax.numpy as jnp
 import numpy as np
-from .operator import PartialDerivative
+from .base import FirstOrderEquation
 from .habc_jax import habc1st, bound_mask
 
 
@@ -66,7 +64,7 @@ def step_habc(vx, vz, txx, tzz, txz,
 
     return y_vx, y_vz, y_txx, y_tzz, y_txz
 
-class Elastic:
+class Elastic(FirstOrderEquation):
     """Parameter order: vp, vs, rho.
     
        Wavefields: (vx, vz, txx, tzz, txz)
@@ -74,7 +72,7 @@ class Elastic:
        Reference: Jean Virieux, 10.1190/1.1442147
     """
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
-        self.pd = PartialDerivative(spatial_order, device, backend)
+        super().__init__(spatial_order, device, backend)
         self.use_habc = False
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
@@ -92,7 +90,3 @@ class Elastic:
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, **kwargs)
-    
-    def func_jax(self, *args, **kwargs):
-        _step = step_habc if self.use_habc else step
-        return _step(*args, self.pd, habc_masks=self.habc_masks, **kwargs)

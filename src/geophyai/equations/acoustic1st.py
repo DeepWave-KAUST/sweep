@@ -1,6 +1,4 @@
-import torch
-from .operator import PartialDerivative
-from typing import Tuple, Optional, Union, List, Any
+from .base import FirstOrderEquation
 
 def step(p, vx, vz, vp, rho, dt, h, b, pd):
 
@@ -19,7 +17,7 @@ def step(p, vx, vz, vp, rho, dt, h, b, pd):
 
     return y_p, y_vx, y_vz
 
-class Acoustic:
+class Acoustic1st(FirstOrderEquation):
     """
     Parameter order: vp, rho
 
@@ -28,7 +26,7 @@ class Acoustic:
     References: 10.1190/GEO2011-0345.1
     """
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
-        self.pd = PartialDerivative(spatial_order, device, backend)
+        super().__init__(spatial_order, device, backend)
 
     @property
     def models(self):
@@ -39,9 +37,6 @@ class Acoustic:
         return ['p', 'vx', 'vz']
     
     def func(self, *args, **kwargs):
-        return step(*args, pd=self.pd, **kwargs)
-    
-    def func_jax(self, *args, **kwargs):
         return step(*args, pd=self.pd, **kwargs)
 
 

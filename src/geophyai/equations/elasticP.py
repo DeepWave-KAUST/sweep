@@ -1,9 +1,6 @@
-import torch, jax
+import torch
 import jax.numpy as jnp
-import numpy as np
-from .operator import PartialDerivative
-from .utils import to_backend
-from typing import Tuple, Optional, Union, List, Any
+from .base import FirstOrderEquation
 
 def step(vx, vz, txx, tzz, txz,
          vp, vs, rho, 
@@ -40,8 +37,8 @@ def step(vx, vz, txx, tzz, txz,
 
     div = xx + zz
 
-    vxp = pd.x_backward(div)*h**(-1) * jnp.exp(-c)
-    vzp = pd.z_forward(div)*h**(-1) * jnp.exp(-c)
+    vxp = pd.x_backward(div)*h**(-1) * backend.exp(-c)
+    vzp = pd.z_forward(div)*h**(-1) * backend.exp(-c)
 
     ############### Update P ###############
     vx_x = pd.x_forward(vxp)
@@ -56,25 +53,19 @@ def step(vx, vz, txx, tzz, txz,
 
     return y_vx, y_vz, y_txx, y_tzz, y_txz
 
-class ElasticP:
+class ElasticP(FirstOrderEquation):
     """This class implements the 2D elastic wave equation for pure P-mode waves.
        Mu and Alkhalifah, 2024, 10.1111/1365-2478.13610
     """
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         self.backend = backend
-        self.pd = PartialDerivative(spatial_order, device, backend)
-
+        self.op = {'torch': torch, 'jax': jnp}[backend]
+        super().__init__(spatial_order, device, backend)
+        
     @property
     def need_init(self):
         return True
-
-    def init(self, shape, device, h):
-        kz = np.fft.fftfreq(shape[0], d=h) * 2 * np.pi
-        kx = np.fft.fftfreq(shape[1], d=h) * 2 * np.pi
-        kz, kx = np.meshgrid(kz, kx, indexing='ij')
-        ksquared = kx**2 + kz**2
-        self.ksquared = to_backend(ksquared, self.backend, device)[None, None, ...]
 
     @property
     def models(self):
@@ -85,7 +76,4 @@ class ElasticP:
         return ['vx', 'vz', 'txx', 'tzz', 'txz']
     
     def func(self, *args, **kwargs):
-        return step(*args, self.ksquared, torch, **kwargs)
-    
-    def func_jax(self, *args, **kwargs):
-        return step(*args, self.ksquared, self.pd, jnp, **kwargs)
+        return step(*args, self.k, self.pd, self.op, **kwargs)
