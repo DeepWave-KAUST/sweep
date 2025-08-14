@@ -1,10 +1,79 @@
 import jax
 import jax.numpy as jnp
 
-import numpy as np
-
 import torch
 import torch.nn.functional as F
+
+import numpy as np
+import math
+
+from .scalars import normal_grid_coes
+
+def symbol_S(theta, a0, a_m):
+    """
+    Calculate the symbol S(theta) = a0 + 2 * sum_{m=1}^M a_m * cos(m*theta)
+    """
+    s = a0
+    for m_idx, a in enumerate(a_m, start=1):
+        s += 2.0 * a * math.cos(m_idx * theta)
+    return s
+
+def max_dx_from_error(f_max, c_min, so, error_tol=0.01, dx_upper=None):
+    """
+    Calculate the maximum stable spatial step dx based on frequency, minimum and maximum velocities,
+    and the.
+    """
+    a_m = normal_grid_coes(so//2)
+    a0 = -2.0 * np.sum(a_m)
+    lambda_min = c_min / f_max
+    k = 2.0 * math.pi / lambda_min
+
+    if dx_upper is None:
+        dx_upper = lambda_min * 0.9
+
+    low = 1e-9
+    high = dx_upper
+    for _ in range(60):
+        mid = 0.5 * (low + high)
+        theta = k * mid
+        S = symbol_S(theta, a0, a_m)
+        k_num_sq = - S / (mid * mid)
+        if k_num_sq <= 0:
+            high = mid
+            continue
+        k_num = math.sqrt(k_num_sq)
+        c_ratio = k_num / k
+        err = abs(1.0 - c_ratio)
+        if err <= error_tol:
+            low = mid
+        else:
+            high = mid
+    return low
+
+def max_dt_from_dx_dy(dx, dy, so, c_max, C_safe=0.9, theta_samples=300):
+    """
+    Calculate the maximum stable time step dt based on dx, dy, and the coefficients a0, a_m.
+    """
+    a_m = normal_grid_coes(so//2)
+    a0 = -2.0 * np.sum(a_m)
+    thetas = np.linspace(0.0, math.pi, theta_samples)
+    lambda_max = 0.0
+    for tx in thetas:
+        Sx = symbol_S(tx, a0, a_m)
+        kx_sq = max(0.0, - Sx / (dx * dx))
+        for ty in thetas:
+            Sy = symbol_S(ty, a0, a_m)
+            ky_sq = max(0.0, - Sy / (dy * dy))
+            lam = kx_sq + ky_sq
+            if lam > lambda_max:
+                lambda_max = lam
+
+    if lambda_max <= 0:
+        return float('inf'), lambda_max
+
+    dt_limit = 2.0 / (c_max * math.sqrt(lambda_max))
+    return dt_limit * C_safe
+
 
 def to_tensor(array):
     if isinstance(array, np.ndarray):
@@ -95,8 +164,8 @@ def split_model(m, sources, receivers, one_side_expand=50):
 
     # Calculate the max length between the sources and receivers for each shot
     # and determine the leftmost and rightmost points
-    max_length = np.abs(np.max(receivers[..., 0], axis=1) - sources[..., 0]).max()
-    
+    # max_length = np.abs(np.max(receivers[..., 0], axis=1) - sources[..., 0]).max()
+    max_length = np.max(np.abs(receivers[..., 0] - sources[..., 0][..., None]), axis=1).max()
     for shot in range(sources.shape[0]):
         srcx = sources[shot, ..., 0]
         recx = receivers[shot, ..., 0]
@@ -132,6 +201,7 @@ def split_model(m, sources, receivers, one_side_expand=50):
         m_split.append([_m[:, left_start:right_end] for _m in m])
         left.append(left_start)
         right.append(right_end)
+
         sources_moved = sources_moved.at[shot, ..., 0].subtract(left_start)
         receivers_moved = receivers_moved.at[shot, ..., 0].subtract(left_start)
     try:

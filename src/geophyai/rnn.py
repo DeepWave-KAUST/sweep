@@ -59,7 +59,7 @@ class RNNBase:
 
         self.abc_func = {2: abc_coefficients_2d, 3: abc_coefficients_3d}[self.ndim]
 
-        if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM', 'AEC', 'AECLSRTM'] and self.free_surface:
+        if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM', 'AEC', 'AECLSRTM', 'Acoustic1st'] and self.free_surface:
             raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
 
         self.source_type = source_type

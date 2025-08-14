@@ -42,7 +42,7 @@ new_shape = (int(ori_nz*ori_dh/target_dh), int(ori_nx*ori_dh/target_dh))
 
 # Interpolate the true model to the target resolution
 if ori_dh != target_dh:
-    true_model = resize(true_model, (ori_nz, ori_nx), new_shape)
+    true_model = resize(true_model, new_shape)
     dh = target_dh
 
 smooth_model = gaussian_filter(true_model, sigma=11)

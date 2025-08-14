@@ -30,7 +30,7 @@ class DataLoader:
             self.shape = self.msplit[0].shape[-2:]
         else:
             self.left, self.right = None, None
-
+            self.shape = None
     @property
     def device_count(self):
         return jax.device_count()

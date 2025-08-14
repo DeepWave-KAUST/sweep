@@ -26,6 +26,7 @@ class FirstOrderEquation:
 
         :param initial_condition: The initial condition for the equation.
         """
+        self.so = spatial_order
         self.backend = backend
         self.use_habc = False
         self.pd = PartialDerivative(spatial_order, device, backend)
@@ -46,6 +47,7 @@ class SecondOrderEquation:
         :param initial_condition: The initial condition for the equation.
         """
         dim = kwargs.get('dim', 2)
+        self.so = spatial_order
         self.backend = backend
         self.use_habc = False
         self.habc_masks = None

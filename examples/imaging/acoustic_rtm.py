@@ -33,6 +33,8 @@ dt = 0.001
 delay = 0.128
 nt = 4000
 free_surface = True
+water_depth = 470 # m
+water_grid = int(water_depth / target_dh)  # Convert water depth to grid points
 
 t = np.arange(0, nt*dt, dt)
 true_model = np.load(true_path)[:,::2]  # Load the true model and downsample by 2 in x direction
@@ -42,7 +44,7 @@ new_shape = (int(ori_nz*ori_dh/target_dh), int(ori_nx*ori_dh/target_dh))
 
 # Interpolate the true model to the target resolution
 if ori_dh != target_dh:
-    true_model = resize(true_model, (ori_nz, ori_nx), new_shape)
+    true_model = resize(true_model, new_shape)
     dh = target_dh
 
 smooth_model = gaussian_filter(true_model, sigma=11)
@@ -92,10 +94,12 @@ def bwd(res, g):
     """Backward step of the wave equation, used for vjp."""
     vjp_fun = res[-1]
     grads = vjp_fun(g)
+    # Calculate gradient using (forward * adjoint) wavefields
+    vp_grad = res[0] * grads[0]
     # Source-side illumination
     sill = jnp.sum(res[0]**2, axis=0).squeeze()
     rill = jnp.sum(grads[0]**2, axis=0).squeeze()
-    return grads + (sill,rill)
+    return grads[0:2] + (vp_grad,) + grads[3:] + (sill,rill)
 
 step_fn = jax.custom_vjp(fwd_base)
 step_fn.defvjp(fwd, bwd)
@@ -152,13 +156,34 @@ def fwi_step(params, rand_shots):
     (loss, data), gradients = jax.value_and_grad(loss_fn, (0, 1, 2), has_aux=True)(params, tmp1, tmp2, rand_shots)
     return loss, gradients
 
+def stack(grads, sources, max_offset=1000):
+    """Stack gradients with only near offsets.
+    max_offset: unit is in meters, used to filter out far offsets.
+    """
+    srcx = sources[..., 0]
+    rtm = jnp.zeros(grads.shape[-2:], dtype=grads.dtype)
+    _mo = int(max_offset / dh)  # Convert max_offset to grid points
+    for i in range(sources.shape[0]):
+        if srcx[i] - _mo//2 < 0:
+            left = _mo//2 - srcx[i]
+            right = left + _mo
+        elif srcx[i] + _mo//2 > grads.shape[-1]:
+            right = grads.shape[-1] - srcx[i]
+            left = right - _mo
+        else:
+            left = int(srcx[i] - _mo//2)
+            right = int(srcx[i] + _mo//2)
+        rtm = rtm.at[:, left:right].add(grads[i, 0, :, left:right])
+    return rtm
+
 LOSS = []
 for epoch in tqdm.trange(epochs):
 
     rand_shots = jnp.arange(sources.shape[0])
-
-    loss, grads = fwi_step(solver.vp, rand_shots)
+    vp = jnp.tile(solver.vp.reshape(1, 1, *shape), (rand_shots.shape[0], 1, 1, 1))  # (nshots, 1, nz, nx)
+    loss, grads = fwi_step(vp, rand_shots)
     grad_vp = grads[0]
+    grad_vp = stack(grad_vp, sources, max_offset=1000)  # Stack gradients with near offsets
     sill = solver.crop(grads[1])
     rill = solver.crop(grads[2])
 
