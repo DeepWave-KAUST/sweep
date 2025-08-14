@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from jax import vmap
-from geophyai.scalars import staggered_grid_coes_torch
+from sweep.scalars import staggered_grid_coes_torch
 from jax.scipy.signal import convolve2d as conv2d
 
 

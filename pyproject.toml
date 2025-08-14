@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "geophyai"
+name = "sweep"
 version = "0.0.1"
 authors = [
   { name="Shaowen Wang", email="shaowen.wang@kaust.edu.sa" },
 ]
-description = "A.D. based package for seismic inverse problem."
+description = "Seismic Wave Equation Exploration Platform"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
@@ -18,4 +18,4 @@ Homepage = "https://github.com/GeophyAI/geophyai"
 Issues = "https://github.com/GeophyAI/geophyai/issues"
 
 [project.scripts]
-geophyai = "geophyai.cli:main"
+sweep = "sweep.cli:main"

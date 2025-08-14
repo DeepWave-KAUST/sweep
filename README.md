@@ -1,5 +1,5 @@
-# GeophyAI
-A automatic differentiation-based library for seismic inverse problems.
+# SWEEP
+Seismic Wave Equation Exploration Platform (SWEEP) is a Python package designed for seismic wave equation modeling and inversion.
 
 ## Installation
 ```bash
@@ -12,9 +12,9 @@ The following example shows how to compute the gradient of the a toy model with 
 ```python
 import torch
 torch.backends.cudnn.benchmark = True
-from geophyai.rnn import RNN
-from geophyai.equations import Acoustic
-from geophyai.signal import ricker
+from sweep.rnn import RNN
+from sweep.equations import Acoustic
+from sweep.signal import ricker
 import numpy as np
 import matplotlib.pyplot as plt
 

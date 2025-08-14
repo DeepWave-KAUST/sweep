@@ -2,7 +2,7 @@
 import numpy as np
 from .utils import to_backend
 from .operator import PartialDerivative
-from geophyai.scalars import generate_convolution_kernel, generate_convolution_kernel3d
+from sweep.scalars import generate_convolution_kernel, generate_convolution_kernel3d
 from .operator import laplace as laplace_torch
 from .operator_jax import laplace as laplace_jax
 

@@ -29,7 +29,7 @@ class RNNBase:
         """Base class for the RNN
 
         Args:
-            equation (class): The wave equation class from geophyai.equations
+            equation (class): The wave equation class from sweep.equations
             shape (tupel or list): The shape of the model
             dev (torch.device): For pytorch, the dev should be torch.device, for jax, it will automatically detect the device
             source_type (list, optional): List of strings for the source type. Defaults to [].

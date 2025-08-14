@@ -2,7 +2,7 @@ import argparse
 import inspect
 
 def list_equations():
-    import geophyai.equations as eq
+    import sweep.equations as eq
     import inspect
 
     print("Available equations:\n")
@@ -32,7 +32,7 @@ def list_equations():
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='geophyai', description='GeophyAI CLI')
+    parser = argparse.ArgumentParser(prog='sweep', description='SWEEP (Seismic Wave Equation Exploration Platform)')
     subparsers = parser.add_subparsers(dest='command')
 
     list_parser = subparsers.add_parser('list', help='List components')

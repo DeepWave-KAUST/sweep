@@ -1,4 +1,4 @@
-from geophyai.rnn import RNNTorch, RNNJax, RNN
-from geophyai import equations
+import sys
+import sweep
 
-__all__ = ['RNNTorch', 'RNNJax', 'equations']
+sys.modules['geophyai'] = sweep

@@ -2,7 +2,7 @@ import jax, torch
 import numpy as np
 import jax.numpy as jnp
 import torch.nn.functional as F
-from geophyai.scalars import staggered_grid_coes
+from sweep.scalars import staggered_grid_coes
 
 # @torch.jit.script
 def laplace(u: torch.Tensor, 
