@@ -54,7 +54,7 @@ class SecondOrderEquation:
 
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel3d}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
-        self.laplace = {'torch': laplace_torch, 'jax': laplace_jax}[backend]
+        self.laplace = {'torch': laplace_torch, 'jax': laplace_jax, 'cuda': None}[backend]
 
         other_kernels = kwargs.get('other_kernels', False)
 

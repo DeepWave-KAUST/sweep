@@ -67,13 +67,9 @@ class RNNBase:
 
         if self.free_surface:
             self.padding_z = (0, self.abcn)
-            # self.padding = (self.abcn, self.abcn, 0, self.abcn) # left, right. top, bottom, refer to torch.nn.functional.pad
-            # self.shape = (self.shape[0]+self.abcn, self.shape[1]+2*self.abcn)
             shape_z = self.shape[0] + self.abcn
         else:
             self.padding_z = (self.abcn, self.abcn)
-            # self.padding = (self.abcn, )*4 # left, right. top, bottom, refer to  torch.nn.functional.pad
-            # self.shape = (self.shape[0]+2*self.abcn, self.shape[1]+2*self.abcn)
             shape_z = self.shape[0] + 2*self.abcn
 
         self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
@@ -242,13 +238,10 @@ class RNNJax(RNNBase):
         """
         if padding is None:
             padding = self.padding
-        # padding_z = (padding[-2], padding[-1])
-        # padding_x = (padding[0], padding[1])
-        # padding = (padding_z, padding_x)
         padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
-        # if d.ndim == 4: padding = (((0,0),)*2+padding) # Model split case, the input velocity is 4D (batch, 1, nz, nx)
         padding = (((0,0),)*(d.ndim-self.ndim)+padding)
-        return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
+        # return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
+        return jnp.pad(d, padding, mode='edge')
     
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -264,7 +257,9 @@ class RNNJax(RNNBase):
                 return_wavefield=False, 
                 adj=False, 
                 wave_equation=None, 
+                pad_outside=True,
                 aux_args=tuple(),
+                # pad_outside=False,
                 **kwargs,):
         """Forward pass of the wave equation
 
@@ -317,7 +312,7 @@ class RNNJax(RNNBase):
 
         # Get the model parameters
         models = models if models is not None else self.parameters()
-
+        
         models = [self.pad(para, self.padding) for para in models]
 
         self.models_padded = models
@@ -410,14 +405,73 @@ class RNNJax(RNNBase):
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
     
+class RNNCUDA(RNNBase):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def pad(self, d, padding=None):
+        """Padding the model parameters
+
+        Args:
+            padding (list): 4 elements list for padding the model parameters
+        """
+        if padding is None:
+            padding = self.padding
+        padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
+        padding = (((0,0),)*(d.ndim-self.ndim)+padding)
+        return np.pad(d, padding, mode='edge')
+    
+
+    def forward(self, 
+                wavelet, 
+                sources, 
+                receivers, 
+                models=None, 
+                source_encoding=False, 
+                return_wavefield=False, 
+                adj=False, 
+                wave_equation=None, 
+                aux_args=tuple(),
+                **kwargs,):
+        
+        nt = wavelet.shape[-1]
+        # import conv2d_cpp
+
+        sources = sources.copy()
+        receivers = receivers.copy()
+
+        if self.free_surface:
+            sources[..., 0] += self.abcn
+            receivers[..., 0] += self.abcn
+        else:
+            sources += self.abcn
+            receivers += self.abcn
+
+        models = [self.pad(para, self.padding) for para in models]
+
+        record = wave_equation.forward(models[0], self.equation.kernel, self.b, wavelet, sources, receivers, None, None, nt, self._dt, self._dh)
+
+        # print(kernel.shape)
+        # exit()
+        # record = conv2d_cpp.forward(models[0], kernel, self.b, wavelet, sources, receivers, nt, self.dt, self._dh)
+
+        return record
+    
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
 class RNN:
 
     def __init__(self, equation, *args, **kwargs):
         backend = getattr(equation, 'backend', 'jax').lower()
-        if backend == 'torch':
-            self._impl = RNNTorch(equation, *args, **kwargs)
-        elif backend == 'jax':
-            self._impl = RNNJax(equation, *args, **kwargs)
+
+        backend_func = {'torch': RNNTorch, 
+                        'jax': RNNJax, 
+                        'cuda': RNNCUDA}
+
+        if backend in backend_func.keys():
+            self._impl = backend_func[backend](equation, *args, **kwargs)
         else:
             raise ValueError(f"Unsupported backend: {backend}")
 
