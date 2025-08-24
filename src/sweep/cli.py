@@ -16,19 +16,17 @@ def list_equations():
             models = None
             try:
                 instance = obj()
-                models = getattr(instance, 'models', None)
+                models_attr = getattr(instance, 'models', None)
+                if isinstance(models_attr, property):
+                    models = models_attr.__get__(instance)
+                else:
+                    models = models_attr
             except Exception:
-                try:
-                    attr = getattr(obj, 'models', None)
-                    if isinstance(attr, property):
-                        models = attr.__get__(None, obj)
-                    else:
-                        models = attr
-                except Exception:
-                    models = None
+                models = None
 
             models_str = f"models: {models}" if models is not None else "models: N/A"
             print(f"  - {name:<16} {models_str}")
+
 
 
 def main():

@@ -1,7 +1,7 @@
 import torch
 import jax.numpy as jnp
 import numpy as np
-
+from .base import SecondOrderEquation
 
 def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, pd, habc_masks=None):
     a = 1 / (1 + b * dt)
@@ -14,7 +14,7 @@ def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz
 #     u_next = habc(u_next, u_now, u_pre, vp, b, dt, h, maskidx=habc_mask)
 #     return u_next, u_now
 
-class AcousticVRR:
+class AcousticVRR(SecondOrderEquation):
     """
     Parameter order: vp, rx, rz
 
