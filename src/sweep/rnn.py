@@ -240,7 +240,19 @@ class RNNJax(RNNBase):
             padding = self.padding
         padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
         padding = (((0,0),)*(d.ndim-self.ndim)+padding)
-        # return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
+        return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
+        # return jnp.pad(d, padding, mode='edge')
+
+    def jaxpad(self, d, padding=None):
+        """Padding the model parameters
+
+        Args:
+            padding (list): 4 elements list for padding the model parameters
+        """
+        if padding is None:
+            padding = self.padding
+        padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
+        padding = (((0,0),)*(d.ndim-self.ndim)+padding)
         return jnp.pad(d, padding, mode='edge')
     
     def set_parameters(self, model):
@@ -248,19 +260,17 @@ class RNNJax(RNNBase):
         for name, data in zip(self.model_names, model):
             setattr(self, name, jnp.array(data))
 
-    def forward(self, 
-                wavelet, 
-                sources, 
-                receivers, 
-                models=None, 
-                source_encoding=False, 
-                return_wavefield=False, 
-                adj=False, 
-                wave_equation=None, 
-                pad_outside=True,
-                aux_args=tuple(),
-                # pad_outside=False,
-                **kwargs,):
+    def forward_base(self, 
+                     wavelet, 
+                     sources, 
+                     receivers, 
+                     models=None,
+                     source_encoding=False, 
+                     return_wavefield=False, 
+                     adj=False, 
+                     wave_equation=None, 
+                     aux_args=tuple(),
+                     **kwargs,):
         """Forward pass of the wave equation
 
         Args:
@@ -310,11 +320,6 @@ class RNNJax(RNNBase):
 
         record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
-        # Get the model parameters
-        models = models if models is not None else self.parameters()
-        
-        models = [self.pad(para, self.padding) for para in models]
-
         self.models_padded = models
 
         has_aux = False
@@ -342,14 +347,9 @@ class RNNJax(RNNBase):
 
         num_chunks = (nt + chunk_size - 1) // chunk_size
 
-        nt_padded = num_chunks * chunk_size
-        # pad_len = nt_padded - nt
-
-        # wavelet_padded = jnp.pad(wavelet, ((0, pad_len),) + ((0, 0),) * (wavelet.ndim - 1))
         post_fix = '3d' if self.ndim == 3 else ''
         wave_equation = getattr(self.equation, f'func{post_fix}') if wave_equation is None else wave_equation
         
-        # @jax.checkpoint
         def step_fn_single(carry, it):
 
             def do_step(carry):
@@ -402,8 +402,22 @@ class RNNJax(RNNBase):
 
         return rec if not has_aux else (rec, final[-2])
     
+    def forward(self, *args, **kwargs):
+        return self.__call__(*args, **kwargs)
+
     def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
+        models = kwargs.pop("models", None)
+        models = models if models is not None else self.parameters()
+        models = [self.pad(para, self.padding) for para in models]
+        return self.forward_base(*args, models=models, **kwargs)
+    
+    def __call_outside_padding__(self,*args, **kwargs):
+        """ This function is useful when you want to compile forward modeling.
+        """
+        models = kwargs.pop("models", None)
+        models = models if models is not None else self.parameters()
+        models = [self.jaxpad(para, self.padding) for para in models]
+        return self.forward_base(*args, models=models, **kwargs)
     
 class RNNCUDA(RNNBase):
 
@@ -422,7 +436,6 @@ class RNNCUDA(RNNBase):
         padding = (((0,0),)*(d.ndim-self.ndim)+padding)
         return np.pad(d, padding, mode='edge')
     
-
     def forward(self, 
                 wavelet, 
                 sources, 
@@ -488,7 +501,7 @@ class RNN:
         return self._impl(*args, **kwargs)
 
 RNNJax.__init__.__doc__ = RNNBase.__init__.__doc__
-RNNJax.__call__.__doc__ = RNNJax.forward.__doc__
+RNNJax.__call__.__doc__ = RNNJax.forward_base.__doc__
 RNNTorch.__init__.__doc__ = RNNBase.__init__.__doc__
 
 RNN.__init__.__doc__ = RNNBase.__init__.__doc__
