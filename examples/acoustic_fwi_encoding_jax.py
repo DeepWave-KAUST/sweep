@@ -2,7 +2,7 @@ import sys, tqdm, os, jax, optax
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
-# sys.path.append('../src')
+sys.path.append('../src')
 from geophyai.rnn import RNNJax
 from geophyai.equations import Acoustic
 from geophyai.signal import ricker
@@ -82,56 +82,85 @@ receivers = jnp.array(receivers)[0:1]
 
 @jax.jit
 def fwi_step(key, params, rand_shots):
-    # @jax.jit
+
     def loss_fn(params, shot_nums):
+        nshots = shot_nums.shape[0]
 
-        # Random shifts and polarity
-        # time_shifts = jnp.arange(0, 0.2 * nt, dtype=jnp.int32)
-        # p = jax.random.randint(key, 1, 1, 3)
-        # tau_s = jax.random.choice(key, time_shifts)
-        # mask = jnp.arange(nt) < tau_s
+        subkeys = jax.random.split(key, nshots * 2)
+        keys_p, keys_tau = subkeys[:nshots], subkeys[nshots:]
 
-        # super_wave = []
-        # super_obs = []
+        def process_shot(carry, inputs):
+            num, key_p, key_tau = inputs
+            # Random polarity
+            p = jax.random.randint(key_p, shape=(), minval=0, maxval=2)  # 0或1
+            # Random time shift
+            time_shifts = jnp.arange(0, 0.2 * nt, dtype=jnp.int32)
+            tau_s = jax.random.choice(key_tau, time_shifts)
+            mask = jnp.arange(nt) < tau_s
 
-        # for num in shot_nums:
-        #     rolled_signal = (-1)**p * jnp.roll(wave, tau_s, axis=0)
-        #     rolled_signal = rolled_signal * (~mask)
-        #     super_wave.append(rolled_signal)
-        #     rolled_data = (-1)**p * jnp.roll(obs[num], tau_s, axis=0)
-        #     rolled_data = rolled_data * (~mask.reshape(-1, 1, 1))
-        #     super_obs.append(rolled_data)
-        # super_wave = jnp.array(super_wave)
-        # super_obs = jnp.array(super_obs)
-        
-        # Forward modeling
-        syn = model(wave,
-                    sources=sources[shot_nums], 
-                    receivers=receivers, 
-                    models=[params], 
+            rolled_wave = (-1)**p * jnp.roll(wave, tau_s, axis=0)
+            rolled_wave = rolled_wave * (~mask)
+            rolled_obs = (-1)**p * jnp.roll(obs[num], tau_s, axis=0)
+            rolled_obs = rolled_obs * (~mask.reshape(-1, 1, 1))
+
+            return carry, (rolled_wave, rolled_obs)
+
+        _, (super_wave, super_obs) = jax.lax.scan(
+            process_shot,
+            None,
+            (shot_nums, keys_p, keys_tau)
+        )
+
+        super_wave = jnp.stack(super_wave)
+        super_obs = jnp.stack(super_obs)
+
+        syn = model(super_wave,
+                    sources=sources[shot_nums],
+                    receivers=receivers,
+                    models=[params],
                     source_encoding=True)
+        _obs = jnp.sum(super_obs, axis=0)
+        _loss_ = jnp.mean((syn - _obs)**2)
+    
+        # # Forward modeling
+        # syn = model(wave,
+        #             sources=sources[shot_nums], 
+        #             receivers=receivers, 
+        #             models=[params], 
+        #             source_encoding=True)
         
-        _obs = jnp.sum(obs[shot_nums], axis=0)
-        _loss_ = jnp.mean((syn-_obs)**2)
+        # _obs = jnp.sum(obs[shot_nums], axis=0)
+        # _loss_ = jnp.mean((syn-_obs)**2)
 
         return _loss_, (syn, _obs)
     # Compute the gradient
     (loss, data), gradients = jax.value_and_grad(loss_fn, has_aux=True)(params, rand_shots)
-    return loss, gradients
+    return loss, gradients, data
 
 LOSS = []
 for epoch in tqdm.trange(epochs):
 
     key, subkey = random.split(key)
-    rand_shots = random.randint(subkey, (batchsize,), 0, sources.shape[0])
+    rand_shots = random.permutation(subkey, sources.shape[0])[:batchsize]
 
-    loss, grads = fwi_step(subkey, model.vp, rand_shots)
+    loss, grads, (syn, obs) = fwi_step(subkey, model.vp, rand_shots)
     model.vp, opt_state = update_fn(model.vp, grads, opt_state)
 
     print(f'Epoch: {epoch}, Loss: {loss}')
     LOSS.append(loss)
     # Save the model
     if epoch % show_every == 0:
+
+        fig, axes = plt.subplots(1, 2, figsize=(6, 8))
+        vmin, vmax = np.percentile(obs.squeeze(), [2, 98])
+        axes[0].imshow(obs.squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+        axes[0].set_title('Observed Data')
+        axes[1].imshow(syn.squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+        axes[1].set_title('Synthetic Data')
+        plt.tight_layout()
+        plt.savefig(f'{save_path}/data_epoch_{epoch}.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
         vmin, vmax = true_model.min(), true_model.max()
         fig, ax = plt.subplots(1, 3, figsize=(12, 4))
         extent = [0, nx*dh, nz*dh, 0]

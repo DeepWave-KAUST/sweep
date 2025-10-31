@@ -4,7 +4,7 @@ from .utils import split_model, split_by_lr
 
 class DataLoader:
 
-    def __init__(self, obs, sources, receivers, batch_size=8, steps_per_epoch=1, mask=None, models=None, key=None, model_split=False):
+    def __init__(self, obs, sources, receivers, batch_size=8, steps_per_epoch=1, mask=None, models=None, wavelets=None, key=None, model_split=False):
 
         self.obs = obs
         self.sources = sources
@@ -15,6 +15,7 @@ class DataLoader:
         self.models = models
         self.key = key
         self.model_split = model_split
+        self.wavelets = wavelets
 
         self.check()
         self.init()
@@ -38,6 +39,17 @@ class DataLoader:
     @property
     def multi_gpu(self):
         return self.device_count > 1
+
+    @property
+    def has_wavelets(self):
+        return self.wavelets is not None
+    
+    @property
+    def shotwise_wavelets(self):
+        if self.has_wavelets:
+            return self.wavelets.shape[0] == self.obs.shape[0]
+        else:
+            return False
 
     def __len__(self):
         return self.obs.shape[0]
@@ -102,4 +114,9 @@ class DataLoader:
         else:
             models_batch = [jnp.tile(m.reshape(1, 1, *m.shape), (self.device_count, self.shots_per_gpu, 1, 1)) for m in self.models]
 
-        return obs_batch, sources_batch, receivers_batch, mask_batch, models_batch
+        if self.shotwise_wavelets:
+            wavelets_batch = self.wavelets[self.rand_shots[step]]
+        else:
+            wavelets_batch = self.wavelets.repeat(self.shots_per_gpu, axis=0)[None, ...].repeat(self.device_count, axis=0)
+
+        return obs_batch, sources_batch, receivers_batch, mask_batch, models_batch, wavelets_batch

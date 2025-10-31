@@ -59,7 +59,7 @@ class RNNBase:
 
         self.abc_func = {2: abc_coefficients_2d, 3: abc_coefficients_3d}[self.ndim]
 
-        if self.equation.__class__.__name__ not in ['Acoustic', 'AcousticLSRTM', 'AEC', 'AECLSRTM', 'Acoustic1st'] and self.free_surface:
+        if self.equation.__class__.__name__ not in ['AcousticVRZ', 'Acoustic', 'AcousticLSRTM', 'AEC', 'AECLSRTM', 'Acoustic1st'] and self.free_surface:
             raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
 
         self.source_type = source_type
@@ -286,7 +286,8 @@ class RNNJax(RNNBase):
         """
 
         wavelet = jnp.array(wavelet, dtype=jnp.float32)
-        
+        wavelet = jnp.atleast_2d(wavelet)
+
         nt = wavelet.shape[-1]
         nshots = sources.shape[0]
 
@@ -347,7 +348,7 @@ class RNNJax(RNNBase):
 
         num_chunks = (nt + chunk_size - 1) // chunk_size
 
-        post_fix = '3d' if self.ndim == 3 else ''
+        post_fix = '_jax3d' if self.ndim == 3 else ''
         wave_equation = getattr(self.equation, f'func{post_fix}') if wave_equation is None else wave_equation
         
         def step_fn_single(carry, it):
@@ -411,7 +412,7 @@ class RNNJax(RNNBase):
         models = [self.pad(para, self.padding) for para in models]
         return self.forward_base(*args, models=models, **kwargs)
     
-    def __call_outside_padding__(self,*args, **kwargs):
+    def __call_forward__(self,*args, **kwargs):
         """ This function is useful when you want to compile forward modeling.
         """
         models = kwargs.pop("models", None)
