@@ -24,6 +24,7 @@ class Acoustic(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend, dim=dim)
+        super().init_laplace(ltype='1dsep')
 
     def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
         habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
@@ -39,10 +40,10 @@ class Acoustic(SecondOrderEquation):
         return ['h1', 'h2']
 
     def func(self, *args, **kwargs):
-        lap_u_now = self.laplace(args[0], args[4], self.kernel)
+        lap_u_now = self.laplace(args[0], self.kernel, args[4], args[4])
         step = step_habc if self.use_habc else step_pml
         return step(*args, lap_u_now, self.habc_masks)
 
     def func_jax3d(self, *args, **kwargs):
-        lap_u_now = laplace3d_jax(args[0], args[4], self.kernel[None, None, ...])
+        lap_u_now = laplace3d_jax(args[0], self.kernel[None, None, ...], args[4])
         return step_pml(*args, lap_u_now)

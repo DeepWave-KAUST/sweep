@@ -25,7 +25,8 @@ class AcousticLSRTM(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend)
-        
+        super().init_laplace(ltype='1dsep')
+    
     @property
     def models(self):
         return ['vp', 'mp']
@@ -35,7 +36,7 @@ class AcousticLSRTM(SecondOrderEquation):
         return ['h1', 'h2', 'sh1', 'sh2']
     
     def func(self, *args, **kwargs):
-        lap_u_now = self.laplace(args[0], args[7], self.kernel)
-        lap_su_now = self.laplace(args[2], args[7], self.kernel)
+        lap_u_now = self.laplace(args[0], self.kernel, args[7], args[7])
+        lap_su_now = self.laplace(args[2], self.kernel, args[7], args[7])
         return step(*args, lap_u_now, lap_su_now)
     
