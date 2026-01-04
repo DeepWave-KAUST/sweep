@@ -15,6 +15,15 @@ def laplace(u, h=1, kernel=None):
     return batch_convolve2d(u, kernel) / (h ** 2)
 
 def laplace3d(u, h=1, kernel=None):
+    """ 3D Laplace operator using JAX.
+     Args:
+         u (jnp.ndarray): Input wavefield of shape (batch, 1, depth, height, width).
+         h (float): Grid spacing.
+         kernel (jnp.ndarray): 3D convolution kernel of shape (1, 1, kD, kH, kW).
+
+     Returns:
+         jnp.ndarray: Resulting wavefield after applying the Laplace operator.
+     """
     dn = jax.lax.conv_dimension_numbers(u.shape, kernel.shape,
                                         ('NCDHW', 'OIDHW', 'NCDHW'))
     out = jax.lax.conv_general_dilated(u,    # lhs = image tensor

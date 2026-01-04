@@ -75,9 +75,9 @@ class SourceJax(SourceBase):
         self._coords = zip(*coords)
         self.adj = adj
         self.coords_r = [c.flatten() for c in jnp.split(jnp.flip(coords, -1), coords.shape[-1], axis=-1)]
-        for i in range(coords.shape[0]): # Loop over each source
-            index = 0 if source_encoding else i
-            self.mask = self.mask.at[index, 0,  *jax.numpy.flip(coords, [-1])[i]].set(1.)
+        # for i in range(coords.shape[0]): # Loop over each source
+        #     index = 0 if source_encoding else i
+        #     self.mask = self.mask.at[index, 0,  *jax.numpy.flip(coords, [-1])[i]].set(1.)
     
     def forward_source_encoding(self, wavefield, wavelet):
         wavefield = wavefield.at[..., *self.coords_r].add(wavelet)
@@ -93,10 +93,11 @@ class SourceJax(SourceBase):
     
     def multiwavelet(self, wavefield, wavelet):
         shots = jnp.arange(wavefield.shape[0])
+        if self.adj:
+            shots = jnp.repeat(shots, self.coords.shape[1])
+            wavelet = wavelet.reshape(-1)
         wavefield = wavefield.at[shots, 0, *self.coords_r].add(wavelet)
         return wavefield
 
     def __call__(self, *args):
         return self.multiwavelet(*args)
-        
-        

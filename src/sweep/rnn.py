@@ -1,6 +1,5 @@
 
 import jax, inspect
-# a=jax.numpy.array([2.0])
 import jax.numpy as jnp
 import torch
 import numpy as np
@@ -23,7 +22,7 @@ class RNNBase:
                  dh=10., 
                  dt=0.002, 
                  use_ckpt=True,
-                 ckpt_chunks=50,
+                 ckpt_chunks=100,
                  use_habc=False,
                  **kwargs):
         """Base class for the RNN
@@ -73,6 +72,7 @@ class RNNBase:
             shape_z = self.shape[0] + 2*self.abcn
 
         self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
+        self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
 
         # Coefficients for absorbing boundary conditions must be initialized after the shape is set
@@ -96,7 +96,8 @@ class RNNBase:
         if self.free_surface:
             return data[..., 0:-self.abcn, self.abcn:-self.abcn]
         else:
-            return data[..., self.abcn:-self.abcn, self.abcn:-self.abcn]
+            s = slice(self.abcn, -self.abcn)
+            return data[(...,) + (s,) * self.ndim]
 
     def get_parameters(self, key):
         assert key in self.model_names, f'Key must be in {self.model_names}, got {key}'
@@ -319,14 +320,14 @@ class RNNJax(RNNBase):
             self.equation.init_habc(self.shape, self.abcn, self.free_surface, batchsize=batch_size, use_habc=self.use_habc)
         #############
 
-        record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
+        # record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
         self.models_padded = models
 
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = jnp.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=jnp.float32) #, device=jax.devices('cpu')[0]
+            snapshots = jnp.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=jnp.float32, device=jax.devices('cpu')[0]) #
         else:
             snapshots = None
 
@@ -341,7 +342,9 @@ class RNNJax(RNNBase):
         for receiver_type in self.receiver_type:
             receiver_idx_at.append(self.wavefield_names.index(receiver_type))
 
-        
+        ridxs = jnp.asarray(receiver_idx_at, dtype=jnp.int32)  
+        sidxs = jnp.asarray(source_idx_at, dtype=jnp.int32)
+
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
 
         chunk_size = self.ckpt_chunks
@@ -351,55 +354,67 @@ class RNNJax(RNNBase):
         post_fix = '_jax3d' if self.ndim == 3 else ''
         wave_equation = getattr(self.equation, f'func{post_fix}') if wave_equation is None else wave_equation
         
+        zero_rec = jnp.zeros(
+            (batch_size, receivers.shape[1], len(self.receiver_type)),
+            dtype=jnp.float32
+        )
+
         def step_fn_single(carry, it):
-
-            def do_step(carry):
                 
-                wavefields, fixargs, snapshots, _rec = carry
+            wavefields, fixargs, snapshots = carry
 
-                time = it if not adj else nt - it
-                # Forward propagation
-                wavefields = wave_equation(*wavefields, *models, *fixargs, *aux_args)
-                wavefields = list(wavefields)
+            time = it if not adj else nt - it - 1
+            # Forward propagation
+            wavefields = wave_equation(*wavefields, *models, *fixargs, *aux_args)
+            wavefields_arr = jnp.stack(wavefields, axis=0)
+            # Add source
+            wf_src = jnp.take(wavefields_arr, sidxs, axis=0)
+            wf_src_new = jax.vmap(lambda w: src(w, wavelet[..., time]))(wf_src)            
+            wavefields_arr = wavefields_arr.at[sidxs].set(wf_src_new)
+            # Save snapshots
+            if snapshots is not None:
+                snapshots = snapshots.at[it].set(jnp.stack(wavefields, 0))
 
-                # Add source
-                for sidx in source_idx_at:
-                    wavefields[sidx] = src(wavefields[sidx], wavelet[..., time])
-                wavefields = tuple(wavefields)
+            # Record receivers
+            wf_sel = jnp.take(wavefields_arr, ridxs, axis=0) 
+            def one_channel(wf):
+                y = rec(wf)
+                return y.reshape(batch_size, -1, y.shape[-1])
+            all_rec = jax.vmap(one_channel)(wf_sel)
+            rec_t = jnp.transpose(all_rec, (1, 2, 0, 3))[..., 0]
 
-                # Save snapshots
-                if snapshots is not None:
-                    snapshots = snapshots.at[it].set(jnp.stack(wavefields, 0))
+            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), fixargs, snapshots), rec_t
 
-                # Record receivers
-                for channel, ridx in enumerate(receiver_idx_at):
-                    rec_this_step = jnp.array(jnp.split(rec(wavefields[ridx]), batch_size))
-                    _rec = _rec.at[:, it, :, channel:channel+1].set(rec_this_step)
 
-                return (wavefields, fixargs, snapshots, _rec)
-        
-            def skip_fn(carry):
-                return carry
+        def step_fn_single_with_skip(carry, it):
+
+            def do_step(c):
+                return step_fn_single(c, it)
+
+            def skip_fn(c):
+                return c, zero_rec
             
-            carry = jax.lax.cond(it < nt, do_step, skip_fn, carry)
+            carry, rec_t = jax.lax.cond(it < nt, do_step, skip_fn, carry)
 
-            return carry, None
-        
+            return carry, rec_t
 
         def chunked_step_fn(carry, chunk_idx):
 
             def inner_step_fn(carry, it):
                 t = chunk_idx * chunk_size + it
-                return step_fn_single(carry, t)
+                return step_fn_single_with_skip(carry, t)
             return jax.checkpoint(lambda carry, idxs: 
                 jax.lax.scan(inner_step_fn, carry, jnp.arange(chunk_size))
             )(carry, None)
         
-        initial = (wavefields, tuple(fixargs), snapshots, record)
+        initial = (wavefields, tuple(fixargs), snapshots)
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
         num_steps = num_chunks if self.use_ckpt else nt
-        (final), _ = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
-        rec = final[-1]
+        (final), rec_seq = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
+
+        n = num_steps * chunk_size if self.use_ckpt else nt
+        rec_seq = rec_seq.reshape(n, batch_size, receivers.shape[1], len(self.receiver_type))
+        rec = jnp.transpose(rec_seq, (1, 0, 2, 3))[:, :nt, :, :]
 
         return rec if not has_aux else (rec, final[-2])
     
