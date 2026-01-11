@@ -29,6 +29,8 @@ vs = np.ones((nz, nx), dtype=np.float32)*700.
 z = vp * rho
 vpz = vp * rho
 vsz = vs * rho
+rx = -0.5 * z * np.gradient(1/z, dh, axis=0)
+rz = -0.5 * z * np.gradient(1/z, dh, axis=1)
 
 # Tariq's model parameters
 vv = np.ones((nz, nx), np.float32) * 1000
@@ -44,7 +46,7 @@ omega = np.ones_like(vp) * 2 * np.pi * fm
 
 model_lib = dict(vp=vp, rho=rho, vs=vs, vv=vv, v=v, eta=eta_a, 
                  epsilon=epsilon, delta=delta, theta=theta, Q=Q, 
-                 omega=omega, 
+                 omega=omega, rx=rx, rz=rz,
                  z=z, vpz=vpz, vsz=vsz)
 
 t = np.arange(0, nt*dt, dt)

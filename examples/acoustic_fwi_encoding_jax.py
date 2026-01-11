@@ -2,10 +2,10 @@ import sys, tqdm, os, jax, optax
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
-sys.path.append('../src')
-from geophyai.rnn import RNNJax
-from geophyai.equations import Acoustic
-from geophyai.signal import ricker
+# sys.path.append('../src')
+from sweep.rnn import RNN
+from sweep.equations import Acoustic
+from sweep.signal import ricker
 from functools import partial
 import matplotlib.pyplot as plt
 from configure import *
@@ -30,7 +30,7 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = RNNJax(Acoustic(spatial_order=spatial_order, backend='jax'), 
+model = RNN(Acoustic(spatial_order=spatial_order, backend='jax'), 
                 shape=shape, 
                 dev=None,
                 dh=dh,

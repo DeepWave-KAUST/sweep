@@ -2,9 +2,9 @@ import sys, tqdm
 import torch
 # sys.path.append('../src')
 torch.backends.cudnn.benchmark = True
-from geophyai.rnn import RNN
-from geophyai.equations import Acoustic
-from geophyai.signal import ricker
+from sweep.rnn import RNN
+from sweep.equations import Acoustic
+from sweep.signal import ricker
 import numpy as np
 import matplotlib.pyplot as plt
 from configure import *

@@ -7,6 +7,8 @@ from torch.utils.checkpoint import checkpoint as ckpt_torch
 from .sources import SourceTorch, SourceJax
 from .receivers import ReceiverTorch, ReceiverJax
 from .abc import abc_coefficients_2d, abc_coefficients_3d, habc_coefficients_2d
+from .cpml import set_pml_profiles
+
 from .utils import EdgePadding, edge_pad
 
 class RNNBase:
@@ -24,6 +26,7 @@ class RNNBase:
                  use_ckpt=True,
                  ckpt_chunks=100,
                  use_habc=False,
+                 use_cpml=False,
                  **kwargs):
         """Base class for the RNN
 
@@ -55,6 +58,10 @@ class RNNBase:
         self.ckpt_chunks = ckpt_chunks
         self.ndim = len(shape)
         self.use_habc = use_habc
+        self.use_cpml = use_cpml
+
+        if self.use_habc and self.use_cpml:
+            raise ValueError("Cannot use both HABC and CPML at the same time. Please choose one.")
 
         self.abc_func = {2: abc_coefficients_2d, 3: abc_coefficients_3d}[self.ndim]
 
@@ -74,13 +81,34 @@ class RNNBase:
         self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
+        self.init_abc(**kwargs)
 
+    def init_abc(self, **kwargs):
         # Coefficients for absorbing boundary conditions must be initialized after the shape is set
+
+        # A bad ABC
         self.b = self.abc_func(self.shape, N=self.abcn, free_surface=self.free_surface)
-        ######### HABC
+
+        # HABC
         if self.use_habc:
             self.b = habc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
 
+        # CPML (best ABC performance)
+        if self.use_cpml:
+            self.b = set_pml_profiles(
+                    pml_width=[self.abcn if not self.free_surface else 0, self.abcn, self.abcn, self.abcn],
+                    accuracy=self.equation.so,
+                    fd_pad=[self.equation.so//2, self.equation.so//2, self.equation.so//2, self.equation.so//2],
+                    dt=self._dt,
+                    grid_spacing=[self._dh, self._dh],
+                    max_vel=kwargs.get('max_vel', 4500.0),
+                    dtype=np.float32,
+                    pml_freq=kwargs.get('pml_freq', 25.0),
+                    shape=self.shape,
+                )
+            if getattr(self.equation, 'init_cpml', False):
+                self.equation.init_cpml(self.abcn, free_surface=self.free_surface)
+            
         if getattr(self.equation, 'need_init', False):
             self.equation.init(self.shape, self.dev, self._dh)
 
@@ -193,7 +221,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
 
             # Time step forward
             if self.use_ckpt:
-                wavefield = ckpt_torch(self.equation.func, *wavefield, *fixargs)
+                wavefield = ckpt_torch(self.equation.func, *wavefield, *fixargs, use_reentrant=False)
             else:
                 wavefield = self.equation.func(*wavefield, *fixargs)
 
@@ -217,6 +245,8 @@ class RNNTorch(RNNBase, torch.nn.Module):
             return record
         else:
             return record, snapshots
+
+    forward_base = forward
     
 class RNNJax(RNNBase):
 
@@ -226,10 +256,13 @@ class RNNJax(RNNBase):
 
         self.setup_abc()
 
-    def setup_abc(self, ):
-
+    def setup_abc(self,):
+        
         # Absorbing boundary conditions
-        self.b = jnp.array(self.b)
+        if isinstance(self.b, list):
+            self.b = [jnp.array(bi)[None, ...] for bi in self.b]
+        else:
+            self.b = jnp.array(self.b)
 
     def pad(self, d, padding=None):
         """Padding the model parameters
@@ -285,6 +318,8 @@ class RNNJax(RNNBase):
             wave_equation (callable, optional): The wave equation function to use. If None, use the equation defined in the class. Defaults to None.
             aux_args (tuple(list), optional): Auxiliary arguments for the wave equation function. Defaults to ().
         """
+        self.init_abc(**kwargs)
+        self.setup_abc()
 
         wavelet = jnp.array(wavelet, dtype=jnp.float32)
         wavelet = jnp.atleast_2d(wavelet)
@@ -316,9 +351,8 @@ class RNNJax(RNNBase):
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
 
         ############# For HABC
-        if getattr(self.equation, 'init_habc', False) and self.ndim==2:
-            self.equation.init_habc(self.shape, self.abcn, self.free_surface, batchsize=batch_size, use_habc=self.use_habc)
-        #############
+        if getattr(self.equation, 'init_habc', False) and self.ndim==2 and self.use_habc:
+            self.equation.init_habc(self.shape, self.abcn, self.free_surface, batchsize=batch_size, use_habc=True)
 
         # record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
@@ -369,7 +403,7 @@ class RNNJax(RNNBase):
             wavefields_arr = jnp.stack(wavefields, axis=0)
             # Add source
             wf_src = jnp.take(wavefields_arr, sidxs, axis=0)
-            wf_src_new = jax.vmap(lambda w: src(w, wavelet[..., time]))(wf_src)            
+            wf_src_new = jax.vmap(lambda w: src(w, wavelet[..., time]))(wf_src)
             wavefields_arr = wavefields_arr.at[sidxs].set(wf_src_new)
             # Save snapshots
             if snapshots is not None:
@@ -416,7 +450,7 @@ class RNNJax(RNNBase):
         rec_seq = rec_seq.reshape(n, batch_size, receivers.shape[1], len(self.receiver_type))
         rec = jnp.transpose(rec_seq, (1, 0, 2, 3))[:, :nt, :, :]
 
-        return rec if not has_aux else (rec, final[-2])
+        return rec if not has_aux else (rec, final[-1])
     
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
@@ -503,6 +537,9 @@ class RNN:
             self._impl = backend_func[backend](equation, *args, **kwargs)
         else:
             raise ValueError(f"Unsupported backend: {backend}")
+
+        impl_doc = getattr(self._impl.forward_base, "__doc__", None)
+        type(self).__call__.__doc__ = impl_doc
 
     def __getattr__(self, name):
         return getattr(self._impl, name)

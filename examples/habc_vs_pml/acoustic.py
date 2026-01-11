@@ -21,7 +21,7 @@ dh = 5.0
 fm = 20
 delay = 0.1
 spatial_order = 8
-abcn = 50
+abcn = 30
 
 # Generate models
 vp = np.ones((nz, nx), np.float32) * 2000.0
@@ -44,7 +44,7 @@ plt.close()
 # Forward solver_all for observed data
 solver_kwargs = dict(shape=shape, dev=None, dh=dh, dt=dt, source_type=['h1'], receiver_type=['h1'], abcn=abcn, free_surface=False)
 eq_kwargs = dict(spatial_order=spatial_order, backend='jax', )
-solver_pml = RNNJax(Acoustic(**eq_kwargs), **solver_kwargs)
+solver_cpml = RNNJax(Acoustic(**eq_kwargs), use_cpml=True, **solver_kwargs)
 solver_habc = RNNJax(Acoustic(**eq_kwargs), use_habc=True, **solver_kwargs)
 # Set the true solver_all
 
@@ -59,7 +59,7 @@ print("(Number of shots, number of receivers, dimension)", receivers.shape)
 fig, axes = plt.subplots(1,2, figsize=(8, 4))
 axes = axes.flatten()
 DATA = []
-for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PML'])):
+for i, (solver, titles) in enumerate(zip([solver_habc, solver_cpml], ['HABC', 'PML'])):
     start = time.time()
     _, wavefields = solver.forward(wave, sources, receivers, models=[vp], return_wavefield=True)
     wavefields.block_until_ready()
@@ -92,7 +92,7 @@ print("(Number of shots, number of receivers, dimension)", receivers.shape)
 fig, axes = plt.subplots(1,2, figsize=(8, 6))
 axes = axes.flatten()
 DATA = []
-for i, (solver, titles) in enumerate(zip([solver_habc, solver_pml], ['HABC', 'PML'])):
+for i, (solver, titles) in enumerate(zip([solver_habc, solver_cpml], ['HABC', 'PML'])):
     start = time.time()
     obs = solver.forward(wave, sources, receivers, models=[vp])
     obs.block_until_ready()

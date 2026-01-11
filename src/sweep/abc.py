@@ -33,60 +33,18 @@ def bound_mask(nz, nx, w, batchsize=1, return_idx=False, free_surface=False):
         rm = np.repeat(right[np.newaxis, :, :], 1, 0)==1
         return tm, bm, lm, rm
 
-def habc_coefficients_2d(domain_shape, 
-                         N=50, 
-                         free_surface=False):
-
-    nz, nx = domain_shape
-
-    d = np.zeros(domain_shape, dtype=np.float32)
-
-    d_vals = np.linspace(0.0, N, N)/N
-    d_vals = np.flip(d_vals, [0])
-
-    tm, bm, lm, rm = bound_mask(*domain_shape, N, free_surface=free_surface)
-
-    if N > 0:
-        # Top
-        if not free_surface:
-            idx = tm==1
-            d[:N,:][idx] = (d_vals[:, np.newaxis].repeat(nx, 1).transpose(0, 1)*tm)[idx]
-
-        # Bottom
-        idx = bm==1 # Mask for equation left
-        d[-N:,:][idx] = (np.flip(d_vals, [0])[:, np.newaxis].repeat(nx, 1).transpose(0, 1)*bm)[idx]
-
-        # Left
-        idx = lm==1
-
-        if not free_surface:
-            d[:, :N][idx] = (d_vals[:, np.newaxis].repeat(nz, 1).T*lm)[idx]
-        if free_surface:
-            lm[:N] = 1.
-            d[:, :N][lm==1] = (d_vals[:, np.newaxis].repeat(nz, 1).T*lm)[lm==1]
-
-        # Right boundary
-        idx = rm==1
-        if not free_surface:
-            d[:, -N:][idx] = (np.flip(d_vals[:, np.newaxis], [0]).repeat(nz, 1).T*rm)[idx]
-        if free_surface:
-            rm[:N] = 1.
-            d[:, -N:][rm==1] = (np.flip(d_vals[:, np.newaxis], [0]).repeat(nz, 1).T*rm)[rm==1]
-    return d
-
-
 # Coefficients of PML
 def abc_coefficients_2d(domain_shape, N=50, B=100., free_surface=False):
     Nx, Ny = domain_shape
 
     if N == 0:
         return np.zeros(domain_shape, dtype=np.float32)
+    order = 2
+    cp = 1500.
 
     R = 10**(-((np.log10(N)-1)/np.log10(2))-3)
-    # d0 = -(order+1)*cp/(2*abs_N)*np.log(R) # Origin
-    R = 1e-6
-    order = 2
-    cp = 1000.
+    d0 = -(order+1)*cp/(2*N)*np.log(R) # Origin
+    # R = 1e-6
     d0 = (1.5 * cp / N) * np.log10(R**-1)
     d_vals = d0 * np.linspace(0.0, 1.0, N) ** order
     d_vals = d_vals[::-1]  # Flip the array
@@ -103,6 +61,28 @@ def abc_coefficients_2d(domain_shape, N=50, B=100., free_surface=False):
 
     _d = np.sqrt(d_x ** 2 + d_y ** 2).T
     _d = _corners(domain_shape, N, _d, d_x.T, d_y.T, free_surface)
+
+    return _d.astype(np.float32)
+
+def abc_coefficients_2d_wwh(domain_shape, N=100, B=300., free_surface=False):
+    Nx, Ny = domain_shape
+
+    if N == 0:
+        return np.zeros(domain_shape, dtype=np.float32)
+    
+    d_vals = B * (1-np.cos(np.pi/2* ( np.arange(1,N+1)/N ) ) )[::-1]
+
+    d_x = np.zeros((Ny, Nx))
+    d_y = np.zeros((Ny, Nx))
+
+    if N > 0:
+        d_x[0:N, :] = np.tile(d_vals, (Nx, 1)).T
+        d_x[(Ny - N):Ny, :] = np.tile(d_vals[::-1], (Nx, 1)).T
+        if not free_surface:
+            d_y[:, 0:N] = np.tile(d_vals, (Ny, 1))
+        d_y[:, (Nx - N):Nx] = np.tile(d_vals[::-1], (Ny, 1))
+
+    _d = np.sqrt(d_x ** 2 + d_y ** 2).T
 
     return _d.astype(np.float32)
 
@@ -170,8 +150,8 @@ def habc_coefficients_2d(domain_shape,
 
     d = np.zeros(domain_shape, dtype=np.float32)
 
-    # d_vals = np.linspace(0.0, N, N)
-    # d_vals = np.flip(d_vals, [0])
+    # d_vals = 1 - np.arange(1, N+1)/N
+
     # cosine 
     d_vals = 1-np.cos(np.pi/2* (1+ (1-np.arange(1,N+1))/N ) )
 

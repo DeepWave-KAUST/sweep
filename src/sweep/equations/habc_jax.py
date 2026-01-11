@@ -110,13 +110,30 @@ def _habc(u_next, u_now, u_pre, c, b, dt, dh, w=50):
     lam = 2*c*dt/dh
     mu = c**2*dt**2/(dh**2)
 
+    # lam = lam[..., :-2, :]
+    # mu = mu[..., :-2, :]
+
+    u_one = jnp.zeros_like(u_now)
+
+    rolled1_u_now = jnp.roll(u_now, shift=-1, axis=3) # bwidth, shots, 1, bwidth, nx
+    rolled2_u_now = jnp.roll(u_now, shift=-2, axis=3)
+    rolled1_u_pre = jnp.roll(u_pre, shift=-1, axis=3)
+
     # Top
     t1 = (2 - lam - mu) * u_now
-    t2 = (lam + 2 * mu) * jnp.roll(u_now, shift=-1, axis=3)
-    t3 = -mu * jnp.roll(u_now, shift=-2, axis=3)
+    t2 = (lam + 2 * mu) * rolled1_u_now
+    t3 = -mu * rolled2_u_now
     t4 = (lam - 1) * u_pre
-    t5 = -lam * jnp.roll(u_pre, shift=-1, axis=3)
+    t5 = -lam * rolled1_u_pre
     u_one = t1 + t2 + t3 + t4 + t5
+
+    # u_one = u_one.at[..., :-2, :].set(
+    #     (2 - lam - mu) * u_now[..., :-2, :] +
+    #     (lam + 2 * mu) * u_now[..., 1:-1, :] +
+    #     -mu * u_now[..., 2:, :] +
+    #     (lam - 1) * u_pre[..., :-2, :] +
+    #     -lam * u_pre[..., 1:-1, :]
+    # )
 
     hb_next = (u_one*b + (1-b) * u_next)
 

@@ -41,7 +41,7 @@ model = RNN(Elastic(spatial_order=spatial_order, device=dev),
             dt=dt,
             source_type=['vz'],
             receiver_type=['vx', 'vz'],
-            free_surface=free_surface, 
+            free_surface=False, 
             use_ckpt=False)
 
 # Set the true model, the order of the parameters should be 
@@ -127,7 +127,27 @@ for epoch in tqdm.trange(epochs):
     opt.step()
 
     # Save the model
-    if epoch % show_every == 0:
+    if epoch % 1 == 0:
+
+        # Show shotgather
+        fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+        vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,0], [2, 98])
+        plt.colorbar(axes[0,0].imshow(coding_obs.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        axes[0,0].set_title('Observed Vx')
+        vmin, vmax = np.percentile(coding_syn.detach().detach().cpu().numpy()[...,0], [2, 98])
+        plt.colorbar(axes[1,0].imshow(coding_syn.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        axes[1,0].set_title('Synthetic Vx')
+        vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,1], [2, 98])
+        plt.colorbar(axes[0,1].imshow(coding_obs.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        axes[0,1].set_title('Observed Vz')
+        vmin, vmax = np.percentile(coding_syn.detach().cpu().numpy()[...,1], [2, 98])
+        plt.colorbar(axes[1,1].imshow(coding_syn.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        axes[1,1].set_title('Synthetic Vz')
+
+        plt.tight_layout()
+        plt.savefig(f'{save_path}/epoch_{epoch}_shotgather_vx.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
         vmin_vp, vmax_vp = vp_true.min(), vp_true.max()
         vmin_vs, vmax_vs = vs_true.min(), vs_true.max()
         fig, axes = plt.subplots(3, 2, figsize=(8, 9))

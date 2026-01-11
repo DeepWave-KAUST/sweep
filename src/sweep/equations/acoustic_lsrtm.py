@@ -25,7 +25,8 @@ class AcousticLSRTM(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend)
-        super().init_laplace(ltype='1dsep')
+        if backend == 'jax':
+            super().init_laplace(ltype='1dsep')
     
     @property
     def models(self):

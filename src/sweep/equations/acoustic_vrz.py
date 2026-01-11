@@ -60,10 +60,10 @@ class AcousticVRZ(SecondOrderEquation):
     
     def func_torch(self, *args, **kwargs):
         lap_u_now = self.laplace(args[0], args[5], self.kernel)
-        dvpdx = torch.gradient(args[2], spacing=args[5], axis=-1)[0] # 2nd Center Difference
-        dvpdz = torch.gradient(args[2], spacing=args[5], axis=-2)[0]
-        dpdx = torch.gradient(args[0], spacing=args[5], axis=-1)[0]
-        dpdz = torch.gradient(args[0], spacing=args[5], axis=-2)[0]
-        z1_x = torch.gradient(1/args[3], spacing=args[5], axis=-1)[0]
-        z1_z = torch.gradient(1/args[3], spacing=args[5], axis=-2)[0]
+        dvpdx = torch.gradient(args[2], spacing=args[5], dim=-1)[0] # 2nd Center Difference
+        dvpdz = torch.gradient(args[2], spacing=args[5], dim=-2)[0]
+        dpdx = torch.gradient(args[0], spacing=args[5], dim=-1)[0]
+        dpdz = torch.gradient(args[0], spacing=args[5], dim=-2)[0]
+        z1_x = torch.gradient(1/args[3], spacing=args[5], dim=-1)[0]
+        z1_z = torch.gradient(1/args[3], spacing=args[5], dim=-2)[0]
         return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, self.habc_masks)

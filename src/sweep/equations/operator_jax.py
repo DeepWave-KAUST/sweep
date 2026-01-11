@@ -10,8 +10,8 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     Anisotropic spacing: Laplace = d2/dz2 / hz^2 + d2/dx2 / hx^2
     """
     # k1d = jnp.asarray(k1d, dtype=u.dtype)
-    kz = k1d[:, None, None, None]  # (3,1,1,1)
-    kx = k1d[None, :, None, None]  # (1,3,1,1)
+    kz = k1d[:, None, None, None]  # (k,1,1,1)
+    kx = k1d[None, :, None, None]  # (1,k,1,1)
 
     d2z = lax.conv_general_dilated(
         u, kz,
@@ -27,7 +27,7 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
     )
 
-    return d2z / (hz * hz) + d2x / (hx * hx)
+    return d2z / (hz * hz), d2x / (hx * hx)
 
 def _laplace(image, kernel):
     # Expected input shape: (height, width)
