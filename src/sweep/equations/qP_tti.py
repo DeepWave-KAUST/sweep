@@ -1,9 +1,7 @@
 import numpy as np
 import torch
 import jax.numpy as jnp
-from .utils import to_backend
 from .base import SecondOrderEquation
-from .habc_jax import habc, bound_mask
 
 def step(u_now, u_pre, # Wavefields
          vp, epsilon, delta, theta, # Model parameters 
@@ -11,7 +9,7 @@ def step(u_now, u_pre, # Wavefields
          dpdx, dpdz, # Wavenumbers
          nabla_x, nabla_z, dpdx_dz, # Partial derivatives
          op=None,  # Operator (Jax or Torch)
-         habc_masks=None):
+         ):
 
     # from degree to radian
     theta = op.deg2rad(theta)
@@ -55,11 +53,6 @@ class AcousticTTI(SecondOrderEquation):
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
         self.op = {'torch': torch, 'jax': jnp}[backend]
-
-    def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
-        habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
-        self.habc_masks = tuple([np.array(mask) if mask is not None else mask for mask in habc_masks])
-        self.use_habc = use_habc
     
     @property
     def models(self):

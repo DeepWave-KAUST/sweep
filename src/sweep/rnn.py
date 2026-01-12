@@ -6,8 +6,9 @@ import numpy as np
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 from .sources import SourceTorch, SourceJax
 from .receivers import ReceiverTorch, ReceiverJax
-from .abc import abc_coefficients_2d, abc_coefficients_3d, habc_coefficients_2d
+from .abc import abc_coefficients_2d, abc_coefficients_3d
 from .cpml import set_pml_profiles
+from sweep.equations.registry import CPML_SUPPORTED_EQUATIONS, FREE_SURFACE_SUPPORTED_EQUATIONS
 
 from .utils import EdgePadding, edge_pad
 
@@ -57,16 +58,15 @@ class RNNBase:
         self.use_ckpt = use_ckpt
         self.ckpt_chunks = ckpt_chunks
         self.ndim = len(shape)
-        self.use_habc = use_habc
         self.use_cpml = use_cpml
-
-        if self.use_habc and self.use_cpml:
-            raise ValueError("Cannot use both HABC and CPML at the same time. Please choose one.")
 
         self.abc_func = {2: abc_coefficients_2d, 3: abc_coefficients_3d}[self.ndim]
 
-        if self.equation.__class__.__name__ not in ['AcousticVRZ', 'Acoustic', 'AcousticLSRTM', 'AEC', 'AECLSRTM', 'Acoustic1st'] and self.free_surface:
+        if self.equation.__class__.__name__ not in FREE_SURFACE_SUPPORTED_EQUATIONS and self.free_surface:
             raise NotImplementedError(f'Free surface is not implemented for {self.equation.__class__.__name__} equation. Please set free_surface=False.')
+
+        if self.equation.__class__.__name__ not in CPML_SUPPORTED_EQUATIONS and self.use_cpml:
+            raise NotImplementedError(f'CPML is not implemented for {self.equation.__class__.__name__} equation. Please set use_cpml=False.')
 
         self.source_type = source_type
         self.receiver_type = receiver_type
@@ -89,10 +89,6 @@ class RNNBase:
         # A bad ABC
         self.b = self.abc_func(self.shape, N=self.abcn, free_surface=self.free_surface)
 
-        # HABC
-        if self.use_habc:
-            self.b = habc_coefficients_2d(self.shape, N=self.abcn, free_surface=self.free_surface)
-
         # CPML (best ABC performance)
         if self.use_cpml:
             self.b = set_pml_profiles(
@@ -106,8 +102,6 @@ class RNNBase:
                     pml_freq=kwargs.get('pml_freq', 25.0),
                     shape=self.shape,
                 )
-            if getattr(self.equation, 'init_cpml', False):
-                self.equation.init_cpml(self.abcn, free_surface=self.free_surface)
             
         if getattr(self.equation, 'need_init', False):
             self.equation.init(self.shape, self.dev, self._dh)
@@ -154,7 +148,10 @@ class RNNTorch(RNNBase, torch.nn.Module):
     def setup_abc(self, ):
 
         # Absorbing boundary conditions
-        self.b = torch.from_numpy(self.b).to(self.dev)
+        if isinstance(self.b, list):
+            self.b = [torch.from_numpy(bi).to(self.dev)[None, ...] for bi in self.b]
+        else:
+            self.b = torch.from_numpy(self.b).to(self.dev)
 
         self.register_buffer('h', torch.tensor(self._dh, dtype=torch.float32))
         self.register_buffer('dt', torch.tensor(self._dt, dtype=torch.float32))
@@ -164,7 +161,7 @@ class RNNTorch(RNNBase, torch.nn.Module):
         for name, data in zip(self.model_names, model):
             setattr(self, name, torch.nn.Parameter(data))
 
-    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False):
+    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, **kwargs):
         """Forward pass of the wave equation
 
         Args:
@@ -173,6 +170,9 @@ class RNNTorch(RNNBase, torch.nn.Module):
             receivers (np.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
         """
+
+        self.init_abc(**kwargs)
+        self.setup_abc()
 
         nt = wavelet.shape[-1]
         nshots = sources.shape[0]
@@ -349,12 +349,6 @@ class RNNJax(RNNBase):
         # Memory allocation for wavefields
         for name in self.wavefield_names:
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
-
-        ############# For HABC
-        if getattr(self.equation, 'init_habc', False) and self.ndim==2 and self.use_habc:
-            self.equation.init_habc(self.shape, self.abcn, self.free_surface, batchsize=batch_size, use_habc=True)
-
-        # record = jnp.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=jnp.float32)
 
         self.models_padded = models
 

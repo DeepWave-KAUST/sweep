@@ -1,19 +1,44 @@
 import jax.numpy as jnp
 import numpy as np
-import torch
 
-from .habc_jax import habc, bound_mask
 from .base import SecondOrderEquation
-def step(u_now, u_pre, vp, z, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, habc_masks=None):
-    a = 1 / (1 + b * dt)
-    u_next = 2 * u_now - u_pre + vp**2*dt**2*lap_u_now + vp*(dvpdx*dpdx + dvpdz*dpdz)*dt**2 +vp**2*z*(z1_x*dpdx + z1_z*dpdz)*dt**2
-    u_next = a * u_next + (1 - a) * u_now
-    return u_next, u_now
+from .operator import gradientO2
 
-# def step_habc(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask):
-#     u_next = 2*u_now - u_pre + vp**2*dt**2 * lap_u_now
-#     u_next = habc(u_next, u_now, u_pre, vp, b, dt, h, maskidx=habc_mask)
-#     return u_next, u_now
+def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
+              vp, z, dt, h, b, 
+              lap_x, lap_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z
+              ):
+
+    az, bz, dbzdz, ax, bx, dbxdx = b
+
+    w_sum = 0.
+
+    # Z direction
+    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + gradientO2(az*psiz, h, axis=-2)
+    w_sum += (1+bz) * tmpz + az * zetaz
+
+    psiyn = bz * dpdz + az * psiz
+    zetaz = bz * tmpz + az * zetaz
+
+    # X direction
+    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + gradientO2(ax*psix, h, axis=-1)
+    w_sum += (1+bx) * tmpx + ax * zetax
+
+    psixn = bx * dpdx + ax * psix
+    zetax = bx * tmpx + ax * zetax
+
+    dpdx_cpml = dpdx + psixn
+    dpdz_cpml = dpdz + psiyn
+
+    Ax = vp * dvpdx + vp**2 * z * z1_x
+    Az = vp * dvpdz + vp**2 * z * z1_z
+
+    grad_term = Ax * dpdx_cpml + Az * dpdz_cpml
+
+    u_next = 2 * u_now - u_pre + dt**2 * ( vp**2 * w_sum + grad_term )
+
+    return u_next, u_now, psixn, psiyn, zetax, zetaz
+
 
 class AcousticVRZ(SecondOrderEquation):
     """
@@ -30,40 +55,23 @@ class AcousticVRZ(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
-
-    def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
-        habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
-        self.habc_masks = tuple([np.array(mask) if mask is not None else mask for mask in habc_masks])
-        self.use_habc = use_habc
+        super().init_laplace(ltype='1dsep', backend=backend)
 
     @property
     def models(self):
         return ['vp', 'z']
-    
+
     @property
     def wavefields(self):
-        return ['h1', 'h2']
-    
-    def func(self, *args, **kwargs):
-        _func = {'torch': self.func_torch, 'jax': self.func_jax}[self.backend]
-        return _func(*args, **kwargs)
+        return  ['h1', 'h2', 'psix', 'psiz', 'zetax', 'zetaz']
 
-    def func_jax(self, *args, **kwargs):
-        lap_u_now = self.laplace(args[0], args[5], self.kernel)
-        dvpdx = jnp.gradient(args[2],args[5], axis=-1) # 2nd Center Difference
-        dvpdz = jnp.gradient(args[2],args[5], axis=-2)
-        dpdx = jnp.gradient(args[0], args[5], axis=-1)
-        dpdz = jnp.gradient(args[0], args[5], axis=-2)
-        z1_x = jnp.gradient(1/args[3], args[5], axis=-1)
-        z1_z = jnp.gradient(1/args[3], args[5], axis=-2)
-        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, self.habc_masks)
-    
-    def func_torch(self, *args, **kwargs):
-        lap_u_now = self.laplace(args[0], args[5], self.kernel)
-        dvpdx = torch.gradient(args[2], spacing=args[5], dim=-1)[0] # 2nd Center Difference
-        dvpdz = torch.gradient(args[2], spacing=args[5], dim=-2)[0]
-        dpdx = torch.gradient(args[0], spacing=args[5], dim=-1)[0]
-        dpdz = torch.gradient(args[0], spacing=args[5], dim=-2)[0]
-        z1_x = torch.gradient(1/args[3], spacing=args[5], dim=-1)[0]
-        z1_z = torch.gradient(1/args[3], spacing=args[5], dim=-2)[0]
-        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, self.habc_masks)
+    def func(self, *args, **kwargs):
+        dh = args[9]
+        lap_u_now_z, lap_u_now_x = self.laplace(args[0], self.kernel, dh, dh)
+        dvpdx = gradientO2(args[6], dh, axis=-1)
+        dvpdz = gradientO2(args[6], dh, axis=-2)
+        dpdx = gradientO2(args[0], dh, axis=-1)
+        dpdz = gradientO2(args[0], dh, axis=-2)
+        z1_x = gradientO2(1/args[7], dh, axis=-1)
+        z1_z = gradientO2(1/args[7], dh, axis=-2)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z)

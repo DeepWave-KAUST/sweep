@@ -3,16 +3,11 @@ import jax.numpy as jnp
 import numpy as np
 from .base import SecondOrderEquation
 
-def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, habc_masks=None):
+def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz):
     a = 1 / (1 + b * dt)
     u_next = 2 * u_now - u_pre + vp**2*dt**2*lap_u_now + vp*(dvpdx*dpdx + dvpdz*dpdz)*dt**2 - 2*vp**2*(rx*dpdx + rz*dpdz)*dt**2
     u_next = a * u_next + (1 - a) * u_now
     return u_next, u_now
-
-# def step_habc(u_now, u_pre, vp, dt, h, b, lap_u_now, habc_mask):
-#     u_next = 2*u_now - u_pre + vp**2*dt**2 * lap_u_now
-#     u_next = habc(u_next, u_now, u_pre, vp, b, dt, h, maskidx=habc_mask)
-#     return u_next, u_now
 
 class AcousticVRR(SecondOrderEquation):
     """
@@ -49,7 +44,7 @@ class AcousticVRR(SecondOrderEquation):
         dvpdz = jnp.gradient(args[2],args[6], axis=-2)
         dpdx = jnp.gradient(args[0], args[6], axis=-1)
         dpdz = jnp.gradient(args[0], args[6], axis=-2)
-        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, self.habc_masks)
+        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz)
       
     def func_torch(self, *args, **kwargs):
         lap_u_now = self.laplace(args[0], args[6], self.kernel)
@@ -57,4 +52,4 @@ class AcousticVRR(SecondOrderEquation):
         dvpdz = torch.gradient(args[2], spacing=args[6], dim=-2)[0]
         dpdx = torch.gradient(args[0], spacing=args[6], dim=-1)[0]
         dpdz = torch.gradient(args[0], spacing=args[6], dim=-2)[0]
-        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz, self.habc_masks)
+        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz)

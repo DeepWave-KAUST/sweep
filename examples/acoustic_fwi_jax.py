@@ -43,6 +43,7 @@ model = RNNJax(Acoustic(spatial_order=spatial_order, backend='jax'),
                 receiver_type=['h1'],
                 abcn=abcn, 
                 free_surface=free_surface, 
+                use_cpml=True,
                 use_ckpt=False)
 
 # Set the true model

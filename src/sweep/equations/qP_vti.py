@@ -1,13 +1,11 @@
 import numpy as np
 from .base import SecondOrderEquation
-from .habc_jax import habc, bound_mask
-from .utils import to_backend
 
 def step(u_now, u_pre, # Wavefields
          vp, epsilon, delta, # Model parameters
          dt, h, b,  # Auxiliary parameters
          nabla_x, nabla_z, dpdx, dpdz,# Partial derivatives
-         habc_masks=None):
+         ):
 
         # 10.1190/geo2022-0292.1 EQ(19) from 10.1190/geo2014-0242.1
         numerator = -2*(epsilon-delta)*dpdx**2*dpdz**2 
@@ -40,11 +38,6 @@ class AcousticVTI(SecondOrderEquation):
         """
         
         super().__init__(spatial_order, device, backend, other_kernels=True)
-
-    def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
-        habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
-        self.habc_masks = tuple([np.array(mask) if mask is not None else mask for mask in habc_masks])
-        self.use_habc = use_habc
     
     @property
     def models(self):

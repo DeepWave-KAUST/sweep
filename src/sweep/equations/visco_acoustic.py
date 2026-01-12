@@ -3,7 +3,6 @@ import numpy as np
 import jax.numpy as jnp
 from .base import SecondOrderEquation
 from .utils import to_backend
-from .habc_jax import habc, bound_mask
 
 def cond_torch(pred, true_fn, false_fn, args):
     # Make sure args is a tuple
@@ -20,7 +19,7 @@ def step(u_now, u_pre, # Wavefields
          amplitude_damping=True, # Amplitude damping
          op=None,  # Operator (jax or torch)
          cond_op = None, # Operator (jax.lax.cond or torch.cond)
-         habc_masks=None):
+         ):
     
     a = 1 / (1 + b * dt)
 
@@ -79,11 +78,6 @@ class ViscoAcoustic(SecondOrderEquation):
 
         self.op = {'torch': torch, 'jax': jnp}[backend]
         self.cond_op = {'torch': cond_torch, 'jax': jax.lax.cond}[backend]
-
-    def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
-        habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
-        self.habc_masks = tuple([np.array(mask) if mask is not None else mask for mask in habc_masks])
-        self.use_habc = use_habc
 
     @property
     def need_init(self):

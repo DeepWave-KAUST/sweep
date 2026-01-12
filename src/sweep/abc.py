@@ -1,38 +1,6 @@
 import torch
 import numpy as np
 
-def bound_mask(nz, nx, w, batchsize=1, return_idx=False, free_surface=False):
-
-    top = np.ones((w, nx), dtype=np.float32)
-
-    indices = np.tril_indices(w, k=-1)
-
-    top[indices] = 0.0
-    top *= np.fliplr(top)
-    bottom = np.flipud(top)
-
-    if free_surface:
-        top = None
-
-    left = np.ones((nz, w), dtype=np.float32)
-    indices = np.triu_indices(w, k=1)
-    left[indices] = 0.0
-    left *= np.flipud(left)
-    right = np.fliplr(left)
-
-    if free_surface:
-        left[:w] = 1.
-        right[:w] = 1.
-
-    if not return_idx:
-        return top, bottom, left, right
-    else:
-        tm = np.repeat(top[np.newaxis, :, :], 1, 0)==1 if not free_surface else None
-        bm = np.repeat(bottom[np.newaxis, :, :], 1, 0)==1
-        lm = np.repeat(left[np.newaxis, :, :], 1, 0)==1
-        rm = np.repeat(right[np.newaxis, :, :], 1, 0)==1
-        return tm, bm, lm, rm
-
 # Coefficients of PML
 def abc_coefficients_2d(domain_shape, N=50, B=100., free_surface=False):
     Nx, Ny = domain_shape
@@ -141,47 +109,3 @@ def abc_coefficients_3d(domain_shape, N=50, B=100., free_surface=False):
         b_z[0:N, :, :] = 0.0  # no damping at top surface if free surface
 
     return np.sqrt(b_x ** 2 + b_y ** 2 + b_z ** 2)
-
-def habc_coefficients_2d(domain_shape, 
-                         N=50, 
-                         free_surface=False):
-
-    nz, nx = domain_shape
-
-    d = np.zeros(domain_shape, dtype=np.float32)
-
-    # d_vals = 1 - np.arange(1, N+1)/N
-
-    # cosine 
-    d_vals = 1-np.cos(np.pi/2* (1+ (1-np.arange(1,N+1))/N ) )
-
-    tm, bm, lm, rm = bound_mask(*domain_shape, N, free_surface=free_surface)
-
-    if N > 0:
-        # Top
-        if not free_surface:
-            idx = tm==1
-            d[:N,:][idx] = (d_vals[:, np.newaxis].repeat(nx, 1).transpose(0, 1)*tm)[idx]
-
-        # Bottom
-        idx = bm==1 # Mask for equation left
-        d[-N:,:][idx] = (np.flip(d_vals, [0])[:, np.newaxis].repeat(nx, 1).transpose(0, 1)*bm)[idx]
-
-        # Left
-        idx = lm==1
-
-        if not free_surface:
-            d[:, :N][idx] = (d_vals[:, np.newaxis].repeat(nz, 1).T*lm)[idx]
-        if free_surface:
-            lm[:N] = 1.
-            d[:, :N][lm==1] = (d_vals[:, np.newaxis].repeat(nz, 1).T*lm)[lm==1]
-
-        # Right boundary
-        idx = rm==1
-        if not free_surface:
-            d[:, -N:][idx] = (np.flip(d_vals[:, np.newaxis], [0]).repeat(nz, 1).T*rm)[idx]
-        if free_surface:
-            rm[:N] = 1.
-            d[:, -N:][rm==1] = (np.flip(d_vals[:, np.newaxis], [0]).repeat(nz, 1).T*rm)[rm==1]
-            
-    return d.astype(np.float32)

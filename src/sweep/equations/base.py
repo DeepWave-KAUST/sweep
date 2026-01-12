@@ -3,9 +3,10 @@ import numpy as np
 from .utils import to_backend
 from .operator import PartialDerivative
 from sweep.scalars import generate_convolution_kernel, generate_convolution_kernel3d
-from .operator import laplace as laplace_torch
-from .operator_jax import laplace as laplace2d_mix
-from .operator_jax import laplace1d_sep
+from .operator import laplace as lap2d_torch
+from .operator_jax import laplace as lap2d_jax
+from .operator_jax import laplace1d_sep as lap1d_jax
+from .operator import laplace1d_sep as lap1d_torch
 
 
 def init_wavenumbers(shape, h):
@@ -57,7 +58,7 @@ class SecondOrderEquation:
 
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel3d}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
-        self.laplace = {'torch': laplace_torch, 'jax': laplace2d_mix, 'cuda': None}[backend]
+        self.laplace = {'torch': lap2d_torch, 'jax': lap2d_jax, 'cuda': None}[backend]
 
         other_kernels = kwargs.get('other_kernels', False)
         self.kf = kernel_func
@@ -67,14 +68,16 @@ class SecondOrderEquation:
             self.gkernel_x = to_backend(kernel_func(spatial_order, derivative_order=1, mode='x', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
             self.gkernel_z = to_backend(kernel_func(spatial_order, derivative_order=1, mode='z', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
 
-    def init_laplace(self, ltype='2dmix'):
+    def init_laplace(self, ltype='2dmix', backend='jax'):
         """Overwrting the proporty <laplace>.
 
         Args:
             ltype (str, optional): Should be '2dmix' or '1dsep'. Defaults to '2dmix'.
         """
         assert ltype in ['2dmix', '1dsep'], "Unsupported laplace type"
-        self.laplace = {'2dmix': laplace2d_mix, '1dsep': laplace1d_sep}[ltype]
+        self.laplace = {'jax':   {'2dmix': lap2d_jax,   '1dsep': lap1d_jax},
+                        'torch': {'2dmix': lap2d_torch, '1dsep': lap1d_torch},
+                         }[backend][ltype]
         if ltype == '1dsep':
             self.kernel = to_backend(self.kf(self.so, mode='x')[0,0][self.so//2,:], backend=self.backend, device=self.device)
 

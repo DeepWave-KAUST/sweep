@@ -1,12 +1,11 @@
 import numpy as np
 from .base import SecondOrderEquation
-from .habc_jax import habc, bound_mask
 
 def step(u_now, u_pre, f_now, f_next, # wavefields
          vv, v, eta, # Model parameters 
          dt, h, b,  # Auxiliary parameters
          nabla_x, nabla_z, dpdx2dz2, # Partial derivatives
-         habc_masks=None):
+         ):
     
     a = 1 / (1 + b * dt)
 
@@ -36,11 +35,6 @@ class AcousticTariq(SecondOrderEquation):
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
 
-    def init_habc(self, shape, abcn, free_surface=False, batchsize=1, use_habc=False):
-        habc_masks = bound_mask(*shape, abcn, batchsize, return_idx=True, free_surface=free_surface)
-        self.habc_masks = tuple([np.array(mask) if mask is not None else mask for mask in habc_masks])
-        self.use_habc = use_habc
-    
     @property
     def models(self):
         return ['vv', 'v', 'eta']

@@ -1,6 +1,6 @@
 from .base import SecondOrderEquation
 
-def step(u_now, u_pre, su_now, su_pre, vp, ref, dt, h, b, lap_u_now, lap_su_now, habc_masks=None):
+def step(u_now, u_pre, su_now, su_pre, vp, ref, dt, h, b, lap_u_now, lap_su_now):
     
     a = 1 / (1 + b * dt)
 
@@ -25,8 +25,7 @@ class AcousticLSRTM(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend)
-        if backend == 'jax':
-            super().init_laplace(ltype='1dsep')
+        super().init_laplace(ltype='1dsep')
     
     @property
     def models(self):
