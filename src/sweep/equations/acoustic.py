@@ -1,9 +1,5 @@
 from .base import SecondOrderEquation
-from .operator_jax import laplace3d as laplace3d_jax
-import numpy as np
-
 from .operator import gradientO2
-import jax.numpy as jnp
 
 def step_cpml(
         u_now, u_pre, psix, psiz, zetax, zetaz, 

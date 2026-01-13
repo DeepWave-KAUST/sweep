@@ -139,7 +139,7 @@ def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', 
 
     return kernel.reshape(1, 1, *kernel.shape)
 
-def generate_convolution_kernel3d(spatial_order):
+def generate_convolution_kernel3d(spatial_order, **kwargs):
     """Generate convolution kernel
 
     Args:

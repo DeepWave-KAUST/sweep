@@ -6,6 +6,7 @@ from sweep.scalars import generate_convolution_kernel, generate_convolution_kern
 from .operator import laplace as lap2d_torch
 from .operator_jax import laplace as lap2d_jax
 from .operator_jax import laplace1d_sep as lap1d_jax
+from .operator_jax import laplace3d_sep as lap3d_jax
 from .operator import laplace1d_sep as lap1d_torch
 
 
@@ -56,7 +57,7 @@ class SecondOrderEquation:
         self.habc_masks = None
         self.abcn = 50 # only useful for HABC
 
-        kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel3d}[dim]
+        kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
         self.laplace = {'torch': lap2d_torch, 'jax': lap2d_jax, 'cuda': None}[backend]
 
@@ -74,11 +75,11 @@ class SecondOrderEquation:
         Args:
             ltype (str, optional): Should be '2dmix' or '1dsep'. Defaults to '2dmix'.
         """
-        assert ltype in ['2dmix', '1dsep'], "Unsupported laplace type"
-        self.laplace = {'jax':   {'2dmix': lap2d_jax,   '1dsep': lap1d_jax},
+        assert ltype in ['2dmix', '1dsep', '3dsep'], "Unsupported laplace type"
+        self.laplace = {'jax':   {'2dmix': lap2d_jax,   '1dsep': lap1d_jax, '3dsep': lap3d_jax},
                         'torch': {'2dmix': lap2d_torch, '1dsep': lap1d_torch},
                          }[backend][ltype]
-        if ltype == '1dsep':
+        if ltype in ['1dsep', '3dsep']:
             self.kernel = to_backend(self.kf(self.so, mode='x')[0,0][self.so//2,:], backend=self.backend, device=self.device)
 
 

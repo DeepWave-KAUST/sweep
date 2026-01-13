@@ -15,6 +15,7 @@ from .qP_vti import AcousticVTI
 from .elasticP import ElasticP
 from .acoustic import Acoustic
 from .qP_tariq import AcousticTariq
+from .acoustic3d import Acoustic3D
 
 __all__ = [
     'AcousticLSRTM',
@@ -32,4 +33,5 @@ __all__ = [
     'ElasticP',
     'Acoustic',
     'AcousticTariq',
+    'Acoustic3D',
 ]

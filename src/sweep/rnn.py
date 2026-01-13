@@ -92,11 +92,11 @@ class RNNBase:
         # CPML (best ABC performance)
         if self.use_cpml:
             self.b = set_pml_profiles(
-                    pml_width=[self.abcn if not self.free_surface else 0, self.abcn, self.abcn, self.abcn],
+                    pml_width=[self.abcn if not self.free_surface else 0] + (2**self.ndim-1) * [self.abcn],
                     accuracy=self.equation.so,
-                    fd_pad=[self.equation.so//2, self.equation.so//2, self.equation.so//2, self.equation.so//2],
+                    fd_pad=[self.equation.so//2 if not self.free_surface else 0] + (2**self.ndim-1) * [self.equation.so//2],
                     dt=self._dt,
-                    grid_spacing=[self._dh, self._dh],
+                    grid_spacing=[self._dh]*self.ndim,
                     max_vel=kwargs.get('max_vel', 4500.0),
                     dtype=np.float32,
                     pml_freq=kwargs.get('pml_freq', 25.0),
@@ -379,8 +379,7 @@ class RNNJax(RNNBase):
 
         num_chunks = (nt + chunk_size - 1) // chunk_size
 
-        post_fix = '_jax3d' if self.ndim == 3 else ''
-        wave_equation = getattr(self.equation, f'func{post_fix}') if wave_equation is None else wave_equation
+        wave_equation = getattr(self.equation, f'func') if wave_equation is None else wave_equation
         
         zero_rec = jnp.zeros(
             (batch_size, receivers.shape[1], len(self.receiver_type)),

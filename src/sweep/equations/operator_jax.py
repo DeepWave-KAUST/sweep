@@ -29,6 +29,33 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
 
     return d2z / (hz * hz), d2x / (hx * hx)
 
+
+def laplace3d_sep(u, k1d, hz, hy, hx):
+    """ 3D Laplace operator using JAX.
+     Args:
+         u (jnp.ndarray): Input wavefield of shape (batch, 1, depth, height, width).
+         h (float): Grid spacing.
+         kernel (jnp.ndarray): 3D convolution kernel of shape (1, 1, kD, kH, kW).
+
+     Returns:
+         jnp.ndarray: Resulting wavefield after applying the Laplace operator.
+     """
+    kz = k1d[None, None, :, None, None]  # (1,1,k,1,1)
+    ky = k1d[None, None, None, :, None]  # (1,1,1,k,1)
+    kx = k1d[None, None, None, None, :]  # (1,1,1,1,k)
+    dn = jax.lax.conv_dimension_numbers(u.shape, kz.shape,
+                                        ('NCDHW', 'OIDHW', 'NCDHW'))
+    kwargs = {'window_strides': (1,1,1),
+              'padding': 'SAME',
+              'lhs_dilation': (1,1,1),
+              'rhs_dilation': (1,1,1),
+              'dimension_numbers': dn}
+    d2z = lax.conv_general_dilated(u, kz, **kwargs)/ (hz ** 2)
+    d2y = lax.conv_general_dilated(u, ky, **kwargs)/ (hy ** 2)
+    d2x = lax.conv_general_dilated(u, kx, **kwargs)/ (hx ** 2)
+    return d2z, d2y, d2x
+
+
 def _laplace(image, kernel):
     # Expected input shape: (height, width)
     return conv2d(image, kernel, mode='same')

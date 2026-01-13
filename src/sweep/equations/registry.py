@@ -1,6 +1,7 @@
 CPML_SUPPORTED_EQUATIONS = {
     'AcousticVRZ',
     'Acoustic',
+    'Acoustic3D',
 }
 
 FREE_SURFACE_SUPPORTED_EQUATIONS = {
@@ -10,4 +11,5 @@ FREE_SURFACE_SUPPORTED_EQUATIONS = {
     'AEC', 
     'AECLSRTM', 
     'Acoustic1st',
+    'Acoustic3D',
 }
