@@ -2,33 +2,63 @@ import numpy as np
 from .base import FirstOrderEquation
 
 
-def step(vx, vz, txx, tzz, txz,
+def step(vx, vz, txx, tzz, txz, 
+         m_vxx, m_vxz, m_vzx, m_vzz,
+         m_txxx, m_txxz, m_tzzx, m_tzzz,
+         m_txzx, m_txzz,
          vp, vs, rho, 
          dt, h, b, pd, 
+         pml=None,
          ):
+
+    az, bz, azh, bzh, ax, bx, axh, bxh = pml
 
     lame_lambda = rho*(vp**2-2*vs**2)
     lame_mu = rho*vs**2
-    c = 0.5*dt*b
 
+    txx_x = pd.x_backward(txx)
+    txz_z = pd.z_backward(txz)
+    tzz_z = pd.z_forward(tzz)
+    txz_x = pd.x_forward(txz)
+
+    # Update Veclocity fields
+    m_tzzz = azh * m_tzzz + bzh * tzz_z
+    tzz_z = tzz_z + m_tzzz
+    m_txzx = ax * m_txzx + bx * txz_x
+    txz_x = txz_x + m_txzx
+    vz = vz + dt / (rho * h) * (tzz_z + txz_x)
+
+    m_txzz = az * m_txzz + bz * txz_z
+    txz_z = txz_z + m_txzz
+    m_txxx = axh * m_txxx + bxh * txx_x
+    txx_x = txx_x + m_txxx
+    vx = vx + dt / (rho * h) * (txx_x + txz_z)
+
+    # Update Stress fields
     vx_x = pd.x_forward(vx)
     vz_z = pd.z_backward(vz)
     vx_z = pd.z_forward(vx)
     vz_x = pd.x_backward(vz)
 
-    y_txx  = (1+c)**-1*(dt*h**(-1)*((lame_lambda+2*lame_mu)*vx_x+lame_lambda*vz_z)+(1-c)*txx)
-    y_tzz  = (1+c)**-1*(dt*h**(-1)*((lame_lambda+2*lame_mu)*vz_z+lame_lambda*vx_x)+(1-c)*tzz)
-    y_txz = (1+c)**-1*(dt*lame_mu*h**(-1)*(vz_x+vx_z)+(1-c)*txz)
+    m_vzz = az * m_vzz + bz * vz_z
+    vz_z = vz_z + m_vzz
+    m_vxx = ax * m_vxx + bx * vx_x
+    vx_x = vx_x + m_vxx
 
-    txx_x = pd.x_backward(y_txx)
-    txz_z = pd.z_backward(y_txz)
-    tzz_z = pd.z_forward(y_tzz)
-    txz_x = pd.x_forward(y_txz)
+    tzz = tzz + dt * (lame_lambda + 2 * lame_mu) / h * vz_z + dt * lame_lambda / h * vx_x
+    txx = txx + dt * (lame_lambda + 2 * lame_mu) / h * vx_x + dt * lame_lambda / h * vz_z
 
-    y_vx = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txx_x+txz_z)+(1-c)*vx)
-    y_vz = (1+c)**-1*(dt*rho**(-1)*h**(-1)*(txz_x+tzz_z)+(1-c)*vz)
+    m_vxz = azh * m_vxz + bzh * vx_z
+    vx_z = vx_z + m_vxz
+    m_vzx = axh * m_vzx + bxh * vz_x
+    vz_x = vz_x + m_vzx
+    txz = txz + dt * lame_mu / h * (vx_z + vz_x)
 
-    return y_vx, y_vz, y_txx, y_tzz, y_txz
+
+    return vx, vz, txx, tzz, txz, \
+           m_vxx, m_vxz, m_vzx, m_vzz, \
+           m_txxx, m_txxz, m_tzzx, m_tzzz, \
+           m_txzx, m_txzz
 
 class Elastic(FirstOrderEquation):
     """Parameter order: vp, vs, rho.
@@ -46,7 +76,8 @@ class Elastic(FirstOrderEquation):
     
     @property
     def wavefields(self):
-        return ['vx', 'vz', 'txx', 'tzz', 'txz']
+        return ['vx', 'vz', 'txx', 'tzz', 'txz', 
+                'm_vxx', 'm_vxz', 'm_vzx', 'm_vzz', 'm_txxx', 'm_txxz', 'm_tzzx', 'm_tzzz', 'm_txzx', 'm_txzz']
     
     def func(self, *args, **kwargs):
-        return step(*args, pd=self.pd, **kwargs)
+        return step(*args, pd=self.pd, pml=self.b, **kwargs)

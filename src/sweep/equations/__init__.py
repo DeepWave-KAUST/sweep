@@ -6,7 +6,7 @@ from .acoustic1st import Acoustic1st
 from .acoustic_vrz import AcousticVRZ
 # from .aec_lsrtm import AECLSRTM
 # from .elastic_lsrtm import ElasticLSRTM
-# from .elastic import Elastic
+from .elastic import Elastic
 # from .acoustic_vrr import AcousticVRR
 # from .qP_tti import AcousticTTI
 # from .aec import AEC

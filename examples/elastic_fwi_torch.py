@@ -2,9 +2,10 @@ import sys, tqdm, os
 sys.path.append('../src')
 import torch
 torch.backends.cudnn.benchmark = True
-from geophyai.rnn import RNN
-from geophyai.equations import Elastic
-from geophyai.signal import ricker
+from sweep.propagator.torch import PropTorch
+from sweep.equations import Elastic
+from sweep.signal import ricker
+
 import numpy as np
 import matplotlib.pyplot as plt
 from configure import *
@@ -33,16 +34,17 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = RNN(Elastic(spatial_order=spatial_order, device=dev), 
+model = PropTorch(Elastic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
             abcn=abcn, 
             dh=dh,
             dt=dt,
-            source_type=['vz'],
+            source_type=['txx', 'tzz'],
             receiver_type=['vx', 'vz'],
             free_surface=False, 
-            use_ckpt=False)
+            pml_type='cpmls',
+            use_ckpt=True)
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
@@ -127,7 +129,7 @@ for epoch in tqdm.trange(epochs):
     opt.step()
 
     # Save the model
-    if epoch % 1 == 0:
+    if epoch % 10 == 0:
 
         # Show shotgather
         fig, axes = plt.subplots(2, 2, figsize=(8, 8))

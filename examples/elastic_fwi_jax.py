@@ -1,14 +1,14 @@
 import sys, tqdm, os
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 sys.path.append('../src')
-import torch, optax, jax
+import optax, jax
 import jax.numpy as jnp
 import jax.random as random
 from functools import partial
-torch.backends.cudnn.benchmark = True
-from geophyai.rnn import RNNJax
-from geophyai.equations import Elastic
-from geophyai.signal import ricker
+
+from sweep.propagator.jax import PropJax
+from sweep.equations import Elastic
+from sweep.signal import ricker
 import numpy as np
 import matplotlib.pyplot as plt
 from configure import *
@@ -31,7 +31,6 @@ shape = vp_true.shape
 extent = [0, shape[1]*dh, shape[0]*dh, 0]
 
 nz, nx = shape
-dev = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 wave = ricker(t-delay, f=fm)
 plt.plot(wave)
@@ -39,15 +38,16 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = RNNJax(Elastic(spatial_order=spatial_order, backend='jax'), 
+model = PropJax(Elastic(spatial_order=spatial_order, backend='jax'), 
             shape=shape, 
-            dev=dev, 
+            dev=None, 
             abcn=abcn, 
             dh=dh,
             dt=dt,
-            source_type=['vz'],
+            source_type=['txx', 'tzz'],
             receiver_type=['vx', 'vz'],
             free_surface=False, 
+            pml_type='cpmls',
             use_ckpt=True)
 
 # Set the true model, the order of the parameters should be 
@@ -111,7 +111,7 @@ def fwi_step(vp, vs, rho, rand_shots):
                     source_encoding=True,
                     models=[vp, vs, rho])
         _obs = jnp.sum(obs[shot_nums], axis=0)
-        _loss_ = jnp.mean((syn-_obs)**2)
+        _loss_ = jnp.sum((syn-_obs)**2)
 
         return _loss_, (syn, _obs)
     # Compute the gradient

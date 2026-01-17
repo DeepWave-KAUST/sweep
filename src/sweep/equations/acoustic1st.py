@@ -10,27 +10,26 @@ def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None
     p_z = pd.z_backward(p)
  
     psi_z = azh * psiz + bzh * p_z
-    p_z += psi_z
-    vz -= dt / (rho * h) * p_z
+    p_z = p_z + psi_z
+    vz = vz - dt / (rho * h) * p_z
 
     psi_x = axh * psix + bxh * p_x
-    p_x += psi_x
-    vx -= dt / (rho * h) * p_x
-
+    p_x = p_x + psi_x
+    vx = vx - dt / (rho * h) * p_x
     # Update p
     vx_x = pd.x_forward(vx)
     vz_z = pd.z_forward(vz)
     div_v = 0.
 
     phiz = az * phiz + bz * vz_z
-    vz_z += phiz
-    div_v += vz_z
+    vz_z = vz_z + phiz
+    div_v = div_v + vz_z
 
     phix = ax * phix + bx * vx_x
-    vx_x += phix
-    div_v += vx_x
+    vx_x = vx_x + phix
+    div_v = div_v + vx_x
 
-    p -= vp**2 * rho * dt / h * div_v
+    p = p - vp**2 * rho * dt / h * div_v
 
     return p, vx, vz, phix, phiz, psi_x, psi_z
 
