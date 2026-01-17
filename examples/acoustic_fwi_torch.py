@@ -1,10 +1,10 @@
 import sys, tqdm, os
 import torch
-# sys.path.append('../src')
+sys.path.append('../src')
 torch.backends.cudnn.benchmark = True
-from geophyai.rnn import RNN
-from geophyai.equations import Acoustic
-from geophyai.signal import ricker
+from sweep.propagator.torch import PropTorch
+from sweep.equations import Acoustic
+from sweep.signal import ricker
 import numpy as np
 import matplotlib.pyplot as plt
 from configure import *
@@ -30,7 +30,7 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = RNN(Acoustic(spatial_order=spatial_order, device=dev), 
+model = PropTorch(Acoustic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
             dh=dh,
@@ -38,8 +38,9 @@ model = RNN(Acoustic(spatial_order=spatial_order, device=dev),
             source_type=['h1'],
             receiver_type=['h1'],
             abcn=abcn, 
-            free_surface=free_surface)
-
+            free_surface=free_surface,
+            use_ckpt=False,
+            pml_type='cpmlr')
 # Set the true model
 model.set_parameters([torch.from_numpy(true_model).to(dev)])
 

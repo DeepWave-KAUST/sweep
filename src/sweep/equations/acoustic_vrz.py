@@ -1,27 +1,24 @@
-import jax.numpy as jnp
-import numpy as np
-
 from .base import SecondOrderEquation
-from .operator import gradientO2
 
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
               vp, z, dt, h, b, 
-              lap_x, lap_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z
+              lap_x, lap_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z,
+              pml, grad_op
               ):
 
-    az, bz, dbzdz, ax, bx, dbxdx = b
+    az, bz, dbzdz, ax, bx, dbxdx = pml
 
     w_sum = 0.
 
     # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + gradientO2(az*psiz, h, axis=-2)
+    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az*psiz, h, axis=-2)
     w_sum += (1+bz) * tmpz + az * zetaz
 
     psiyn = bz * dpdz + az * psiz
     zetaz = bz * tmpz + az * zetaz
 
     # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + gradientO2(ax*psix, h, axis=-1)
+    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + grad_op(ax*psix, h, axis=-1)
     w_sum += (1+bx) * tmpx + ax * zetax
 
     psixn = bx * dpdx + ax * psix
@@ -67,11 +64,11 @@ class AcousticVRZ(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[9]
-        lap_u_now_z, lap_u_now_x = self.laplace(args[0], self.kernel, dh, dh)
-        dvpdx = gradientO2(args[6], dh, axis=-1)
-        dvpdz = gradientO2(args[6], dh, axis=-2)
-        dpdx = gradientO2(args[0], dh, axis=-1)
-        dpdz = gradientO2(args[0], dh, axis=-2)
-        z1_x = gradientO2(1/args[7], dh, axis=-1)
-        z1_z = gradientO2(1/args[7], dh, axis=-2)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z)
+        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
+        dvpdx = self.gradient(args[6], dh, axis=-1)
+        dvpdz = self.gradient(args[6], dh, axis=-2)
+        dpdx = self.gradient(args[0], dh, axis=-1)
+        dpdz = self.gradient(args[0], dh, axis=-2)
+        z1_x = self.gradient(1/args[7], dh, axis=-1)
+        z1_z = self.gradient(1/args[7], dh, axis=-2)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, self.b, self.gradient)

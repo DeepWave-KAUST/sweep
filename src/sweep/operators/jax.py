@@ -1,8 +1,7 @@
 import jax
 import jax.numpy as jnp
-from jax import vmap
+from jax import vmap, lax
 from jax.scipy.signal import convolve2d as conv2d
-from jax import lax
 
 @jax.jit
 def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
@@ -63,7 +62,7 @@ def _laplace(image, kernel):
 batch_convolve2d = vmap(vmap(_laplace, in_axes=(0, None)), in_axes=(0, None))
 
 @jax.jit
-def laplace(u, h=1.0, kernel=None):
+def laplace2d(u, h=1.0, kernel=None):
     return batch_convolve2d(u, kernel) / (h ** 2)
 
 def laplace3d(u, kernel=None, h=1.0):
@@ -86,3 +85,23 @@ def laplace3d(u, kernel=None, h=1.0):
                                        (1,1,1), # rhs/kernel dilation
                                        dn)      # dimension_numbers
     return out / (h ** 2)
+
+def apply_kernels_jax(u, kernels):
+    # u: (b, 1, h, w)
+    # kernels: (k, kh, kw)
+    B, C, H, W = u.shape
+    K, KH, KW = kernels.shape
+    kernels_exp = kernels[:, None, ::-1, ::-1]  # (K, 1, kh, kw), need reverse for lax conv
+    def single_conv():
+        return jax.lax.conv_general_dilated(
+            lhs=u,  # (b, k, h, w)
+            rhs=kernels_exp, # (1, k, kh, kw)
+            window_strides=(1, 1),
+            padding='SAME',
+            dimension_numbers=('NCHW', 'OIHW', 'NCHW'), 
+        )  # → (b, k, 1, h, w)
+    conv_out = single_conv()  # → (b, k, h, w)
+    return jnp.sum(conv_out, axis=1, keepdims=True)  # → (b, 1, h, w)
+
+def gradient(u, h, axis):
+    return jnp.gradient(u, h, axis=axis)

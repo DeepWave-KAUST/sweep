@@ -7,9 +7,9 @@ import numpy as np
 import jax.numpy as jnp
 import jax.random as random
 sys.path.append('../src')
-from geophyai.rnn import RNNJax
-from geophyai.equations import Acoustic
-from geophyai.signal import ricker
+from sweep.propagator.jax import PropJax
+from sweep.equations import Acoustic
+from sweep.signal import ricker
 from functools import partial
 import matplotlib.pyplot as plt
 from configure import *
@@ -34,7 +34,7 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = RNNJax(Acoustic(spatial_order=spatial_order, backend='jax'), 
+model = PropJax(Acoustic(spatial_order=spatial_order, backend='jax'), 
                 shape=shape, 
                 dev=None,
                 dh=dh,
@@ -43,8 +43,8 @@ model = RNNJax(Acoustic(spatial_order=spatial_order, backend='jax'),
                 receiver_type=['h1'],
                 abcn=abcn, 
                 free_surface=free_surface, 
-                use_cpml=True,
-                use_ckpt=False)
+                use_ckpt=False,
+                pml_type='cpmlr')
 
 # Set the true model
 model.set_parameters([jnp.array(true_model)])

@@ -1,13 +1,11 @@
 
 import numpy as np
 from .utils import to_backend
-from .operator import PartialDerivative
-from sweep.scalars import generate_convolution_kernel, generate_convolution_kernel3d
-from .operator import laplace as lap2d_torch
-from .operator_jax import laplace as lap2d_jax
-from .operator_jax import laplace1d_sep as lap1d_jax
-from .operator_jax import laplace3d_sep as lap3d_jax
-from .operator import laplace1d_sep as lap1d_torch
+from sweep.operators.general import PartialDerivative
+from sweep.scalars import generate_convolution_kernel
+from sweep.operators.factory import OperatorBase
+from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
+
 
 
 def init_wavenumbers(shape, h):
@@ -17,7 +15,26 @@ def init_wavenumbers(shape, h):
     k = np.sqrt(kxx**2 + kzz**2)
     return k, kx, kz
 
-class FirstOrderEquation:
+class WaveEquation:
+
+    def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
+        """
+        Initialize the wave equation with an initial condition.
+
+        :param initial_condition: The initial condition for the equation.
+        """
+        self.so = spatial_order
+        self.backend = backend
+        self.use_habc = False
+        self.device = device
+        self.pml_type = kwargs.get('pml_type', 'cpmls')
+
+    def init_abc(self, type='cpml', **kwargs):
+        pml_func = {'cpmls': set_cpml_profiles_s, 'cpmlr': set_cpml_profiles_r,'spml': set_spml_profiles}[type]
+        self.b = pml_func(**kwargs)
+        self.b = to_backend(self.b, self.backend, self.device)
+
+class FirstOrderEquation(WaveEquation, ):
     """
     Base class for first-order equations.
     This class can be extended to implement specific first-order equations.
@@ -29,15 +46,17 @@ class FirstOrderEquation:
 
         :param initial_condition: The initial condition for the equation.
         """
+        WaveEquation.__init__(self, spatial_order, device, backend, **kwargs)
         self.so = spatial_order
         self.backend = backend
         self.use_habc = False
         self.pd = PartialDerivative(spatial_order, device, backend)
+        self.pd.to_backend(to_backend)
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]
 
-class SecondOrderEquation:
+class SecondOrderEquation(OperatorBase, WaveEquation):
     """
     Base class for second-order equations.
     This class can be extended to implement specific second-order equations.
@@ -49,6 +68,8 @@ class SecondOrderEquation:
 
         :param initial_condition: The initial condition for the equation.
         """
+        OperatorBase.__init__(self, backend=backend)
+        WaveEquation.__init__(self, spatial_order, device, backend, **kwargs)
         dim = kwargs.get('dim', 2)
         self.so = spatial_order
         self.backend = backend
@@ -59,7 +80,6 @@ class SecondOrderEquation:
 
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
-        self.laplace = {'torch': lap2d_torch, 'jax': lap2d_jax, 'cuda': None}[backend]
 
         other_kernels = kwargs.get('other_kernels', False)
         self.kf = kernel_func
@@ -75,13 +95,8 @@ class SecondOrderEquation:
         Args:
             ltype (str, optional): Should be '2dmix' or '1dsep'. Defaults to '2dmix'.
         """
-        assert ltype in ['2dmix', '1dsep', '3dsep'], "Unsupported laplace type"
-        self.laplace = {'jax':   {'2dmix': lap2d_jax,   '1dsep': lap1d_jax, '3dsep': lap3d_jax},
-                        'torch': {'2dmix': lap2d_torch, '1dsep': lap1d_torch},
-                         }[backend][ltype]
         if ltype in ['1dsep', '3dsep']:
             self.kernel = to_backend(self.kf(self.so, mode='x')[0,0][self.so//2,:], backend=self.backend, device=self.device)
-
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]

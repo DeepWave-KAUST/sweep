@@ -1,7 +1,7 @@
-import torch, math
+import math
 import numpy as np
 
-def normal_grid_coes(M):
+def regular_grid_coes(M):
     """Finite difference coefficients for the normal grid.
 
     Args:
@@ -20,32 +20,6 @@ def normal_grid_coes(M):
         a_m[m - 1] = (-1)**(m + 1) / (m**2) * product
 
     return a_m
-
-def staggered_grid_coes_torch(M: int) -> torch.Tensor:
-    """Finite difference coefficients for the staggered grid.
-
-    Args:
-        M (length of operator): 2*M is the difference order.
-
-    Returns:
-       Array : Coefficients for the finite difference operator with shape (M,).
-    """
-    a = torch.zeros(M, dtype=torch.float32)
-    
-    for m in range(1, M + 1):
-        a_m = (-1) ** (m + 1) / (2 * m - 1)
-        
-        prod = 1.0
-        for n in range(1, M + 1):
-            if n != m:
-                numerator = (2 * n - 1) ** 2
-                denominator = numerator - (2 * m - 1) ** 2
-                prod *= abs(numerator / denominator)
-        
-        a_m *= prod
-        a[m - 1] = a_m
-    
-    return a
 
 def staggered_grid_coes(M):
     """Finite difference coefficients for the staggered grid.
@@ -148,7 +122,7 @@ def generate_convolution_kernel3d(spatial_order, **kwargs):
     Returns:
         _type_: Tensor, the convolution kernel
     """
-    constant = normal_grid_coes(spatial_order//2)
+    constant = regular_grid_coes(spatial_order//2)
     kernel_size = spatial_order + 1
     kernel = np.zeros((kernel_size, kernel_size, kernel_size), dtype=np.float32)
     center = spatial_order // 2

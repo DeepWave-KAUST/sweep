@@ -1,26 +1,27 @@
 from .base import SecondOrderEquation
-from .operator import gradientO2
 
 def step_cpml(
         u_now, u_pre, psix, psiz, zetax, zetaz, 
         vp, dt, h, b, 
         lap_x, lap_z, 
-        dudx, dudz
+        dudx, dudz,
+        pml,
+        grad_op
         ):
 
-    az, bz, dbzdz, ax, bx, dbxdx = b
+    az, bz, dbzdz, ax, bx, dbxdx = pml
 
     w_sum = 0.
 
     # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + gradientO2(az*psiz, h, -2)
+    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -2)
     w_sum += (1+bz) * tmpz + az * zetaz
 
     psiyn = bz * dudz + az * psiz
     zetaz = bz * tmpz + az * zetaz
 
     # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + gradientO2(ax*psix, h, -1)
+    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1)
     w_sum += (1+bx) * tmpx + ax * zetax
     psixn = bx * dudx + ax * psix
     zetax = bx * tmpx + ax * zetax
@@ -38,7 +39,6 @@ class Acoustic(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend, dim=dim)
-        self._wavefields = []
         super().init_laplace(ltype='1dsep', backend=backend)
 
     @property
@@ -51,7 +51,7 @@ class Acoustic(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[8]
-        dudz = gradientO2(args[0], dh, -2)
-        dudx = gradientO2(args[0], dh, -1)
-        lap_u_now_z, lap_u_now_x = self.laplace(args[0], self.kernel, dh, dh)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dudx, dudz)
+        dudz = self.gradient(args[0], dh, -2)
+        dudx = self.gradient(args[0], dh, -1)
+        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dudx, dudz, self.b, self.gradient)
