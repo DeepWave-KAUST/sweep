@@ -1,6 +1,6 @@
 # # AUTO-GENERATED FILE - DO NOT EDIT MANUALLY
 
-# from .acoustic_lsrtm import AcousticLSRTM
+from .acoustic_lsrtm import AcousticLSRTM
 from .acoustic1st import Acoustic1st
 # from .elasticz import ElasticZ
 from .acoustic_vrz import AcousticVRZ

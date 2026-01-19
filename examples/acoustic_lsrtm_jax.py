@@ -1,14 +1,14 @@
 import sys, tqdm, os, optax
-# sys.path.append('../src')
+sys.path.append('../src')
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
 import jax
 import jax.numpy as jnp
 import jax.random as random
-from geophyai.rnn import RNNJax as RNN
-from geophyai.equations import Acoustic, AcousticLSRTM
-from geophyai.signal import ricker
-from geophyai.loss import CosineSimilarity, MSE
+from sweep.propagator.jax import PropJax
+from sweep.equations import Acoustic, AcousticLSRTM
+from sweep.signal import ricker
+
 import numpy as np
 import matplotlib.pyplot as plt
 from configure import *
@@ -22,7 +22,7 @@ key = random.PRNGKey(0)
 
 # Overwrite configures
 fm = 10
-spatial_order = 10
+spatial_order = 8
 batchsize = 8
 
 t = np.arange(0, nt*dt, dt)
@@ -37,17 +37,17 @@ plt.plot(wave)
 plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-free_surface = False
 # Forward model for observed data
-model = RNN(Acoustic(spatial_order=spatial_order, backend='jax'), 
+model = PropJax(Acoustic(spatial_order=spatial_order, backend='jax'), 
             shape=shape, 
             dev=None,
             dh=dh,
             dt=dt,
             source_type=['h1'],
             receiver_type=['h1'],
-            abcn=abcn, 
-            free_surface=free_surface)
+            abcn=20,
+            pml_type='cpmlr' ,
+            free_surface=False)
 
 # Set the true model
 model.set_parameters([jnp.array(true_model)])
@@ -84,15 +84,16 @@ plt.tight_layout()
 plt.savefig(f'{save_path}/acoustic_obs.png', dpi=300, bbox_inches='tight')
 
 ########## LSRTM inversion ##########
-lsrtm = RNN(AcousticLSRTM(spatial_order=spatial_order, backend='jax'), 
+lsrtm = PropJax(AcousticLSRTM(spatial_order=spatial_order, backend='jax'), 
             shape=shape, 
             dev=None,
             dh=dh,
             dt=dt,
             source_type=['h1'],
             receiver_type=['sh1'],
-            abcn=abcn, 
-            free_surface=free_surface)
+            abcn=20,
+            pml_type='cpmlr' ,            
+            free_surface=False)
 
 # Set the model
 lsrtm.set_parameters([jnp.array(smooth_model), # smoothed velocity model 
@@ -106,7 +107,7 @@ def update_fn(param, grads, state):
     updates, state = opt.update(grads, state)
     param = optax.apply_updates(param, updates)
     return param, state
-opt_state = opt.init(lsrtm.ref)
+opt_state = opt.init(lsrtm.mp)
 
 @jax.jit
 def lsrtm_step(vp, ref, rand_shots):
@@ -131,10 +132,10 @@ for epoch in tqdm.trange(epochs):
     key, subkey = random.split(key)
     rand_shots = random.randint(subkey, (batchsize,), 0, sources.shape[0])
 
-    loss, grads, (syn, _obs) = lsrtm_step(lsrtm.vp, lsrtm.ref, rand_shots)
+    loss, grads, (syn, _obs) = lsrtm_step(lsrtm.vp, lsrtm.mp, rand_shots)
     grad_ref = grads[-1]
     grad_ref = grad_ref/grad_ref.max()
-    lsrtm.ref, opt_state = update_fn(lsrtm.ref, grad_ref, opt_state)
+    lsrtm.mp, opt_state = update_fn(lsrtm.mp, grad_ref, opt_state)
 
     print(f'Epoch: {epoch}, Loss: {loss.item()}')
     LOSS.append(loss)
@@ -145,7 +146,7 @@ for epoch in tqdm.trange(epochs):
         extent = [0, nx*dh, nz*dh, 0]
         ax[0].imshow(true_model, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto', extent=extent)
         ax[0].set_title('True Velocity Model')
-        inverted_ref = lsrtm.ref
+        inverted_ref = lsrtm.mp
         vmin, vmax = np.percentile(inverted_ref, [2, 98])
         ax[1].imshow(inverted_ref, vmin=vmin, vmax=vmax, cmap='gray', aspect='auto', extent=extent)
         ax[1].set_title('Inverted Reflectivity')
