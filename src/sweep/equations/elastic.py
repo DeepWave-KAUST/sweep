@@ -1,7 +1,6 @@
 import numpy as np
 from .base import FirstOrderEquation
 
-
 def step(vx, vz, txx, tzz, txz, 
          m_vxx, m_vxz, m_vzx, m_vzz,
          m_txxx, m_txxz, m_tzzx, m_tzzz,

@@ -32,7 +32,7 @@ extent = [0, shape[1]*dh, shape[0]*dh, 0]
 
 nz, nx = shape
 
-wave = ricker(t-delay, f=fm)
+wave = ricker(t-delay, f=fm) * 1e6
 plt.plot(wave)
 plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
@@ -48,7 +48,7 @@ model = PropJax(Elastic(spatial_order=spatial_order, backend='jax'),
             receiver_type=['vx', 'vz'],
             free_surface=False, 
             pml_type='cpmls',
-            use_ckpt=True)
+            use_ckpt=False)
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
@@ -121,10 +121,8 @@ def fwi_step(vp, vs, rho, rand_shots):
 LOSS = []
 for epoch in tqdm.trange(epochs):
 
-    rand_shots = np.random.randint(0, sources.shape[0], batchsize)
-
     key, subkey = random.split(key)
-    rand_shots = random.randint(subkey, (batchsize,), 0, sources.shape[0])
+    rand_shots = random.choice(subkey, sources.shape[0], shape=(batchsize,), replace=False)
 
     loss, grads = fwi_step(model.vp, model.vs, model.rho, rand_shots)
     model.vp, opt_states[0] = update_fn(model.vp, grads[0], opt_states[0], opts[0])

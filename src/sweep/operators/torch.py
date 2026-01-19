@@ -9,6 +9,7 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     lapz = F.conv2d(u, kz, padding=(pad, 0)) / (hz*hz)
     return lapz, lapx
 
+@torch.jit.script
 def apply_kernels_torch(u, kernels):
     # u: (B, 1, H, W), torch.Tensor
     # kernels: (K, kh, kw), torch.Tensor
@@ -16,7 +17,7 @@ def apply_kernels_torch(u, kernels):
     B, C, H, W = u.shape
     K, KH, KW = kernels.shape
 
-    kernels_exp = kernels.unsqueeze(1)  # (K, 1, kh, kw)
+    kernels_exp = kernels.flip(-1, -2).unsqueeze(1)  # (K, 1, kh, kw)
 
     padding = (KH // 2, KW // 2) 
 

@@ -22,8 +22,9 @@ class SourceTorch(SourceBase, torch.nn.Module):
     def forward_source_encoding(self, wavefield, wavelet):
         z = self.coords[..., 1]
         x = self.coords[..., 0]
-        wavefield[0, 0, z, x] = wavefield[0, 0, z, x] + wavelet
-        return wavefield
+        out = wavefield.clone()
+        out[0, 0, z, x] = wavefield[0, 0, z, x] + wavelet
+        return out
     
     def forward_adjoint_modeling(self, wavefield, wavelet):
 

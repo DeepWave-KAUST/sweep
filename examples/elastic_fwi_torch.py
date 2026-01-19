@@ -28,7 +28,7 @@ extent = [0, shape[1]*dh, shape[0]*dh, 0]
 nz, nx = shape
 dev = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-wave = ricker(t-delay, f=fm)
+wave = ricker(t-delay, f=fm)# * 1e6
 plt.plot(wave)
 plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
@@ -40,11 +40,11 @@ model = PropTorch(Elastic(spatial_order=spatial_order, device=dev),
             abcn=abcn, 
             dh=dh,
             dt=dt,
-            source_type=['txx', 'tzz'],
+            source_type=['vz'],
             receiver_type=['vx', 'vz'],
             free_surface=False, 
             pml_type='cpmls',
-            use_ckpt=True)
+            use_ckpt=False)
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
@@ -105,13 +105,13 @@ opt = torch.optim.Adam([{'params': model.get_parameters('vp'), 'lr': lr},
                         {'params': model.get_parameters('vs'), 'lr': lr/1.73}, 
                         {'params': model.get_parameters('rho'), 'lr': 0}], 
                         eps=1e-22)
-
+model = torch.compile(model)
 for epoch in tqdm.trange(epochs):
 
     opt.zero_grad()
 
-    rand_shots = np.random.randint(0, sources.shape[0], batchsize)
-
+    # rand_shots = np.random.randint(0, sources.shape[0], batchsize)
+    rand_shots = np.random.choice(sources.shape[0], size=batchsize, replace=False)
     # Source encoding for acceleration
     coding_syn = model(wave, sources[rand_shots], receivers[0:1], source_encoding=True)
     coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
@@ -129,7 +129,7 @@ for epoch in tqdm.trange(epochs):
     opt.step()
 
     # Save the model
-    if epoch % 10 == 0:
+    if epoch % 1 == 0:
 
         # Show shotgather
         fig, axes = plt.subplots(2, 2, figsize=(8, 8))
