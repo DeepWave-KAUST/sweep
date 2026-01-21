@@ -4,12 +4,17 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
          su_now, su_pre, spsix, spsiz, szetax, szetaz, 
          vp, ref, dt, h, b, 
          lap_ux, lap_uz, lap_sux, lap_suz,
-         dudx, dudz,dsudx, dsudz,
          pml,
          grad_op,
          ):
     
     az, bz, dbzdz, ax, bx, dbxdx = pml
+
+    # Calcualte gradients based on 2nd order central finite difference
+    dudz = grad_op(u_now, h, -2)
+    dudx = grad_op(u_now, h, -1)
+    dsudz = grad_op(su_now, h, -2)
+    dsudx = grad_op(su_now, h, -1)
 
     # Background wavefield
     w_sum = 0.
@@ -79,9 +84,5 @@ class AcousticLSRTM(SecondOrderEquation):
         dh = args[15]
         lap_uz, lap_ux = self.laplace1d_sep(args[0], self.kernel, dh, dh)
         lap_suz, lap_sux = self.laplace1d_sep(args[6], self.kernel, dh, dh)
-        dudz = self.gradient(args[0], dh, -2)
-        dudx = self.gradient(args[0], dh, -1)
-        dsudz = self.gradient(args[6], dh, -2)
-        dsudx = self.gradient(args[6], dh, -1)
-        return step(*args, lap_ux, lap_uz, lap_sux, lap_suz, dudx, dudz, dsudx, dsudz, self.b, self.gradient)
+        return step(*args, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient)
     

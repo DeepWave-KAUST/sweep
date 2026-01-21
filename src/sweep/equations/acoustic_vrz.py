@@ -2,13 +2,21 @@ from .base import SecondOrderEquation
 
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
               vp, z, dt, h, b, 
-              lap_x, lap_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z,
+              lap_x, lap_z,
               pml, grad_op
               ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
 
     w_sum = 0.
+
+    # Calcualte gradients based on 2nd order central finite difference
+    dvpdx = grad_op(vp, h, axis=-1)
+    dvpdz = grad_op(vp, h, axis=-2)
+    dpdx = grad_op(u_now, h, axis=-1)
+    dpdz = grad_op(u_now, h, axis=-2)
+    z1_x = grad_op(1/z, h, axis=-1)
+    z1_z = grad_op(1/z, h, axis=-2)
 
     # Z direction
     tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az*psiz, h, axis=-2)
@@ -65,10 +73,4 @@ class AcousticVRZ(SecondOrderEquation):
     def func(self, *args, **kwargs):
         dh = args[9]
         lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
-        dvpdx = self.gradient(args[6], dh, axis=-1)
-        dvpdz = self.gradient(args[6], dh, axis=-2)
-        dpdx = self.gradient(args[0], dh, axis=-1)
-        dpdz = self.gradient(args[0], dh, axis=-2)
-        z1_x = self.gradient(1/args[7], dh, axis=-1)
-        z1_z = self.gradient(1/args[7], dh, axis=-2)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dpdx, dpdz, dvpdx, dvpdz, z1_x, z1_z, self.b, self.gradient)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient)

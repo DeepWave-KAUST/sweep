@@ -4,7 +4,6 @@ def step_cpml(
         u_now, u_pre, psix, psiz, zetax, zetaz, 
         vp, dt, h, b, 
         lap_x, lap_z, 
-        dudx, dudz,
         pml,
         grad_op
         ):
@@ -12,6 +11,10 @@ def step_cpml(
     az, bz, dbzdz, ax, bx, dbxdx = pml
 
     w_sum = 0.
+    
+    # Calcualte gradients based on 2nd order central finite difference
+    dudz = grad_op(u_now, h, -2)
+    dudx = grad_op(u_now, h, -1)
 
     # Z direction
     tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -2)
@@ -51,7 +54,5 @@ class Acoustic(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[8]
-        dudz = self.gradient(args[0], dh, -2)
-        dudx = self.gradient(args[0], dh, -1)
         lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, dudx, dudz, self.b, self.gradient)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient)
