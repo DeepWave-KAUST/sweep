@@ -17,7 +17,7 @@ from configure import *
 save_path = 'acoustic_fwi_l2_jax'
 if not os.path.exists(save_path):
     os.makedirs(save_path)
-
+free_surface=True
 np.random.seed(0)
 key = random.PRNGKey(0)
 

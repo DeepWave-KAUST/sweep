@@ -1,32 +1,35 @@
 from .base import SecondOrderEquation
-from .operator import gradientO2
 
 def step_cpml(
         u_now, u_pre, psix, psiy, psiz, zetax, zetay, zetaz, 
         vp, dt, h, b, 
         lap_x, lap_y, lap_z, 
-        dudx, dudy, dudz
+        grad_op
         ):
 
     az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = b
 
     w_sum = 0.
 
+    dudz = grad_op(u_now, h, -3)
+    dudy = grad_op(u_now, h, -2)
+    dudx = grad_op(u_now, h, -1)
+
     # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + gradientO2(az*psiz, h, -3)
+    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -3)
     w_sum += (1+bz) * tmpz + az * zetaz
 
     psizn = bz * dudz + az * psiz
     zetaz = bz * tmpz + az * zetaz
 
     # Y direction
-    tmpy = ((1+by)*lap_y + dbydy * dudy) + gradientO2(ay*psiy, h, -2)
+    tmpy = ((1+by)*lap_y + dbydy * dudy) + grad_op(ay*psiy, h, -2)
     w_sum += (1+by) * tmpy + ay * zetay
     psiyn = by * dudy + ay * psiy
     zetay = by * tmpy + ay * zetay
 
     # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + gradientO2(ax*psix, h, -1)
+    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1)
     w_sum += (1+bx) * tmpx + ax * zetax
     psixn = bx * dudx + ax * psix
     zetax = bx * tmpx + ax * zetax
@@ -56,12 +59,10 @@ class Acoustic3D(SecondOrderEquation):
         return ['h1', 'h2', 'psix', 'psiy', 'psiz', 'zetax', 'zetay', 'zetaz']
 
     def func(self, *args, **kwargs):
-        print(
-            'kernel.shape:', self.kernel.shape,
-        )
         dh = args[10]
-        dudz = gradientO2(args[0], dh, -3)
-        dudy = gradientO2(args[0], dh, -2)
-        dudx = gradientO2(args[0], dh, -1)
         lap_z, lap_y, lap_x = self.laplace(args[0], self.kernel, dh, dh, dh)
-        return step_cpml(*args, lap_x, lap_y, lap_z, dudx, dudy, dudz)
+        return step_cpml(*args, lap_x, lap_y, lap_z, self.gradient)
+
+    def _C(self, ):
+        import sweep._C as _C
+        return (_C.acoustic_forward3d, _C.acoustic_backward3d, _C.acoustic_backward3d_bs)

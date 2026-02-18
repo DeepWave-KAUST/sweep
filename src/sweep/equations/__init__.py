@@ -15,7 +15,7 @@ from .elastic import Elastic
 # from .elasticP import ElasticP
 from .acoustic import Acoustic
 # from .qP_tariq import AcousticTariq
-# from .acoustic3d import Acoustic3D
+from .acoustic3d import Acoustic3D
 
 # __all__ = [
 #     'AcousticLSRTM',

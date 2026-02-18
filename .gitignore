@@ -1,5 +1,6 @@
 __pycache__
 dist
+build
 tests
 *.egg-info
 examples/test_figures
