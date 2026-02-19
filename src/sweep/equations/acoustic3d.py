@@ -4,10 +4,11 @@ def step_cpml(
         u_now, u_pre, psix, psiy, psiz, zetax, zetay, zetaz, 
         vp, dt, h, b, 
         lap_x, lap_y, lap_z, 
+        pml,
         grad_op
         ):
 
-    az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = b
+    az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = pml
 
     w_sum = 0.
 
@@ -60,8 +61,8 @@ class Acoustic3D(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[10]
-        lap_z, lap_y, lap_x = self.laplace(args[0], self.kernel, dh, dh, dh)
-        return step_cpml(*args, lap_x, lap_y, lap_z, self.gradient)
+        lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.kernel, dh, dh, dh)
+        return step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
 
     def _C(self, ):
         import sweep._C as _C

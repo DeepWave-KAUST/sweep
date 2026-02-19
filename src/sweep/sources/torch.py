@@ -15,7 +15,7 @@ class SourceTorch(SourceBase, torch.nn.Module):
         self.se = source_encoding
         self.coords = coords
         self.adj = adj
-        print(self.mask.shape, self.coords.shape)
+
         for i in range(coords.shape[0]):
             index = 0 if source_encoding else i
             self.mask[index, :, *torch.flip(coords, [-1])[i]] = 1.

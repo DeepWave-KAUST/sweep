@@ -22,10 +22,12 @@ class OperatorBase:
             from sweep.operators.torch import laplace2d as lap2d_torch
             from sweep.operators.torch import laplace1d_sep as lap1d_torch
             from sweep.operators.torch import gradient as gradient_torch
+            from sweep.operators.torch import laplace3d_sep as lap3d_torch
             
             self.gradient = gradient_torch
             self.laplace2d = lap2d_torch
             self.laplace1d_sep = lap1d_torch
+            self.laplace3d_sep = lap3d_torch # Reuse 1D kernel for 3D by applying it sequentially
 
 
 

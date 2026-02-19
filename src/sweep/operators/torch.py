@@ -9,6 +9,25 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     lapz = F.conv2d(u, kz, padding=(pad, 0)) / (hz*hz)
     return lapz, lapx
 
+def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
+    """
+    u: (B, 1, nz, ny, nx)
+    k1d: (k,)
+    """
+
+    pad = k1d.shape[-1] // 2
+
+    # reshape kernels to 3D
+    kz = k1d.view(1, 1, -1, 1, 1)  # (1,1,k,1,1)
+    ky = k1d.view(1, 1, 1, -1, 1)  # (1,1,1,k,1)
+    kx = k1d.view(1, 1, 1, 1, -1)  # (1,1,1,1,k)
+
+    lapz = F.conv3d(u, kz, padding=(pad, 0, 0)) / (hz * hz)
+    lapy = F.conv3d(u, ky, padding=(0, pad, 0)) / (hy * hy)
+    lapx = F.conv3d(u, kx, padding=(0, 0, pad)) / (hx * hx)
+
+    return lapz, lapy, lapx
+
 @torch.jit.script
 def apply_kernels_torch(u, kernels):
     # u: (B, 1, H, W), torch.Tensor

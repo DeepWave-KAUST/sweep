@@ -2,7 +2,8 @@ import tqdm
 import torch
 import matplotlib.pyplot as plt
 from sweep.propagator.cuda import PropCUDA
-from sweep.equations import Acoustic
+from sweep.propagator.torch import PropTorch
+from sweep.equations import Acoustic3D
 import numpy as np
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -35,10 +36,10 @@ recx, recy = np.meshgrid(np.arange(0, nx, 10), np.arange(0, ny, 10))
 rec_z = np.ones_like(recx)
 receivers = np.concatenate([recx.reshape(-1, 1), recy.reshape(-1, 1), rec_z.reshape(-1, 1)], axis=1)
 receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nreceivers, 2)
-print(sources.shape, receivers.shape)
+
 vp = torch.from_numpy(true_model).float().to(device).requires_grad_()
 
-solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=device,), 
+solver = PropTorch(Acoustic3D(spatial_order=spatial_order, device=device,), 
                    shape=vp.shape, 
                    source_type=['h1'],
                    receiver_type=['h1'],
@@ -51,12 +52,13 @@ solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=device,),
 
 for i in tqdm.trange(1001):
     vp.grad = None
-    out = solver(wave, sources = sources,
-                 receivers = receivers,
-                 models=[vp], 
-                 use_boundary_saving=True)
-    loss = out.pow(2).sum()
-    loss.backward()
+    with torch.no_grad():
+        out = solver(wave, sources = sources,
+                    receivers = receivers,
+                    models=[vp], 
+                    use_boundary_saving=True)
+    # loss = out.pow(2).sum()
+    # loss.backward()
 
     fig, ax = plt.subplots(figsize=(10, 6))
     record = out[-1].detach().cpu().numpy().squeeze()
@@ -70,17 +72,19 @@ for i in tqdm.trange(1001):
     plt.savefig('record_sweep.png', dpi=300)
     plt.show()
 
-    fig,ax=plt.subplots(figsize=(10, 6))
-    grad = vp.grad.cpu().numpy()
-    vmin,vmax= np.percentile(grad, [0.5, 99.5])
-    im = ax.imshow(grad, cmap='seismic', aspect='auto',
-                   extent=[0, nx * dh, nz * dh, 0], vmin=vmin, vmax=vmax)
-    ax.set_xlabel('Distance (m)')
-    ax.set_ylabel('Depth (m)')
-    ax.set_title('Gradient of the velocity model')
-    fig.colorbar(im, ax=ax, label='Gradient')
-    plt.savefig('gradient_sweep.png', dpi=300)
-    plt.show()
-    np.save('vp_grad_sweep_pytorch.npy', vp.grad.cpu().numpy())
+    # fig,ax=plt.subplots(1, 3, figsize=(12, 3))
+    # grad = vp.grad.cpu().numpy()
+    # vmin,vmax= np.percentile(grad, [0.5, 99.5])
+    # ax[0].set_title('Gradient of VP')
+    # im = ax[0].imshow(grad[nz//2, :, :], cmap='seismic', aspect='auto', vmin=vmin, vmax=vmax)
+    # fig.colorbar(im, ax=ax[0])
+    # ax[1].set_title('Gradient of VP (X slice)')
+    # im = ax[1].imshow(grad[:, ny//2, :], cmap='seismic', aspect='auto', vmin=vmin, vmax=vmax)
+    # fig.colorbar(im, ax=ax[1])
+    # ax[2].set_title('Gradient of VP (Y slice)')
+    # im = ax[2].imshow(grad[:, :, nx//2], cmap='seismic', aspect='auto', vmin=vmin, vmax=vmax)
+    # fig.colorbar(im, ax=ax[2])
+    # plt.savefig('gradient_sweep.png', dpi=300)
+    # plt.show()
     break
 
