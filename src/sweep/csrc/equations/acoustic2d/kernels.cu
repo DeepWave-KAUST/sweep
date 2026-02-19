@@ -56,9 +56,11 @@ __global__ void calculate_grad_utt(
     float*       grad_b       = grad       + b * spatial_size;
     const float* vp_b         = vp         + b * spatial_size;
 
-    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]); // / (dt*dt)
+    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
 
-    grad_b[idx] += 2*u_tt * u_backward_b[idx]/vp_b[idx];
+    float vp3 = vp_b[idx] * vp_b[idx] * vp_b[idx];
+
+    grad_b[idx] += 2*u_tt * u_backward_b[idx]/vp3;
 
 }
 
@@ -86,12 +88,20 @@ __global__ void save_boundary_kernel(
     // ======================
     // TOP boundary
     // ======================
-    if (iz >= solver.abcn + solver.M && iz < solver.abcn + 2*solver.M)
+
+    int top_start = solver.free_surface ? 
+                    solver.M :
+                    solver.abcn + solver.M;
+
+    int top_end = top_start + solver.M;
+
+    if (iz >= top_start && iz < top_end)
     {
-        int zloc = iz - (solver.abcn + solver.M);
+        int zloc = iz - top_start;
 
         int idx =
-            ((it * solver.B + b) * solver.M + zloc) * solver.nx + ix;
+            ((it * solver.B + b) * solver.M + zloc) 
+            * solver.nx + ix;
 
         top[idx] = val;
     }
@@ -158,12 +168,18 @@ __global__ void restore_boundary_kernel(
     // ======================
     // TOP
     // ======================
-    if (iz >= solver.abcn + solver.M && iz < solver.abcn + 2*solver.M && !solver.free_surface)
+    int top_start = solver.free_surface ? 
+                    solver.M :
+                    solver.abcn + solver.M;
+    int top_end   = top_start + solver.M;
+
+    if (iz >= top_start && iz < top_end)
     {
-        int zloc = iz - (solver.abcn + solver.M);
+        int zloc = iz - top_start;
 
         int idx =
-            ((it * solver.B + b) * solver.M + zloc) * solver.nx + ix;
+            ((it * solver.B + b) * solver.M + zloc) 
+            * solver.nx + ix;
 
         u_b[iz * solver.nx + ix] = top[idx];
     }

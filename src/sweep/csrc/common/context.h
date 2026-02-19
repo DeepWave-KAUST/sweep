@@ -1,6 +1,8 @@
 #pragma once
 struct SolverContext {
 
+    int ndim;
+
     int nx;
     int ny;
     int nz;

@@ -1,5 +1,6 @@
 
 #include "common.cuh"
+#include "context.h"
 #include <cuda_runtime.h>
 
 __global__ void add_source(
@@ -8,9 +9,7 @@ __global__ void add_source(
     const int* __restrict__ sources_loc,  // (B, nsrc, 2)
     int it,
     int nsrc,
-    int nt,
-    int nx,
-    int nz
+    SolverContext solver
 ) {
     int b = blockIdx.x;
     int s = threadIdx.x;
@@ -21,13 +20,12 @@ __global__ void add_source(
     int ix = sources_loc[base + 0];
     int iz = sources_loc[base + 1];
 
-    if (ix < 0 || ix >= nx || iz < 0 || iz >= nz)
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = nx * nz;
-    int u_idx = b * spatial_size + iz * nx + ix;
-
-    int src_idx = (b * nsrc + s) * nt + it;
+    int spatial_size = solver.nx * solver.nz;
+    int u_idx = b * spatial_size + iz * solver.nx + ix;
+    int src_idx = (b * nsrc + s) * solver.nt + it;
 
     atomicAdd(&u[u_idx], source[src_idx]);
 }
@@ -39,9 +37,7 @@ __global__ void record_kernel(
     const int* __restrict__ receivers,   // (B, nrec, 2)
     int it,
     int nrec,
-    int nt,
-    int nx,
-    int nz
+    SolverContext solver
 ) {
     int b = blockIdx.x;     // shot index
     int r = threadIdx.x;    // receiver index
@@ -52,13 +48,12 @@ __global__ void record_kernel(
     int ix = receivers[base + 0];
     int iz = receivers[base + 1];
 
-    if (ix < 0 || ix >= nx || iz < 0 || iz >= nz)
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = nx * nz;
-    int u_idx = b * spatial_size + iz * nx + ix;
-
-    int rec_idx = (b * nrec + r) * nt + it;
+    int spatial_size = solver.nx * solver.nz;
+    int u_idx = b * spatial_size + iz * solver.nx + ix;
+    int rec_idx = (b * nrec + r) * solver.nt + it;
 
     record[rec_idx] = u[u_idx];
 }
@@ -69,10 +64,7 @@ __global__ void add_source_3d(
     const int* __restrict__ sources_loc,   // (B, nsrc, 3)
     int it,
     int nsrc,
-    int nt,
-    int nx,
-    int ny,
-    int nz
+    SolverContext solver
 ) {
     int b = blockIdx.x;      // shot index
     int s = threadIdx.x;     // source index
@@ -85,19 +77,19 @@ __global__ void add_source_3d(
     int iy = sources_loc[base + 1];
     int iz = sources_loc[base + 2];
 
-    if (ix < 0 || ix >= nx ||
-        iy < 0 || iy >= ny ||
-        iz < 0 || iz >= nz)
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = nx * ny * nz;
+    int spatial_size = solver.nx * solver.ny * solver.nz;
 
     int u_idx = b * spatial_size
-              + iz * ny * nx
-              + iy * nx
+              + iz * solver.ny * solver.nx
+              + iy * solver.nx
               + ix;
 
-    int src_idx = (b * nsrc + s) * nt + it;
+    int src_idx = (b * nsrc + s) * solver.nt + it;
 
     atomicAdd(&u[u_idx], source[src_idx]);
 }
@@ -108,10 +100,7 @@ __global__ void record_kernel_3d(
     const int* __restrict__ receivers,     // (B, nrec, 3)
     int it,
     int nrec,
-    int nt,
-    int nx,
-    int ny,
-    int nz
+    SolverContext solver
 ) {
     int b = blockIdx.x;     // shot index
     int r = threadIdx.x;    // receiver index
@@ -124,19 +113,19 @@ __global__ void record_kernel_3d(
     int iy = receivers[base + 1];
     int iz = receivers[base + 2];
 
-    if (ix < 0 || ix >= nx ||
-        iy < 0 || iy >= ny ||
-        iz < 0 || iz >= nz)
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = nx * ny * nz;
+    int spatial_size = solver.nx * solver.ny * solver.nz;
 
     int u_idx = b * spatial_size
-              + iz * ny * nx
-              + iy * nx
+              + iz * solver.ny * solver.nx
+              + iy * solver.nx
               + ix;
 
-    int rec_idx = (b * nrec + r) * nt + it;
+    int rec_idx = (b * nrec + r) * solver.nt + it;
 
     record[rec_idx] = u[u_idx];
 }

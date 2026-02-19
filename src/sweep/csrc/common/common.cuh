@@ -1,5 +1,6 @@
 #pragma once
 #include <cuda_runtime.h>
+#include "context.h"
 
 __global__ void add_source(
     float* __restrict__ u,          // (B, nz, nx)
@@ -7,9 +8,7 @@ __global__ void add_source(
     const int* __restrict__ sources_loc,  // (B, nsrc, 2)
     int it,
     int nsrc,
-    int nt,
-    int nx,
-    int nz
+    SolverContext solver
 );
 
 __global__ void record_kernel(
@@ -18,9 +17,7 @@ __global__ void record_kernel(
     const int* __restrict__ receivers,   // (B, nrec, 2)
     int it,
     int nrec,
-    int nt,
-    int nx,
-    int nz
+    SolverContext solver
 );
 
 __global__ void add_source_3d(
@@ -29,10 +26,7 @@ __global__ void add_source_3d(
     const int* __restrict__ sources_loc,   // (B, nsrc, 3)
     int it,
     int nsrc,
-    int nt,
-    int nx,
-    int ny,
-    int nz
+    SolverContext solver
 );
 
 __global__ void record_kernel_3d(
@@ -41,8 +35,5 @@ __global__ void record_kernel_3d(
     const int* __restrict__ receivers,     // (B, nrec, 3)
     int it,
     int nrec,
-    int nt,
-    int nx,
-    int ny,
-    int nz
+    SolverContext solver
 );

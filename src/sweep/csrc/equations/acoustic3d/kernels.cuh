@@ -26,14 +26,14 @@
 
 template<int Order>
 __global__ void acoustic_forward_kernel_3d(
-    AcousticWavefield wf,
+    AcousticWavefieldPointer wf,
 
     bool save_all_wavefields,
     float* __restrict__ u_this,
 
     const float* __restrict__ vp,
 
-    AcousticCPML cpml,
+    AcousticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -206,7 +206,7 @@ __global__ void acoustic_forward_kernel_3d(
 
 template<int Order>
 __global__ void acoustic_nopml_3d(
-    AcousticWavefield wf,
+    AcousticWavefieldPointer wf,
     float* __restrict__ u_this,
     const float* __restrict__ vp,
     SolverContext solver

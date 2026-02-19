@@ -52,6 +52,7 @@ class Warpper(torch.autograd.Function):
             [p.contiguous() for p in pml_vals],
             save_all_wavefield,
             use_boundary_saving,
+            free_surface,
             nt,
             dt,
             spacing
@@ -61,6 +62,7 @@ class Warpper(torch.autograd.Function):
             vp,
             u_allt,
             last,
+            sources_loc,
             receivers_loc,
             lap_coes, grad_coes,
         )
@@ -76,6 +78,7 @@ class Warpper(torch.autograd.Function):
         ctx.use_boundary_saving = use_boundary_saving
         ctx.backward_func = backward_func
         ctx.backward_bs_func = backward_bs_func
+        ctx.wavelet = wavelet
 
         return syn        
     
@@ -87,7 +90,8 @@ class Warpper(torch.autograd.Function):
             vp,
             u_allt,
             last,
-            receivers_loc,
+            forward_sources_loc,
+            adjoint_sources_loc,
             lap_coes, grad_coes,
         ) = ctx.saved_tensors
 
@@ -107,7 +111,7 @@ class Warpper(torch.autograd.Function):
                 grad_coes.contiguous(),
                 M,
                 abcn,
-                receivers_loc,
+                adjoint_sources_loc.contiguous(),
                 [p.contiguous() for p in ctx.pml_vals],
                 nt,
                 dt,
@@ -119,11 +123,13 @@ class Warpper(torch.autograd.Function):
                 last.contiguous(),
                 vp.contiguous(),
                 adjoint_source.contiguous(),
+                ctx.wavelet.contiguous(),
                 lap_coes.contiguous(),
                 grad_coes.contiguous(),
                 M,
                 abcn,
-                receivers_loc.contiguous(),
+                adjoint_sources_loc.contiguous(),
+                forward_sources_loc.contiguous(),
                 [p.contiguous() for p in ctx.pml_vals],
                 nt,
                 dt,

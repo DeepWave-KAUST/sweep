@@ -32,6 +32,7 @@ acoustic_forward3d_cuda(
     const std::vector<torch::Tensor>& pml_vals,
     bool save_all_wavefields,
     bool use_boundary_saving,
+    bool free_surface,
     unsigned int nt,
     float dt,
     std::vector<float> spacing
@@ -52,66 +53,20 @@ acoustic_forward3d_cuda(
     int nsrc  = sources_loc.size(1);
     int nrec  = receivers_loc.size(1);
 
-    // ----------------------------
-    // wavefields
-    // ----------------------------
-    auto u_prev = torch::zeros_like(vp);
-    auto u_now  = torch::zeros_like(vp);
-    auto u_next = torch::zeros_like(vp);
+    const int order =
+        (M <= 4) ? static_cast<int>(2 * M) : -1;
 
-    auto psixn = torch::zeros_like(vp);
-    auto psiyn = torch::zeros_like(vp);
-    auto psizn = torch::zeros_like(vp);
+    SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
 
-    auto zetax = torch::zeros_like(vp);
-    auto zetay = torch::zeros_like(vp);
-    auto zetaz = torch::zeros_like(vp);
-
-    AcousticWavefield wavefield{
-
-        u_now.data_ptr<float>(),
-        u_prev.data_ptr<float>(), 
-        u_next.data_ptr<float>(),
-
-        psixn.data_ptr<float>(),
-        psiyn.data_ptr<float>(),
-        psizn.data_ptr<float>(),
-
-        zetax.data_ptr<float>(),
-        zetay.data_ptr<float>(),
-        zetaz.data_ptr<float>()
-    
-    };
+    AcousticWavefieldTensor wavefield;
+    wavefield.allocate(vp, 3, true);
 
     // ----------------------------
     // PML parameters
     // ----------------------------
-    auto az     = pml_vals[0];
-    auto bz     = pml_vals[1];
-    auto dbzdz  = pml_vals[2];
-
-    auto ay     = pml_vals[3];
-    auto by     = pml_vals[4];
-    auto dbydy  = pml_vals[5];
-
-    auto ax     = pml_vals[6];
-    auto bx     = pml_vals[7];
-    auto dbxdx  = pml_vals[8];
-
-    AcousticCPML cpml{
-
-        ax.data_ptr<float>(),
-        bx.data_ptr<float>(),
-        dbxdx.data_ptr<float>(),
-
-        ay.data_ptr<float>(),
-        by.data_ptr<float>(),
-        dbydy.data_ptr<float>(),
-
-        az.data_ptr<float>(),
-        bz.data_ptr<float>(),
-        dbzdz.data_ptr<float>()
-    };
+    AcousticCPMLTensor cpml_tensor;
+    cpml_tensor.allocate(pml_vals, 3);
+    auto cpml = cpml_tensor.view();
 
     // ----------------------------
     // record
@@ -131,24 +86,9 @@ acoustic_forward3d_cuda(
     // ----------------------------
     // boundary saving (3D)
     // ----------------------------
-    torch::Tensor u_boundary_xmin, u_boundary_xmax;
-    torch::Tensor u_boundary_ymin, u_boundary_ymax;
-    torch::Tensor u_boundary_zmin, u_boundary_zmax;
-    torch::Tensor u_last_two;
-
-    if (use_boundary_saving) {
-
-        u_boundary_xmin = torch::zeros({nt, B, nz, ny, M}, vp.options());
-        u_boundary_xmax = torch::zeros({nt, B, nz, ny, M}, vp.options());
-
-        u_boundary_ymin = torch::zeros({nt, B, nz, M, nx}, vp.options());
-        u_boundary_ymax = torch::zeros({nt, B, nz, M, nx}, vp.options());
-
-        u_boundary_zmin = torch::zeros({nt, B, M, ny, nx}, vp.options());
-        u_boundary_zmax = torch::zeros({nt, B, M, ny, nx}, vp.options());
-
-        u_last_two = torch::zeros({2, B, 1, nz, ny, nx}, vp.options());
-    }
+    AcousticBoundarySaver boundary_saver;
+    boundary_saver.allocate(use_boundary_saving, 3, ctx, vp);
+    auto bs = boundary_saver.view();
 
     // ----------------------------
     // CUDA launch config
@@ -160,25 +100,24 @@ acoustic_forward3d_cuda(
         (nz + block.z - 1) / block.z * B
     );
 
-    const int order =
-        (M <= 4) ? static_cast<int>(2 * M) : -1;
 
     float* u_thist = nullptr;
-
-    SolverContext ctx{nx, ny, nz, B, dt, nt, M, abcn, true, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
 
     // ============================================================
     // time stepping
     // ============================================================
     for (int it = 0; it < nt; ++it)
     {
+
+        auto view = wavefield.view();
+
         u_thist = u_allt.defined()
             ? u_allt[it].data_ptr<float>()
             : nullptr;
 
         LAUNCH_FORWARD_3D(
             order,
-            wavefield,
+            view,
             save_all_wavefields,
             u_thist,
             vp.data_ptr<float>(),
@@ -188,71 +127,55 @@ acoustic_forward3d_cuda(
 
         if (use_boundary_saving) {
             save_boundary_kernel_3d<<<grid, block>>>(
-                wavefield.u_now,
-                u_boundary_zmin.data_ptr<float>(),
-                u_boundary_zmax.data_ptr<float>(),
-                u_boundary_ymin.data_ptr<float>(),
-                u_boundary_ymax.data_ptr<float>(),
-                u_boundary_xmin.data_ptr<float>(),
-                u_boundary_xmax.data_ptr<float>(),
+                view.u_now,
+                bs.top,
+                bs.bottom,
+                bs.front,
+                bs.back,
+                bs.left,
+                bs.right,
                 it,
                 ctx
             );
         }
 
         add_source_3d<<<B, nsrc>>>(
-            wavefield.u_next,
+            view.u_next,
             source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
             it,
             nsrc,
-            nt,
-            nx, ny, nz
+            ctx
         );
 
         record_kernel_3d<<<B, nrec>>>(
-            wavefield.u_next,
+            view.u_next,
             record.data_ptr<float>(),
             receivers_loc.data_ptr<int>(),
             it,
             nrec,
-            nt,
-            nx, ny, nz
+            ctx
         );
 
-        // rotate
-        auto tmp = wavefield.u_prev;
-        wavefield.u_prev = wavefield.u_now;
-        wavefield.u_now  = wavefield.u_next;
-        wavefield.u_next = tmp;
+        wavefield.swap();
     }
 
     if (use_boundary_saving) {
-        cudaMemcpy(
-            u_last_two[0].data_ptr<float>(),
-            wavefield.u_prev,
-            sizeof(float) * B * nz * ny * nx,
-            cudaMemcpyDeviceToDevice
-        );
-        cudaMemcpy(
-            u_last_two[1].data_ptr<float>(),
-            wavefield.u_now,
-            sizeof(float) * B * nz * ny * nx,
-            cudaMemcpyDeviceToDevice
-        );
+        boundary_saver.last_two_t[0].copy_(wavefield.u_prev_t);
+        boundary_saver.last_two_t[1].copy_(wavefield.u_now_t);
     }
 
     return std::make_tuple(
         u_allt,
         std::make_tuple(
-            u_boundary_zmin,
-            u_boundary_zmax,
-            u_boundary_ymin,
-            u_boundary_ymax,
-            u_boundary_xmin,
-            u_boundary_xmax
+            boundary_saver.top_t,
+            boundary_saver.bottom_t,
+            boundary_saver.front_t,
+            boundary_saver.back_t,
+            boundary_saver.left_t,
+            boundary_saver.right_t
         ),
-        u_last_two,
+        boundary_saver.last_two_t,
         record
     );
 }

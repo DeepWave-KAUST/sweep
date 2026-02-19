@@ -26,11 +26,11 @@
 
 template<int Order>
 __global__ void acoustic_forward_kernel(
-    AcousticWavefield wf,
+    AcousticWavefieldPointer wf,
     bool save_all_wavefields,
     float* __restrict__ u_this,
     const float* __restrict__ vp,
-    AcousticCPML cpml,
+    AcousticCPMLPointer cpml,
     SolverContext solver
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -121,7 +121,7 @@ __global__ void acoustic_forward_kernel(
 
 template<int Order>
 __global__ void acoustic_nopml(
-    AcousticWavefield wf,
+    AcousticWavefieldPointer wf,
     float* __restrict__ u_this,
     const float* __restrict__ vp,
     SolverContext solver
@@ -134,7 +134,7 @@ __global__ void acoustic_nopml(
 
     int halo = solver.abcn + 2*solver.M;
 
-    int top_halo = solver.free_surface ? solver.M : halo;
+    int top_halo = solver.free_surface ? solver.M*2: halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 

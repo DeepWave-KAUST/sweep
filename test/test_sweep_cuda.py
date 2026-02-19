@@ -1,7 +1,8 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from deepwave import scalar
+from sweep.propagator.cuda import PropCUDA
+from sweep.equations import Acoustic
 import numpy as np
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -20,35 +21,45 @@ dt = 0.002
 delay = 0.2
 dh = 10.0
 fm = 5.0
-spatial_order = 2
+spatial_order = 8
 
 t = np.arange(nt) * dt - delay
-wave = -ricker(t, fm=fm)
+wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([512, 0]).reshape(1, 2)
-receivers = np.stack((np.arange(0, nx, 1), 
-                     np.ones(nx, dtype=np.int32)*1), axis=1).reshape(1, -1, 2)
-dh = 10.0
-vp = torch.from_numpy(true_model.T).to(device).requires_grad_()
+sources = np.array([512, 1]).reshape(1, 2)
+
+# receivers = np.stack((np.arange(0, nx, 1), 
+#                      np.zeros(nx, dtype=np.int32)), axis=1).reshape(1, -1, 2)
+
+rec_x = np.arange(0, nx, 1).reshape(-1, 1)
+rec_z = np.ones_like(rec_x)*20
+receivers = np.concatenate([rec_x, rec_z], axis=1)
+receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nreceivers, 2)
+
+vp = torch.from_numpy(true_model).float().to(device).requires_grad_()
+
+solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=device,), 
+                   shape=vp.shape, 
+                   source_type=['h1'],
+                   receiver_type=['h1'],
+                   abcn=30, 
+                   dh = dh,
+                   dt = dt,
+                   pml_type='cpmlr',
+                   dev=device,
+                   )
+
 for i in tqdm.trange(1001):
     vp.grad = None
-    out = scalar(vp, 
-                dh, 
-                dt, 
-                source_amplitudes=torch.from_numpy(wave.reshape(1, 1, -1).repeat(sources.shape[0], 0)).to(device).float(),
-                source_locations=torch.from_numpy(np.expand_dims(sources, 1)).to(device).long(),
-                receiver_locations=torch.from_numpy(receivers).to(device).long(),
-                accuracy=spatial_order, 
-                #  python_backend='eager',
-                pml_width=[20, 20, 20, 20], 
-                pml_freq=fm,)
-    loss = out[-1].pow(2).sum()
+    out = solver(wave, sources = sources,
+                 receivers = receivers,
+                 models=[vp], 
+                 use_boundary_saving=False)
+    loss = out.pow(2).sum()
     loss.backward()
 
-    # np.save('record_dw.npy', out[-1].detach().cpu().numpy().squeeze().T)
-
     # fig, ax = plt.subplots(figsize=(10, 6))
-    # record = out[-1].detach().cpu().numpy().squeeze().T
+    # record = out[-1].detach().cpu().numpy().squeeze()
     # vmin, vmax = np.percentile(record, [0.5, 99.5])
     # im = ax.imshow(record, cmap='seismic', aspect='auto',
     #             extent=[0, nx * dh, nz * dh, 0], vmin=vmin, vmax=vmax)
@@ -56,12 +67,11 @@ for i in tqdm.trange(1001):
     # ax.set_ylabel('Depth (m)')
     # ax.set_title('Seismic Wavefield at Source Location')
     # fig.colorbar(im, ax=ax, label='Amplitude')
-    # plt.savefig('record_dw.png', dpi=300)
+    # plt.savefig('record_sweep.png', dpi=300)
     # plt.show()
-    # np.save('grad_dw.npy', vp.grad.cpu().numpy().T)
 
     # fig,ax=plt.subplots(figsize=(10, 6))
-    # grad = vp.grad.cpu().numpy().T
+    # grad = vp.grad.cpu().numpy()
     # vmin,vmax= np.percentile(grad, [0.5, 99.5])
     # im = ax.imshow(grad, cmap='seismic', aspect='auto',
     #                extent=[0, nx * dh, nz * dh, 0], vmin=vmin, vmax=vmax)
@@ -69,8 +79,8 @@ for i in tqdm.trange(1001):
     # ax.set_ylabel('Depth (m)')
     # ax.set_title('Gradient of the velocity model')
     # fig.colorbar(im, ax=ax, label='Gradient')
-    # plt.savefig('gradient_deepwave.png', dpi=300)
+    # plt.savefig('gradient_sweep.png', dpi=300)
     # plt.show()
-
+    # np.save('vp_grad_sweep_pytorch.npy', vp.grad.cpu().numpy())
     # break
 
