@@ -5,11 +5,12 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/boundarysaver.h"
 
 std::tuple<torch::Tensor>
 acoustic_backward_cuda(
     torch::Tensor u_forward,     // (nt, B, nz, nx)
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
     torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
@@ -21,6 +22,8 @@ acoustic_backward_cuda(
     float dt,
     std::vector<float> spacing
 ) {
+
+    auto vp = models[0];
 
     float dx = spacing[0];
     float dz = spacing[1];
@@ -99,7 +102,7 @@ std::tuple<torch::Tensor>
 acoustic_backward_boundary_saving_cuda(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
     torch::Tensor forward_source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
@@ -118,6 +121,8 @@ acoustic_backward_boundary_saving_cuda(
     float dx = spacing[0];
     float dz = spacing[1];
 
+    auto vp = models[0];
+
     int N = vp.size(0);
     int C = vp.size(1);
     int nz = vp.size(2);
@@ -132,14 +137,12 @@ acoustic_backward_boundary_saving_cuda(
 
     SolverContext ctx{2, nx, 0, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
-    auto f_this = torch::zeros_like(vp); // for gradient calculation
-
     AcousticWavefieldTensor adjoint;
     adjoint.allocate(vp, 2, true);
     AcousticWavefieldTensor forward;
     forward.allocate(vp, 2, false);
-    forward.u_prev_t.copy_(u_last_two[1]);
-    forward.u_now_t.copy_(u_last_two[0]);
+    forward.u_prev_t.copy_(u_last_two.select(1,1).squeeze(0));
+    forward.u_now_t.copy_(u_last_two.select(1,0).squeeze(0));
 
     auto grad = torch::zeros_like(vp);
 
@@ -152,8 +155,8 @@ acoustic_backward_boundary_saving_cuda(
     auto cpml = cpml_tensor.view();
 
     // Boundary wavefields (for saving all wavefields)
-    AcousticBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 2, ctx, vp);
+    GeneralBoundarySaver boundary_saver;
+    boundary_saver.allocate(true, 2, 1, ctx, vp);
     boundary_saver.load_from_vector(u_boundary);
     auto bs = boundary_saver.view();
 
@@ -194,7 +197,6 @@ acoustic_backward_boundary_saving_cuda(
         LAUNCH_FORWARD_NOPML(
             order,
             for_view,
-            f_this.data_ptr<float>(),
             vp.data_ptr<float>(),
             ctx
         );
@@ -207,6 +209,7 @@ acoustic_backward_boundary_saving_cuda(
             bs.left,
             bs.right,
             it-1,
+            ctx.M,
             ctx
         );
 

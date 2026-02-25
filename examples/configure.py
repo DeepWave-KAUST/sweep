@@ -9,14 +9,14 @@ smooth_path = 'marmousi_smooth.npy'
 dh = 25.
 spatial_order = 8
 
-abcn = 50
+abcn = 20
 free_surface = False
 use_habc = False
 
 src_step = 2
 rec_step = 1
 srcz = 1
-recz = 1
+recz = 18
 
 lr = 25
 epochs = 101

@@ -126,6 +126,7 @@ def set_cpml_profiles_s(
 
     pml_profiles = []
     for dim in range(ndim):
+
         a, b = setup_pml(
             pml_width[2 * dim : 2 * dim + 2],
             pml_start[dim],

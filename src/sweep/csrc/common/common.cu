@@ -2,6 +2,7 @@
 #include "common.cuh"
 #include "context.h"
 #include <cuda_runtime.h>
+#include <stdio.h>
 
 __global__ void add_source(
     float* __restrict__ u,          // (B, nz, nx)
@@ -28,6 +29,7 @@ __global__ void add_source(
     int src_idx = (b * nsrc + s) * solver.nt + it;
 
     atomicAdd(&u[u_idx], source[src_idx]);
+
 }
 
 
@@ -128,4 +130,29 @@ __global__ void record_kernel_3d(
     int rec_idx = (b * nrec + r) * solver.nt + it;
 
     record[rec_idx] = u[u_idx];
+}
+
+__global__ void set_boundary_zeros(
+    float* __restrict__ u,           // (B, nz, ny, nx)
+    int width,
+    int nx,
+    int nz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= nx || iz >= nz) return;
+
+    int spatial = nx * nz;
+    float* u_b = u + b * spatial;
+
+    int halo = width;
+
+    if (ix < halo || ix >= nx - halo || iz < halo || iz >= nz - halo){
+        int idx = iz * nx + ix;
+        u_b[idx] = 0.f;
+    }
+
 }

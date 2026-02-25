@@ -97,6 +97,31 @@ struct AcousticWavefieldPointer {
     float* __restrict__ zetax;
     float* __restrict__ zetay;
     float* __restrict__ zetaz;
+
+    __device__ AcousticWavefieldPointer offset(
+        int b,
+        int spatial_size
+    ) const {
+
+        AcousticWavefieldPointer out = *this;
+ 
+        int shift = b * spatial_size;
+
+        out.u_prev += shift;
+        out.u_now  += shift;
+        out.u_next += shift;
+
+        if (out.psix)  out.psix  += shift;
+        if (out.psiy)  out.psiy  += shift;
+        if (out.psiz)  out.psiz  += shift;
+
+        if (out.zetax) out.zetax += shift;
+        if (out.zetay) out.zetay += shift;
+        if (out.zetaz) out.zetaz += shift;
+
+        return out;
+    }
+
 };
 
 struct AcousticWavefieldTensor {
@@ -192,130 +217,5 @@ struct AcousticWavefieldTensor {
         std::swap(u_prev_t, u_now_t);
         std::swap(u_now_t,  u_next_t);
     }
-
-};
-
-struct AcousticBoundaryPointer {
-
-    float* __restrict__ left;
-    float* __restrict__ right;
-
-    float* __restrict__ front;
-    float* __restrict__ back;
-
-    float* __restrict__ bottom;
-    float* __restrict__ top;
-
-    float* __restrict__ last_two;
-};
-
-struct AcousticBoundarySaver {
-
-    torch::Tensor left_t, right_t;
-    torch::Tensor front_t, back_t;
-    torch::Tensor bottom_t, top_t;
-    torch::Tensor last_two_t;
-
-    bool enabled = false;
-    int dim = 3;
-
-    void allocate(
-        bool use_boundary_saving,
-        int dim_,
-        SolverContext ctx,
-        const torch::Tensor& vp
-    )
-    {
-        enabled = use_boundary_saving;
-        dim = dim_;
-
-        if (!enabled) return;
-
-        auto options = vp.options();
-
-        if (dim == 3) {
-
-            left_t  = torch::zeros({ctx.nt, ctx.B, ctx.nz, ctx.ny, ctx.M}, options);
-            right_t = torch::zeros({ctx.nt, ctx.B, ctx.nz, ctx.ny, ctx.M}, options);
-
-            front_t = torch::zeros({ctx.nt, ctx.B, ctx.nz, ctx.M, ctx.nx}, options);
-            back_t  = torch::zeros({ctx.nt, ctx.B, ctx.nz, ctx.M, ctx.nx}, options);
-
-            bottom_t = torch::zeros({ctx.nt, ctx.B, ctx.M, ctx.ny, ctx.nx}, options);
-            top_t    = torch::zeros({ctx.nt, ctx.B, ctx.M, ctx.ny, ctx.nx}, options);
-
-            last_two_t = torch::zeros({2, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx}, options);
-
-        } else {
-
-            left_t  = torch::zeros({ctx.nt, ctx.B, ctx.nz, ctx.M}, options);
-            right_t = torch::zeros({ctx.nt, ctx.B, ctx.nz, ctx.M}, options);
-
-            bottom_t = torch::zeros({ctx.nt, ctx.B, ctx.M, ctx.nx}, options);
-            top_t    = torch::zeros({ctx.nt, ctx.B, ctx.M, ctx.nx}, options);
-
-            last_two_t = torch::zeros({2, ctx.B, 1, ctx.nz, ctx.nx}, options);
-
-            front_t = torch::Tensor();
-            back_t  = torch::Tensor();
-        }
-    }
-
-    AcousticBoundaryPointer view()
-    {
-        AcousticBoundaryPointer v{};
-
-        if (!enabled) return v;
-
-        v.left  = left_t.data_ptr<float>();
-        v.right = right_t.data_ptr<float>();
-
-        if (dim == 3) {
-            v.front = front_t.data_ptr<float>();
-            v.back  = back_t.data_ptr<float>();
-        } else {
-            v.front = nullptr;
-            v.back  = nullptr;
-        }
-
-        v.bottom = bottom_t.data_ptr<float>();
-        v.top    = top_t.data_ptr<float>();
-
-        v.last_two = last_two_t.data_ptr<float>();
-
-        return v;
-
-    }
-
-    void load_from_vector(const std::vector<torch::Tensor>& u_boundary)
-        {
-            if (!enabled)
-                throw std::runtime_error("Boundary saving not enabled.");
-
-            if (dim == 2) {
-
-                if (u_boundary.size() != 4)
-                    throw std::runtime_error("2D boundary expects 4 tensors.");
-
-                top_t.copy_(u_boundary[0]);
-                bottom_t.copy_(u_boundary[1]);
-                left_t.copy_(u_boundary[2]);
-                right_t.copy_(u_boundary[3]);
-
-            } else { // 3D
-
-                if (u_boundary.size() != 6)
-                    throw std::runtime_error("3D boundary expects 6 tensors.");
-
-                top_t.copy_(u_boundary[0]);
-                bottom_t.copy_(u_boundary[1]);
-
-                front_t.copy_(u_boundary[2]);
-                back_t.copy_(u_boundary[3]);
-
-                left_t.copy_(u_boundary[4]);
-                right_t.copy_(u_boundary[5]);
-            }
-        }
 
 };

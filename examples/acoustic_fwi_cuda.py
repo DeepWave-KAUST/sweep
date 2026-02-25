@@ -78,16 +78,17 @@ plt.tight_layout()
 plt.savefig(f'{save_path}/acoustic_obs_cuda.png', dpi=300, bbox_inches='tight')
 ########## Inversion ##########
 # Set the model
-solver.set_parameters([torch.from_numpy(smooth_model).to(dev)])
 
-opt = torch.optim.Adam(solver.parameters(), lr=lr, eps=1e-22)
 LOSS = []
+vp = torch.from_numpy(smooth_model).float().to(dev).requires_grad_()
+opt = torch.optim.Adam([vp], lr=lr, eps=1e-22)
+
 for epoch in tqdm.trange(epochs):
 
     opt.zero_grad()
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
     
-    syn = solver(wave, sources[rand_shots], receivers[rand_shots], use_boundary_saving=True)
+    syn = solver(wave, sources[rand_shots], receivers[rand_shots], models=[vp], use_boundary_saving=True)
     loss = (syn-torch.from_numpy(obs[rand_shots]).to(dev)).pow(2).mean()
     loss.backward()
     LOSS.append(loss.item())
@@ -101,9 +102,9 @@ for epoch in tqdm.trange(epochs):
         extent = [0, nx*dh, nz*dh, 0]
         ax[0].imshow(true_model, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto', extent=extent)
         ax[0].set_title('True Model')
-        ax[1].imshow(solver.vp.cpu().detach().numpy(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto', extent=extent)
+        ax[1].imshow(vp.cpu().detach().numpy(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto', extent=extent)
         ax[1].set_title('Inverted Model')
-        grad = solver.vp.grad.cpu().detach().numpy()
+        grad = vp.grad.cpu().detach().numpy()
         # grad = model.get_model('vp').grad.cpu().detach().numpy()
         vmin,vmax=np.percentile(grad, [2, 98])
         ax[2].imshow(grad, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto', extent=extent)

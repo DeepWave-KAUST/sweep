@@ -63,75 +63,36 @@ __global__ void acoustic_forward_kernel_3d(
 
     int idx = iz * stride_z + iy * stride_y + ix;
 
-    const float* u_now_b  = wf.u_now  + spatial_size * b;
-    const float* u_prev_b = wf.u_prev + spatial_size * b;
-    float*       u_next_b = wf.u_next + spatial_size * b;
+    auto f = wf.offset(b, spatial_size);
+
     float*       u_this_b = u_this ? u_this + spatial_size * b : nullptr;
     const float* vp_b     = vp     + spatial_size * b;
 
-    float* psix_b = wf.psix + spatial_size * b;
-    float* psiy_b = wf.psiy + spatial_size * b;
-    float* psiz_b = wf.psiz + spatial_size * b;
-
-    float* zetax_b = wf.zetax + spatial_size * b;
-    float* zetay_b = wf.zetay + spatial_size * b;
-    float* zetaz_b = wf.zetaz + spatial_size * b;
-
     Laplace3dContext ctx{solver.nx, solver.ny, ix, iy, iz, solver.M, solver.lap_coeff, solver.dx, solver.dy, solver.dz};
     GradContext3D gctx{1, solver.nx, solver.nx*solver.ny, ix, iy, iz, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
-    GradContext3D gctx_x{
-        1,      // sx
-        0,      // sy
-        0,      // sz
-        ix,     // ix
-        0,      // iy
-        0,      // iz
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
-    GradContext3D gctx_y{
-        0,
-        1,
-        0,
-        0,
-        iy,
-        0,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
-    GradContext3D gctx_z{
-        0,
-        0,
-        1,
-        0,
-        0,
-        iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
+    GradContext3D gctx_x{1, 0, 0, ix, 0, 0, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
+    GradContext3D gctx_y{0, 1, 0, 0, iy, 0, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
+    GradContext3D gctx_z{0, 0, 1, 0, 0, iz, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
 
     // =========================================================
     // Laplace
     // =========================================================
 
-    float lap_x = laplace<Order, LAPLACE_X>(u_now_b, ctx);
-    float lap_y = laplace<Order, LAPLACE_Y>(u_now_b, ctx);
-    float lap_z = laplace<Order, LAPLACE_Z>(u_now_b, ctx);
+    float lap_x = laplace<Order, LAPLACE_X>(f.u_now, ctx);
+    float lap_y = laplace<Order, LAPLACE_Y>(f.u_now, ctx);
+    float lap_z = laplace<Order, LAPLACE_Z>(f.u_now, ctx);
 
     // =========================================================
     // Gradients
     // =========================================================
 
-    float dudx = gradient<Order, GRAD_X>(u_now_b, gctx);
-    float dudy = gradient<Order, GRAD_Y>(u_now_b, gctx);
-    float dudz = gradient<Order, GRAD_Z>(u_now_b, gctx);
+    float dudx = gradient<Order, GRAD_X>(f.u_now, gctx);
+    float dudy = gradient<Order, GRAD_Y>(f.u_now, gctx);
+    float dudz = gradient<Order, GRAD_Z>(f.u_now, gctx);
 
-    float dpsixdx = gradient<Order, GRAD_X>(psix_b, gctx);
-    float dpsiydy = gradient<Order, GRAD_Y>(psiy_b, gctx);
-    float dpsizdz = gradient<Order, GRAD_Z>(psiz_b, gctx);
+    float dpsixdx = gradient<Order, GRAD_X>(f.psix, gctx);
+    float dpsiydy = gradient<Order, GRAD_Y>(f.psiy, gctx);
+    float dpsizdz = gradient<Order, GRAD_Z>(f.psiz, gctx);
 
     float daxdx = gradient<Order, GRAD_X>(cpml.ax, gctx_x);
     float daydy = gradient<Order, GRAD_Y>(cpml.ay, gctx_y);
@@ -156,47 +117,47 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
 
     float tmpx = ((1.f + bx_) * lap_x + dbxdx_ * dudx)
-                 + (daxdx * psix_b[idx] + ax_ * dpsixdx);
+                 + (daxdx * f.psix[idx] + ax_ * dpsixdx);
 
-    w_sum += (1.f + bx_) * tmpx + ax_ * zetax_b[idx];
+    w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[idx];
 
-    psix_b[idx]  = bx_ * dudx + ax_ * psix_b[idx];
-    zetax_b[idx] = bx_ * tmpx + ax_ * zetax_b[idx];
+    f.psix[idx]  = bx_ * dudx + ax_ * f.psix[idx];
+    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
 
     // =========================================================
     // Y direction
     // =========================================================
 
     float tmpy = ((1.f + by_) * lap_y + dbydy_ * dudy)
-                 + (daydy * psiy_b[idx] + ay_ * dpsiydy);
+                 + (daydy * f.psiy[idx] + ay_ * dpsiydy);
 
-    w_sum += (1.f + by_) * tmpy + ay_ * zetay_b[idx];
+    w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[idx];
 
-    psiy_b[idx]  = by_ * dudy + ay_ * psiy_b[idx];
-    zetay_b[idx] = by_ * tmpy + ay_ * zetay_b[idx];
+    f.psiy[idx]  = by_ * dudy + ay_ * f.psiy[idx];
+    f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
 
     // =========================================================
     // Z direction
     // =========================================================
 
     float tmpz = ((1.f + bz_) * lap_z + dbzdz_ * dudz)
-                 + (dazdz * psiz_b[idx] + az_ * dpsizdz);
+                 + (dazdz * f.psiz[idx] + az_ * dpsizdz);
 
-    w_sum += (1.f + bz_) * tmpz + az_ * zetaz_b[idx];
+    w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[idx];
 
-    psiz_b[idx]  = bz_ * dudz + az_ * psiz_b[idx];
-    zetaz_b[idx] = bz_ * tmpz + az_ * zetaz_b[idx];
+    f.psiz[idx]  = bz_ * dudz + az_ * f.psiz[idx];
+    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
 
     // =========================================================
     // Time update
     // =========================================================
 
-    float u0 = u_now_b[idx];
+    float u0 = f.u_now[idx];
     float v  = vp_b[idx];
 
-    u_next_b[idx] =
+    f.u_next[idx] =
         2.f * u0 -
-        u_prev_b[idx] +
+        f.u_prev[idx] +
         (v * v) * solver.dt * solver.dt * w_sum;
 
     if (u_this_b != nullptr)
@@ -237,11 +198,10 @@ __global__ void acoustic_nopml_3d(
     int stride_z = solver.nx * solver.ny;
     int spatial_size = solver.nx * solver.ny * solver.nz;
 
+    auto f = wf.offset(b, spatial_size);
+
     int idx = iz * stride_z + iy * stride_y + ix;
 
-    const float* u_now_b  = wf.u_now  + spatial_size * b;
-    const float* u_prev_b = wf.u_prev + spatial_size * b;
-    float*       u_next_b = wf.u_next + spatial_size * b;
     float*       u_this_b = u_this ? u_this + spatial_size * b : nullptr;
     const float* vp_b     = vp     + spatial_size * b;
 
@@ -251,18 +211,18 @@ __global__ void acoustic_nopml_3d(
 
     Laplace3dContext ctx{solver.nx, solver.ny, ix, iy, iz, solver.M, solver.lap_coeff, solver.dx, solver.dy, solver.dz};
 
-    lap_x    = laplace<Order, LAPLACE_X>(u_now_b, ctx);
-    lap_y    = laplace<Order, LAPLACE_Y>(u_now_b, ctx);
-    lap_z    = laplace<Order, LAPLACE_Z>(u_now_b, ctx);
+    lap_x    = laplace<Order, LAPLACE_X>(f.u_now, ctx);
+    lap_y    = laplace<Order, LAPLACE_Y>(f.u_now, ctx);
+    lap_z    = laplace<Order, LAPLACE_Z>(f.u_now, ctx);
 
     w_sum = lap_x + lap_y + lap_z;
 
-    float u0 = u_now_b[idx];
+    float u0 = f.u_now[idx];
     float v  = vp_b[idx];
 
-    u_next_b[idx] =
+    f.u_next[idx] =
         2.0f * u0 -
-        u_prev_b[idx] +
+        f.u_prev[idx] +
         (v * v) * solver.dt * solver.dt * w_sum;
 
     u_this_b[idx] = (v * v) * w_sum;
@@ -284,36 +244,4 @@ __global__ void calculate_grad_utt_3d(
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
     int B, int nx, int ny, int nz, float dt
-);
-
-__global__ void save_boundary_kernel_3d(
-    const float* __restrict__ u,    // (B, nz, ny, nx)
-
-    float* __restrict__ front,      // (nt, B, M, ny, nx)
-    float* __restrict__ back,
-
-    float* __restrict__ top,        // (nt, B, nz, M, nx)
-    float* __restrict__ bottom,
-
-    float* __restrict__ left,       // (nt, B, nz, ny, M)
-    float* __restrict__ right,
-
-    int it,
-    SolverContext solver
-);
-
-__global__ void restore_boundary_kernel_3d(
-    float* __restrict__ u,        // (B, nz, ny, nx)
-
-    const float* __restrict__ front,   // (nt, B, n, ny, nx)
-    const float* __restrict__ back,
-
-    const float* __restrict__ top,     // (nt, B, nz, n, nx)
-    const float* __restrict__ bottom,
-
-    const float* __restrict__ left,    // (nt, B, nz, ny, n)
-    const float* __restrict__ right,
-
-    int it,
-    SolverContext solver
 );

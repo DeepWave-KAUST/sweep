@@ -5,11 +5,12 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/boundarysaver.h"
 
 std::tuple<torch::Tensor>
 acoustic_backward3d_cuda(
     torch::Tensor u_forward,     // (nt, B, nz, nx)
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
     torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
@@ -21,6 +22,8 @@ acoustic_backward3d_cuda(
     float dt,
     std::vector<float> spacing
 ) {
+
+    auto vp = models[0];
 
     float dx = spacing[0];
     float dy = spacing[1];
@@ -102,7 +105,7 @@ std::tuple<torch::Tensor>
 acoustic_backward3d_boundary_saving_cuda(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
     torch::Tensor forward_source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
@@ -117,6 +120,8 @@ acoustic_backward3d_boundary_saving_cuda(
     std::vector<float> spacing,
     bool free_surface
 ) {
+
+    auto vp = models[0];
 
     float dx = spacing[0];
     float dy = spacing[1];
@@ -143,8 +148,8 @@ acoustic_backward3d_boundary_saving_cuda(
     adjoint.allocate(vp, 3, true);
     AcousticWavefieldTensor forward;
     forward.allocate(vp, 3, false);
-    forward.u_prev_t.copy_(u_last_two[1]);
-    forward.u_now_t.copy_(u_last_two[0]);
+    forward.u_prev_t.copy_(u_last_two.select(1,1).squeeze(0));
+    forward.u_now_t.copy_(u_last_two.select(1,0).squeeze(0));
     
     auto grad = torch::zeros_like(vp);
 
@@ -157,8 +162,8 @@ acoustic_backward3d_boundary_saving_cuda(
     auto cpml = cpml_tensor.view();
 
     // Boundary wavefields (for saving all wavefields)
-    AcousticBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 3, ctx, vp);
+    GeneralBoundarySaver boundary_saver;
+    boundary_saver.allocate(true, 3, 1, ctx, vp);
     boundary_saver.load_from_vector(u_boundary);
     auto bs = boundary_saver.view();
 

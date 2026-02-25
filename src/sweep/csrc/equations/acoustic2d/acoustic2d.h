@@ -13,7 +13,7 @@ std::tuple<
     torch::Tensor    // record
 >
 acoustic_forward_cuda(
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
     torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
@@ -33,7 +33,7 @@ acoustic_forward_cuda(
 std::tuple<torch::Tensor>
 acoustic_backward_cuda(
     torch::Tensor u_forward,     // (nt, B, nz, nx)
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
     torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
@@ -50,7 +50,7 @@ std::tuple<torch::Tensor>
 acoustic_backward_boundary_saving_cuda(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
     torch::Tensor forward_source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]

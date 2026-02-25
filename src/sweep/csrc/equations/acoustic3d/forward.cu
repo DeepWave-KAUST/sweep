@@ -6,6 +6,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/boundarysaver.h"
 
 std::tuple<
     torch::Tensor,   // vp
@@ -21,7 +22,7 @@ std::tuple<
     torch::Tensor    // record
 >
 acoustic_forward3d_cuda(
-    torch::Tensor vp,          // (N, C, nz, ny, nx)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,
     torch::Tensor grad_coes,
@@ -38,6 +39,8 @@ acoustic_forward3d_cuda(
     std::vector<float> spacing
 )
 {
+
+    auto vp = models[0];
 
     float dx = spacing[0];
     float dy = spacing[1];
@@ -86,8 +89,8 @@ acoustic_forward3d_cuda(
     // ----------------------------
     // boundary saving (3D)
     // ----------------------------
-    AcousticBoundarySaver boundary_saver;
-    boundary_saver.allocate(use_boundary_saving, 3, ctx, vp);
+    GeneralBoundarySaver boundary_saver;
+    boundary_saver.allocate(use_boundary_saving, 3, 1, ctx, vp);
     auto bs = boundary_saver.view();
 
     // ----------------------------
@@ -161,8 +164,8 @@ acoustic_forward3d_cuda(
     }
 
     if (use_boundary_saving) {
-        boundary_saver.last_two_t[0].copy_(wavefield.u_prev_t);
-        boundary_saver.last_two_t[1].copy_(wavefield.u_now_t);
+        boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
+        boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }
 
     return std::make_tuple(

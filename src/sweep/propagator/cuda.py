@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import sweep._C as _C
 from sweep.propagator.base import PropBase
 from sweep.utils.torch import EdgePadding
@@ -12,7 +13,6 @@ class Warpper(torch.autograd.Function):
         forward_func,
         backward_func,
         backward_bs_func,
-        vp,                 # (B, nz, nx)
         wavelet,             # (B, nsrc, nt)
         sources_loc,        # (B, nsrc, 2)
         receivers_loc,      # (B, nrec, 2)
@@ -24,6 +24,7 @@ class Warpper(torch.autograd.Function):
         pml_vals: list,     # list of 6 tensors for PML profiles
         use_boundary_saving: bool=False,
         free_surface: bool=False,
+        *models             # list of (B, nz, nx) tensors
     ):
         """
         Forward modeling: vp -> synthetic seismograms
@@ -34,14 +35,14 @@ class Warpper(torch.autograd.Function):
 
         # only forward modeling, no need to save wavefield for backward
         save_all_wavefield = False
-        if vp.requires_grad: 
+        if any(m.requires_grad for m in models): 
             save_all_wavefield = True
-        if vp.requires_grad and use_boundary_saving:
+        if any(m.requires_grad for m in models) and use_boundary_saving:
             save_all_wavefield = False
 
         # -------- CUDA forward --------
         (u_allt, boundary_vals, last, syn) = forward_func(
-            vp.contiguous(),
+            [m.contiguous() for m in models],
             wavelet.contiguous(),
             lap_coes.contiguous(),  # u0, not used --- IGNORE ---
             grad_coes.contiguous(),
@@ -59,14 +60,14 @@ class Warpper(torch.autograd.Function):
         )
 
         ctx.save_for_backward(
-            vp,
             u_allt,
             last,
             sources_loc,
             receivers_loc,
             lap_coes, grad_coes,
         )
-
+        # np.save('u_last.npy', last.detach().cpu().numpy())
+        ctx.models = models
         ctx.boundary_vals = boundary_vals
         ctx.pml_vals = pml_vals
         ctx.abcn = abcn
@@ -87,7 +88,6 @@ class Warpper(torch.autograd.Function):
         
         # -------- unpack --------
         (
-            vp,
             u_allt,
             last,
             forward_sources_loc,
@@ -103,9 +103,9 @@ class Warpper(torch.autograd.Function):
         # -------- CUDA adjoint --------
 
         if not ctx.use_boundary_saving:
-            (grad_vp, ) = ctx.backward_func(
+            gradients = ctx.backward_func(
                 u_allt.contiguous(),
-                vp.contiguous(),
+                [m.contiguous() for m in ctx.models],
                 adjoint_source.contiguous(),
                 lap_coes.contiguous(), 
                 grad_coes.contiguous(),
@@ -118,10 +118,10 @@ class Warpper(torch.autograd.Function):
                 ctx.spacing
             )
         else:
-            (grad_vp, ) = ctx.backward_bs_func(
+            gradients = ctx.backward_bs_func(
                 [b.contiguous() for b in ctx.boundary_vals],
                 last.contiguous(),
-                vp.contiguous(),
+                [m.contiguous() for m in ctx.models],
                 adjoint_source.contiguous(),
                 ctx.wavelet.contiguous(),
                 lap_coes.contiguous(),
@@ -136,20 +136,24 @@ class Warpper(torch.autograd.Function):
                 ctx.spacing,
                 ctx.free_surface
             )
-
+            np.save('/data/tmp/u_forward.npy', gradients[0].detach().cpu().numpy())
+            np.save('/data/tmp/u_adoint.npy', gradients[1].detach().cpu().numpy())
+            gradients = gradients[2:]
+            # print([g.shape for g in gradients])
         return (
-            None, None, None,
-            grad_vp,   # vp
-            None,      # source
+            None, None, None, # functions
+            None,      # wavelet
             None,      # sources_loc
             None,      # receivers_loc
             None,      # fd_coeff
             None,      # M
             None,      # abcn
-            None,      # nt
-            None, None, None,  # dx, dz, dt
+            None,      # spacing
+            None,      # dt
             None,      # pml_vals
             None,      # use_boundary_saving
+            None,      # free_surface
+            *gradients # models
         )
 
 import torch
@@ -215,7 +219,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         """
         M = self.equation.so // 2
 
+        pml_padding = M
         padding = [p+M for p in self.padding]
+        base_shift = M + self.abcn
 
         self.init_abc(**kwargs)
 
@@ -227,19 +233,19 @@ class PropCUDA(PropBase, torch.nn.Module):
         receivers = receivers.copy()
 
         if self.free_surface:
-            sources[..., 0] += (M+self.abcn)
-            receivers[..., 0] += (M+self.abcn)
+            sources[..., 0] += base_shift
+            receivers[..., 0] += base_shift
 
             if self.ndim == 3:
-                sources[..., 1] += (M+self.abcn)
-                receivers[..., 1] += (M+self.abcn)
+                sources[..., 1] += base_shift
+                receivers[..., 1] += base_shift
 
             # For cuda implementation, we pad in z-direction for free surface with width M
             sources[..., -1] += M
             receivers[..., -1] += M
         else:
-            sources += (M+self.abcn)
-            receivers += (M+self.abcn)
+            sources += base_shift
+            receivers += base_shift
 
         # Batch the wavelet, sources and receivers
         wavelet = torch.from_numpy(wavelet).to(self.dev).float()[None, None, :].repeat(batch_size, 1, 1)  # (B, 1, nt)
@@ -250,7 +256,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
-        self.equation.b = pad_pml_vals(self.equation.b, M)
+        self.equation.b = pad_pml_vals(self.equation.b, pml_padding)
+        # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ax', 'bx', 'axh', 'bxh']):
+        #     np.save(f'{name}.npy', b.detach().cpu().numpy())
 
         lap_coes = torch.zeros(M+1, dtype=torch.float32, device=self.dev)
         grad_coes = torch.zeros(M+1, dtype=torch.float32, device=self.dev)
@@ -259,16 +267,14 @@ class PropCUDA(PropBase, torch.nn.Module):
         grad_coes[1:] = torch.from_numpy(fd_coefficients(1, 2*M)).to(self.dev).float()
         grad_coes[0] = 0.
 
-        vp = self.models_padded[0][None, None, ...]
-        vp = vp.repeat(batch_size, *([1]*(vp.ndim-1)))  # vp
+        models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
 
         spacing = [self.dh.item()] * self.ndim
-
+        
         syn = Warpper.apply(
                 self.forward_func, 
                 self.backward_func, 
                 self.backward_bs_func,
-                vp,  # vp
                 wavelet,
                 sources,
                 receivers,
@@ -280,6 +286,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 self.equation.b,
                 use_boundary_saving,
                 self.free_surface,
+                *models,
             )
         
         return syn

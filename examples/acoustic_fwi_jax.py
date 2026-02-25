@@ -108,7 +108,7 @@ LOSS = []
 for epoch in tqdm.trange(epochs):
 
     key, subkey = random.split(key)
-    rand_shots = random.randint(subkey, (batchsize,), 0, sources.shape[0])
+    rand_shots = np.random.randint(0, sources.shape[0], batchsize)
 
     loss, grads = fwi_step(model.vp, rand_shots)
     model.vp, opt_state = update_fn(model.vp, grads, opt_state)

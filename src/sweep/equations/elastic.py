@@ -80,3 +80,8 @@ class Elastic(FirstOrderEquation):
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, pml=self.b, **kwargs)
+    
+    def _C(self, ):
+        # CUDA IMPLEMENTATION
+        import sweep._C as _C
+        return (_C.elastic_forward, _C.elastic_backward, _C.elastic_backward_bs)

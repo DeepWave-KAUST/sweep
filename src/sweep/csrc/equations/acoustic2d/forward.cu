@@ -6,6 +6,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/boundarysaver.h"
 
 std::tuple<
     torch::Tensor,   // u_allt
@@ -19,7 +20,7 @@ std::tuple<
     torch::Tensor    // record
 >
 acoustic_forward_cuda(
-    torch::Tensor vp,          // velocity (m/s)
+    const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
     torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
@@ -35,6 +36,8 @@ acoustic_forward_cuda(
     float dt,
     std::vector<float> spacing
 ) {
+
+    auto vp = models[0];
 
     float dx = spacing[0];
     float dz = spacing[1];
@@ -70,9 +73,8 @@ acoustic_forward_cuda(
     if (save_all_wavefields)
         u_allt = torch::zeros({nt, B, nz, nx}, vp.options());
 
-    // Wavefields for boundary saving
-    AcousticBoundarySaver boundary_saver;
-    boundary_saver.allocate(use_boundary_saving, 2, ctx, vp);
+    GeneralBoundarySaver boundary_saver;
+    boundary_saver.allocate(use_boundary_saving, 2, 1, ctx, vp);
     auto bs = boundary_saver.view();
 
     dim3 block(32, 8);
@@ -109,6 +111,7 @@ acoustic_forward_cuda(
                 bs.left,
                 bs.right,
                 it,
+                ctx.M,
                 ctx
             );
         }
@@ -137,8 +140,8 @@ acoustic_forward_cuda(
 
     // Save the last two time steps for backward
     if (use_boundary_saving) {
-        boundary_saver.last_two_t[0].copy_(wavefield.u_prev_t);
-        boundary_saver.last_two_t[1].copy_(wavefield.u_now_t);
+        boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
+        boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }
 
     return std::make_tuple(
