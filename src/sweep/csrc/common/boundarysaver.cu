@@ -206,6 +206,7 @@ __global__ void save_boundary_kernel_3d(
     float* __restrict__ right,
 
     int it,
+    int width,
     SolverContext solver
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -233,14 +234,14 @@ __global__ void save_boundary_kernel_3d(
     int top_start = solver.free_surface ? 
                     solver.M :
                     solver.abcn + solver.M;
-    int top_end = top_start + solver.M;
+    int top_end = top_start + width;
 
     if (iz >= top_start && iz < top_end)
     {
         int zloc = iz - top_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.M + zloc) * solver.ny + iy) * solver.nx + ix);
+            ((((it * solver.B + b) * width + zloc) * solver.ny + iy) * solver.nx + ix);
 
         top[idx] = val;
     }
@@ -248,12 +249,14 @@ __global__ void save_boundary_kernel_3d(
     // ==================================================
     // Z+ (bottom)
     // ==================================================
-    if (iz >= solver.nz - solver.abcn - 2*solver.M && iz < solver.nz - solver.abcn - solver.M)
+    int bot_end = solver.nz - solver.abcn - solver.M;
+    int bot_start = bot_end - width;
+    if (iz >= bot_start && iz < bot_end)
     {
-        int zloc = iz - (solver.nz - solver.abcn - 2*solver.M);
+        int zloc = iz - bot_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.M + zloc) * solver.ny + iy) * solver.nx + ix);
+            ((((it * solver.B + b) * width + zloc) * solver.ny + iy) * solver.nx + ix);
 
         bottom[idx] = val;
     }
@@ -261,12 +264,14 @@ __global__ void save_boundary_kernel_3d(
     // ==================================================
     // Y- (front)
     // ==================================================
-    if (iy >= solver.abcn + solver.M && iy < solver.abcn + 2*solver.M)
+    int front_start = solver.abcn + solver.M;
+    int front_end = front_start + width;
+    if (iy >= front_start && iy < front_end)
     {
-        int yloc = iy - (solver.abcn + solver.M);
+        int yloc = iy - front_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.M + yloc) * solver.nx + ix);
+            ((((it * solver.B + b) * solver.nz + iz) * width + yloc) * solver.nx + ix);
 
         front[idx] = val;
     }
@@ -274,12 +279,14 @@ __global__ void save_boundary_kernel_3d(
     // ==================================================
     // Y+ (back)
     // ==================================================
-    if (iy >= solver.ny - solver.abcn - 2*solver.M && iy < solver.ny - solver.abcn - solver.M)
+    int back_end = solver.ny - solver.abcn - solver.M;
+    int back_start = back_end - width;
+    if (iy >= back_start && iy < back_end)
     {
-        int yloc = iy - (solver.ny - solver.abcn - 2*solver.M);
+        int yloc = iy - back_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.M + yloc) * solver.nx + ix);
+            ((((it * solver.B + b) * solver.nz + iz) * width + yloc) * solver.nx + ix);
 
         back[idx] = val;
     }
@@ -287,12 +294,14 @@ __global__ void save_boundary_kernel_3d(
     // ==================================================
     // X- (left)
     // ==================================================
-    if (ix >= solver.abcn + solver.M && ix < solver.abcn + 2*solver.M)
+    int left_start = solver.abcn + solver.M;
+    int left_end = left_start + width;
+    if (ix >= left_start && ix < left_end)
     {
-        int xloc = ix - (solver.abcn + solver.M);
+        int xloc = ix - left_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * solver.M + xloc);
+            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * width + xloc);
 
         left[idx] = val;
     }
@@ -300,12 +309,14 @@ __global__ void save_boundary_kernel_3d(
     // ==================================================
     // X+ (right)
     // ==================================================
-    if (ix >= solver.nx - solver.abcn - 2*solver.M && ix < solver.nx - solver.abcn - solver.M)
+    int right_end = solver.nx - solver.abcn - solver.M;
+    int right_start = right_end - width;
+    if (ix >= right_start && ix < right_end)
     {
-        int xloc = ix - (solver.nx - solver.abcn - 2*solver.M);
+        int xloc = ix - right_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * solver.M + xloc);
+            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * width + xloc);
 
         right[idx] = val;
     }
@@ -325,6 +336,7 @@ __global__ void restore_boundary_kernel_3d(
     const float* __restrict__ right,
 
     int it,
+    int width,
     SolverContext solver
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -352,13 +364,13 @@ __global__ void restore_boundary_kernel_3d(
                     solver.M :
                     solver.abcn + solver.M;
 
-    int top_end = top_start + solver.M;
+    int top_end = top_start + width;
     if (iz >= top_start && iz < top_end)
     {
         int zloc = iz - top_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.M + zloc) * solver.ny + iy) * solver.nx + ix);
+            ((((it * solver.B + b) * width + zloc) * solver.ny + iy) * solver.nx + ix);
 
         u_b[idx3] = top[idx];
     }
@@ -366,12 +378,14 @@ __global__ void restore_boundary_kernel_3d(
     // ==================================================
     // Z+  (bottom)
     // ==================================================
-    if (iz >= solver.nz - solver.abcn - 2*solver.M && iz < solver.nz - solver.abcn - solver.M)
+    int bot_end = solver.nz - solver.abcn - solver.M;
+    int bot_start = bot_end - width;
+    if (iz >= bot_start && iz < bot_end)
     {
-        int zloc = iz - (solver.nz - solver.abcn - 2*solver.M);
+        int zloc = iz - bot_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.M + zloc) * solver.ny + iy) * solver.nx + ix);
+            ((((it * solver.B + b) * width + zloc) * solver.ny + iy) * solver.nx + ix);
 
         u_b[idx3] = bottom[idx];
     }
@@ -379,12 +393,14 @@ __global__ void restore_boundary_kernel_3d(
     // ==================================================
     // Y-  (front)
     // ==================================================
-    if (iy >= solver.abcn + solver.M && iy < solver.abcn + 2*solver.M)
+    int front_start = solver.abcn + solver.M;
+    int front_end = front_start + width;
+    if (iy >= front_start && iy < front_end)
     {
-        int yloc = iy - (solver.abcn + solver.M);
+        int yloc = iy - front_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.M + yloc) * solver.nx + ix);
+            ((((it * solver.B + b) * solver.nz + iz) * width + yloc) * solver.nx + ix);
 
         u_b[idx3] = front[idx];
     }
@@ -392,12 +408,14 @@ __global__ void restore_boundary_kernel_3d(
     // ==================================================
     // Y+  (back)
     // ==================================================
-    if (iy >= solver.ny - solver.abcn - 2*solver.M && iy < solver.ny - solver.abcn - solver.M)
+    int back_end = solver.ny - solver.abcn - solver.M;
+    int back_start = back_end - width;
+    if (iy >= back_start && iy < back_end)
     {
-        int yloc = iy - (solver.ny - solver.abcn - 2*solver.M);
+        int yloc = iy - back_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.M + yloc) * solver.nx + ix);
+            ((((it * solver.B + b) * solver.nz + iz) * width + yloc) * solver.nx + ix);
 
         u_b[idx3] = back[idx];
     }
@@ -405,12 +423,14 @@ __global__ void restore_boundary_kernel_3d(
     // ==================================================
     // X-  (left)
     // ==================================================
-    if (ix >= solver.abcn + solver.M && ix < solver.abcn + 2*solver.M)
+    int left_start = solver.abcn + solver.M;
+    int left_end = left_start + width;
+    if (ix >= left_start && ix < left_end)
     {
-        int xloc = ix - (solver.abcn + solver.M);
+        int xloc = ix - left_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * solver.M + xloc);
+            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * width + xloc);
 
         u_b[idx3] = left[idx];
     }
@@ -418,12 +438,14 @@ __global__ void restore_boundary_kernel_3d(
     // ==================================================
     // X+  (right)
     // ==================================================
-    if (ix >= solver.nx - solver.abcn - 2*solver.M && ix < solver.nx - solver.abcn - solver.M)
+    int right_end = solver.nx - solver.abcn - solver.M;
+    int right_start = right_end - width;
+    if (ix >= right_start && ix < right_end)
     {
-        int xloc = ix - (solver.nx - solver.abcn - 2*solver.M);
+        int xloc = ix - right_start;
 
         int idx =
-            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * solver.M + xloc);
+            ((((it * solver.B + b) * solver.nz + iz) * solver.ny + iy) * width + xloc);
 
         u_b[idx3] = right[idx];
     }

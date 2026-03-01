@@ -27,15 +27,15 @@ delay = 0.2
 dh = 5.0
 fm = 5.0
 spatial_orders = [8]
-sourcesz = [3]
+sourcesz = [4]
 grid = list(product(spatial_orders, sourcesz))
-abcn = 20
+abcn = 0
 free_surface=False
 use_boundary_saving = True
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([128, 3]).reshape(1, 2)
+# sources = np.array([128, 3]).reshape(1, 2)
 # print(staggered_grid_coes(spatial_orders//2))
 # receivers = np.stack((np.arange(0, nx, 1), 
 #                      np.zeros(nx, dtype=np.int32)), axis=1).reshape(1, -1, 2)
@@ -54,7 +54,10 @@ prop = [PropCUDA, PropTorch]
 pname = ['CUDA', 'PyTorch']
 for so, srcz in grid:
     gradients = []
+
     sources = np.array([128, srcz]).reshape(1, 2)
+    receivers = np.array([384, srcz]).reshape(1, 1, 2)
+
     print(f"Testing spatial order {so} with source depth {srcz}...")
     for name, propagator in zip(pname, prop):
         print(f"Testing {name} implementation...")
@@ -86,7 +89,7 @@ for so, srcz in grid:
 
         # np.save(f'record_{name}.npy', out.detach().cpu().numpy())
         del solver, loss
-    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
+    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
 
     grads_cuda = gradients[0]
     grads_torch = gradients[1]
@@ -94,13 +97,15 @@ for so, srcz in grid:
     grads_cuda_vp, grads_cuda_vs, grads_cuda_rho = grads_cuda
     grads_torch_vp, grads_torch_vs, grads_torch_rho = grads_torch
 
-    # Pytorch automatic differentiation
-    vmin, vmax = np.percentile(grads_cuda_vp, [0.5, 99.5])
+    # grads_cuda_vp[0:3,:]=0
+    # grads_cuda_vs[0:3,:]=0
+    # grads_cuda_rho[0:3,:]=0
+    # Show Vp
+    vmin, vmax = np.percentile(grads_torch_vp, [0.5, 99.5])
     ax = axes[0,0].imshow(grads_cuda_vp, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
     plt.colorbar(ax, ax=axes[0,0])
     axes[0,0].set_title('Vp (CUDA)')
 
-    vmin, vmax = np.percentile(grads_torch_vp, [0.5, 99.5])
     ax = axes[0,1].imshow(grads_torch_vp, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
     plt.colorbar(ax, ax=axes[0,1])
     axes[0,1].set_title('Vp (Torch)')
@@ -109,13 +114,12 @@ for so, srcz in grid:
     plt.colorbar(ax, ax=axes[0,2])
     axes[0,2].set_title('Vp (Difference)')
 
-
-    vmin, vmax = np.percentile(grads_cuda_vs, [0.5, 99.5])
+    # Show Vs
+    vmin, vmax = np.percentile(grads_torch_vs, [0.5, 99.5])
     ax = axes[1,0].imshow(grads_cuda_vs, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
     plt.colorbar(ax, ax=axes[1,0])
     axes[1,0].set_title('Vs (CUDA)')
 
-    vmin, vmax = np.percentile(grads_torch_vs, [0.5, 99.5])
     ax = axes[1,1].imshow(grads_torch_vs, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
     plt.colorbar(ax, ax=axes[1,1])
     axes[1,1].set_title('Vs (Torch)')
@@ -124,49 +128,19 @@ for so, srcz in grid:
     plt.colorbar(ax, ax=axes[1,2])
     axes[1,2].set_title('Vs (Difference)')
 
+    # Show Rho
+    vmin, vmax = np.percentile(grads_cuda_rho, [0.5, 99.5])
+    ax = axes[2,0].imshow(grads_cuda_rho, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
+    plt.colorbar(ax, ax=axes[2,0])
+    axes[2,0].set_title('Rho (CUDA)')
+    vmin, vmax = np.percentile(grads_torch_rho, [0.5, 99.5])
+    ax = axes[2,1].imshow(grads_torch_rho, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
+    plt.colorbar(ax, ax=axes[2,1])
+    axes[2,1].set_title('Rho (Torch)')
+    ax = axes[2,2].imshow(grads_cuda_rho - grads_torch_rho, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
+    plt.colorbar(ax, ax=axes[2,2])
+    axes[2,2].set_title('Rho (Difference)')
+
     plt.tight_layout()
     plt.savefig(f'grad_srcz{srcz}_so{so}_{"bs" if use_boundary_saving else "no_bs"}.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-# for i in tqdm.trange(1001):
-#     # vp.grad = None
-#     out = solver(wave, sources = sources,
-#                  receivers = receivers,
-#                  models=[vp, vs, rho], 
-#                  use_boundary_saving=True)
-#     loss = out.pow(2).sum()
-#     loss.backward()
-
-#     # fig, ax = plt.subplots(figsize=(10, 6))
-#     # record = out[-1].detach().cpu().numpy()#.squeeze()
-#     # vmin, vmax = np.percentile(record, [0.5, 99.5])
-#     # im = ax.imshow(record.T, cmap='seismic', aspect='auto',
-#     #             extent=[0, nx * dh, nt * dt, 0], vmin=vmin, vmax=vmax)
-#     # ax.set_xlabel('Time (s)')
-#     # ax.set_ylabel('Depth (m)')
-#     # ax.set_title('Seismic Wavefield at Source Location')
-#     # fig.colorbar(im, ax=ax, label='Amplitude')
-#     # plt.savefig(f'record_{ptype}.png', dpi=300)
-#     # plt.show()
-
-#     fig, axes = plt.subplots(1, 3, figsize=(18, 4))
-#     grads = [vp.grad.cpu().numpy(), vs.grad.cpu().numpy(), np.zeros_like(true_vp)]
-#     titles = ['Gradient of Vp', 'Gradient of Vs', 'Gradient of Density']
-#     for ax, grad, title in zip(axes, grads, titles):
-#         # grad[:2,:] = 0.
-#         # if 'Density' in title: grad = -grad
-#         vmin, vmax = np.percentile(grad, [0.5, 99.5])
-#         print(grad.max(), grad.min())
-#         im = ax.imshow(grad, cmap='seismic', aspect='auto',
-#                     extent=[0, nx * dh, nz * dh, 0], vmin=vmin, vmax=vmax)
-#         ax.set_xlabel('Distance (m)')
-#         ax.set_ylabel('Depth (m)')
-#         ax.set_title(title)
-#         fig.colorbar(im, ax=ax, label='Gradient')
-#     plt.tight_layout()
-#     plt.savefig(f'gradient_{ptype}.png', dpi=300)
-#     plt.show()
-
-#     for g, name in zip([vp.grad, vs.grad, rho.grad], ['Vp', 'Vs', 'Density']):
-#         np.save(f'{name}_grad_{ptype}.npy', g.cpu().numpy())
-#     break
+    plt.close()

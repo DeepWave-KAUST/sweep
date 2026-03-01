@@ -7,6 +7,9 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
+
+namespace acoustic3d {
 
 std::tuple<
     torch::Tensor,   // vp
@@ -21,7 +24,7 @@ std::tuple<
     torch::Tensor,   // u_last_two
     torch::Tensor    // record
 >
-acoustic_forward3d_cuda(
+forward(
     const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,
@@ -96,13 +99,9 @@ acoustic_forward3d_cuda(
     // ----------------------------
     // CUDA launch config
     // ----------------------------
-    dim3 block(16, 8, 4);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (ny + block.y - 1) / block.y,
-        (nz + block.z - 1) / block.z * B
-    );
-
+    auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
+    auto source_config = fdtd::Geom::make(nsrc, B);
+    auto record_config = fdtd::Geom::make(nrec, B);
 
     float* u_thist = nullptr;
 
@@ -120,6 +119,8 @@ acoustic_forward3d_cuda(
 
         LAUNCH_FORWARD_3D(
             order,
+            launch_config.grid,
+            launch_config.block,
             view,
             save_all_wavefields,
             u_thist,
@@ -129,7 +130,7 @@ acoustic_forward3d_cuda(
         );
 
         if (use_boundary_saving) {
-            save_boundary_kernel_3d<<<grid, block>>>(
+            save_boundary_kernel_3d<<<launch_config.grid, launch_config.block>>>(
                 view.u_now,
                 bs.top,
                 bs.bottom,
@@ -138,11 +139,12 @@ acoustic_forward3d_cuda(
                 bs.left,
                 bs.right,
                 it,
+                ctx.M,
                 ctx
             );
         }
 
-        add_source_3d<<<B, nsrc>>>(
+        add_source_3d<<<source_config.grid, source_config.block>>>(
             view.u_next,
             source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
@@ -151,7 +153,7 @@ acoustic_forward3d_cuda(
             ctx
         );
 
-        record_kernel_3d<<<B, nrec>>>(
+        record_kernel_3d<<<record_config.grid, record_config.block>>>(
             view.u_next,
             record.data_ptr<float>(),
             receivers_loc.data_ptr<int>(),
@@ -182,3 +184,5 @@ acoustic_forward3d_cuda(
         record
     );
 }
+
+} // namespace acoustic3d

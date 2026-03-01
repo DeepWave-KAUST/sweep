@@ -15,10 +15,10 @@ def step(vx, vz, txx, tzz, txz,
     lame_lambda = rho*(vp**2-2*vs**2)
     lame_mu = rho*vs**2
 
-    txx_x = pd.x_backward(txx)
+    txx_x = pd.x_forward(txx)
     txz_z = pd.z_backward(txz)
     tzz_z = pd.z_forward(tzz)
-    txz_x = pd.x_forward(txz)
+    txz_x = pd.x_backward(txz)
 
     # Update Veclocity fields
     m_tzzz = azh * m_tzzz + bzh * tzz_z
@@ -34,10 +34,10 @@ def step(vx, vz, txx, tzz, txz,
     vx = vx + dt / (rho * h) * (txx_x + txz_z)
 
     # Update Stress fields
-    vx_x = pd.x_forward(vx)
+    vx_x = pd.x_backward(vx)
     vz_z = pd.z_backward(vz)
     vx_z = pd.z_forward(vx)
-    vz_x = pd.x_backward(vz)
+    vz_x = pd.x_forward(vz)
 
     m_vzz = az * m_vzz + bz * vz_z
     vz_z = vz_z + m_vzz
@@ -84,4 +84,4 @@ class Elastic(FirstOrderEquation):
     def _C(self, ):
         # CUDA IMPLEMENTATION
         import sweep._C as _C
-        return (_C.elastic_forward, _C.elastic_backward, _C.elastic_backward_bs)
+        return (_C.elastic2d_forward, _C.elastic2d_backward, _C.elastic2d_backward_bs)

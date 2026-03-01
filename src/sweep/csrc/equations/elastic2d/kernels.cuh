@@ -34,7 +34,6 @@
         else                   elastic_velocity_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-
 #define LAUNCH_ELASTIC_STRESS_NOPML(order, ...)                       \
     do {                                                        \
         if      ((order) == 2) elastic_stress_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
@@ -44,13 +43,22 @@
         else                   elastic_stress_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_CALCULATE_GRAD_ELASTIC(order, ...)                       \
+#define LAUNCH_CALCULATE_GRAD_ELASTIC_BS(order, ...)                       \
     do {                                                        \
-        if      ((order) == 2) calculate_grad_elastic<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) calculate_grad_elastic_bs<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) calculate_grad_elastic_bs<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) calculate_grad_elastic_bs<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) calculate_grad_elastic_bs<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   calculate_grad_elastic_bs<-1><<<grid, block>>>(__VA_ARGS__);\
+    } while (0)
+
+#define LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(order, ...)                       \
+    do {                                                        \
+        if      ((order) == 2) calculate_grad_elastic_nobs<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) calculate_grad_elastic_nobs<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) calculate_grad_elastic_nobs<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) calculate_grad_elastic_nobs<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   calculate_grad_elastic_nobs<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
 #define LAUNCH_ELASTIC_VELOCITY_ADJOINT(order, ...)                     \
@@ -114,9 +122,9 @@ __global__ void elastic_velocity_kernel(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // backward because stress is at integer grid
-    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.sxx, ctx2d);
+    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxx, ctx2d);
     float dsxz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.sxz, ctx2d);
-    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxz, ctx2d);
+    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.sxz, ctx2d);
     float dszz_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.szz, ctx2d);
 
     float inv_rho = 1.f / rho_b[idx];
@@ -184,10 +192,10 @@ __global__ void elastic_stress_kernel(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // forward because velocity is staggered
-    float dvx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vx, ctx2d);
+    float dvx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx2d);
     float dvz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx2d);
     float dvx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx2d);
-    float dvz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vz, ctx2d);
+    float dvz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx2d);
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -215,10 +223,12 @@ __global__ void elastic_stress_kernel(
 
     if (u_this_b) {
         int comp_stride  = solver.B * spatial_size;
-        u_this_b[0 * comp_stride + idx] = dvx_dx;
-        u_this_b[1 * comp_stride + idx] = dvx_dz;
-        u_this_b[2 * comp_stride + idx] = dvz_dx;
-        u_this_b[3 * comp_stride + idx] = dvz_dz;
+        u_this_b[0 * comp_stride + idx] = f.vx[idx];
+        u_this_b[1 * comp_stride + idx] = f.vz[idx];
+        // u_this_b[0 * comp_stride + idx] = dvx_dx;
+        // u_this_b[1 * comp_stride + idx] = dvx_dz;
+        // u_this_b[2 * comp_stride + idx] = dvz_dx;
+        // u_this_b[3 * comp_stride + idx] = dvz_dz;
     }
 
 }
@@ -260,9 +270,9 @@ __global__ void elastic_velocity_kernel_nopml(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // backward because stress is at integer grid
-    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.sxx, ctx2d);
+    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxx, ctx2d);
     float dsxz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.sxz, ctx2d);
-    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxz, ctx2d);
+    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.sxz, ctx2d);
     float dszz_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.szz, ctx2d);
 
     float inv_rho = 1.f / rho_b[idx];
@@ -314,10 +324,10 @@ __global__ void elastic_stress_kernel_nopml(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // forward because velocity is staggered
-    float dvx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vx, ctx2d);
+    float dvx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx2d);
     float dvz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx2d);
     float dvx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx2d);
-    float dvz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vz, ctx2d);
+    float dvz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx2d);
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -379,12 +389,12 @@ __global__ void elastic_velocity_adjoint_kernel(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // backward because stress is at integer grid
-    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.sxx, ctx2d);
+    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxx, ctx2d);
     float dsxz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.sxz, ctx2d);
-    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxz, ctx2d);
+    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.sxz, ctx2d);
     float dszz_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.szz, ctx2d);
     
-    float dszz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.szz, ctx2d);
+    float dszz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.szz, ctx2d);
     float dsxx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.sxx, ctx2d);
 
     f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
@@ -452,10 +462,10 @@ __global__ void elastic_stress_adjoint_kernel(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // forward because velocity is staggered
-    float dvx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vx, ctx2d);
+    float dvx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx2d);
     float dvx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx2d);
     float dvz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx2d);
-    float dvz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vz, ctx2d);
+    float dvz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx2d);
     
     float inv_rho = 1.f / rho_b[idx];
     
@@ -478,7 +488,7 @@ __global__ void elastic_stress_adjoint_kernel(
 
 
 template<int Order>
-__global__ void calculate_grad_elastic(
+__global__ void calculate_grad_elastic_bs(
 
     ElasticWavefieldPointer forward,
     ElasticWavefieldPointer adjoint,
@@ -531,30 +541,34 @@ __global__ void calculate_grad_elastic(
     SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
 
     // forward because velocity is staggered
-    float fvx_x = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vx, ctx2d);
-    float fvx_z = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx2d);
-    float fvz_x = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vz, ctx2d);
+    float fvx_x = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx2d);
     float fvz_z = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx2d);
+    float fvx_z = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx2d);
+    float fvz_x = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx2d);
 
     float grad_lambda = (a.sxx[idx] + a.szz[idx]) * (fvx_x + fvz_z);
     float grad_mu = 2*(a.sxx[idx] * fvx_x + a.szz[idx] * fvz_z) + a.sxz[idx] * (fvx_z + fvz_x);
     
-    gvp[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+    gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
     gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
                    2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
 
-    grad_rho[idx] += (a.vx[idx] * (fvx_prev_b[idx] - f.vx[idx]) / solver.dt + 
-                      a.vz[idx] * (fvz_prev_b[idx] - f.vz[idx]) / solver.dt) * solver.dt;
+    grad_rho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) + 
+                      a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
+    grad_rho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                     grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
 }
 
-__global__ void calculate_elastic_grad(
+template<int Order>
+__global__ void calculate_grad_elastic_nobs(
 
     ElasticWavefieldPointer adjoint,
 
-    const float* __restrict__ vx_x,
-    const float* __restrict__ vx_z,
-    const float* __restrict__ vz_x,
-    const float* __restrict__ vz_z,
+    const float* __restrict__ fvx,
+    const float* __restrict__ fvz,
+
+    const float* __restrict__ fvx_prev,
+    const float* __restrict__ fvz_prev,
 
     const float* __restrict__ vp,        // (B, nz, nx)
     const float* __restrict__ vs,        // (B, nz, nx)
@@ -565,4 +579,52 @@ __global__ void calculate_elastic_grad(
     float* __restrict__ grad_rho,         // (B, nz, nx)
 
     SolverContext solver
-);
+)
+{
+
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    const float* fvx_b = fvx + b * spatial_size;
+    const float* fvz_b = fvz + b * spatial_size;
+    const float* fvx_prev_b = fvx_prev + b * spatial_size;
+    const float* fvz_prev_b = fvz_prev + b * spatial_size;
+
+    float*       grad_vp_b       = grad_vp       + b * spatial_size;
+    float*       grad_vs_b       = grad_vs       + b * spatial_size;
+    float*       grad_rho_b      = grad_rho      + b * spatial_size;
+
+    const float* vp_b         = vp         + b * spatial_size;
+    const float* vs_b         = vs         + b * spatial_size;
+    const float* rho_b        = rho        + b * spatial_size;
+
+    SGradContext ctx2d {1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
+
+    auto a = adjoint.offset(b, spatial_size);
+
+    // forward because velocity is staggered
+    float fvx_x = sgradient<Order, GRAD_X, DIFF_BACKWARD>(fvx_b, ctx2d);
+    float fvz_z = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(fvz_b, ctx2d);
+    float fvx_z = sgradient<Order, GRAD_Z, DIFF_FORWARD>(fvx_b, ctx2d);
+    float fvz_x = sgradient<Order, GRAD_X, DIFF_FORWARD>(fvz_b, ctx2d);
+
+    float grad_lambda = (a.sxx[idx] + a.szz[idx]) * (fvx_x + fvz_z);
+    float grad_mu = 2*(a.sxx[idx] * fvx_x + a.szz[idx] * fvz_z) + a.sxz[idx] * (fvx_z + fvz_x);
+    
+    grad_vp_b[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+    grad_vs_b[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
+                         2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
+
+    grad_rho_b[idx] += (a.vx[idx] * (fvx_b[idx]-fvx_prev_b[idx]) + 
+                        a.vz[idx] * (fvz_b[idx]-fvz_prev_b[idx])) / rho_b[idx];
+    grad_rho_b[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                       grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+
+}

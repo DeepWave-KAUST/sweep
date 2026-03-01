@@ -6,7 +6,7 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 
-#define LAUNCH_FORWARD(order, ...)                                  \
+#define LAUNCH_FORWARD(order, grid, block, ...)                                  \
     do {                                                        \
         if      ((order) == 2) acoustic_forward_kernel<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) acoustic_forward_kernel<4><<<grid, block>>>(__VA_ARGS__); \
@@ -15,7 +15,7 @@
         else                   acoustic_forward_kernel<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_FORWARD_NOPML(order, ...)                                  \
+#define LAUNCH_FORWARD_NOPML(order, grid, block, ...)                                  \
     do {                                                        \
         if      ((order) == 2) acoustic_nopml<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) acoustic_nopml<4><<<grid, block>>>(__VA_ARGS__); \
@@ -131,7 +131,7 @@ __global__ void acoustic_nopml(
 
     int halo = solver.abcn + 2*M;
 
-    int top_halo = solver.free_surface ? M*2: halo;
+    int top_halo = solver.free_surface ? 2* M: halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 

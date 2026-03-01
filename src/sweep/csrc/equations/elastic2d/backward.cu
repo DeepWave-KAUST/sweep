@@ -8,8 +8,10 @@
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.h"
 
+namespace elastic2d {
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-elastic_backward_cuda(
+backward(
     torch::Tensor u_forward,     // (nt, 4， B, nz, nx)
     const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
@@ -71,7 +73,7 @@ elastic_backward_cuda(
         (nz + block.y - 1) / block.y,
         B
     );
-
+    int t2=0;
 
     for (int it = nt - 1; it >= 1; --it) {
 
@@ -100,14 +102,18 @@ elastic_backward_cuda(
             adjoint_nsrc,
             solver
         );
+        
+        if (it+1>=nt) t2=it; else t2=it+1;
 
-        calculate_elastic_grad<<<grid, block>>>(
+        LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
+            order,
             adj_view,
 
-            u_forward.select(0, it).select(0, 0).data_ptr<float>(), // vx_x
-            u_forward.select(0, it).select(0, 1).data_ptr<float>(), // vx_z
-            u_forward.select(0, it).select(0, 2).data_ptr<float>(), // vz_x
-            u_forward.select(0, it).select(0, 3).data_ptr<float>(), // vz_z
+            u_forward.select(0, it).select(0, 0).data_ptr<float>(), // vx
+            u_forward.select(0, it).select(0, 1).data_ptr<float>(), // vz
+            
+            u_forward.select(0, t2).select(0, 0).data_ptr<float>(), // vx
+            u_forward.select(0, t2).select(0, 1).data_ptr<float>(), // vz
 
             vp.data_ptr<float>(),
             vs.data_ptr<float>(),
@@ -120,14 +126,13 @@ elastic_backward_cuda(
             solver
         );
 
-
     }
 
     return std::make_tuple(grad_vp, grad_vs, grad_rho);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-elastic_backward_boundary_saving_cuda(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+backward_bs(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
     const std::vector<torch::Tensor>& models,
@@ -172,7 +177,6 @@ elastic_backward_boundary_saving_cuda(
     ElasticWavefieldTensor adjoint;
     adjoint.allocate(vp, 2);
     ElasticWavefieldTensor forward;
-    forward.allocate(vp, 2);
 
     auto mu  = rho * vs * vs;
     auto lambda = rho * (vp * vp - 2 * vs * vs);
@@ -201,8 +205,8 @@ elastic_backward_boundary_saving_cuda(
     auto cpml_view = cpml.view();
 
     GeneralBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 2, 5, solver, vp, solver.M+1);
-    boundary_saver.load_from_vector(u_boundary);
+    boundary_saver.allocate(true, 2, 5, solver, vp, solver.M+0);
+    boundary_saver.load_from_vector(u_boundary, vp);
     auto bs = boundary_saver.view();
 
     dim3 block(32, 8);
@@ -222,8 +226,7 @@ elastic_backward_boundary_saving_cuda(
     auto fvz_prev = torch::zeros_like(vp);
     auto fvx_prev = torch::zeros_like(vp);
 
-    auto u_allt = torch::zeros({nt, B, C, nz, nx}, vp.options()); // check
-    auto u_allt_allw = torch::zeros({5, nt, B, C, nz, nx}, vp.options()); // check
+    auto u_all_t = torch::zeros({nt, B, 1, nz, nx}, vp.options());
 
     for (int it = nt - 1; it >= 1; --it) {
         
@@ -234,7 +237,7 @@ elastic_backward_boundary_saving_cuda(
             mu.data_ptr<float>(),
             cpml_view,
             solver
-        );
+        ); // t-0.5
 
         LAUNCH_ELASTIC_STRESS_ADJOINT(
             order,
@@ -242,7 +245,7 @@ elastic_backward_boundary_saving_cuda(
             rho.data_ptr<float>(),
             cpml_view,
             solver
-        );
+        ); // t-1.0
 
         add_source<<<B, adjoint_nsrc>>>(
             adj_view.vz,
@@ -254,6 +257,7 @@ elastic_backward_boundary_saving_cuda(
         );
 
         // Wavefield reconstruction
+        // donot work when source is in the saving part
         add_source<<<B, forward_nsrc>>>(
             for_view.vz,
             neg_forward_source.data_ptr<float>(),
@@ -282,12 +286,12 @@ elastic_backward_boundary_saving_cuda(
                 boundary_saver.left_t[f].data_ptr<float>(),
                 boundary_saver.right_t[f].data_ptr<float>(),
                 it-1,
-                solver.M+1,
+                solver.M+0,
                 solver
-            );    
+            );
 
         // Gradient calculation
-        LAUNCH_CALCULATE_GRAD_ELASTIC(
+        LAUNCH_CALCULATE_GRAD_ELASTIC_BS(
             order,
             for_view,
             adj_view,
@@ -327,17 +331,14 @@ elastic_backward_boundary_saving_cuda(
                 boundary_saver.left_t[f].data_ptr<float>(),
                 boundary_saver.right_t[f].data_ptr<float>(),
                 it-1,
-                solver.M+1,
+                solver.M+0,
                 solver
             );
-        u_allt[it].copy_(forward.vz_t); // check
 
-        u_allt_allw.select(1, it).select(0, 0).copy_(adjoint.vx_t);
-        u_allt_allw.select(1, it).select(0, 1).copy_(adjoint.vz_t);
-        u_allt_allw.select(1, it).select(0, 2).copy_(adjoint.sxx_t);
-        u_allt_allw.select(1, it).select(0, 3).copy_(adjoint.szz_t);
-        u_allt_allw.select(1, it).select(0, 4).copy_(adjoint.sxz_t);
+        u_all_t[it].copy_(forward.vz_t); // for visualization
     }
 
-    return std::make_tuple(u_allt, u_allt_allw,grad_vp, grad_vs, grad_rho);
+    return std::make_tuple(u_all_t, grad_vp, grad_vs, grad_rho);
+}
+
 }

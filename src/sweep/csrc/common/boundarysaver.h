@@ -102,34 +102,45 @@ struct GeneralBoundarySaver {
 
     }
 
-    void load_from_vector(const std::vector<torch::Tensor>& u_boundary)
+    void load_from_vector(
+        const std::vector<torch::Tensor>& u_boundary,
+        const torch::Tensor& ref_tensor
+        )
         {
             if (!enabled)
                 throw std::runtime_error("Boundary saving not enabled.");
+
+            auto device = ref_tensor.device();
+            
+            auto move = [&](const torch::Tensor& t) {
+                return t.device() == device ?
+                    t :
+                    t.to(device, /*non_blocking=*/true);
+            };
 
             if (dim == 2) {
 
                 if (u_boundary.size() != 4)
                     throw std::runtime_error("2D boundary expects 4 tensors.");
 
-                top_t.copy_(u_boundary[0]);
-                bottom_t.copy_(u_boundary[1]);
-                left_t.copy_(u_boundary[2]);
-                right_t.copy_(u_boundary[3]);
+                top_t.copy_(move(u_boundary[0]));
+                bottom_t.copy_(move(u_boundary[1]));
+                left_t.copy_(move(u_boundary[2]));
+                right_t.copy_(move(u_boundary[3]));
 
             } else { // 3D
 
                 if (u_boundary.size() != 6)
                     throw std::runtime_error("3D boundary expects 6 tensors.");
 
-                top_t.copy_(u_boundary[0]);
-                bottom_t.copy_(u_boundary[1]);
+                top_t.copy_(move(u_boundary[0]));
+                bottom_t.copy_(move(u_boundary[1]));
 
-                front_t.copy_(u_boundary[2]);
-                back_t.copy_(u_boundary[3]);
+                front_t.copy_(move(u_boundary[2]));
+                back_t.copy_(move(u_boundary[3]));
 
-                left_t.copy_(u_boundary[4]);
-                right_t.copy_(u_boundary[5]);
+                left_t.copy_(move(u_boundary[4]));
+                right_t.copy_(move(u_boundary[5]));
             }
         }
 
@@ -172,21 +183,23 @@ __global__ void save_boundary_kernel_3d(
     float* __restrict__ right,
 
     int it,
+    int width,
     SolverContext solver
 );
 
 __global__ void restore_boundary_kernel_3d(
     float* __restrict__ u,        // (B, nz, ny, nx)
 
-    const float* __restrict__ front,   // (nt, B, n, ny, nx)
-    const float* __restrict__ back,
-
-    const float* __restrict__ top,     // (nt, B, nz, n, nx)
+    const float* __restrict__ top,   // (nt, B, n, ny, nx)
     const float* __restrict__ bottom,
+
+    const float* __restrict__ front,     // (nt, B, nz, n, nx)
+    const float* __restrict__ back,
 
     const float* __restrict__ left,    // (nt, B, nz, ny, n)
     const float* __restrict__ right,
 
     int it,
+    int width,
     SolverContext solver
 );

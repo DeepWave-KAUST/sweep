@@ -10,12 +10,12 @@ __global__ void add_source(
     const int* __restrict__ sources_loc,  // (B, nsrc, 2)
     int it,
     int nsrc,
-    SolverContext solver
+    const SolverContext solver
 ) {
     int b = blockIdx.x;
-    int s = threadIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
 
-    if (s >= nsrc) return;
+    if (b >= solver.B || s >= nsrc) return;
 
     int base = (b * nsrc + s) * 2;
     int ix = sources_loc[base + 0];
@@ -41,10 +41,10 @@ __global__ void record_kernel(
     int nrec,
     SolverContext solver
 ) {
-    int b = blockIdx.x;     // shot index
-    int r = threadIdx.x;    // receiver index
+    int b = blockIdx.x;  
+    int r = blockIdx.y * blockDim.x + threadIdx.x;
 
-    if (r >= nrec) return;
+    if (b >= solver.B || r >= nrec) return;
 
     int base = (b * nrec + r) * 2;
     int ix = receivers[base + 0];
@@ -66,10 +66,10 @@ __global__ void add_source_3d(
     const int* __restrict__ sources_loc,   // (B, nsrc, 3)
     int it,
     int nsrc,
-    SolverContext solver
+    const SolverContext solver
 ) {
-    int b = blockIdx.x;      // shot index
-    int s = threadIdx.x;     // source index
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
 
     if (s >= nsrc) return;
 
@@ -102,12 +102,13 @@ __global__ void record_kernel_3d(
     const int* __restrict__ receivers,     // (B, nrec, 3)
     int it,
     int nrec,
-    SolverContext solver
+    const SolverContext solver
 ) {
-    int b = blockIdx.x;     // shot index
-    int r = threadIdx.x;    // receiver index
+    int b = blockIdx.x;  
 
-    if (r >= nrec) return;
+    int r = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || r >= nrec) return;
 
     int base = (b * nrec + r) * 3;
 
@@ -155,4 +156,36 @@ __global__ void set_boundary_zeros(
         u_b[idx] = 0.f;
     }
 
+}
+
+__global__ void set_boundary_zeros_3d(
+    float* __restrict__ u,   // (B, nz, ny, nx)
+    int width,
+    int nx,
+    int ny,
+    int nz
+)
+{
+
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    int b  = iz_global / nz;
+    int iz = iz_global % nz;
+
+    if (ix >= nx || iy >= ny || iz >= nz) return;
+
+    int spatial = nx * ny * nz;
+    float* u_b = u + b * spatial;
+
+    int halo = width;
+
+    if (ix < halo || ix >= nx - halo ||
+        iy < halo || iy >= ny - halo ||
+        iz < halo || iz >= nz - halo)
+    {
+        int idx = iz * ny * nx + iy * nx + ix;
+        u_b[idx] = 0.f;
+    }
 }

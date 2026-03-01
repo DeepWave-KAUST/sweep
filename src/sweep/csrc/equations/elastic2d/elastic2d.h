@@ -1,6 +1,8 @@
 #pragma once
 #include <torch/extension.h>
 
+namespace elastic2d {
+
 std::tuple<
     torch::Tensor,   // u_allt
     std::tuple<      // boundary tuple
@@ -12,7 +14,7 @@ std::tuple<
     torch::Tensor,   // u_last_two
     torch::Tensor    // record
 >
-elastic_forward_cuda(
+forward(
     const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
@@ -31,7 +33,7 @@ elastic_forward_cuda(
 );
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-elastic_backward_cuda(
+backward(
     torch::Tensor u_forward,     // (nt, 4， B, nz, nx)
     const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
@@ -46,8 +48,8 @@ elastic_backward_cuda(
     std::vector<float> spacing
 );
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-elastic_backward_boundary_saving_cuda(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+backward_bs(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
     const std::vector<torch::Tensor>& models,
@@ -65,3 +67,5 @@ elastic_backward_boundary_saving_cuda(
     std::vector<float> spacing,
     bool free_surface
 );
+
+}

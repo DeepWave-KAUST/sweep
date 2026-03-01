@@ -68,7 +68,7 @@ class PropTorch(PropBase, torch.nn.Module):
 
 
         # Extract adjoint wavefields
-        self.adjoint_wavefields = torch.zeros((nt, 5, *shape_wavefield), device=self.dev, dtype=torch.float32)
+        # self.adjoint_wavefields = torch.zeros((nt, 5, *shape_wavefield), device=self.dev, dtype=torch.float32)
         # def hook_it(index, t):
         #     def _hook(grad):
         #         self.adjoint_wavefields[t, index] = grad.detach().clone()

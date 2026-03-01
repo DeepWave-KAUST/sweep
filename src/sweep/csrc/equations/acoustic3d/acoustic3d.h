@@ -1,6 +1,8 @@
 #pragma once
 #include <torch/extension.h>
 
+namespace acoustic3d {
+
 std::tuple<
     torch::Tensor,   // vp
     std::tuple<      // boundary tuple
@@ -14,7 +16,7 @@ std::tuple<
     torch::Tensor,   // u_last_two
     torch::Tensor    // record
 >
-acoustic_forward3d_cuda(
+forward(
     const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,
@@ -33,7 +35,7 @@ acoustic_forward3d_cuda(
 );
 
 std::tuple<torch::Tensor>
-acoustic_backward3d_cuda(
+backward(
     torch::Tensor u_forward,     // (nt, B, nz, nx)
     const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
@@ -49,7 +51,7 @@ acoustic_backward3d_cuda(
 );
 
 std::tuple<torch::Tensor>
-acoustic_backward3d_boundary_saving_cuda(
+backward_bs(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
     const std::vector<torch::Tensor>& models,
@@ -67,3 +69,5 @@ acoustic_backward3d_boundary_saving_cuda(
     std::vector<float> spacing,
     bool free_surface
 );
+
+} // namespace acoustic3d

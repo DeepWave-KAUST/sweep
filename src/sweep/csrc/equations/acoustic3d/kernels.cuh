@@ -6,8 +6,8 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 
-#define LAUNCH_FORWARD_3D(order, ...)                                  \
-    do {                                                        \
+#define LAUNCH_FORWARD_3D(order, grid, block, ...)                                          \
+    do {                                                                                    \
         if      ((order) == 2) acoustic_forward_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) acoustic_forward_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 6) acoustic_forward_kernel_3d<6><<<grid, block>>>(__VA_ARGS__); \
@@ -15,8 +15,8 @@
         else                   acoustic_forward_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_FORWARD_3D_NOPML(order, ...)                                  \
-    do {                                                        \
+#define LAUNCH_FORWARD_3D_NOPML(order, grid, block, ...)                           \
+    do {                                                                           \
         if      ((order) == 2) acoustic_nopml_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) acoustic_nopml_3d<4><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 6) acoustic_nopml_3d<6><<<grid, block>>>(__VA_ARGS__); \
@@ -182,12 +182,16 @@ __global__ void acoustic_nopml_3d(
     if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
         return;
 
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int M;
+    if constexpr (Order == -1) {
+        M = solver.M;
+    } else {
+        M = Order / 2;
+    }
 
-    int halo = is_runtime ? solver.M : M_static;
+    int halo = solver.abcn + 2*M;
 
-    int top_halo = solver.free_surface ? solver.M : halo;
+    int top_halo = solver.free_surface ? 2*M : halo;
 
     if (ix < halo || ix >= solver.nx - halo ||
         iy < halo || iy >= solver.ny - halo ||

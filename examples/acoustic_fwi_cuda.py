@@ -3,6 +3,7 @@ import torch
 sys.path.append('../src')
 torch.backends.cudnn.benchmark = True
 from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.torch import PropTorch
 from sweep.equations import Acoustic
 from sweep.signal import ricker
 import numpy as np
@@ -10,8 +11,8 @@ import matplotlib.pyplot as plt
 from configure import *
 
 # Overwritre 
-abcn = 20
-free_surface = True
+abcn = 30
+free_surface = False
 
 save_path = 'acoustic_fwi_l2_cuda'
 if not os.path.exists(save_path):
@@ -34,13 +35,13 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=dev), 
+solver = PropTorch(Acoustic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
             dh=dh,
             dt=dt,
-            # source_type=['h1'],   # for cuda, no need to specify source and receiver type
-            # receiver_type=['h1'], # for cuda, no need to specify source and receiver type
+            source_type=['h1'],   # for cuda, no need to specify source and receiver type
+            receiver_type=['h1'], # for cuda, no need to specify source and receiver type
             abcn=abcn, 
             free_surface=free_surface,
             pml_type='cpmlr')
@@ -70,7 +71,7 @@ end_event.record()
 torch.cuda.synchronize()
 elapsed_time = start_event.elapsed_time(end_event)
 print(f"Execution time: {elapsed_time:.2f} ms")
-
+print(obs.shape)
 vmin, vmax = np.percentile(obs[-1], [2, 98])
 plt.imshow(obs[-1].squeeze().T, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
@@ -87,8 +88,8 @@ for epoch in tqdm.trange(epochs):
 
     opt.zero_grad()
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
-    
-    syn = solver(wave, sources[rand_shots], receivers[rand_shots], models=[vp], use_boundary_saving=True)
+    rand_shots = np.arange(0, sources.shape[0], 20) # Use all shots
+    syn = solver(wave, sources[rand_shots], receivers[rand_shots], models=[vp], use_boundary_saving=False)
     loss = (syn-torch.from_numpy(obs[rand_shots]).to(dev)).pow(2).mean()
     loss.backward()
     LOSS.append(loss.item())

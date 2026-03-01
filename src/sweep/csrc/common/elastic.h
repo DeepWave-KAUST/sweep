@@ -266,6 +266,14 @@ struct ElasticWavefieldTensor {
         szz_t = torch::zeros_like(vp);
         sxz_t = torch::zeros_like(vp);
 
+        if (dim == 3) {
+            // Wavefield
+            vy_t = torch::zeros_like(vp);
+            syy_t = torch::zeros_like(vp);
+            sxy_t = torch::zeros_like(vp);
+            syz_t = torch::zeros_like(vp);
+        }
+
         if (use_pml) {
 
             // Vx
@@ -285,12 +293,6 @@ struct ElasticWavefieldTensor {
             m_szzz_t = torch::zeros_like(vp);
 
             if (dim == 3) {
-                // Wavefield
-                vy_t = torch::zeros_like(vp);
-                syy_t = torch::zeros_like(vp);
-                sxy_t = torch::zeros_like(vp);
-                syz_t = torch::zeros_like(vp);
-
                 // Boundary conditions
 
                 // Vx
@@ -309,14 +311,18 @@ struct ElasticWavefieldTensor {
                 m_sxyz_t = torch::zeros_like(vp);
 
                 // syy
-                m_syyx_t = torch::zeros_like(vp);
-                m_syyy_t = torch::zeros_like(vp);
-                m_syyz_t = torch::zeros_like(vp);
+                m_syyx_t = torch::zeros_like(vp); // Adjoint
+                m_syyy_t = torch::zeros_like(vp); // Adjoint
+                m_syyz_t = torch::zeros_like(vp); // Adjoint
 
                 // syz
-                m_syzx_t = torch::zeros_like(vp);
+                // m_syzx_t = torch::zeros_like(vp);
                 m_syzy_t = torch::zeros_like(vp);
                 m_syzz_t = torch::zeros_like(vp);
+
+                // for adjoint
+                m_sxxy_t = torch::zeros_like(vp);
+                m_szzy_t = torch::zeros_like(vp);
             }
         }
 
@@ -336,6 +342,19 @@ struct ElasticWavefieldTensor {
         v.sxx = sxx_t.data_ptr<float>();
         v.szz = szz_t.data_ptr<float>();
         v.sxz = sxz_t.data_ptr<float>();
+
+        if (dim == 3) {
+            v.vy = vy_t.data_ptr<float>();
+            v.syy = syy_t.data_ptr<float>();
+            v.sxy = sxy_t.data_ptr<float>();
+            v.syz = syz_t.data_ptr<float>();
+        }
+        else {
+            v.vy = nullptr;
+            v.syy = nullptr;
+            v.sxy = nullptr;
+            v.syz = nullptr;
+        }
 
         if (use_pml) {
 
@@ -358,6 +377,40 @@ struct ElasticWavefieldTensor {
             // szz
             v.m_szzx = m_szzx_t.data_ptr<float>();
             v.m_szzz = m_szzz_t.data_ptr<float>();
+
+            // For adjoint
+            v.m_sxxy = m_sxxy_t.data_ptr<float>();
+            v.m_szzy = m_szzy_t.data_ptr<float>();
+
+            if (dim == 3) {
+                // Boundary conditions
+
+                // Vx
+                v.m_vxy = m_vxy_t.data_ptr<float>();
+
+                // Vz
+                v.m_vzy = m_vzy_t.data_ptr<float>();
+
+                // Vy
+                v.m_vyx = m_vyx_t.data_ptr<float>();
+                v.m_vyy = m_vyy_t.data_ptr<float>();
+                v.m_vyz = m_vyz_t.data_ptr<float>();
+
+                // sxy
+                v.m_sxyx = m_sxyx_t.data_ptr<float>();
+                v.m_sxyy = m_sxyy_t.data_ptr<float>();
+                v.m_sxyz = m_sxyz_t.data_ptr<float>();
+
+                // syy
+                v.m_syyx = m_syyx_t.data_ptr<float>(); // Adjoint
+                v.m_syyy = m_syyy_t.data_ptr<float>(); // Adjoint
+                v.m_syyz = m_syyz_t.data_ptr<float>();
+
+                // syz
+                // v.m_syzx = m_syzx_t.data_ptr<float>();
+                v.m_syzy = m_syzy_t.data_ptr<float>();
+                v.m_syzz = m_syzz_t.data_ptr<float>();
+            }
 
         }
         else {

@@ -1,61 +1,58 @@
 #pragma once
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "gradient2d.cuh"
+#include "gradient3d.cuh"
 
 enum DiffType : int {
     DIFF_FORWARD  = 0,
     DIFF_BACKWARD = 1
 };
 
-struct SGradContext {
-    int sx;      // stride in x
-    int sz;      // stride in z
+struct SGradContext3d {
+    int sx;
+    int sy;
+    int sz;
+
     int ix;
+    int iy;
     int iz;
 
-    int M;      // runtime order (if needed)
+    int M;
     const float* __restrict__ coeff;
 
     float dx;
+    float dy;
     float dz;
 };
 
 template<int Order, int Dim, DiffType Type>
 struct SGradientImpl;
 
-
 template<int Order, int Dim, DiffType Type>
 __device__ __forceinline__
 float sgradient(
     const float* __restrict__ u,
-    const SGradContext& ctx
+    const SGradContext3d& ctx
 )
 {
     if constexpr (Order == -1) {
 
         return SGradientImpl<-1, Dim, Type>::eval(
             u,
-            ctx.sx,
-            ctx.sz,
-            ctx.ix,
-            ctx.iz,
+            ctx.sx, ctx.sy, ctx.sz,
+            ctx.ix, ctx.iy, ctx.iz,
             ctx.M,
             ctx.coeff,
-            ctx.dx,
-            ctx.dz
+            ctx.dx, ctx.dy, ctx.dz
         );
 
     } else {
 
         return SGradientImpl<Order, Dim, Type>::eval(
             u,
-            ctx.sx,
-            ctx.sz,
-            ctx.ix,
-            ctx.iz,
-            ctx.dx,
-            ctx.dz
+            ctx.sx, ctx.sy, ctx.sz,
+            ctx.ix, ctx.iy, ctx.iz,
+            ctx.dx, ctx.dy, ctx.dz
         );
     }
 }
@@ -70,28 +67,39 @@ struct SGradientImpl<2, Dim, Type> {
     __device__ __forceinline__
     static float eval(
         const float* __restrict__ u,
-        int sx, int sz,
-        int ix, int iz,
-        float dx, float dz
+        int sx, int sy, int sz,
+        int ix, int iy, int iz,
+        float dx, float dy, float dz
     ) {
 
-        int idx = iz * sz + ix * sx;
+        int idx = iz*sz + iy*sy + ix*sx;
         float grad = 0.f;
 
+        // X
         if constexpr (Dim & GRAD_X) {
 
             if constexpr (Type == DIFF_FORWARD)
-                grad += (u[idx + sx] - u[idx]) / dx;
+                grad += (u[idx+sx] - u[idx]) / dx;
             else
-                grad += (u[idx] - u[idx - sx]) / dx;
+                grad += (u[idx] - u[idx-sx]) / dx;
         }
 
+        // Y
+        if constexpr (Dim & GRAD_Y) {
+
+            if constexpr (Type == DIFF_FORWARD)
+                grad += (u[idx+sy] - u[idx]) / dy;
+            else
+                grad += (u[idx] - u[idx-sy]) / dy;
+        }
+
+        // Z
         if constexpr (Dim & GRAD_Z) {
 
             if constexpr (Type == DIFF_FORWARD)
-                grad += (u[idx + sz] - u[idx]) / dz;
+                grad += (u[idx+sz] - u[idx]) / dz;
             else
-                grad += (u[idx] - u[idx - sz]) / dz;
+                grad += (u[idx] - u[idx-sz]) / dz;
         }
 
         return grad;
@@ -108,19 +116,23 @@ struct SGradientImpl<4, Dim, Type> {
     static float eval(
         const float* __restrict__ u,
         int sx,
+        int sy,
         int sz,
         int ix,
+        int iy,
         int iz,
         float dx,
+        float dy,
         float dz
     ) {
 
         constexpr float c1 = 9.f/8.f;
         constexpr float c2 = -1.f/24.f;
 
-        int idx = iz * sz + ix * sx;
+        int idx = iz*sz + iy*sy + ix*sx;
         float grad = 0.f;
 
+        // ================= X =================
         if constexpr (Dim & GRAD_X) {
 
             if constexpr (Type == DIFF_FORWARD) {
@@ -143,6 +155,30 @@ struct SGradientImpl<4, Dim, Type> {
             }
         }
 
+        // ================= Y =================
+        if constexpr (Dim & GRAD_Y) {
+
+            if constexpr (Type == DIFF_FORWARD) {
+
+                grad += (
+                    c2*u[idx+2*sy] +
+                     c1*u[idx+sy] -
+                     c1*u[idx] -
+                     c2*u[idx-sy]
+                ) / dy;
+
+            } else {
+
+                grad += (
+                     c2*u[idx+sy] +
+                     c1*u[idx] -
+                     c1*u[idx-sy] -
+                     c2*u[idx-2*sy]
+                ) / dy;
+            }
+        }
+
+        // ================= Z =================
         if constexpr (Dim & GRAD_Z) {
 
             if constexpr (Type == DIFF_FORWARD) {
@@ -178,21 +214,19 @@ struct SGradientImpl<6, Dim, Type> {
     __device__ __forceinline__
     static float eval(
         const float* __restrict__ u,
-        int sx,
-        int sz,
-        int ix,
-        int iz,
-        float dx,
-        float dz
+        int sx, int sy, int sz,
+        int ix, int iy, int iz,
+        float dx, float dy, float dz
     ) {
 
         constexpr float c1 = 75.f/64.f;
         constexpr float c2 = -25.f/384.f;
         constexpr float c3 = 3.f/640.f;
 
-        int idx = iz * sz + ix * sx;
+        int idx = iz*sz + iy*sy + ix*sx;
         float grad = 0.f;
 
+        // ================= X =================
         if constexpr (Dim & GRAD_X) {
 
             if constexpr (Type == DIFF_FORWARD) {
@@ -219,6 +253,34 @@ struct SGradientImpl<6, Dim, Type> {
             }
         }
 
+        // ================= Y =================
+        if constexpr (Dim & GRAD_Y) {
+
+            if constexpr (Type == DIFF_FORWARD) {
+
+                grad += (
+                     c3*u[idx+3*sy] +
+                     c2*u[idx+2*sy] +
+                     c1*u[idx+sy] -
+                     c1*u[idx] -
+                     c2*u[idx-sy] -
+                     c3*u[idx-2*sy]
+                ) / dy;
+
+            } else {
+
+                grad += (
+                     c3*u[idx+2*sy] +
+                     c2*u[idx+sy] +
+                     c1*u[idx] -
+                     c1*u[idx-sy] -
+                     c2*u[idx-2*sy] -
+                     c3*u[idx-3*sy]
+                ) / dy;
+            }
+        }
+
+        // ================= Z =================
         if constexpr (Dim & GRAD_Z) {
 
             if constexpr (Type == DIFF_FORWARD) {
@@ -258,12 +320,9 @@ struct SGradientImpl<8, Dim, Type> {
     __device__ __forceinline__
     static float eval(
         const float* __restrict__ u,
-        int sx,
-        int sz,
-        int ix,
-        int iz,
-        float dx,
-        float dz
+        int sx, int sy, int sz,
+        int ix, int iy, int iz,
+        float dx, float dy, float dz
     ) {
 
         constexpr float c1 = 1225.f/1024.f;
@@ -271,9 +330,10 @@ struct SGradientImpl<8, Dim, Type> {
         constexpr float c3 = 49.f/5120.f;
         constexpr float c4 = -5.f/7168.f;
 
-        int idx = iz * sz + ix * sx;
+        int idx = iz*sz + iy*sy + ix*sx;
         float grad = 0.f;
 
+        // ================= X =================
         if constexpr (Dim & GRAD_X) {
 
             if constexpr (Type == DIFF_FORWARD) {
@@ -304,6 +364,38 @@ struct SGradientImpl<8, Dim, Type> {
             }
         }
 
+        // ================= Y =================
+        if constexpr (Dim & GRAD_Y) {
+
+            if constexpr (Type == DIFF_FORWARD) {
+
+                grad += (
+                     c4*u[idx+4*sy] +
+                     c3*u[idx+3*sy] +
+                     c2*u[idx+2*sy] +
+                     c1*u[idx+sy] -
+                     c1*u[idx] -
+                     c2*u[idx-sy] -
+                     c3*u[idx-2*sy] -
+                     c4*u[idx-3*sy]
+                ) / dy;
+
+            } else {
+
+                grad += (
+                     c4*u[idx+3*sy] +
+                     c3*u[idx+2*sy] +
+                     c2*u[idx+sy] +
+                     c1*u[idx] -
+                     c1*u[idx-sy] -
+                     c2*u[idx-2*sy] -
+                     c3*u[idx-3*sy] -
+                     c4*u[idx-4*sy]
+                ) / dy;
+            }
+        }
+
+        // ================= Z =================
         if constexpr (Dim & GRAD_Z) {
 
             if constexpr (Type == DIFF_FORWARD) {
@@ -348,16 +440,19 @@ struct SGradientImpl<-1, Dim, Type> {
     static float eval(
         const float* __restrict__ u,
         int sx,
+        int sy,
         int sz,
         int ix,
+        int iy,
         int iz,
         int M,
         const float* __restrict__ coeff,
         float dx,
+        float dy,
         float dz
     ) {
 
-        int idx = iz * sz + ix * sx;
+        int idx = iz*sz + iy*sy + ix*sx;
         float grad = 0.f;
 
         // ================= X =================
@@ -383,6 +478,31 @@ struct SGradientImpl<-1, Dim, Type> {
             }
 
             grad += acc / dx;
+        }
+
+        // ================= Y =================
+        if constexpr (Dim & GRAD_Y) {
+
+            float acc = 0.f;
+
+            #pragma unroll 1
+            for (int m = 1; m <= M; ++m) {
+
+                if constexpr (Type == DIFF_FORWARD) {
+
+                    acc += coeff[m] *
+                        ( u[idx + m*sy]
+                        - u[idx - (m-1)*sy] );
+
+                } else {
+
+                    acc += coeff[m] *
+                        ( u[idx + (m-1)*sy]
+                        - u[idx - m*sy] );
+                }
+            }
+
+            grad += acc / dy;
         }
 
         // ================= Z =================

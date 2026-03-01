@@ -7,6 +7,9 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
+
+namespace acoustic2d {
 
 std::tuple<
     torch::Tensor,   // u_allt
@@ -19,7 +22,7 @@ std::tuple<
     torch::Tensor,   // u_last_two
     torch::Tensor    // record
 >
-acoustic_forward_cuda(
+forward(
     const std::vector<torch::Tensor>& models,
     torch::Tensor source,      // (B, nsrc, nt)
     torch::Tensor lap_coes,       // FD coefficients c[0..M]
@@ -77,12 +80,9 @@ acoustic_forward_cuda(
     boundary_saver.allocate(use_boundary_saving, 2, 1, ctx, vp);
     auto bs = boundary_saver.view();
 
-    dim3 block(32, 8);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (nz + block.y - 1) / block.y,
-        B
-    );
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+    auto source_config = fdtd::Geom::make(nsrc, B);
+    auto record_config = fdtd::Geom::make(nrec, B);
 
     float* u_thist = nullptr;
 
@@ -95,6 +95,8 @@ acoustic_forward_cuda(
         
         LAUNCH_FORWARD(
             order,
+            launch_config.grid,
+            launch_config.block,
             view,
             save_all_wavefields,
             u_thist,
@@ -104,7 +106,7 @@ acoustic_forward_cuda(
         );
 
         if (use_boundary_saving) {
-            save_boundary_kernel<<<grid, block>>>(
+            save_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
                 view.u_now,
                 bs.top,
                 bs.bottom,
@@ -116,7 +118,7 @@ acoustic_forward_cuda(
             );
         }
         
-        add_source<<<B, nsrc>>>(
+        add_source<<<source_config.grid, source_config.block>>>(
             view.u_next,
             source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
@@ -125,7 +127,7 @@ acoustic_forward_cuda(
             ctx
         );
         
-        record_kernel<<<N, nrec>>>(
+        record_kernel<<<record_config.grid, record_config.block>>>(
             view.u_next,
             record.data_ptr<float>(),
             receivers_loc.data_ptr<int>(),
@@ -157,3 +159,5 @@ acoustic_forward_cuda(
     );
 
 }
+
+} // namespace acoustic2d

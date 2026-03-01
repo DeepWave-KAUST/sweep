@@ -39,7 +39,9 @@ class Warpper(torch.autograd.Function):
             save_all_wavefield = True
         if any(m.requires_grad for m in models) and use_boundary_saving:
             save_all_wavefield = False
-
+        if not any(m.requires_grad for m in models):
+            save_all_wavefield = False
+            use_boundary_saving = False
         # -------- CUDA forward --------
         (u_allt, boundary_vals, last, syn) = forward_func(
             [m.contiguous() for m in models],
@@ -68,6 +70,7 @@ class Warpper(torch.autograd.Function):
         )
         # np.save('u_last.npy', last.detach().cpu().numpy())
         ctx.models = models
+        # ctx.boundary_vals = [b.cpu() for b in boundary_vals]
         ctx.boundary_vals = boundary_vals
         ctx.pml_vals = pml_vals
         ctx.abcn = abcn
@@ -100,8 +103,7 @@ class Warpper(torch.autograd.Function):
         nt = ctx.nt
         dt = ctx.dt
 
-        # -------- CUDA adjoint --------
-
+        # -------- CUDA adjoint --------        
         if not ctx.use_boundary_saving:
             gradients = ctx.backward_func(
                 u_allt.contiguous(),
@@ -136,9 +138,10 @@ class Warpper(torch.autograd.Function):
                 ctx.spacing,
                 ctx.free_surface
             )
-            np.save('/data/tmp/u_forward.npy', gradients[0].detach().cpu().numpy())
-            np.save('/data/tmp/u_adoint.npy', gradients[1].detach().cpu().numpy())
-            gradients = gradients[2:]
+            # print('Saving forward wavefield for checking...')
+            # np.save('/data/tmp/u_forward.npy', gradients[0].detach().cpu().numpy())
+            # np.save('/data/tmp/u_adoint.npy', gradients[0].detach().cpu().numpy())
+            # gradients = gradients[1:]
             # print([g.shape for g in gradients])
         return (
             None, None, None, # functions
@@ -257,6 +260,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
         self.equation.b = pad_pml_vals(self.equation.b, pml_padding)
+        
         # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ax', 'bx', 'axh', 'bxh']):
         #     np.save(f'{name}.npy', b.detach().cpu().numpy())
 
@@ -269,7 +273,7 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
 
-        spacing = [self.dh.item()] * self.ndim
+        spacing = [float(self.dh.item())] * self.ndim
         
         syn = Warpper.apply(
                 self.forward_func, 
@@ -282,7 +286,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 M,
                 self.abcn,
                 spacing,
-                self.dt.item(),
+                float(self.dt.item()),
                 self.equation.b,
                 use_boundary_saving,
                 self.free_surface,

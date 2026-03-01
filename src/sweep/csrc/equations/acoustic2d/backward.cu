@@ -6,9 +6,12 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
+
+namespace acoustic2d {
 
 std::tuple<torch::Tensor>
-acoustic_backward_cuda(
+backward(
     torch::Tensor u_forward,     // (nt, B, nz, nx)
     const std::vector<torch::Tensor>& models,
     torch::Tensor adjoint_source,      // (B, nsrc, nt)
@@ -47,12 +50,8 @@ acoustic_backward_cuda(
     cpml_tensor.allocate(pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    dim3 block(32, 8);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (nz + block.y - 1) / block.y,
-        B
-    );
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+    auto source_config = fdtd::Geom::make(nsrc, B);
 
     const int order =
         (M <= 4) ? static_cast<int>(2 * M) : -1;
@@ -65,6 +64,8 @@ acoustic_backward_cuda(
 
         LAUNCH_FORWARD(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             false,
             u_thist,
@@ -73,7 +74,7 @@ acoustic_backward_cuda(
             ctx
         );
         
-        add_source<<<B, nsrc>>>(
+        add_source<<<source_config.grid, source_config.block>>>(
             adj_view.u_next,
             adjoint_source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
@@ -85,7 +86,7 @@ acoustic_backward_cuda(
         // rotate pointers: u_prev <- u_now <- u_next
         adjoint.swap();
 
-        calculate_grad<<<grid, block>>>(
+        calculate_grad<<<launch_config.grid, launch_config.block>>>(
             u_forward[it].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
@@ -99,7 +100,7 @@ acoustic_backward_cuda(
 }
 
 std::tuple<torch::Tensor>
-acoustic_backward_boundary_saving_cuda(
+backward_bs(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
     const std::vector<torch::Tensor>& models,
@@ -157,24 +158,29 @@ acoustic_backward_boundary_saving_cuda(
     // Boundary wavefields (for saving all wavefields)
     GeneralBoundarySaver boundary_saver;
     boundary_saver.allocate(true, 2, 1, ctx, vp);
-    boundary_saver.load_from_vector(u_boundary);
+    boundary_saver.load_from_vector(u_boundary, vp);
     auto bs = boundary_saver.view();
 
-    dim3 block(32, 8);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (nz + block.y - 1) / block.y,
-        B
-    );
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+    auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
+    auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
+
+    auto for_view = forward.view();
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn+ctx.M, nx, nz);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn+ctx.M, nx, nz);
 
     for (int it = nt - 1; it >= 1; --it) {
 
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
+        // u_allt[it].copy_(forward.u_now_t);
+
         // adjoint modeling
         LAUNCH_FORWARD(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             false,
             nullptr,
@@ -183,7 +189,7 @@ acoustic_backward_boundary_saving_cuda(
             ctx
         );
         
-        add_source<<<B, adjoint_nsrc>>>(
+        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
             adjoint_source.data_ptr<float>(),
             adjoint_sources_loc.data_ptr<int>(),
@@ -196,13 +202,15 @@ acoustic_backward_boundary_saving_cuda(
         
         LAUNCH_FORWARD_NOPML(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             vp.data_ptr<float>(),
             ctx
         );
 
         // Reconstruct the forward wavefield
-        restore_boundary_kernel<<<grid, block>>>(
+        restore_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
             for_view.u_next,
             bs.top,
             bs.bottom,
@@ -213,7 +221,7 @@ acoustic_backward_boundary_saving_cuda(
             ctx
         );
 
-        add_source<<<B, forward_nsrc>>>(
+        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
             for_view.u_next,
             forward_source.data_ptr<float>(),
             forward_sources_loc.data_ptr<int>(),
@@ -224,7 +232,7 @@ acoustic_backward_boundary_saving_cuda(
         
         forward.swap();
         
-        calculate_grad_utt<<<grid, block>>>(
+        calculate_grad_utt<<<launch_config.grid, launch_config.block>>>(
             forward.u_next_t.data_ptr<float>(),
             forward.u_now_t.data_ptr<float>(),
             forward.u_prev_t.data_ptr<float>(),
@@ -234,9 +242,10 @@ acoustic_backward_boundary_saving_cuda(
             nx, nz, dt
         );
 
-        // u_allt[it].copy_(f_now);
 
     }
 
     return std::make_tuple(grad);
+}
+
 }

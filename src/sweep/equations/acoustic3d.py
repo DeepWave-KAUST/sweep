@@ -65,5 +65,5 @@ class Acoustic3D(SecondOrderEquation):
         return step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
 
     def _C(self, ):
-        import sweep._C as _C
-        return (_C.acoustic_forward3d, _C.acoustic_backward3d, _C.acoustic_backward3d_bs)
+        from sweep._C import acoustic3d_forward, acoustic3d_backward, acoustic3d_backward_bs
+        return (acoustic3d_forward, acoustic3d_backward, acoustic3d_backward_bs)

@@ -39,8 +39,16 @@ __global__ void record_kernel_3d(
 );
 
 __global__ void set_boundary_zeros(
-    float* __restrict__ u,           // (B, nz, ny, nx)
+    float* __restrict__ u,           // (B, nz, nx)
     int width,
     int nx,
+    int nz
+);
+
+__global__ void set_boundary_zeros_3d(
+    float* __restrict__ u,   // (B, nz, ny, nx)
+    int width,
+    int nx,
+    int ny,
     int nz
 );

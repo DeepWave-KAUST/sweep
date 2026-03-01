@@ -40,7 +40,7 @@ class FirstOrderEquation(WaveEquation, ):
     This class can be extended to implement specific first-order equations.
     """
 
-    def __init__(self, spatial_order=4, device='cpu', backend='torch', **kwargs):
+    def __init__(self, spatial_order=4, device='cpu', backend='torch', ndim=2, **kwargs):
         """
         Initialize the first-order equation with an initial condition.
 
@@ -50,7 +50,7 @@ class FirstOrderEquation(WaveEquation, ):
         self.so = spatial_order
         self.backend = backend
         self.use_habc = False
-        self.pd = PartialDerivative(spatial_order, device, backend)
+        self.pd = PartialDerivative(spatial_order, device, backend, ndim=ndim)
         self.pd.to_backend(to_backend)
 
     def init(self, shape, device='cpu', h=1.0):

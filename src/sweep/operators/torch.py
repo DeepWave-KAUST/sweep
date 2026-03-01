@@ -46,6 +46,23 @@ def apply_kernels_torch(u, kernels):
 
     return out
 
+@torch.jit.script
+def apply_kernels_torch3d(u, kernels):
+    # u: (B, 1, D, H, W), torch.Tensor
+    # kernels: (K, kD, kH, kW), torch.Tensor
+    B, C, D, H, W = u.shape
+    K, KD, KH, KW = kernels.shape
+
+    kernels_exp = kernels.flip(-1, -2, -3).unsqueeze(1)  # (K, 1, kD, kH, kW)
+
+    padding = (KD // 2, KH // 2, KW // 2) 
+
+    conv_out = F.conv3d(u, kernels_exp, padding=padding)  # (B, K, D, H, W)
+
+    out = conv_out.sum(dim=1, keepdim=True)  # (B, 1, D, H, W)
+
+    return out
+
 def laplace2d(u: torch.Tensor, 
             h: float | torch.Tensor, 
             kernel: torch.Tensor) -> torch.Tensor:
