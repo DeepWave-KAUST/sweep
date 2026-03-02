@@ -8,6 +8,8 @@
 #include "../../common/acoustic.h"
 #include "../../common/boundarysaver.h"
 #include "../../launch/config.h"
+#include "../../operators/laplace.cuh"
+#include "../../operators/gradient.cuh"
 
 namespace acoustic2d {
 
@@ -77,7 +79,7 @@ forward(
         u_allt = torch::zeros({nt, B, nz, nx}, vp.options());
 
     GeneralBoundarySaver boundary_saver;
-    boundary_saver.allocate(use_boundary_saving, 2, 1, ctx, vp);
+    boundary_saver.allocate(use_boundary_saving, 2, 1, ctx, vp, -1, 2);
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -86,14 +88,18 @@ forward(
 
     float* u_thist = nullptr;
 
+    LaplaceParam lap_ctx{nx, 1, M, lap_coes.data_ptr<float>(), dx, 0.f, dz};
+    GradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     for (int it = 0; it < nt; ++it) {
 
         auto view = wavefield.view();
 
         u_thist = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
-        
-        LAUNCH_FORWARD(
+
+        ACOUSTIC2D(
             order,
             launch_config.grid,
             launch_config.block,
@@ -101,6 +107,10 @@ forward(
             save_all_wavefields,
             u_thist,
             vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_z,
             cpml,
             ctx
         );
@@ -144,6 +154,11 @@ forward(
     if (use_boundary_saving) {
         boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
         boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
+        // For reverse test
+        boundary_saver.last_two_t.select(1,2).copy_(wavefield.psix_t);
+        boundary_saver.last_two_t.select(1,3).copy_(wavefield.psiz_t);
+        boundary_saver.last_two_t.select(1,4).copy_(wavefield.zetax_t);
+        boundary_saver.last_two_t.select(1,5).copy_(wavefield.zetaz_t);
     }
 
     return std::make_tuple(

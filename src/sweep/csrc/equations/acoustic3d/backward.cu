@@ -1,7 +1,6 @@
 #include <torch/extension.h>
 
 #include "kernels.cuh"
-#include "../../operators/laplace3d.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
@@ -61,11 +60,18 @@ backward(
 
     SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, true, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
 
+    LaplaceParam lap_ctx{nx, ny, M, lap_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_y{1, 0, 0, M, grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+
+
     for (int it = nt - 1; it >= 0; --it) {
 
         auto adj_view = adjoint.view();
 
-        LAUNCH_FORWARD_3D(
+        ACOUSTIC3D(
             order,
             launch_config.grid,
             launch_config.block,
@@ -73,6 +79,11 @@ backward(
             false,
             u_thist,
             vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_y,
+            grad_ctx_z,
             cpml,
             ctx
         );
@@ -163,7 +174,7 @@ backward_bs(
     auto cpml = cpml_tensor.view();
 
     // Boundary wavefields (for saving all wavefields)
-    GeneralBoundarySaver boundary_saver;
+    GeneralBoundarySaverMore boundary_saver;
     boundary_saver.allocate(true, 3, 1, ctx, vp);
     boundary_saver.load_from_vector(u_boundary, vp);
     auto bs = boundary_saver.view();
@@ -176,6 +187,12 @@ backward_bs(
     set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn+ctx.M, nx, ny, nz);
     set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn+ctx.M, nx, ny, nz);
 
+    LaplaceParam lap_ctx{nx, ny, M, lap_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_y{1, 0, 0, M, grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+
 
     for (int it = nt - 1; it >= 1; --it) {
 
@@ -185,7 +202,7 @@ backward_bs(
         auto for_view = forward.view();
 
         // adjoint modeling
-        LAUNCH_FORWARD_3D(
+        ACOUSTIC3D(
             order,
             launch_config.grid,
             launch_config.block,
@@ -193,6 +210,11 @@ backward_bs(
             false,
             nullptr,
             vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_y,
+            grad_ctx_z,
             cpml,
             ctx
         );
@@ -210,18 +232,19 @@ backward_bs(
         adjoint.swap();
         
         
-        LAUNCH_FORWARD_3D_NOPML(
+        ACOUSTIC3D_NOPML(
             order,
             launch_config.grid,
             launch_config.block,
             for_view,
             f_this.data_ptr<float>(),
             vp.data_ptr<float>(),
+            lap_ctx,
             ctx
         );
 
         // Reconstruct the forward wavefield
-        restore_boundary_kernel_3d<<<launch_config.grid, launch_config.block>>>(
+        restore_boundary_kernel_3d_advance<<<launch_config.grid, launch_config.block>>>(
             for_view.u_next,
             bs.top,
             bs.bottom,

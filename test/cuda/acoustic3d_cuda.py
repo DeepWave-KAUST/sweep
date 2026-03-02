@@ -1,4 +1,4 @@
-import tqdm
+import tqdm, time
 import torch
 import matplotlib.pyplot as plt
 from sweep.propagator.cuda import PropCUDA
@@ -22,13 +22,13 @@ delay = 0.2
 dh = 10.0
 fm = 5.0
 spatial_order = 8
-abcn = 20
+abcn = 30
 
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([10, 25, 25]).reshape(1, 3)
-receivers = np.array([40, 25, 25]).reshape(1, 1, 3)
+sources = np.array([10, 25, 1]).reshape(1, 3)
+receivers = np.array([40, 25, 1]).reshape(1, 1, 3)
 # receivers = np.stack((np.arange(0, nx, 1), 
 #                      np.zeros(nx, dtype=np.int32)), axis=1).reshape(1, -1, 2)
 
@@ -50,18 +50,20 @@ vp.grad = None
 syn = solver_cuda(wave, sources, receivers, models=[vp], use_boundary_saving=True)
 syn.pow(2).sum().backward()
 grad_cuda_bs = vp.grad.cpu().numpy()
-
+grad_cuda_bs /= grad_cuda_bs.max()
 # CUDA WITHOUT BOUNDARY SAVING
 vp.grad = None
 syn = solver_cuda(wave, sources, receivers, models=[vp], use_boundary_saving=False)
 syn.pow(2).sum().backward()
 grad_cuda_nobs = vp.grad.cpu().numpy()
+grad_cuda_nobs /= grad_cuda_nobs.max()
 
 # PYTORCH AD
 vp.grad = None
 syn = solver_torch(wave, sources, receivers, models=[vp])
 syn.pow(2).sum().backward()
 grad_torch = vp.grad.cpu().numpy()
+grad_torch /= grad_torch.max()
 
 fig, axes = plt.subplots(3, 3, figsize=(18, 12))
 

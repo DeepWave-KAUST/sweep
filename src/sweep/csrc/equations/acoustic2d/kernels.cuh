@@ -1,35 +1,39 @@
 #pragma once
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "../../operators/gradient2d.cuh"
-#include "../../operators/laplace2d.cuh"
+#include "../../operators/laplace.cuh"
+#include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 
-#define LAUNCH_FORWARD(order, grid, block, ...)                                  \
+#define ACOUSTIC2D(order, grid, block, ...)                                  \
     do {                                                        \
-        if      ((order) == 2) acoustic_forward_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic_forward_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic_forward_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic_forward_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic_forward_kernel<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) acoustic2nd<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) acoustic2nd<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) acoustic2nd<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) acoustic2nd<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_FORWARD_NOPML(order, grid, block, ...)                                  \
+#define ACOUSTIC2D_NOPML(order, grid, block, ...)                                  \
     do {                                                        \
-        if      ((order) == 2) acoustic_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) acoustic2nd_nopml<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) acoustic2nd_nopml<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) acoustic2nd_nopml<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) acoustic2nd_nopml<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   acoustic2nd_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
 template<int Order>
-__global__ void acoustic_forward_kernel(
+__global__ void acoustic2nd(
     AcousticWavefieldPointer wf,
     bool save_all_wavefields,
     float* __restrict__ u_this,
     const float* __restrict__ vp,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_z,
     AcousticCPMLPointer cpml,
     SolverContext solver
 ){
@@ -64,25 +68,16 @@ __global__ void acoustic_forward_kernel(
 
     float w_sum = 0.0f;
 
-    Laplace2dContext ctx{
-        solver.nx, ix, iz,
-        solver.M,
-        solver.lap_coeff,
-        solver.dx, solver.dz
-    };
+    float lap_x    = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z    = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
 
-    GradContext ctx2d{1, solver.nx, ix, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
-    GradContext ctx_x{1, 0, ix, 0, solver.M, solver.grad_coeff, solver.dx, solver.dz};
-    GradContext ctx_z{0, 1, 0, iz, solver.M, solver.grad_coeff, solver.dx, solver.dz};
+    float dudz     = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
+    float dudx     = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
+    float dpsizdz  = gradient<2, Order, Z>(f.psiz, ix, 0, iz, grad_ctx);
+    float dpsixdx  = gradient<2, Order, X>(f.psix, ix, 0, iz, grad_ctx);
 
-    float lap_x    = laplace<Order, LAPLACE_X>(f.u_now, ctx);
-    float lap_z    = laplace<Order, LAPLACE_Z>(f.u_now, ctx);
-    float dudz     = gradient<Order, GRAD_Z>(f.u_now, ctx2d);
-    float dudx     = gradient<Order, GRAD_X>(f.u_now, ctx2d);
-    float dpsizdz  = gradient<Order, GRAD_Z>(f.psiz, ctx2d);
-    float dpsixdx  = gradient<Order, GRAD_X>(f.psix, ctx2d);
-    float dazdz    = gradient<Order, GRAD_Z>(cpml.az, ctx_z);
-    float daxdx    = gradient<Order, GRAD_X>(cpml.ax, ctx_x);
+    float dazdz    = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
+    float daxdx    = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
 
     float daipsiz_dz = dazdz * f.psiz[idx] + az_ * dpsizdz;
     float daipxix_dx = daxdx * f.psix[idx] + ax_ * dpsixdx;
@@ -111,9 +106,10 @@ __global__ void acoustic_forward_kernel(
 }
 
 template<int Order>
-__global__ void acoustic_nopml(
+__global__ void acoustic2nd_nopml(
     AcousticWavefieldPointer wf,
     const float* __restrict__ vp,
+    LaplaceParam lap_ctx,
     SolverContext solver
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -142,14 +138,10 @@ __global__ void acoustic_nopml(
 
     const float* vp_b     = vp     + b * spatial_size;
 
-    float lap_x, lap_z;
-
     float w_sum = 0.0f;
 
-    Laplace2dContext ctx{solver.nx, ix, iz, solver.M, solver.lap_coeff, solver.dx, solver.dz};
-
-    lap_x    = laplace<Order, LAPLACE_X>(f.u_now, ctx);
-    lap_z    = laplace<Order, LAPLACE_Z>(f.u_now, ctx);
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
 
     w_sum = lap_x + lap_z;
 

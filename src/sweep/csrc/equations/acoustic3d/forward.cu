@@ -8,6 +8,8 @@
 #include "../../common/acoustic.h"
 #include "../../common/boundarysaver.h"
 #include "../../launch/config.h"
+#include "../../operators/gradient.cuh"
+#include "../../operators/laplace.cuh"
 
 namespace acoustic3d {
 
@@ -92,10 +94,13 @@ forward(
     // ----------------------------
     // boundary saving (3D)
     // ----------------------------
-    GeneralBoundarySaver boundary_saver;
-    boundary_saver.allocate(use_boundary_saving, 3, 1, ctx, vp);
-    auto bs = boundary_saver.view();
+    // GeneralBoundarySaver boundary_saver;
+    // boundary_saver.allocate(use_boundary_saving, 3, 1, ctx, vp);
+    // auto bs = boundary_saver.view();
 
+    GeneralBoundarySaverMore boundary_saver_more;
+    boundary_saver_more.allocate(use_boundary_saving, 3, 1, ctx, vp);
+    auto bsm = boundary_saver_more.view();
     // ----------------------------
     // CUDA launch config
     // ----------------------------
@@ -104,6 +109,13 @@ forward(
     auto record_config = fdtd::Geom::make(nrec, B);
 
     float* u_thist = nullptr;
+
+    // Laplace Gradient Contexts
+    LaplaceParam lap_ctx{nx, ny, M, lap_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_y{1, 0, 0, M, grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     // ============================================================
     // time stepping
@@ -117,7 +129,7 @@ forward(
             ? u_allt[it].data_ptr<float>()
             : nullptr;
 
-        LAUNCH_FORWARD_3D(
+        ACOUSTIC3D(
             order,
             launch_config.grid,
             launch_config.block,
@@ -125,19 +137,37 @@ forward(
             save_all_wavefields,
             u_thist,
             vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_y,
+            grad_ctx_z,
             cpml,
             ctx
         );
 
         if (use_boundary_saving) {
-            save_boundary_kernel_3d<<<launch_config.grid, launch_config.block>>>(
+            // save_boundary_kernel_3d<<<launch_config.grid, launch_config.block>>>(
+            //     view.u_now,
+            //     bs.top,
+            //     bs.bottom,
+            //     bs.front,
+            //     bs.back,
+            //     bs.left,
+            //     bs.right,
+            //     it,
+            //     ctx.M,
+            //     ctx
+            // );
+
+            save_boundary_kernel_3d_advance<<<launch_config.grid, launch_config.block>>>(
                 view.u_now,
-                bs.top,
-                bs.bottom,
-                bs.front,
-                bs.back,
-                bs.left,
-                bs.right,
+                bsm.top,
+                bsm.bottom,
+                bsm.front,
+                bsm.back,
+                bsm.left,
+                bsm.right,
                 it,
                 ctx.M,
                 ctx
@@ -166,23 +196,39 @@ forward(
     }
 
     if (use_boundary_saving) {
-        boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
-        boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
+        // boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
+        // boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
+        boundary_saver_more.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
+        boundary_saver_more.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }
 
+    // return std::make_tuple(
+    //     u_allt,
+    //     std::make_tuple(
+    //         boundary_saver.top_t,
+    //         boundary_saver.bottom_t,
+    //         boundary_saver.front_t,
+    //         boundary_saver.back_t,
+    //         boundary_saver.left_t,
+    //         boundary_saver.right_t
+    //     ),
+    //     boundary_saver.last_two_t,
+    //     record
+    // );
     return std::make_tuple(
         u_allt,
         std::make_tuple(
-            boundary_saver.top_t,
-            boundary_saver.bottom_t,
-            boundary_saver.front_t,
-            boundary_saver.back_t,
-            boundary_saver.left_t,
-            boundary_saver.right_t
+            boundary_saver_more.top_t,
+            boundary_saver_more.bottom_t,
+            boundary_saver_more.front_t,
+            boundary_saver_more.back_t,
+            boundary_saver_more.left_t,
+            boundary_saver_more.right_t
         ),
-        boundary_saver.last_two_t,
+        boundary_saver_more.last_two_t,
         record
     );
 }
+
 
 } // namespace acoustic3d

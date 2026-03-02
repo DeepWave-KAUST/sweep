@@ -7,6 +7,8 @@
 #include "../../common/context.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
+#include "../../operators/staggered.cuh"
 
 namespace elastic3d {
 
@@ -79,29 +81,20 @@ backward_bs(
     auto for_view = forward.view();
     auto adj_view = adjoint.view();
 
+    auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
+    auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
+    auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
-    dim3 block(16, 8, 4);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (ny + block.y - 1) / block.y,
-        (nz + block.z - 1) / block.z * B
-    );
-
-    int threads_adj_src = 256;
-    int blocks_adj_src = (adjoint_nsrc + threads_adj_src - 1) / threads_adj_src;
-    dim3 grid_adj_source(B, blocks_adj_src);
-    dim3 block_adj_source(threads_adj_src);
-
-    // Set PML part to zero
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.vx, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.vy, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.vz, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.sxx, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.syy, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.szz, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.sxy, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.sxz, solver.abcn+solver.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<grid, block>>>(for_view.syz, solver.abcn+solver.M, nx, ny, nz);
+    // // Set PML part to zero
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.vx, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.vy, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.vz, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.sxx, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.syy, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.szz, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.sxy, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.sxz, solver.abcn+0, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.syz, solver.abcn+0, nx, ny, nz);
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_vs = torch::zeros_like(vp);
@@ -112,40 +105,45 @@ backward_bs(
     cpml.allocate(pml_vals, 3);
     auto cpml_view = cpml.view();
 
-    GeneralBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 3, 9, solver, vp, solver.M);
+    GeneralBoundarySaverMore boundary_saver;
+    boundary_saver.allocate(true, 3, 9, solver, vp, solver.M, 1);
     boundary_saver.load_from_vector(u_boundary, vp);
     auto bs = boundary_saver.view();
-
 
     auto fvx_prev = torch::zeros_like(vp);
     auto fvy_prev = torch::zeros_like(vp);
     auto fvz_prev = torch::zeros_like(vp);
 
     auto u_all_t = torch::zeros({2, B, 1, nz, ny, nx}, vp.options());
+    SGradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
 
     for (int it = nt - 1; it >= 1; --it) {
         
-
         // Adjoint modeling
         LAUNCH_3DELASTIC_VELOCITY_ADJOINT(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         ); // t-0.5
 
         LAUNCH_3DELASTIC_STRESS_ADJOINT(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             rho.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         ); // t-1.0
 
-        add_source_3d<<<grid_adj_source, block_adj_source>>>(
+        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.vz,
             adjoint_source.data_ptr<float>(),
             adjoint_sources_loc.data_ptr<int>(),
@@ -155,7 +153,7 @@ backward_bs(
         );
 
         // Wavefield reconstruction
-        add_source_3d<<<B, forward_nsrc>>>(
+        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
             for_view.vz,
             neg_forward_source.data_ptr<float>(),
             forward_sources_loc.data_ptr<int>(),
@@ -166,16 +164,19 @@ backward_bs(
 
         LAUNCH_3DELASTIC_STRESS_NOPML(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
+            grad_ctx,
             solver
         );
 
         float *field2[6] = {for_view.sxx, for_view.syy, for_view.szz, for_view.sxy, for_view.sxz, for_view.syz};
 
         for (int f = 3; f < 9; ++f)
-            restore_boundary_kernel_3d<<<grid, block>>>(
+            restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
                 field2[f-3],
                 boundary_saver.top_t[f].data_ptr<float>(),
                 boundary_saver.bottom_t[f].data_ptr<float>(),
@@ -191,6 +192,8 @@ backward_bs(
         // Gradient calculation
         LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             adj_view,
 
@@ -206,6 +209,7 @@ backward_bs(
             grad_vs.data_ptr<float>(),
             grad_rho.data_ptr<float>(),
 
+            grad_ctx,
             solver
         );
 
@@ -216,15 +220,18 @@ backward_bs(
         // Update Velocity components
         LAUNCH_3DELASTIC_VELOCITY_NOPML(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             rho.data_ptr<float>(),
+            grad_ctx,
             solver
         );
 
         float *field1[3] = {for_view.vx, for_view.vy, for_view.vz};
 
         for (int f = 0; f < 3; ++f)
-            restore_boundary_kernel_3d<<<grid, block>>>(
+            restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
                 field1[f],
                 boundary_saver.top_t[f].data_ptr<float>(),
                 boundary_saver.bottom_t[f].data_ptr<float>(),
@@ -236,7 +243,6 @@ backward_bs(
                 solver.M,
                 solver
             );
-
     }
 
     u_all_t[0].copy_(forward.vz_t); // for visualization

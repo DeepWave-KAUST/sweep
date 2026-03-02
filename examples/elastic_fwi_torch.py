@@ -3,6 +3,7 @@ sys.path.append('../src')
 import torch
 torch.backends.cudnn.benchmark = True
 from sweep.propagator.torch import PropTorch
+from sweep.propagator.cuda import PropCUDA
 from sweep.equations import Elastic
 from sweep.signal import ricker
 
@@ -34,23 +35,23 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = PropTorch(Elastic(spatial_order=spatial_order, device=dev), 
+model = PropCUDA(Elastic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
             abcn=abcn, 
             dh=dh,
             dt=dt,
             source_type=['vz'],
-            receiver_type=['vx', 'vz'],
+            receiver_type=['vz'],
             free_surface=False, 
             pml_type='cpmls',
             use_ckpt=False)
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
-model.set_parameters([torch.from_numpy(vp_true).to(dev), 
-                      torch.from_numpy(vs_true).to(dev), 
-                      torch.from_numpy(rho_true).to(dev)])
+# model.set_parameters([torch.from_numpy(vp_true).to(dev), 
+#                       torch.from_numpy(vs_true).to(dev), 
+#                       torch.from_numpy(rho_true).to(dev)])
 
 # Geometry
 src_x = np.arange(0,nx, src_step*2).reshape(-1, 1)
@@ -72,38 +73,47 @@ start_event.record()
 with torch.no_grad():
     obs = model.forward(wave, 
                         sources, 
-                        receivers).cpu().numpy()
+                        receivers, 
+                        models=[torch.from_numpy(vp_true).to(dev), 
+                                torch.from_numpy(vs_true).to(dev), 
+                                torch.from_numpy(rho_true).to(dev)]).cpu().numpy()
 end_event.record()
 torch.cuda.synchronize()
 elapsed_time = start_event.elapsed_time(end_event)
+print('data shape:', obs.shape)
 print(f"Execution time: {elapsed_time:.2f} ms")
 # print(obs.shape)
-
-vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
-plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+vmin, vmax = np.percentile(obs[-1], [2, 98])
+plt.imshow(obs[-1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
 plt.tight_layout()
 plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
 plt.close()
-vmin, vmax = np.percentile(obs[-1][...,1], [2, 98])
-plt.imshow(obs[-1].squeeze()[...,1], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
-plt.colorbar()
-plt.tight_layout()
-plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
-plt.close()
+# vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
+# plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+# plt.colorbar()
+# plt.tight_layout()
+# plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
+# plt.close()
+# vmin, vmax = np.percentile(obs[-1][...,1], [2, 98])
+# plt.imshow(obs[-1].squeeze()[...,1], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+# plt.colorbar()
+# plt.tight_layout()
+# plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
+# plt.close()
 
 
 # ########## Inversion ##########
 # Set the model
-model.set_parameters([torch.from_numpy(vp_smooth).to(dev), 
-                      torch.from_numpy(vp_smooth/1.732).to(dev), 
-                      torch.from_numpy(rho_true).to(dev)])
+vp = torch.from_numpy(vp_smooth).float().to(dev).requires_grad_()
+vs = torch.from_numpy(vp_smooth/1.73).float().to(dev).requires_grad_()
+rho = torch.ones_like(vp).float().to(dev).requires_grad_()
 
 # model = torch.compile(model, backend='tensorrt')
 # Set different lr to different parameters
-opt = torch.optim.Adam([{'params': model.get_parameters('vp'), 'lr': lr}, 
-                        {'params': model.get_parameters('vs'), 'lr': lr/1.73}, 
-                        {'params': model.get_parameters('rho'), 'lr': 0}], 
+opt = torch.optim.Adam([{'params': [vp], 'lr': lr}, 
+                        {'params': [vs], 'lr': lr/1.73}, 
+                        {'params': [rho], 'lr': 0}], 
                         eps=1e-22)
 model = torch.compile(model)
 for epoch in tqdm.trange(epochs):
@@ -113,10 +123,11 @@ for epoch in tqdm.trange(epochs):
     # rand_shots = np.random.randint(0, sources.shape[0], batchsize)
     rand_shots = np.random.choice(sources.shape[0], size=batchsize, replace=False)
     # Source encoding for acceleration
-    coding_syn = model(wave, sources[rand_shots], receivers[0:1], source_encoding=True)
-    coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
-    
-    loss = (coding_syn-coding_obs).pow(2).mean()
+    # coding_syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=False)
+    # coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
+    _syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=True)
+    _obs = torch.from_numpy(obs[rand_shots]).to(dev)
+    loss = (_syn-_obs).pow(2).mean()
     loss.backward()
     # Accumulate the gradients, when the graph is too large to be kept in memory
     # for step in range(step_per_epoch):
@@ -131,31 +142,31 @@ for epoch in tqdm.trange(epochs):
     # Save the model
     if epoch % 1 == 0:
 
-        # Show shotgather
-        fig, axes = plt.subplots(2, 2, figsize=(8, 8))
-        vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,0], [2, 98])
-        plt.colorbar(axes[0,0].imshow(coding_obs.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        axes[0,0].set_title('Observed Vx')
-        vmin, vmax = np.percentile(coding_syn.detach().detach().cpu().numpy()[...,0], [2, 98])
-        plt.colorbar(axes[1,0].imshow(coding_syn.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        axes[1,0].set_title('Synthetic Vx')
-        vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,1], [2, 98])
-        plt.colorbar(axes[0,1].imshow(coding_obs.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        axes[0,1].set_title('Observed Vz')
-        vmin, vmax = np.percentile(coding_syn.detach().cpu().numpy()[...,1], [2, 98])
-        plt.colorbar(axes[1,1].imshow(coding_syn.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        axes[1,1].set_title('Synthetic Vz')
+        # # Show shotgather
+        # fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+        # vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,0], [2, 98])
+        # plt.colorbar(axes[0,0].imshow(coding_obs.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        # axes[0,0].set_title('Observed Vx')
+        # vmin, vmax = np.percentile(coding_syn.detach().detach().cpu().numpy()[...,0], [2, 98])
+        # plt.colorbar(axes[1,0].imshow(coding_syn.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        # axes[1,0].set_title('Synthetic Vx')
+        # vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,1], [2, 98])
+        # plt.colorbar(axes[0,1].imshow(coding_obs.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        # axes[0,1].set_title('Observed Vz')
+        # vmin, vmax = np.percentile(coding_syn.detach().cpu().numpy()[...,1], [2, 98])
+        # plt.colorbar(axes[1,1].imshow(coding_syn.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+        # axes[1,1].set_title('Synthetic Vz')
 
-        plt.tight_layout()
-        plt.savefig(f'{save_path}/epoch_{epoch}_shotgather_vx.png', dpi=300, bbox_inches='tight')
-        plt.close()
+        # plt.tight_layout()
+        # plt.savefig(f'{save_path}/epoch_{epoch}_shotgather_vx.png', dpi=300, bbox_inches='tight')
+        # plt.close()
 
         vmin_vp, vmax_vp = vp_true.min(), vp_true.max()
         vmin_vs, vmax_vs = vs_true.min(), vs_true.max()
         fig, axes = plt.subplots(3, 2, figsize=(8, 9))
         show_data = [vp_true, vs_true, 
-                     model.vp.detach().cpu().numpy(), model.vs.detach().cpu().numpy(), 
-                     model.vp.grad.detach().cpu().numpy(), model.vs.grad.detach().cpu().numpy()]
+                     vp.detach().cpu().numpy(), vs.detach().cpu().numpy(), 
+                     vp.grad.detach().cpu().numpy(), vs.grad.detach().cpu().numpy()]
         titles = ['True Vp', 'True Vs', 'Inverted Vp', 'Inverted Vs', 'Gradient Vp', 'Gradient Vs']
         for ax, data, title in zip(axes.ravel(), show_data, titles):
             if 'vp' in title.lower():

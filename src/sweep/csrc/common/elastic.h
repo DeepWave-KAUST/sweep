@@ -195,12 +195,12 @@ struct ElasticWavefieldPointer {
         if (out.m_syyx) out.m_syyx += shift;
         if (out.m_syyy) out.m_syyy += shift;
         if (out.m_syyz) out.m_syyz += shift;
-
+        
         // PML szz
         out.m_szzx += shift;
         if (out.m_szzy) out.m_szzy += shift;
         out.m_szzz += shift;
-
+        
         // PML sxy
         if (out.m_sxyx) out.m_sxyx += shift;
         if (out.m_sxyy) out.m_sxyy += shift;
@@ -265,7 +265,7 @@ struct ElasticWavefieldTensor {
         sxx_t = torch::zeros_like(vp);
         szz_t = torch::zeros_like(vp);
         sxz_t = torch::zeros_like(vp);
-
+        
         if (dim == 3) {
             // Wavefield
             vy_t = torch::zeros_like(vp);
@@ -309,7 +309,7 @@ struct ElasticWavefieldTensor {
                 m_sxyx_t = torch::zeros_like(vp);
                 m_sxyy_t = torch::zeros_like(vp);
                 m_sxyz_t = torch::zeros_like(vp);
-
+                
                 // syy
                 m_syyx_t = torch::zeros_like(vp); // Adjoint
                 m_syyy_t = torch::zeros_like(vp); // Adjoint
@@ -323,6 +323,7 @@ struct ElasticWavefieldTensor {
                 // for adjoint
                 m_sxxy_t = torch::zeros_like(vp);
                 m_szzy_t = torch::zeros_like(vp);
+
             }
         }
 
@@ -334,7 +335,7 @@ struct ElasticWavefieldTensor {
     // =========================
     ElasticWavefieldPointer view()
     {
-        ElasticWavefieldPointer v;
+        ElasticWavefieldPointer v={};
 
         v.vx = vx_t.data_ptr<float>();
         v.vz = vz_t.data_ptr<float>();
@@ -378,10 +379,6 @@ struct ElasticWavefieldTensor {
             v.m_szzx = m_szzx_t.data_ptr<float>();
             v.m_szzz = m_szzz_t.data_ptr<float>();
 
-            // For adjoint
-            v.m_sxxy = m_sxxy_t.data_ptr<float>();
-            v.m_szzy = m_szzy_t.data_ptr<float>();
-
             if (dim == 3) {
                 // Boundary conditions
 
@@ -410,6 +407,10 @@ struct ElasticWavefieldTensor {
                 // v.m_syzx = m_syzx_t.data_ptr<float>();
                 v.m_syzy = m_syzy_t.data_ptr<float>();
                 v.m_syzz = m_syzz_t.data_ptr<float>();
+
+                // For adjoint
+                v.m_sxxy = m_sxxy_t.data_ptr<float>();
+                v.m_szzy = m_szzy_t.data_ptr<float>();
             }
 
         }

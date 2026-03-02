@@ -33,7 +33,8 @@ struct GeneralBoundarySaver {
         int nvar_,
         SolverContext ctx,
         const torch::Tensor& ref_tensor,
-        int width = -1
+        int width = -1,
+        int last_two_nvar = 2
     )
     {
         enabled = use_boundary_saving;
@@ -59,7 +60,7 @@ struct GeneralBoundarySaver {
             bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, ctx.ny, ctx.nx}, options);
             top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, ctx.ny, ctx.nx}, options);
 
-            last_two_t = torch::zeros({nvar, 2, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx}, options);
+            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx}, options);
 
         } else {
 
@@ -69,7 +70,7 @@ struct GeneralBoundarySaver {
             bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, ctx.nx}, options);
             top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, ctx.nx}, options);
 
-            last_two_t = torch::zeros({nvar, 2, ctx.B, 1, ctx.nz, ctx.nx}, options);
+            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.nx}, options);
 
             front_t = torch::Tensor();
             back_t  = torch::Tensor();
@@ -146,6 +147,149 @@ struct GeneralBoundarySaver {
 
 };
 
+struct GeneralBoundarySaverMore {
+
+    torch::Tensor left_t, right_t;
+    torch::Tensor front_t, back_t;
+    torch::Tensor bottom_t, top_t;
+    torch::Tensor last_two_t;
+
+    bool enabled = false;
+    int dim = 3;
+    int nvar = 1;
+
+    void allocate(
+        bool use_boundary_saving,
+        int dim_,
+        int nvar_,
+        SolverContext ctx,
+        const torch::Tensor& ref_tensor,
+        int width = -1,
+        int last_two_nvar = 2
+    )
+    {
+        enabled = use_boundary_saving;
+        dim = dim_;
+        nvar = nvar_;
+
+        if (!enabled) return;
+
+        if (width < 0) {
+            width = ctx.M;
+        }
+
+        auto options = ref_tensor.options();
+
+        int phys_z0 = ctx.free_surface ? ctx.M : ctx.abcn + ctx.M;
+        int phys_z1 = ctx.nz - ctx.abcn - ctx.M;
+
+        int phys_x0 = ctx.abcn + ctx.M;
+        int phys_x1 = ctx.nx - ctx.abcn - ctx.M;
+
+        int nz_phys = phys_z1 - phys_z0;
+        int nx_phys = phys_x1 - phys_x0;
+
+        if (dim == 3) {
+
+            int phys_y0 = ctx.abcn + ctx.M;
+            int phys_y1 = ctx.ny - ctx.abcn - ctx.M;
+            int ny_phys = phys_y1 - phys_y0;
+
+            left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, ny_phys, width}, options);
+            right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, ny_phys, width}, options);
+
+            front_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width, nx_phys}, options);
+            back_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width, nx_phys}, options);
+
+            bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, ny_phys, nx_phys}, options);
+            top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, ny_phys, nx_phys}, options);
+
+            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx}, options);
+
+        } else {
+
+            left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width}, options);
+            right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width}, options);
+
+            bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_phys}, options);
+            top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_phys}, options);
+
+            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.nx}, options);
+
+            front_t = torch::Tensor();
+            back_t  = torch::Tensor();
+        }
+    }
+
+    GeneralBoundaryPointer view()
+    {
+        GeneralBoundaryPointer v{};
+
+        if (!enabled) return v;
+
+        v.left  = left_t.data_ptr<float>();
+        v.right = right_t.data_ptr<float>();
+
+        if (dim == 3) {
+            v.front = front_t.data_ptr<float>();
+            v.back  = back_t.data_ptr<float>();
+        } else {
+            v.front = nullptr;
+            v.back  = nullptr;
+        }
+
+        v.bottom = bottom_t.data_ptr<float>();
+        v.top    = top_t.data_ptr<float>();
+
+        v.last_two = last_two_t.data_ptr<float>();
+
+        return v;
+
+    }
+
+    void load_from_vector(
+        const std::vector<torch::Tensor>& u_boundary,
+        const torch::Tensor& ref_tensor
+        )
+        {
+            if (!enabled)
+                throw std::runtime_error("Boundary saving not enabled.");
+
+            auto device = ref_tensor.device();
+            
+            auto move = [&](const torch::Tensor& t) {
+                return t.device() == device ?
+                    t :
+                    t.to(device, /*non_blocking=*/true);
+            };
+
+            if (dim == 2) {
+
+                if (u_boundary.size() != 4)
+                    throw std::runtime_error("2D boundary expects 4 tensors.");
+
+                top_t.copy_(move(u_boundary[0]));
+                bottom_t.copy_(move(u_boundary[1]));
+                left_t.copy_(move(u_boundary[2]));
+                right_t.copy_(move(u_boundary[3]));
+
+            } else { // 3D
+
+                if (u_boundary.size() != 6)
+                    throw std::runtime_error("3D boundary expects 6 tensors.");
+
+                top_t.copy_(move(u_boundary[0]));
+                bottom_t.copy_(move(u_boundary[1]));
+
+                front_t.copy_(move(u_boundary[2]));
+                back_t.copy_(move(u_boundary[3]));
+
+                left_t.copy_(move(u_boundary[4]));
+                right_t.copy_(move(u_boundary[5]));
+            }
+        }
+
+};
 
 __global__ void save_boundary_kernel(
     const float* __restrict__ u,   // (B, nz, nx)
@@ -197,6 +341,75 @@ __global__ void restore_boundary_kernel_3d(
     const float* __restrict__ back,
 
     const float* __restrict__ left,    // (nt, B, nz, ny, n)
+    const float* __restrict__ right,
+
+    int it,
+    int width,
+    SolverContext solver
+);
+
+
+__global__ void save_boundary_kernel_3d_advance(
+    const float* __restrict__ u,    // (B, nz, ny, nx)
+
+    float* __restrict__ top,        // (nt,B,width,ny_phys,nx_phys)
+    float* __restrict__ bottom,
+
+    float* __restrict__ front,      // (nt,B,nz_phys,width,nx_phys)
+    float* __restrict__ back,
+
+    float* __restrict__ left,       // (nt,B,nz_phys,ny_phys,width)
+    float* __restrict__ right,
+
+    int it,
+    int width,
+    SolverContext solver
+);
+
+__global__ void restore_boundary_kernel_3d_advance(
+    float* __restrict__ u,        // (B, nz, ny, nx)
+
+    const float* __restrict__ top,      // (nt,B,width,ny_phys,nx_phys)
+    const float* __restrict__ bottom,
+
+    const float* __restrict__ front,    // (nt,B,nz_phys,width,nx_phys)
+    const float* __restrict__ back,
+
+    const float* __restrict__ left,     // (nt,B,nz_phys,ny_phys,width)
+    const float* __restrict__ right,
+
+    int it,
+    int width,
+    SolverContext solver
+);
+
+__global__ void save_boundary_kernel_3d_advance2(
+    const float* __restrict__ u,    // (B, nz, ny, nx)
+
+    float* __restrict__ top,        // (nt,B,width,ny_phys,nx_phys)
+    float* __restrict__ bottom,
+
+    float* __restrict__ front,      // (nt,B,nz_phys,width,nx_phys)
+    float* __restrict__ back,
+
+    float* __restrict__ left,       // (nt,B,nz_phys,ny_phys,width)
+    float* __restrict__ right,
+
+    int it,
+    int width,
+    SolverContext solver
+);
+
+__global__ void restore_boundary_kernel_3d_advance2(
+    float* __restrict__ u,        // (B, nz, ny, nx)
+
+    const float* __restrict__ top,      // (nt,B,width,ny_phys,nx_phys)
+    const float* __restrict__ bottom,
+
+    const float* __restrict__ front,    // (nt,B,nz_phys,width,nx_phys)
+    const float* __restrict__ back,
+
+    const float* __restrict__ left,     // (nt,B,nz_phys,ny_phys,width)
     const float* __restrict__ right,
 
     int it,

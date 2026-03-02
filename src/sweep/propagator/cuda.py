@@ -42,6 +42,7 @@ class Warpper(torch.autograd.Function):
         if not any(m.requires_grad for m in models):
             save_all_wavefield = False
             use_boundary_saving = False
+
         # -------- CUDA forward --------
         (u_allt, boundary_vals, last, syn) = forward_func(
             [m.contiguous() for m in models],
@@ -70,8 +71,8 @@ class Warpper(torch.autograd.Function):
         )
         # np.save('u_last.npy', last.detach().cpu().numpy())
         ctx.models = models
-        # ctx.boundary_vals = [b.cpu() for b in boundary_vals]
-        ctx.boundary_vals = boundary_vals
+        ctx.boundary_vals = [b.cpu() for b in boundary_vals]
+        # ctx.boundary_vals = boundary_vals
         ctx.pml_vals = pml_vals
         ctx.abcn = abcn
         ctx.M = M
@@ -141,7 +142,7 @@ class Warpper(torch.autograd.Function):
             # print('Saving forward wavefield for checking...')
             # np.save('/data/tmp/u_forward.npy', gradients[0].detach().cpu().numpy())
             # np.save('/data/tmp/u_adoint.npy', gradients[0].detach().cpu().numpy())
-            # gradients = gradients[1:]
+            gradients = gradients[1:]
             # print([g.shape for g in gradients])
         return (
             None, None, None, # functions
@@ -274,7 +275,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
 
         spacing = [float(self.dh.item())] * self.ndim
-        
+
         syn = Warpper.apply(
                 self.forward_func, 
                 self.backward_func, 

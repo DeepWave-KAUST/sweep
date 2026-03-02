@@ -1,12 +1,12 @@
 #pragma once
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "../../operators/gradient3d.cuh"
-#include "../../operators/laplace3d.cuh"
+#include "../../operators/gradient.cuh"
+#include "../../operators/laplace.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 
-#define LAUNCH_FORWARD_3D(order, grid, block, ...)                                          \
+#define ACOUSTIC3D(order, grid, block, ...)                                          \
     do {                                                                                    \
         if      ((order) == 2) acoustic_forward_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) acoustic_forward_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
@@ -15,7 +15,7 @@
         else                   acoustic_forward_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_FORWARD_3D_NOPML(order, grid, block, ...)                           \
+#define ACOUSTIC3D_NOPML(order, grid, block, ...)                           \
     do {                                                                           \
         if      ((order) == 2) acoustic_nopml_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) acoustic_nopml_3d<4><<<grid, block>>>(__VA_ARGS__); \
@@ -33,6 +33,11 @@ __global__ void acoustic_forward_kernel_3d(
 
     const float* __restrict__ vp,
 
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_y,
+    GradParam grad_ctx_z,
     AcousticCPMLPointer cpml,
     SolverContext solver
 )
@@ -68,35 +73,29 @@ __global__ void acoustic_forward_kernel_3d(
     float*       u_this_b = u_this ? u_this + spatial_size * b : nullptr;
     const float* vp_b     = vp     + spatial_size * b;
 
-    Laplace3dContext ctx{solver.nx, solver.ny, ix, iy, iz, solver.M, solver.lap_coeff, solver.dx, solver.dy, solver.dz};
-    GradContext3D gctx{1, solver.nx, solver.nx*solver.ny, ix, iy, iz, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
-    GradContext3D gctx_x{1, 0, 0, ix, 0, 0, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
-    GradContext3D gctx_y{0, 1, 0, 0, iy, 0, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
-    GradContext3D gctx_z{0, 0, 1, 0, 0, iz, solver.M, solver.grad_coeff, solver.dx, solver.dy, solver.dz};
-
     // =========================================================
     // Laplace
     // =========================================================
 
-    float lap_x = laplace<Order, LAPLACE_X>(f.u_now, ctx);
-    float lap_y = laplace<Order, LAPLACE_Y>(f.u_now, ctx);
-    float lap_z = laplace<Order, LAPLACE_Z>(f.u_now, ctx);
+    float lap_x = laplace<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_z = laplace<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
 
     // =========================================================
     // Gradients
     // =========================================================
 
-    float dudx = gradient<Order, GRAD_X>(f.u_now, gctx);
-    float dudy = gradient<Order, GRAD_Y>(f.u_now, gctx);
-    float dudz = gradient<Order, GRAD_Z>(f.u_now, gctx);
+    float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
+    float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
+    float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
 
-    float dpsixdx = gradient<Order, GRAD_X>(f.psix, gctx);
-    float dpsiydy = gradient<Order, GRAD_Y>(f.psiy, gctx);
-    float dpsizdz = gradient<Order, GRAD_Z>(f.psiz, gctx);
+    float dpsixdx = gradient<3, Order, X>(f.psix, ix, iy, iz, grad_ctx);
+    float dpsiydy = gradient<3, Order, Y>(f.psiy, ix, iy, iz, grad_ctx);
+    float dpsizdz = gradient<3, Order, Z>(f.psiz, ix, iy, iz, grad_ctx);
 
-    float daxdx = gradient<Order, GRAD_X>(cpml.ax, gctx_x);
-    float daydy = gradient<Order, GRAD_Y>(cpml.ay, gctx_y);
-    float dazdz = gradient<Order, GRAD_Z>(cpml.az, gctx_z);
+    float daxdx = gradient<3, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
+    float daydy = gradient<3, Order, X>(cpml.ay, iy, 0, 0, grad_ctx_y);
+    float dazdz = gradient<3, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
 
     float ax_ = cpml.ax[ix];
     float ay_ = cpml.ay[iy];
@@ -168,8 +167,11 @@ __global__ void acoustic_forward_kernel_3d(
 template<int Order>
 __global__ void acoustic_nopml_3d(
     AcousticWavefieldPointer wf,
+    
     float* __restrict__ u_this,
     const float* __restrict__ vp,
+
+    LaplaceParam lap_ctx,
     SolverContext solver
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -197,11 +199,11 @@ __global__ void acoustic_nopml_3d(
         iy < halo || iy >= solver.ny - halo ||
         iz < top_halo || iz >= solver.nz - halo)
         return;
-
+    
     int stride_y = solver.nx;
     int stride_z = solver.nx * solver.ny;
     int spatial_size = solver.nx * solver.ny * solver.nz;
-
+    
     auto f = wf.offset(b, spatial_size);
 
     int idx = iz * stride_z + iy * stride_y + ix;
@@ -213,11 +215,9 @@ __global__ void acoustic_nopml_3d(
 
     float w_sum = 0.0f;
 
-    Laplace3dContext ctx{solver.nx, solver.ny, ix, iy, iz, solver.M, solver.lap_coeff, solver.dx, solver.dy, solver.dz};
-
-    lap_x    = laplace<Order, LAPLACE_X>(f.u_now, ctx);
-    lap_y    = laplace<Order, LAPLACE_Y>(f.u_now, ctx);
-    lap_z    = laplace<Order, LAPLACE_Z>(f.u_now, ctx);
+    lap_x = laplace<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
+    lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
+    lap_z = laplace<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
 
     w_sum = lap_x + lap_y + lap_z;
 

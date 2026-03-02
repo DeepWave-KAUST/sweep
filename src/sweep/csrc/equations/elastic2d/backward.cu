@@ -7,6 +7,7 @@
 #include "../../common/context.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
 
 namespace elastic2d {
 
@@ -67,34 +68,39 @@ backward(
     cpml.allocate(pml_vals, 2);
     auto cpml_view = cpml.view();
 
-    dim3 block(32, 8);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (nz + block.y - 1) / block.y,
-        B
-    );
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+    auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
+
+    SGradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
+
     int t2=0;
 
     for (int it = nt - 1; it >= 1; --it) {
 
         LAUNCH_ELASTIC_VELOCITY_ADJOINT(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         );
 
         LAUNCH_ELASTIC_STRESS_ADJOINT(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             rho.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         );
 
-        add_source<<<B, adjoint_nsrc>>>(
+        add_source<<<source_config.grid, source_config.block>>>(
             adj_view.vz,
             adjoint_source.data_ptr<float>(),
             adjoint_sources_loc.data_ptr<int>(),
@@ -107,6 +113,9 @@ backward(
 
         LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
             order,
+            launch_config.grid,
+            launch_config.block,
+
             adj_view,
 
             u_forward.select(0, it).select(0, 0).data_ptr<float>(), // vx
@@ -123,6 +132,7 @@ backward(
             grad_vs.data_ptr<float>(),
             grad_rho.data_ptr<float>(),
 
+            grad_ctx,
             solver
         );
 
@@ -131,7 +141,7 @@ backward(
     return std::make_tuple(grad_vp, grad_vs, grad_rho);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 backward_bs(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
@@ -171,6 +181,7 @@ backward_bs(
         (M <= 4) ? static_cast<int>(2 * M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SGradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto f_this = torch::zeros_like(vp); // for gradient calculation
     
@@ -209,45 +220,48 @@ backward_bs(
     boundary_saver.load_from_vector(u_boundary, vp);
     auto bs = boundary_saver.view();
 
-    dim3 block(32, 8);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (nz + block.y - 1) / block.y,
-        B
-    );
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+    auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
+    auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     // Set boundarys of the last frame to be zeors
-    set_boundary_zeros<<<grid, block>>>(for_view.vx, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<grid, block>>>(for_view.vz, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<grid, block>>>(for_view.szz, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<grid, block>>>(for_view.sxx, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<grid, block>>>(for_view.sxz, solver.abcn+solver.M, nx, nz);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vx, solver.abcn+solver.M, nx, nz);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vz, solver.abcn+solver.M, nx, nz);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.szz, solver.abcn+solver.M, nx, nz);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxx, solver.abcn+solver.M, nx, nz);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxz, solver.abcn+solver.M, nx, nz);
 
     auto fvz_prev = torch::zeros_like(vp);
     auto fvx_prev = torch::zeros_like(vp);
 
-    auto u_all_t = torch::zeros({nt, B, 1, nz, nx}, vp.options());
+    // auto u_all_t = torch::zeros({nt, B, 1, nz, nx}, vp.options());
 
     for (int it = nt - 1; it >= 1; --it) {
         
         LAUNCH_ELASTIC_VELOCITY_ADJOINT(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         ); // t-0.5
 
         LAUNCH_ELASTIC_STRESS_ADJOINT(
             order,
+            launch_config.grid,
+            launch_config.block,
             adj_view,
             rho.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         ); // t-1.0
 
-        add_source<<<B, adjoint_nsrc>>>(
+        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.vz,
             adjoint_source.data_ptr<float>(),
             adjoint_sources_loc.data_ptr<int>(),
@@ -258,7 +272,7 @@ backward_bs(
 
         // Wavefield reconstruction
         // donot work when source is in the saving part
-        add_source<<<B, forward_nsrc>>>(
+        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
             for_view.vz,
             neg_forward_source.data_ptr<float>(),
             forward_sources_loc.data_ptr<int>(),
@@ -270,16 +284,19 @@ backward_bs(
         // Update Stress components
         LAUNCH_ELASTIC_STRESS_NOPML(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
+            grad_ctx,
             solver
         );
 
         float *field2[3] = {for_view.sxx, for_view.szz, for_view.sxz};
 
         for (int f = 2; f < 5; ++f)
-            restore_boundary_kernel<<<grid, block>>>(
+            restore_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
                 field2[f-2],
                 boundary_saver.top_t[f].data_ptr<float>(),
                 boundary_saver.bottom_t[f].data_ptr<float>(),
@@ -293,6 +310,8 @@ backward_bs(
         // Gradient calculation
         LAUNCH_CALCULATE_GRAD_ELASTIC_BS(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             adj_view,
 
@@ -307,6 +326,7 @@ backward_bs(
             grad_vs.data_ptr<float>(),
             grad_rho.data_ptr<float>(),
 
+            grad_ctx,
             solver
         );
 
@@ -316,15 +336,18 @@ backward_bs(
         // Update Velocity components
         LAUNCH_ELASTIC_VELOCITY_NOPML(
             order,
+            launch_config.grid,
+            launch_config.block,
             for_view,
             rho.data_ptr<float>(),
+            grad_ctx,
             solver
         );
 
         float *field1[2] = {for_view.vx, for_view.vz};
 
         for (int f = 0; f < 2; ++f)
-            restore_boundary_kernel<<<grid, block>>>(
+            restore_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
                 field1[f],
                 boundary_saver.top_t[f].data_ptr<float>(),
                 boundary_saver.bottom_t[f].data_ptr<float>(),
@@ -335,10 +358,10 @@ backward_bs(
                 solver
             );
 
-        u_all_t[it].copy_(forward.vz_t); // for visualization
+        // u_all_t[it].copy_(forward.vz_t); // for visualization
     }
 
-    return std::make_tuple(u_all_t, grad_vp, grad_vs, grad_rho);
+    return std::make_tuple(grad_vp, grad_vs, grad_rho);
 }
 
 }

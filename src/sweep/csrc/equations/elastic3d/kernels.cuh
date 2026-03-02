@@ -1,12 +1,11 @@
 #pragma once
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "../../operators/staggered_gradient3d.cuh"
-#include "../../operators/gradient3d.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"
+#include "../../operators/staggered.cuh"
 
-#define LAUNCH_3DELASTIC_VELOCITY(order, ...)                     \
+#define LAUNCH_3DELASTIC_VELOCITY(order, grid, block, ...)                     \
     do {                                                        \
         if      ((order) == 2) elastic_velocity_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) elastic_velocity_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
@@ -16,7 +15,7 @@
     } while (0)
 
 
-#define LAUNCH_3DELASTIC_STRESS(order, ...)                       \
+#define LAUNCH_3DELASTIC_STRESS(order, grid, block, ...)                       \
     do {                                                        \
         if      ((order) == 2) elastic_stress_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) elastic_stress_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
@@ -25,7 +24,7 @@
         else                   elastic_stress_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_3DELASTIC_VELOCITY_NOPML(order, ...)                     \
+#define LAUNCH_3DELASTIC_VELOCITY_NOPML(order, grid, block, ...)                     \
     do {                                                        \
         if      ((order) == 2) elastic_velocity_kernel_3d_nopml<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) elastic_velocity_kernel_3d_nopml<4><<<grid, block>>>(__VA_ARGS__); \
@@ -35,7 +34,7 @@
     } while (0)
 
 
-#define LAUNCH_3DELASTIC_STRESS_NOPML(order, ...)                       \
+#define LAUNCH_3DELASTIC_STRESS_NOPML(order, grid, block, ...)                       \
     do {                                                        \
         if      ((order) == 2) elastic_stress_kernel_3d_nopml<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) elastic_stress_kernel_3d_nopml<4><<<grid, block>>>(__VA_ARGS__); \
@@ -44,7 +43,7 @@
         else                   elastic_stress_kernel_3d_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_3DELASTIC_VELOCITY_ADJOINT(order, ...)                     \
+#define LAUNCH_3DELASTIC_VELOCITY_ADJOINT(order, grid, block, ...)                     \
     do {                                                        \
         if      ((order) == 2) elastic_velocity_adjoint_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) elastic_velocity_adjoint_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
@@ -53,7 +52,7 @@
         else                   elastic_velocity_adjoint_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_3DELASTIC_STRESS_ADJOINT(order, ...)                       \
+#define LAUNCH_3DELASTIC_STRESS_ADJOINT(order, grid, block, ...)                       \
     do {                                                        \
         if      ((order) == 2) elastic_stress_adjoint_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) elastic_stress_adjoint_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
@@ -62,7 +61,7 @@
         else                   elastic_stress_adjoint_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(order, ...)                       \
+#define LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(order, grid, block, ...)                       \
     do {                                                        \
         if      ((order) == 2) calculate_grad_elastic3d_bs<2><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 4) calculate_grad_elastic3d_bs<4><<<grid, block>>>(__VA_ARGS__); \
@@ -75,6 +74,7 @@ template<int Order>
 __global__ void elastic_velocity_kernel_3d(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
+    SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
 )
@@ -122,30 +122,19 @@ __global__ void elastic_velocity_kernel_3d(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
-
-    // ===== stress derivatives =====
-    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxx, ctx);
-    float dsxy_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD >(f.sxy, ctx);
-    float dsxz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD >(f.sxz, ctx);
-
-    float dsxy_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD >(f.sxy, ctx);
-    float dsyy_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.syy, ctx);
-    float dsyz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD >(f.syz, ctx);
-
-    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD >(f.sxz, ctx);
-    float dsyz_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD >(f.syz, ctx);
-    float dszz_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.szz, ctx);
     
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
+
     float inv_rho = 1.f / rho_b[idx];
 
     // PML boundaries
@@ -192,6 +181,7 @@ __global__ void elastic_stress_kernel_3d(
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
     float* __restrict__ u_this_t,
+    SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
 )
@@ -227,28 +217,17 @@ __global__ void elastic_stress_kernel_3d(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
+    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
 
-    // ===== velocity derivatives =====
-    float dvx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx);
-    float dvx_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vx, ctx);
-    float dvx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx);
+    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
 
-    float dvy_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vy, ctx);
-    float dvy_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD>(f.vy, ctx);
-    float dvy_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vy, ctx);
-
-    float dvz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx);
-    float dvz_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vz, ctx);
-    float dvz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx);
+    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
 
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
@@ -315,6 +294,7 @@ template<int Order>
 __global__ void elastic_velocity_kernel_3d_nopml(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
+    SGradParam grad_ctx,
     SolverContext solver
 )
 {
@@ -354,28 +334,17 @@ __global__ void elastic_velocity_kernel_3d_nopml(
     auto f = wf.offset(b, spatial_size);
     const float* rho_b = rho + b * spatial_size;
 
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
 
-    // ===== stress derivatives =====
-    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxx, ctx);
-    float dsxy_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD >(f.sxy, ctx);
-    float dsxz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD >(f.sxz, ctx);
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
 
-    float dsxy_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD >(f.sxy, ctx);
-    float dsyy_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.syy, ctx);
-    float dsyz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD >(f.syz, ctx);
-
-    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD >(f.sxz, ctx);
-    float dsyz_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD >(f.syz, ctx);
-    float dszz_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.szz, ctx);
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
     
     float inv_rho = 1.f / rho_b[idx];
 
@@ -395,6 +364,7 @@ __global__ void elastic_stress_kernel_3d_nopml(
     ElasticWavefieldPointer wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
+    SGradParam grad_ctx,
     SolverContext solver
 )
 {
@@ -436,28 +406,18 @@ __global__ void elastic_stress_kernel_3d_nopml(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
+    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
 
-    // ===== velocity derivatives =====
-    float dvx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx);
-    float dvx_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vx, ctx);
-    float dvx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx);
+    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
 
-    float dvy_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vy, ctx);
-    float dvy_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD>(f.vy, ctx);
-    float dvy_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vy, ctx);
+    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
 
-    float dvz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx);
-    float dvz_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vz, ctx);
-    float dvz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx);
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -489,6 +449,7 @@ __global__ void elastic_velocity_adjoint_kernel_3d(
     ElasticWavefieldPointer wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
+    SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
 )
@@ -544,37 +505,27 @@ __global__ void elastic_velocity_adjoint_kernel_3d(
 
     float l2m = lam + 2.f * mu_;
 
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
 
-    // ===== stress derivatives =====
-    float dsxx_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.sxx, ctx); //
-    float dsxx_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.sxx, ctx);
-    float dsxx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.sxx, ctx);
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
 
-    float dsxy_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD >(f.sxy, ctx); //
-    float dsxy_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD >(f.sxy, ctx); //
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
 
-    float dsxz_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD >(f.sxz, ctx); //
-    float dsxz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD >(f.sxz, ctx); //
+    float dsyy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyy_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
 
-    float dsyy_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.syy, ctx);
-    float dsyy_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.syy, ctx); //
-    float dsyy_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.syy, ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
 
-    float dsyz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD >(f.syz, ctx); //
-    float dsyz_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD >(f.syz, ctx);
+    float dszz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
+    float dszz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
+    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
 
-    float dszz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.szz, ctx);
-    float dszz_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.szz, ctx);
-    float dszz_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.szz, ctx); //
 
     f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
     dsxx_dx += f.m_sxxx[idx];
@@ -646,6 +597,7 @@ template<int Order>
 __global__ void elastic_stress_adjoint_kernel_3d(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
+    SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
 )
@@ -696,29 +648,19 @@ __global__ void elastic_stress_adjoint_kernel_3d(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
-
     float inv_rho = 1.f / rho_b[idx];
 
-    float dvx_dx = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx);
-    float dvx_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vx, ctx);
-    float dvx_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx);
+    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
 
-    float dvy_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vy, ctx);
-    float dvy_dy = sgradient<Order, GRAD_Y, DIFF_BACKWARD>(f.vy, ctx);
-    float dvy_dz = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vy, ctx);
+    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
 
-    float dvz_dx = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx);
-    float dvz_dy = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vz, ctx);
-    float dvz_dz = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx);
+    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
 
     f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
     dvz_dz += f.m_vzz[idx];
@@ -770,6 +712,8 @@ __global__ void calculate_grad_elastic3d_bs(
     float* __restrict__ grad_vp,             // (B, nz, nx)
     float* __restrict__ grad_vs,             // (B, nz, nx)
     float* __restrict__ grad_rho,            // (B, nz, nx)
+
+    SGradParam grad_ctx,
     SolverContext solver
 )
 {
@@ -814,29 +758,18 @@ __global__ void calculate_grad_elastic3d_bs(
     float* gvp = grad_vp + b * spatial_size;
     float* gvs = grad_vs + b * spatial_size;
     float* grho = grad_rho + b * spatial_size;
-    
-    SGradContext3d ctx {
-        1,
-        solver.nx,
-        solver.nx * solver.ny,
-        ix, iy, iz,
-        solver.M,
-        solver.grad_coeff,
-        solver.dx, solver.dy, solver.dz
-    };
 
-    // forward because velocity is staggered
-    float fvx_x = sgradient<Order, GRAD_X, DIFF_BACKWARD>(f.vx, ctx);
-    float fvx_y = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vx, ctx);
-    float fvx_z = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vx, ctx);
+    float fvx_x = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float fvx_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float fvx_z = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
 
-    float fvy_x = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vy, ctx);
-    float fvy_y = sgradient<Order, GRAD_Y, DIFF_BACKWARD>(f.vy, ctx);
-    float fvy_z = sgradient<Order, GRAD_Z, DIFF_FORWARD>(f.vy, ctx);
+    float fvy_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float fvy_y = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float fvy_z = sgradient<3, Order, Z, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
 
-    float fvz_x = sgradient<Order, GRAD_X, DIFF_FORWARD>(f.vz, ctx);
-    float fvz_y = sgradient<Order, GRAD_Y, DIFF_FORWARD>(f.vz, ctx);
-    float fvz_z = sgradient<Order, GRAD_Z, DIFF_BACKWARD>(f.vz, ctx);
+    float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float fvz_z = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
 
     float grad_lambda = (a.sxx[idx] + a.syy[idx] + a.szz[idx]) * (fvx_x + fvy_y + fvz_z);
     float grad_mu = 2*(a.sxx[idx] * fvx_x + 
@@ -850,9 +783,9 @@ __global__ void calculate_grad_elastic3d_bs(
     gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
                    2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
 
-    grad_rho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) + 
-                      a.vy[idx] * (f.vy[idx]-fvy_prev_b[idx]) +
-                      a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
-    grad_rho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
-                     grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+    grho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) + 
+                  a.vy[idx] * (f.vy[idx]-fvy_prev_b[idx]) +
+                  a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
+    grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                 grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
 }

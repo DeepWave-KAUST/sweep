@@ -8,6 +8,8 @@
 #include "../../common/context.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
+#include "../../operators/staggered.cuh"
 
 namespace elastic3d {
 
@@ -77,23 +79,17 @@ forward(
     torch::Tensor u_allt;
     // if (save_all_wavefields) u_allt = torch::zeros({nt, 2, B, nz, ny, nx}, vp.options()); // Only save Vx and Vz.
 
-    dim3 block(16, 8, 4);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (ny + block.y - 1) / block.y,
-        (nz + block.z - 1) / block.z * B
-    );
-
-    int threads_rec = 256;
-    int blocks_rec = (nrec + threads_rec - 1) / threads_rec;
-    dim3 grid_rec(B, blocks_rec);
-    dim3 block_rec(threads_rec);
+    auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
+    auto source_config = fdtd::Geom::make(nsrc, B);
+    auto record_config = fdtd::Geom::make(nrec, B);
 
     SolverContext solver{3, nx, ny, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
-   
-    GeneralBoundarySaver boundary_saver;
-    boundary_saver.allocate(use_boundary_saving, 3, 9, solver, vp, solver.M);
+    
+    GeneralBoundarySaverMore boundary_saver;
+    boundary_saver.allocate(use_boundary_saving, 3, 9, solver, vp, solver.M, 1);
     auto bs = boundary_saver.view();
+
+    SGradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
 
     const int order =
         (M <= 4) ? static_cast<int>(2 * M) : -1;
@@ -106,23 +102,29 @@ forward(
 
         LAUNCH_3DELASTIC_VELOCITY(
             order,
+            launch_config.grid,
+            launch_config.block,
             wf,
             rho.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         ); // t+0.5
 
         LAUNCH_3DELASTIC_STRESS(
             order,
+            launch_config.grid,
+            launch_config.block,
             wf,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
             u_this_t,
+            grad_ctx,
             cpml_view,
             solver
         ); // t+1.0
 
-        add_source_3d<<<B, nsrc>>>(
+        add_source_3d<<<source_config.grid, source_config.block>>>(
             wf.vz,
             source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
@@ -146,8 +148,7 @@ forward(
             };
 
             for (int f = 0; f < 9; ++f) {
-
-                save_boundary_kernel_3d<<<grid, block>>>(
+                save_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
                     fields[f],
                     boundary_saver.top_t[f].data_ptr<float>(),
                     boundary_saver.bottom_t[f].data_ptr<float>(),
@@ -162,7 +163,7 @@ forward(
             }
         }
 
-        record_kernel_3d<<<grid_rec, block_rec>>>(
+        record_kernel_3d<<<record_config.grid, record_config.block>>>(
             wf.vz,
             record.data_ptr<float>(),
             receivers_loc.data_ptr<int>(),

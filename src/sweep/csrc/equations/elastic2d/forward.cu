@@ -8,6 +8,7 @@
 #include "../../common/context.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.h"
+#include "../../launch/config.h"
 
 namespace elastic2d {
 
@@ -72,23 +73,22 @@ forward(
     torch::Tensor u_allt;
     if (save_all_wavefields) u_allt = torch::zeros({nt, 2, B, nz, nx}, vp.options()); // Only save Vx and Vz.
 
-    dim3 block(16, 16);
-    dim3 grid(
-        (nx + block.x - 1) / block.x,
-        (nz + block.y - 1) / block.y,
-        B
-    );
-
     SolverContext solver{2, nx, 0, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, 0.f, dz};
-   
+    
     GeneralBoundarySaver boundary_saver;
     boundary_saver.allocate(use_boundary_saving, 2, 5, solver, vp, solver.M+0);
     auto bs = boundary_saver.view();
+
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+    auto source_config = fdtd::Geom::make(nsrc, B);
+    auto record_config = fdtd::Geom::make(nrec, B);
 
     const int order =
         (M <= 4) ? static_cast<int>(2 * M) : -1;
 
     float* u_this_t = nullptr;
+
+    SGradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     for (unsigned int it = 0; it < nt; ++it) {
 
@@ -96,24 +96,29 @@ forward(
 
         LAUNCH_ELASTIC_VELOCITY(
             order,
+            launch_config.grid,
+            launch_config.block,
             wf,
             rho.data_ptr<float>(),
+            grad_ctx,
             cpml_view,
             solver
         ); // t+0.5
-
+        
         LAUNCH_ELASTIC_STRESS(
             order,
+            launch_config.grid,
+            launch_config.block,
             wf,
             lambda.data_ptr<float>(),
             mu.data_ptr<float>(),
             u_this_t,
+            grad_ctx,
             cpml_view,
             solver
         ); // t+1.0
 
-
-        add_source<<<B, nsrc>>>(
+        add_source<<<source_config.grid, source_config.block>>>(
             wf.vz,
             source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
@@ -121,7 +126,6 @@ forward(
             nsrc,
             solver
         );
-
 
         if (use_boundary_saving) {
 
@@ -135,7 +139,7 @@ forward(
 
             for (int f = 0; f < 5; ++f) {
 
-                save_boundary_kernel<<<grid, block>>>(
+                save_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
                     fields[f],
                     boundary_saver.top_t[f].data_ptr<float>(),
                     boundary_saver.bottom_t[f].data_ptr<float>(),
@@ -147,8 +151,8 @@ forward(
                 );
             }
         }
-
-        record_kernel<<<N, nrec>>>(
+        
+        record_kernel<<<record_config.grid, record_config.block>>>(
             wf.vz,
             record.data_ptr<float>(),
             receivers_loc.data_ptr<int>(),

@@ -10,7 +10,7 @@ from itertools import product
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-nz, nx = 256, 512
+nz, nx = 100, 100
 true_vp = np.ones((nz, nx), dtype=np.float32) * 2000.0
 # true_vp[nz//2:, :] = 2000.0
 true_vs = true_vp /1.73
@@ -21,16 +21,16 @@ def ricker(t, fm):
     return wave#.to(torch.float32)
 
 dev = torch.device("cuda:0")
-nt = 1000
-dt = 0.001
+nt = 3000
+dt = 0.002
 delay = 0.2
-dh = 5.0
+dh = 10.0
 fm = 5.0
 spatial_orders = [8]
-sourcesz = [4]
+sourcesz = [0]
 grid = list(product(spatial_orders, sourcesz))
-abcn = 0
-free_surface=False
+abcn = 50
+free_surface = False
 use_boundary_saving = True
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
@@ -55,8 +55,8 @@ pname = ['CUDA', 'PyTorch']
 for so, srcz in grid:
     gradients = []
 
-    sources = np.array([128, srcz]).reshape(1, 2)
-    receivers = np.array([384, srcz]).reshape(1, 1, 2)
+    sources = np.array([10, srcz]).reshape(1, 2)
+    receivers = np.array([40, srcz]).reshape(1, 1, 2)
 
     print(f"Testing spatial order {so} with source depth {srcz}...")
     for name, propagator in zip(pname, prop):
@@ -142,5 +142,5 @@ for so, srcz in grid:
     axes[2,2].set_title('Rho (Difference)')
 
     plt.tight_layout()
-    plt.savefig(f'grad_srcz{srcz}_so{so}_{"bs" if use_boundary_saving else "no_bs"}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'elastic_grad_srcz{srcz}_so{so}_{"bs" if use_boundary_saving else "no_bs"}.png', dpi=300, bbox_inches='tight')
     plt.close()

@@ -28,7 +28,6 @@ wave = -ricker(t, fm=fm)
 sources = np.array([512, 0]).reshape(1, 2)
 receivers = np.stack((np.arange(0, nx, 1), 
                      np.ones(nx, dtype=np.int32)*1), axis=1).reshape(1, -1, 2)
-dh = 10.0
 vp = torch.from_numpy(true_model.T).to(device).requires_grad_()
 for i in tqdm.trange(1001):
     vp.grad = None

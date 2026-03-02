@@ -1,7 +1,6 @@
 #include <torch/extension.h>
 
 #include "kernels.cuh"
-#include "../../operators/laplace2d.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
@@ -58,11 +57,16 @@ backward(
 
     SolverContext ctx{2, nx, 0, nz, B, dt, nt, M, abcn, true, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
+    LaplaceParam lap_ctx{nx, 1, M, lap_coes.data_ptr<float>(), dx, 0, dz};
+    GradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+
     for (int it = nt - 1; it >= 0; --it) {
 
         auto adj_view = adjoint.view();
 
-        LAUNCH_FORWARD(
+        ACOUSTIC2D(
             order,
             launch_config.grid,
             launch_config.block,
@@ -70,6 +74,10 @@ backward(
             false,
             u_thist,
             vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_z,
             cpml,
             ctx
         );
@@ -168,6 +176,11 @@ backward_bs(
     auto for_view = forward.view();
     set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn+ctx.M, nx, nz);
     set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn+ctx.M, nx, nz);
+    
+    LaplaceParam lap_ctx{nx, 1, M, lap_coes.data_ptr<float>(), dx, 0, dz};
+    GradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     for (int it = nt - 1; it >= 1; --it) {
 
@@ -177,7 +190,7 @@ backward_bs(
         // u_allt[it].copy_(forward.u_now_t);
 
         // adjoint modeling
-        LAUNCH_FORWARD(
+        ACOUSTIC2D(
             order,
             launch_config.grid,
             launch_config.block,
@@ -185,6 +198,10 @@ backward_bs(
             false,
             nullptr,
             vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_z,
             cpml,
             ctx
         );
@@ -200,12 +217,13 @@ backward_bs(
 
         adjoint.swap();
         
-        LAUNCH_FORWARD_NOPML(
+        ACOUSTIC2D_NOPML(
             order,
             launch_config.grid,
             launch_config.block,
             for_view,
             vp.data_ptr<float>(),
+            lap_ctx,
             ctx
         );
 

@@ -48,6 +48,7 @@ solver_kwargs = dict(wavelet=wave, sources=sources, receivers=receivers, models=
 # CUDA WITH BOUNDARY SAVING
 vp.grad = None
 out = cuda_solver(**solver_kwargs, use_boundary_saving=True)
+print(out.max(), out.min())
 loss = out.pow(2).sum()
 loss.backward()
 grads_cuda_vp_bs = vp.grad.cpu().numpy()
