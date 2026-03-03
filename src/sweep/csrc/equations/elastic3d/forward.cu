@@ -85,7 +85,8 @@ forward(
 
     SolverContext solver{3, nx, ny, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
     
-    GeneralBoundarySaverMore boundary_saver;
+    // GeneralBoundarySaverMore boundary_saver;
+    GeneralBoundarySaverPinned boundary_saver;
     boundary_saver.allocate(use_boundary_saving, 3, 9, solver, vp, solver.M, 1);
     auto bs = boundary_saver.view();
 
@@ -148,19 +149,39 @@ forward(
             };
 
             for (int f = 0; f < 9; ++f) {
+                // save_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
+                //     fields[f],
+                //     boundary_saver.top_t[f].data_ptr<float>(),
+                //     boundary_saver.bottom_t[f].data_ptr<float>(),
+                //     boundary_saver.front_t[f].data_ptr<float>(),
+                //     boundary_saver.back_t[f].data_ptr<float>(),
+                //     boundary_saver.left_t[f].data_ptr<float>(),
+                //     boundary_saver.right_t[f].data_ptr<float>(),
+                //     it,
+                //     solver.M,
+                //     solver
+                // );
                 save_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
                     fields[f],
-                    boundary_saver.top_t[f].data_ptr<float>(),
-                    boundary_saver.bottom_t[f].data_ptr<float>(),
-                    boundary_saver.front_t[f].data_ptr<float>(),
-                    boundary_saver.back_t[f].data_ptr<float>(),
-                    boundary_saver.left_t[f].data_ptr<float>(),
-                    boundary_saver.right_t[f].data_ptr<float>(),
-                    it,
+                    boundary_saver.top_gpu[f].data_ptr<float>(),
+                    boundary_saver.bottom_gpu[f].data_ptr<float>(),
+                    boundary_saver.front_gpu[f].data_ptr<float>(),
+                    boundary_saver.back_gpu[f].data_ptr<float>(),
+                    boundary_saver.left_gpu[f].data_ptr<float>(),
+                    boundary_saver.right_gpu[f].data_ptr<float>(),
+                    0,
                     solver.M,
                     solver
                 );
             }
+
+            boundary_saver.left_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.left_gpu.squeeze(1), /*non_blocking=*/true);
+            boundary_saver.right_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.right_gpu.squeeze(1), /*non_blocking=*/true);
+            boundary_saver.front_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.front_gpu.squeeze(1), /*non_blocking=*/true);
+            boundary_saver.back_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.back_gpu.squeeze(1), /*non_blocking=*/true);
+            boundary_saver.top_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.top_gpu.squeeze(1), /*non_blocking=*/true);
+            boundary_saver.bottom_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.bottom_gpu.squeeze(1), /*non_blocking=*/true);
+
         }
 
         record_kernel_3d<<<record_config.grid, record_config.block>>>(

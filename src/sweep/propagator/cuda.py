@@ -62,29 +62,29 @@ class Warpper(torch.autograd.Function):
             spacing
         )
 
-        ctx.save_for_backward(
-            u_allt,
-            last,
-            sources_loc,
-            receivers_loc,
-            lap_coes, grad_coes,
-        )
-        # np.save('u_last.npy', last.detach().cpu().numpy())
-        ctx.models = models
-        ctx.boundary_vals = [b.cpu() for b in boundary_vals]
-        # ctx.boundary_vals = boundary_vals
-        ctx.pml_vals = pml_vals
-        ctx.abcn = abcn
-        ctx.M = M
-        ctx.nt = nt
-        ctx.spacing = spacing
-        ctx.dt = dt
-        ctx.free_surface = free_surface
-        ctx.use_boundary_saving = use_boundary_saving
-        ctx.backward_func = backward_func
-        ctx.backward_bs_func = backward_bs_func
-        ctx.wavelet = wavelet
+        if any([save_all_wavefield, use_boundary_saving]):
 
+            ctx.save_for_backward(
+                u_allt,
+                last,
+                sources_loc,
+                receivers_loc,
+                lap_coes, grad_coes,
+            )
+            ctx.models = models
+            # ctx.boundary_vals = [b.detach().cpu() for b in boundary_vals]
+            ctx.boundary_vals = boundary_vals
+            ctx.pml_vals = pml_vals
+            ctx.abcn = abcn
+            ctx.M = M
+            ctx.nt = nt
+            ctx.spacing = spacing
+            ctx.dt = dt
+            ctx.free_surface = free_surface
+            ctx.use_boundary_saving = use_boundary_saving
+            ctx.backward_func = backward_func
+            ctx.backward_bs_func = backward_bs_func
+            ctx.wavelet = wavelet
         return syn        
     
     @staticmethod
@@ -142,7 +142,7 @@ class Warpper(torch.autograd.Function):
             # print('Saving forward wavefield for checking...')
             # np.save('/data/tmp/u_forward.npy', gradients[0].detach().cpu().numpy())
             # np.save('/data/tmp/u_adoint.npy', gradients[0].detach().cpu().numpy())
-            gradients = gradients[1:]
+            # gradients = gradients[1:]
             # print([g.shape for g in gradients])
         return (
             None, None, None, # functions

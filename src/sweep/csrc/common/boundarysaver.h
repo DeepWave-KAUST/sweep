@@ -291,6 +291,175 @@ struct GeneralBoundarySaverMore {
 
 };
 
+struct GeneralBoundarySaverPinned {
+
+    torch::Tensor left_t, right_t;
+    torch::Tensor front_t, back_t;
+    torch::Tensor bottom_t, top_t;
+    torch::Tensor last_two_t;
+
+    torch::Tensor left_gpu, right_gpu;
+    torch::Tensor front_gpu, back_gpu;
+    torch::Tensor bottom_gpu, top_gpu;
+    torch::Tensor last_two_gpu;
+
+    bool enabled = false;
+    int dim = 3;
+    int nvar = 1;
+
+    void allocate(
+        bool use_boundary_saving,
+        int dim_,
+        int nvar_,
+        SolverContext ctx,
+        const torch::Tensor& ref_tensor,
+        int width = -1,
+        int last_two_nvar = 2
+    )
+    {
+        enabled = use_boundary_saving;
+        dim = dim_;
+        nvar = nvar_;
+
+        if (!enabled) return;
+
+        if (width < 0) {
+            width = ctx.M;
+        }
+
+        auto options = ref_tensor.options();
+
+        int phys_z0 = ctx.free_surface ? ctx.M : ctx.abcn + ctx.M;
+        int phys_z1 = ctx.nz - ctx.abcn - ctx.M;
+
+        int phys_x0 = ctx.abcn + ctx.M;
+        int phys_x1 = ctx.nx - ctx.abcn - ctx.M;
+
+        int nz_phys = phys_z1 - phys_z0;
+        int nx_phys = phys_x1 - phys_x0;
+
+        if (dim == 3) {
+
+            int phys_y0 = ctx.abcn + ctx.M;
+            int phys_y1 = ctx.ny - ctx.abcn - ctx.M;
+            int ny_phys = phys_y1 - phys_y0;
+
+            auto pinned_options = torch::TensorOptions()
+                .dtype(torch::kFloat32)
+                .device(torch::kCPU)
+                .pinned_memory(true);
+
+            // On CPU for saving and restoring
+            left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, ny_phys, width}, pinned_options);
+            right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, ny_phys, width}, pinned_options);
+
+            front_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width, nx_phys}, pinned_options);
+            back_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width, nx_phys}, pinned_options);
+
+            bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, ny_phys, nx_phys}, pinned_options);
+            top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, ny_phys, nx_phys}, pinned_options);
+
+            // On GPU for transerring back to GPU faster
+            left_gpu = torch::zeros({nvar, 1, ctx.B, nz_phys, ny_phys, width}, options);
+            right_gpu = torch::zeros({nvar, 1, ctx.B, nz_phys, ny_phys, width}, options);
+
+            front_gpu = torch::zeros({nvar, 1, ctx.B, nz_phys, width, nx_phys}, options);
+            back_gpu  = torch::zeros({nvar, 1, ctx.B, nz_phys, width, nx_phys}, options);
+
+            bottom_gpu = torch::zeros({nvar, 1, ctx.B, width, ny_phys, nx_phys}, options);
+            top_gpu    = torch::zeros({nvar, 1, ctx.B, width, ny_phys, nx_phys}, options);
+
+
+            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx}, options);
+
+        } else {
+
+            left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width}, options);
+            right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width}, options);
+
+            bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_phys}, options);
+            top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_phys}, options);
+
+            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.nx}, options);
+
+            front_t = torch::Tensor();
+            back_t  = torch::Tensor();
+        }
+    }
+
+    GeneralBoundaryPointer view()
+    {
+        GeneralBoundaryPointer v{};
+
+        if (!enabled) return v;
+
+        v.left  = left_t.data_ptr<float>();
+        v.right = right_t.data_ptr<float>();
+
+        if (dim == 3) {
+            v.front = front_t.data_ptr<float>();
+            v.back  = back_t.data_ptr<float>();
+        } else {
+            v.front = nullptr;
+            v.back  = nullptr;
+        }
+
+        v.bottom = bottom_t.data_ptr<float>();
+        v.top    = top_t.data_ptr<float>();
+
+        v.last_two = last_two_t.data_ptr<float>();
+
+        return v;
+
+    }
+
+    void load_from_vector(
+        const std::vector<torch::Tensor>& u_boundary,
+        const torch::Tensor& ref_tensor
+        )
+        {
+            if (!enabled)
+                throw std::runtime_error("Boundary saving not enabled.");
+
+
+            auto copy_to = [&](torch::Tensor& dst, const torch::Tensor& src)
+            {
+                if (dst.device() == src.device()) {
+                    dst.copy_(src);
+                }
+                else {
+                    dst.copy_(src, /*non_blocking=*/true);
+                }
+            };
+
+            if (dim == 2) {
+
+                if (u_boundary.size() != 4)
+                    throw std::runtime_error("2D boundary expects 4 tensors.");
+                
+                copy_to( top_t, u_boundary[0]);
+                copy_to( bottom_t, u_boundary[1]);
+                copy_to( left_t, u_boundary[2]);
+                copy_to( right_t, u_boundary[3]);
+
+            } else { // 3D
+
+                if (u_boundary.size() != 6)
+                    throw std::runtime_error("3D boundary expects 6 tensors.");
+
+                copy_to( top_t, u_boundary[0]);
+                copy_to( bottom_t, u_boundary[1]);
+
+                copy_to( front_t, u_boundary[2]);
+                copy_to( back_t, u_boundary[3]);
+
+                copy_to( left_t, u_boundary[4]);
+                copy_to( right_t, u_boundary[5]);
+            }
+        }
+
+};
+
 __global__ void save_boundary_kernel(
     const float* __restrict__ u,   // (B, nz, nx)
     float* __restrict__ top,       // (nt, B, n, nx)

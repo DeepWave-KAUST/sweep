@@ -12,7 +12,7 @@
 
 namespace elastic3d {
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 backward_bs(
     const std::vector<torch::Tensor>& u_boundary,
     torch::Tensor u_last_two,     // (B, nz, nx)
@@ -105,7 +105,8 @@ backward_bs(
     cpml.allocate(pml_vals, 3);
     auto cpml_view = cpml.view();
 
-    GeneralBoundarySaverMore boundary_saver;
+    // GeneralBoundarySaverMore boundary_saver;
+    GeneralBoundarySaverPinned boundary_saver;
     boundary_saver.allocate(true, 3, 9, solver, vp, solver.M, 1);
     boundary_saver.load_from_vector(u_boundary, vp);
     auto bs = boundary_saver.view();
@@ -114,7 +115,7 @@ backward_bs(
     auto fvy_prev = torch::zeros_like(vp);
     auto fvz_prev = torch::zeros_like(vp);
 
-    auto u_all_t = torch::zeros({2, B, 1, nz, ny, nx}, vp.options());
+    // auto u_all_t = torch::zeros({2, B, 1, nz, ny, nx}, vp.options());
     SGradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
 
     for (int it = nt - 1; it >= 1; --it) {
@@ -173,18 +174,38 @@ backward_bs(
             solver
         );
 
-        float *field2[6] = {for_view.sxx, for_view.syy, for_view.szz, for_view.sxy, for_view.sxz, for_view.syz};
+        // Copy boundary data from CPU to GPU
+        boundary_saver.top_gpu.copy_(boundary_saver.top_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+        boundary_saver.bottom_gpu.copy_(boundary_saver.bottom_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+        boundary_saver.front_gpu.copy_(boundary_saver.front_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+        boundary_saver.back_gpu.copy_(boundary_saver.back_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+        boundary_saver.left_gpu.copy_(boundary_saver.left_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+        boundary_saver.right_gpu.copy_(boundary_saver.right_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
 
+        float *field2[6] = {for_view.sxx, for_view.syy, for_view.szz, for_view.sxy, for_view.sxz, for_view.syz};
+        
         for (int f = 3; f < 9; ++f)
+            // restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
+            //     field2[f-3],
+            //     boundary_saver.top_t[f].data_ptr<float>(),
+            //     boundary_saver.bottom_t[f].data_ptr<float>(),
+            //     boundary_saver.front_t[f].data_ptr<float>(),
+            //     boundary_saver.back_t[f].data_ptr<float>(),
+            //     boundary_saver.left_t[f].data_ptr<float>(),
+            //     boundary_saver.right_t[f].data_ptr<float>(),
+            //     it-1,
+            //     solver.M,
+            //     solver
+            // );
             restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
                 field2[f-3],
-                boundary_saver.top_t[f].data_ptr<float>(),
-                boundary_saver.bottom_t[f].data_ptr<float>(),
-                boundary_saver.front_t[f].data_ptr<float>(),
-                boundary_saver.back_t[f].data_ptr<float>(),
-                boundary_saver.left_t[f].data_ptr<float>(),
-                boundary_saver.right_t[f].data_ptr<float>(),
-                it-1,
+                boundary_saver.top_gpu[f].data_ptr<float>(),
+                boundary_saver.bottom_gpu[f].data_ptr<float>(),
+                boundary_saver.front_gpu[f].data_ptr<float>(),
+                boundary_saver.back_gpu[f].data_ptr<float>(),
+                boundary_saver.left_gpu[f].data_ptr<float>(),
+                boundary_saver.right_gpu[f].data_ptr<float>(),
+                0,
                 solver.M,
                 solver
             );
@@ -231,24 +252,36 @@ backward_bs(
         float *field1[3] = {for_view.vx, for_view.vy, for_view.vz};
 
         for (int f = 0; f < 3; ++f)
+            // restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
+            //     field1[f],
+            //     boundary_saver.top_t[f].data_ptr<float>(),
+            //     boundary_saver.bottom_t[f].data_ptr<float>(),
+            //     boundary_saver.front_t[f].data_ptr<float>(),
+            //     boundary_saver.back_t[f].data_ptr<float>(),
+            //     boundary_saver.left_t[f].data_ptr<float>(),
+            //     boundary_saver.right_t[f].data_ptr<float>(),
+            //     it-1,
+            //     solver.M,
+            //     solver
+            // );
             restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
                 field1[f],
-                boundary_saver.top_t[f].data_ptr<float>(),
-                boundary_saver.bottom_t[f].data_ptr<float>(),
-                boundary_saver.front_t[f].data_ptr<float>(),
-                boundary_saver.back_t[f].data_ptr<float>(),
-                boundary_saver.left_t[f].data_ptr<float>(),
-                boundary_saver.right_t[f].data_ptr<float>(),
-                it-1,
+                boundary_saver.top_gpu[f].data_ptr<float>(),
+                boundary_saver.bottom_gpu[f].data_ptr<float>(),
+                boundary_saver.front_gpu[f].data_ptr<float>(),
+                boundary_saver.back_gpu[f].data_ptr<float>(),
+                boundary_saver.left_gpu[f].data_ptr<float>(),
+                boundary_saver.right_gpu[f].data_ptr<float>(),
+                0,
                 solver.M,
                 solver
             );
     }
 
-    u_all_t[0].copy_(forward.vz_t); // for visualization
-    u_all_t[1].copy_(adjoint.vz_t); // for visualization
+    // u_all_t[0].copy_(forward.vz_t); // for visualization
+    // u_all_t[1].copy_(adjoint.vz_t); // for visualization
 
-    return std::make_tuple(u_all_t, grad_vp, grad_vs, grad_rho);
+    return std::make_tuple(grad_vp, grad_vs, grad_rho);
 }
 
 }

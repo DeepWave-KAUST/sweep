@@ -8,6 +8,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          m_sxxx, m_szzz,
          m_sxyx, m_sxyy,
          m_sxzx, m_sxzz,
+            m_syyy,
          m_syzy, m_syzz,
          vp, vs, rho, 
          dt, h, b, pd, 
@@ -31,29 +32,29 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dsyz_dy = pd.y_backward(syz)
     dszz_dz = pd.z_forward(szz)
 
-    # m_szzz = azh * m_szzz + bzh * dszz_dz
-    # dszz_dz = dszz_dz + m_szzz
-    # m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    # dsxz_dx = dsxz_dx + m_sxzx
+    m_szzz = azh * m_szzz + bzh * dszz_dz
+    dszz_dz = dszz_dz + m_szzz
+    m_sxzx = ax * m_sxzx + bx * dsxz_dx
+    dsxz_dx = dsxz_dx + m_sxzx
 
-    # m_sxzz = az * m_sxzz + bz * dsxz_dz
-    # dsxz_dz = dsxz_dz + m_sxzz
-    # m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    # dsxx_dx = dsxx_dx + m_sxxx
+    m_sxzz = az * m_sxzz + bz * dsxz_dz
+    dsxz_dz = dsxz_dz + m_sxzz
+    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
+    dsxx_dx = dsxx_dx + m_sxxx
 
-    # m_sxyy = ay * m_sxyy + by * dsxy_dy
-    # dsxy_dy = dsxy_dy + m_sxyy
+    m_sxyy = ay * m_sxyy + by * dsxy_dy
+    dsxy_dy = dsxy_dy + m_sxyy
 
-    # m_sxyx = ax * m_sxyx + bx * dsxy_dx
-    # dsxy_dx = dsxy_dx + m_sxyx
+    m_sxyx = ax * m_sxyx + bx * dsxy_dx
+    dsxy_dx = dsxy_dx + m_sxyx
 
-    # m_syyy = ayh * m_syyy + byh * dsyy_dy
-    # dsyy_dy = dsyy_dy + m_syyy
-    # m_syzz = az * m_syzz + bz * dsyz_dz
-    # dsyz_dz = dsyz_dz + m_syzz
+    m_syyy = ayh * m_syyy + byh * dsyy_dy
+    dsyy_dy = dsyy_dy + m_syyy
+    m_syzz = az * m_syzz + bz * dsyz_dz
+    dsyz_dz = dsyz_dz + m_syzz
 
-    # m_syzy = ay * m_syzy + by * dsyz_dy
-    # dsyz_dy = dsyz_dy + m_syzy
+    m_syzy = ay * m_syzy + by * dsyz_dy
+    dsyz_dy = dsyz_dy + m_syzy
 
     vx = vx + dt / (rho * h) * (dsxx_dx + dsxy_dy + dsxz_dz)
     vy = vy + dt / (rho * h) * (dsxy_dx + dsyy_dy + dsyz_dz)
@@ -71,25 +72,25 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dvz_dy = pd.y_forward(vz)
     dvz_dz = pd.z_backward(vz)
 
-    # m_vzz = az * m_vzz + bz * dvz_dz
-    # dvz_dz = dvz_dz + m_vzz
-    # m_vyy = ay * m_vyy + by * dvy_dy
-    # dvy_dy = dvy_dy + m_vyy
-    # m_vxx = ax * m_vxx + bx * dvx_dx
-    # dvx_dx = dvx_dx + m_vxx
-    # m_vxz = azh * m_vxz + bzh * dvx_dz
-    # dvx_dz = dvx_dz + m_vxz
-    # m_vzx = axh * m_vzx + bxh * dvz_dx
-    # dvz_dx = dvz_dx + m_vzx
+    m_vzz = az * m_vzz + bz * dvz_dz
+    dvz_dz = dvz_dz + m_vzz
+    m_vyy = ay * m_vyy + by * dvy_dy
+    dvy_dy = dvy_dy + m_vyy
+    m_vxx = ax * m_vxx + bx * dvx_dx
+    dvx_dx = dvx_dx + m_vxx
+    m_vxz = azh * m_vxz + bzh * dvx_dz
+    dvx_dz = dvx_dz + m_vxz
+    m_vzx = axh * m_vzx + bxh * dvz_dx
+    dvz_dx = dvz_dx + m_vzx
 
-    # m_vxy = ayh * m_vxy + byh * dvx_dy
-    # dvx_dy = dvx_dy + m_vxy
-    # m_vyx = axh * m_vyx + bxh * dvy_dx
-    # dvy_dx = dvy_dx + m_vyx
-    # m_vyz = azh * m_vyz + bzh * dvy_dz
-    # dvy_dz = dvy_dz + m_vyz
-    # m_vzy = ayh * m_vzy + byh * dvz_dy
-    # dvz_dy = dvz_dy + m_vzy
+    m_vxy = ayh * m_vxy + byh * dvx_dy
+    dvx_dy = dvx_dy + m_vxy
+    m_vyx = axh * m_vyx + bxh * dvy_dx
+    dvy_dx = dvy_dx + m_vyx
+    m_vyz = azh * m_vyz + bzh * dvy_dz
+    dvy_dz = dvy_dz + m_vyz
+    m_vzy = ayh * m_vzy + byh * dvz_dy
+    dvz_dy = dvz_dy + m_vzy
 
     div_v = dvx_dx + dvy_dy + dvz_dz
 
@@ -107,6 +108,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
            m_sxxx, m_szzz, \
            m_sxyx, m_sxyy, \
            m_sxzx, m_sxzz, \
+           m_syyy, \
            m_syzy, m_syzz
 
 class Elastic(FirstOrderEquation):
@@ -132,7 +134,7 @@ class Elastic(FirstOrderEquation):
                 'm_sxxx', 'm_szzz',
                 'm_sxyx', 'm_sxyy',
                 'm_sxzx', 'm_sxzz',
-                'm_syzy', 'm_syzz']
+                'm_syyy', 'm_syzy', 'm_syzz']
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, pml=self.b, **kwargs)
