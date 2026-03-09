@@ -17,22 +17,24 @@ def ricker(t, fm):
     return wave#.to(torch.float32)
 
 dev = torch.device("cuda:0")
-nt = 1000
+nt = 3000
 dt = 0.001
 delay = 0.2
 dh = 5.0
 fm = 10.0
 spatial_order = 8
-abcn = 30
-free_surface=False
+abcn = 50
+free_surface=True
 
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([128, 32]).reshape(1, 2)
+sources = np.array([128, 3]).reshape(1, 2)
 
-receivers = np.array([384, 32]).reshape(1, 1, 2)
-
+receivers = np.array([384, 3]).reshape(1, 1, 2)
+print('free_surface:', free_surface, sources, receivers)
+print('Spatial order:', spatial_order)
+print('abcn: ', abcn)
 vp = torch.from_numpy(true_vp).float().to(device).requires_grad_()
 
 prop = [PropCUDA, PropTorch]
@@ -91,7 +93,6 @@ axes[1,1].set_title('Vp (Torch)')
 ax = axes[1,2].imshow(grads_cuda_vp_bs - grads_torch_vp, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
 plt.colorbar(ax, ax=axes[1,2])
 axes[1,2].set_title('Vp (Difference)')
-
 
 plt.tight_layout()
 plt.savefig(f'acoustic_grad.png', dpi=300, bbox_inches='tight')

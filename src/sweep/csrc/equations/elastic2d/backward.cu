@@ -6,47 +6,37 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"
-#include "../../common/boundarysaver.h"
+#include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
+#include "../../common/wavetypes.h"
 
 namespace elastic2d {
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-backward(
-    torch::Tensor u_forward,     // (nt, 4， B, nz, nx)
-    const std::vector<torch::Tensor>& models,
-    torch::Tensor adjoint_source,      // (B, nsrc, nt)
-    torch::Tensor lap_coes,       // FD coefficients c[0..M]
-    torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
-    int M,            // half order (order = 2*M)
-    int abcn,                 // number of ABC layers
-    torch::Tensor adjoint_sources_loc,   // (B, nsrc, 2) int32
-    const std::vector<torch::Tensor>& pml_vals,
-    unsigned int nt,
-    float dt,
-    std::vector<float> spacing
-) {
+BackwardOutput backward(const BackwardInput& in)
+{
+    const auto& p = in;
+    BackwardOutput out;
 
-    float dx = spacing[0];
-    float dz = spacing[1];
+    float dx = p.spacing[0];
+    float dz = p.spacing[1];
 
-    auto vp = models[0];
-    auto vs = models[1];
-    auto rho = models[2];
+    auto vp = p.models[0];
+    auto vs = p.models[1];
+    auto rho = p.models[2];
 
     int N = vp.size(0);
     int C = vp.size(1);
     int nz = vp.size(2);
     int nx = vp.size(3);
 
-    int adjoint_nsrc = adjoint_sources_loc.size(1);
+    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
 
     int B = N * C;
 
     const int order =
-        (M <= 4) ? static_cast<int>(2 * M) : -1;
+        (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext solver{2, nx, 0, nz, B, dt, nt, M, abcn, false, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, false, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto f_this = torch::zeros_like(vp); // for gradient calculation
     
@@ -65,17 +55,17 @@ backward(
 
     // PML coefficients
     ElasticCPMLTensor cpml;
-    cpml.allocate(pml_vals, 2);
+    cpml.allocate(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
-    SGradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     int t2=0;
 
-    for (int it = nt - 1; it >= 1; --it) {
+    for (int it = p.nt - 1; it >= 1; --it) {
 
         LAUNCH_ELASTIC_VELOCITY_ADJOINT(
             order,
@@ -102,14 +92,14 @@ backward(
 
         add_source<<<source_config.grid, source_config.block>>>(
             adj_view.vz,
-            adjoint_source.data_ptr<float>(),
-            adjoint_sources_loc.data_ptr<int>(),
+            p.adjoint_source.data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
             solver
         );
         
-        if (it+1>=nt) t2=it; else t2=it+1;
+        if (it+1>=p.nt) t2=it; else t2=it+1;
 
         LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
             order,
@@ -118,11 +108,11 @@ backward(
 
             adj_view,
 
-            u_forward.select(0, it).select(0, 0).data_ptr<float>(), // vx
-            u_forward.select(0, it).select(0, 1).data_ptr<float>(), // vz
+            p.u_forward.select(0, it).select(0, 0).data_ptr<float>(), // vx
+            p.u_forward.select(0, it).select(0, 1).data_ptr<float>(), // vz
             
-            u_forward.select(0, t2).select(0, 0).data_ptr<float>(), // vx
-            u_forward.select(0, t2).select(0, 1).data_ptr<float>(), // vz
+            p.u_forward.select(0, t2).select(0, 0).data_ptr<float>(), // vx
+            p.u_forward.select(0, t2).select(0, 1).data_ptr<float>(), // vz
 
             vp.data_ptr<float>(),
             vs.data_ptr<float>(),
@@ -138,50 +128,38 @@ backward(
 
     }
 
-    return std::make_tuple(grad_vp, grad_vs, grad_rho);
+    out.grads = {grad_vp, grad_vs, grad_rho};
+    return out;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-backward_bs(
-    const std::vector<torch::Tensor>& u_boundary,
-    torch::Tensor u_last_two,     // (B, nz, nx)
-    const std::vector<torch::Tensor>& models,
-    torch::Tensor adjoint_source,      // (B, nsrc, nt)
-    torch::Tensor forward_source,      // (B, nsrc, nt)
-    torch::Tensor lap_coes,       // FD coefficients c[0..M]
-    torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
-    int M,            // half order (order = 2*M)
-    int abcn,                 // number of ABC layers
-    torch::Tensor adjoint_sources_loc,   // (B, nsrc, 2) int32
-    torch::Tensor forward_sources_loc,   // (B, nsrc, 2) int32
-    const std::vector<torch::Tensor>& pml_vals,
-    unsigned int nt,
-    float dt,
-    std::vector<float> spacing,
-    bool free_surface
-) {
 
-    float dx = spacing[0];
-    float dz = spacing[1];
+BackwardOutput backward_bs(const BackwardInput& in)
+{
 
-    auto vp = models[0];
-    auto vs = models[1];
-    auto rho = models[2];
+    const auto& p = in;
+    BackwardOutput out;
+
+    float dx = p.spacing[0];
+    float dz = p.spacing[1];
+
+    auto vp = p.models[0];
+    auto vs = p.models[1];
+    auto rho = p.models[2];
 
     int N = vp.size(0);
     int C = vp.size(1);
     int nz = vp.size(2);
     int nx = vp.size(3);
 
-    int adjoint_nsrc = adjoint_sources_loc.size(1);
-    int forward_nsrc = forward_sources_loc.size(1);
+    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
+    int forward_nsrc = p.forward_sources_loc.size(1);
     int B = N * C;
 
     const int order =
-        (M <= 4) ? static_cast<int>(2 * M) : -1;
+        (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext solver{2, nx, 0, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, 0.f, dz};
-    SGradParam grad_ctx{1, 0, nx, M, grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto f_this = torch::zeros_like(vp); // for gradient calculation
     
@@ -194,30 +172,32 @@ backward_bs(
 
     // Copy last step of forward wavefield from u_last_two
     forward.allocate(vp, 2, false);
-    forward.vx_t.copy_(u_last_two.select(0,0).select(0,0));
-    forward.vz_t.copy_(u_last_two.select(0,1).select(0,0));
-    forward.sxx_t.copy_(u_last_two.select(0,2).select(0,0));
-    forward.szz_t.copy_(u_last_two.select(0,3).select(0,0));
-    forward.sxz_t.copy_(u_last_two.select(0,4).select(0,0));
+    forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
+    forward.vz_t.copy_(p.u_last_two.select(0,1).select(0,0));
+    forward.sxx_t.copy_(p.u_last_two.select(0,2).select(0,0));
+    forward.szz_t.copy_(p.u_last_two.select(0,3).select(0,0));
+    forward.sxz_t.copy_(p.u_last_two.select(0,4).select(0,0));
 
-    auto neg_forward_source = -forward_source;
+    auto neg_forward_source = -p.forward_source;
 
     // Generate pointer views
     auto for_view = forward.view();
     auto adj_view = adjoint.view();
-
+    
     auto grad_vp = torch::zeros_like(vp);
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
 
     // PML coefficients
     ElasticCPMLTensor cpml;
-    cpml.allocate(pml_vals, 2);
+    cpml.allocate(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
-    GeneralBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 2, 5, solver, vp, solver.M+0);
-    boundary_saver.load_from_vector(u_boundary, vp);
+
+    EffectiveBoundarySaver boundary_saver;
+    int save_width = solver.M + 1;
+    boundary_saver.allocate(true, 2, 5, solver, vp, save_width, 1, true, true);
+    boundary_saver.load_from_vector(p.u_boundary, vp);
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -225,18 +205,19 @@ backward_bs(
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     // Set boundarys of the last frame to be zeors
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vx, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vz, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.szz, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxx, solver.abcn+solver.M, nx, nz);
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxz, solver.abcn+solver.M, nx, nz);
+    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vx, solver.abcn+solver.M, nx, nz);
+    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vz, solver.abcn+solver.M, nx, nz);
+    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.szz, solver.abcn+solver.M, nx, nz);
+    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxx, solver.abcn+solver.M, nx, nz);
+    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxz, solver.abcn+solver.M, nx, nz);
 
     auto fvz_prev = torch::zeros_like(vp);
     auto fvx_prev = torch::zeros_like(vp);
 
-    // auto u_all_t = torch::zeros({nt, B, 1, nz, nx}, vp.options());
+    // auto u_all_for = torch::zeros({nt, B, 1, nz, nx}, vp.options());
+    // auto u_all_adj = torch::zeros({nt, B, 1, nz, nx}, vp.options());
 
-    for (int it = nt - 1; it >= 1; --it) {
+    for (int it = p.nt - 1; it >= 1; --it) {
         
         LAUNCH_ELASTIC_VELOCITY_ADJOINT(
             order,
@@ -262,25 +243,41 @@ backward_bs(
         ); // t-1.0
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+            adj_view.vx,
+            p.adjoint_source[0].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it,
+            adjoint_nsrc,
+            solver
+        );
+
+        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.vz,
-            adjoint_source.data_ptr<float>(),
-            adjoint_sources_loc.data_ptr<int>(),
+            p.adjoint_source[1].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
             solver
         );
 
         // Wavefield reconstruction
-        // donot work when source is in the saving part
         add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.vz,
+            for_view.sxx,
             neg_forward_source.data_ptr<float>(),
-            forward_sources_loc.data_ptr<int>(),
+            p.forward_sources_loc.data_ptr<int>(),
             it,
             forward_nsrc,
             solver
         );
 
+        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.szz,
+            neg_forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            solver
+        );
         // Update Stress components
         LAUNCH_ELASTIC_STRESS_NOPML(
             order,
@@ -296,15 +293,17 @@ backward_bs(
         float *field2[3] = {for_view.sxx, for_view.szz, for_view.sxz};
 
         for (int f = 2; f < 5; ++f)
-            restore_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
+            boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
                 field2[f-2],
                 boundary_saver.top_t[f].data_ptr<float>(),
                 boundary_saver.bottom_t[f].data_ptr<float>(),
                 boundary_saver.left_t[f].data_ptr<float>(),
                 boundary_saver.right_t[f].data_ptr<float>(),
                 it-1,
-                solver.M+0,
-                solver
+                save_width,
+                -p.M,
+                solver,
+                BOUNDARY_RESTORE
             );
 
         // Gradient calculation
@@ -347,21 +346,26 @@ backward_bs(
         float *field1[2] = {for_view.vx, for_view.vz};
 
         for (int f = 0; f < 2; ++f)
-            restore_boundary_kernel<<<launch_config.grid, launch_config.block>>>(
+            boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
                 field1[f],
                 boundary_saver.top_t[f].data_ptr<float>(),
                 boundary_saver.bottom_t[f].data_ptr<float>(),
                 boundary_saver.left_t[f].data_ptr<float>(),
                 boundary_saver.right_t[f].data_ptr<float>(),
                 it-1,
-                solver.M+0,
-                solver
+                save_width,
+                -p.M,
+                solver,
+                BOUNDARY_RESTORE
             );
 
-        // u_all_t[it].copy_(forward.vz_t); // for visualization
+        // u_all_for[it].copy_(forward.vz_t); // for visualization
+        // u_all_adj[it].copy_(adjoint.vz_t); // for visualization
     }
 
-    return std::make_tuple(grad_vp, grad_vs, grad_rho);
+    out.grads = {grad_vp, grad_vs, grad_rho};
+    return out;
+
 }
 
 }

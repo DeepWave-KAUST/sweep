@@ -27,9 +27,9 @@ delay = 0.2
 dh = 10.0
 fm = 5.0
 spatial_orders = [8]
-sourcesz = [0]
+sourcesz = [2]
 grid = list(product(spatial_orders, sourcesz))
-abcn = 50
+abcn = 10
 free_surface = False
 use_boundary_saving = True
 t = np.arange(nt) * dt - delay
@@ -44,8 +44,7 @@ wave = ricker(t, fm=fm).astype(np.float32)
 # rec_z = np.ones_like(rec_x)*0
 # receivers = np.concatenate([rec_x, rec_z], axis=1)
 # receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nreceivers, 2)
-receivers = np.array([384, 3]).reshape(1, 1, 2)
-
+print(spatial_orders, sourcesz, abcn)
 vp = torch.from_numpy(true_vp).float().to(device).requires_grad_()
 vs = torch.from_numpy(true_vs).float().to(device).requires_grad_()
 rho = torch.from_numpy(rho).float().to(device).requires_grad_()
@@ -56,7 +55,7 @@ for so, srcz in grid:
     gradients = []
 
     sources = np.array([10, srcz]).reshape(1, 2)
-    receivers = np.array([40, srcz]).reshape(1, 1, 2)
+    receivers = np.array([90, srcz]).reshape(1, 1, 2)
 
     print(f"Testing spatial order {so} with source depth {srcz}...")
     for name, propagator in zip(pname, prop):
@@ -66,8 +65,8 @@ for so, srcz in grid:
         rho.grad=None
         solver = propagator(Elastic(spatial_order=so, device=device,), 
                         shape=vp.shape, 
-                        source_type=['vz'],
-                        receiver_type=['vz'],
+                        source_type=['sxx', 'szz'],
+                        receiver_type=['vx', 'vz'],
                         abcn=abcn , 
                         dh = dh,
                         dt = dt,

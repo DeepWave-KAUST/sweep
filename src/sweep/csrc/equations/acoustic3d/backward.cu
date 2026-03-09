@@ -4,32 +4,23 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
-#include "../../common/boundarysaver.h"
+#include "../../common/wavetypes.h"
+#include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
 
 namespace acoustic3d {
 
-std::tuple<torch::Tensor>
-backward(
-    torch::Tensor u_forward,     // (nt, B, nz, nx)
-    const std::vector<torch::Tensor>& models,
-    torch::Tensor adjoint_source,      // (B, nsrc, nt)
-    torch::Tensor lap_coes,       // FD coefficients c[0..M]
-    torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
-    int M,            // half order (order = 2*M)
-    int abcn,                 // number of ABC layers
-    torch::Tensor adjoint_sources_loc,   // (B, nsrc, 2) int32
-    const std::vector<torch::Tensor>& pml_vals,
-    unsigned int nt,
-    float dt,
-    std::vector<float> spacing
-) {
+BackwardOutput backward(const BackwardInput& in)
+{
 
-    auto vp = models[0];
+    const auto& p = in;
+    BackwardOutput out;
 
-    float dx = spacing[0];
-    float dy = spacing[1];
-    float dz = spacing[2];
+    auto vp = p.models[0];
+
+    float dx = p.spacing[0];
+    float dy = p.spacing[1];
+    float dz = p.spacing[2];
 
     int N  = vp.size(0);
     int C  = vp.size(1);
@@ -48,26 +39,26 @@ backward(
 
     // PML coefficients
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(pml_vals, 3);
+    cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
     
-    int adjoint_nsrc = adjoint_sources_loc.size(1);
+    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     const int order =
-        (M <= 4) ? static_cast<int>(2 * M) : -1;
+        (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, true, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
+    SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, true, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
-    LaplaceParam lap_ctx{nx, ny, M, lap_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
-    GradParam grad_ctx_y{1, 0, 0, M, grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
-    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+    LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
 
-    for (int it = nt - 1; it >= 0; --it) {
+    for (int it = p.nt - 1; it >= 0; --it) {
 
         auto adj_view = adjoint.view();
 
@@ -90,8 +81,8 @@ backward(
         
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
-            adjoint_source.data_ptr<float>(),
-            adjoint_sources_loc.data_ptr<int>(),
+            p.adjoint_source.data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
             ctx
@@ -101,7 +92,7 @@ backward(
         adjoint.swap();
 
         calculate_grad_3d<<<launch_config.grid, launch_config.block>>>(
-            u_forward[it].data_ptr<float>(),
+            p.u_forward[it].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             grad.data_ptr<float>(),
@@ -110,49 +101,36 @@ backward(
 
     }
 
-    return std::make_tuple(grad);
+    out.grads = {grad};
+    return out;
 }
 
-std::tuple<torch::Tensor>
-backward_bs(
-    const std::vector<torch::Tensor>& u_boundary,
-    torch::Tensor u_last_two,     // (B, nz, nx)
-    const std::vector<torch::Tensor>& models,
-    torch::Tensor adjoint_source,      // (B, nsrc, nt)
-    torch::Tensor forward_source,      // (B, nsrc, nt)
-    torch::Tensor lap_coes,       // FD coefficients c[0..M]
-    torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
-    int M,            // half order (order = 2*M)
-    int abcn,                 // number of ABC layers
-    torch::Tensor adjoint_sources_loc,   // (B, nsrc, 2) int32
-    torch::Tensor forward_sources_loc,   // (B, nsrc, 2) int32
-    const std::vector<torch::Tensor>& pml_vals,
-    unsigned int nt,
-    float dt,
-    std::vector<float> spacing,
-    bool free_surface
-) {
+BackwardOutput backward_bs(const BackwardInput& in)
+{
 
-    auto vp = models[0];
+    const auto& p = in;
+    BackwardOutput out;
 
-    float dx = spacing[0];
-    float dy = spacing[1];
-    float dz = spacing[2];
+    auto vp = p.models[0];
+
+    float dx = p.spacing[0];
+    float dy = p.spacing[1];
+    float dz = p.spacing[2];
 
     int N  = vp.size(0);
     int C  = vp.size(1);
     int nz = vp.size(2);
     int ny = vp.size(3);
     int nx = vp.size(4);
-    int adjoint_nsrc = adjoint_sources_loc.size(1);
-    int forward_nsrc = forward_sources_loc.size(1);
+    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
+    int forward_nsrc = p.forward_sources_loc.size(1);
     int B = N * C;
 
     const int order =
-        (M <= 4) ? static_cast<int>(2 * M) : -1;
+        (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     // Assign the last two wavefields from forward to u_prev and u_now
-    SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, free_surface, nullptr, nullptr, dx, dy, dz};
+    SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, nullptr, nullptr, dx, dy, dz};
 
     auto f_this = torch::zeros_like(vp); // for gradient calculation
 
@@ -160,23 +138,24 @@ backward_bs(
     adjoint.allocate(vp, 3, true);
     AcousticWavefieldTensor forward;
     forward.allocate(vp, 3, false);
-    forward.u_prev_t.copy_(u_last_two.select(1,1).squeeze(0));
-    forward.u_now_t.copy_(u_last_two.select(1,0).squeeze(0));
+    forward.u_prev_t.copy_(p.u_last_two.select(1,1).squeeze(0));
+    forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
     
     auto grad = torch::zeros_like(vp);
 
     // For checking wavefields
-    // torch::Tensor u_allt = torch::zeros({nt, B, 1, nz, ny, nx}, vp.options());
+    // torch::Tensor u_allt = torch::zeros({p.nt, B, 1, nz, ny, nx}, vp.options());
 
     // PML coefficients
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(pml_vals, 3);
+    cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     // Boundary wavefields (for saving all wavefields)
-    GeneralBoundarySaverMore boundary_saver;
-    boundary_saver.allocate(true, 3, 1, ctx, vp);
-    boundary_saver.load_from_vector(u_boundary, vp);
+    int save_width = p.abcn > 0 ? p.M + 1 : p.M;
+    EffectiveBoundarySaver boundary_saver;
+    boundary_saver.allocate(true, 3, 1, ctx, vp, save_width, 2, true, true);
+    boundary_saver.load_from_vector(p.u_boundary, vp);
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
@@ -184,17 +163,17 @@ backward_bs(
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     auto for_view = forward.view();
-    set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn+ctx.M, nx, ny, nz);
-    set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn+ctx.M, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.p.abcn+ctx.p.M, nx, ny, nz);
+    // set_boundary_zeros_3d<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.p.abcn+ctx.p.M, nx, ny, nz);
 
-    LaplaceParam lap_ctx{nx, ny, M, lap_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
-    GradParam grad_ctx_y{1, 0, 0, M, grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
-    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+    LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
 
-    for (int it = nt - 1; it >= 1; --it) {
+    for (int it = p.nt - 1; it >= 1; --it) {
 
         // u_allt[it].copy_(forward.u_now_t);
 
@@ -221,8 +200,8 @@ backward_bs(
         
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
-            adjoint_source.data_ptr<float>(),
-            adjoint_sources_loc.data_ptr<int>(),
+            p.adjoint_source.data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
             ctx
@@ -243,8 +222,16 @@ backward_bs(
             ctx
         );
 
-        // Reconstruct the forward wavefield
-        restore_boundary_kernel_3d_advance<<<launch_config.grid, launch_config.block>>>(
+        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            ctx
+        );
+
+        boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
             for_view.u_next,
             bs.top,
             bs.bottom,
@@ -252,20 +239,12 @@ backward_bs(
             bs.back,
             bs.left,
             bs.right,
-            it-1,
-            ctx.M,
-            ctx
-        );
-
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.u_next,
-            forward_source.data_ptr<float>(),
-            forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            ctx
-        );
-        
+            it - 1,
+            save_width,
+            0,
+            ctx,
+            BOUNDARY_RESTORE
+        );        
         // rotate pointers for forward wavefields
         forward.swap();
 
@@ -276,12 +255,14 @@ backward_bs(
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             grad.data_ptr<float>(),
-            B, nx, ny, nz, dt
+            B, nx, ny, nz, p.dt
         );
 
     }
 
-    return std::make_tuple(grad);
+    out.grads = {grad};
+    return out;
+
 }
 
 }

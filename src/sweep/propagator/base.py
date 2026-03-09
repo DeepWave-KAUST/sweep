@@ -64,17 +64,18 @@ class PropBase:
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
 
     def init_abc(self, **kwargs):
+        _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim
         self.equation.init_abc(
                 type=self.pml_type,
                 pml_width=[self.abcn if not self.free_surface else 0] + (2**self.ndim-1) * [self.abcn],
                 accuracy=self.equation.so,
-                fd_pad=[self.equation.so // 2, self.equation.so // 2] * self.ndim,#[self.equation.so//2 if not self.free_surface else 0] + (2**self.ndim-1) * [self.equation.so//2], #
+                fd_pad=kwargs.get('fd_pad', _padding),#[self.equation.so//2 if not self.free_surface else 0] + (2**self.ndim-1) * [self.equation.so//2], #
                 dt=self._dt, 
                 grid_spacing=[self._dh]*self.ndim,
                 max_vel=kwargs.get('max_vel', 4500.0),
                 dtype=np.float32,
                 pml_freq=kwargs.get('pml_freq', 25.0),
-                shape=self.shape,
+                shape=kwargs.get('shape', self.shape)
         )
         
         if getattr(self.equation, 'need_init', False):

@@ -1,7 +1,7 @@
 import numpy as np
 from .base import FirstOrderEquation
 
-def step(vx, vz, txx, tzz, txz, 
+def step(vx, vz, sxx, szz, sxz, 
          m_vxx, m_vxz, m_vzx, m_vzz,
          m_txxx, m_txxz, m_tzzx, m_tzzz,
          m_txzx, m_txzz,
@@ -15,10 +15,10 @@ def step(vx, vz, txx, tzz, txz,
     lame_lambda = rho*(vp**2-2*vs**2)
     lame_mu = rho*vs**2
 
-    txx_x = pd.x_forward(txx)
-    txz_z = pd.z_backward(txz)
-    tzz_z = pd.z_forward(tzz)
-    txz_x = pd.x_backward(txz)
+    txx_x = pd.x_forward(sxx)
+    txz_z = pd.z_backward(sxz)
+    tzz_z = pd.z_forward(szz)
+    txz_x = pd.x_backward(sxz)
 
     # Update Veclocity fields
     m_tzzz = azh * m_tzzz + bzh * tzz_z
@@ -44,17 +44,17 @@ def step(vx, vz, txx, tzz, txz,
     m_vxx = ax * m_vxx + bx * vx_x
     vx_x = vx_x + m_vxx
 
-    tzz = tzz + dt * (lame_lambda + 2 * lame_mu) / h * vz_z + dt * lame_lambda / h * vx_x
-    txx = txx + dt * (lame_lambda + 2 * lame_mu) / h * vx_x + dt * lame_lambda / h * vz_z
+    szz = szz + dt * (lame_lambda + 2 * lame_mu) / h * vz_z + dt * lame_lambda / h * vx_x
+    sxx = sxx + dt * (lame_lambda + 2 * lame_mu) / h * vx_x + dt * lame_lambda / h * vz_z
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
     m_vzx = axh * m_vzx + bxh * vz_x
     vz_x = vz_x + m_vzx
-    txz = txz + dt * lame_mu / h * (vx_z + vz_x)
+    sxz = sxz + dt * lame_mu / h * (vx_z + vz_x)
 
 
-    return vx, vz, txx, tzz, txz, \
+    return vx, vz, sxx, szz, sxz, \
            m_vxx, m_vxz, m_vzx, m_vzz, \
            m_txxx, m_txxz, m_tzzx, m_tzzz, \
            m_txzx, m_txzz
@@ -62,7 +62,7 @@ def step(vx, vz, txx, tzz, txz,
 class Elastic(FirstOrderEquation):
     """Parameter order: vp, vs, rho.
     
-       Wavefields: (vx, vz, txx, tzz, txz)
+       Wavefields: (vx, vz, sxx, szz, sxz)
 
        Reference: Jean Virieux, 10.1190/1.1442147
     """
@@ -75,7 +75,7 @@ class Elastic(FirstOrderEquation):
     
     @property
     def wavefields(self):
-        return ['vx', 'vz', 'txx', 'tzz', 'txz', 
+        return ['vx', 'vz', 'sxx', 'szz', 'sxz', 
                 'm_vxx', 'm_vxz', 'm_vzx', 'm_vzz', 'm_txxx', 'm_txxz', 'm_tzzx', 'm_tzzz', 'm_txzx', 'm_txzz']
     
     def func(self, *args, **kwargs):

@@ -6,50 +6,25 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
-#include "../../common/boundarysaver.h"
+#include "../../common/wavetypes.h"
+#include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
 
 namespace acoustic3d {
 
-std::tuple<
-    torch::Tensor,   // vp
-    std::tuple<      // boundary tuple
-        torch::Tensor,
-        torch::Tensor,
-        torch::Tensor,
-        torch::Tensor,
-        torch::Tensor,
-        torch::Tensor
-    >,
-    torch::Tensor,   // u_last_two
-    torch::Tensor    // record
->
-forward(
-    const std::vector<torch::Tensor>& models,
-    torch::Tensor source,      // (B, nsrc, nt)
-    torch::Tensor lap_coes,
-    torch::Tensor grad_coes,
-    int M,
-    int abcn,
-    torch::Tensor sources_loc,    // (B, nsrc, 3)
-    torch::Tensor receivers_loc,  // (B, nrec, 3)
-    const std::vector<torch::Tensor>& pml_vals,
-    bool save_all_wavefields,
-    bool use_boundary_saving,
-    bool free_surface,
-    unsigned int nt,
-    float dt,
-    std::vector<float> spacing
-)
+ForwardOutput forward(const ForwardInput& in)
 {
 
-    auto vp = models[0];
+    const auto& p = in;
+    ForwardOutput out;
 
-    float dx = spacing[0];
-    float dy = spacing[1];
-    float dz = spacing[2];
+    auto vp = p.models[0];
+
+    float dx = p.spacing[0];
+    float dy = p.spacing[1];
+    float dz = p.spacing[2];
 
     int N  = vp.size(0);
     int C  = vp.size(1);
@@ -58,13 +33,18 @@ forward(
     int nx = vp.size(4);
 
     int B     = N * C;
-    int nsrc  = sources_loc.size(1);
-    int nrec  = receivers_loc.size(1);
+    int nsrc  = p.sources_loc.size(1);
+    int nrec  = p.receivers_loc.size(1);
+
+    unsigned int nt = in.nt;
+    float dt = in.dt;
+    int M = in.M;
+    int abcn = in.abcn;
 
     const int order =
         (M <= 4) ? static_cast<int>(2 * M) : -1;
 
-    SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
+    SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
     AcousticWavefieldTensor wavefield;
     wavefield.allocate(vp, 3, true);
@@ -73,7 +53,7 @@ forward(
     // PML parameters
     // ----------------------------
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(pml_vals, 3);
+    cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     // ----------------------------
@@ -88,19 +68,17 @@ forward(
     // save all wavefields
     // ----------------------------
     torch::Tensor u_allt;
-    if (save_all_wavefields)
+    if (p.save_all_wavefields)
         u_allt = torch::zeros({nt, B, nz, ny, nx}, vp.options());
 
     // ----------------------------
     // boundary saving (3D)
     // ----------------------------
-    // GeneralBoundarySaver boundary_saver;
-    // boundary_saver.allocate(use_boundary_saving, 3, 1, ctx, vp);
-    // auto bs = boundary_saver.view();
-
-    GeneralBoundarySaverMore boundary_saver_more;
-    boundary_saver_more.allocate(use_boundary_saving, 3, 1, ctx, vp);
-    auto bsm = boundary_saver_more.view();
+    int save_width = abcn > 0 ? M + 1 : M;
+    EffectiveBoundarySaver boundary_saver;
+    boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true);
+    auto bs = boundary_saver.view();
+    
     // ----------------------------
     // CUDA launch config
     // ----------------------------
@@ -111,11 +89,11 @@ forward(
     float* u_thist = nullptr;
 
     // Laplace Gradient Contexts
-    LaplaceParam lap_ctx{nx, ny, M, lap_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx_x{1, 0, 0, M, grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
-    GradParam grad_ctx_y{1, 0, 0, M, grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
-    GradParam grad_ctx_z{1, 0, 0, M, grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+    LaplaceParam lap_ctx{nx, ny, M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx{1, nx, nx*ny, M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    GradParam grad_ctx_y{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     // ============================================================
     // time stepping
@@ -134,7 +112,7 @@ forward(
             launch_config.grid,
             launch_config.block,
             view,
-            save_all_wavefields,
+            p.save_all_wavefields,
             u_thist,
             vp.data_ptr<float>(),
             lap_ctx,
@@ -146,38 +124,27 @@ forward(
             ctx
         );
 
-        if (use_boundary_saving) {
-            // save_boundary_kernel_3d<<<launch_config.grid, launch_config.block>>>(
-            //     view.u_now,
-            //     bs.top,
-            //     bs.bottom,
-            //     bs.front,
-            //     bs.back,
-            //     bs.left,
-            //     bs.right,
-            //     it,
-            //     ctx.M,
-            //     ctx
-            // );
-
-            save_boundary_kernel_3d_advance<<<launch_config.grid, launch_config.block>>>(
+        if (p.use_boundary_saving) {
+            boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                 view.u_now,
-                bsm.top,
-                bsm.bottom,
-                bsm.front,
-                bsm.back,
-                bsm.left,
-                bsm.right,
+                bs.top,
+                bs.bottom,
+                bs.front,
+                bs.back,
+                bs.left,
+                bs.right,
                 it,
-                ctx.M,
-                ctx
+                save_width,
+                0,
+                ctx,
+                BOUNDARY_SAVE
             );
         }
 
         add_source_3d<<<source_config.grid, source_config.block>>>(
             view.u_next,
-            source.data_ptr<float>(),
-            sources_loc.data_ptr<int>(),
+            p.source.data_ptr<float>(),
+            p.sources_loc.data_ptr<int>(),
             it,
             nsrc,
             ctx
@@ -186,7 +153,7 @@ forward(
         record_kernel_3d<<<record_config.grid, record_config.block>>>(
             view.u_next,
             record.data_ptr<float>(),
-            receivers_loc.data_ptr<int>(),
+            p.receivers_loc.data_ptr<int>(),
             it,
             nrec,
             ctx
@@ -195,39 +162,26 @@ forward(
         wavefield.swap();
     }
 
-    if (use_boundary_saving) {
-        // boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
-        // boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
-        boundary_saver_more.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
-        boundary_saver_more.last_two_t.select(1,1).copy_(wavefield.u_now_t);
+    if (p.use_boundary_saving) {
+        boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
+        boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }
 
-    // return std::make_tuple(
-    //     u_allt,
-    //     std::make_tuple(
-    //         boundary_saver.top_t,
-    //         boundary_saver.bottom_t,
-    //         boundary_saver.front_t,
-    //         boundary_saver.back_t,
-    //         boundary_saver.left_t,
-    //         boundary_saver.right_t
-    //     ),
-    //     boundary_saver.last_two_t,
-    //     record
-    // );
-    return std::make_tuple(
-        u_allt,
-        std::make_tuple(
-            boundary_saver_more.top_t,
-            boundary_saver_more.bottom_t,
-            boundary_saver_more.front_t,
-            boundary_saver_more.back_t,
-            boundary_saver_more.left_t,
-            boundary_saver_more.right_t
-        ),
-        boundary_saver_more.last_two_t,
-        record
-    );
+    out.wavefield = u_allt;
+    out.boundaries = {
+        boundary_saver.top_t,
+        boundary_saver.bottom_t,
+        boundary_saver.front_t,
+        boundary_saver.back_t,
+        boundary_saver.left_t,
+        boundary_saver.right_t
+    };
+
+    out.last_two = boundary_saver.last_two_t;
+    out.record = record;
+
+    return out;
+
 }
 
 

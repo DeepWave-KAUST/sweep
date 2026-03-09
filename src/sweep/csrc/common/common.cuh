@@ -42,7 +42,8 @@ __global__ void set_boundary_zeros(
     float* __restrict__ u,           // (B, nz, nx)
     int width,
     int nx,
-    int nz
+    int nz,
+    bool free_surface
 );
 
 __global__ void set_boundary_zeros_3d(

@@ -125,9 +125,11 @@ __global__ void acoustic2nd_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 2*M;
+    // int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
+    int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
 
-    int top_halo = solver.free_surface ? 2* M: halo;
+    int top_halo = solver.free_surface ? 2*M: halo;
+    // top_halo = (solver.free_surface && solver.abcn > 0) ? 2*M : top_halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 

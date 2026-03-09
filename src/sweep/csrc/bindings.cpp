@@ -3,17 +3,57 @@
 #include "equations/acoustic3d/acoustic3d.h"
 #include "equations/elastic2d/elastic2d.h"
 #include "equations/elastic3d/elastic3d.h"
+#include "bindings_utils.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("acoustic2d_forward", &acoustic2d::forward, "Acoustic forward 2D (CUDA)");
-    m.def("acoustic2d_backward", &acoustic2d::backward, "Acoustic backward (CUDA)");
-    m.def("acoustic2d_backward_bs", &acoustic2d::backward_bs, "Acoustic backward with boundary saving (CUDA)");
-    m.def("acoustic3d_forward", &acoustic3d::forward, "Acoustic forward 3D (CUDA)");
-    m.def("acoustic3d_backward", &acoustic3d::backward, "Acoustic backward 3D (CUDA)");
-    m.def("acoustic3d_backward_bs", &acoustic3d::backward_bs, "Acoustic backward with boundary saving 3D (CUDA)");
-    m.def("elastic2d_forward", &elastic2d::forward, "Elastic forward 2D (CUDA)");
-    m.def("elastic2d_backward", &elastic2d::backward, "Elastic backward 2D (CUDA)");
-    m.def("elastic2d_backward_bs", &elastic2d::backward_bs, "Elastic backward with boundary saving 2D (CUDA)");
-    m.def("elastic3d_forward", &elastic3d::forward, "Elastic forward 3D (CUDA)");
-    m.def("elastic3d_backward_bs", &elastic3d::backward_bs, "Elastic backward with boundary saving 3D (CUDA)");
+    m.def("acoustic2d_forward", wrap_forward(acoustic2d::forward));
+    m.def("acoustic2d_backward", wrap_backward(acoustic2d::backward), "Acoustic backward (CUDA)");
+    m.def("acoustic2d_backward_bs", wrap_backward(acoustic2d::backward_bs), "Acoustic backward with boundary saving (CUDA)");
+    m.def("acoustic3d_forward", wrap_forward(acoustic3d::forward), "Acoustic forward 3D (CUDA)");
+    m.def("acoustic3d_backward", wrap_backward(acoustic3d::backward), "Acoustic backward 3D (CUDA)");
+    m.def("acoustic3d_backward_bs", wrap_backward(acoustic3d::backward_bs), "Acoustic backward with boundary saving 3D (CUDA)");
+    m.def("elastic2d_forward", wrap_forward(elastic2d::forward), "Elastic forward 2D (CUDA)");
+    m.def("elastic2d_backward", wrap_backward(elastic2d::backward), "Elastic backward 2D (CUDA)");
+    m.def("elastic2d_backward_bs", wrap_backward(elastic2d::backward_bs), "Elastic backward with boundary saving 2D (CUDA)");
+    m.def("elastic3d_forward", wrap_forward(elastic3d::forward), "Elastic forward 3D (CUDA)");
+    m.def("elastic3d_backward_bs", wrap_backward(elastic3d::backward_bs), "Elastic backward with boundary saving 3D (CUDA)");
+    
+    py::class_<ForwardInput>(m, "ForwardInput")
+        .def(py::init<>())
+        .def_readwrite("models", &ForwardInput::models)
+        .def_readwrite("source", &ForwardInput::source)
+        .def_readwrite("lap_coes", &ForwardInput::lap_coes)
+        .def_readwrite("grad_coes", &ForwardInput::grad_coes)
+        .def_readwrite("M", &ForwardInput::M)
+        .def_readwrite("abcn", &ForwardInput::abcn)
+        .def_readwrite("sources_loc", &ForwardInput::sources_loc)
+        .def_readwrite("receivers_loc", &ForwardInput::receivers_loc)
+        .def_readwrite("pml_vals", &ForwardInput::pml_vals)
+        .def_readwrite("save_all_wavefields", &ForwardInput::save_all_wavefields)
+        .def_readwrite("use_boundary_saving", &ForwardInput::use_boundary_saving)
+        .def_readwrite("free_surface", &ForwardInput::free_surface)
+        .def_readwrite("nt", &ForwardInput::nt)
+        .def_readwrite("dt", &ForwardInput::dt)
+        .def_readwrite("spacing", &ForwardInput::spacing);
+
+    py::class_<BackwardInput>(m, "BackwardInput")
+        .def(py::init<>())
+        .def_readwrite("u_forward", &BackwardInput::u_forward)
+        .def_readwrite("u_boundary", &BackwardInput::u_boundary)
+        .def_readwrite("u_last_two", &BackwardInput::u_last_two)
+        .def_readwrite("models", &BackwardInput::models)
+        .def_readwrite("adjoint_source", &BackwardInput::adjoint_source)
+        .def_readwrite("forward_source", &BackwardInput::forward_source)
+        .def_readwrite("lap_coes", &BackwardInput::lap_coes)
+        .def_readwrite("grad_coes", &BackwardInput::grad_coes)
+        .def_readwrite("M", &BackwardInput::M)
+        .def_readwrite("abcn", &BackwardInput::abcn)
+        .def_readwrite("adjoint_sources_loc", &BackwardInput::adjoint_sources_loc)
+        .def_readwrite("forward_sources_loc", &BackwardInput::forward_sources_loc)
+        .def_readwrite("pml_vals", &BackwardInput::pml_vals)
+        .def_readwrite("nt", &BackwardInput::nt)
+        .def_readwrite("dt", &BackwardInput::dt)
+        .def_readwrite("spacing", &BackwardInput::spacing)
+        .def_readwrite("free_surface", &BackwardInput::free_surface);
 }
+

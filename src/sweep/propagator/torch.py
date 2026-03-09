@@ -30,7 +30,8 @@ class PropTorch(PropBase, torch.nn.Module):
             receivers (np.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
         """
-
+        fd_pad = [0,0]*self.ndim
+        kwargs.setdefault('fd_pad', fd_pad)
         self.init_abc(**kwargs)
 
         nt = wavelet.shape[-1]
@@ -44,6 +45,9 @@ class PropTorch(PropBase, torch.nn.Module):
         if self.free_surface:
             sources[..., 0] += self.abcn
             receivers[..., 0] += self.abcn
+            if self.ndim == 3:
+                sources[..., 1] += self.abcn
+                receivers[..., 1] += self.abcn
         else:
             sources += self.abcn
             receivers += self.abcn
@@ -68,11 +72,11 @@ class PropTorch(PropBase, torch.nn.Module):
 
 
         # Extract adjoint wavefields
-        # self.adjoint_wavefields = torch.zeros((nt, 5, *shape_wavefield), device=self.dev, dtype=torch.float32)
-        # def hook_it(index, t):
-        #     def _hook(grad):
-        #         self.adjoint_wavefields[t, index] = grad.detach().clone()
-        #     return _hook
+        self.adjoint_wavefields = torch.zeros((nt, 5, *shape_wavefield), device=self.dev, dtype=torch.float32)
+        def hook_it(index, t):
+            def _hook(grad):
+                self.adjoint_wavefields[t, index] = grad.detach().clone()
+            return _hook
 
         record = torch.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=torch.float32, device=self.dev)
 
@@ -81,15 +85,17 @@ class PropTorch(PropBase, torch.nn.Module):
         models = [EdgePadding.apply(para, self.padding) for para in models]
         self.models_padded = models
         fixargs = models+[self.dt, self.dh, None]
-    
+        # import numpy as np
+        # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ay', 'by', 'ayh', 'byh', 'ax', 'bx', 'axh', 'bxh']):
+        #     np.save(f'{name}.npy', b.detach().cpu().numpy())
         for i in range(nt):
 
             wavefield = [getattr(self, name) for name in self.wavefield_names]
 
-            # # register hook for adjoint wavefield extraction
-            # for w, name in zip(wavefield, self.wavefield_names[:5]):
-            #     if w.requires_grad:
-            #         w.register_hook(hook_it(self.wavefield_names.index(name), i))
+            # register hook for adjoint wavefield extraction
+            for w, name in zip(wavefield, self.wavefield_names[:5]):
+                if w.requires_grad:
+                    w.register_hook(hook_it(self.wavefield_names.index(name), i))
 
             # Time step forward
             if self.use_ckpt:

@@ -32,37 +32,41 @@ class Warpper(torch.autograd.Function):
 
         lap_coes, grad_coes = coes_list
         nt = wavelet.shape[-1]
-
+        spacing = [s.item() for s in spacing]
+        dt = float(dt.item())
+        
         # only forward modeling, no need to save wavefield for backward
-        save_all_wavefield = False
+        save_all_wavefields = False
         if any(m.requires_grad for m in models): 
-            save_all_wavefield = True
+            save_all_wavefields = True
         if any(m.requires_grad for m in models) and use_boundary_saving:
-            save_all_wavefield = False
+            save_all_wavefields = False
         if not any(m.requires_grad for m in models):
-            save_all_wavefield = False
+            save_all_wavefields = False
             use_boundary_saving = False
 
-        # -------- CUDA forward --------
-        (u_allt, boundary_vals, last, syn) = forward_func(
-            [m.contiguous() for m in models],
-            wavelet.contiguous(),
-            lap_coes.contiguous(),  # u0, not used --- IGNORE ---
-            grad_coes.contiguous(),
-            M,
-            abcn,
-            sources_loc.contiguous(),
-            receivers_loc.contiguous(),
-            [p.contiguous() for p in pml_vals],
-            save_all_wavefield,
-            use_boundary_saving,
-            free_surface,
-            nt,
-            dt,
-            spacing
-        )
+        params = _C.ForwardInput()
 
-        if any([save_all_wavefield, use_boundary_saving]):
+        params.models = [m.contiguous() for m in models]
+        params.source = wavelet.contiguous()
+        params.lap_coes = lap_coes.contiguous()
+        params.grad_coes = grad_coes.contiguous()
+        params.M = M
+        params.abcn = abcn
+        params.sources_loc = sources_loc.contiguous()
+        params.receivers_loc = receivers_loc.contiguous()
+        params.pml_vals = [p.contiguous() for p in pml_vals]
+        params.save_all_wavefields = save_all_wavefields
+        params.use_boundary_saving = use_boundary_saving
+        params.free_surface = free_surface
+        params.nt = nt
+        params.dt = dt
+        params.spacing = spacing
+
+        # -------- CUDA forward --------
+        (u_allt, boundary_vals, last, syn) = forward_func(params)
+
+        if any([save_all_wavefields, use_boundary_saving]):
 
             ctx.save_for_backward(
                 u_allt,
@@ -84,12 +88,13 @@ class Warpper(torch.autograd.Function):
             ctx.use_boundary_saving = use_boundary_saving
             ctx.backward_func = backward_func
             ctx.backward_bs_func = backward_bs_func
-            ctx.wavelet = wavelet
-        return syn        
+            ctx.forward_source = wavelet
+
+        return syn
     
     @staticmethod
     def backward(ctx, adjoint_source):
-        
+
         # -------- unpack --------
         (
             u_allt,
@@ -104,46 +109,36 @@ class Warpper(torch.autograd.Function):
         nt = ctx.nt
         dt = ctx.dt
 
-        # -------- CUDA adjoint --------        
+        params = _C.BackwardInput()
+
+        # common
+        params.models = [m.contiguous() for m in ctx.models]
+        params.adjoint_source = adjoint_source.contiguous()
+        params.lap_coes = lap_coes.contiguous()
+        params.grad_coes = grad_coes.contiguous()
+        params.M = M
+        params.abcn = abcn
+        params.adjoint_sources_loc = adjoint_sources_loc.contiguous()
+        params.pml_vals = [p.contiguous() for p in ctx.pml_vals]
+        params.nt = nt
+        params.dt = dt
+        params.spacing = ctx.spacing
+        params.free_surface = ctx.free_surface
+
         if not ctx.use_boundary_saving:
-            gradients = ctx.backward_func(
-                u_allt.contiguous(),
-                [m.contiguous() for m in ctx.models],
-                adjoint_source.contiguous(),
-                lap_coes.contiguous(), 
-                grad_coes.contiguous(),
-                M,
-                abcn,
-                adjoint_sources_loc.contiguous(),
-                [p.contiguous() for p in ctx.pml_vals],
-                nt,
-                dt,
-                ctx.spacing
-            )
+            params.u_forward = u_allt.contiguous()
+            gradients = ctx.backward_func(params)
         else:
-            gradients = ctx.backward_bs_func(
-                [b.contiguous() for b in ctx.boundary_vals],
-                last.contiguous(),
-                [m.contiguous() for m in ctx.models],
-                adjoint_source.contiguous(),
-                ctx.wavelet.contiguous(),
-                lap_coes.contiguous(),
-                grad_coes.contiguous(),
-                M,
-                abcn,
-                adjoint_sources_loc.contiguous(),
-                forward_sources_loc.contiguous(),
-                [p.contiguous() for p in ctx.pml_vals],
-                nt,
-                dt,
-                ctx.spacing,
-                ctx.free_surface
-            )
-            # print('Saving forward wavefield for checking...')
-            # np.save('/data/tmp/u_forward.npy', gradients[0].detach().cpu().numpy())
-            # np.save('/data/tmp/u_adoint.npy', gradients[0].detach().cpu().numpy())
-            # gradients = gradients[1:]
-            # print([g.shape for g in gradients])
+            params.u_boundary = [b.contiguous() for b in ctx.boundary_vals]
+            params.u_last_two = last.contiguous()
+            params.forward_source = ctx.forward_source.contiguous()
+            params.forward_sources_loc = forward_sources_loc.contiguous()
+            gradients = ctx.backward_bs_func(params)
+
+        del ctx.backward_func, ctx.backward_bs_func
+        del ctx.boundary_vals, ctx.pml_vals, ctx.forward_source
+        del ctx.models
+        # print(gradients[0].shape)
         return (
             None, None, None, # functions
             None,      # wavelet
@@ -157,7 +152,7 @@ class Warpper(torch.autograd.Function):
             None,      # pml_vals
             None,      # use_boundary_saving
             None,      # free_surface
-            *gradients # models
+            *gradients[-1] # models
         )
 
 import torch
@@ -227,6 +222,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         padding = [p+M for p in self.padding]
         base_shift = M + self.abcn
 
+        shape_for_pml = [p+2*M for p in self.shape]
+
+        kwargs['shape'] = shape_for_pml
         self.init_abc(**kwargs)
 
         nt = wavelet.shape[-1]
@@ -260,8 +258,10 @@ class PropCUDA(PropBase, torch.nn.Module):
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
-        self.equation.b = pad_pml_vals(self.equation.b, pml_padding)
+        # self.equation.b = pad_pml_vals(self.equation.b, pml_padding)
         
+        # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ay', 'by', 'ayh', 'byh', 'ax', 'bx', 'axh', 'bxh']):
+        # for b, name in zip(self.equation.b, ['az', 'bz', 'dbzdz', 'ax', 'bx', 'dbxdx']):
         # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ax', 'bx', 'axh', 'bxh']):
         #     np.save(f'{name}.npy', b.detach().cpu().numpy())
 
@@ -274,7 +274,7 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
 
-        spacing = [float(self.dh.item())] * self.ndim
+        spacing = [self.dh] * self.ndim
 
         syn = Warpper.apply(
                 self.forward_func, 
@@ -287,7 +287,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 M,
                 self.abcn,
                 spacing,
-                float(self.dt.item()),
+                self.dt,
                 self.equation.b,
                 use_boundary_saving,
                 self.free_surface,

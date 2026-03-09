@@ -60,4 +60,110 @@ struct Geom {
     }
 };
 
+// --------------------------------------------------
+// 2D Boundary Save
+// --------------------------------------------------
+
+struct Boundary2D {
+
+    // top / bottom
+    static inline LaunchConfig top_bottom(
+        int nx_phys,
+        int width,
+        int B
+    ) {
+        dim3 block(32, 8);
+
+        dim3 grid(
+            ceil_div(nx_phys, block.x),
+            ceil_div(width, block.y),
+            B
+        );
+
+        return {block, grid};
+    }
+
+    // left / right
+    static inline LaunchConfig left_right(
+        int nz_phys,
+        int width,
+        int B
+    ) {
+        dim3 block(8, 32);
+
+        dim3 grid(
+            ceil_div(width, block.x),
+            ceil_div(nz_phys, block.y),
+            B
+        );
+
+        return {block, grid};
+    }
+};
+
+// --------------------------------------------------
+// 3D Boundary Save
+// --------------------------------------------------
+
+struct Boundary3D {
+
+    // top / bottom
+    static inline LaunchConfig top_bottom(
+        int nx_phys,
+        int ny_phys,
+        int width,
+        int B
+    ) {
+
+        dim3 block(16, 8, 2);
+
+        dim3 grid(
+            ceil_div(nx_phys, block.x),
+            ceil_div(ny_phys, block.y),
+            ceil_div(width, block.z) * B
+        );
+
+        return {block, grid};
+    }
+
+    // left / right
+    static inline LaunchConfig left_right(
+        int nz_phys,
+        int ny_phys,
+        int width,
+        int B
+    ) {
+
+        dim3 block(8, 16, 2);
+
+        dim3 grid(
+            ceil_div(width, block.x),
+            ceil_div(ny_phys, block.y),
+            ceil_div(nz_phys, block.z) * B
+        );
+
+        return {block, grid};
+    }
+
+    // front / back
+    static inline LaunchConfig front_back(
+        int nx_phys,
+        int nz_phys,
+        int width,
+        int B
+    ) {
+
+        dim3 block(16, 8, 2);
+
+        dim3 grid(
+            ceil_div(nx_phys, block.x),
+            ceil_div(width, block.y),
+            ceil_div(nz_phys, block.z) * B
+        );
+
+        return {block, grid};
+    }
+};
+
+
 } // namespace fdtd

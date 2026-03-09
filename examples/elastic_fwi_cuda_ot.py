@@ -9,9 +9,9 @@ from sweep.signal import ricker
 
 import numpy as np
 import matplotlib.pyplot as plt
-from configure import *
+from configure_ot import *
 
-save_path = 'elastic_torch'
+save_path = 'elastic_cuda_ot'
 if not os.path.exists(save_path):
     os.makedirs(save_path)
 
@@ -41,8 +41,8 @@ model = PropCUDA(Elastic(spatial_order=spatial_order, device=dev),
             abcn=abcn, 
             dh=dh,
             dt=dt,
-            source_type=['vz'],
-            receiver_type=['vz'],
+            source_type=['sxx', 'szz'],
+            receiver_type=['vx', 'vz'],
             free_surface=False, 
             pml_type='cpmls',
             use_ckpt=False)
@@ -84,10 +84,10 @@ print('data shape:', obs.shape)
 print(f"Execution time: {elapsed_time:.2f} ms")
 # print(obs.shape)
 vmin, vmax = np.percentile(obs[-1], [2, 98])
-plt.imshow(obs[-1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+plt.imshow(obs[-1].squeeze().T, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 plt.colorbar()
 plt.tight_layout()
-plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
 plt.close()
 # vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
 # plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
@@ -125,7 +125,7 @@ for epoch in tqdm.trange(epochs):
     # Source encoding for acceleration
     # coding_syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=False)
     # coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
-    _syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=True)
+    _syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=False)
     _obs = torch.from_numpy(obs[rand_shots]).to(dev)
     loss = (_syn-_obs).pow(2).mean()
     loss.backward()
@@ -139,62 +139,62 @@ for epoch in tqdm.trange(epochs):
         #     m.grad /= m.grad.max() # Just for stability
     opt.step()
 
-    # Save the model
-    if epoch % 1 == 0:
+    # # Save the model
+    # if epoch % 1 == 0:
 
-        # # Show shotgather
-        # fig, axes = plt.subplots(2, 2, figsize=(8, 8))
-        # vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,0], [2, 98])
-        # plt.colorbar(axes[0,0].imshow(coding_obs.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        # axes[0,0].set_title('Observed Vx')
-        # vmin, vmax = np.percentile(coding_syn.detach().detach().cpu().numpy()[...,0], [2, 98])
-        # plt.colorbar(axes[1,0].imshow(coding_syn.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        # axes[1,0].set_title('Synthetic Vx')
-        # vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,1], [2, 98])
-        # plt.colorbar(axes[0,1].imshow(coding_obs.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        # axes[0,1].set_title('Observed Vz')
-        # vmin, vmax = np.percentile(coding_syn.detach().cpu().numpy()[...,1], [2, 98])
-        # plt.colorbar(axes[1,1].imshow(coding_syn.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        # axes[1,1].set_title('Synthetic Vz')
+    #     # # Show shotgather
+    #     # fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+    #     # vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,0], [2, 98])
+    #     # plt.colorbar(axes[0,0].imshow(coding_obs.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #     # axes[0,0].set_title('Observed Vx')
+    #     # vmin, vmax = np.percentile(coding_syn.detach().detach().cpu().numpy()[...,0], [2, 98])
+    #     # plt.colorbar(axes[1,0].imshow(coding_syn.detach().cpu().numpy()[...,0].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #     # axes[1,0].set_title('Synthetic Vx')
+    #     # vmin, vmax = np.percentile(coding_obs.detach().cpu().numpy()[...,1], [2, 98])
+    #     # plt.colorbar(axes[0,1].imshow(coding_obs.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #     # axes[0,1].set_title('Observed Vz')
+    #     # vmin, vmax = np.percentile(coding_syn.detach().cpu().numpy()[...,1], [2, 98])
+    #     # plt.colorbar(axes[1,1].imshow(coding_syn.detach().cpu().numpy()[...,1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #     # axes[1,1].set_title('Synthetic Vz')
 
-        # plt.tight_layout()
-        # plt.savefig(f'{save_path}/epoch_{epoch}_shotgather_vx.png', dpi=300, bbox_inches='tight')
-        # plt.close()
+    #     # plt.tight_layout()
+    #     # plt.savefig(f'{save_path}/epoch_{epoch}_shotgather_vx.png', dpi=300, bbox_inches='tight')
+    #     # plt.close()
 
-        # show gradients
-        vp_grad = vp.grad.cpu().numpy()
-        vs_grad = vs.grad.cpu().numpy()
-        fig, axes = plt.subplots(1, 2, figsize=(8, 3))
-        vmin, vmax = np.percentile(vp_grad, [2, 98])
-        plt.colorbar(axes[0].imshow(vp_grad, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        axes[0].set_title('Gradient of Vp')
-        vmin, vmax = np.percentile(vs_grad, [2, 98])
-        plt.colorbar(axes[1].imshow(vs_grad, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-        axes[1].set_title('Gradient of Vs')
-        plt.tight_layout()
-        plt.savefig(f'{save_path}/epoch_{epoch}_gradient.png', dpi=300, bbox_inches='tight')
-        plt.close()
+    #     # show gradients
+    #     vp_grad = vp.grad.cpu().numpy()
+    #     vs_grad = vs.grad.cpu().numpy()
+    #     fig, axes = plt.subplots(1, 2, figsize=(8, 3))
+    #     vmin, vmax = np.percentile(vp_grad, [2, 98])
+    #     plt.colorbar(axes[0].imshow(vp_grad, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #     axes[0].set_title('Gradient of Vp')
+    #     vmin, vmax = np.percentile(vs_grad, [2, 98])
+    #     plt.colorbar(axes[1].imshow(vs_grad, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #     axes[1].set_title('Gradient of Vs')
+    #     plt.tight_layout()
+    #     plt.savefig(f'{save_path}/epoch_{epoch}_gradient.png', dpi=300, bbox_inches='tight')
+    #     plt.close()
 
-        vmin_vp, vmax_vp = vp_true.min(), vp_true.max()
-        vmin_vs, vmax_vs = vs_true.min(), vs_true.max()
-        fig, axes = plt.subplots(3, 2, figsize=(8, 9))
-        show_data = [vp_true, vs_true, 
-                     vp.detach().cpu().numpy(), vs.detach().cpu().numpy(), 
-                     vp.grad.detach().cpu().numpy(), vs.grad.detach().cpu().numpy()]
-        titles = ['True Vp', 'True Vs', 'Inverted Vp', 'Inverted Vs', 'Gradient Vp', 'Gradient Vs']
-        for ax, data, title in zip(axes.ravel(), show_data, titles):
-            if 'vp' in title.lower():
-                vmin, vmax = vmin_vp, vmax_vp
-            else:
-                vmin, vmax = vmin_vs, vmax_vs
-            if 'gradient' in title.lower():
-                vmin, vmax = np.percentile(data, [2, 98])
-            plt.colorbar(ax.imshow(data, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
-            ax.set_title(title)
-            ax.set_xlabel('X (m)')
-            ax.set_ylabel('Z (m)')
-        plt.tight_layout()
-        plt.savefig(f'{save_path}/epoch_{epoch}.png', dpi=300, bbox_inches='tight')
-        plt.close()
+    #     vmin_vp, vmax_vp = vp_true.min(), vp_true.max()
+    #     vmin_vs, vmax_vs = vs_true.min(), vs_true.max()
+    #     fig, axes = plt.subplots(3, 2, figsize=(8, 9))
+    #     show_data = [vp_true, vs_true, 
+    #                  vp.detach().cpu().numpy(), vs.detach().cpu().numpy(), 
+    #                  vp.grad.detach().cpu().numpy(), vs.grad.detach().cpu().numpy()]
+    #     titles = ['True Vp', 'True Vs', 'Inverted Vp', 'Inverted Vs', 'Gradient Vp', 'Gradient Vs']
+    #     for ax, data, title in zip(axes.ravel(), show_data, titles):
+    #         if 'vp' in title.lower():
+    #             vmin, vmax = vmin_vp, vmax_vp
+    #         else:
+    #             vmin, vmax = vmin_vs, vmax_vs
+    #         if 'gradient' in title.lower():
+    #             vmin, vmax = np.percentile(data, [2, 98])
+    #         plt.colorbar(ax.imshow(data, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))
+    #         ax.set_title(title)
+    #         ax.set_xlabel('X (m)')
+    #         ax.set_ylabel('Z (m)')
+    #     plt.tight_layout()
+    #     plt.savefig(f'{save_path}/epoch_{epoch}.png', dpi=300, bbox_inches='tight')
+    #     plt.close()
 
         

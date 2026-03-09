@@ -134,10 +134,11 @@ __global__ void record_kernel_3d(
 }
 
 __global__ void set_boundary_zeros(
-    float* __restrict__ u,           // (B, nz, ny, nx)
+    float* __restrict__ u,           // (B, nz, nx)
     int width,
     int nx,
-    int nz
+    int nz,
+    bool free_surface
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -151,11 +152,28 @@ __global__ void set_boundary_zeros(
 
     int halo = width;
 
-    if (ix < halo || ix >= nx - halo || iz < halo || iz >= nz - halo){
-        int idx = iz * nx + ix;
-        u_b[idx] = 0.f;
-    }
+    bool left   = ix < halo;
+    bool right  = ix >= nx - halo;
+    bool bottom = iz >= nz - halo;
+    bool top    = iz < halo;
 
+    if (free_surface)
+    {
+        // 不清零 top
+        if (left || right || bottom)
+        {
+            int idx = iz * nx + ix;
+            u_b[idx] = 0.f;
+        }
+    }
+    else
+    {
+        if (left || right || top || bottom)
+        {
+            int idx = iz * nx + ix;
+            u_b[idx] = 0.f;
+        }
+    }
 }
 
 __global__ void set_boundary_zeros_3d(

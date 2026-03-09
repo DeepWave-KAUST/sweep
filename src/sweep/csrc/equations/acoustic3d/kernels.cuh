@@ -191,7 +191,7 @@ __global__ void acoustic_nopml_3d(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 2*M;
+    int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
 
     int top_halo = solver.free_surface ? 2*M : halo;
 

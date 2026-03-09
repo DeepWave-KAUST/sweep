@@ -1,4 +1,7 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 
 #include "kernels.cuh"
 #include "elastic3d.h"
@@ -6,39 +9,26 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"
-#include "../../common/boundarysaver.h"
+#include "../../common/boundarysaver.cuh"
+#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/staggered.cuh"
 
 namespace elastic3d {
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-backward_bs(
-    const std::vector<torch::Tensor>& u_boundary,
-    torch::Tensor u_last_two,     // (B, nz, nx)
-    const std::vector<torch::Tensor>& models,
-    torch::Tensor adjoint_source,      // (B, nsrc, nt)
-    torch::Tensor forward_source,      // (B, nsrc, nt)
-    torch::Tensor lap_coes,       // FD coefficients c[0..M]
-    torch::Tensor grad_coes,      // Grad FD coefficients g[0..M-1]
-    int M,            // half order (order = 2*M)
-    int abcn,                 // number of ABC layers
-    torch::Tensor adjoint_sources_loc,   // (B, nsrc, 2) int32
-    torch::Tensor forward_sources_loc,   // (B, nsrc, 2) int32
-    const std::vector<torch::Tensor>& pml_vals,
-    unsigned int nt,
-    float dt,
-    std::vector<float> spacing,
-    bool free_surface
-) {
+BackwardOutput backward_bs(const BackwardInput& in)
+{
 
-    float dx = spacing[0];
-    float dy = spacing[1];
-    float dz = spacing[2];
+    const auto& p = in;
+    BackwardOutput out;
 
-    auto vp = models[0];
-    auto vs = models[1];
-    auto rho = models[2];
+    float dx = p.spacing[0];
+    float dy = p.spacing[1];
+    float dz = p.spacing[2];
+
+    auto vp = p.models[0];
+    auto vs = p.models[1];
+    auto rho = p.models[2];
 
     int N  = vp.size(0);
     int C  = vp.size(1);
@@ -48,13 +38,13 @@ backward_bs(
 
     int B = N * C;
 
-    int adjoint_nsrc = adjoint_sources_loc.size(1);
-    int forward_nsrc = forward_sources_loc.size(1);
+    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
+    int forward_nsrc = p.forward_sources_loc.size(1);
 
     const int order =
-        (M <= 4) ? static_cast<int>(2 * M) : -1;
+        (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext solver{3, nx, ny, nz, B, dt, nt, M, abcn, free_surface, lap_coes.data_ptr<float>(), grad_coes.data_ptr<float>(), dx, dy, dz};
+    SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
     
     ElasticWavefieldTensor adjoint;
     adjoint.allocate(vp, 3);
@@ -65,17 +55,17 @@ backward_bs(
 
     // Copy last step of forward wavefield from u_last_two
     forward.allocate(vp, 3, false);
-    forward.vx_t.copy_(u_last_two.select(0,0).select(0,0));
-    forward.vy_t.copy_(u_last_two.select(0,1).select(0,0));
-    forward.vz_t.copy_(u_last_two.select(0,2).select(0,0));
-    forward.sxx_t.copy_(u_last_two.select(0,3).select(0,0));
-    forward.syy_t.copy_(u_last_two.select(0,4).select(0,0));
-    forward.szz_t.copy_(u_last_two.select(0,5).select(0,0));
-    forward.sxy_t.copy_(u_last_two.select(0,6).select(0,0));
-    forward.sxz_t.copy_(u_last_two.select(0,7).select(0,0));
-    forward.syz_t.copy_(u_last_two.select(0,8).select(0,0));
+    forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
+    forward.vy_t.copy_(p.u_last_two.select(0,1).select(0,0));
+    forward.vz_t.copy_(p.u_last_two.select(0,2).select(0,0));
+    forward.sxx_t.copy_(p.u_last_two.select(0,3).select(0,0));
+    forward.syy_t.copy_(p.u_last_two.select(0,4).select(0,0));
+    forward.szz_t.copy_(p.u_last_two.select(0,5).select(0,0));
+    forward.sxy_t.copy_(p.u_last_two.select(0,6).select(0,0));
+    forward.sxz_t.copy_(p.u_last_two.select(0,7).select(0,0));
+    forward.syz_t.copy_(p.u_last_two.select(0,8).select(0,0));
 
-    auto neg_forward_source = -forward_source;
+    auto neg_forward_source = -p.forward_source;
 
     // Generate pointer views
     auto for_view = forward.view();
@@ -102,13 +92,14 @@ backward_bs(
 
     // PML coefficients
     ElasticCPMLTensor cpml;
-    cpml.allocate(pml_vals, 3);
+    cpml.allocate(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     // GeneralBoundarySaverMore boundary_saver;
-    GeneralBoundarySaverPinned boundary_saver;
-    boundary_saver.allocate(true, 3, 9, solver, vp, solver.M, 1);
-    boundary_saver.load_from_vector(u_boundary, vp);
+    EffectiveBoundarySaver boundary_saver;
+    int save_width = solver.M + 1;
+    boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1);
+    boundary_saver.load_from_vector(p.u_boundary, vp);
     auto bs = boundary_saver.view();
 
     auto fvx_prev = torch::zeros_like(vp);
@@ -116,10 +107,10 @@ backward_bs(
     auto fvz_prev = torch::zeros_like(vp);
 
     // auto u_all_t = torch::zeros({2, B, 1, nz, ny, nx}, vp.options());
-    SGradParam grad_ctx{1, nx, nx*ny, M, grad_coes.data_ptr<float>(), dx, dy, dz};
+    SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
-    for (int it = nt - 1; it >= 1; --it) {
-        
+    for (int it = p.nt - 1; it >= 1; --it) {
+
         // Adjoint modeling
         LAUNCH_3DELASTIC_VELOCITY_ADJOINT(
             order,
@@ -145,19 +136,51 @@ backward_bs(
         ); // t-1.0
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.vz,
-            adjoint_source.data_ptr<float>(),
-            adjoint_sources_loc.data_ptr<int>(),
+            adj_view.vx,
+            p.adjoint_source[0].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
             solver
         );
-
+        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+            adj_view.vy,
+            p.adjoint_source[1].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it,
+            adjoint_nsrc,
+            solver
+        );
+        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+            adj_view.vz,
+            p.adjoint_source[2].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it,
+            adjoint_nsrc,
+            solver
+        );
         // Wavefield reconstruction
+        // Substract source term from forward wavefield
         add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.vz,
+            for_view.szz,
             neg_forward_source.data_ptr<float>(),
-            forward_sources_loc.data_ptr<int>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            solver
+        );
+        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.syy,
+            neg_forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            solver
+        );
+        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.sxx,
+            neg_forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
             it,
             forward_nsrc,
             solver
@@ -175,29 +198,22 @@ backward_bs(
         );
 
         // Copy boundary data from CPU to GPU
-        boundary_saver.top_gpu.copy_(boundary_saver.top_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-        boundary_saver.bottom_gpu.copy_(boundary_saver.bottom_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-        boundary_saver.front_gpu.copy_(boundary_saver.front_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-        boundary_saver.back_gpu.copy_(boundary_saver.back_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-        boundary_saver.left_gpu.copy_(boundary_saver.left_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-        boundary_saver.right_gpu.copy_(boundary_saver.right_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+        {
+
+            boundary_saver.top_gpu.copy_(boundary_saver.top_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+            boundary_saver.bottom_gpu.copy_(boundary_saver.bottom_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+            boundary_saver.front_gpu.copy_(boundary_saver.front_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+            boundary_saver.back_gpu.copy_(boundary_saver.back_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+            boundary_saver.left_gpu.copy_(boundary_saver.left_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+            boundary_saver.right_gpu.copy_(boundary_saver.right_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+
+        }
+
 
         float *field2[6] = {for_view.sxx, for_view.syy, for_view.szz, for_view.sxy, for_view.sxz, for_view.syz};
-        
+
         for (int f = 3; f < 9; ++f)
-            // restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
-            //     field2[f-3],
-            //     boundary_saver.top_t[f].data_ptr<float>(),
-            //     boundary_saver.bottom_t[f].data_ptr<float>(),
-            //     boundary_saver.front_t[f].data_ptr<float>(),
-            //     boundary_saver.back_t[f].data_ptr<float>(),
-            //     boundary_saver.left_t[f].data_ptr<float>(),
-            //     boundary_saver.right_t[f].data_ptr<float>(),
-            //     it-1,
-            //     solver.M,
-            //     solver
-            // );
-            restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
+            boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                 field2[f-3],
                 boundary_saver.top_gpu[f].data_ptr<float>(),
                 boundary_saver.bottom_gpu[f].data_ptr<float>(),
@@ -206,8 +222,10 @@ backward_bs(
                 boundary_saver.left_gpu[f].data_ptr<float>(),
                 boundary_saver.right_gpu[f].data_ptr<float>(),
                 0,
-                solver.M,
-                solver
+                save_width,
+                -p.M,
+                solver,
+                BOUNDARY_RESTORE
             );
 
         // Gradient calculation
@@ -252,19 +270,7 @@ backward_bs(
         float *field1[3] = {for_view.vx, for_view.vy, for_view.vz};
 
         for (int f = 0; f < 3; ++f)
-            // restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
-            //     field1[f],
-            //     boundary_saver.top_t[f].data_ptr<float>(),
-            //     boundary_saver.bottom_t[f].data_ptr<float>(),
-            //     boundary_saver.front_t[f].data_ptr<float>(),
-            //     boundary_saver.back_t[f].data_ptr<float>(),
-            //     boundary_saver.left_t[f].data_ptr<float>(),
-            //     boundary_saver.right_t[f].data_ptr<float>(),
-            //     it-1,
-            //     solver.M,
-            //     solver
-            // );
-            restore_boundary_kernel_3d_advance2<<<launch_config.grid, launch_config.block>>>(
+            boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                 field1[f],
                 boundary_saver.top_gpu[f].data_ptr<float>(),
                 boundary_saver.bottom_gpu[f].data_ptr<float>(),
@@ -273,15 +279,20 @@ backward_bs(
                 boundary_saver.left_gpu[f].data_ptr<float>(),
                 boundary_saver.right_gpu[f].data_ptr<float>(),
                 0,
-                solver.M,
-                solver
+                save_width,
+                -p.M,
+                solver,
+                BOUNDARY_RESTORE
             );
+
+        // if (it == 15) u_all_t[0].copy_(forward.vz_t);
+            
     }
 
     // u_all_t[0].copy_(forward.vz_t); // for visualization
     // u_all_t[1].copy_(adjoint.vz_t); // for visualization
-
-    return std::make_tuple(grad_vp, grad_vs, grad_rho);
+    out.grads = {grad_vp, grad_vs, grad_rho};
+    return out;
 }
 
 }

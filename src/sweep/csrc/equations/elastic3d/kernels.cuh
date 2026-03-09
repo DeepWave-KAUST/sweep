@@ -315,9 +315,9 @@ __global__ void elastic_velocity_kernel_3d_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 1*M+0;
+    int halo = solver.abcn + 1*M+1;
 
-    int top_halo = solver.free_surface ? 1*M+0: halo;
+    int top_halo = solver.free_surface ? 1*M+1: halo;
 
     if (ix < halo || ix >= solver.nx - halo ||
         iy < halo || iy >= solver.ny - halo ||
@@ -385,9 +385,9 @@ __global__ void elastic_stress_kernel_3d_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 1*M+0;
+    int halo = solver.abcn + 1*M+1;
 
-    int top_halo = solver.free_surface ? 1*M+0: halo;
+    int top_halo = solver.free_surface ? 1*M+1: halo;
 
     if (ix < halo || ix >= solver.nx - halo ||
         iy < halo || iy >= solver.ny - halo ||
@@ -686,7 +686,7 @@ __global__ void elastic_stress_adjoint_kernel_3d(
     f.sxx[idx] += solver.dt * inv_rho * dvx_dx;
     f.syy[idx] += solver.dt * inv_rho * dvy_dy;
     f.szz[idx] += solver.dt * inv_rho * dvz_dz;
-
+    
     // ===== Shear stresses =====
     f.sxy[idx] += solver.dt * inv_rho * (dvx_dy + dvy_dx);
     f.sxz[idx] += solver.dt * inv_rho * (dvx_dz + dvz_dx);

@@ -47,7 +47,7 @@ vp.grad = None
 solver_kwargs = dict(wavelet=wave, sources=sources, receivers=receivers, models=[vp])
 
 # CUDA WITH BOUNDARY SAVING
-for i in tqdm.trange(1000):
+for i in tqdm.trange(10000):
     vp.grad = None
     out = cuda_solver(**solver_kwargs, use_boundary_saving=False)
     loss = out.pow(2).sum()

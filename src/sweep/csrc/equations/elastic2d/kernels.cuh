@@ -248,9 +248,9 @@ __global__ void elastic_velocity_kernel_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 2*M+0;
+    int halo = solver.abcn + M+1;
 
-    int top_halo = solver.free_surface ? 2*M+0: halo;
+    int top_halo = solver.free_surface ? M+1: halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 
@@ -299,9 +299,9 @@ __global__ void elastic_stress_kernel_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 2*M+0;
+    int halo = solver.abcn + M+1;
 
-    int top_halo = solver.free_surface ? 2*M+0: halo;
+    int top_halo = solver.free_surface ? M+1: halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 

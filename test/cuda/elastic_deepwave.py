@@ -6,7 +6,7 @@ import numpy as np
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-nz, nx = 256, 256
+nz, nx = 25, 25
 true_vp = np.ones((nz, nx), dtype=np.float32) * 1500.0
 # true_vp[nz//2:, :] = 2000.0
 true_vs = true_vp /1.73
@@ -22,18 +22,18 @@ dt = 0.001
 delay = 0.2
 dh = 5.0
 fm = 10.0
-spatial_order = 2
-abcn = 0
+spatial_order = 8
+abcn = 10
 free_surface=False
 
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([128, 128]).reshape(1, 2)
+sources = np.array([12, 12]).reshape(1, 2)
 
 
 rec_x = np.arange(0, nx-1, 1).reshape(-1, 1)
-rec_z = np.ones_like(rec_x)*128
+rec_z = np.ones_like(rec_x)*10
 receivers = np.concatenate([rec_x, rec_z], axis=1)
 receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nreceivers, 2)
 
@@ -55,8 +55,8 @@ for i in tqdm.trange(1001):
                 #   source_amplitudes_x=torch.from_numpy(wave.reshape(1, 1, -1).repeat(sources.shape[0], 0)).to(device).float(),
                   source_locations_y = torch.from_numpy(np.expand_dims(sources, 1)).to(device).long(),
                   receiver_locations_y = torch.from_numpy(receivers).to(device), 
-                  pml_width=20,
-                  accuracy=2,
+                  pml_width=abcn,
+                  accuracy=spatial_order,
                   )
     vy, vx = out[:2]
 
