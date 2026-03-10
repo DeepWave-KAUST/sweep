@@ -36,7 +36,7 @@ struct Wave2D {
 struct Wave3D {
 
     static inline LaunchConfig make(int nx, int ny, int nz, int B) {
-        dim3 block(16, 8, 4);
+        dim3 block(32, 4, 2);
         dim3 grid(
             ceil_div(nx, block.x),
             ceil_div(ny, block.y),

@@ -19,6 +19,14 @@ namespace elastic3d {
 BackwardOutput backward_bs(const BackwardInput& in)
 {
 
+    cudaEvent_t start, stop, flush_start, flush_end;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventCreate(&flush_start);
+    cudaEventCreate(&flush_end);
+
+    cudaEventRecord(start);
+
     const auto& p = in;
     BackwardOutput out;
 
@@ -47,14 +55,21 @@ BackwardOutput backward_bs(const BackwardInput& in)
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
     
     ElasticWavefieldTensor adjoint;
-    adjoint.allocate(vp, 3);
+    if (!p.adjoint_wavefields.empty())
+        adjoint.bind(p.adjoint_wavefields, true);
+    else
+        adjoint.allocate(vp, 3);
+
     ElasticWavefieldTensor forward;
+    if (!p.forward_wavefields.empty())
+        forward.bind(p.forward_wavefields, false);
+    else
+        forward.allocate(vp, 3, false);
 
     auto mu  = rho * vs * vs;
     auto lambda = rho * (vp * vp - 2 * vs * vs);
 
     // Copy last step of forward wavefield from u_last_two
-    forward.allocate(vp, 3, false);
     forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
     forward.vy_t.copy_(p.u_last_two.select(0,1).select(0,0));
     forward.vz_t.copy_(p.u_last_two.select(0,2).select(0,0));
@@ -98,8 +113,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // GeneralBoundarySaverMore boundary_saver;
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1);
-    boundary_saver.load_from_vector(p.u_boundary, vp);
+    // boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval);
+    // boundary_saver.load_from_vector(p.u_boundary, vp);
+    boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu);
     auto bs = boundary_saver.view();
 
     auto fvx_prev = torch::zeros_like(vp);
@@ -108,8 +124,21 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     // auto u_all_t = torch::zeros({2, B, 1, nz, ny, nx}, vp.options());
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    int interval = p.transfer_interval;
+    int buf_idx = 0;
 
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float ms = 0;
+    float flush_time_ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
+    std::cout << "Backward GPU allocation time: " << ms << " ms\n";
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    int gpu_idx = 0;
     for (int it = p.nt - 1; it >= 1; --it) {
+
+        buf_idx = (it - 1) % interval;
 
         // Adjoint modeling
         LAUNCH_3DELASTIC_VELOCITY_ADJOINT(
@@ -197,37 +226,45 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         );
 
-        // Copy boundary data from CPU to GPU
+        if (buf_idx == interval - 1 || it == p.nt - 1)
         {
+            int start = it - buf_idx - 1;
+            int len   = buf_idx + 1;
 
-            boundary_saver.top_gpu.copy_(boundary_saver.top_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-            boundary_saver.bottom_gpu.copy_(boundary_saver.bottom_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-            boundary_saver.front_gpu.copy_(boundary_saver.front_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-            boundary_saver.back_gpu.copy_(boundary_saver.back_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-            boundary_saver.left_gpu.copy_(boundary_saver.left_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
-            boundary_saver.right_gpu.copy_(boundary_saver.right_t.select(1, static_cast<int64_t>(it-1)).unsqueeze(1),true);
+            cudaEventRecord(flush_start);
+
+            boundary_saver.load_cpu_to_gpu(start, len);
+
+            cudaEventRecord(flush_end);
+            cudaEventSynchronize(flush_end);
+            float ms;
+
+            cudaEventElapsedTime(&ms, flush_start, flush_end);
+            flush_time_ms += ms;
 
         }
 
-
         float *field2[6] = {for_view.sxx, for_view.syy, for_view.szz, for_view.sxy, for_view.sxz, for_view.syz};
 
-        for (int f = 3; f < 9; ++f)
+        for (int f = 3; f < 9; ++f){
+            gpu_idx = f * interval + buf_idx;
             boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                 field2[f-3],
-                boundary_saver.top_gpu[f].data_ptr<float>(),
-                boundary_saver.bottom_gpu[f].data_ptr<float>(),
-                boundary_saver.front_gpu[f].data_ptr<float>(),
-                boundary_saver.back_gpu[f].data_ptr<float>(),
-                boundary_saver.left_gpu[f].data_ptr<float>(),
-                boundary_saver.right_gpu[f].data_ptr<float>(),
+
+                boundary_saver.top_gpu.data_ptr<float>()    + gpu_idx * boundary_saver.top_stride,
+                boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride,
+                boundary_saver.front_gpu.data_ptr<float>()  + gpu_idx * boundary_saver.front_stride,
+                boundary_saver.back_gpu.data_ptr<float>()   + gpu_idx * boundary_saver.back_stride,
+                boundary_saver.left_gpu.data_ptr<float>()   + gpu_idx * boundary_saver.left_stride,
+                boundary_saver.right_gpu.data_ptr<float>()  + gpu_idx * boundary_saver.right_stride,
+
                 0,
                 save_width,
                 -p.M,
                 solver,
                 BOUNDARY_RESTORE
             );
-
+        }
         // Gradient calculation
         LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(
             order,
@@ -269,26 +306,30 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         float *field1[3] = {for_view.vx, for_view.vy, for_view.vz};
 
-        for (int f = 0; f < 3; ++f)
+        for (int f = 0; f < 3; ++f){
+            gpu_idx = f * interval + buf_idx;
+
             boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                 field1[f],
-                boundary_saver.top_gpu[f].data_ptr<float>(),
-                boundary_saver.bottom_gpu[f].data_ptr<float>(),
-                boundary_saver.front_gpu[f].data_ptr<float>(),
-                boundary_saver.back_gpu[f].data_ptr<float>(),
-                boundary_saver.left_gpu[f].data_ptr<float>(),
-                boundary_saver.right_gpu[f].data_ptr<float>(),
+                
+                boundary_saver.top_gpu.data_ptr<float>()    + gpu_idx * boundary_saver.top_stride,
+                boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride,
+                boundary_saver.front_gpu.data_ptr<float>()  + gpu_idx * boundary_saver.front_stride,
+                boundary_saver.back_gpu.data_ptr<float>()   + gpu_idx * boundary_saver.back_stride,
+                boundary_saver.left_gpu.data_ptr<float>()   + gpu_idx * boundary_saver.left_stride,
+                boundary_saver.right_gpu.data_ptr<float>()  + gpu_idx * boundary_saver.right_stride,
+
                 0,
                 save_width,
                 -p.M,
                 solver,
                 BOUNDARY_RESTORE
             );
-
+        }
         // if (it == 15) u_all_t[0].copy_(forward.vz_t);
             
     }
-
+    printf("total backward flush time: %f ms\n", flush_time_ms);
     // u_all_t[0].copy_(forward.vz_t); // for visualization
     // u_all_t[1].copy_(adjoint.vz_t); // for visualization
     out.grads = {grad_vp, grad_vs, grad_rho};

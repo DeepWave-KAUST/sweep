@@ -1,7 +1,7 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.cuda2 import PropCUDA
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Elastic3D
 from sweep.utils.general import boundary_gpu_memory, bytes_to_gb
@@ -32,7 +32,7 @@ dh = 10.0
 fm = 5.0
 spatial_order = 2
 abcn = 10
-transfer_interval=200
+transfer_interval=101
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
@@ -59,6 +59,9 @@ prop_kwargs = dict(shape=vp.shape,
                    source_type=['sxx', 'syy', 'szz'], 
                    receiver_type=['vx', 'vy', 'vz'], 
                    abcn=abcn, 
+                   nt = nt,
+                   B = 1,
+                   transfer_interval = transfer_interval,
                    dh=dh, dt=dt, pml_type='cpmls', dev=device, free_surface=False)
 
 for i in tqdm.trange(1001):

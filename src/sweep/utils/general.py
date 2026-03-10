@@ -75,3 +75,47 @@ def split_model(m, sources, receivers, one_side_expand=50):
     right = np.array(right)
 
     return m_split, left, right, sources_moved, receivers_moved
+
+def tensor_bytes(shape, dtype=np.float32):
+    return np.prod(shape) * np.dtype(dtype).itemsize
+
+def bytes_to_mb(b):
+    return b / (1024**2)
+
+def bytes_to_gb(b):
+    return b / (1024**3)
+
+def boundary_gpu_memory(
+    nvar,
+    transfer_interval,
+    B,
+    nz,
+    ny,
+    nx,
+    width,
+    dim=3,
+    dtype=np.float32
+):
+    total = 0
+
+    if dim == 3:
+        shapes = [
+            (nvar, transfer_interval, B, nz, ny, width),  # left
+            (nvar, transfer_interval, B, nz, ny, width),  # right
+            (nvar, transfer_interval, B, nz, width, nx),  # front
+            (nvar, transfer_interval, B, nz, width, nx),  # back
+            (nvar, transfer_interval, B, width, ny, nx),  # bottom
+            (nvar, transfer_interval, B, width, ny, nx),  # top
+        ]
+    else:
+        shapes = [
+            (nvar, transfer_interval, B, nz, width),
+            (nvar, transfer_interval, B, nz, width),
+            (nvar, transfer_interval, B, width, nx),
+            (nvar, transfer_interval, B, width, nx),
+        ]
+
+    for s in shapes:
+        total += tensor_bytes(s, dtype)
+
+    return total

@@ -34,7 +34,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("free_surface", &ForwardInput::free_surface)
         .def_readwrite("nt", &ForwardInput::nt)
         .def_readwrite("dt", &ForwardInput::dt)
-        .def_readwrite("spacing", &ForwardInput::spacing);
+        .def_readwrite("spacing", &ForwardInput::spacing)
+        .def_readwrite("transfer_interval", &ForwardInput::transfer_interval)
+        .def_readwrite("wavefields", &ForwardInput::wavefields)
+        .def_readwrite("boundary_cpu", &ForwardInput::boundary_cpu)
+        .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu);
 
     py::class_<BackwardInput>(m, "BackwardInput")
         .def(py::init<>())
@@ -54,6 +58,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("nt", &BackwardInput::nt)
         .def_readwrite("dt", &BackwardInput::dt)
         .def_readwrite("spacing", &BackwardInput::spacing)
-        .def_readwrite("free_surface", &BackwardInput::free_surface);
+        .def_readwrite("free_surface", &BackwardInput::free_surface)
+        .def_readwrite("transfer_interval", &BackwardInput::transfer_interval)
+        .def_readwrite("forward_wavefields", &BackwardInput::forward_wavefields)
+        .def_readwrite("adjoint_wavefields", &BackwardInput::adjoint_wavefields)
+        .def_readwrite("boundary_cpu", &BackwardInput::boundary_cpu)
+        .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu);
+
+
 }
 

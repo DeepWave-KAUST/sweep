@@ -143,3 +143,11 @@ class Elastic(FirstOrderEquation):
         # CUDA IMPLEMENTATION
         import sweep._C as _C
         return (_C.elastic3d_forward, None, _C.elastic3d_backward_bs)
+    
+    @property
+    def base_nvar(self,):
+        return 9
+    
+    @property
+    def pml_nvar(self,):
+        return 27

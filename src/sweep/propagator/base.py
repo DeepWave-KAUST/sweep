@@ -15,6 +15,9 @@ class PropBase:
                  use_ckpt=True,
                  ckpt_chunks=100,
                  pml_type='spml',
+                 nt=-1,
+                 B=1,
+                 transfer_interval=1,
                  **kwargs):
         """Base class for the RNN
 
@@ -49,6 +52,10 @@ class PropBase:
         self.ndim = len(shape)
         self.pml_type = pml_type
 
+        self.nt = nt
+        self.B = B
+        self.transfer_interval = transfer_interval
+
         self.source_type = source_type
         self.receiver_type = receiver_type
 
@@ -62,6 +69,7 @@ class PropBase:
         self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
+        self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
 
     def init_abc(self, **kwargs):
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim

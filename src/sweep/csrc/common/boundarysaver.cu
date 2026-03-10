@@ -108,7 +108,7 @@ __global__ void boundary_kernel2d(
         if (mode == BOUNDARY_SAVE) left[idx] = val;
         else u_b[iz * ctx.nx + ix] = left[idx];
     }
-
+    
     // RIGHT
     if (is_right)
     {

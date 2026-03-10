@@ -20,6 +20,12 @@ namespace elastic3d {
 ForwardOutput forward(const ForwardInput& in)
 {
 
+    cudaEvent_t start, stop, flush_start, flush_end;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    cudaEventCreate(&flush_start);
+    cudaEventCreate(&flush_end);
     const auto& p = in;
     ForwardOutput out;
 
@@ -41,7 +47,10 @@ ForwardOutput forward(const ForwardInput& in)
     int B = N * C;
 
     ElasticWavefieldTensor wavefield;
-    wavefield.allocate(vp, 3);
+    if (!p.wavefields.empty())
+        wavefield.bind(p.wavefields, true);
+    else
+        wavefield.allocate(vp, 3);
     auto wf = wavefield.view();
 
     auto mu  = rho * vs * vs;
@@ -66,7 +75,7 @@ ForwardOutput forward(const ForwardInput& in)
     
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    boundary_saver.allocate(p.use_boundary_saving, 3, 9, solver, vp, save_width, 1);
+    boundary_saver.allocate(p.use_boundary_saving, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu);
     auto bs = boundary_saver.view();
 
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
@@ -76,8 +85,22 @@ ForwardOutput forward(const ForwardInput& in)
 
     float* u_this_t = nullptr;
 
+    int interval = p.transfer_interval;
+    int buf_idx = 0;
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float ms = 0;
+    float flush_time_ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
+    std::cout << "Forward GPU allocation time: " << ms << " ms\n";
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    int gpu_idx = 0;
+
     for (unsigned int it = 0; it < p.nt; ++it) {
 
+        buf_idx = it % interval;
         // u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
 
         LAUNCH_3DELASTIC_VELOCITY(
@@ -132,26 +155,23 @@ ForwardOutput forward(const ForwardInput& in)
         if (p.use_boundary_saving) {
 
             float* fields[9] = {
-                wf.vx,
-                wf.vy,
-                wf.vz,
-                wf.sxx,
-                wf.syy,
-                wf.szz,
-                wf.sxy,
-                wf.sxz,
-                wf.syz
+                wf.vx, wf.vy, wf.vz,
+                wf.sxx, wf.syy, wf.szz,
+                wf.sxy, wf.sxz, wf.syz
             };
 
             for (int f = 0; f < 9; ++f) {
+                gpu_idx = f * interval + buf_idx;
                 boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                     fields[f],
-                    boundary_saver.top_gpu[f].data_ptr<float>(),
-                    boundary_saver.bottom_gpu[f].data_ptr<float>(),
-                    boundary_saver.front_gpu[f].data_ptr<float>(),
-                    boundary_saver.back_gpu[f].data_ptr<float>(),
-                    boundary_saver.left_gpu[f].data_ptr<float>(),
-                    boundary_saver.right_gpu[f].data_ptr<float>(),
+                    
+                    boundary_saver.top_gpu.data_ptr<float>()    + gpu_idx * boundary_saver.top_stride,
+                    boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride,
+                    boundary_saver.front_gpu.data_ptr<float>()  + gpu_idx * boundary_saver.front_stride,
+                    boundary_saver.back_gpu.data_ptr<float>()   + gpu_idx * boundary_saver.back_stride,
+                    boundary_saver.left_gpu.data_ptr<float>()   + gpu_idx * boundary_saver.left_stride,
+                    boundary_saver.right_gpu.data_ptr<float>()  + gpu_idx * boundary_saver.right_stride,
+
                     0,
                     save_width,
                     -p.M, // offset
@@ -160,13 +180,21 @@ ForwardOutput forward(const ForwardInput& in)
                 );
             }
 
-            {
-                boundary_saver.left_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.left_gpu.squeeze(1), /*non_blocking=*/true);
-                boundary_saver.right_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.right_gpu.squeeze(1), /*non_blocking=*/true);
-                boundary_saver.front_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.front_gpu.squeeze(1), /*non_blocking=*/true);
-                boundary_saver.back_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.back_gpu.squeeze(1), /*non_blocking=*/true);
-                boundary_saver.top_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.top_gpu.squeeze(1), /*non_blocking=*/true);
-                boundary_saver.bottom_t.index({torch::indexing::Slice(), static_cast<int64_t>(it)}).copy_(boundary_saver.bottom_gpu.squeeze(1), /*non_blocking=*/true);
+            if (buf_idx == interval - 1 || it == p.nt - 1) {
+
+                int start = it - buf_idx;
+                int len = buf_idx + 1;
+                cudaEventRecord(flush_start);
+
+                boundary_saver.flush_gpu_to_cpu(start, len);
+
+                cudaEventRecord(flush_end);
+                cudaEventSynchronize(flush_end);
+                float ms;
+
+                cudaEventElapsedTime(&ms, flush_start, flush_end);
+                flush_time_ms += ms;
+
             }
 
         }
@@ -197,7 +225,7 @@ ForwardOutput forward(const ForwardInput& in)
         );
 
     }
-    
+
     if (p.use_boundary_saving) {
         boundary_saver.last_two_t.select(0,0).select(0,0).copy_(wavefield.vx_t);
         boundary_saver.last_two_t.select(0,1).select(0,0).copy_(wavefield.vy_t);
@@ -211,14 +239,15 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     out.wavefield = u_allt;
-    out.boundaries = {
-        boundary_saver.top_t,
-        boundary_saver.bottom_t,
-        boundary_saver.front_t,
-        boundary_saver.back_t,
-        boundary_saver.left_t,
-        boundary_saver.right_t
-    };
+    // out.boundaries = {
+    //     boundary_saver.top_t,
+    //     boundary_saver.bottom_t,
+    //     boundary_saver.front_t,
+    //     boundary_saver.back_t,
+    //     boundary_saver.left_t,
+    //     boundary_saver.right_t
+    // };
+    printf("total forward flush time: %f ms\n", flush_time_ms);
 
     out.last_two = boundary_saver.last_two_t;
     out.record = record;

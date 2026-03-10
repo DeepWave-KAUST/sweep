@@ -31,7 +31,7 @@ setup(
                 os.path.join(this_dir, "src/sweep/csrc/equations"),
             ],
             extra_compile_args={
-                "cxx": ["-O3"],
+                "cxx": ["-O3", "-Wno-attributes"],
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
