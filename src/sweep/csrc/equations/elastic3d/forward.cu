@@ -19,13 +19,6 @@ namespace elastic3d {
 
 ForwardOutput forward(const ForwardInput& in)
 {
-
-    cudaEvent_t start, stop, flush_start, flush_end;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
-    cudaEventCreate(&flush_start);
-    cudaEventCreate(&flush_end);
     const auto& p = in;
     ForwardOutput out;
 
@@ -76,7 +69,7 @@ ForwardOutput forward(const ForwardInput& in)
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
     boundary_saver.allocate(p.use_boundary_saving, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu);
-    auto bs = boundary_saver.view();
+    // auto bs = boundary_saver.view();
 
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
@@ -88,15 +81,14 @@ ForwardOutput forward(const ForwardInput& in)
     int interval = p.transfer_interval;
     int buf_idx = 0;
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    float ms = 0;
-    float flush_time_ms = 0;
-    cudaEventElapsedTime(&ms, start, stop);
-    std::cout << "Forward GPU allocation time: " << ms << " ms\n";
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
     int gpu_idx = 0;
+
+    // For copying data
+    cudaStream_t compute_stream = 0; // default stream
+    cudaStream_t copy_stream;
+    cudaStreamCreate(&copy_stream);
+    cudaEvent_t event;
+    cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
@@ -181,19 +173,12 @@ ForwardOutput forward(const ForwardInput& in)
             }
 
             if (buf_idx == interval - 1 || it == p.nt - 1) {
-
                 int start = it - buf_idx;
                 int len = buf_idx + 1;
-                cudaEventRecord(flush_start);
 
-                boundary_saver.flush_gpu_to_cpu(start, len);
-
-                cudaEventRecord(flush_end);
-                cudaEventSynchronize(flush_end);
-                float ms;
-
-                cudaEventElapsedTime(&ms, flush_start, flush_end);
-                flush_time_ms += ms;
+                cudaEventRecord(event, compute_stream);
+                cudaStreamWaitEvent(copy_stream, event, 0);
+                boundary_saver.flush_gpu_to_cpu(start, len, copy_stream);
 
             }
 
@@ -223,7 +208,7 @@ ForwardOutput forward(const ForwardInput& in)
             nrec,
             solver
         );
-
+    
     }
 
     if (p.use_boundary_saving) {
@@ -247,7 +232,6 @@ ForwardOutput forward(const ForwardInput& in)
     //     boundary_saver.left_t,
     //     boundary_saver.right_t
     // };
-    printf("total forward flush time: %f ms\n", flush_time_ms);
 
     out.last_two = boundary_saver.last_two_t;
     out.record = record;

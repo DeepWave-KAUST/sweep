@@ -25,14 +25,14 @@ def ricker(t, fm):
     return wave#.to(torch.float32)
 
 dev = torch.device("cuda:0")
-nt = 3001
+nt = 2501
 dt = 0.002
 delay = 0.2
 dh = 10.0
 fm = 5.0
 spatial_order = 2
 abcn = 10
-transfer_interval=101
+transfer_interval=191
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 

@@ -56,8 +56,8 @@ class Warpper(torch.autograd.Function):
         
         params = _C.ForwardInput()
         params.wavefields = forward_wavefields
-        params.boundary_cpu = boundary_cpu
-        params.boundary_gpu = boundary_gpu
+        params.boundary_cpu = [b.zero_() for b in boundary_cpu]
+        params.boundary_gpu = [b.zero_() for b in boundary_gpu]
         params.transfer_interval = transfer_interval
         params.models = [m.contiguous() for m in models]
         params.source = wavelet.contiguous()
@@ -76,7 +76,7 @@ class Warpper(torch.autograd.Function):
         params.spacing = spacing
 
         # -------- CUDA forward --------
-        (u_allt, boundary_vals, last, syn) = forward_func(params)
+        (u_allt, _, last, syn) = forward_func(params)
         if any([save_all_wavefields, use_boundary_saving]):
             
             ctx.save_for_backward(
@@ -198,7 +198,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         self.forward_wavefields = self.forward_allocator.zeros((self.equation.base_nvar+self.equation.pml_nvar)*[[self.B,1,*self.shape_cuda],])
         self.adjoint_wavefields = self.forward_allocator.zeros( self.equation.base_nvar*[[self.B,1,*self.shape_cuda],])
 
-        self.boundary_cpu = self.boundary_cpu_allocator.zeros(layout.cpu_shapes, dev='cpu')
+        self.boundary_cpu = self.boundary_cpu_allocator.zeros(layout.cpu_shapes, dtype=torch.float32, dev='cpu')
         self.boundary_gpu = self.boundary_gpu_allocator.zeros(layout.gpu_shapes)
 
     def set_parameters(self, model):

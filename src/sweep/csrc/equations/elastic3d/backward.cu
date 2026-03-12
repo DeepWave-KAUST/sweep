@@ -116,7 +116,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval);
     // boundary_saver.load_from_vector(p.u_boundary, vp);
     boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu);
-    auto bs = boundary_saver.view();
+    // auto bs = boundary_saver.view();
 
     auto fvx_prev = torch::zeros_like(vp);
     auto fvy_prev = torch::zeros_like(vp);
@@ -127,15 +127,29 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int interval = p.transfer_interval;
     int buf_idx = 0;
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    float ms = 0;
-    float flush_time_ms = 0;
-    cudaEventElapsedTime(&ms, start, stop);
-    std::cout << "Backward GPU allocation time: " << ms << " ms\n";
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
     int gpu_idx = 0;
+
+    // Copy the last block boundaries
+    cudaEvent_t copy_done_event;
+    cudaStream_t copy_stream;
+    cudaStreamCreate(&copy_stream);
+    cudaEventCreateWithFlags(&copy_done_event, cudaEventDisableTiming);
+
+    // Pre-load the first block of boundaries to GPU
+    int it0 = p.nt - 1;
+    int buf_idx0 = (it0 - 1) % interval;
+
+    int _start = it0 - buf_idx0 - 1;
+    int _len   = buf_idx0 + 1;
+
+    boundary_saver.load_cpu_to_gpu(_start, _len, copy_stream);
+    cudaEventRecord(copy_done_event, copy_stream);
+
+    cudaStream_t compute_stream = at::cuda::getCurrentCUDAStream();
+
+    int next_start = 0;
+    int next_len = 0;
+
     for (int it = p.nt - 1; it >= 1; --it) {
 
         buf_idx = (it - 1) % interval;
@@ -215,6 +229,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         );
 
+        if (buf_idx == interval - 1)
+            cudaStreamWaitEvent(compute_stream, copy_done_event, 0);
+        
         LAUNCH_3DELASTIC_STRESS_NOPML(
             order,
             launch_config.grid,
@@ -225,24 +242,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
             grad_ctx,
             solver
         );
-
-        if (buf_idx == interval - 1 || it == p.nt - 1)
-        {
-            int start = it - buf_idx - 1;
-            int len   = buf_idx + 1;
-
-            cudaEventRecord(flush_start);
-
-            boundary_saver.load_cpu_to_gpu(start, len);
-
-            cudaEventRecord(flush_end);
-            cudaEventSynchronize(flush_end);
-            float ms;
-
-            cudaEventElapsedTime(&ms, flush_start, flush_end);
-            flush_time_ms += ms;
-
-        }
 
         float *field2[6] = {for_view.sxx, for_view.syy, for_view.szz, for_view.sxy, for_view.sxz, for_view.syz};
 
@@ -303,7 +302,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             grad_ctx,
             solver
         );
-
+        
         float *field1[3] = {for_view.vx, for_view.vy, for_view.vz};
 
         for (int f = 0; f < 3; ++f){
@@ -326,12 +325,29 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 BOUNDARY_RESTORE
             );
         }
+
+        if (buf_idx == 0 && it > 1) {
+
+            int chunk_id = (it - 1) / interval;
+
+            int chunk_start = chunk_id * interval;
+
+            int next_chunk = chunk_id - 1;
+
+            if (next_chunk >= 0){
+
+                int remain   = (int)p.nt - next_start;
+                int next_len = std::min(interval, remain);
+                int next_start = next_chunk * interval;                
+                boundary_saver.load_cpu_to_gpu(next_start, next_len, copy_stream);
+                cudaEventRecord(copy_done_event, copy_stream);
+            }
+
+        }
         // if (it == 15) u_all_t[0].copy_(forward.vz_t);
             
     }
-    printf("total backward flush time: %f ms\n", flush_time_ms);
-    // u_all_t[0].copy_(forward.vz_t); // for visualization
-    // u_all_t[1].copy_(adjoint.vz_t); // for visualization
+
     out.grads = {grad_vp, grad_vs, grad_rho};
     return out;
 }

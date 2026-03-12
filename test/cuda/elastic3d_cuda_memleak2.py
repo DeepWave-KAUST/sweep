@@ -22,14 +22,14 @@ def ricker(t, fm):
     return wave#.to(torch.float32)
 
 dev = torch.device("cuda:0")
-nt = 3001
+nt = 2500
 dt = 0.002
 delay = 0.2
 dh = 10.0
 fm = 5.0
-spatial_order = 8
+spatial_order = 2
 abcn = 10
-transfer_interval = 50
+transfer_interval = 200
 
 cpu_mem = boundary_gpu_memory(9, nt, 1, nz, ny, nx, spatial_order//2+1)
 print(f"{bytes_to_gb(cpu_mem):.2f} GB")
