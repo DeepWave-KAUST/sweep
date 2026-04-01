@@ -7,3 +7,5 @@ examples/test_figures
 examples/models/models
 build_ibex
 build_ws
+
+test/cuda/*

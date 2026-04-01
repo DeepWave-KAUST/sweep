@@ -92,8 +92,5 @@ The ground truth model, observed data and the gradient of the velocity model are
 # Examples
 Some examples are provided in the `examples` folder (Still working on it since some of the APIs are changed). 
 
-# CLI
-The following command lists all available equations in GeophyAI, it will also show the available parameters for each equation.
-```
-geophyai list equations
-```
+# License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
