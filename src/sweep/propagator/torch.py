@@ -71,12 +71,12 @@ class PropTorch(PropBase, torch.nn.Module):
             setattr(self, name, torch.zeros(shape_wavefield, device=self.dev))
 
 
-        # Extract adjoint wavefields
-        self.adjoint_wavefields = torch.zeros((nt, 5, *shape_wavefield), device=self.dev, dtype=torch.float32)
-        def hook_it(index, t):
-            def _hook(grad):
-                self.adjoint_wavefields[t, index] = grad.detach().clone()
-            return _hook
+        # # Extract adjoint wavefields
+        # self.adjoint_wavefields = torch.zeros((nt, 5, *shape_wavefield), device=self.dev, dtype=torch.float32)
+        # def hook_it(index, t):
+        #     def _hook(grad):
+        #         self.adjoint_wavefields[t, index] = grad.detach().clone()
+        #     return _hook
 
         record = torch.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=torch.float32, device=self.dev)
 
@@ -92,10 +92,10 @@ class PropTorch(PropBase, torch.nn.Module):
 
             wavefield = [getattr(self, name) for name in self.wavefield_names]
 
-            # register hook for adjoint wavefield extraction
-            for w, name in zip(wavefield, self.wavefield_names[:5]):
-                if w.requires_grad:
-                    w.register_hook(hook_it(self.wavefield_names.index(name), i))
+            # # register hook for adjoint wavefield extraction
+            # for w, name in zip(wavefield, self.wavefield_names[:5]):
+            #     if w.requires_grad:
+            #         w.register_hook(hook_it(self.wavefield_names.index(name), i))
 
             # Time step forward
             if self.use_ckpt:

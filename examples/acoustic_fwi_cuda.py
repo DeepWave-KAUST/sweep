@@ -35,7 +35,7 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-solver = PropTorch(Acoustic(spatial_order=spatial_order, device=dev), 
+solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
             dh=dh,
