@@ -28,6 +28,7 @@ struct ForwardInput {
 
     bool save_all_wavefields;
     bool use_boundary_saving;
+    bool use_pinned_memory = false;
     bool free_surface;
 
     unsigned int nt;
@@ -105,6 +106,7 @@ struct BackwardInput {
 
     // options
     bool free_surface;
+    bool use_pinned_memory = false;
     int transfer_interval = 1; // Transfer every time step by default
 
 };

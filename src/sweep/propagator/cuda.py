@@ -27,6 +27,7 @@ class Warpper(torch.autograd.Function):
         dt: float,
         pml_vals: list,     # list of 6 tensors for PML profiles
         use_boundary_saving: bool=False,
+        use_pinned_memory: bool=False,
         free_surface: bool=False,
         transfer_interval: int=1,
         *models             # list of (B, nz, nx) tensors
@@ -65,6 +66,7 @@ class Warpper(torch.autograd.Function):
         params.pml_vals = [p.contiguous() for p in pml_vals]
         params.save_all_wavefields = save_all_wavefields
         params.use_boundary_saving = use_boundary_saving
+        params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.nt = nt
         params.dt = dt
@@ -96,6 +98,7 @@ class Warpper(torch.autograd.Function):
             ctx.dt = dt
             ctx.free_surface = free_surface
             ctx.use_boundary_saving = use_boundary_saving
+            ctx.use_pinned_memory = use_pinned_memory
             ctx.backward_func = backward_func
             ctx.backward_bs_func = backward_bs_func
             ctx.forward_source = wavelet
@@ -138,6 +141,7 @@ class Warpper(torch.autograd.Function):
         params.dt = dt
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
+        params.use_pinned_memory = ctx.use_pinned_memory
 
         if not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
@@ -167,6 +171,7 @@ class Warpper(torch.autograd.Function):
             None,      # dt
             None,      # pml_vals
             None,      # use_boundary_saving
+            None,      # use_pinned_memory
             None,      # free_surface
             None,      # transfer_interval
             *gradients[-1] # models
@@ -328,6 +333,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 self.dt,
                 self.equation.b,
                 use_boundary_saving,
+                self.use_pinned_memory,
                 self.free_surface,
                 transfer_interval,
                 *models,

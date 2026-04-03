@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 
@@ -8,6 +7,7 @@
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
+#include "../../common/cudautils.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/wavetypes.h"
@@ -119,7 +119,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int save_width = solver.M + 1;
     // boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval);
     // boundary_saver.load_from_vector(p.u_boundary, vp);
-    boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu);
+    boundary_saver.allocate(true, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, false, p.use_pinned_memory);
     // auto bs = boundary_saver.view();
 
     auto fvx_prev = torch::zeros_like(vp);
@@ -134,10 +134,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int gpu_idx = 0;
 
     // Copy the last block boundaries
-    cudaEvent_t copy_done_event;
-    cudaStream_t copy_stream;
-    cudaStreamCreate(&copy_stream);
-    cudaEventCreateWithFlags(&copy_done_event, cudaEventDisableTiming);
+    AsyncCopyContext async_copy(true);
 
     // Pre-load the first block of boundaries to GPU
     int it0 = p.nt - 1;
@@ -146,13 +143,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int _start = it0 - buf_idx0 - 1;
     int _len   = buf_idx0 + 1;
 
-    boundary_saver.load_cpu_to_gpu(_start, _len, copy_stream);
-    cudaEventRecord(copy_done_event, copy_stream);
-
-    cudaStream_t compute_stream = at::cuda::getCurrentCUDAStream();
-
-    int next_start = 0;
-    int next_len = 0;
+    boundary_saver.load_cpu_to_gpu(_start, _len, async_copy.copy_stream);
+    async_copy.record_copy_ready();
 
     for (int it = p.nt - 1; it >= 1; --it) {
 
@@ -210,7 +202,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         }
 
         if (buf_idx == interval - 1)
-            cudaStreamWaitEvent(compute_stream, copy_done_event, 0);
+            async_copy.wait_for_copy();
         
         LAUNCH_3DELASTIC_STRESS_NOPML(
             order,
@@ -316,11 +308,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
             if (next_chunk >= 0){
 
+                int next_start = next_chunk * interval;
                 int remain   = (int)p.nt - next_start;
                 int next_len = std::min(interval, remain);
-                int next_start = next_chunk * interval;                
-                boundary_saver.load_cpu_to_gpu(next_start, next_len, copy_stream);
-                cudaEventRecord(copy_done_event, copy_stream);
+                boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
+                async_copy.record_copy_ready();
             }
 
         }

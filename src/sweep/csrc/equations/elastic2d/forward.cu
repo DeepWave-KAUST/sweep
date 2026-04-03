@@ -6,6 +6,7 @@
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
+#include "../../common/cudautils.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
@@ -34,7 +35,10 @@ ForwardOutput forward(const ForwardInput& in)
     int B = N * C;
 
     ElasticWavefieldTensor wavefield;
-    wavefield.allocate(vp, 2);
+    if (!p.wavefields.empty())
+        wavefield.bind(p.wavefields, true);
+    else
+        wavefield.allocate(vp, 2);
     auto wf = wavefield.view();
 
     auto mu  = rho * vs * vs;
@@ -59,8 +63,11 @@ ForwardOutput forward(const ForwardInput& in)
     
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, true);
-    auto bs = boundary_saver.view();
+    bool staged_boundary = !p.boundary_cpu.empty() || !p.boundary_gpu.empty();
+    if (staged_boundary)
+        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, false, p.use_pinned_memory);
+    else
+        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, {}, false, p.use_pinned_memory);
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -70,11 +77,17 @@ ForwardOutput forward(const ForwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     float* u_this_t = nullptr;
+    int interval = p.transfer_interval;
+    int buf_idx = 0;
+    int gpu_idx = 0;
 
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
+    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+
     for (unsigned int it = 0; it < p.nt; ++it) {
 
+        buf_idx = it % interval;
         u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
 
         LAUNCH_ELASTIC_VELOCITY(
@@ -125,19 +138,45 @@ ForwardOutput forward(const ForwardInput& in)
             };
 
             for (int f = 0; f < 5; ++f) {
+                float* top_ptr = nullptr;
+                float* bottom_ptr = nullptr;
+                float* left_ptr = nullptr;
+                float* right_ptr = nullptr;
+
+                if (staged_boundary) {
+                    gpu_idx = f * interval + buf_idx;
+                    top_ptr = boundary_saver.top_gpu.data_ptr<float>() + gpu_idx * boundary_saver.top_stride;
+                    bottom_ptr = boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride;
+                    left_ptr = boundary_saver.left_gpu.data_ptr<float>() + gpu_idx * boundary_saver.left_stride;
+                    right_ptr = boundary_saver.right_gpu.data_ptr<float>() + gpu_idx * boundary_saver.right_stride;
+                } else {
+                    top_ptr = boundary_saver.top_t[f].data_ptr<float>();
+                    bottom_ptr = boundary_saver.bottom_t[f].data_ptr<float>();
+                    left_ptr = boundary_saver.left_t[f].data_ptr<float>();
+                    right_ptr = boundary_saver.right_t[f].data_ptr<float>();
+                }
 
                 boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
                     fields[f],
-                    boundary_saver.top_t[f].data_ptr<float>(),
-                    boundary_saver.bottom_t[f].data_ptr<float>(),
-                    boundary_saver.left_t[f].data_ptr<float>(),
-                    boundary_saver.right_t[f].data_ptr<float>(),
-                    it,
+                    top_ptr,
+                    bottom_ptr,
+                    left_ptr,
+                    right_ptr,
+                    staged_boundary ? 0 : it,
                     save_width,
                     -p.M, // offset
                     solver,
                     BOUNDARY_SAVE
                 );
+            }
+
+            if (staged_boundary && (buf_idx == interval - 1 || it == p.nt - 1)) {
+                int start = it - buf_idx;
+                int len = buf_idx + 1;
+
+                async_copy.record_compute_ready();
+                async_copy.wait_for_compute();
+                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
             }
         }
         for (int irec = 0; irec < nrec_fields; ++irec) {
@@ -161,6 +200,8 @@ ForwardOutput forward(const ForwardInput& in)
         boundary_saver.last_two_t.select(0,3).select(0,0).copy_(wavefield.szz_t);
         boundary_saver.last_two_t.select(0,4).select(0,0).copy_(wavefield.sxz_t);
     }
+
+    async_copy.synchronize_copy();
 
     out.wavefield = u_allt;
     out.boundaries = {

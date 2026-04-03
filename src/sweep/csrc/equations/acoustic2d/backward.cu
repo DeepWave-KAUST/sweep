@@ -149,7 +149,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // Boundary wavefields (for saving all wavefields)
     int save_width = p.abcn > 0 ? M + 1 : M;
     EffectiveBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true);
+    boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true, 1, {}, {}, false, p.use_pinned_memory);
     boundary_saver.load_from_vector(p.u_boundary, vp);
     auto bs = boundary_saver.view();
 

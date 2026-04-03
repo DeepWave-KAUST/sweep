@@ -29,6 +29,7 @@ class Warpper(torch.autograd.Function):
         dt: float,
         pml_vals: list,     # list of 6 tensors for PML profiles
         use_boundary_saving: bool=False,
+        use_pinned_memory: bool=False,
         free_surface: bool=False,
         transfer_interval: int=1,
         forward_wavefields: tuple=(),
@@ -74,6 +75,7 @@ class Warpper(torch.autograd.Function):
         params.pml_vals = [p.contiguous() for p in pml_vals]
         params.save_all_wavefields = save_all_wavefields
         params.use_boundary_saving = use_boundary_saving
+        params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.nt = nt
         params.dt = dt
@@ -104,6 +106,7 @@ class Warpper(torch.autograd.Function):
             ctx.dt = dt
             ctx.free_surface = free_surface
             ctx.use_boundary_saving = use_boundary_saving
+            ctx.use_pinned_memory = use_pinned_memory
             ctx.backward_func = backward_func
             ctx.backward_bs_func = backward_bs_func
             ctx.forward_source = wavelet
@@ -149,6 +152,7 @@ class Warpper(torch.autograd.Function):
         params.dt = dt
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
+        params.use_pinned_memory = ctx.use_pinned_memory
 
         if not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
@@ -179,6 +183,7 @@ class Warpper(torch.autograd.Function):
             None,      # dt
             None,      # pml_vals
             None,      # use_boundary_saving
+            None,      # use_pinned_memory
             None,      # free_surface
             None,      # transfer_interval
             None,      # forward wavefields
@@ -200,6 +205,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         self.forward_func, self.backward_func, self.backward_bs_func = self.equation._C()
 
         # Initilize memory for wavefields
+
         layout = Layout(self.shape_cuda, self.equation.base_nvar, self.nt, self.abcn, self.equation.so//2, self.B, self.transfer_interval, self.free_surface, self.equation.so//2+1)
 
         #
@@ -210,7 +216,12 @@ class PropCUDA(PropBase, torch.nn.Module):
         self.forward_wavefields = self.forward_allocator.zeros((self.equation.base_nvar+self.equation.pml_nvar)*[[self.B,1,*self.shape_cuda],])
         self.adjoint_wavefields = self.forward_allocator.zeros( self.equation.base_nvar*[[self.B,1,*self.shape_cuda],])
 
-        self.boundary_cpu = self.boundary_cpu_allocator.zeros(layout.cpu_shapes, dtype=torch.float32, dev='cpu')
+        self.boundary_cpu = self.boundary_cpu_allocator.zeros(
+            layout.cpu_shapes,
+            dtype=torch.float32,
+            dev='cpu',
+            pin_memory=self.use_pinned_memory,
+        )
         self.boundary_gpu = self.boundary_gpu_allocator.zeros(layout.gpu_shapes)
 
     def set_parameters(self, model):
@@ -331,6 +342,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 self.dt,
                 self.equation.b,
                 use_boundary_saving,
+                self.use_pinned_memory,
                 self.free_surface,
                 transfer_interval,
                 self.forward_wavefields,

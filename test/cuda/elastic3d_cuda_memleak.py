@@ -1,7 +1,7 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.cuda2 import PropCUDA
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Elastic3D
 from sweep.utils.general import boundary_gpu_memory, bytes_to_gb
@@ -22,7 +22,7 @@ def ricker(t, fm):
     return wave#.to(torch.float32)
 
 dev = torch.device("cuda:0")
-nt = 3001
+nt = 2500
 dt = 0.002
 delay = 0.2
 dh = 10.0
@@ -59,21 +59,28 @@ prop_kwargs = dict(shape=vp.shape,
                    source_type=['sxx', 'syy', 'szz'], 
                    receiver_type=['vx', 'vy', 'vz'], 
                    abcn=abcn, 
-                   dh=dh, dt=dt, pml_type='cpmls', dev=device, free_surface=False)
-
+                   dh=dh, 
+                   dt=dt, 
+                   pml_type='cpmls', 
+                   nt = nt,
+                   B = 1,
+                   transfer_interval = transfer_interval,
+                   dev=device, 
+                   free_surface=False,
+                   use_pinned_memory=True)
+solver = PropCUDA(Elastic3D(**eq_kwargs), **prop_kwargs)
+# exit()
 for i in tqdm.trange(10001):
 
-    for Prop, pname in zip(prop, pnames):
-        solver = Prop(Elastic3D(**eq_kwargs), **prop_kwargs)
-        vp.grad = None
-        vs.grad = None
-        rho.grad = None
-        out = solver(wave, sources = sources,
-                        receivers = receivers,
-                        models=[vp, vs, rho], 
-                        use_boundary_saving=True, 
-                        transfer_interval=transfer_interval)
-        record = out.detach().cpu().numpy().squeeze()
-        loss = out.pow(2).sum()
-        loss.backward()
+    vp.grad = None
+    vs.grad = None
+    rho.grad = None
+    out = solver(wave, sources = sources,
+                    receivers = receivers,
+                    models=[vp, vs, rho], 
+                    use_boundary_saving=True, 
+                    transfer_interval=transfer_interval)
+    record = out.detach().cpu().numpy().squeeze()
+    loss = out.pow(2).sum()
+    loss.backward()
 

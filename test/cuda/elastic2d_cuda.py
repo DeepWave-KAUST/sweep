@@ -1,7 +1,7 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.cuda2 import PropCUDA
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Elastic
 import numpy as np
@@ -73,6 +73,9 @@ for so, srcz in grid:
                         pml_type='cpmls',
                         dev=device,
                         free_surface=free_surface,
+                        use_pinned_memory=True,
+                        B=1,
+                        nt=nt,
                         )
         
         out = solver(wave, sources = sources,

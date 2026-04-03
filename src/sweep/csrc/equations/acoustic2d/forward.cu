@@ -57,7 +57,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
     EffectiveBoundarySaver boundary_saver;
-    boundary_saver.allocate(p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, true, p.transfer_interval);
+    boundary_saver.allocate(p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, true, p.transfer_interval, {}, {}, false, p.use_pinned_memory);
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);

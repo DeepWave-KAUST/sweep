@@ -1,7 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #include "elastic3d.h"
@@ -9,6 +8,7 @@
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
+#include "../../common/cudautils.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/wavetypes.h"
@@ -72,7 +72,7 @@ ForwardOutput forward(const ForwardInput& in)
     
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    boundary_saver.allocate(p.use_boundary_saving, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu);
+    boundary_saver.allocate(p.use_boundary_saving, 3, 9, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, false, p.use_pinned_memory);
     // auto bs = boundary_saver.view();
 
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
@@ -88,11 +88,7 @@ ForwardOutput forward(const ForwardInput& in)
     int gpu_idx = 0;
 
     // For copying data
-    cudaStream_t compute_stream = 0; // default stream
-    cudaStream_t copy_stream;
-    cudaStreamCreate(&copy_stream);
-    cudaEvent_t event;
-    cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
+    AsyncCopyContext async_copy(p.use_boundary_saving);
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
@@ -168,9 +164,9 @@ ForwardOutput forward(const ForwardInput& in)
                 int start = it - buf_idx;
                 int len = buf_idx + 1;
 
-                cudaEventRecord(event, compute_stream);
-                cudaStreamWaitEvent(copy_stream, event, 0);
-                boundary_saver.flush_gpu_to_cpu(start, len, copy_stream);
+                async_copy.record_compute_ready();
+                async_copy.wait_for_compute();
+                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
 
             }
 
@@ -202,6 +198,8 @@ ForwardOutput forward(const ForwardInput& in)
         boundary_saver.last_two_t.select(0,7).select(0,0).copy_(wavefield.sxz_t);
         boundary_saver.last_two_t.select(0,8).select(0,0).copy_(wavefield.syz_t);
     }
+
+    async_copy.synchronize_copy();
 
     out.wavefield = u_allt;
     // out.boundaries = {

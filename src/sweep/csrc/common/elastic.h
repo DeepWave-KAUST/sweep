@@ -332,62 +332,90 @@ struct ElasticWavefieldTensor {
 
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_=true)
     {
-
-        dim = 3;
-
         int i = 0;
-
-        vx_t = tensors[i++];
-        vy_t = tensors[i++];
-        vz_t = tensors[i++];
-
-        sxx_t = tensors[i++];
-        syy_t = tensors[i++];
-        szz_t = tensors[i++];
-        sxy_t = tensors[i++];
-        sxz_t = tensors[i++];
-        syz_t = tensors[i++];
-
         use_pml = use_pml_;
-        if(use_pml){
 
-            m_vxx_t = tensors[i++];
-            m_vxy_t = tensors[i++];
-            m_vxz_t = tensors[i++];
+        if (tensors.size() == 15) {
+            dim = 2;
 
-            m_vyx_t = tensors[i++];
-            m_vyy_t = tensors[i++];
-            m_vyz_t = tensors[i++];
+            vx_t = tensors[i++];
+            vz_t = tensors[i++];
 
-            m_vzx_t = tensors[i++];
-            m_vzy_t = tensors[i++];
-            m_vzz_t = tensors[i++];
+            sxx_t = tensors[i++];
+            szz_t = tensors[i++];
+            sxz_t = tensors[i++];
 
-            m_sxxx_t = tensors[i++];
-            m_sxxy_t = tensors[i++];
-            m_sxxz_t = tensors[i++];
+            vy_t = torch::Tensor();
+            syy_t = torch::Tensor();
+            sxy_t = torch::Tensor();
+            syz_t = torch::Tensor();
 
-            m_syyx_t = tensors[i++];
-            m_syyy_t = tensors[i++];
-            m_syyz_t = tensors[i++];
+            if (use_pml) {
+                m_vxx_t = tensors[i++];
+                m_vxz_t = tensors[i++];
+                m_vzx_t = tensors[i++];
+                m_vzz_t = tensors[i++];
 
-            m_szzx_t = tensors[i++];
-            m_szzy_t = tensors[i++];
-            m_szzz_t = tensors[i++];
+                m_sxxx_t = tensors[i++];
+                m_sxxz_t = tensors[i++];
+                m_szzx_t = tensors[i++];
+                m_szzz_t = tensors[i++];
+                m_sxzx_t = tensors[i++];
+                m_sxzz_t = tensors[i++];
+            }
+        } else {
+            dim = 3;
 
-            m_sxyx_t = tensors[i++];
-            m_sxyy_t = tensors[i++];
-            m_sxyz_t = tensors[i++];
+            vx_t = tensors[i++];
+            vy_t = tensors[i++];
+            vz_t = tensors[i++];
 
-            m_sxzx_t = tensors[i++];
-            m_sxzy_t = tensors[i++];
-            m_sxzz_t = tensors[i++];
+            sxx_t = tensors[i++];
+            syy_t = tensors[i++];
+            szz_t = tensors[i++];
+            sxy_t = tensors[i++];
+            sxz_t = tensors[i++];
+            syz_t = tensors[i++];
 
-            m_syzx_t = tensors[i++];
-            m_syzy_t = tensors[i++];
-            m_syzz_t = tensors[i++];
+            if(use_pml){
+
+                m_vxx_t = tensors[i++];
+                m_vxy_t = tensors[i++];
+                m_vxz_t = tensors[i++];
+
+                m_vyx_t = tensors[i++];
+                m_vyy_t = tensors[i++];
+                m_vyz_t = tensors[i++];
+
+                m_vzx_t = tensors[i++];
+                m_vzy_t = tensors[i++];
+                m_vzz_t = tensors[i++];
+
+                m_sxxx_t = tensors[i++];
+                m_sxxy_t = tensors[i++];
+                m_sxxz_t = tensors[i++];
+
+                m_syyx_t = tensors[i++];
+                m_syyy_t = tensors[i++];
+                m_syyz_t = tensors[i++];
+
+                m_szzx_t = tensors[i++];
+                m_szzy_t = tensors[i++];
+                m_szzz_t = tensors[i++];
+
+                m_sxyx_t = tensors[i++];
+                m_sxyy_t = tensors[i++];
+                m_sxyz_t = tensors[i++];
+
+                m_sxzx_t = tensors[i++];
+                m_sxzy_t = tensors[i++];
+                m_sxzz_t = tensors[i++];
+
+                m_syzx_t = tensors[i++];
+                m_syzy_t = tensors[i++];
+                m_syzz_t = tensors[i++];
+            }
         }
-
         allocated = true;
     }
 

@@ -18,6 +18,7 @@ class PropBase:
                  nt=-1,
                  B=1,
                  transfer_interval=1,
+                 use_pinned_memory=False,
                  **kwargs):
         """Base class for the RNN
 
@@ -55,6 +56,7 @@ class PropBase:
         self.nt = nt
         self.B = B
         self.transfer_interval = transfer_interval
+        self.use_pinned_memory = use_pinned_memory
 
         self.source_type = source_type
         self.receiver_type = receiver_type

@@ -39,8 +39,12 @@ class Layout:
         self.phys_x0 = abcn + M
         self.phys_x1 = self.nx - abcn - M
 
-        self.phys_y0 = abcn + M
-        self.phys_y1 = self.ny - abcn - M
+        if dim == 3:
+            self.phys_y0 = abcn + M
+            self.phys_y1 = self.ny - abcn - M
+        else:
+            self.phys_y0 = 0
+            self.phys_y1 = 1
 
         self.phys_z0 = M if free_surface else abcn + M
         self.phys_z1 = self.nz - abcn - M
@@ -224,7 +228,7 @@ class Layout:
     
     @property
     def cpu_shapes(self,):
-        return (
+        shapes = (
             self.top_shape, 
             self.bottom_shape, 
             self.front_shape, 
@@ -232,10 +236,11 @@ class Layout:
             self.left_shape, 
             self.right_shape
         )
+        return tuple(shape for shape in shapes if shape is not None)
 
     @property
     def gpu_shapes(self):
-        return (
+        shapes = (
             self.top_gpu_shape,
             self.bottom_gpu_shape,
             self.front_gpu_shape,
@@ -243,3 +248,4 @@ class Layout:
             self.left_gpu_shape,
             self.right_gpu_shape
         )
+        return tuple(shape for shape in shapes if shape is not None)

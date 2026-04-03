@@ -76,7 +76,8 @@ struct EffectiveBoundarySaver {
         int transfer_interval = 1,
         const std::vector<torch::Tensor>& boundary_cpu = {},
         const std::vector<torch::Tensor>& boundary_gpu = {},
-        bool use_fp16_storage_ = false
+        bool use_fp16_storage_ = false,
+        bool use_pinned_memory_ = false
     )
     {
         enabled = use_boundary_saving;
@@ -104,8 +105,8 @@ struct EffectiveBoundarySaver {
 
         auto pinned_options = torch::TensorOptions()
             .dtype(dtype)
-            .device(torch::kCPU);
-            // .pinned_memory(true);
+            .device(torch::kCPU)
+            .pinned_memory(use_pinned_memory_);
 
         auto storage_options = store_on_gpu ? gpu_options : pinned_options;
 
@@ -123,14 +124,25 @@ struct EffectiveBoundarySaver {
 
         if (!boundary_cpu.empty())
         {
-            TORCH_CHECK(boundary_cpu.size() == 6,
-                "boundary_cpu must contain 6 tensors");
-            top_t    = boundary_cpu[0];
-            bottom_t = boundary_cpu[1];
-            front_t  = boundary_cpu[2];
-            back_t   = boundary_cpu[3];
-            left_t   = boundary_cpu[4];
-            right_t  = boundary_cpu[5];
+            if (dim == 3) {
+                TORCH_CHECK(boundary_cpu.size() == 6,
+                    "boundary_cpu must contain 6 tensors for 3D");
+                top_t    = boundary_cpu[0];
+                bottom_t = boundary_cpu[1];
+                front_t  = boundary_cpu[2];
+                back_t   = boundary_cpu[3];
+                left_t   = boundary_cpu[4];
+                right_t  = boundary_cpu[5];
+            } else {
+                TORCH_CHECK(boundary_cpu.size() == 4,
+                    "boundary_cpu must contain 4 tensors for 2D");
+                top_t    = boundary_cpu[0];
+                bottom_t = boundary_cpu[1];
+                left_t   = boundary_cpu[2];
+                right_t  = boundary_cpu[3];
+                front_t  = torch::Tensor();
+                back_t   = torch::Tensor();
+            }
         }
         else
         {   
@@ -168,14 +180,25 @@ struct EffectiveBoundarySaver {
 
             if (!boundary_gpu.empty())
             {
-                TORCH_CHECK(boundary_gpu.size() == 6,
-                    "boundary_gpu must contain 6 tensors");
-                top_gpu    = boundary_gpu[0];
-                bottom_gpu = boundary_gpu[1];
-                front_gpu  = boundary_gpu[2];
-                back_gpu   = boundary_gpu[3];
-                left_gpu   = boundary_gpu[4];
-                right_gpu  = boundary_gpu[5];
+                if (dim == 3) {
+                    TORCH_CHECK(boundary_gpu.size() == 6,
+                        "boundary_gpu must contain 6 tensors for 3D");
+                    top_gpu    = boundary_gpu[0];
+                    bottom_gpu = boundary_gpu[1];
+                    front_gpu  = boundary_gpu[2];
+                    back_gpu   = boundary_gpu[3];
+                    left_gpu   = boundary_gpu[4];
+                    right_gpu  = boundary_gpu[5];
+                } else {
+                    TORCH_CHECK(boundary_gpu.size() == 4,
+                        "boundary_gpu must contain 4 tensors for 2D");
+                    top_gpu    = boundary_gpu[0];
+                    bottom_gpu = boundary_gpu[1];
+                    left_gpu   = boundary_gpu[2];
+                    right_gpu  = boundary_gpu[3];
+                    front_gpu  = torch::Tensor();
+                    back_gpu   = torch::Tensor();
+                }
             }
             else
             {
@@ -311,6 +334,67 @@ struct EffectiveBoundarySaver {
 
     inline void flush_gpu_to_cpu(int start, int len, cudaStream_t stream)
     {
+        if (dim == 2)
+        {
+            size_t top_var_block = top_t.stride(0);
+            size_t top_time_block = top_t.stride(1);
+            size_t left_var_block = left_t.stride(0);
+            size_t left_time_block = left_t.stride(1);
+            size_t top_gpu_var_block = top_gpu.stride(0);
+            size_t left_gpu_var_block = left_gpu.stride(0);
+
+            size_t top_bytes = len * top_time_block * sizeof(float);
+            size_t left_bytes = len * left_time_block * sizeof(float);
+
+            if (top_t.dtype() == torch::kFloat32)
+            {
+                cudaMemcpy2DAsync(
+                    top_t.data_ptr<float>() + start * top_time_block,
+                    top_var_block * sizeof(float),
+                    top_gpu.data_ptr<float>(),
+                    top_gpu_var_block * sizeof(float),
+                    top_bytes,
+                    nvar,
+                    cudaMemcpyDeviceToHost,
+                    stream
+                );
+
+                cudaMemcpy2DAsync(
+                    bottom_t.data_ptr<float>() + start * top_time_block,
+                    top_var_block * sizeof(float),
+                    bottom_gpu.data_ptr<float>(),
+                    top_gpu_var_block * sizeof(float),
+                    top_bytes,
+                    nvar,
+                    cudaMemcpyDeviceToHost,
+                    stream
+                );
+
+                cudaMemcpy2DAsync(
+                    left_t.data_ptr<float>() + start * left_time_block,
+                    left_var_block * sizeof(float),
+                    left_gpu.data_ptr<float>(),
+                    left_gpu_var_block * sizeof(float),
+                    left_bytes,
+                    nvar,
+                    cudaMemcpyDeviceToHost,
+                    stream
+                );
+
+                cudaMemcpy2DAsync(
+                    right_t.data_ptr<float>() + start * left_time_block,
+                    left_var_block * sizeof(float),
+                    right_gpu.data_ptr<float>(),
+                    left_gpu_var_block * sizeof(float),
+                    left_bytes,
+                    nvar,
+                    cudaMemcpyDeviceToHost,
+                    stream
+                );
+                return;
+            }
+
+        }
 
         size_t left_block   = left_t.stride(0);
         size_t front_block  = front_t.stride(0);
@@ -374,42 +458,70 @@ struct EffectiveBoundarySaver {
             return;
         }
 
-        auto copy_fp16 = [&](torch::Tensor& cpu_half,
-                            torch::Tensor& gpu_float,
-                            int64_t elems)
-        {
-            auto tmp = torch::empty(
-                {elems},
-                torch::dtype(torch::kFloat32).device(torch::kCPU)
-            );
-
-            cudaMemcpy(
-                tmp.data_ptr<float>(),
-                gpu_float.data_ptr<float>(),
-                elems * sizeof(float),
-                cudaMemcpyDeviceToHost
-            );
-
-            auto view = cpu_half.view({-1});
-            int64_t offset = start * elems;
-            auto dst = view.slice(0, offset, offset + elems);
-            dst.copy_(tmp);
-
-        };
-
-        copy_fp16(left_t,   left_gpu,   left_elems);
-        copy_fp16(right_t,  right_gpu,  left_elems);
-
-        copy_fp16(front_t,  front_gpu,  front_elems);
-        copy_fp16(back_t,   back_gpu,   front_elems);
-
-        copy_fp16(top_t,    top_gpu,    bottom_elems);
-        copy_fp16(bottom_t, bottom_gpu, bottom_elems);
-
     }
 
     inline void load_cpu_to_gpu(int start, int len, cudaStream_t stream)
     {
+        if (dim == 2)
+        {
+            size_t top_var_block = top_t.stride(0);
+            size_t top_time_block = top_t.stride(1);
+            size_t left_var_block = left_t.stride(0);
+            size_t left_time_block = left_t.stride(1);
+            size_t top_gpu_var_block = top_gpu.stride(0);
+            size_t left_gpu_var_block = left_gpu.stride(0);
+
+            size_t top_bytes = len * top_time_block * sizeof(float);
+            size_t left_bytes = len * left_time_block * sizeof(float);
+
+            if (top_t.dtype() == torch::kFloat32){
+                cudaMemcpy2DAsync(
+                    top_gpu.data_ptr<float>(),
+                    top_gpu_var_block * sizeof(float),
+                    top_t.data_ptr<float>() + start * top_time_block,
+                    top_var_block * sizeof(float),
+                    top_bytes,
+                    nvar,
+                    cudaMemcpyHostToDevice,
+                    stream
+                );
+
+                cudaMemcpy2DAsync(
+                    bottom_gpu.data_ptr<float>(),
+                    top_gpu_var_block * sizeof(float),
+                    bottom_t.data_ptr<float>() + start * top_time_block,
+                    top_var_block * sizeof(float),
+                    top_bytes,
+                    nvar,
+                    cudaMemcpyHostToDevice,
+                    stream
+                );
+
+                cudaMemcpy2DAsync(
+                    left_gpu.data_ptr<float>(),
+                    left_gpu_var_block * sizeof(float),
+                    left_t.data_ptr<float>() + start * left_time_block,
+                    left_var_block * sizeof(float),
+                    left_bytes,
+                    nvar,
+                    cudaMemcpyHostToDevice,
+                    stream
+                );
+
+                cudaMemcpy2DAsync(
+                    right_gpu.data_ptr<float>(),
+                    left_gpu_var_block * sizeof(float),
+                    right_t.data_ptr<float>() + start * left_time_block,
+                    left_var_block * sizeof(float),
+                    left_bytes,
+                    nvar,
+                    cudaMemcpyHostToDevice,
+                    stream
+                );
+                return;
+            }
+
+        }
 
         size_t top_block    = top_t.stride(0);
         size_t front_block  = front_t.stride(0);
@@ -474,42 +586,6 @@ struct EffectiveBoundarySaver {
             );
             return;
         }
-
-        // =========================
-        // float16 path
-        // =========================
-
-        TORCH_CHECK(top_t.dtype() == torch::kFloat16,
-            "Boundary tensor must be float32 or float16");
-
-        auto copy_fp16 = [&](torch::Tensor& cpu_half,
-                            torch::Tensor& gpu_float,
-                            int64_t elems)
-        {
-            // slice CPU tensor
-            int64_t offset = start * elems;
-            auto slice = cpu_half.view({-1})
-                .slice(0, offset, offset + elems);
-
-            // cast to float32
-            auto tmp = slice.to(torch::kFloat32).contiguous();
-
-            cudaMemcpy(
-                gpu_float.data_ptr<float>(),
-                tmp.data_ptr<float>(),
-                elems * sizeof(float),
-                cudaMemcpyHostToDevice
-            );
-        };
-
-        copy_fp16(top_t,    top_gpu,    top_elems);
-        copy_fp16(bottom_t, bottom_gpu, top_elems);
-
-        copy_fp16(front_t,  front_gpu,  front_elems);
-        copy_fp16(back_t,   back_gpu,   front_elems);
-
-        copy_fp16(left_t,   left_gpu,   left_elems);
-        copy_fp16(right_t,  right_gpu,  left_elems);
 
     }
 

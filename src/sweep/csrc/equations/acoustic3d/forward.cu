@@ -76,7 +76,7 @@ ForwardOutput forward(const ForwardInput& in)
     // ----------------------------
     int save_width = abcn > 0 ? M + 1 : M;
     EffectiveBoundarySaver boundary_saver;
-    boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true);
+    boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true, 1, {}, {}, false, p.use_pinned_memory);
     auto bs = boundary_saver.view();
     
     // ----------------------------
