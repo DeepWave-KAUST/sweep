@@ -1,35 +1,86 @@
 import argparse
 import inspect
 
-def list_equations():
+
+def _format_yes_no(value):
+    return "yes" if value else "no"
+
+
+def _format_models(models):
+    return str(models) if models is not None else "N/A"
+
+
+def _read_class_metadata(cls, name):
+    try:
+        descriptor = inspect.getattr_static(cls, name)
+    except AttributeError:
+        return None
+
+    if isinstance(descriptor, property):
+        try:
+            return descriptor.fget(cls)
+        except Exception:
+            return None
+
+    return descriptor
+
+
+def _iter_equation_rows():
+    import sweep
     import sweep.equations as eq
-    import inspect
+
+    torch_binding_available = sweep.is_torch_binding_available()
+    rows = []
+
+    for name, obj in sorted(eq._equation_classes().items()):
+        models = _read_class_metadata(obj, "models")
+        binding_supported = eq.supports_torch_binding(obj)
+        rows.append(
+            {
+                "name": name,
+                "models": _format_models(models),
+                "torch_binding_support": _format_yes_no(binding_supported),
+                "torch_binding_available": _format_yes_no(
+                    binding_supported and torch_binding_available
+                ),
+            }
+        )
+
+    return rows
+
+
+def list_equations():
+    rows = _iter_equation_rows()
+    headers = [
+        ("Equation", "name"),
+        ("Models", "models"),
+        ("Torch Binding", "torch_binding_support"),
+        ("Binding Ready", "torch_binding_available"),
+    ]
+    widths = {
+        key: max(len(header), *(len(row[key]) for row in rows))
+        for header, key in headers
+    }
 
     print("Available equations:\n")
+    print(
+        "  "
+        + "  ".join(header.ljust(widths[key]) for header, key in headers)
+    )
+    print(
+        "  "
+        + "  ".join("-" * widths[key] for _, key in headers)
+    )
 
-    for name in dir(eq):
-        if name.startswith("_"):
-            continue
-        obj = getattr(eq, name)
-
-        if inspect.isclass(obj):
-            models = None
-            try:
-                instance = obj()
-                models_attr = getattr(instance, 'models', None)
-                if isinstance(models_attr, property):
-                    models = models_attr.__get__(instance)
-                else:
-                    models = models_attr
-            except Exception:
-                models = None
-
-            models_str = f"models: {models}" if models is not None else "models: N/A"
-            print(f"  - {name:<16} {models_str}")
+    for row in rows:
+        print(
+            "  "
+            + "  ".join(row[key].ljust(widths[key]) for _, key in headers)
+        )
 
 def list_wavefields(class_name):
+    import sweep
     import sweep.equations as eq
-    import inspect
 
     if not hasattr(eq, class_name):
         print(f"No such wave equation: {class_name}")
@@ -40,16 +91,13 @@ def list_wavefields(class_name):
         print(f"{class_name} is not a valid wave equation")
         return
 
-    wavefields = None
-    models = None
-    try:
-        instance = cls()
-        wavefields = getattr(instance, 'wavefields', None)
-        models = getattr(instance, 'models', None)
-    except Exception as e:
-        print(f"Cannot instantiate {class_name}: {e}")
+    wavefields = _read_class_metadata(cls, "wavefields")
+    models = _read_class_metadata(cls, "models")
 
     print(f"\n=== {class_name} ===")
+    binding_supported = eq.supports_torch_binding(cls)
+    binding_available = binding_supported and sweep.is_torch_binding_available()
+
     if wavefields is not None:
         print(f"  Wavefields: {wavefields}")
     else:
@@ -59,6 +107,9 @@ def list_wavefields(class_name):
         print(f"  Needed models: {models}")
     else:
         print("  Needed models: N/A")
+
+    print(f"  Torch binding support: {_format_yes_no(binding_supported)}")
+    print(f"  Torch binding available: {_format_yes_no(binding_available)}")
 
 
 def main():
@@ -79,4 +130,3 @@ def main():
         list_wavefields(args.component)
     else:
         parser.print_help()
-

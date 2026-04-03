@@ -1,21 +1,3 @@
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
-
-[project]
-name = "sweep"
-version = "0.0.1"
-authors = [
-  { name="Shaowen Wang", email="shaowen.wang@kaust.edu.sa" },
-]
-description = "Seismic Wave Equation Exploration Platform"
-readme = "README.md"
-requires-python = ">=3.8"
-license = {file = "LICENSE"}
-
-[project.urls]
-Homepage = "https://github.com/GeophyAI/geophyai"
-Issues = "https://github.com/GeophyAI/geophyai/issues"
-
-[project.scripts]
-sweep = "sweep.cli:main"

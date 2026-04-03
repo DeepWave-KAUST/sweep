@@ -1,6 +1,6 @@
 import sys, tqdm, os
 import torch
-sys.path.append('../src')
+# sys.path.append('../src')
 torch.backends.cudnn.benchmark = True
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Acoustic

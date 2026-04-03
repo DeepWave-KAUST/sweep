@@ -4,9 +4,17 @@ Seismic Wave Equation Exploration Platform (SWEEP) is a Python package designed 
 ** Note: From this version on, lazy imports are supported. You no longer need to install both JAX and PyTorch—you only need to install whichever backend you intend to use.
 
 ## Installation
+
+### Pytorch/Jax only
+This is the simplest way to install SWEEP, but it may not be the most efficient way to use it. If you only want to use sweep with PyTorch or JAX APIs, you can install the package with the following command:
 ```bash
-python -m build
-pip install dist/*.whl
+pip install .
+```
+
+### Pytorch Bindings
+Faster, recommended, but may take more time to install due to the need to compile CUDA kernels. If you have a compatible NVIDIA GPU and CUDA toolkit installed, you can install the PyTorch bindings with CUDA support using the following command:
+```bash
+SWEEP_BUILD_CUDA=1 pip install -v .[cuda] --no-build-isolation
 ```
 
 ## Usage

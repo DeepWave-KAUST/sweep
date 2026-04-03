@@ -6,7 +6,7 @@ import sys, tqdm, jax, optax
 import numpy as np
 import jax.numpy as jnp
 import jax.random as random
-sys.path.append('../src')
+# sys.path.append('../src')
 from sweep.propagator.jax import PropJax
 from sweep.equations import Acoustic
 from sweep.signal import ricker

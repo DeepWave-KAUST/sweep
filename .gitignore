@@ -1,12 +1,11 @@
 __pycache__
 .vscode
+.codex
+.pytest_cache
 dist
 build
 tests
 *.egg-info
 examples/test_figures
 examples/models/models
-build_ibex
-build_ws
-
 test/cuda

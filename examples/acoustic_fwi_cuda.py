@@ -1,6 +1,6 @@
 import sys, tqdm, os
 import torch
-sys.path.append('../src')
+# sys.path.append('../src')
 torch.backends.cudnn.benchmark = True
 from sweep.propagator.cuda import PropCUDA
 from sweep.propagator.torch import PropTorch
@@ -85,7 +85,7 @@ vp = torch.from_numpy(smooth_model).float().to(dev).requires_grad_()
 opt = torch.optim.Adam([vp], lr=lr, eps=1e-22)
 
 for epoch in tqdm.trange(epochs):
-
+    
     opt.zero_grad()
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
     rand_shots = np.arange(0, sources.shape[0], 20) # Use all shots

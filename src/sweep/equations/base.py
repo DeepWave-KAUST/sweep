@@ -17,6 +17,12 @@ def init_wavenumbers(shape, h):
 
 class WaveEquation:
 
+    @classmethod
+    def supports_torch_binding(cls):
+        """Return True when the equation class exposes a compiled ``_C`` binding hook."""
+        binding = getattr(cls, "_C", None)
+        return callable(binding)
+
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
         """
         Initialize the wave equation with an initial condition.

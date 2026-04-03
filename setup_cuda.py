@@ -11,5 +11,6 @@ from build_config import build_setup_kwargs, patch_packaging_compat
 
 
 patch_packaging_compat()
+os.environ["SWEEP_BUILD_CUDA"] = "1"
 
-setup(**build_setup_kwargs(distribution_name="sweep"))
+setup(**build_setup_kwargs(distribution_name="sweep-cuda"))
