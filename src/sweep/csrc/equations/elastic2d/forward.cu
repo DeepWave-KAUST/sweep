@@ -46,7 +46,11 @@ ForwardOutput forward(const ForwardInput& in)
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
-    auto record = torch::zeros({2, B, nrec, p.nt}, vp.options());
+    int nsrc_fields = p.source_field_indices.numel();
+    int nrec_fields = p.receiver_field_indices.numel();
+    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields) u_allt = torch::zeros({p.nt, 2, B, nz, nx}, vp.options()); // Only save Vx and Vz.
@@ -97,23 +101,18 @@ ForwardOutput forward(const ForwardInput& in)
             solver
         ); // t+1.0
 
-        add_source<<<source_config.grid, source_config.block>>>(
-            wf.sxx,
-            p.source.data_ptr<float>(),
-            p.sources_loc.data_ptr<int>(),
-            it,
-            nsrc,
-            solver
-        );
-
-        add_source<<<source_config.grid, source_config.block>>>(
-            wf.szz,
-            p.source.data_ptr<float>(),
-            p.sources_loc.data_ptr<int>(),
-            it,
-            nsrc,
-            solver
-        );
+        for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
+            float* field = elastic_field_ptr(wf, 2, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<source_config.grid, source_config.block>>>(
+                field,
+                p.source.data_ptr<float>(),
+                p.sources_loc.data_ptr<int>(),
+                it,
+                nsrc,
+                solver
+            );
+        }
 
         if (p.use_boundary_saving) {
 
@@ -141,22 +140,18 @@ ForwardOutput forward(const ForwardInput& in)
                 );
             }
         }
-        record_kernel<<<record_config.grid, record_config.block>>>(
-            wf.vx,
-            record[0].data_ptr<float>(),
-            p.receivers_loc.data_ptr<int>(),
-            it,
-            nrec,
-            solver
-        );
-        record_kernel<<<record_config.grid, record_config.block>>>(
-            wf.vz,
-            record[1].data_ptr<float>(),
-            p.receivers_loc.data_ptr<int>(),
-            it,
-            nrec,
-            solver
-        );
+        for (int irec = 0; irec < nrec_fields; ++irec) {
+            float* field = elastic_field_ptr(wf, 2, receiver_fields[irec].item<int>());
+            if (field == nullptr) continue;
+            record_kernel<<<record_config.grid, record_config.block>>>(
+                field,
+                record[irec].data_ptr<float>(),
+                p.receivers_loc.data_ptr<int>(),
+                it,
+                nrec,
+                solver
+            );
+        }
     }
 
     if (p.use_boundary_saving) {

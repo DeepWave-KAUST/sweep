@@ -48,6 +48,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     int forward_nsrc = p.forward_sources_loc.size(1);
+    int nsrc_fields = p.source_field_indices.numel();
+    int nrec_fields = p.receiver_field_indices.numel();
+    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
 
     const int order =
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
@@ -178,56 +182,32 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         ); // t-1.0
 
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.vx,
-            p.adjoint_source[0].data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            solver
-        );
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.vy,
-            p.adjoint_source[1].data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            solver
-        );
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.vz,
-            p.adjoint_source[2].data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            solver
-        );
+        for (int irec = 0; irec < nrec_fields; ++irec) {
+            float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
+            if (field == nullptr) continue;
+            add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+                field,
+                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(),
+                it,
+                adjoint_nsrc,
+                solver
+            );
+        }
         // Wavefield reconstruction
         // Substract source term from forward wavefield
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.szz,
-            neg_forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            solver
-        );
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.syy,
-            neg_forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            solver
-        );
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.sxx,
-            neg_forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            solver
-        );
+        for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
+            float* field = elastic_field_ptr(for_view, 3, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                field,
+                neg_forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                solver
+            );
+        }
 
         if (buf_idx == interval - 1)
             cudaStreamWaitEvent(compute_stream, copy_done_event, 0);

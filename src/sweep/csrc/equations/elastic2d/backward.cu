@@ -30,6 +30,8 @@ BackwardOutput backward(const BackwardInput& in)
     int nx = vp.size(3);
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
+    int nrec_fields = p.receiver_field_indices.numel();
+    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
 
     int B = N * C;
 
@@ -90,14 +92,18 @@ BackwardOutput backward(const BackwardInput& in)
             solver
         );
 
-        add_source<<<source_config.grid, source_config.block>>>(
-            adj_view.vz,
-            p.adjoint_source.data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            solver
-        );
+        for (int irec = 0; irec < nrec_fields; ++irec) {
+            float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<source_config.grid, source_config.block>>>(
+                field,
+                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(),
+                it,
+                adjoint_nsrc,
+                solver
+            );
+        }
         
         if (it+1>=p.nt) t2=it; else t2=it+1;
 
@@ -153,6 +159,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     int forward_nsrc = p.forward_sources_loc.size(1);
+    int nsrc_fields = p.source_field_indices.numel();
+    int nrec_fields = p.receiver_field_indices.numel();
+    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     int B = N * C;
 
     const int order =
@@ -242,42 +252,32 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         ); // t-1.0
 
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.vx,
-            p.adjoint_source[0].data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            solver
-        );
-
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.vz,
-            p.adjoint_source[1].data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            solver
-        );
+        for (int irec = 0; irec < nrec_fields; ++irec) {
+            float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+                field,
+                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(),
+                it,
+                adjoint_nsrc,
+                solver
+            );
+        }
 
         // Wavefield reconstruction
-        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.sxx,
-            neg_forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            solver
-        );
-
-        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.szz,
-            neg_forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            solver
-        );
+        for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
+            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                field,
+                neg_forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                solver
+            );
+        }
         // Update Stress components
         LAUNCH_ELASTIC_STRESS_NOPML(
             order,

@@ -18,6 +18,8 @@ class Warpper(torch.autograd.Function):
         wavelet,             # (B, nsrc, nt)
         sources_loc,        # (B, nsrc, 2)
         receivers_loc,      # (B, nrec, 2)
+        source_field_indices,
+        receiver_field_indices,
         coes_list,          
         M: int,
         abcn: int,
@@ -58,6 +60,8 @@ class Warpper(torch.autograd.Function):
         params.abcn = abcn
         params.sources_loc = sources_loc.contiguous()
         params.receivers_loc = receivers_loc.contiguous()
+        params.source_field_indices = source_field_indices.contiguous()
+        params.receiver_field_indices = receiver_field_indices.contiguous()
         params.pml_vals = [p.contiguous() for p in pml_vals]
         params.save_all_wavefields = save_all_wavefields
         params.use_boundary_saving = use_boundary_saving
@@ -76,6 +80,8 @@ class Warpper(torch.autograd.Function):
                 last,
                 sources_loc,
                 receivers_loc,
+                source_field_indices,
+                receiver_field_indices,
                 lap_coes, grad_coes,
             )
             ctx.transfer_interval = transfer_interval
@@ -105,6 +111,8 @@ class Warpper(torch.autograd.Function):
             last,
             forward_sources_loc,
             adjoint_sources_loc,
+            source_field_indices,
+            receiver_field_indices,
             lap_coes, grad_coes,
         ) = ctx.saved_tensors
 
@@ -123,6 +131,8 @@ class Warpper(torch.autograd.Function):
         params.M = M
         params.abcn = abcn
         params.adjoint_sources_loc = adjoint_sources_loc.contiguous()
+        params.source_field_indices = source_field_indices.contiguous()
+        params.receiver_field_indices = receiver_field_indices.contiguous()
         params.pml_vals = [p.contiguous() for p in ctx.pml_vals]
         params.nt = nt
         params.dt = dt
@@ -148,6 +158,8 @@ class Warpper(torch.autograd.Function):
             None,      # wavelet
             None,      # sources_loc
             None,      # receivers_loc
+            None,      # source_field_indices
+            None,      # receiver_field_indices
             None,      # fd_coeff
             None,      # M
             None,      # abcn
@@ -209,6 +221,26 @@ class PropCUDA(PropBase, torch.nn.Module):
         for name, data in zip(self.model_names, model):
             setattr(self, name, torch.nn.Parameter(data))
 
+    def _default_field_types(self, kinds, is_source):
+        if kinds:
+            return kinds
+
+        if self.equation.__class__.__name__ == 'Elastic':
+            if self.ndim == 2:
+                return ['sxx', 'szz'] if is_source else ['vx', 'vz']
+            return ['sxx', 'syy', 'szz'] if is_source else ['vx', 'vy', 'vz']
+
+        return [self.wavefield_names[0]]
+
+    def _field_indices_tensor(self, kinds, is_source):
+        resolved = self._default_field_types(kinds, is_source)
+        missing = [name for name in resolved if name not in self.wavefield_names]
+        if missing:
+            role = 'source_type' if is_source else 'receiver_type'
+            raise ValueError(f'Invalid {role} entries {missing}; available wavefields are {self.wavefield_names}')
+        indices = [self.wavefield_names.index(name) for name in resolved]
+        return torch.tensor(indices, dtype=torch.int32, device=self.dev)
+
     def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, use_boundary_saving=False, transfer_interval=1, **kwargs):
         """Forward pass of the wave equation
 
@@ -255,6 +287,8 @@ class PropCUDA(PropBase, torch.nn.Module):
         wavelet = torch.from_numpy(wavelet).to(self.dev).float()[None, None, :].repeat(batch_size, 1, 1)  # (B, 1, nt)
         sources = torch.from_numpy(sources).to(self.dev).int()[:, None, :]
         receivers = torch.from_numpy(receivers).to(self.dev).int()
+        source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
+        receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
         # Get the model parameters
 
         models = models if models is not None else self.parameters()
@@ -285,6 +319,8 @@ class PropCUDA(PropBase, torch.nn.Module):
                 wavelet,
                 sources,
                 receivers,
+                source_field_indices,
+                receiver_field_indices,
                 (lap_coes, grad_coes),
                 M,
                 self.abcn,

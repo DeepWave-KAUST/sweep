@@ -28,6 +28,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("abcn", &ForwardInput::abcn)
         .def_readwrite("sources_loc", &ForwardInput::sources_loc)
         .def_readwrite("receivers_loc", &ForwardInput::receivers_loc)
+        .def_readwrite("source_field_indices", &ForwardInput::source_field_indices)
+        .def_readwrite("receiver_field_indices", &ForwardInput::receiver_field_indices)
         .def_readwrite("pml_vals", &ForwardInput::pml_vals)
         .def_readwrite("save_all_wavefields", &ForwardInput::save_all_wavefields)
         .def_readwrite("use_boundary_saving", &ForwardInput::use_boundary_saving)
@@ -54,6 +56,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("abcn", &BackwardInput::abcn)
         .def_readwrite("adjoint_sources_loc", &BackwardInput::adjoint_sources_loc)
         .def_readwrite("forward_sources_loc", &BackwardInput::forward_sources_loc)
+        .def_readwrite("source_field_indices", &BackwardInput::source_field_indices)
+        .def_readwrite("receiver_field_indices", &BackwardInput::receiver_field_indices)
         .def_readwrite("pml_vals", &BackwardInput::pml_vals)
         .def_readwrite("nt", &BackwardInput::nt)
         .def_readwrite("dt", &BackwardInput::dt)
@@ -67,4 +71,3 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
 
 }
-

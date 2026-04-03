@@ -488,3 +488,58 @@ struct ElasticWavefieldTensor {
 
 
 };
+
+inline float* elastic_field_ptr(ElasticWavefieldPointer& wf, int dim, int idx)
+{
+    if (dim == 2) {
+        switch (idx) {
+            case 0: return wf.vx;
+            case 1: return wf.vz;
+            case 2: return wf.sxx;
+            case 3: return wf.szz;
+            case 4: return wf.sxz;
+            case 5: return wf.m_vxx;
+            case 6: return wf.m_vxz;
+            case 7: return wf.m_vzx;
+            case 8: return wf.m_vzz;
+            case 9: return wf.m_sxxx;
+            case 10: return wf.m_sxxz;
+            case 11: return wf.m_szzx;
+            case 12: return wf.m_szzz;
+            case 13: return wf.m_sxzx;
+            case 14: return wf.m_sxzz;
+            default: return nullptr;
+        }
+    }
+
+    switch (idx) {
+        case 0: return wf.vx;
+        case 1: return wf.vy;
+        case 2: return wf.vz;
+        case 3: return wf.sxx;
+        case 4: return wf.syy;
+        case 5: return wf.szz;
+        case 6: return wf.sxy;
+        case 7: return wf.sxz;
+        case 8: return wf.syz;
+        case 9: return wf.m_vxx;
+        case 10: return wf.m_vxy;
+        case 11: return wf.m_vxz;
+        case 12: return wf.m_vyx;
+        case 13: return wf.m_vyy;
+        case 14: return wf.m_vyz;
+        case 15: return wf.m_vzx;
+        case 16: return wf.m_vzy;
+        case 17: return wf.m_vzz;
+        case 18: return wf.m_sxxx;
+        case 19: return wf.m_szzz;
+        case 20: return wf.m_sxyx;
+        case 21: return wf.m_sxyy;
+        case 22: return wf.m_sxzx;
+        case 23: return wf.m_sxzz;
+        case 24: return wf.m_syyy;
+        case 25: return wf.m_syzy;
+        case 26: return wf.m_syzz;
+        default: return nullptr;
+    }
+}

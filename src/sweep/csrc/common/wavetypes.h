@@ -17,6 +17,8 @@ struct ForwardInput {
 
     torch::Tensor sources_loc;
     torch::Tensor receivers_loc;
+    torch::Tensor source_field_indices;
+    torch::Tensor receiver_field_indices;
 
     std::vector<torch::Tensor> pml_vals;  // Bind from python
     std::vector<torch::Tensor> wavefields; // Bind from python
@@ -88,6 +90,8 @@ struct BackwardInput {
     // source locations
     torch::Tensor adjoint_sources_loc;
     torch::Tensor forward_sources_loc;
+    torch::Tensor source_field_indices;
+    torch::Tensor receiver_field_indices;
 
     // pml
     std::vector<torch::Tensor> pml_vals;
