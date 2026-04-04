@@ -17,8 +17,7 @@ class PropBase:
                  pml_type='spml',
                  nt=-1,
                  B=1,
-                 transfer_interval=1,
-                 use_pinned_memory=False,
+                 boundary_saving_config=None,
                  **kwargs):
         """Base class for the RNN
 
@@ -55,8 +54,20 @@ class PropBase:
 
         self.nt = nt
         self.B = B
-        self.transfer_interval = transfer_interval
-        self.use_pinned_memory = use_pinned_memory
+        legacy_boundary_config = {
+            "transfer_interval": kwargs.pop("transfer_interval", 1),
+            "storage": "cpu" if kwargs.pop("boundary_on_cpu", False) else "gpu",
+            "pinned_memory": kwargs.pop("use_pinned_memory", False),
+        }
+        if boundary_saving_config is None:
+            boundary_saving_config = legacy_boundary_config
+        else:
+            boundary_saving_config = {**legacy_boundary_config, **boundary_saving_config}
+
+        self.boundary_saving_config = self._normalize_boundary_saving_config(boundary_saving_config)
+        self.transfer_interval = self.boundary_saving_config["transfer_interval"]
+        self.boundary_on_cpu = (self.boundary_saving_config["storage"] == "cpu")
+        self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
 
         self.source_type = source_type
         self.receiver_type = receiver_type
@@ -72,6 +83,40 @@ class PropBase:
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
+
+    def _normalize_boundary_saving_config(self, config):
+        default = {
+            "enabled": False,
+            "storage": "gpu",
+            "transfer_interval": 1,
+            "pinned_memory": False,
+        }
+
+        if config is None:
+            return default
+
+        merged = default.copy()
+        merged.update(config)
+
+        if merged["storage"] not in {"gpu", "cpu"}:
+            raise ValueError("boundary_saving_config['storage'] must be 'gpu' or 'cpu'")
+
+        if merged["transfer_interval"] < 1:
+            raise ValueError("boundary_saving_config['transfer_interval'] must be >= 1")
+
+        if merged["storage"] == "gpu":
+            merged["transfer_interval"] = 1
+            merged["pinned_memory"] = False
+
+        return merged
+
+    def resolve_boundary_saving_config(self, override=None, use_boundary_saving=None):
+        config = self.boundary_saving_config.copy()
+        if override is not None:
+            config = self._normalize_boundary_saving_config({**config, **override})
+        if use_boundary_saving is not None:
+            config["enabled"] = bool(use_boundary_saving)
+        return config
 
     def init_abc(self, **kwargs):
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim

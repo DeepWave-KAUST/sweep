@@ -151,3 +151,11 @@ class Elastic(FirstOrderEquation):
     @property
     def pml_nvar(self,):
         return 27
+
+    @property
+    def last_two_nvar(self):
+        return 1
+
+    @property
+    def last_two_storage_nvar(self):
+        return self.base_nvar

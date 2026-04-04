@@ -76,6 +76,7 @@ struct EffectiveBoundarySaver {
         int transfer_interval = 1,
         const std::vector<torch::Tensor>& boundary_cpu = {},
         const std::vector<torch::Tensor>& boundary_gpu = {},
+        const torch::Tensor& last_two = {},
         bool use_fp16_storage_ = false,
         bool use_pinned_memory_ = false
     )
@@ -140,6 +141,28 @@ struct EffectiveBoundarySaver {
                 bottom_t = boundary_cpu[1];
                 left_t   = boundary_cpu[2];
                 right_t  = boundary_cpu[3];
+                front_t  = torch::Tensor();
+                back_t   = torch::Tensor();
+            }
+        }
+        else if (store_on_gpu && !boundary_gpu.empty())
+        {
+            if (dim == 3) {
+                TORCH_CHECK(boundary_gpu.size() == 6,
+                    "boundary_gpu must contain 6 tensors for 3D direct storage");
+                top_t    = boundary_gpu[0];
+                bottom_t = boundary_gpu[1];
+                front_t  = boundary_gpu[2];
+                back_t   = boundary_gpu[3];
+                left_t   = boundary_gpu[4];
+                right_t  = boundary_gpu[5];
+            } else {
+                TORCH_CHECK(boundary_gpu.size() == 4,
+                    "boundary_gpu must contain 4 tensors for 2D direct storage");
+                top_t    = boundary_gpu[0];
+                bottom_t = boundary_gpu[1];
+                left_t   = boundary_gpu[2];
+                right_t  = boundary_gpu[3];
                 front_t  = torch::Tensor();
                 back_t   = torch::Tensor();
             }
@@ -222,22 +245,43 @@ struct EffectiveBoundarySaver {
                     top_gpu    = torch::zeros({nvar,transfer_interval,ctx.B,width,nx_phys}, gpu_options);
                 }
             }
-            // =========================
-            // Compute strides (elements per timestep)
-            // =========================
-            
-            left_stride   = left_gpu.stride(1);
-            right_stride  = right_gpu.stride(1);
+        }
 
-            if (dim == 3)
-            {
-                front_stride  = front_gpu.stride(1);
-                back_stride   = back_gpu.stride(1);
+        // =========================
+        // Compute strides (elements per saved timestep)
+        // =========================
+
+        if (dim == 3)
+        {
+            if (store_on_gpu) {
+                left_stride   = left_t.stride(0);
+                right_stride  = right_t.stride(0);
+                front_stride  = front_t.stride(0);
+                back_stride   = back_t.stride(0);
+                bottom_stride = bottom_t.stride(0);
+                top_stride    = top_t.stride(0);
+            } else {
+                left_stride   = left_gpu.stride(0);
+                right_stride  = right_gpu.stride(0);
+                front_stride  = front_gpu.stride(0);
+                back_stride   = back_gpu.stride(0);
+                bottom_stride = bottom_gpu.stride(0);
+                top_stride    = top_gpu.stride(0);
             }
-
-            bottom_stride = bottom_gpu.stride(1);
-            top_stride    = top_gpu.stride(1);
-
+        }
+        else
+        {
+            if (store_on_gpu) {
+                left_stride   = left_t.stride(1);
+                right_stride  = right_t.stride(1);
+                bottom_stride = bottom_t.stride(1);
+                top_stride    = top_t.stride(1);
+            } else {
+                left_stride   = left_gpu.stride(1);
+                right_stride  = right_gpu.stride(1);
+                bottom_stride = bottom_gpu.stride(1);
+                top_stride    = top_gpu.stride(1);
+            }
         }
 
 
@@ -247,14 +291,13 @@ struct EffectiveBoundarySaver {
 
         auto last_two_options = store_on_gpu ? gpu_options : pinned_options;
 
-        if (dim == 3)
-        {
+        if (last_two.defined()) {
+            last_two_t = last_two;
+        } else if (dim == 3) {
             last_two_t = torch::zeros(
                 {nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx},
                 last_two_options);
-        }
-        else
-        {
+        } else {
             last_two_t = torch::zeros(
                 {nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.nx},
                 last_two_options);

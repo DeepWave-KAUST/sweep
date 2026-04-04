@@ -23,15 +23,15 @@ delay = 0.2
 dh = 5.0
 fm = 10.0
 spatial_order = 8
-abcn = 50
-free_surface=True
+abcn = 30
+free_surface=False
 
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([128, 3]).reshape(1, 2)
+sources = np.array([128, 0]).reshape(1, 2)
 
-receivers = np.array([384, 3]).reshape(1, 1, 2)
+receivers = np.array([384, 0]).reshape(1, 1, 2)
 print('free_surface:', free_surface, sources, receivers)
 print('Spatial order:', spatial_order)
 print('abcn: ', abcn)
@@ -40,7 +40,19 @@ vp = torch.from_numpy(true_vp).float().to(device).requires_grad_()
 prop = [PropCUDA, PropTorch]
 pname = ['CUDA', 'PyTorch']
 gradients = []
-kwargs = dict(shape=vp.shape, source_type=['h1'], receiver_type=['h1'], abcn=abcn, dh=dh, dt=dt, pml_type='cpmlr', dev=device, free_surface=free_surface)
+kwargs = dict(shape=vp.shape, 
+              source_type=['h1'], 
+              receiver_type=['h1'], abcn=abcn, dh=dh, dt=dt, 
+              pml_type='cpmlr', dev=device, free_surface=free_surface, 
+              B=1,
+              nt=nt,
+              boundary_saving_config = {
+                    "enabled": False,
+                    "storage": "cpu",
+                    "transfer_interval": 99,
+                    "pinned_memory": True,
+            }
+              )
 cuda_solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=device,), **kwargs)
 torch_solver = PropTorch(Acoustic(spatial_order=spatial_order, device=device,), **kwargs)
 

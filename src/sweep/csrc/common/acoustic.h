@@ -180,6 +180,57 @@ struct AcousticWavefieldTensor {
         allocated = true;
     }
 
+    void bind(
+        const std::vector<torch::Tensor>& tensors,
+        int dim_,
+        bool use_pml_ = true
+    )
+    {
+        int i = 0;
+        dim = dim_;
+        use_pml = use_pml_;
+
+        if (dim == 2) {
+            TORCH_CHECK(
+                tensors.size() == (use_pml ? 7 : 3),
+                "Acoustic 2D wavefields expect 7 tensors with PML or 3 tensors without PML"
+            );
+        } else {
+            TORCH_CHECK(
+                tensors.size() == (use_pml ? 9 : 3),
+                "Acoustic 3D wavefields expect 9 tensors with PML or 3 tensors without PML"
+            );
+        }
+
+        u_prev_t = tensors[i++];
+        u_now_t  = tensors[i++];
+        u_next_t = tensors[i++];
+
+        if (use_pml) {
+            psix_t  = tensors[i++];
+            psiz_t  = tensors[i++];
+            zetax_t = tensors[i++];
+            zetaz_t = tensors[i++];
+
+            if (dim == 3) {
+                psiy_t  = tensors[i++];
+                zetay_t = tensors[i++];
+            } else {
+                psiy_t = torch::Tensor();
+                zetay_t = torch::Tensor();
+            }
+        } else {
+            psix_t = torch::Tensor();
+            psiy_t = torch::Tensor();
+            psiz_t = torch::Tensor();
+            zetax_t = torch::Tensor();
+            zetay_t = torch::Tensor();
+            zetaz_t = torch::Tensor();
+        }
+
+        allocated = true;
+    }
+
     // =========================
     // Generate View
     // =========================

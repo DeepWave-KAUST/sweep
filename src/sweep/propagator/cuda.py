@@ -3,6 +3,8 @@ import torch.nn.functional as F
 
 import numpy as np
 import sweep._C as _C
+from sweep.memory.torch import Allocator
+from sweep.memory.shape import Layout
 from sweep.propagator.base import PropBase
 from sweep.utils.torch import EdgePadding
 from sweep.scalars import fd_coefficients
@@ -30,12 +32,18 @@ class Warpper(torch.autograd.Function):
         use_pinned_memory: bool=False,
         free_surface: bool=False,
         transfer_interval: int=1,
+        boundary_on_cpu: bool=False,
+        forward_wavefields: tuple=(),
+        adjoint_wavefields: tuple=(),
+        last_two: torch.Tensor=None,
+        boundary_cpu: tuple=(),
+        boundary_gpu: tuple=(),
         *models             # list of (B, nz, nx) tensors
     ):
         """
         Forward modeling: vp -> synthetic seismograms
         """
-
+        
         lap_coes, grad_coes = coes_list
         nt = wavelet.shape[-1]
         spacing = [s.item() for s in spacing]
@@ -50,8 +58,12 @@ class Warpper(torch.autograd.Function):
         if not any(m.requires_grad for m in models):
             save_all_wavefields = False
             use_boundary_saving = False
-
+        
         params = _C.ForwardInput()
+        params.wavefields = forward_wavefields
+        params.last_two = last_two
+        params.boundary_cpu = [b.zero_() for b in boundary_cpu] if boundary_on_cpu else []
+        params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
         params.transfer_interval = transfer_interval
         params.models = [m.contiguous() for m in models]
         params.source = wavelet.contiguous()
@@ -66,6 +78,7 @@ class Warpper(torch.autograd.Function):
         params.pml_vals = [p.contiguous() for p in pml_vals]
         params.save_all_wavefields = save_all_wavefields
         params.use_boundary_saving = use_boundary_saving
+        params.boundary_on_cpu = boundary_on_cpu
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.nt = nt
@@ -73,10 +86,9 @@ class Warpper(torch.autograd.Function):
         params.spacing = spacing
 
         # -------- CUDA forward --------
-        (u_allt, boundary_vals, last, syn) = forward_func(params)
-
+        (u_allt, last, syn) = forward_func(params)
         if any([save_all_wavefields, use_boundary_saving]):
-
+            
             ctx.save_for_backward(
                 u_allt,
                 last,
@@ -88,8 +100,9 @@ class Warpper(torch.autograd.Function):
             )
             ctx.transfer_interval = transfer_interval
             ctx.models = models
-            # ctx.boundary_vals = [b.detach().cpu() for b in boundary_vals]
-            ctx.boundary_vals = boundary_vals
+            ctx.boundary_on_cpu = boundary_on_cpu
+            ctx.boundary_cpu = boundary_cpu if boundary_on_cpu else ()
+            ctx.boundary_gpu = boundary_gpu if use_boundary_saving else ()
             ctx.pml_vals = pml_vals
             ctx.abcn = abcn
             ctx.M = M
@@ -102,6 +115,8 @@ class Warpper(torch.autograd.Function):
             ctx.backward_func = backward_func
             ctx.backward_bs_func = backward_bs_func
             ctx.forward_source = wavelet
+
+            ctx.adjoint_wavefields = adjoint_wavefields
 
         return syn
     
@@ -127,6 +142,7 @@ class Warpper(torch.autograd.Function):
         params = _C.BackwardInput()
         # common
         params.transfer_interval = ctx.transfer_interval
+        params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.models = [m.contiguous() for m in ctx.models]
         params.adjoint_source = adjoint_source.contiguous()
         params.lap_coes = lap_coes.contiguous()
@@ -141,20 +157,22 @@ class Warpper(torch.autograd.Function):
         params.dt = dt
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
+        params.boundary_on_cpu = ctx.boundary_on_cpu
         params.use_pinned_memory = ctx.use_pinned_memory
 
         if not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
             gradients = ctx.backward_func(params)
         else:
-            params.u_boundary = [b.contiguous() for b in ctx.boundary_vals]
+            params.boundary_cpu = list(ctx.boundary_cpu) if ctx.boundary_on_cpu else []
+            params.boundary_gpu = list(ctx.boundary_gpu) if ctx.use_boundary_saving else []
             params.u_last_two = last.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = ctx.backward_bs_func(params)
 
         del ctx.backward_func, ctx.backward_bs_func
-        del ctx.boundary_vals, ctx.pml_vals, ctx.forward_source
+        del ctx.pml_vals, ctx.forward_source
         del ctx.models
         # print(gradients[0].shape)
         return (
@@ -174,52 +192,42 @@ class Warpper(torch.autograd.Function):
             None,      # use_pinned_memory
             None,      # free_surface
             None,      # transfer_interval
+            None,      # boundary_on_cpu
+            None,      # forward wavefields
+            None,      # adjoint wavefields
+            None,      # last_two
+            None,      # boundary cpu
+            None,      # boundary gpu
             *gradients[-1] # models
         )
-
-def pad_along_non_singleton_dim(tensor, pad_width):
-    """
-    Pad tensor along the dimension whose size != 1.
-    Only one such dimension is assumed.
-    """
-    shape = tensor.shape
-    ndim = tensor.dim()
-
-    non_singleton_dims = [i for i, s in enumerate(shape) if s != 1]
-
-    if len(non_singleton_dims) != 1:
-        raise ValueError(
-            f"Expect exactly one non-singleton dimension, got {shape}"
-        )
-
-    dim = non_singleton_dims[0]
-
-    pad = []
-    for d in reversed(range(ndim)):
-        if d == dim:
-            pad.extend([pad_width, pad_width])
-        else:
-            pad.extend([0, 0])
-
-    return F.pad(tensor, pad)
-
-
-def pad_pml_vals(pml_vals, pad_width):
-    return [
-        pad_along_non_singleton_dim(t, pad_width)
-        for t in pml_vals
-    ]
 
 class PropCUDA(PropBase, torch.nn.Module):
 
     def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
         super().__init__(*args, **kwargs)
-
+        
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer('dh', torch.tensor(self._dh, device=self.dev, dtype=torch.float32))
 
         self.forward_func, self.backward_func, self.backward_bs_func = self.equation._C()
+
+        # Initilize memory for wavefields
+        self.forward_allocator = Allocator(self.dev)
+        self.boundary_cpu_allocator = Allocator('cpu')
+        self.boundary_gpu_allocator = Allocator(self.dev)
+
+        total_wavefields = self.equation.base_nvar + self.equation.pml_nvar
+        self.forward_wavefields = self.forward_allocator.zeros(total_wavefields * [[self.B, 1, *self.shape_cuda]])
+        self.adjoint_wavefields = self.forward_allocator.zeros(total_wavefields * [[self.B, 1, *self.shape_cuda]])
+        self.boundary_cpu = ()
+        self.boundary_gpu = ()
+        self.boundary_gpu_full = ()
+        self.last_two = torch.empty(0, device=self.dev)
+        self._boundary_cache_mode = None
+        self._boundary_cache_interval = None
+        self._boundary_cache_pinned = None
+        self._boundary_cache_nt = None
 
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -246,7 +254,59 @@ class PropCUDA(PropBase, torch.nn.Module):
         indices = [self.wavefield_names.index(name) for name in resolved]
         return torch.tensor(indices, dtype=torch.int32, device=self.dev)
 
-    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, use_boundary_saving=False, transfer_interval=1, **kwargs):
+    def _ensure_boundary_buffers(self, boundary_on_cpu, transfer_interval, use_pinned_memory):
+        if (
+            self._boundary_cache_mode == boundary_on_cpu
+            and self._boundary_cache_interval == transfer_interval
+            and self._boundary_cache_pinned == use_pinned_memory
+            and self._boundary_cache_nt == self.nt
+        ):
+            return
+
+        layout = Layout(
+            self.shape_cuda,
+            self.equation.base_nvar,
+            self.nt,
+            self.abcn,
+            self.equation.so // 2,
+            self.B,
+            transfer_interval,
+            self.free_surface,
+            self.equation.so // 2 + 1,
+        )
+
+        self.boundary_cpu_allocator = Allocator('cpu')
+        self.boundary_gpu_allocator = Allocator(self.dev)
+        last_two_storage_nvar = getattr(self.equation, "last_two_storage_nvar", self.equation.base_nvar)
+        last_two_shape = [last_two_storage_nvar, self.equation.last_two_nvar, self.B, 1, *self.shape_cuda]
+
+        if boundary_on_cpu:
+            self.boundary_cpu = self.boundary_cpu_allocator.zeros(
+                layout.cpu_shapes,
+                dtype=torch.float32,
+                dev='cpu',
+                pin_memory=use_pinned_memory,
+            )
+            self.boundary_gpu = self.boundary_gpu_allocator.zeros(layout.gpu_shapes)
+            self.boundary_gpu_full = ()
+            self.last_two = self.boundary_cpu_allocator.zeros(
+                [last_two_shape],
+                dtype=torch.float32,
+                dev='cpu',
+                pin_memory=use_pinned_memory,
+            )[0]
+        else:
+            self.boundary_cpu = ()
+            self.boundary_gpu = ()
+            self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(layout.gpu_full_shapes)
+            self.last_two = self.forward_allocator.zeros([last_two_shape])[0]
+
+        self._boundary_cache_mode = boundary_on_cpu
+        self._boundary_cache_interval = transfer_interval
+        self._boundary_cache_pinned = use_pinned_memory
+        self._boundary_cache_nt = self.nt
+
+    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
         """Forward pass of the wave equation
 
         Args:
@@ -255,6 +315,43 @@ class PropCUDA(PropBase, torch.nn.Module):
             receivers (np.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
         """
+
+        legacy_override = {}
+        if "transfer_interval" in kwargs:
+            legacy_override["transfer_interval"] = kwargs.pop("transfer_interval")
+        if "boundary_on_cpu" in kwargs:
+            legacy_override["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
+        if "use_pinned_memory" in kwargs:
+            legacy_override["pinned_memory"] = kwargs.pop("use_pinned_memory")
+        if boundary_saving_config is None and legacy_override:
+            boundary_saving_config = legacy_override
+        elif legacy_override:
+            boundary_saving_config = {**legacy_override, **boundary_saving_config}
+
+        boundary_cfg = self.resolve_boundary_saving_config(
+            override=boundary_saving_config,
+            use_boundary_saving=use_boundary_saving,
+        )
+        use_boundary_saving = boundary_cfg["enabled"]
+        boundary_on_cpu = boundary_cfg["storage"] == "cpu"
+        transfer_interval = boundary_cfg["transfer_interval"]
+        use_pinned_memory = boundary_cfg["pinned_memory"]
+
+        self.nt = wavelet.shape[-1]
+
+        # Set zeros
+        self.forward_allocator.zero_()
+        if boundary_on_cpu:
+            if use_boundary_saving:
+                self._ensure_boundary_buffers(boundary_on_cpu, transfer_interval, use_pinned_memory)
+            self.boundary_cpu_allocator.zero_()
+            self.boundary_gpu_allocator.zero_()
+        else:
+            if use_boundary_saving:
+                self._ensure_boundary_buffers(boundary_on_cpu, transfer_interval, use_pinned_memory)
+                for t in self.boundary_gpu_full:
+                    t.zero_()
+
         M = self.equation.so // 2
 
         pml_padding = M
@@ -266,9 +363,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         kwargs['shape'] = shape_for_pml
         self.init_abc(**kwargs)
 
-        nt = wavelet.shape[-1]
+        nt = self.nt
         nshots = sources.shape[0]
-
+        
         batch_size = 1 if source_encoding else nshots
         sources = sources.copy()
         receivers = receivers.copy()
@@ -333,9 +430,15 @@ class PropCUDA(PropBase, torch.nn.Module):
                 self.dt,
                 self.equation.b,
                 use_boundary_saving,
-                self.use_pinned_memory,
+                use_pinned_memory,
                 self.free_surface,
                 transfer_interval,
+                boundary_on_cpu,
+                self.forward_wavefields,
+                self.adjoint_wavefields,
+                self.last_two,
+                self.boundary_cpu,
+                self.boundary_gpu if boundary_on_cpu else self.boundary_gpu_full,
                 *models,
             )
         

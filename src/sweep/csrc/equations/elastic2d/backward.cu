@@ -213,12 +213,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    bool staged_boundary = !p.boundary_cpu.empty() || !p.boundary_gpu.empty();
+    bool staged_boundary = p.boundary_on_cpu;
     if (staged_boundary) {
-        boundary_saver.allocate(true, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, false, p.use_pinned_memory);
+        boundary_saver.allocate(true, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, false, p.use_pinned_memory);
     } else {
-        boundary_saver.allocate(true, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, {}, false, p.use_pinned_memory);
-        boundary_saver.load_from_vector(p.u_boundary, vp);
+        boundary_saver.allocate(true, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, p.boundary_gpu, {}, false, p.use_pinned_memory);
+        if (p.boundary_gpu.empty())
+            boundary_saver.load_from_vector(p.u_boundary, vp);
     }
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);

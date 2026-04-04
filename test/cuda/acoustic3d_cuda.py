@@ -41,7 +41,21 @@ receivers = np.array([40, 25, 0]).reshape(1, 1, 3)
 vp = torch.from_numpy(true_model).float().to(device).requires_grad_()
 
 kwargs_eq = dict(spatial_order=spatial_order, device=device)
-kwargs_modeling = dict(shape=vp.shape, source_type=['h1'], receiver_type=['h1'], abcn=abcn, dh=dh, dt=dt, pml_type='cpmlr', dev=device, free_surface=free_surface)
+kwargs_modeling = dict(shape=vp.shape, 
+                       source_type=['h1'], 
+                       receiver_type=['h1'], 
+                       abcn=abcn, 
+                       dh=dh, dt=dt, pml_type='cpmlr', dev=device, 
+                       free_surface=free_surface, 
+                       B=1,
+                       nt=nt,
+                       boundary_saving_config = {
+                            "enabled": True,
+                            "storage": "cpu",
+                            "transfer_interval": 99,
+                            "pinned_memory": True,
+                            }
+                        )
 
 solver_cuda = PropCUDA(Acoustic3D(**kwargs_eq), **kwargs_modeling)
 solver_torch = PropTorch(Acoustic3D(**kwargs_eq), **kwargs_modeling)

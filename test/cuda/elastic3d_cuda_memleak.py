@@ -1,7 +1,7 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from sweep.propagator.cuda2 import PropCUDA
+from sweep.propagator.cuda import PropCUDA
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Elastic3D
 from sweep.utils.general import boundary_gpu_memory, bytes_to_gb
@@ -29,7 +29,12 @@ dh = 10.0
 fm = 5.0
 spatial_order = 2
 abcn = 10
+
+# Boundary saving config
+use_boundary_saving = True
 transfer_interval = 200
+use_pinned_memory = True
+storage = "cpu"
 
 cpu_mem = boundary_gpu_memory(9, nt, 1, nz, ny, nx, spatial_order//2+1)
 print(f"{bytes_to_gb(cpu_mem):.2f} GB")
@@ -64,10 +69,15 @@ prop_kwargs = dict(shape=vp.shape,
                    pml_type='cpmls', 
                    nt = nt,
                    B = 1,
-                   transfer_interval = transfer_interval,
                    dev=device, 
                    free_surface=False,
-                   use_pinned_memory=True)
+                   boundary_saving_config = {
+                        "enabled": use_boundary_saving,
+                        "storage": storage,
+                        "transfer_interval": transfer_interval,
+                        "pinned_memory": use_pinned_memory,
+                    }
+                   )
 solver = PropCUDA(Elastic3D(**eq_kwargs), **prop_kwargs)
 # exit()
 for i in tqdm.trange(10001):
@@ -75,12 +85,10 @@ for i in tqdm.trange(10001):
     vp.grad = None
     vs.grad = None
     rho.grad = None
-    out = solver(wave, sources = sources,
-                    receivers = receivers,
-                    models=[vp, vs, rho], 
-                    use_boundary_saving=True, 
-                    transfer_interval=transfer_interval)
+    out = solver(wave, 
+                 sources = sources,
+                 receivers = receivers,
+                 models=[vp, vs, rho])
     record = out.detach().cpu().numpy().squeeze()
     loss = out.pow(2).sum()
     loss.backward()
-

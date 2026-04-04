@@ -1,7 +1,7 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from sweep.propagator.cuda2 import PropCUDA
+from sweep.propagator.cuda import PropCUDA
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Elastic
 import numpy as np
@@ -26,6 +26,7 @@ dt = 0.002
 delay = 0.2
 dh = 10.0
 fm = 5.0
+transfer_interval = 191
 spatial_orders = [8]
 sourcesz = [2]
 grid = list(product(spatial_orders, sourcesz))
@@ -73,9 +74,14 @@ for so, srcz in grid:
                         pml_type='cpmls',
                         dev=device,
                         free_surface=free_surface,
-                        use_pinned_memory=True,
                         B=1,
                         nt=nt,
+                        boundary_saving_config = {
+                            "enabled": False,
+                            "storage": "cpu",
+                            "transfer_interval": 200,
+                            "pinned_memory": True,
+                        }
                         )
         
         out = solver(wave, sources = sources,

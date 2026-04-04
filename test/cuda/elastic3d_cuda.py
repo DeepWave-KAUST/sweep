@@ -1,7 +1,7 @@
 import tqdm
 import torch
 import matplotlib.pyplot as plt
-from sweep.propagator.cuda2 import PropCUDA
+from sweep.propagator.cuda import PropCUDA
 from sweep.propagator.torch import PropTorch
 from sweep.equations import Elastic3D
 from sweep.utils.general import boundary_gpu_memory, bytes_to_gb
@@ -32,7 +32,13 @@ dh = 10.0
 fm = 5.0
 spatial_order = 2
 abcn = 10
-transfer_interval=191
+
+# Boundary saving config
+use_boundary_saving = True
+transfer_interval = 191
+use_pinned_memory = True
+storage = "cpu"
+
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
@@ -61,8 +67,12 @@ prop_kwargs = dict(shape=vp.shape,
                    abcn=abcn, 
                    nt = nt,
                    B = 1,
-                   pinned_memory = True,
-                   transfer_interval = transfer_interval,
+                   boundary_saving_config = {
+                        "enabled": use_boundary_saving,
+                        "storage": storage,
+                        "transfer_interval": transfer_interval,
+                        "pinned_memory": use_pinned_memory,
+                    },
                    dh=dh, dt=dt, pml_type='cpmls', dev=device, free_surface=False)
 
 for i in tqdm.trange(1001):
@@ -72,11 +82,10 @@ for i in tqdm.trange(1001):
         vp.grad = None
         vs.grad = None
         rho.grad = None
-        out = solver(wave, sources = sources,
-                        receivers = receivers,
-                        models=[vp, vs, rho], 
-                        use_boundary_saving=True, 
-                        transfer_interval=transfer_interval)
+        out = solver(wave, 
+                     sources = sources,
+                     receivers = receivers,
+                     models=[vp, vs, rho])
 
         fig, ax = plt.subplots(figsize=(10, 6))
         record = out.detach().cpu().numpy().squeeze()
@@ -121,4 +130,3 @@ for i in tqdm.trange(1001):
             np.save(f'grad_{pname}_{mname}.npy', grad)
     #     time.sleep(100)
     break
-

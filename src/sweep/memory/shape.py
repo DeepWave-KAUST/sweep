@@ -249,3 +249,7 @@ class Layout:
             self.right_gpu_shape
         )
         return tuple(shape for shape in shapes if shape is not None)
+
+    @property
+    def gpu_full_shapes(self):
+        return self.cpu_shapes

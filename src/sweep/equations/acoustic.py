@@ -62,3 +62,18 @@ class Acoustic(SecondOrderEquation):
         from sweep._C import acoustic2d_forward, acoustic2d_backward, acoustic2d_backward_bs
         return (acoustic2d_forward, acoustic2d_backward, acoustic2d_backward_bs) 
 
+    @property
+    def base_nvar(self):
+        return 3
+
+    @property
+    def pml_nvar(self):
+        return 4
+
+    @property
+    def last_two_nvar(self):
+        return 2
+
+    @property
+    def last_two_storage_nvar(self):
+        return 1

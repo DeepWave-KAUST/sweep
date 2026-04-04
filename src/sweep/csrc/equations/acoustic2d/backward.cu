@@ -1,9 +1,11 @@
 #include <torch/extension.h>
+#include <algorithm>
 
 #include "kernels.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
 #include "../../common/wavetypes.h"
@@ -32,7 +34,10 @@ BackwardOutput backward(const BackwardInput& in)
     float dt = p.dt;
 
     AcousticWavefieldTensor adjoint;
-    adjoint.allocate(vp, 2, true);
+    if (!p.adjoint_wavefields.empty())
+        adjoint.bind(p.adjoint_wavefields, 2, true);
+    else
+        adjoint.allocate(vp, 2, true);
 
     auto grad = torch::zeros_like(vp);
 
@@ -130,9 +135,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     AcousticWavefieldTensor adjoint;
-    adjoint.allocate(vp, 2, true);
+    if (!p.adjoint_wavefields.empty())
+        adjoint.bind(p.adjoint_wavefields, 2, true);
+    else
+        adjoint.allocate(vp, 2, true);
     AcousticWavefieldTensor forward;
-    forward.allocate(vp, 2, false);
+    if (!p.forward_wavefields.empty())
+        forward.bind(p.forward_wavefields, 2, false);
+    else
+        forward.allocate(vp, 2, false);
     forward.u_prev_t.copy_(p.u_last_two.select(1,1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
 
@@ -149,8 +160,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // Boundary wavefields (for saving all wavefields)
     int save_width = p.abcn > 0 ? M + 1 : M;
     EffectiveBoundarySaver boundary_saver;
-    boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true, 1, {}, {}, false, p.use_pinned_memory);
-    boundary_saver.load_from_vector(p.u_boundary, vp);
+    bool staged_boundary = p.boundary_on_cpu;
+    if (staged_boundary) {
+        boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, false, p.use_pinned_memory);
+    } else {
+        boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true, 1, {}, p.boundary_gpu, {}, false, p.use_pinned_memory);
+        if (p.boundary_gpu.empty())
+            boundary_saver.load_from_vector(p.u_boundary, vp);
+    }
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -165,8 +182,21 @@ BackwardOutput backward_bs(const BackwardInput& in)
     GradParam grad_ctx{1, 0, nx, M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+    int interval = p.transfer_interval;
+    int buf_idx = 0;
+
+    AsyncCopyContext async_copy(staged_boundary);
+    if (staged_boundary) {
+        int it0 = p.nt - 1;
+        int buf_idx0 = (it0 - 1) % interval;
+        int chunk_start = it0 - buf_idx0 - 1;
+        int chunk_len = buf_idx0 + 1;
+        boundary_saver.load_cpu_to_gpu(chunk_start, chunk_len, async_copy.copy_stream);
+        async_copy.record_copy_ready();
+    }
 
     for (int it = p.nt - 1; it >= 1; --it) {
+        buf_idx = (it - 1) % interval;
 
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
@@ -220,20 +250,43 @@ BackwardOutput backward_bs(const BackwardInput& in)
             ctx
         );
 
+        if (staged_boundary && buf_idx == interval - 1)
+            async_copy.wait_for_copy();
+
+        float* top_ptr = staged_boundary ? boundary_saver.top_gpu.data_ptr<float>() + buf_idx * boundary_saver.top_stride
+                                         : bs.top;
+        float* bottom_ptr = staged_boundary ? boundary_saver.bottom_gpu.data_ptr<float>() + buf_idx * boundary_saver.bottom_stride
+                                            : bs.bottom;
+        float* left_ptr = staged_boundary ? boundary_saver.left_gpu.data_ptr<float>() + buf_idx * boundary_saver.left_stride
+                                          : bs.left;
+        float* right_ptr = staged_boundary ? boundary_saver.right_gpu.data_ptr<float>() + buf_idx * boundary_saver.right_stride
+                                           : bs.right;
+
         boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
             for_view.u_next,
-            bs.top,
-            bs.bottom,
-            bs.left,
-            bs.right,
-            it-1,
+            top_ptr,
+            bottom_ptr,
+            left_ptr,
+            right_ptr,
+            staged_boundary ? 0 : it-1,
             save_width,
             0,
             ctx,
             BOUNDARY_RESTORE
         );
-        
+
         forward.swap();
+
+        if (staged_boundary && buf_idx == 0 && it > 1) {
+            int next_chunk = (it - 1) / interval - 1;
+            if (next_chunk >= 0) {
+                int next_start = next_chunk * interval;
+                int remain = static_cast<int>(p.nt) - next_start;
+                int next_len = std::min(interval, remain);
+                boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
+                async_copy.record_copy_ready();
+            }
+        }
         
         calculate_grad_utt<<<launch_config.grid, launch_config.block>>>(
             forward.u_next_t.data_ptr<float>(),

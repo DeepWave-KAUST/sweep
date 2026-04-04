@@ -10,7 +10,6 @@ auto wrap_forward(Func f)
         auto out = f(in);
         return std::make_tuple(
             out.wavefield,
-            out.boundaries,
             out.last_two,
             out.record
         );

@@ -26,12 +26,17 @@ dt = 0.002
 delay = 0.2
 dh = 10.0
 fm = 5.0
+
+# Boundary saving config
+use_boundary_saving = True
+transfer_interval = 200
+use_pinned_memory = True
+
 spatial_orders = [8]
 sourcesz = [0]
 grid = list(product(spatial_orders, sourcesz))
 abcn = 20
 free_surface = False
-use_boundary_saving = False
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
@@ -50,34 +55,40 @@ vp = torch.from_numpy(true_vp).float().to(device).requires_grad_()
 vs = torch.from_numpy(true_vs).float().to(device).requires_grad_()
 rho = torch.from_numpy(rho).float().to(device).requires_grad_()
 
-prop = [PropCUDA]
-pname = ['CUDA']
+prop = PropCUDA(Elastic(spatial_order=spatial_orders[0], device=device,), 
+                shape=vp.shape, 
+                source_type=['sxx', 'szz'],
+                receiver_type=['vx', 'vz'],
+                abcn=abcn , 
+                dh = dh,
+                dt = dt,
+                pml_type='cpmls',
+                dev=device,
+                free_surface=free_surface,
+                B = 1,
+                nt = nt,
+                boundary_saving_config = {
+                    "enabled": use_boundary_saving,
+                    "storage": "cpu",
+                    "transfer_interval": transfer_interval,
+                    "pinned_memory": use_pinned_memory,
+                }
+                )
+
+pname = 'CUDA'
 
 for _ in tqdm.trange(10001):
-    for so, srcz in grid:
 
-        sources = np.array([10, srcz]).reshape(1, 2)
-        receivers = np.array([40, srcz]).reshape(1, 1, 2)
+    sources = np.array([10, sourcesz[0]]).reshape(1, 2)
+    receivers = np.array([40, sourcesz[0]]).reshape(1, 1, 2)
 
-        for name, propagator in zip(pname, prop):
-            vp.grad=None
-            vs.grad=None
-            rho.grad=None
-            solver = propagator(Elastic(spatial_order=so, device=device,), 
-                            shape=vp.shape, 
-                            source_type=['sxx', 'szz'],
-                            receiver_type=['vx', 'vz'],
-                            abcn=abcn , 
-                            dh = dh,
-                            dt = dt,
-                            pml_type='cpmls',
-                            dev=device,
-                            free_surface=free_surface,
-                            )
-            
-            out = solver(wave, sources = sources,
-                        receivers = receivers,
-                        models=[vp, vs, rho], 
-                        use_boundary_saving=use_boundary_saving)
-            loss = out.pow(2).sum()
-            loss.backward()
+    vp.grad=None
+    vs.grad=None
+    rho.grad=None
+    solver = prop
+    
+    out = solver(wave, sources = sources,
+                receivers = receivers,
+                models=[vp, vs, rho])
+    loss = out.pow(2).sum()
+    loss.backward()

@@ -6,6 +6,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/cudautils.h"
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
@@ -47,7 +48,10 @@ ForwardOutput forward(const ForwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
     AcousticWavefieldTensor wavefield;
-    wavefield.allocate(vp, 3, true);
+    if (!p.wavefields.empty())
+        wavefield.bind(p.wavefields, 3, true);
+    else
+        wavefield.allocate(vp, 3, true);
 
     // ----------------------------
     // PML parameters
@@ -76,7 +80,19 @@ ForwardOutput forward(const ForwardInput& in)
     // ----------------------------
     int save_width = abcn > 0 ? M + 1 : M;
     EffectiveBoundarySaver boundary_saver;
-    boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true, 1, {}, {}, false, p.use_pinned_memory);
+    bool staged_boundary = p.boundary_on_cpu;
+    if (staged_boundary) {
+        boundary_saver.allocate(
+            p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2,
+            true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two,
+            false, p.use_pinned_memory
+        );
+    } else {
+        boundary_saver.allocate(
+            p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2,
+            true, true, 1, {}, p.boundary_gpu, p.last_two, false, p.use_pinned_memory
+        );
+    }
     auto bs = boundary_saver.view();
     
     // ----------------------------
@@ -95,11 +111,17 @@ ForwardOutput forward(const ForwardInput& in)
     GradParam grad_ctx_y{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
+    int interval = p.transfer_interval;
+    int buf_idx = 0;
+    int gpu_idx = 0;
+    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+
     // ============================================================
     // time stepping
     // ============================================================
     for (int it = 0; it < nt; ++it)
     {
+        buf_idx = it % interval;
 
         auto view = wavefield.view();
 
@@ -125,20 +147,53 @@ ForwardOutput forward(const ForwardInput& in)
         );
 
         if (p.use_boundary_saving) {
+            float* top_ptr = nullptr;
+            float* bottom_ptr = nullptr;
+            float* front_ptr = nullptr;
+            float* back_ptr = nullptr;
+            float* left_ptr = nullptr;
+            float* right_ptr = nullptr;
+
+            if (staged_boundary) {
+                gpu_idx = buf_idx;
+                top_ptr = boundary_saver.top_gpu.data_ptr<float>() + gpu_idx * boundary_saver.top_stride;
+                bottom_ptr = boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride;
+                front_ptr = boundary_saver.front_gpu.data_ptr<float>() + gpu_idx * boundary_saver.front_stride;
+                back_ptr = boundary_saver.back_gpu.data_ptr<float>() + gpu_idx * boundary_saver.back_stride;
+                left_ptr = boundary_saver.left_gpu.data_ptr<float>() + gpu_idx * boundary_saver.left_stride;
+                right_ptr = boundary_saver.right_gpu.data_ptr<float>() + gpu_idx * boundary_saver.right_stride;
+            } else {
+                top_ptr = bs.top;
+                bottom_ptr = bs.bottom;
+                front_ptr = bs.front;
+                back_ptr = bs.back;
+                left_ptr = bs.left;
+                right_ptr = bs.right;
+            }
+
             boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
                 view.u_now,
-                bs.top,
-                bs.bottom,
-                bs.front,
-                bs.back,
-                bs.left,
-                bs.right,
-                it,
+                top_ptr,
+                bottom_ptr,
+                front_ptr,
+                back_ptr,
+                left_ptr,
+                right_ptr,
+                staged_boundary ? 0 : it,
                 save_width,
                 0,
                 ctx,
                 BOUNDARY_SAVE
             );
+
+            if (staged_boundary && (buf_idx == interval - 1 || it == p.nt - 1)) {
+                int start = it - buf_idx;
+                int len = buf_idx + 1;
+
+                async_copy.record_compute_ready();
+                async_copy.wait_for_compute();
+                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
+            }
         }
 
         add_source_3d<<<source_config.grid, source_config.block>>>(
@@ -167,16 +222,9 @@ ForwardOutput forward(const ForwardInput& in)
         boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }
 
-    out.wavefield = u_allt;
-    out.boundaries = {
-        boundary_saver.top_t,
-        boundary_saver.bottom_t,
-        boundary_saver.front_t,
-        boundary_saver.back_t,
-        boundary_saver.left_t,
-        boundary_saver.right_t
-    };
+    async_copy.synchronize_copy();
 
+    out.wavefield = u_allt;
     out.last_two = boundary_saver.last_two_t;
     out.record = record;
 

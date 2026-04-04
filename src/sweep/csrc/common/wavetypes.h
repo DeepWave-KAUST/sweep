@@ -22,12 +22,14 @@ struct ForwardInput {
 
     std::vector<torch::Tensor> pml_vals;  // Bind from python
     std::vector<torch::Tensor> wavefields; // Bind from python
+    torch::Tensor last_two; // Bind from python
 
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
 
     bool save_all_wavefields;
     bool use_boundary_saving;
+    bool boundary_on_cpu = false;
     bool use_pinned_memory = false;
     bool free_surface;
 
@@ -42,8 +44,6 @@ struct ForwardInput {
 struct ForwardOutput {
 
     torch::Tensor wavefield;
-
-    std::vector<torch::Tensor> boundaries;
 
     torch::Tensor last_two;
 
@@ -106,6 +106,7 @@ struct BackwardInput {
 
     // options
     bool free_surface;
+    bool boundary_on_cpu = false;
     bool use_pinned_memory = false;
     int transfer_interval = 1; // Transfer every time step by default
 

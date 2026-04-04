@@ -63,11 +63,11 @@ ForwardOutput forward(const ForwardInput& in)
     
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    bool staged_boundary = !p.boundary_cpu.empty() || !p.boundary_gpu.empty();
+    bool staged_boundary = p.boundary_on_cpu;
     if (staged_boundary)
-        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, false, p.use_pinned_memory);
+        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, false, p.use_pinned_memory);
     else
-        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, {}, false, p.use_pinned_memory);
+        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, p.boundary_gpu, p.last_two, false, p.use_pinned_memory);
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -204,13 +204,6 @@ ForwardOutput forward(const ForwardInput& in)
     async_copy.synchronize_copy();
 
     out.wavefield = u_allt;
-    out.boundaries = {
-        boundary_saver.top_t,
-        boundary_saver.bottom_t,
-        boundary_saver.left_t,
-        boundary_saver.right_t
-    };
-
     out.last_two = boundary_saver.last_two_t;
     out.record = record;
 

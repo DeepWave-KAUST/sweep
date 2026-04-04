@@ -67,3 +67,19 @@ class Acoustic3D(SecondOrderEquation):
     def _C(self, ):
         from sweep._C import acoustic3d_forward, acoustic3d_backward, acoustic3d_backward_bs
         return (acoustic3d_forward, acoustic3d_backward, acoustic3d_backward_bs)
+
+    @property
+    def base_nvar(self):
+        return 3
+
+    @property
+    def pml_nvar(self):
+        return 6
+
+    @property
+    def last_two_nvar(self):
+        return 2
+
+    @property
+    def last_two_storage_nvar(self):
+        return 1
