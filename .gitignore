@@ -6,6 +6,7 @@ dist
 build
 tests
 *.egg-info
+*.csv
 examples/test_figures
 examples/models/models
 test/cuda

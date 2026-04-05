@@ -1,3 +1,7 @@
+import pytest
+
+pytest.skip("Legacy exploratory script kept for manual inspection only.", allow_module_level=True)
+
 import sys
 sys.path.append('../src')
 import numpy as np

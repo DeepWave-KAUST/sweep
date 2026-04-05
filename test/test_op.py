@@ -1,3 +1,7 @@
+import pytest
+
+pytest.skip("Legacy exploratory script kept for manual inspection only.", allow_module_level=True)
+
 import sys
 sys.path.append('../src')
 import numpy as np
@@ -38,4 +42,3 @@ if backend == 'torch':
     np.save(f'./op_backward_x_{backend}.npy', u_backward_x.cpu().numpy())
     np.save(f'./op_forward_z_{backend}.npy', u_forward_z.cpu().numpy())
     np.save(f'./op_backward_z_{backend}.npy', u_backward_z.cpu().numpy())
-

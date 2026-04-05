@@ -23,7 +23,7 @@ dt = 0.002
 delay = 0.2
 dh = 10.0
 fm = 5.0
-spatial_order = 2
+spatial_order = 8
 abcn = 20
 free_surface=False
 

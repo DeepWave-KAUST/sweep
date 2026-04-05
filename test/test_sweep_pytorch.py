@@ -1,3 +1,7 @@
+import pytest
+
+pytest.skip("Legacy exploratory script kept for manual inspection only.", allow_module_level=True)
+
 import tqdm
 import torch
 import matplotlib.pyplot as plt
@@ -82,4 +86,3 @@ for i in tqdm.trange(1001):
     plt.show()
     np.save('vp_grad_sweep_pytorch.npy', vp.grad.cpu().numpy())
     break
-
