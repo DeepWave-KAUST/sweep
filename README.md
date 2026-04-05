@@ -5,6 +5,13 @@ Seismic Wave Equation Exploration Platform (SWEEP) is a Python package designed 
 
 ## Installation
 
+Install SWEEP from the repository root. If you have not downloaded the source code yet, clone the repository first and change into the project directory:
+
+```bash
+git clone <repository-url>
+cd geophyai
+```
+
 ### Pytorch/Jax only
 This is the simplest way to install SWEEP, but it may not be the most efficient way to use it. If you only want to use sweep with PyTorch or JAX APIs, you can install the package with the following command:
 ```bash

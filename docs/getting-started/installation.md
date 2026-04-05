@@ -2,6 +2,15 @@
 
 This page explains how to install SWEEP for different use cases.
 
+## Get the Source Code
+
+Install from the project root directory. If you have not downloaded the source code yet, clone the repository first and change into the repository root:
+
+```bash
+git clone https://github.com/DeepWave-KAUST/sweep
+cd sweep
+```
+
 ## Option 1: Base Installation
 
 Use this when you only need the Pytorch/Jax package interface.

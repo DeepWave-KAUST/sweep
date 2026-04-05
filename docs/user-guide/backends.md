@@ -6,6 +6,7 @@ SWEEP supports multiple execution paths.
 
 - `torch`: PyTorch-based propagation and differentiation
 - `jax`: JAX-based propagation and differentiation
+- `cuda`: PyTorch-based CUDA binding for propagation and differentiation
 
 ## CUDA Binding
 
