@@ -9,7 +9,7 @@ from sweep.signal import ricker
 
 import numpy as np
 import matplotlib.pyplot as plt
-from configure import *
+from configure_ot import *
 
 save_path = 'elastic_torch'
 if not os.path.exists(save_path):
@@ -35,14 +35,14 @@ plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # Forward model for observed data
-model = PropCUDA(Elastic(spatial_order=spatial_order, device=dev), 
+model = PropTorch(Elastic(spatial_order=spatial_order, device=dev), 
             shape=shape, 
             dev=dev, 
             abcn=abcn, 
             dh=dh,
             dt=dt,
-            source_type=['vz'],
-            receiver_type=['vz'],
+            source_type=['sxx', 'szz'],
+            receiver_type=['vx', 'vz'],
             free_surface=False, 
             pml_type='cpmls',
             use_ckpt=False)
@@ -83,12 +83,12 @@ elapsed_time = start_event.elapsed_time(end_event)
 print('data shape:', obs.shape)
 print(f"Execution time: {elapsed_time:.2f} ms")
 # print(obs.shape)
-vmin, vmax = np.percentile(obs[-1], [2, 98])
-plt.imshow(obs[-1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
-plt.colorbar()
-plt.tight_layout()
-plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
-plt.close()
+# vmin, vmax = np.percentile(obs[-1], [2, 98])
+# plt.imshow(obs[-1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+# plt.colorbar()
+# plt.tight_layout()
+# plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
+# plt.close()
 # vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
 # plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
 # plt.colorbar()
@@ -105,9 +105,16 @@ plt.close()
 
 # ########## Inversion ##########
 # Set the model
-vp = torch.from_numpy(vp_smooth).float().to(dev).requires_grad_()
-vs = torch.from_numpy(vp_smooth/1.73).float().to(dev).requires_grad_()
-rho = torch.ones_like(vp).float().to(dev).requires_grad_()
+vp = torch.from_numpy(vp_smooth).float().to(dev)
+vs = torch.from_numpy(vp_smooth/1.73).float().to(dev)
+
+vp = torch.from_numpy(vp_smooth).float().to(dev)#.requires_grad_()
+vp[0:2] = torch.from_numpy(vp_true[0:2]).float().to(dev) # Fix the top 2 layers for better convergence
+vs = torch.from_numpy(vp_smooth/1.73).float().to(dev)#.requires_grad_()
+vs[0:2] = torch.from_numpy(vs_true[0:2]).float().to(dev) # Fix the top 2 layers for better convergence
+vp.requires_grad_()
+vs.requires_grad_()
+rho = (torch.ones_like(vp)*1000).float().to(dev).requires_grad_()
 
 # model = torch.compile(model, backend='tensorrt')
 # Set different lr to different parameters
@@ -115,13 +122,13 @@ opt = torch.optim.Adam([{'params': [vp], 'lr': lr},
                         {'params': [vs], 'lr': lr/1.73}, 
                         {'params': [rho], 'lr': 0}], 
                         eps=1e-22)
-model = torch.compile(model)
+# model = torch.compile(model)
 for epoch in tqdm.trange(epochs):
 
     opt.zero_grad()
 
     # rand_shots = np.random.randint(0, sources.shape[0], batchsize)
-    rand_shots = np.random.choice(sources.shape[0], size=batchsize, replace=False)
+    rand_shots = np.array([20])#np.random.choice(sources.shape[0], size=batchsize, replace=False)
     # Source encoding for acceleration
     # coding_syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=False)
     # coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
@@ -164,6 +171,8 @@ for epoch in tqdm.trange(epochs):
         # show gradients
         vp_grad = vp.grad.cpu().numpy()
         vs_grad = vs.grad.cpu().numpy()
+        print(vp_grad.shape, vs_grad.shape)
+
         fig, axes = plt.subplots(1, 2, figsize=(8, 3))
         vmin, vmax = np.percentile(vp_grad, [2, 98])
         plt.colorbar(axes[0].imshow(vp_grad, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto'))

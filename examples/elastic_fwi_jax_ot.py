@@ -3,7 +3,6 @@ os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 sys.path.append('../src')
 import optax, jax
 import jax.numpy as jnp
-import jax.random as random
 from functools import partial
 
 from sweep.propagator.jax import PropJax
@@ -13,7 +12,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from configure_ot import *
 np.random.seed(0)
-key = random.PRNGKey(0)
+
+
+def jax_record_to_standard(record):
+    return np.array(record)
 
 save_path = 'elastic_jax_ot'
 if not os.path.exists(save_path):
@@ -32,7 +34,7 @@ extent = [0, shape[1]*dh, shape[0]*dh, 0]
 
 nz, nx = shape
 
-wave = ricker(t-delay, f=fm) * 1e6
+wave = ricker(t-delay, f=fm)
 plt.plot(wave)
 plt.savefig(f'{save_path}/ricker.png', dpi=300, bbox_inches='tight')
 plt.close()
@@ -44,8 +46,8 @@ model = PropJax(Elastic(spatial_order=spatial_order, backend='jax'),
             abcn=abcn, 
             dh=dh,
             dt=dt,
-            source_type=['vz'],
-            receiver_type=['vz'],
+            source_type=['sxx', 'szz'],
+            receiver_type=['vx', 'vz'],
             free_surface=False, 
             pml_type='cpmls',
             use_ckpt=False)
@@ -68,10 +70,10 @@ receivers = receivers[None, ...].repeat(sources.shape[0], axis=0) # (nshots, nre
 print("(Number of shots, dimension)", sources.shape)
 print("(Number of shots, number of receivers, dimension)", receivers.shape)
 
+
 obs = model.forward(wave, 
                     sources, 
                     receivers)
-print(obs.shape)
 
 # vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
 # plt.imshow(obs[-1].squeeze(), vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
@@ -89,10 +91,20 @@ def update_fn(param, grads, opt_state, opt):
     return param, opt_state
 
 # Set the model
-model.set_parameters([jnp.array(vp_smooth), 
-                      jnp.array(vp_smooth/1.732), 
+init_vp = jnp.array(vp_smooth)
+init_vs = jnp.array(vp_smooth/1.732)
+# init_vp = init_vp.at[:2, :].set(jnp.array(vp_true[:2, :]))
+# init_vs = init_vs.at[:2, :].set(jnp.array(vs_true[:2, :]))
+model.set_parameters([init_vp, 
+                      init_vs, 
                       jnp.array(rho_true)])
 opt_states = [opt.init(param) for param, opt in zip(model.parameters(), opts)]
+
+shot_rng = np.random.RandomState(0)
+shot_schedule = [
+    jnp.array(shot_rng.choice(int(sources.shape[0]), size=batchsize, replace=False), dtype=jnp.int32)
+    for _ in range(epochs)
+]
 
 @jax.jit
 def fwi_step(vp, vs, rho, rand_shots):
@@ -117,16 +129,15 @@ def fwi_step(vp, vs, rho, rand_shots):
 LOSS = []
 for epoch in tqdm.trange(epochs):
 
-    model.vp = model.vp.at[:2, :].set(jnp.array(vp_true[:2, :]))
-    model.vs = model.vs.at[:2, :].set(jnp.array(vs_true[:2, :]))
-
-    key, subkey = random.split(key)
-    rand_shots = random.choice(subkey, sources.shape[0], shape=(batchsize,), replace=False)
+    rand_shots = np.array([0])#shot_schedule[epoch]
 
     loss, grads = fwi_step(model.vp, model.vs, model.rho, rand_shots)
     model.vp, opt_states[0] = update_fn(model.vp, grads[0], opt_states[0], opts[0])
     model.vs, opt_states[1] = update_fn(model.vs, grads[1], opt_states[1], opts[1])
     model.rho, opt_states[2] = update_fn(model.rho, grads[2], opt_states[2], opts[2])
+
+    # model.vp = model.vp.at[:2, :].set(jnp.array(vp_true[:2, :]))
+    # model.vs = model.vs.at[:2, :].set(jnp.array(vs_true[:2, :]))
 
     print(f'Epoch: {epoch}, Loss: {loss}')
     LOSS.append(loss)

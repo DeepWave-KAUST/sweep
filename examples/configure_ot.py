@@ -5,11 +5,12 @@ delay = 0.3
 fm = 8
 true_path = 'overthrust/overthrust_true.npy'
 smooth_path = 'overthrust/overthrust_smooth.npy'
+obs_path = 'overthrust/elastic_obs_ot.npy'
 # smooth_path = 'marmousi_linear.npy'
 dh = 25.
 spatial_order = 4
 
-abcn = 20
+abcn = 10
 free_surface = False
 use_habc = False
 

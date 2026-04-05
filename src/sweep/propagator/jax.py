@@ -65,6 +65,8 @@ class PropJax(PropBase):
             wave_equation (callable, optional): The wave equation function to use. If None, use the equation defined in the class. Defaults to None.
             aux_args (tuple(list), optional): Auxiliary arguments for the wave equation function. Defaults to ().
         """
+        fd_pad = [0, 0] * self.ndim
+        kwargs.setdefault('fd_pad', fd_pad)
         self.init_abc(**kwargs)
         if getattr(self.equation, 'setup_pml', None):
             self.equation.setup_pml(self.pml_type)

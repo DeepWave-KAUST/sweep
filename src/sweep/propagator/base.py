@@ -17,6 +17,7 @@ class PropBase:
                  pml_type='spml',
                  nt=-1,
                  B=1,
+                 allow_growth=True,
                  boundary_saving_config=None,
                  **kwargs):
         """Base class for the RNN
@@ -33,7 +34,15 @@ class PropBase:
             dev (str, optional): The device to run the simulation on. Defaults to None.
             use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 50.
-            pml_type (str, optional): 
+            pml_type (str, optional): The type of PML to use. Defaults to 'spml'. Options include 'spml', 'cpml', 'cpmlr', etc.
+            nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
+            B (int, optional): The batch size for the simulation. Defaults to 1.
+            allow_growth (bool, optional): Whether to allow GPU memory growth. Defaults to True.
+            boundary_saving_config (dict, optional): Configuration for boundary saving. Defaults to None, which means boundary saving is disabled. If provided, it should be a dictionary with the following keys:
+                - enabled (bool): Whether to enable boundary saving. If True, the boundary wavefields will be saved and transferred to CPU for checkpointing. Defaults to False.
+                - storage (str): Where to store the boundary wavefields. Options are 'gpu' and 'cpu'. If 'gpu', the boundary wavefields will be stored in GPU memory. If 'cpu', the boundary wavefields will be transferred to CPU memory. Defaults to 'gpu'.
+                - transfer_interval (int): The interval (in time steps) at which to transfer the boundary wavefields to CPU memory if storage is 'cpu'. For example, if transfer_interval is 10, then every 10 time steps the boundary wavefields will be transferred to CPU memory. Defaults to 1.
+                - pinned_memory (bool): Whether to use pinned memory for the boundary wavefields when storage is 'cpu'. Using pinned memory can speed up the transfer between GPU and CPU. Defaults to False.
         """
         
         self.equation = equation
@@ -54,6 +63,7 @@ class PropBase:
 
         self.nt = nt
         self.B = B
+        self.allow_growth = allow_growth
         legacy_boundary_config = {
             "transfer_interval": kwargs.pop("transfer_interval", 1),
             "storage": "cpu" if kwargs.pop("boundary_on_cpu", False) else "gpu",

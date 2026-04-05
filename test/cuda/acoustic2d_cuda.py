@@ -29,9 +29,12 @@ free_surface=False
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([128, 0]).reshape(1, 2)
+sources = np.array([[128, 0], [256, 0]], dtype=np.int32)
 
-receivers = np.array([384, 0]).reshape(1, 1, 2)
+receivers = np.array([
+    [[384, 0]],
+    [[384, 0]],
+], dtype=np.int32)
 print('free_surface:', free_surface, sources, receivers)
 print('Spatial order:', spatial_order)
 print('abcn: ', abcn)
@@ -45,6 +48,7 @@ kwargs = dict(shape=vp.shape,
               receiver_type=['h1'], abcn=abcn, dh=dh, dt=dt, 
               pml_type='cpmlr', dev=device, free_surface=free_surface, 
               B=1,
+              allow_growth=True,
               nt=nt,
               boundary_saving_config = {
                     "enabled": False,

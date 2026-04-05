@@ -25,7 +25,7 @@ class Warpper(torch.autograd.Function):
         coes_list,          
         M: int,
         abcn: int,
-        spacing: list,       # list of 2 floats for dx and dz
+        spacing: list,       # list of floats for grid spacing
         dt: float,
         pml_vals: list,     # list of 6 tensors for PML profiles
         use_boundary_saving: bool=False,
@@ -46,8 +46,8 @@ class Warpper(torch.autograd.Function):
         
         lap_coes, grad_coes = coes_list
         nt = wavelet.shape[-1]
-        spacing = [s.item() for s in spacing]
-        dt = float(dt.item())
+        spacing = [float(s) for s in spacing]
+        dt = float(dt)
         
         # only forward modeling, no need to save wavefield for backward
         save_all_wavefields = False
@@ -212,22 +212,23 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         self.forward_func, self.backward_func, self.backward_bs_func = self.equation._C()
 
-        # Initilize memory for wavefields
+        # Initialize reusable runtime buffers lazily so they always match the
+        # current batch size used by the CUDA kernels.
         self.forward_allocator = Allocator(self.dev)
         self.boundary_cpu_allocator = Allocator('cpu')
         self.boundary_gpu_allocator = Allocator(self.dev)
-
-        total_wavefields = self.equation.base_nvar + self.equation.pml_nvar
-        self.forward_wavefields = self.forward_allocator.zeros(total_wavefields * [[self.B, 1, *self.shape_cuda]])
-        self.adjoint_wavefields = self.forward_allocator.zeros(total_wavefields * [[self.B, 1, *self.shape_cuda]])
+        self.forward_wavefields = ()
+        self.adjoint_wavefields = ()
         self.boundary_cpu = ()
         self.boundary_gpu = ()
         self.boundary_gpu_full = ()
         self.last_two = torch.empty(0, device=self.dev)
+        self._buffer_capacity_batch = None
         self._boundary_cache_mode = None
         self._boundary_cache_interval = None
         self._boundary_cache_pinned = None
         self._boundary_cache_nt = None
+        self._boundary_cache_batch = None
 
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -256,6 +257,8 @@ class PropCUDA(PropBase, torch.nn.Module):
 
     def _ensure_boundary_buffers(self, boundary_on_cpu, transfer_interval, use_pinned_memory):
         if (
+            self._boundary_cache_batch == self.B
+            and
             self._boundary_cache_mode == boundary_on_cpu
             and self._boundary_cache_interval == transfer_interval
             and self._boundary_cache_pinned == use_pinned_memory
@@ -305,7 +308,46 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._boundary_cache_interval = transfer_interval
         self._boundary_cache_pinned = use_pinned_memory
         self._boundary_cache_nt = self.nt
+        self._boundary_cache_batch = self.B
 
+    def _ensure_wavefield_buffers(self, batch_size):
+        current_capacity = self._buffer_capacity_batch
+        if current_capacity is not None and batch_size <= current_capacity:
+            return
+
+        if current_capacity is not None and batch_size > current_capacity and not self.allow_growth:
+            raise ValueError(
+                f"Input batch size {batch_size} exceeds preallocated CUDA buffer capacity {current_capacity}. "
+                "Increase B when constructing PropCUDA or set allow_growth=True."
+            )
+
+        target_capacity = batch_size
+        if current_capacity is None:
+            target_capacity = max(self.B, batch_size)
+
+        self.B = target_capacity
+        self.forward_allocator = Allocator(self.dev)
+        total_wavefields = self.equation.base_nvar + self.equation.pml_nvar
+        wavefield_shapes = total_wavefields * [[self.B, 1, *self.shape_cuda]]
+        self.forward_wavefields = self.forward_allocator.zeros(wavefield_shapes)
+        self.adjoint_wavefields = self.forward_allocator.zeros(wavefield_shapes)
+        self._buffer_capacity_batch = target_capacity
+        self._boundary_cache_batch = None
+
+    def _slice_wavefield_buffers(self, batch_size):
+        return tuple(t[:batch_size] for t in self.forward_wavefields), tuple(t[:batch_size] for t in self.adjoint_wavefields)
+
+    def _slice_last_two(self, batch_size):
+        return self.last_two[:, :, :batch_size]
+
+    def _slice_boundary_buffers(self, tensors, batch_size):
+        if not tensors:
+            return ()
+
+        batch_dim = 1 if self.ndim == 3 else 2
+        return tuple(t.narrow(batch_dim, 0, batch_size) for t in tensors)
+
+    @torch._dynamo.disable
     def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
         """Forward pass of the wave equation
 
@@ -338,6 +380,10 @@ class PropCUDA(PropBase, torch.nn.Module):
         use_pinned_memory = boundary_cfg["pinned_memory"]
 
         self.nt = wavelet.shape[-1]
+        nshots = sources.shape[0]
+        batch_size = 1 if source_encoding else nshots
+        self._ensure_wavefield_buffers(batch_size)
+        forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
 
         # Set zeros
         self.forward_allocator.zero_()
@@ -346,11 +392,16 @@ class PropCUDA(PropBase, torch.nn.Module):
                 self._ensure_boundary_buffers(boundary_on_cpu, transfer_interval, use_pinned_memory)
             self.boundary_cpu_allocator.zero_()
             self.boundary_gpu_allocator.zero_()
+            boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size)
+            boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
                 self._ensure_boundary_buffers(boundary_on_cpu, transfer_interval, use_pinned_memory)
                 for t in self.boundary_gpu_full:
                     t.zero_()
+            boundary_cpu = ()
+            boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu_full, batch_size)
+        last_two = self._slice_last_two(batch_size) if use_boundary_saving else self.last_two
 
         M = self.equation.so // 2
 
@@ -364,9 +415,6 @@ class PropCUDA(PropBase, torch.nn.Module):
         self.init_abc(**kwargs)
 
         nt = self.nt
-        nshots = sources.shape[0]
-        
-        batch_size = 1 if source_encoding else nshots
         sources = sources.copy()
         receivers = receivers.copy()
 
@@ -412,7 +460,7 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
 
-        spacing = [self.dh] * self.ndim
+        spacing = [self._dh] * self.ndim
 
         syn = Warpper.apply(
                 self.forward_func, 
@@ -427,18 +475,18 @@ class PropCUDA(PropBase, torch.nn.Module):
                 M,
                 self.abcn,
                 spacing,
-                self.dt,
+                self._dt,
                 self.equation.b,
                 use_boundary_saving,
                 use_pinned_memory,
                 self.free_surface,
                 transfer_interval,
                 boundary_on_cpu,
-                self.forward_wavefields,
-                self.adjoint_wavefields,
-                self.last_two,
-                self.boundary_cpu,
-                self.boundary_gpu if boundary_on_cpu else self.boundary_gpu_full,
+                forward_wavefields,
+                adjoint_wavefields,
+                last_two,
+                boundary_cpu,
+                boundary_gpu,
                 *models,
             )
         

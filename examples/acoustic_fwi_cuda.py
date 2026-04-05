@@ -44,7 +44,14 @@ solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=dev),
             receiver_type=['h1'], # for cuda, no need to specify source and receiver type
             abcn=abcn, 
             free_surface=free_surface,
-            pml_type='cpmlr')
+            pml_type='cpmlr',
+            boundary_saving_config={
+                "enabled": True,
+                "storage": "gpu",
+                "transfer_interval": 10,
+                "pinned_memory": True,
+            },
+            )
 
 # Geometry
 src_x = np.arange(0,nx, src_step).reshape(-1, 1)
@@ -89,7 +96,7 @@ for epoch in tqdm.trange(epochs):
     opt.zero_grad()
     rand_shots = np.random.randint(0, sources.shape[0], batchsize)
     rand_shots = np.arange(0, sources.shape[0], 20) # Use all shots
-    syn = solver(wave, sources[rand_shots], receivers[rand_shots], models=[vp], use_boundary_saving=False)
+    syn = solver(wave, sources[rand_shots], receivers[rand_shots], models=[vp])
     loss = (syn-torch.from_numpy(obs[rand_shots]).to(dev)).pow(2).mean()
     loss.backward()
     LOSS.append(loss.item())
