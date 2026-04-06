@@ -112,6 +112,19 @@ def summary_stats(timings):
     }
 
 
+def segment_summary_stats(segment_timings):
+    stats = {}
+    for name, timings in segment_timings.items():
+        timings_ms = np.asarray(timings, dtype=np.float64) * 1e3
+        stats[name] = {
+            "mean_ms": float(timings_ms.mean()),
+            "std_ms": float(timings_ms.std(ddof=0)),
+            "min_ms": float(timings_ms.min()),
+            "max_ms": float(timings_ms.max()),
+        }
+    return stats
+
+
 def memory_summary_line(name, peaks_bytes):
     peaks_mib = np.asarray(peaks_bytes, dtype=np.float64) / (1024.0 ** 2)
     return (
