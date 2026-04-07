@@ -29,11 +29,10 @@ free_surface=False
 t = np.arange(nt) * dt - delay
 wave = ricker(t, fm=fm).astype(np.float32)
 
-sources = np.array([[128, 0], [256, 0]], dtype=np.int32)
+sources = np.array([[1, 0]], dtype=np.int32)
 
 receivers = np.array([
-    [[384, 0]],
-    [[384, 0]],
+    [[511, 0]],
 ], dtype=np.int32)
 print('free_surface:', free_surface, sources, receivers)
 print('Spatial order:', spatial_order)
@@ -55,7 +54,10 @@ kwargs = dict(shape=vp.shape,
                     "storage": "cpu",
                     "transfer_interval": 99,
                     "pinned_memory": True,
-            }
+              },
+              use_ckpt=True,
+              ckpt_mode="recursive",
+              ckpt_num=4
               )
 cuda_solver = PropCUDA(Acoustic(spatial_order=spatial_order, device=device,), **kwargs)
 torch_solver = PropTorch(Acoustic(spatial_order=spatial_order, device=device,), **kwargs)
@@ -85,7 +87,7 @@ grads_torch_vp = vp.grad.cpu().numpy()
 
 fig, axes = plt.subplots(2, 3, figsize=(18, 8))
 
-vmin, vmax = np.percentile(grads_torch_vp, [0.5, 99.5])
+vmin, vmax = np.percentile(grads_cuda_vp, [0.5, 99.5])
 ax = axes[0,0].imshow(grads_cuda_vp, cmap='seismic', vmin=vmin, vmax=vmax, aspect='auto')
 plt.colorbar(ax, ax=axes[0,0])
 axes[0,0].set_title('Vp (CUDA, No Boundary Saving)')

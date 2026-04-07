@@ -59,8 +59,20 @@ class Acoustic(SecondOrderEquation):
 
     def _C(self, ):
         # CUDA IMPLEMENTATION
-        from sweep._C import acoustic2d_forward, acoustic2d_backward, acoustic2d_backward_bs
-        return (acoustic2d_forward, acoustic2d_backward, acoustic2d_backward_bs) 
+        from sweep._C import (
+            acoustic2d_forward,
+            acoustic2d_backward,
+            acoustic2d_backward_bs,
+            acoustic2d_backward_ckpt,
+            acoustic2d_backward_recursive_ckpt,
+        )
+        return (
+            acoustic2d_forward,
+            acoustic2d_backward,
+            acoustic2d_backward_bs,
+            acoustic2d_backward_ckpt,
+            acoustic2d_backward_recursive_ckpt,
+        )
 
     @property
     def base_nvar(self):

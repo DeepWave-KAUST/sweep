@@ -68,7 +68,7 @@ __global__ void calculate_grad_utt_3d(
     float*       grad_b       = grad       + b * spatial_size;
     const float* vp_b         = vp         + b * spatial_size;
 
-    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx])/ (dt*dt);
+    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx])/ (dt*dt); //
 
     float vp3 = vp_b[idx] * vp_b[idx] * vp_b[idx];
 

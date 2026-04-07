@@ -9,9 +9,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic2d_forward", wrap_forward(acoustic2d::forward));
     m.def("acoustic2d_backward", wrap_backward(acoustic2d::backward), "Acoustic backward (CUDA)");
     m.def("acoustic2d_backward_bs", wrap_backward(acoustic2d::backward_bs), "Acoustic backward with boundary saving (CUDA)");
+    m.def("acoustic2d_backward_ckpt", wrap_backward(acoustic2d::backward_ckpt), "Acoustic backward with checkpointing (CUDA)");
+    m.def("acoustic2d_backward_recursive_ckpt", wrap_backward(acoustic2d::backward_recursive_ckpt), "Acoustic backward with recursive checkpointing (CUDA)");
     m.def("acoustic3d_forward", wrap_forward(acoustic3d::forward), "Acoustic forward 3D (CUDA)");
     m.def("acoustic3d_backward", wrap_backward(acoustic3d::backward), "Acoustic backward 3D (CUDA)");
     m.def("acoustic3d_backward_bs", wrap_backward(acoustic3d::backward_bs), "Acoustic backward with boundary saving 3D (CUDA)");
+    m.def("acoustic3d_backward_ckpt", wrap_backward(acoustic3d::backward_ckpt), "Acoustic backward with checkpointing 3D (CUDA)");
+    m.def("acoustic3d_backward_recursive_ckpt", wrap_backward(acoustic3d::backward_recursive_ckpt), "Acoustic backward with recursive checkpointing 3D (CUDA)");
     m.def("elastic2d_forward", wrap_forward(elastic2d::forward), "Elastic forward 2D (CUDA)");
     m.def("elastic2d_backward", wrap_backward(elastic2d::backward), "Elastic backward 2D (CUDA)");
     m.def("elastic2d_backward_bs", wrap_backward(elastic2d::backward_bs), "Elastic backward with boundary saving 2D (CUDA)");
@@ -34,6 +38,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("last_two", &ForwardInput::last_two)
         .def_readwrite("save_all_wavefields", &ForwardInput::save_all_wavefields)
         .def_readwrite("use_boundary_saving", &ForwardInput::use_boundary_saving)
+        .def_readwrite("use_checkpoint", &ForwardInput::use_checkpoint)
+        .def_readwrite("use_recursive_checkpoint", &ForwardInput::use_recursive_checkpoint)
         .def_readwrite("boundary_on_cpu", &ForwardInput::boundary_on_cpu)
         .def_readwrite("use_pinned_memory", &ForwardInput::use_pinned_memory)
         .def_readwrite("free_surface", &ForwardInput::free_surface)
@@ -41,15 +47,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("dt", &ForwardInput::dt)
         .def_readwrite("spacing", &ForwardInput::spacing)
         .def_readwrite("transfer_interval", &ForwardInput::transfer_interval)
+        .def_readwrite("checkpoint_interval", &ForwardInput::checkpoint_interval)
+        .def_readwrite("checkpoint_count", &ForwardInput::checkpoint_count)
         .def_readwrite("wavefields", &ForwardInput::wavefields)
         .def_readwrite("boundary_cpu", &ForwardInput::boundary_cpu)
-        .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu);
+        .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu)
+        .def_readwrite("checkpoints", &ForwardInput::checkpoints)
+        .def_readwrite("checkpoint_steps", &ForwardInput::checkpoint_steps);
 
     py::class_<BackwardInput>(m, "BackwardInput")
         .def(py::init<>())
         .def_readwrite("u_forward", &BackwardInput::u_forward)
         .def_readwrite("u_boundary", &BackwardInput::u_boundary)
         .def_readwrite("u_last_two", &BackwardInput::u_last_two)
+        .def_readwrite("checkpoints", &BackwardInput::checkpoints)
         .def_readwrite("models", &BackwardInput::models)
         .def_readwrite("adjoint_source", &BackwardInput::adjoint_source)
         .def_readwrite("forward_source", &BackwardInput::forward_source)
@@ -69,10 +80,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_on_cpu", &BackwardInput::boundary_on_cpu)
         .def_readwrite("use_pinned_memory", &BackwardInput::use_pinned_memory)
         .def_readwrite("transfer_interval", &BackwardInput::transfer_interval)
+        .def_readwrite("checkpoint_interval", &BackwardInput::checkpoint_interval)
+        .def_readwrite("checkpoint_count", &BackwardInput::checkpoint_count)
         .def_readwrite("forward_wavefields", &BackwardInput::forward_wavefields)
         .def_readwrite("adjoint_wavefields", &BackwardInput::adjoint_wavefields)
         .def_readwrite("boundary_cpu", &BackwardInput::boundary_cpu)
-        .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu);
+        .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu)
+        .def_readwrite("checkpoint_steps", &BackwardInput::checkpoint_steps);
 
 
 }

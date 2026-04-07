@@ -17,6 +17,8 @@ class Warpper(torch.autograd.Function):
         forward_func,
         backward_func,
         backward_bs_func,
+        backward_ckpt_func,
+        backward_recursive_ckpt_func,
         wavelet,             # (B, nsrc, nt)
         sources_loc,        # (B, nsrc, 2)
         receivers_loc,      # (B, nrec, 2)
@@ -28,6 +30,11 @@ class Warpper(torch.autograd.Function):
         spacing: list,       # list of floats for grid spacing
         dt: float,
         pml_vals: list,     # list of 6 tensors for PML profiles
+        use_checkpoint: bool=False,
+        checkpoint_interval: int=1,
+        use_recursive_checkpoint: bool=False,
+        checkpoint_count: int=0,
+        checkpoint_steps: torch.Tensor=None,
         use_boundary_saving: bool=False,
         use_pinned_memory: bool=False,
         free_surface: bool=False,
@@ -35,6 +42,7 @@ class Warpper(torch.autograd.Function):
         boundary_on_cpu: bool=False,
         forward_wavefields: tuple=(),
         adjoint_wavefields: tuple=(),
+        checkpoint_buffers: tuple=(),
         last_two: torch.Tensor=None,
         boundary_cpu: tuple=(),
         boundary_gpu: tuple=(),
@@ -50,20 +58,24 @@ class Warpper(torch.autograd.Function):
         dt = float(dt)
         
         # only forward modeling, no need to save wavefield for backward
-        save_all_wavefields = False
-        if any(m.requires_grad for m in models): 
-            save_all_wavefields = True
-        if any(m.requires_grad for m in models) and use_boundary_saving:
+        requires_model_grad = any(m.requires_grad for m in models)
+        use_recursive_checkpoint = bool(use_recursive_checkpoint and backward_recursive_ckpt_func is not None)
+        use_checkpoint = bool(use_checkpoint and (backward_ckpt_func is not None or use_recursive_checkpoint))
+        save_all_wavefields = requires_model_grad
+        if requires_model_grad and (use_boundary_saving or use_checkpoint):
             save_all_wavefields = False
-        if not any(m.requires_grad for m in models):
+        if not requires_model_grad:
             save_all_wavefields = False
             use_boundary_saving = False
-        
+            use_checkpoint = False
+            use_recursive_checkpoint = False
+
         params = _C.ForwardInput()
         params.wavefields = forward_wavefields
         params.last_two = last_two
         params.boundary_cpu = [b.zero_() for b in boundary_cpu] if boundary_on_cpu else []
         params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
+        params.checkpoints = [c.zero_() for c in checkpoint_buffers] if use_checkpoint else []
         params.transfer_interval = transfer_interval
         params.models = [m.contiguous() for m in models]
         params.source = wavelet.contiguous()
@@ -78,16 +90,21 @@ class Warpper(torch.autograd.Function):
         params.pml_vals = [p.contiguous() for p in pml_vals]
         params.save_all_wavefields = save_all_wavefields
         params.use_boundary_saving = use_boundary_saving
+        params.use_checkpoint = use_checkpoint
+        params.use_recursive_checkpoint = use_recursive_checkpoint
         params.boundary_on_cpu = boundary_on_cpu
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.nt = nt
         params.dt = dt
         params.spacing = spacing
+        params.checkpoint_interval = checkpoint_interval
+        params.checkpoint_count = checkpoint_count
+        params.checkpoint_steps = checkpoint_steps if checkpoint_steps is not None else torch.empty(0, dtype=torch.int32)
 
         # -------- CUDA forward --------
         (u_allt, last, syn) = forward_func(params)
-        if any([save_all_wavefields, use_boundary_saving]):
+        if any([save_all_wavefields, use_boundary_saving, use_checkpoint]):
             
             ctx.save_for_backward(
                 u_allt,
@@ -97,8 +114,12 @@ class Warpper(torch.autograd.Function):
                 source_field_indices,
                 receiver_field_indices,
                 lap_coes, grad_coes,
+                checkpoint_steps if checkpoint_steps is not None else torch.empty(0, dtype=torch.int32),
+                *checkpoint_buffers,
             )
             ctx.transfer_interval = transfer_interval
+            ctx.checkpoint_interval = checkpoint_interval
+            ctx.checkpoint_count = checkpoint_count
             ctx.models = models
             ctx.boundary_on_cpu = boundary_on_cpu
             ctx.boundary_cpu = boundary_cpu if boundary_on_cpu else ()
@@ -111,11 +132,15 @@ class Warpper(torch.autograd.Function):
             ctx.dt = dt
             ctx.free_surface = free_surface
             ctx.use_boundary_saving = use_boundary_saving
+            ctx.use_checkpoint = use_checkpoint
+            ctx.use_recursive_checkpoint = use_recursive_checkpoint
             ctx.use_pinned_memory = use_pinned_memory
             ctx.backward_func = backward_func
             ctx.backward_bs_func = backward_bs_func
+            ctx.backward_ckpt_func = backward_ckpt_func
+            ctx.backward_recursive_ckpt_func = backward_recursive_ckpt_func
             ctx.forward_source = wavelet
-
+            ctx.forward_wavefields = forward_wavefields
             ctx.adjoint_wavefields = adjoint_wavefields
 
         return syn
@@ -132,6 +157,8 @@ class Warpper(torch.autograd.Function):
             source_field_indices,
             receiver_field_indices,
             lap_coes, grad_coes,
+            checkpoint_steps,
+            *checkpoint_tensors,
         ) = ctx.saved_tensors
 
         abcn = ctx.abcn
@@ -142,6 +169,8 @@ class Warpper(torch.autograd.Function):
         params = _C.BackwardInput()
         # common
         params.transfer_interval = ctx.transfer_interval
+        params.checkpoint_interval = ctx.checkpoint_interval
+        params.checkpoint_count = ctx.checkpoint_count
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.models = [m.contiguous() for m in ctx.models]
         params.adjoint_source = adjoint_source.contiguous()
@@ -160,7 +189,17 @@ class Warpper(torch.autograd.Function):
         params.boundary_on_cpu = ctx.boundary_on_cpu
         params.use_pinned_memory = ctx.use_pinned_memory
 
-        if not ctx.use_boundary_saving:
+        if ctx.use_checkpoint:
+            params.checkpoints = list(checkpoint_tensors)
+            params.checkpoint_steps = checkpoint_steps.contiguous()
+            params.forward_source = ctx.forward_source.contiguous()
+            params.forward_sources_loc = forward_sources_loc.contiguous()
+            params.forward_wavefields = [f.zero_() for f in ctx.forward_wavefields]
+            if ctx.use_recursive_checkpoint:
+                gradients = ctx.backward_recursive_ckpt_func(params)
+            else:
+                gradients = ctx.backward_ckpt_func(params)
+        elif not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
             gradients = ctx.backward_func(params)
         else:
@@ -171,12 +210,13 @@ class Warpper(torch.autograd.Function):
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = ctx.backward_bs_func(params)
 
-        del ctx.backward_func, ctx.backward_bs_func
+        del ctx.backward_func, ctx.backward_bs_func, ctx.backward_ckpt_func, ctx.backward_recursive_ckpt_func
         del ctx.pml_vals, ctx.forward_source
+        del ctx.forward_wavefields
         del ctx.models
         # print(gradients[0].shape)
         return (
-            None, None, None, # functions
+            None, None, None, None, None, # functions
             None,      # wavelet
             None,      # sources_loc
             None,      # receivers_loc
@@ -188,6 +228,11 @@ class Warpper(torch.autograd.Function):
             None,      # spacing
             None,      # dt
             None,      # pml_vals
+            None,      # use_checkpoint
+            None,      # checkpoint_interval
+            None,      # use_recursive_checkpoint
+            None,      # checkpoint_count
+            None,      # checkpoint_steps
             None,      # use_boundary_saving
             None,      # use_pinned_memory
             None,      # free_surface
@@ -195,6 +240,7 @@ class Warpper(torch.autograd.Function):
             None,      # boundary_on_cpu
             None,      # forward wavefields
             None,      # adjoint wavefields
+            None,      # checkpoint buffers
             None,      # last_two
             None,      # boundary cpu
             None,      # boundary gpu
@@ -205,12 +251,18 @@ class PropCUDA(PropBase, torch.nn.Module):
 
     def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
+        kwargs.setdefault("use_ckpt", False)
         super().__init__(*args, **kwargs)
         
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer('dh', torch.tensor(self._dh, device=self.dev, dtype=torch.float32))
 
-        self.forward_func, self.backward_func, self.backward_bs_func = self.equation._C()
+        funcs = self.equation._C()
+        self.forward_func = funcs[0]
+        self.backward_func = funcs[1]
+        self.backward_bs_func = funcs[2]
+        self.backward_ckpt_func = funcs[3] if len(funcs) > 3 else None
+        self.backward_recursive_ckpt_func = funcs[4] if len(funcs) > 4 else None
 
         # Initialize reusable runtime buffers lazily so they always match the
         # current batch size used by the CUDA kernels.
@@ -222,6 +274,8 @@ class PropCUDA(PropBase, torch.nn.Module):
         self.boundary_cpu = ()
         self.boundary_gpu = ()
         self.boundary_gpu_full = ()
+        self.checkpoint_allocator = Allocator(self.dev)
+        self.checkpoints = ()
         self.last_two = torch.empty(0, device=self.dev)
         self._buffer_capacity_batch = None
         self._boundary_cache_mode = None
@@ -229,6 +283,10 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._boundary_cache_pinned = None
         self._boundary_cache_nt = None
         self._boundary_cache_batch = None
+        self._checkpoint_cache_interval = None
+        self._checkpoint_cache_count = None
+        self._checkpoint_cache_nt = None
+        self._checkpoint_cache_batch = None
 
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -333,6 +391,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         self.adjoint_wavefields = self.forward_allocator.zeros(wavefield_shapes)
         self._buffer_capacity_batch = target_capacity
         self._boundary_cache_batch = None
+        self._checkpoint_cache_batch = None
 
     def _slice_wavefield_buffers(self, batch_size):
         return tuple(t[:batch_size] for t in self.forward_wavefields), tuple(t[:batch_size] for t in self.adjoint_wavefields)
@@ -346,6 +405,37 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         batch_dim = 1 if self.ndim == 3 else 2
         return tuple(t.narrow(batch_dim, 0, batch_size) for t in tensors)
+
+    def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None):
+        if not self.use_ckpt or (self.backward_ckpt_func is None and self.backward_recursive_ckpt_func is None):
+            return
+
+        if checkpoint_count is not None:
+            n_checkpoints = int(checkpoint_count)
+        else:
+            n_checkpoints = max(1, (self.nt + checkpoint_interval - 1) // checkpoint_interval)
+
+        if (
+            self._checkpoint_cache_batch == self.B
+            and self._checkpoint_cache_interval == checkpoint_interval
+            and self._checkpoint_cache_count == n_checkpoints
+            and self._checkpoint_cache_nt == self.nt
+        ):
+            return
+
+        checkpoint_shape = [n_checkpoints, self.B, 1, *self.shape_cuda]
+        num_checkpoint_tensors = 2 + self.equation.pml_nvar
+        self.checkpoint_allocator = Allocator(self.dev)
+        self.checkpoints = tuple(self.checkpoint_allocator.zeros([checkpoint_shape] * num_checkpoint_tensors))
+        self._checkpoint_cache_batch = self.B
+        self._checkpoint_cache_interval = checkpoint_interval
+        self._checkpoint_cache_count = n_checkpoints
+        self._checkpoint_cache_nt = self.nt
+
+    def _slice_checkpoint_buffers(self, batch_size):
+        if not self.checkpoints:
+            return ()
+        return tuple(t[:, :batch_size] for t in self.checkpoints)
 
     @torch._dynamo.disable
     def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
@@ -383,10 +473,23 @@ class PropCUDA(PropBase, torch.nn.Module):
         nshots = sources.shape[0]
         batch_size = 1 if source_encoding else nshots
         self._ensure_wavefield_buffers(batch_size)
+        use_recursive_checkpoint = bool(self.use_ckpt and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None)
+        if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
+            raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
+        checkpoint_steps = torch.empty(0, dtype=torch.int32)
+        if self.use_ckpt:
+            if use_recursive_checkpoint:
+                checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
+                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()))
+            elif self.backward_ckpt_func is not None:
+                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
+        checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if self.use_ckpt else ()
 
         # Set zeros
         self.forward_allocator.zero_()
+        if self.use_ckpt and checkpoint_buffers:
+            self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
                 self._ensure_boundary_buffers(boundary_on_cpu, transfer_interval, use_pinned_memory)
@@ -466,6 +569,8 @@ class PropCUDA(PropBase, torch.nn.Module):
                 self.forward_func, 
                 self.backward_func, 
                 self.backward_bs_func,
+                self.backward_ckpt_func,
+                self.backward_recursive_ckpt_func,
                 wavelet,
                 sources,
                 receivers,
@@ -477,6 +582,11 @@ class PropCUDA(PropBase, torch.nn.Module):
                 spacing,
                 self._dt,
                 self.equation.b,
+                self.use_ckpt,
+                self.ckpt_chunks,
+                use_recursive_checkpoint,
+                int(checkpoint_steps.numel()),
+                checkpoint_steps,
                 use_boundary_saving,
                 use_pinned_memory,
                 self.free_surface,
@@ -484,6 +594,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 boundary_on_cpu,
                 forward_wavefields,
                 adjoint_wavefields,
+                checkpoint_buffers,
                 last_two,
                 boundary_cpu,
                 boundary_gpu,
@@ -491,3 +602,12 @@ class PropCUDA(PropBase, torch.nn.Module):
             )
         
         return syn
+
+    def _build_recursive_checkpoint_steps(self, nt, checkpoint_count):
+        checkpoint_count = int(max(0, checkpoint_count))
+        if checkpoint_count == 0 or nt <= 1:
+            return torch.empty(0, dtype=torch.int32)
+
+        steps = np.linspace(1, nt - 1, num=checkpoint_count + 2, dtype=np.int32)[1:-1]
+        steps = np.unique(steps)
+        return torch.from_numpy(steps.astype(np.int32, copy=False))

@@ -75,6 +75,15 @@ ForwardOutput forward(const ForwardInput& in)
     if (p.save_all_wavefields)
         u_allt = torch::zeros({nt, B, nz, ny, nx}, vp.options());
 
+    if (p.use_checkpoint) {
+        TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+        TORCH_CHECK(p.checkpoints.size() == 8, "Acoustic 3D checkpointing expects 8 checkpoint tensors");
+        if (p.use_recursive_checkpoint) {
+            TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
+            TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+        }
+    }
+
     // ----------------------------
     // boundary saving (3D)
     // ----------------------------
@@ -115,6 +124,9 @@ ForwardOutput forward(const ForwardInput& in)
     int buf_idx = 0;
     int gpu_idx = 0;
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    int next_ckpt_idx = 0;
+    int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
+    const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     // ============================================================
     // time stepping
@@ -215,6 +227,27 @@ ForwardOutput forward(const ForwardInput& in)
         );
 
         wavefield.swap();
+
+        if (p.use_checkpoint) {
+            int ckpt_idx = -1;
+            if (p.use_recursive_checkpoint) {
+                if (next_ckpt_idx < num_checkpoint_steps && checkpoint_steps[next_ckpt_idx] == it + 1)
+                    ckpt_idx = next_ckpt_idx++;
+            } else if (((it + 1) % p.checkpoint_interval == 0) && (it + 1 < p.nt)) {
+                ckpt_idx = (it + 1) / p.checkpoint_interval;
+            }
+
+            if (ckpt_idx >= 0) {
+                p.checkpoints[0].select(0, ckpt_idx).copy_(wavefield.u_prev_t);
+                p.checkpoints[1].select(0, ckpt_idx).copy_(wavefield.u_now_t);
+                p.checkpoints[2].select(0, ckpt_idx).copy_(wavefield.psix_t);
+                p.checkpoints[3].select(0, ckpt_idx).copy_(wavefield.psiy_t);
+                p.checkpoints[4].select(0, ckpt_idx).copy_(wavefield.psiz_t);
+                p.checkpoints[5].select(0, ckpt_idx).copy_(wavefield.zetax_t);
+                p.checkpoints[6].select(0, ckpt_idx).copy_(wavefield.zetay_t);
+                p.checkpoints[7].select(0, ckpt_idx).copy_(wavefield.zetaz_t);
+            }
+        }
     }
 
     if (p.use_boundary_saving) {

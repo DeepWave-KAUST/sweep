@@ -26,6 +26,10 @@ def build_parser():
     parser.add_argument("--use-boundary-saving", action="store_true")
     parser.add_argument("--boundary-storage", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--transfer-interval", type=int, default=1)
+    parser.add_argument("--use-checkpoint", action="store_true")
+    parser.add_argument("--checkpoint-mode", choices=("chunk", "recursive"), default="chunk")
+    parser.add_argument("--checkpoint-chunks", type=int, default=100)
+    parser.add_argument("--checkpoint-count", type=int, default=4)
     parser.add_argument("--pinned-memory", action="store_true")
     parser.add_argument("--measure-memory", action="store_true")
     parser.add_argument("--profile-segments", action="store_true")
@@ -105,6 +109,11 @@ def main():
         f"enabled={args.use_boundary_saving}, storage={args.boundary_storage}, "
         f"transfer_interval={args.transfer_interval}, pinned_memory={args.pinned_memory}"
     )
+    print(
+        "Checkpointing: "
+        f"enabled={args.use_checkpoint}, checkpoint_mode={args.checkpoint_mode}, "
+        f"checkpoint_chunks={args.checkpoint_chunks}, checkpoint_count={args.checkpoint_count}"
+    )
     print_params(
         args,
         backend="cuda3d",
@@ -114,6 +123,8 @@ def main():
     )
 
     call_kwargs = {}
+    if args.use_boundary_saving and args.use_checkpoint:
+        raise ValueError("--use-boundary-saving and --use-checkpoint cannot be used together.")
     if args.use_boundary_saving:
         call_kwargs["use_boundary_saving"] = True
         call_kwargs["boundary_saving_config"] = {
@@ -135,7 +146,10 @@ def main():
             abcn=args.abcn,
             free_surface=False,
             pml_type="cpmlr",
-            use_ckpt=False,
+            use_ckpt=args.use_checkpoint,
+            ckpt_mode=args.checkpoint_mode,
+            ckpt_chunks=args.checkpoint_chunks,
+            ckpt_num=args.checkpoint_count,
             nt=args.nt,
         )
         vp = torch.from_numpy(case["vp"]).to(device).requires_grad_(True)

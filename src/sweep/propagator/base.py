@@ -14,6 +14,8 @@ class PropBase:
                  dev=None, 
                  use_ckpt=True,
                  ckpt_chunks=100,
+                 ckpt_mode="chunk",
+                 ckpt_num=0,
                  pml_type='spml',
                  nt=-1,
                  B=1,
@@ -34,6 +36,11 @@ class PropBase:
             dev (str, optional): The device to run the simulation on. Defaults to None.
             use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 50.
+            ckpt_mode (str, optional): Checkpointing mode. "chunk" stores periodic checkpoints and
+                replays each chunk, while "recursive" stores a fixed number of checkpoints and
+                recursively recomputes intermediate states. Defaults to "chunk".
+            ckpt_num (int, optional): Number of persistent checkpoints to save when
+                ckpt_mode="recursive". Defaults to 0.
             pml_type (str, optional): The type of PML to use. Defaults to 'spml'. Options include 'spml', 'cpml', 'cpmlr', etc.
             nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
             B (int, optional): The batch size for the simulation. Defaults to 1.
@@ -58,6 +65,8 @@ class PropBase:
         self._dt = float(dt)
         self.use_ckpt = use_ckpt
         self.ckpt_chunks = ckpt_chunks
+        self.ckpt_mode = ckpt_mode
+        self.ckpt_num = ckpt_num
         self.ndim = len(shape)
         self.pml_type = pml_type
 

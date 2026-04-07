@@ -51,10 +51,11 @@ kwargs_modeling = dict(shape=vp.shape,
                        nt=nt,
                        boundary_saving_config = {
                             "enabled": True,
-                            "storage": "cpu",
+                            "storage": "gpu",
                             "transfer_interval": 99,
                             "pinned_memory": True,
-                            }
+                            },
+                        use_ckpt=False,
                         )
 
 solver_cuda = PropCUDA(Acoustic3D(**kwargs_eq), **kwargs_modeling)
@@ -66,14 +67,14 @@ vp.grad = None
 syn = solver_cuda(wave, sources, receivers, models=[vp], use_boundary_saving=True)
 syn.pow(2).sum().backward()
 grad_cuda_bs = vp.grad.cpu().numpy()
-grad_cuda_bs /= grad_cuda_bs.max()
+# grad_cuda_bs /= grad_cuda_bs.max()
 # CUDA WITHOUT BOUNDARY SAVING
 print('Running CUDA without boundary saving...')
 vp.grad = None
 syn = solver_cuda(wave, sources, receivers, models=[vp], use_boundary_saving=False)
 syn.pow(2).sum().backward()
 grad_cuda_nobs = vp.grad.cpu().numpy()
-grad_cuda_nobs /= grad_cuda_nobs.max()
+# grad_cuda_nobs /= grad_cuda_nobs.max()
 
 # PYTORCH AD
 print('Running PyTorch AD...')
@@ -81,37 +82,48 @@ vp.grad = None
 syn = solver_torch(wave, sources, receivers, models=[vp])
 syn.pow(2).sum().backward()
 grad_torch = vp.grad.cpu().numpy()
-grad_torch /= grad_torch.max()
+# grad_torch /= grad_torch.max()
 
 fig, axes = plt.subplots(3, 3, figsize=(18, 12))
 
 vmin, vmax = np.percentile(grad_torch, [1, 99])
+vmin_bs, vmax_bs = np.percentile(grad_cuda_bs, [1, 99])
 kwargs = dict(vmin=vmin, vmax=vmax, cmap='RdBu_r', aspect='auto')
-axes[0, 0].imshow(grad_cuda_nobs[nz//2], **kwargs)
+# kwargs_bs = dict(vmin=vmin_bs, vmax=vmax_bs, cmap='RdBu_r', aspect='auto')
+ax = axes[0, 0].imshow(grad_cuda_nobs[nz//2], **kwargs)
+plt.colorbar(ax, ax=axes[0, 0])
 axes[0, 0].set_title('CUDA No Boundary Saving')
 
-axes[0, 1].imshow(grad_cuda_bs[nz//2], **kwargs)
+ax = axes[0, 1].imshow(grad_cuda_bs[nz//2], **kwargs)
+plt.colorbar(ax, ax=axes[0, 1])
 axes[0, 1].set_title('CUDA With Boundary Saving')
 
-axes[0, 2].imshow(grad_torch[nz//2], **kwargs)
+ax = axes[0, 2].imshow(grad_torch[nz//2], **kwargs)
+plt.colorbar(ax, ax=axes[0, 2])
 axes[0, 2].set_title('PyTorch AD')
 
-axes[1, 0].imshow(grad_cuda_nobs[:, ny//2], **kwargs)
+ax = axes[1, 0].imshow(grad_cuda_nobs[:, ny//2], **kwargs)
+plt.colorbar(ax, ax=axes[1, 0])
 axes[1, 0].set_title('CUDA No Boundary Saving')
 
-axes[1, 1].imshow(grad_cuda_bs[:, ny//2], **kwargs)
+ax = axes[1, 1].imshow(grad_cuda_bs[:, ny//2], **kwargs)
+plt.colorbar(ax, ax=axes[1, 1])
 axes[1, 1].set_title('CUDA With Boundary Saving')
 
-axes[1, 2].imshow(grad_torch[:, ny//2], **kwargs)
+ax = axes[1, 2].imshow(grad_torch[:, ny//2], **kwargs)
+plt.colorbar(ax, ax=axes[1, 2])
 axes[1, 2].set_title('PyTorch AD')
 
-axes[2, 0].imshow(grad_cuda_nobs[:, :, nx//2], **kwargs)
+ax = axes[2, 0].imshow(grad_cuda_nobs[:, :, nx//2], **kwargs)
+plt.colorbar(ax, ax=axes[2, 0])
 axes[2, 0].set_title('CUDA No Boundary Saving')
 
-axes[2, 1].imshow(grad_cuda_bs[:, :, nx//2], **kwargs)
+ax = axes[2, 1].imshow(grad_cuda_bs[:, :, nx//2], **kwargs)
+plt.colorbar(ax, ax=axes[2, 1])
 axes[2, 1].set_title('CUDA With Boundary Saving')
 
-axes[2, 2].imshow(grad_torch[:, :, nx//2], **kwargs)
+ax = axes[2, 2].imshow(grad_torch[:, :, nx//2], **kwargs)
+plt.colorbar(ax, ax=axes[2, 2])
 axes[2, 2].set_title('PyTorch AD')
 
 plt.tight_layout()
