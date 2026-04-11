@@ -16,11 +16,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic3d_backward_bs", wrap_backward(acoustic3d::backward_bs), "Acoustic backward with boundary saving 3D (CUDA)");
     m.def("acoustic3d_backward_ckpt", wrap_backward(acoustic3d::backward_ckpt), "Acoustic backward with checkpointing 3D (CUDA)");
     m.def("acoustic3d_backward_recursive_ckpt", wrap_backward(acoustic3d::backward_recursive_ckpt), "Acoustic backward with recursive checkpointing 3D (CUDA)");
+    m.def("acoustic3d_rtm", wrap_rtm(acoustic3d::rtm), "Acoustic RTM 3D (CUDA)");
     m.def("elastic2d_forward", wrap_forward(elastic2d::forward), "Elastic forward 2D (CUDA)");
     m.def("elastic2d_backward", wrap_backward(elastic2d::backward), "Elastic backward 2D (CUDA)");
     m.def("elastic2d_backward_bs", wrap_backward(elastic2d::backward_bs), "Elastic backward with boundary saving 2D (CUDA)");
+    m.def("elastic2d_backward_ckpt", wrap_backward(elastic2d::backward_ckpt), "Elastic backward with checkpointing 2D (CUDA)");
+    m.def("elastic2d_backward_recursive_ckpt", wrap_backward(elastic2d::backward_recursive_ckpt), "Elastic backward with recursive checkpointing 2D (CUDA)");
     m.def("elastic3d_forward", wrap_forward(elastic3d::forward), "Elastic forward 3D (CUDA)");
     m.def("elastic3d_backward_bs", wrap_backward(elastic3d::backward_bs), "Elastic backward with boundary saving 3D (CUDA)");
+    m.def("elastic3d_backward_ckpt", wrap_backward(elastic3d::backward_ckpt), "Elastic backward with checkpointing 3D (CUDA)");
+    m.def("elastic3d_backward_recursive_ckpt", wrap_backward(elastic3d::backward_recursive_ckpt), "Elastic backward with recursive checkpointing 3D (CUDA)");
+    m.def("elastic3d_backward", wrap_backward(elastic3d::backward), "Elastic backward 3D (CUDA)");
     
     py::class_<ForwardInput>(m, "ForwardInput")
         .def(py::init<>())
@@ -84,6 +90,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("checkpoint_count", &BackwardInput::checkpoint_count)
         .def_readwrite("forward_wavefields", &BackwardInput::forward_wavefields)
         .def_readwrite("adjoint_wavefields", &BackwardInput::adjoint_wavefields)
+        .def_readwrite("adjoint_workspace", &BackwardInput::adjoint_workspace)
         .def_readwrite("boundary_cpu", &BackwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu)
         .def_readwrite("checkpoint_steps", &BackwardInput::checkpoint_steps);

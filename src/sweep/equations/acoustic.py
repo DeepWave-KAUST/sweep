@@ -89,3 +89,7 @@ class Acoustic(SecondOrderEquation):
     @property
     def last_two_storage_nvar(self):
         return 1
+
+    @property
+    def checkpoint_nvar(self):
+        return 6

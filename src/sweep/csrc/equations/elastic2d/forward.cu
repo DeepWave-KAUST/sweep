@@ -14,6 +14,33 @@
 
 namespace elastic2d {
 
+namespace {
+
+void save_checkpoint_state_2d(
+    const ForwardInput& p,
+    const ElasticWavefieldTensor& wavefield,
+    int checkpoint_idx
+)
+{
+    p.checkpoints[0].select(0, checkpoint_idx).copy_(wavefield.vx_t);
+    p.checkpoints[1].select(0, checkpoint_idx).copy_(wavefield.vz_t);
+    p.checkpoints[2].select(0, checkpoint_idx).copy_(wavefield.sxx_t);
+    p.checkpoints[3].select(0, checkpoint_idx).copy_(wavefield.szz_t);
+    p.checkpoints[4].select(0, checkpoint_idx).copy_(wavefield.sxz_t);
+    p.checkpoints[5].select(0, checkpoint_idx).copy_(wavefield.m_vxx_t);
+    p.checkpoints[6].select(0, checkpoint_idx).copy_(wavefield.m_vxz_t);
+    p.checkpoints[7].select(0, checkpoint_idx).copy_(wavefield.m_vzx_t);
+    p.checkpoints[8].select(0, checkpoint_idx).copy_(wavefield.m_vzz_t);
+    p.checkpoints[9].select(0, checkpoint_idx).copy_(wavefield.m_sxxx_t);
+    p.checkpoints[10].select(0, checkpoint_idx).copy_(wavefield.m_sxxz_t);
+    p.checkpoints[11].select(0, checkpoint_idx).copy_(wavefield.m_szzx_t);
+    p.checkpoints[12].select(0, checkpoint_idx).copy_(wavefield.m_szzz_t);
+    p.checkpoints[13].select(0, checkpoint_idx).copy_(wavefield.m_sxzx_t);
+    p.checkpoints[14].select(0, checkpoint_idx).copy_(wavefield.m_sxzz_t);
+}
+
+} // namespace
+
 ForwardOutput forward(const ForwardInput& in)
 {
 
@@ -56,6 +83,16 @@ ForwardOutput forward(const ForwardInput& in)
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
 
+    if (p.use_checkpoint) {
+        TORCH_CHECK(p.checkpoints.size() == 15, "Elastic 2D checkpointing expects 15 checkpoint tensors");
+        if (p.use_recursive_checkpoint) {
+            TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
+            TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+        } else {
+            TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+        }
+    }
+
     torch::Tensor u_allt;
     if (p.save_all_wavefields) u_allt = torch::zeros({p.nt, 2, B, nz, nx}, vp.options()); // Only save Vx and Vz.
 
@@ -84,6 +121,9 @@ ForwardOutput forward(const ForwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    int next_ckpt_idx = 0;
+    int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
+    const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
@@ -125,6 +165,21 @@ ForwardOutput forward(const ForwardInput& in)
                 nsrc,
                 solver
             );
+        }
+
+        if (p.use_checkpoint) {
+            int ckpt_idx = -1;
+            if (p.use_recursive_checkpoint) {
+                if (next_ckpt_idx < num_checkpoint_steps && checkpoint_steps[next_ckpt_idx] == static_cast<int>(it + 1)) {
+                    ckpt_idx = next_ckpt_idx;
+                    ++next_ckpt_idx;
+                }
+            } else if (((it + 1) % p.checkpoint_interval == 0) && (it + 1 < p.nt)) {
+                ckpt_idx = static_cast<int>((it + 1) / p.checkpoint_interval);
+            }
+            if (ckpt_idx >= 0) {
+                save_checkpoint_state_2d(p, wavefield, ckpt_idx);
+            }
         }
 
         if (p.use_boundary_saving) {

@@ -63,6 +63,15 @@ struct BackwardOutput {
     std::vector<torch::Tensor> grads;
 };
 
+struct RTMOutput {
+
+    torch::Tensor image;
+
+    torch::Tensor source_illumination;
+
+    torch::Tensor receiver_illumination;
+};
+
 struct BackwardInput {
 
     // forward wavefield (used in normal backward)
@@ -77,6 +86,7 @@ struct BackwardInput {
     // Wavefields
     std::vector<torch::Tensor> adjoint_wavefields; // Bind from python
     std::vector<torch::Tensor> forward_wavefields; // Bind from python
+    std::vector<torch::Tensor> adjoint_workspace; // Bind from python
 
     // Wavefields
     std::vector<torch::Tensor> boundary_cpu; // Bind from python

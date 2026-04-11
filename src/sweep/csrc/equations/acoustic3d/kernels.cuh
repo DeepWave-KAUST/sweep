@@ -229,7 +229,8 @@ __global__ void acoustic_nopml_3d(
         f.u_prev[idx] +
         (v * v) * solver.dt * solver.dt * w_sum;
 
-    u_this_b[idx] = (v * v) * w_sum;
+    if (u_this_b != nullptr)
+        u_this_b[idx] = (v * v) * w_sum;
 }
 
 __global__ void calculate_grad_3d(
@@ -248,4 +249,13 @@ __global__ void calculate_grad_utt_3d(
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
     int B, int nx, int ny, int nz, float dt
+);
+
+__global__ void accumulate_rtm_image_3d(
+    const float* __restrict__ u_forward,
+    const float* __restrict__ u_backward,
+    float* __restrict__ image,
+    float* __restrict__ source_illumination,
+    float* __restrict__ receiver_illumination,
+    int B, int nx, int ny, int nz
 );

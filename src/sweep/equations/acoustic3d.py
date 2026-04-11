@@ -80,6 +80,11 @@ class Acoustic3D(SecondOrderEquation):
             acoustic3d_backward_recursive_ckpt,
         )
 
+    def _C_rtm(self):
+        from sweep._C import acoustic3d_rtm
+
+        return acoustic3d_rtm
+
     @property
     def base_nvar(self):
         return 3
@@ -95,3 +100,7 @@ class Acoustic3D(SecondOrderEquation):
     @property
     def last_two_storage_nvar(self):
         return 1
+
+    @property
+    def checkpoint_nvar(self):
+        return 8

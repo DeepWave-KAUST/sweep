@@ -20,6 +20,7 @@ class PropBase:
                  nt=-1,
                  B=1,
                  allow_growth=True,
+                 full_mode="full",
                  boundary_saving_config=None,
                  **kwargs):
         """Base class for the RNN
@@ -73,6 +74,7 @@ class PropBase:
         self.nt = nt
         self.B = B
         self.allow_growth = allow_growth
+        self.full_mode = full_mode
         legacy_boundary_config = {
             "transfer_interval": kwargs.pop("transfer_interval", 1),
             "storage": "cpu" if kwargs.pop("boundary_on_cpu", False) else "gpu",

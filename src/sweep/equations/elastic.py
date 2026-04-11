@@ -84,7 +84,13 @@ class Elastic(FirstOrderEquation):
     def _C(self, ):
         # CUDA IMPLEMENTATION
         import sweep._C as _C
-        return (_C.elastic2d_forward, _C.elastic2d_backward, _C.elastic2d_backward_bs)
+        return (
+            _C.elastic2d_forward,
+            _C.elastic2d_backward,
+            _C.elastic2d_backward_bs,
+            _C.elastic2d_backward_ckpt,
+            _C.elastic2d_backward_recursive_ckpt,
+        )
 
     @property
     def base_nvar(self,):
@@ -101,3 +107,7 @@ class Elastic(FirstOrderEquation):
     @property
     def last_two_storage_nvar(self):
         return self.base_nvar
+
+    @property
+    def backward_workspace_nvar(self):
+        return 8

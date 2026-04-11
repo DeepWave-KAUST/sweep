@@ -10,4 +10,8 @@ BackwardOutput backward(const BackwardInput& in);
 
 BackwardOutput backward_bs(const BackwardInput& in);
 
+BackwardOutput backward_ckpt(const BackwardInput& in);
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
+
 }

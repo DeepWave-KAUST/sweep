@@ -17,6 +17,54 @@
 
 namespace elastic3d {
 
+namespace {
+
+void save_checkpoint_state_3d(
+    const ForwardInput& p,
+    const ElasticWavefieldTensor& wavefield,
+    int checkpoint_idx
+)
+{
+    p.checkpoints[0].select(0, checkpoint_idx).copy_(wavefield.vx_t);
+    p.checkpoints[1].select(0, checkpoint_idx).copy_(wavefield.vy_t);
+    p.checkpoints[2].select(0, checkpoint_idx).copy_(wavefield.vz_t);
+    p.checkpoints[3].select(0, checkpoint_idx).copy_(wavefield.sxx_t);
+    p.checkpoints[4].select(0, checkpoint_idx).copy_(wavefield.syy_t);
+    p.checkpoints[5].select(0, checkpoint_idx).copy_(wavefield.szz_t);
+    p.checkpoints[6].select(0, checkpoint_idx).copy_(wavefield.sxy_t);
+    p.checkpoints[7].select(0, checkpoint_idx).copy_(wavefield.sxz_t);
+    p.checkpoints[8].select(0, checkpoint_idx).copy_(wavefield.syz_t);
+    p.checkpoints[9].select(0, checkpoint_idx).copy_(wavefield.m_vxx_t);
+    p.checkpoints[10].select(0, checkpoint_idx).copy_(wavefield.m_vxy_t);
+    p.checkpoints[11].select(0, checkpoint_idx).copy_(wavefield.m_vxz_t);
+    p.checkpoints[12].select(0, checkpoint_idx).copy_(wavefield.m_vyx_t);
+    p.checkpoints[13].select(0, checkpoint_idx).copy_(wavefield.m_vyy_t);
+    p.checkpoints[14].select(0, checkpoint_idx).copy_(wavefield.m_vyz_t);
+    p.checkpoints[15].select(0, checkpoint_idx).copy_(wavefield.m_vzx_t);
+    p.checkpoints[16].select(0, checkpoint_idx).copy_(wavefield.m_vzy_t);
+    p.checkpoints[17].select(0, checkpoint_idx).copy_(wavefield.m_vzz_t);
+    p.checkpoints[18].select(0, checkpoint_idx).copy_(wavefield.m_sxxx_t);
+    p.checkpoints[19].select(0, checkpoint_idx).copy_(wavefield.m_sxxy_t);
+    p.checkpoints[20].select(0, checkpoint_idx).copy_(wavefield.m_sxxz_t);
+    p.checkpoints[21].select(0, checkpoint_idx).copy_(wavefield.m_syyx_t);
+    p.checkpoints[22].select(0, checkpoint_idx).copy_(wavefield.m_syyy_t);
+    p.checkpoints[23].select(0, checkpoint_idx).copy_(wavefield.m_syyz_t);
+    p.checkpoints[24].select(0, checkpoint_idx).copy_(wavefield.m_szzx_t);
+    p.checkpoints[25].select(0, checkpoint_idx).copy_(wavefield.m_szzy_t);
+    p.checkpoints[26].select(0, checkpoint_idx).copy_(wavefield.m_szzz_t);
+    p.checkpoints[27].select(0, checkpoint_idx).copy_(wavefield.m_sxyx_t);
+    p.checkpoints[28].select(0, checkpoint_idx).copy_(wavefield.m_sxyy_t);
+    p.checkpoints[29].select(0, checkpoint_idx).copy_(wavefield.m_sxyz_t);
+    p.checkpoints[30].select(0, checkpoint_idx).copy_(wavefield.m_sxzx_t);
+    p.checkpoints[31].select(0, checkpoint_idx).copy_(wavefield.m_sxzy_t);
+    p.checkpoints[32].select(0, checkpoint_idx).copy_(wavefield.m_sxzz_t);
+    p.checkpoints[33].select(0, checkpoint_idx).copy_(wavefield.m_syzx_t);
+    p.checkpoints[34].select(0, checkpoint_idx).copy_(wavefield.m_syzy_t);
+    p.checkpoints[35].select(0, checkpoint_idx).copy_(wavefield.m_syzz_t);
+}
+
+} // namespace
+
 ForwardOutput forward(const ForwardInput& in)
 {
     const auto& p = in;
@@ -44,6 +92,8 @@ ForwardOutput forward(const ForwardInput& in)
         wavefield.bind(p.wavefields, true);
     else
         wavefield.allocate(vp, 3);
+    if (!wavefield.m_syzx_t.defined())
+        wavefield.m_syzx_t = torch::zeros_like(vp);
     auto wf = wavefield.view();
 
     auto mu  = rho * vs * vs;
@@ -61,8 +111,19 @@ ForwardOutput forward(const ForwardInput& in)
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
 
+    if (p.use_checkpoint) {
+        TORCH_CHECK(p.checkpoints.size() == 36, "Elastic 3D checkpointing expects 36 checkpoint tensors");
+        if (p.use_recursive_checkpoint) {
+            TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
+            TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+        } else {
+            TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+        }
+    }
+
     torch::Tensor u_allt;
-    // if (save_all_wavefields) u_allt = torch::zeros({nt, 2, B, nz, ny, nx}, vp.options()); // Only save Vx and Vz.
+    if (p.save_all_wavefields)
+        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -96,11 +157,14 @@ ForwardOutput forward(const ForwardInput& in)
 
     // For copying data
     AsyncCopyContext async_copy(p.boundary_on_cpu && p.use_boundary_saving);
+    int next_ckpt_idx = 0;
+    int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
+    const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
         buf_idx = it % interval;
-        // u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+        u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
 
         LAUNCH_3DELASTIC_VELOCITY(
             order,
@@ -137,6 +201,21 @@ ForwardOutput forward(const ForwardInput& in)
                 nsrc,
                 solver
             );
+        }
+
+        if (p.use_checkpoint) {
+            int ckpt_idx = -1;
+            if (p.use_recursive_checkpoint) {
+                if (next_ckpt_idx < num_checkpoint_steps && checkpoint_steps[next_ckpt_idx] == static_cast<int>(it + 1)) {
+                    ckpt_idx = next_ckpt_idx;
+                    ++next_ckpt_idx;
+                }
+            } else if (((it + 1) % p.checkpoint_interval == 0) && (it + 1 < p.nt)) {
+                ckpt_idx = static_cast<int>((it + 1) / p.checkpoint_interval);
+            }
+            if (ckpt_idx >= 0) {
+                save_checkpoint_state_3d(p, wavefield, ckpt_idx);
+            }
         }
 
         if (p.use_boundary_saving) {

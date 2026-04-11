@@ -61,22 +61,40 @@
         else                   calculate_grad_elastic_nobs<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_ELASTIC_VELOCITY_ADJOINT(order, grid, block, ...)                     \
+#define LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(order, grid, block, ...)                       \
     do {                                                        \
-        if      ((order) == 2) elastic_velocity_adjoint_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_kernel<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) elastic_stress_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) elastic_stress_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) elastic_stress_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) elastic_stress_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   elastic_stress_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_ELASTIC_STRESS_ADJOINT(order, grid, block, ...)                       \
+#define LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(order, grid, block, ...)                       \
     do {                                                        \
-        if      ((order) == 2) elastic_stress_adjoint_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_kernel<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) elastic_stress_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) elastic_stress_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) elastic_stress_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) elastic_stress_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   elastic_stress_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__);\
+    } while (0)
+
+#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...)                       \
+    do {                                                        \
+        if      ((order) == 2) elastic_velocity_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) elastic_velocity_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) elastic_velocity_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) elastic_velocity_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   elastic_velocity_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__);\
+    } while (0)
+
+#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(order, grid, block, ...)                       \
+    do {                                                        \
+        if      ((order) == 2) elastic_velocity_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) elastic_velocity_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) elastic_velocity_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) elastic_velocity_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   elastic_velocity_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
 
@@ -335,14 +353,16 @@ __global__ void elastic_stress_kernel_nopml(
 }
 
 template<int Order>
-__global__ void elastic_velocity_adjoint_kernel(
+__global__ void elastic_stress_adjoint_prepare(
     ElasticWavefieldPointer wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
-
-    SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
-    SolverContext solver
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qzz,
+    float* __restrict__ qxz,
+    float* __restrict__ qzx
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -351,68 +371,59 @@ __global__ void elastic_velocity_adjoint_kernel(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
-    // Wavefields
     auto f = wf.offset(b, spatial_size);
 
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
+    float* qxx_b = qxx + b * spatial_size;
+    float* qzz_b = qzz + b * spatial_size;
+    float* qxz_b = qxz + b * spatial_size;
+    float* qzx_b = qzx + b * spatial_size;
 
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
     float bzh = cpml.bzh[iz];
-
     float ax = cpml.ax[ix];
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD> (f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = sgradient<2, Order, Z, DIFF_FORWARD> (f.szz, ix, 0, iz, grad_ctx);
-    float dszz_dx = sgradient<2, Order, X, DIFF_FORWARD> (f.szz, ix, 0, iz, grad_ctx);
-    float dsxx_dz = sgradient<2, Order, Z, DIFF_FORWARD> (f.sxx, ix, 0, iz, grad_ctx);
+    float lam = lam_b[idx];
+    float mu_ = mu_b[idx];
 
-    f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
-    dsxx_dx += f.m_sxxx[idx];
-    f.m_sxxz[idx] = azh * f.m_sxxz[idx] + bzh * dsxx_dz; //new
-    dsxx_dz += f.m_sxxz[idx];
+    float bar_dvx_dx = solver.dt * ((lam + 2.f * mu_) * f.sxx[idx] + lam * f.szz[idx]);
+    float bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * f.szz[idx] + lam * f.sxx[idx]);
+    float bar_dvx_dz = solver.dt * mu_ * f.sxz[idx];
+    float bar_dvz_dx = solver.dt * mu_ * f.sxz[idx];
 
-    f.m_szzx[idx] = axh * f.m_szzx[idx] + bxh * dszz_dx; //new
-    dszz_dx += f.m_szzx[idx];
-    f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
-    dszz_dz += f.m_szzz[idx];
+    float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
+    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
+    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz;
+    float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
 
-    f.m_sxzx[idx] = ax * f.m_sxzx[idx] + bx * dsxz_dx;
-    dsxz_dx += f.m_sxzx[idx];
-    f.m_sxzz[idx] = az * f.m_sxzz[idx] + bz * dsxz_dz;
-    dsxz_dz += f.m_sxzz[idx];
+    qxx_b[idx] = bar_dvx_dx + bx * tmp_vxx;
+    qzz_b[idx] = bar_dvz_dz + bz * tmp_vzz;
+    qxz_b[idx] = bar_dvx_dz + bzh * tmp_vxz;
+    qzx_b[idx] = bar_dvz_dx + bxh * tmp_vzx;
 
-    f.vx[idx] += solver.dt *
-        ((lam_b[idx] + 2.f*mu_b[idx]) * dsxx_dx + lam_b[idx] * dszz_dx + mu_b[idx] * dsxz_dz);
-
-    f.vz[idx] += solver.dt *
-        ((lam_b[idx] + 2.f*mu_b[idx]) * dszz_dz + lam_b[idx] * dsxx_dz + mu_b[idx] * dsxz_dx);
+    f.m_vxx[idx] = ax * tmp_vxx;
+    f.m_vzz[idx] = az * tmp_vzz;
+    f.m_vxz[idx] = azh * tmp_vxz;
+    f.m_vzx[idx] = axh * tmp_vzx;
 }
 
 template<int Order>
-__global__ void elastic_stress_adjoint_kernel(
+__global__ void elastic_stress_adjoint_apply(
     ElasticWavefieldPointer wf,
-    const float* __restrict__ rho,
+    const float* __restrict__ qxx,
+    const float* __restrict__ qzz,
+    const float* __restrict__ qxz,
+    const float* __restrict__ qzx,
     SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -431,45 +442,125 @@ __global__ void elastic_stress_adjoint_kernel(
         return;
 
     int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* qxx_b = qxx + b * spatial_size;
+    const float* qzz_b = qzz + b * spatial_size;
+    const float* qxz_b = qxz + b * spatial_size;
+    const float* qzx_b = qzx + b * spatial_size;
+
+    float dqxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(qxx_b, ix, 0, iz, grad_ctx);
+    float dqxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(qxz_b, ix, 0, iz, grad_ctx);
+    float dqzx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qzx_b, ix, 0, iz, grad_ctx);
+    float dqzz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(qzz_b, ix, 0, iz, grad_ctx);
+
+    int idx = iz * solver.nx + ix;
+    f.vx[idx] += dqxx_dx + dqxz_dz;
+    f.vz[idx] += dqzx_dx + dqzz_dz;
+}
+
+template<int Order>
+__global__ void elastic_velocity_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ rho,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ pxx,
+    float* __restrict__ pzz,
+    float* __restrict__ pxz,
+    float* __restrict__ pzx
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
-    // Wavefields
     auto f = wf.offset(b, spatial_size);
+
+    const float* rho_b = rho + b * spatial_size;
+    float* pxx_b = pxx + b * spatial_size;
+    float* pzz_b = pzz + b * spatial_size;
+    float* pxz_b = pxz + b * spatial_size;
+    float* pzx_b = pzx + b * spatial_size;
 
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
     float bzh = cpml.bzh[iz];
-
     float ax = cpml.ax[ix];
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    const float* rho_b = rho + b * spatial_size;
-
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD> (f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD> (f.vz, ix, 0, iz, grad_ctx);
-    float dvx_dz = sgradient<2, Order, Z, DIFF_FORWARD>  (f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>  (f.vz, ix, 0, iz, grad_ctx);
-    
     float inv_rho = 1.f / rho_b[idx];
-    
-    // Update PML memory variables
-    f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
-    dvx_dx += f.m_vxx[idx];
-    f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
-    dvx_dz += f.m_vxz[idx];
-    f.m_vzx[idx] = axh * f.m_vzx[idx] + bxh * dvz_dx;
-    dvz_dx += f.m_vzx[idx];
-    f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
-    dvz_dz += f.m_vzz[idx];
+    float bar_dsxx_dx = solver.dt * inv_rho * f.vx[idx];
+    float bar_dsxz_dz = solver.dt * inv_rho * f.vx[idx];
+    float bar_dsxz_dx = solver.dt * inv_rho * f.vz[idx];
+    float bar_dszz_dz = solver.dt * inv_rho * f.vz[idx];
 
-    f.sxx[idx] += solver.dt * inv_rho * dvx_dx;
+    float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
+    float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;
+    float tmp_sxzx = f.m_sxzx[idx] + bar_dsxz_dx;
+    float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
 
-    f.szz[idx] += solver.dt * inv_rho * dvz_dz;
+    pxx_b[idx] = bar_dsxx_dx + bxh * tmp_sxxx;
+    pxz_b[idx] = bar_dsxz_dz + bz * tmp_sxzz;
+    pzx_b[idx] = bar_dsxz_dx + bx * tmp_sxzx;
+    pzz_b[idx] = bar_dszz_dz + bzh * tmp_szzz;
 
-    f.sxz[idx] += solver.dt * inv_rho * (dvx_dz + dvz_dx);
+    f.m_sxxx[idx] = axh * tmp_sxxx;
+    f.m_sxzz[idx] = az * tmp_sxzz;
+    f.m_sxzx[idx] = ax * tmp_sxzx;
+    f.m_szzz[idx] = azh * tmp_szzz;
+}
+
+template<int Order>
+__global__ void elastic_velocity_adjoint_apply(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ pxx,
+    const float* __restrict__ pzz,
+    const float* __restrict__ pxz,
+    const float* __restrict__ pzx,
+    SGradParam grad_ctx,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* pxx_b = pxx + b * spatial_size;
+    const float* pzz_b = pzz + b * spatial_size;
+    const float* pxz_b = pxz + b * spatial_size;
+    const float* pzx_b = pzx + b * spatial_size;
+
+    float dpxx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(pxx_b, ix, 0, iz, grad_ctx);
+    float dpzz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(pzz_b, ix, 0, iz, grad_ctx);
+    float dpxz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(pxz_b, ix, 0, iz, grad_ctx);
+    float dpzx_dx = sgradient<2, Order, X, DIFF_FORWARD>(pzx_b, ix, 0, iz, grad_ctx);
+
+    int idx = iz * solver.nx + ix;
+    f.sxx[idx] += dpxx_dx;
+    f.szz[idx] += dpzz_dz;
+    f.sxz[idx] += dpxz_dz + dpzx_dx;
 }
 
 
@@ -573,6 +664,14 @@ __global__ void calculate_grad_elastic_nobs(
     int b  = blockIdx.z;
 
     if (ix >= solver.nx || iz >= solver.nz)
+        return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
         return;
 
     int spatial_size = solver.nx * solver.nz;

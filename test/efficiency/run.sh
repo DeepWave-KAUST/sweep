@@ -1,0 +1,1 @@
+python elastic_checkpoint_compare.py   --dim 2d   --checkpoint-chunks 50,100,200   --checkpoint-counts 2,4,8   --boundary-storages gpu,cpu   --transfer-intervals 1,2,4,8   --warmup 3   --repeats 10
