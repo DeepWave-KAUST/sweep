@@ -73,6 +73,17 @@ __global__ void acoustic_forward_kernel_3d(
     float*       u_this_b = u_this ? u_this + spatial_size * b : nullptr;
     const float* vp_b     = vp     + spatial_size * b;
 
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
+
+    bool in_pml_x = (ix < x0) || (ix >= x1);
+    bool in_pml_y = (iy < y0) || (iy >= y1);
+    bool in_pml_z = (iz < z0) || (iz >= z1);
+
     // =========================================================
     // Laplace
     // =========================================================
@@ -81,71 +92,97 @@ __global__ void acoustic_forward_kernel_3d(
     float lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
     float lap_z = laplace<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
 
+    float w_sum = 0.f;
+
+    if (!(in_pml_x || in_pml_y || in_pml_z)) {
+        w_sum = lap_x + lap_y + lap_z;
+
+        float u0 = f.u_now[idx];
+        float v  = vp_b[idx];
+
+        f.u_next[idx] =
+            2.f * u0 -
+            f.u_prev[idx] +
+            (v * v) * solver.dt * solver.dt * w_sum;
+
+        if (u_this_b != nullptr)
+            u_this_b[idx] = (v * v) * w_sum;
+
+        return;
+    }
+
     // =========================================================
     // Gradients
     // =========================================================
 
-    float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
-    float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
-    float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
-
-    float dpsixdx = gradient<3, Order, X>(f.psix, ix, iy, iz, grad_ctx);
-    float dpsiydy = gradient<3, Order, Y>(f.psiy, ix, iy, iz, grad_ctx);
-    float dpsizdz = gradient<3, Order, Z>(f.psiz, ix, iy, iz, grad_ctx);
-
-    float daxdx = gradient<3, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
-    float daydy = gradient<3, Order, X>(cpml.ay, iy, 0, 0, grad_ctx_y);
-    float dazdz = gradient<3, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
-
-    float ax_ = cpml.ax[ix];
-    float ay_ = cpml.ay[iy];
-    float az_ = cpml.az[iz];
-
-    float bx_ = cpml.bx[ix];
-    float by_ = cpml.by[iy];
-    float bz_ = cpml.bz[iz];
-
-    float dbxdx_ = cpml.dbxdx[ix];
-    float dbydy_ = cpml.dbydy[iy];
-    float dbzdz_ = cpml.dbzdz[iz];
-
-    float w_sum = 0.f;
-
     // =========================================================
     // X direction
     // =========================================================
+    if (in_pml_x) {
+        float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
+        float dpsixdx = gradient<3, Order, X>(f.psix, ix, iy, iz, grad_ctx);
+        float daxdx = gradient<3, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
 
-    float tmpx = ((1.f + bx_) * lap_x + dbxdx_ * dudx)
-                 + (daxdx * f.psix[idx] + ax_ * dpsixdx);
+        float ax_ = cpml.ax[ix];
+        float bx_ = cpml.bx[ix];
+        float dbxdx_ = cpml.dbxdx[ix];
 
-    w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[idx];
+        float tmpx = ((1.f + bx_) * lap_x + dbxdx_ * dudx)
+                     + (daxdx * f.psix[idx] + ax_ * dpsixdx);
 
-    f.psix[idx]  = bx_ * dudx + ax_ * f.psix[idx];
-    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+        w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[idx];
+
+        f.psix[idx]  = bx_ * dudx + ax_ * f.psix[idx];
+        f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+    } else {
+        w_sum += lap_x;
+    }
 
     // =========================================================
     // Y direction
     // =========================================================
+    if (in_pml_y) {
+        float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
+        float dpsiydy = gradient<3, Order, Y>(f.psiy, ix, iy, iz, grad_ctx);
+        float daydy = gradient<3, Order, X>(cpml.ay, iy, 0, 0, grad_ctx_y);
 
-    float tmpy = ((1.f + by_) * lap_y + dbydy_ * dudy)
-                 + (daydy * f.psiy[idx] + ay_ * dpsiydy);
+        float ay_ = cpml.ay[iy];
+        float by_ = cpml.by[iy];
+        float dbydy_ = cpml.dbydy[iy];
 
-    w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[idx];
+        float tmpy = ((1.f + by_) * lap_y + dbydy_ * dudy)
+                     + (daydy * f.psiy[idx] + ay_ * dpsiydy);
 
-    f.psiy[idx]  = by_ * dudy + ay_ * f.psiy[idx];
-    f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
+        w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[idx];
+
+        f.psiy[idx]  = by_ * dudy + ay_ * f.psiy[idx];
+        f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
+    } else {
+        w_sum += lap_y;
+    }
 
     // =========================================================
     // Z direction
     // =========================================================
+    if (in_pml_z) {
+        float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
+        float dpsizdz = gradient<3, Order, Z>(f.psiz, ix, iy, iz, grad_ctx);
+        float dazdz = gradient<3, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
 
-    float tmpz = ((1.f + bz_) * lap_z + dbzdz_ * dudz)
-                 + (dazdz * f.psiz[idx] + az_ * dpsizdz);
+        float az_ = cpml.az[iz];
+        float bz_ = cpml.bz[iz];
+        float dbzdz_ = cpml.dbzdz[iz];
 
-    w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[idx];
+        float tmpz = ((1.f + bz_) * lap_z + dbzdz_ * dudz)
+                     + (dazdz * f.psiz[idx] + az_ * dpsizdz);
 
-    f.psiz[idx]  = bz_ * dudz + az_ * f.psiz[idx];
-    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+        w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[idx];
+
+        f.psiz[idx]  = bz_ * dudz + az_ * f.psiz[idx];
+        f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+    } else {
+        w_sum += lap_z;
+    }
 
     // =========================================================
     // Time update

@@ -144,6 +144,44 @@ __global__ void elastic_velocity_kernel_3d(
     auto f = wf.offset(b, spatial_size);
     const float* rho_b = rho + b * spatial_size;
 
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
+
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
+
+    float inv_rho = 1.f / rho_b[idx];
+
+    bool interior =
+        ix >= x0 + 1 && ix < x1 - 1 &&
+        iy >= y0 + 1 && iy < y1 - 1 &&
+        iz >= z0 + 1 && iz < z1 - 1;
+
+    if (interior) {
+        f.vx[idx] += solver.dt * inv_rho *
+            (dsxx_dx + dsxy_dy + dsxz_dz);
+
+        f.vy[idx] += solver.dt * inv_rho *
+            (dsxy_dx + dsyy_dy + dsyz_dz);
+
+        f.vz[idx] += solver.dt * inv_rho *
+            (dsxz_dx + dsyz_dy + dszz_dz);
+        return;
+    }
+
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
@@ -158,20 +196,6 @@ __global__ void elastic_velocity_kernel_3d(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-    
-    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
-    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
-
-    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
-
-    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
-    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
-    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
-
-    float inv_rho = 1.f / rho_b[idx];
 
     // PML boundaries
     f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
@@ -253,6 +277,13 @@ __global__ void elastic_stress_kernel_3d(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
+
     float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
     float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
     float dvx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
@@ -264,6 +295,45 @@ __global__ void elastic_stress_kernel_3d(
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
+
+    float lam = lam_b[idx];
+    float mu_ = mu_b[idx];
+
+    bool interior =
+        ix >= x0 + 1 && ix < x1 - 1 &&
+        iy >= y0 + 1 && iy < y1 - 1 &&
+        iz >= z0 + 1 && iz < z1 - 1;
+
+    if (interior) {
+        float div_v = dvx_dx + dvy_dy + dvz_dz;
+
+        f.sxx[idx] += solver.dt *
+            (lam * div_v + 2.f * mu_ * dvx_dx);
+
+        f.syy[idx] += solver.dt *
+            (lam * div_v + 2.f * mu_ * dvy_dy);
+
+        f.szz[idx] += solver.dt *
+            (lam * div_v + 2.f * mu_ * dvz_dz);
+
+        f.sxy[idx] += solver.dt *
+            mu_ * (dvx_dy + dvy_dx);
+
+        f.sxz[idx] += solver.dt *
+            mu_ * (dvx_dz + dvz_dx);
+
+        f.syz[idx] += solver.dt *
+            mu_ * (dvy_dz + dvz_dy);
+
+        if (u_this_t) {
+            float* u_this_b = u_this_t + b * spatial_size;
+            int comp_stride = solver.B * spatial_size;
+            u_this_b[0 * comp_stride + idx] = f.vx[idx];
+            u_this_b[1 * comp_stride + idx] = f.vy[idx];
+            u_this_b[2 * comp_stride + idx] = f.vz[idx];
+        }
+        return;
+    }
 
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
@@ -279,9 +349,6 @@ __global__ void elastic_stress_kernel_3d(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    float lam = lam_b[idx];
-    float mu_ = mu_b[idx];
 
     // PML
     f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
@@ -528,21 +595,12 @@ __global__ void elastic_velocity_adjoint_kernel_3d(
     const float* mu_b  = mu     + b * spatial_size;
 
     auto f = wf.offset(b, spatial_size);
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-
-    float ay = cpml.ay[iy];
-    float by = cpml.by[iy];
-    float ayh = cpml.ayh[iy];
-    float byh = cpml.byh[iy];
-
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
 
     float lam = lam_b[idx];
     float mu_  = mu_b[idx];
@@ -569,6 +627,54 @@ __global__ void elastic_velocity_adjoint_kernel_3d(
     float dszz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
     float dszz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
     float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
+
+    bool interior =
+        ix >= x0 + 1 && ix < x1 - 1 &&
+        iy >= y0 + 1 && iy < y1 - 1 &&
+        iz >= z0 + 1 && iz < z1 - 1;
+
+    if (interior) {
+        f.vx[idx] += solver.dt * (
+            l2m * dsxx_dx
+            + lam * dsyy_dx
+            + lam * dszz_dx
+            + mu_  * dsxy_dy
+            + mu_  * dsxz_dz
+        );
+
+        f.vy[idx] += solver.dt * (
+            lam * dsxx_dy
+            + l2m * dsyy_dy
+            + lam * dszz_dy
+            + mu_  * dsxy_dx
+            + mu_  * dsyz_dz
+        );
+
+        f.vz[idx] += solver.dt * (
+            lam * dsxx_dz
+            + lam * dsyy_dz
+            + l2m * dszz_dz
+            + mu_  * dsxz_dx
+            + mu_  * dsyz_dy
+        );
+
+        return;
+    }
+
+    float az = cpml.az[iz];
+    float bz = cpml.bz[iz];
+    float azh = cpml.azh[iz];
+    float bzh = cpml.bzh[iz];
+
+    float ay = cpml.ay[iy];
+    float by = cpml.by[iy];
+    float ayh = cpml.ayh[iy];
+    float byh = cpml.byh[iy];
+
+    float ax = cpml.ax[ix];
+    float bx = cpml.bx[ix];
+    float axh = cpml.axh[ix];
+    float bxh = cpml.bxh[ix];
 
 
     f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
@@ -668,19 +774,12 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
 
     const float* rho_b = rho + b * spatial_size;
     auto f = wf.offset(b, spatial_size);
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-    float ay = cpml.ay[iy];
-    float by = cpml.by[iy];
-    float ayh = cpml.ayh[iy];
-    float byh = cpml.byh[iy];
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
 
     float inv_rho = 1.f / rho_b[idx];
 
@@ -705,6 +804,37 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     float tmp_sxzx = f.m_sxzx[idx] + bar_dsxz_dx;
     float tmp_syzy = f.m_syzy[idx] + bar_dsyz_dy;
     float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
+
+    bool interior =
+        ix >= x0 + 1 && ix < x1 - 1 &&
+        iy >= y0 + 1 && iy < y1 - 1 &&
+        iz >= z0 + 1 && iz < z1 - 1;
+
+    if (interior) {
+        pxx[b * spatial_size + idx] = bar_dsxx_dx;
+        pxy[b * spatial_size + idx] = bar_dsxy_dy;
+        pxz[b * spatial_size + idx] = bar_dsxz_dz;
+        pyx[b * spatial_size + idx] = bar_dsxy_dx;
+        pyy[b * spatial_size + idx] = bar_dsyy_dy;
+        pyz[b * spatial_size + idx] = bar_dsyz_dz;
+        pzx[b * spatial_size + idx] = bar_dsxz_dx;
+        pzy[b * spatial_size + idx] = bar_dsyz_dy;
+        pzz[b * spatial_size + idx] = bar_dszz_dz;
+        return;
+    }
+
+    float az = cpml.az[iz];
+    float bz = cpml.bz[iz];
+    float azh = cpml.azh[iz];
+    float bzh = cpml.bzh[iz];
+    float ay = cpml.ay[iy];
+    float by = cpml.by[iy];
+    float ayh = cpml.ayh[iy];
+    float byh = cpml.byh[iy];
+    float ax = cpml.ax[ix];
+    float bx = cpml.bx[ix];
+    float axh = cpml.axh[ix];
+    float bxh = cpml.bxh[ix];
 
     pxx[b * spatial_size + idx] = bar_dsxx_dx + bxh * tmp_sxxx;
     pxy[b * spatial_size + idx] = bar_dsxy_dy + by * tmp_sxyy;
@@ -836,6 +966,43 @@ __global__ void elastic_stress_adjoint_kernel_3d(
 
 
     auto f = wf.offset(b, spatial_size);
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
+
+    float inv_rho = 1.f / rho_b[idx];
+
+    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+
+    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+
+    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
+
+    bool interior =
+        ix >= x0 + 1 && ix < x1 - 1 &&
+        iy >= y0 + 1 && iy < y1 - 1 &&
+        iz >= z0 + 1 && iz < z1 - 1;
+
+    if (interior) {
+        f.sxx[idx] += solver.dt * inv_rho * dvx_dx;
+        f.syy[idx] += solver.dt * inv_rho * dvy_dy;
+        f.szz[idx] += solver.dt * inv_rho * dvz_dz;
+
+        f.sxy[idx] += solver.dt * inv_rho * (dvx_dy + dvy_dx);
+        f.sxz[idx] += solver.dt * inv_rho * (dvx_dz + dvz_dx);
+        f.syz[idx] += solver.dt * inv_rho * (dvy_dz + dvz_dy);
+
+        return;
+    }
 
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
@@ -851,20 +1018,6 @@ __global__ void elastic_stress_adjoint_kernel_3d(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    float inv_rho = 1.f / rho_b[idx];
-
-    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
-    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
-    float dvx_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
-
-    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
-    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
-    float dvy_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
-
-    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
 
     f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
     dvz_dz += f.m_vzz[idx];
@@ -932,19 +1085,12 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b = mu + b * spatial_size;
     auto f = wf.offset(b, spatial_size);
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-    float ay = cpml.ay[iy];
-    float by = cpml.by[iy];
-    float ayh = cpml.ayh[iy];
-    float byh = cpml.byh[iy];
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
+    int x0 = solver.phys_x0();
+    int x1 = solver.phys_x1();
+    int y0 = solver.phys_y0();
+    int y1 = solver.phys_y1();
+    int z0 = solver.phys_z0();
+    int z1 = solver.phys_z1();
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -971,6 +1117,37 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
     float tmp_vzy = f.m_vzy[idx] + bar_dvz_dy;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
+
+    bool interior =
+        ix >= x0 + 1 && ix < x1 - 1 &&
+        iy >= y0 + 1 && iy < y1 - 1 &&
+        iz >= z0 + 1 && iz < z1 - 1;
+
+    if (interior) {
+        qxx[b * spatial_size + idx] = bar_dvx_dx;
+        qxy[b * spatial_size + idx] = bar_dvx_dy;
+        qxz[b * spatial_size + idx] = bar_dvx_dz;
+        qyx[b * spatial_size + idx] = bar_dvy_dx;
+        qyy[b * spatial_size + idx] = bar_dvy_dy;
+        qyz[b * spatial_size + idx] = bar_dvy_dz;
+        qzx[b * spatial_size + idx] = bar_dvz_dx;
+        qzy[b * spatial_size + idx] = bar_dvz_dy;
+        qzz[b * spatial_size + idx] = bar_dvz_dz;
+        return;
+    }
+
+    float az = cpml.az[iz];
+    float bz = cpml.bz[iz];
+    float azh = cpml.azh[iz];
+    float bzh = cpml.bzh[iz];
+    float ay = cpml.ay[iy];
+    float by = cpml.by[iy];
+    float ayh = cpml.ayh[iy];
+    float byh = cpml.byh[iy];
+    float ax = cpml.ax[ix];
+    float bx = cpml.bx[ix];
+    float axh = cpml.axh[ix];
+    float bxh = cpml.bxh[ix];
 
     qxx[b * spatial_size + idx] = bar_dvx_dx + bx * tmp_vxx;
     qxy[b * spatial_size + idx] = bar_dvx_dy + byh * tmp_vxy;
