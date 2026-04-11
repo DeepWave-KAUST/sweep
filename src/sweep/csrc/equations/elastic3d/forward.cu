@@ -1,7 +1,9 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 
 #include "elastic3d.h"
 #include "kernels.cuh"
@@ -19,48 +21,73 @@ namespace elastic3d {
 
 namespace {
 
+inline void copy_tensor_device_async(torch::Tensor& dst, const torch::Tensor& src)
+{
+    TORCH_CHECK(dst.defined() && src.defined(), "Checkpoint copy expects defined tensors.");
+    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "Checkpoint copy expects CUDA tensors.");
+    TORCH_CHECK(dst.scalar_type() == src.scalar_type(), "Checkpoint copy expects matching dtypes.");
+    TORCH_CHECK(dst.numel() == src.numel(), "Checkpoint copy expects matching numel.");
+    TORCH_CHECK(dst.is_contiguous(), "Checkpoint destination must be contiguous.");
+    TORCH_CHECK(src.is_contiguous(), "Checkpoint source must be contiguous.");
+
+    if (dst.numel() == 0) return;
+
+    C10_CUDA_CHECK(cudaMemcpyAsync(
+        dst.data_ptr(),
+        src.data_ptr(),
+        static_cast<size_t>(dst.nbytes()),
+        cudaMemcpyDeviceToDevice,
+        at::cuda::getCurrentCUDAStream()
+    ));
+}
+
 void save_checkpoint_state_3d(
     const ForwardInput& p,
     const ElasticWavefieldTensor& wavefield,
     int checkpoint_idx
 )
 {
-    p.checkpoints[0].select(0, checkpoint_idx).copy_(wavefield.vx_t);
-    p.checkpoints[1].select(0, checkpoint_idx).copy_(wavefield.vy_t);
-    p.checkpoints[2].select(0, checkpoint_idx).copy_(wavefield.vz_t);
-    p.checkpoints[3].select(0, checkpoint_idx).copy_(wavefield.sxx_t);
-    p.checkpoints[4].select(0, checkpoint_idx).copy_(wavefield.syy_t);
-    p.checkpoints[5].select(0, checkpoint_idx).copy_(wavefield.szz_t);
-    p.checkpoints[6].select(0, checkpoint_idx).copy_(wavefield.sxy_t);
-    p.checkpoints[7].select(0, checkpoint_idx).copy_(wavefield.sxz_t);
-    p.checkpoints[8].select(0, checkpoint_idx).copy_(wavefield.syz_t);
-    p.checkpoints[9].select(0, checkpoint_idx).copy_(wavefield.m_vxx_t);
-    p.checkpoints[10].select(0, checkpoint_idx).copy_(wavefield.m_vxy_t);
-    p.checkpoints[11].select(0, checkpoint_idx).copy_(wavefield.m_vxz_t);
-    p.checkpoints[12].select(0, checkpoint_idx).copy_(wavefield.m_vyx_t);
-    p.checkpoints[13].select(0, checkpoint_idx).copy_(wavefield.m_vyy_t);
-    p.checkpoints[14].select(0, checkpoint_idx).copy_(wavefield.m_vyz_t);
-    p.checkpoints[15].select(0, checkpoint_idx).copy_(wavefield.m_vzx_t);
-    p.checkpoints[16].select(0, checkpoint_idx).copy_(wavefield.m_vzy_t);
-    p.checkpoints[17].select(0, checkpoint_idx).copy_(wavefield.m_vzz_t);
-    p.checkpoints[18].select(0, checkpoint_idx).copy_(wavefield.m_sxxx_t);
-    p.checkpoints[19].select(0, checkpoint_idx).copy_(wavefield.m_sxxy_t);
-    p.checkpoints[20].select(0, checkpoint_idx).copy_(wavefield.m_sxxz_t);
-    p.checkpoints[21].select(0, checkpoint_idx).copy_(wavefield.m_syyx_t);
-    p.checkpoints[22].select(0, checkpoint_idx).copy_(wavefield.m_syyy_t);
-    p.checkpoints[23].select(0, checkpoint_idx).copy_(wavefield.m_syyz_t);
-    p.checkpoints[24].select(0, checkpoint_idx).copy_(wavefield.m_szzx_t);
-    p.checkpoints[25].select(0, checkpoint_idx).copy_(wavefield.m_szzy_t);
-    p.checkpoints[26].select(0, checkpoint_idx).copy_(wavefield.m_szzz_t);
-    p.checkpoints[27].select(0, checkpoint_idx).copy_(wavefield.m_sxyx_t);
-    p.checkpoints[28].select(0, checkpoint_idx).copy_(wavefield.m_sxyy_t);
-    p.checkpoints[29].select(0, checkpoint_idx).copy_(wavefield.m_sxyz_t);
-    p.checkpoints[30].select(0, checkpoint_idx).copy_(wavefield.m_sxzx_t);
-    p.checkpoints[31].select(0, checkpoint_idx).copy_(wavefield.m_sxzy_t);
-    p.checkpoints[32].select(0, checkpoint_idx).copy_(wavefield.m_sxzz_t);
-    p.checkpoints[33].select(0, checkpoint_idx).copy_(wavefield.m_syzx_t);
-    p.checkpoints[34].select(0, checkpoint_idx).copy_(wavefield.m_syzy_t);
-    p.checkpoints[35].select(0, checkpoint_idx).copy_(wavefield.m_syzz_t);
+    auto copy_ckpt = [&](int idx, const torch::Tensor& src) {
+        auto dst = p.checkpoints[idx].select(0, checkpoint_idx);
+        copy_tensor_device_async(dst, src);
+    };
+
+    copy_ckpt(0, wavefield.vx_t);
+    copy_ckpt(1, wavefield.vy_t);
+    copy_ckpt(2, wavefield.vz_t);
+    copy_ckpt(3, wavefield.sxx_t);
+    copy_ckpt(4, wavefield.syy_t);
+    copy_ckpt(5, wavefield.szz_t);
+    copy_ckpt(6, wavefield.sxy_t);
+    copy_ckpt(7, wavefield.sxz_t);
+    copy_ckpt(8, wavefield.syz_t);
+    copy_ckpt(9, wavefield.m_vxx_t);
+    copy_ckpt(10, wavefield.m_vxy_t);
+    copy_ckpt(11, wavefield.m_vxz_t);
+    copy_ckpt(12, wavefield.m_vyx_t);
+    copy_ckpt(13, wavefield.m_vyy_t);
+    copy_ckpt(14, wavefield.m_vyz_t);
+    copy_ckpt(15, wavefield.m_vzx_t);
+    copy_ckpt(16, wavefield.m_vzy_t);
+    copy_ckpt(17, wavefield.m_vzz_t);
+    copy_ckpt(18, wavefield.m_sxxx_t);
+    copy_ckpt(19, wavefield.m_sxxy_t);
+    copy_ckpt(20, wavefield.m_sxxz_t);
+    copy_ckpt(21, wavefield.m_syyx_t);
+    copy_ckpt(22, wavefield.m_syyy_t);
+    copy_ckpt(23, wavefield.m_syyz_t);
+    copy_ckpt(24, wavefield.m_szzx_t);
+    copy_ckpt(25, wavefield.m_szzy_t);
+    copy_ckpt(26, wavefield.m_szzz_t);
+    copy_ckpt(27, wavefield.m_sxyx_t);
+    copy_ckpt(28, wavefield.m_sxyy_t);
+    copy_ckpt(29, wavefield.m_sxyz_t);
+    copy_ckpt(30, wavefield.m_sxzx_t);
+    copy_ckpt(31, wavefield.m_sxzy_t);
+    copy_ckpt(32, wavefield.m_sxzz_t);
+    copy_ckpt(33, wavefield.m_syzx_t);
+    copy_ckpt(34, wavefield.m_syzy_t);
+    copy_ckpt(35, wavefield.m_syzz_t);
 }
 
 } // namespace

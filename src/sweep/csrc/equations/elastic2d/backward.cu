@@ -15,25 +15,6 @@ namespace elastic2d {
 
 namespace {
 
-void zero_wavefield_state_2d(ElasticWavefieldTensor& wf)
-{
-    wf.vx_t.zero_();
-    wf.vz_t.zero_();
-    wf.sxx_t.zero_();
-    wf.szz_t.zero_();
-    wf.sxz_t.zero_();
-    wf.m_vxx_t.zero_();
-    wf.m_vxz_t.zero_();
-    wf.m_vzx_t.zero_();
-    wf.m_vzz_t.zero_();
-    wf.m_sxxx_t.zero_();
-    wf.m_sxxz_t.zero_();
-    wf.m_szzx_t.zero_();
-    wf.m_szzz_t.zero_();
-    wf.m_sxzx_t.zero_();
-    wf.m_sxzz_t.zero_();
-}
-
 void load_checkpoint_state_2d(
     ElasticWavefieldTensor& dst,
     const std::vector<torch::Tensor>& checkpoints,
@@ -177,7 +158,7 @@ void replay_forward_to_time_2d(
         load_checkpoint_state_2d(forward, p.checkpoints, checkpoint_idx);
         start_time = checkpoint_steps[checkpoint_idx];
     } else {
-        zero_wavefield_state_2d(forward);
+        zero_wavefield_state(forward);
     }
 
     const int forward_nsrc = p.forward_sources_loc.size(1);
@@ -275,10 +256,7 @@ void backward_segment_2d(
     auto lambda = rho * (vp * vp - 2 * vs * vs);
     auto mu  = rho * vs * vs;
     ElasticAdjointWorkspaceTensor workspace;
-    if (p.adjoint_workspace.empty())
-        workspace.allocate(vp);
-    else
-        workspace.bind(p.adjoint_workspace);
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
     auto seg_vx = torch::zeros({segment_len + 1, vp.size(0) * vp.size(1), 1, vp.size(2), vp.size(3)}, vp.options());
     auto seg_vz = torch::zeros_like(seg_vx);
@@ -460,10 +438,7 @@ BackwardOutput backward(const BackwardInput& in)
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
     ElasticAdjointWorkspaceTensor workspace;
-    if (p.adjoint_workspace.empty())
-        workspace.allocate(vp);
-    else
-        workspace.bind(p.adjoint_workspace);
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
     // PML coefficients
     ElasticCPMLTensor cpml;
@@ -569,7 +544,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2, true);
-    zero_wavefield_state_2d(adjoint);
+    zero_wavefield_state(adjoint);
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
@@ -585,10 +560,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
     ElasticAdjointWorkspaceTensor workspace;
-    if (p.adjoint_workspace.empty())
-        workspace.allocate(vp);
-    else
-        workspace.bind(p.adjoint_workspace);
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
     ElasticWavefieldTensor start_state;
     start_state.allocate(vp, 2, true);
@@ -603,7 +575,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         int start = chunk_id * chunk_size;
         int end = std::min(static_cast<int>(p.nt), start + chunk_size);
         if (chunk_id == 0) {
-            zero_wavefield_state_2d(start_state);
+            zero_wavefield_state(start_state);
         } else {
             load_checkpoint_state_2d(start_state, p.checkpoints, chunk_id);
         }
@@ -675,7 +647,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2, true);
-    zero_wavefield_state_2d(adjoint);
+    zero_wavefield_state(adjoint);
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
@@ -693,10 +665,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
     ElasticAdjointWorkspaceTensor workspace;
-    if (p.adjoint_workspace.empty())
-        workspace.allocate(vp);
-    else
-        workspace.bind(p.adjoint_workspace);
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
     TORCH_CHECK(
@@ -861,10 +830,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
     ElasticAdjointWorkspaceTensor workspace;
-    if (p.adjoint_workspace.empty())
-        workspace.allocate(vp);
-    else
-        workspace.bind(p.adjoint_workspace);
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
     // PML coefficients
     ElasticCPMLTensor cpml;

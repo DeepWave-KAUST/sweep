@@ -165,3 +165,7 @@ class Elastic(FirstOrderEquation):
     @property
     def last_two_storage_nvar(self):
         return self.base_nvar
+
+    @property
+    def backward_workspace_nvar(self):
+        return 18

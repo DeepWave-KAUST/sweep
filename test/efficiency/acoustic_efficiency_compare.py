@@ -1,5 +1,6 @@
 import argparse
 import gc
+import importlib.util
 import json
 import time
 from pathlib import Path
@@ -48,6 +49,7 @@ def build_parser():
     parser.add_argument("--delay", type=float, default=0.2)
     parser.add_argument("--spatial-order", type=int, default=2)
     parser.add_argument("--abcn", type=int, default=None)
+    parser.add_argument("--nshots", type=int, default=1)
     parser.add_argument("--source-x", type=int, default=None)
     parser.add_argument("--source-y", type=int, default=None)
     parser.add_argument("--src-z", type=int, default=1)
@@ -62,6 +64,7 @@ def build_parser():
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--include-torch", action="store_true")
+    parser.add_argument("--include-deepwave", action="store_true")
     parser.add_argument("--output-prefix", default=None)
     parser.add_argument("--json", default=None)
     return parser
@@ -102,13 +105,23 @@ def build_case(args):
             vp[args.nz // 2 :, :] = 2600.0
             vp[args.nz // 3 : (2 * args.nz) // 3, args.nx // 4 : (3 * args.nx) // 4] += 150.0
 
-        source_x = args.source_x if args.source_x is not None else args.nx // 2
-        sources = np.array([[source_x, args.src_z]], dtype=np.int32)
+        if args.nshots == 1:
+            source_x = args.source_x if args.source_x is not None else args.nx // 2
+            shot_x = np.array([source_x], dtype=np.int32)
+        else:
+            left = max(args.abcn, args.nx // 10)
+            right = min(args.nx - 1 - args.abcn, args.nx - 1 - args.nx // 10)
+            shot_x = np.linspace(left, right, args.nshots, dtype=np.int32)
+        sources = np.stack(
+            [shot_x, np.full(args.nshots, args.src_z, dtype=np.int32)],
+            axis=1,
+        )
         receiver_x = np.arange(0, args.nx, args.receiver_stride, dtype=np.int32)
-        receivers = np.stack(
+        receiver_template = np.stack(
             [receiver_x, np.full(receiver_x.shape[0], args.rec_z, dtype=np.int32)],
             axis=1,
-        )[None, ...]
+        )
+        receivers = np.repeat(receiver_template[None, ...], args.nshots, axis=0)
     else:
         vp = np.full((args.nz, args.ny, args.nx), 1800.0, dtype=np.float32)
         if not args.constant_model:
@@ -119,19 +132,37 @@ def build_case(args):
                 args.nx // 4 : (3 * args.nx) // 4,
             ] += 100.0
 
-        source_x = args.source_x if args.source_x is not None else args.nx // 2
-        source_y = args.source_y if args.source_y is not None else args.ny // 2
-        sources = np.array([[source_x, source_y, args.src_z]], dtype=np.int32)
+        if args.nshots == 1:
+            source_x = args.source_x if args.source_x is not None else args.nx // 2
+            source_y = args.source_y if args.source_y is not None else args.ny // 2
+            shot_x = np.array([source_x], dtype=np.int32)
+            shot_y = np.array([source_y], dtype=np.int32)
+        else:
+            left_x = max(args.abcn, args.nx // 10)
+            right_x = min(args.nx - 1 - args.abcn, args.nx - 1 - args.nx // 10)
+            left_y = max(args.abcn, args.ny // 10)
+            right_y = min(args.ny - 1 - args.abcn, args.ny - 1 - args.ny // 10)
+            side = int(np.ceil(np.sqrt(args.nshots)))
+            grid_x = np.linspace(left_x, right_x, side, dtype=np.int32)
+            grid_y = np.linspace(left_y, right_y, side, dtype=np.int32)
+            mesh_x, mesh_y = np.meshgrid(grid_x, grid_y, indexing="xy")
+            shot_x = mesh_x.reshape(-1)[: args.nshots]
+            shot_y = mesh_y.reshape(-1)[: args.nshots]
+        sources = np.stack(
+            [shot_x, shot_y, np.full(args.nshots, args.src_z, dtype=np.int32)],
+            axis=1,
+        )
         rec_x, rec_y = np.meshgrid(
             np.arange(0, args.nx, args.receiver_stride, dtype=np.int32),
             np.arange(0, args.ny, args.receiver_stride, dtype=np.int32),
             indexing="xy",
         )
         rec_z = np.full(rec_x.size, args.rec_z, dtype=np.int32)
-        receivers = np.stack((rec_x.reshape(-1), rec_y.reshape(-1), rec_z), axis=1)[None, ...]
+        receiver_template = np.stack((rec_x.reshape(-1), rec_y.reshape(-1), rec_z), axis=1)
+        receivers = np.repeat(receiver_template[None, ...], args.nshots, axis=0)
 
     t = np.arange(args.nt, dtype=np.float32) * args.dt - args.delay
-    wave = ricker(t, fm=args.fm).astype(np.float32)
+    wave = np.repeat(ricker(t, fm=args.fm).astype(np.float32)[None, :], args.nshots, axis=0)
     return vp, wave, sources, receivers
 
 
@@ -152,10 +183,26 @@ def common_solver_kwargs(args, shape, device):
         pml_type="cpmlr",
         dev=device,
         free_surface=False,
-        B=1,
+        B=args.nshots,
         allow_growth=True,
         nt=args.nt,
     )
+
+
+def require_deepwave():
+    if importlib.util.find_spec("deepwave") is None:
+        raise RuntimeError(
+            "Deepwave is not installed, but --include-deepwave was requested."
+        )
+    import deepwave
+
+    return deepwave
+
+
+def reorder_locations_for_deepwave(args, locations):
+    if args.dim == "2d":
+        return locations[..., [1, 0]]
+    return locations[..., [2, 1, 0]]
 
 
 def build_cases(args, device):
@@ -253,13 +300,62 @@ def build_cases(args, device):
                 "group": "baseline",
                 "x_value": 0,
                 "solver_factory": make_torch_factory(),
+                "backend": "propagator",
             }
         )
+
+    if args.include_deepwave:
+        require_deepwave()
+        cases.append(
+            {
+                "name": "deepwave",
+                "group": "baseline",
+                "x_value": 0,
+                "solver_factory": lambda: None,
+                "backend": "deepwave",
+            }
+        )
+
+    for case in cases:
+        case.setdefault("backend", "propagator")
 
     return cases
 
 
-def run_single_pass(solver, vp_np, wave, sources, receivers, device):
+def run_deepwave_pass(args, vp_np, wave, sources, receivers, device):
+    deepwave = require_deepwave()
+    vp = torch.from_numpy(vp_np.copy()).to(device).requires_grad_(True)
+    source_amplitudes = torch.from_numpy(wave.copy()).to(device=device, dtype=torch.float32)[:, None, :]
+    source_locations = torch.from_numpy(
+        reorder_locations_for_deepwave(
+            args,
+            sources[:, None, :] if sources.ndim == 2 else sources,
+        )
+    ).to(device=device, dtype=torch.long)
+    receiver_locations = torch.from_numpy(
+        reorder_locations_for_deepwave(args, receivers)
+    ).to(device=device, dtype=torch.long)
+    out = deepwave.scalar(
+        vp,
+        grid_spacing=args.dh,
+        dt=args.dt,
+        source_amplitudes=source_amplitudes,
+        source_locations=source_locations,
+        receiver_locations=receiver_locations,
+        accuracy=args.spatial_order,
+        pml_width=args.abcn,
+        pml_freq=args.fm,
+    )
+    record = out[-1]
+    loss = record.pow(2).sum()
+    loss.backward()
+    return float(loss.detach().cpu().item())
+
+
+def run_single_pass(case, solver, args, vp_np, wave, sources, receivers, device):
+    if case.get("backend") == "deepwave":
+        return run_deepwave_pass(args, vp_np, wave, sources, receivers, device)
+
     vp = torch.from_numpy(vp_np.copy()).to(device).requires_grad_(True)
     record = solver(
         wavelet=wave,
@@ -272,7 +368,7 @@ def run_single_pass(solver, vp_np, wave, sources, receivers, device):
     return float(loss.detach().cpu().item())
 
 
-def benchmark_case(case, vp_np, wave, sources, receivers, device, warmup, repeats):
+def benchmark_case(case, args, vp_np, wave, sources, receivers, device, warmup, repeats):
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -286,7 +382,7 @@ def benchmark_case(case, vp_np, wave, sources, receivers, device, warmup, repeat
         for _ in range(warmup):
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
-            run_single_pass(solver, vp_np, wave, sources, receivers, device)
+            run_single_pass(case, solver, args, vp_np, wave, sources, receivers, device)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
 
@@ -298,7 +394,7 @@ def benchmark_case(case, vp_np, wave, sources, receivers, device, warmup, repeat
                 torch.cuda.reset_peak_memory_stats(device)
                 torch.cuda.synchronize(device)
             start = time.perf_counter()
-            loss_value = run_single_pass(solver, vp_np, wave, sources, receivers, device)
+            loss_value = run_single_pass(case, solver, args, vp_np, wave, sources, receivers, device)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
                 peaks.append(torch.cuda.max_memory_allocated(device))
@@ -343,6 +439,7 @@ def default_output_prefix(args):
 def plot_sweeps(results, output_prefix):
     full_result = next((row for row in results if row["group"] == "full"), None)
     torch_result = next((row for row in results if row["name"] == "torch"), None)
+    deepwave_result = next((row for row in results if row["name"] == "deepwave"), None)
     chunk_rows = sorted((row for row in results if row["group"] == "chunk"), key=lambda row: row["x_value"])
     recursive_rows = sorted((row for row in results if row["group"] == "recursive"), key=lambda row: row["x_value"])
     boundary_rows = [row for row in results if row["group"] == "boundary"]
@@ -354,6 +451,8 @@ def plot_sweeps(results, output_prefix):
             ax.axhline(full_result[key], color="tab:gray", linestyle="--", linewidth=1.0, label="cuda_full")
         if torch_result is not None and torch_result.get(key) is not None:
             ax.axhline(torch_result[key], color="tab:purple", linestyle=":", linewidth=1.0, label="torch")
+        if deepwave_result is not None and deepwave_result.get(key) is not None:
+            ax.axhline(deepwave_result[key], color="tab:red", linestyle="-.", linewidth=1.0, label="deepwave")
 
     def plot_numeric(ax_time, ax_mem, rows, title, xlabel):
         if rows:
@@ -411,6 +510,7 @@ def main(argv=None):
     print("Device:", device)
     print("Dimension:", args.dim)
     print("Shape:", vp_np.shape, "nt:", args.nt)
+    print("Shots:", args.nshots)
     print("Model:", "constant" if args.constant_model else "layered")
     print("Warmup/Reps:", args.warmup, args.repeats)
 
@@ -418,6 +518,7 @@ def main(argv=None):
     for case in cases:
         result = benchmark_case(
             case,
+            args,
             vp_np,
             wave,
             sources,

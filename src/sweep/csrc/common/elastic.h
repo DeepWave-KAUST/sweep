@@ -541,42 +541,156 @@ private:
 };
 
 struct ElasticAdjointWorkspaceTensor {
-    torch::Tensor qxx_t, qzz_t, qxz_t, qzx_t;
-    torch::Tensor pxx_t, pzz_t, pxz_t, pzx_t;
+    torch::Tensor qxx_t, qxy_t, qxz_t, qyx_t, qyy_t, qyz_t, qzx_t, qzy_t, qzz_t;
+    torch::Tensor pxx_t, pxy_t, pxz_t, pyx_t, pyy_t, pyz_t, pzx_t, pzy_t, pzz_t;
 
+    int dim = 2;
     bool allocated = false;
 
-    void allocate(const torch::Tensor& like)
+    void allocate(const torch::Tensor& like, int dim_ = 2)
     {
         if (allocated) return;
 
+        dim = dim_;
         qxx_t = torch::zeros_like(like);
-        qzz_t = torch::zeros_like(like);
-        qxz_t = torch::zeros_like(like);
-        qzx_t = torch::zeros_like(like);
         pxx_t = torch::zeros_like(like);
-        pzz_t = torch::zeros_like(like);
-        pxz_t = torch::zeros_like(like);
-        pzx_t = torch::zeros_like(like);
+
+        if (dim == 2) {
+            qzz_t = torch::zeros_like(like);
+            qxz_t = torch::zeros_like(like);
+            qzx_t = torch::zeros_like(like);
+            pzz_t = torch::zeros_like(like);
+            pxz_t = torch::zeros_like(like);
+            pzx_t = torch::zeros_like(like);
+        } else {
+            qxy_t = torch::zeros_like(like);
+            qxz_t = torch::zeros_like(like);
+            qyx_t = torch::zeros_like(like);
+            qyy_t = torch::zeros_like(like);
+            qyz_t = torch::zeros_like(like);
+            qzx_t = torch::zeros_like(like);
+            qzy_t = torch::zeros_like(like);
+            qzz_t = torch::zeros_like(like);
+
+            pxy_t = torch::zeros_like(like);
+            pxz_t = torch::zeros_like(like);
+            pyx_t = torch::zeros_like(like);
+            pyy_t = torch::zeros_like(like);
+            pyz_t = torch::zeros_like(like);
+            pzx_t = torch::zeros_like(like);
+            pzy_t = torch::zeros_like(like);
+            pzz_t = torch::zeros_like(like);
+        }
         allocated = true;
     }
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 8, "Elastic adjoint workspace expects 8 tensors");
-
         int i = 0;
-        qxx_t = tensors[i++];
-        qzz_t = tensors[i++];
-        qxz_t = tensors[i++];
-        qzx_t = tensors[i++];
-        pxx_t = tensors[i++];
-        pzz_t = tensors[i++];
-        pxz_t = tensors[i++];
-        pzx_t = tensors[i++];
+
+        if (tensors.size() == 8) {
+            dim = 2;
+            qxx_t = tensors[i++];
+            qzz_t = tensors[i++];
+            qxz_t = tensors[i++];
+            qzx_t = tensors[i++];
+            pxx_t = tensors[i++];
+            pzz_t = tensors[i++];
+            pxz_t = tensors[i++];
+            pzx_t = tensors[i++];
+        } else if (tensors.size() == 18) {
+            dim = 3;
+            qxx_t = tensors[i++];
+            qxy_t = tensors[i++];
+            qxz_t = tensors[i++];
+            qyx_t = tensors[i++];
+            qyy_t = tensors[i++];
+            qyz_t = tensors[i++];
+            qzx_t = tensors[i++];
+            qzy_t = tensors[i++];
+            qzz_t = tensors[i++];
+            pxx_t = tensors[i++];
+            pxy_t = tensors[i++];
+            pxz_t = tensors[i++];
+            pyx_t = tensors[i++];
+            pyy_t = tensors[i++];
+            pyz_t = tensors[i++];
+            pzx_t = tensors[i++];
+            pzy_t = tensors[i++];
+            pzz_t = tensors[i++];
+        } else {
+            TORCH_CHECK(false, "Elastic adjoint workspace expects 8 tensors (2D) or 18 tensors (3D)");
+        }
+
         allocated = true;
     }
 };
+
+inline void init_adjoint_workspace(
+    ElasticAdjointWorkspaceTensor& workspace,
+    const std::vector<torch::Tensor>& tensors,
+    const torch::Tensor& like,
+    int dim
+)
+{
+    if (!tensors.empty())
+        workspace.bind(tensors);
+    else
+        workspace.allocate(like, dim);
+}
+
+inline void zero_wavefield_state(ElasticWavefieldTensor& wf)
+{
+    if (wf.dim == 3 && !wf.m_syzx_t.defined())
+        wf.m_syzx_t = torch::zeros_like(wf.vx_t);
+
+    wf.vx_t.zero_();
+    wf.vz_t.zero_();
+    wf.sxx_t.zero_();
+    wf.szz_t.zero_();
+    wf.sxz_t.zero_();
+
+    if (wf.dim == 3) {
+        wf.vy_t.zero_();
+        wf.syy_t.zero_();
+        wf.sxy_t.zero_();
+        wf.syz_t.zero_();
+    }
+
+    if (!wf.use_pml)
+        return;
+
+    wf.m_vxx_t.zero_();
+    wf.m_vxz_t.zero_();
+    wf.m_vzx_t.zero_();
+    wf.m_vzz_t.zero_();
+    wf.m_sxxx_t.zero_();
+    wf.m_sxxz_t.zero_();
+    wf.m_szzx_t.zero_();
+    wf.m_szzz_t.zero_();
+    wf.m_sxzx_t.zero_();
+    wf.m_sxzz_t.zero_();
+
+    if (wf.dim == 3) {
+        wf.m_vxy_t.zero_();
+        wf.m_vyx_t.zero_();
+        wf.m_vyy_t.zero_();
+        wf.m_vyz_t.zero_();
+        wf.m_vzy_t.zero_();
+        wf.m_sxxy_t.zero_();
+        wf.m_syyx_t.zero_();
+        wf.m_syyy_t.zero_();
+        wf.m_syyz_t.zero_();
+        wf.m_szzy_t.zero_();
+        wf.m_sxyx_t.zero_();
+        wf.m_sxyy_t.zero_();
+        wf.m_sxyz_t.zero_();
+        wf.m_sxzy_t.zero_();
+        if (wf.m_syzx_t.defined()) wf.m_syzx_t.zero_();
+        wf.m_syzy_t.zero_();
+        wf.m_syzz_t.zero_();
+    }
+}
 
 inline float* elastic_field_ptr(ElasticWavefieldPointer& wf, int dim, int idx)
 {

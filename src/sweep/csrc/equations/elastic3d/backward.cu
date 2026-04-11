@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 
@@ -18,72 +19,24 @@ namespace elastic3d {
 
 namespace {
 
-struct ElasticAdjointWorkspace3D {
-    torch::Tensor qxx_t, qxy_t, qxz_t, qyx_t, qyy_t, qyz_t, qzx_t, qzy_t, qzz_t;
-    torch::Tensor pxx_t, pxy_t, pxz_t, pyx_t, pyy_t, pyz_t, pzx_t, pzy_t, pzz_t;
-
-    void allocate(const torch::Tensor& like)
-    {
-        qxx_t = torch::zeros_like(like);
-        qxy_t = torch::zeros_like(like);
-        qxz_t = torch::zeros_like(like);
-        qyx_t = torch::zeros_like(like);
-        qyy_t = torch::zeros_like(like);
-        qyz_t = torch::zeros_like(like);
-        qzx_t = torch::zeros_like(like);
-        qzy_t = torch::zeros_like(like);
-        qzz_t = torch::zeros_like(like);
-        pxx_t = torch::zeros_like(like);
-        pxy_t = torch::zeros_like(like);
-        pxz_t = torch::zeros_like(like);
-        pyx_t = torch::zeros_like(like);
-        pyy_t = torch::zeros_like(like);
-        pyz_t = torch::zeros_like(like);
-        pzx_t = torch::zeros_like(like);
-        pzy_t = torch::zeros_like(like);
-        pzz_t = torch::zeros_like(like);
-    }
-};
-
-void zero_wavefield_state_3d(ElasticWavefieldTensor& wf)
+inline void copy_tensor_device_async(torch::Tensor& dst, const torch::Tensor& src)
 {
-    if (!wf.m_syzx_t.defined()) wf.m_syzx_t = torch::zeros_like(wf.vx_t);
-    wf.vx_t.zero_();
-    wf.vy_t.zero_();
-    wf.vz_t.zero_();
-    wf.sxx_t.zero_();
-    wf.syy_t.zero_();
-    wf.szz_t.zero_();
-    wf.sxy_t.zero_();
-    wf.sxz_t.zero_();
-    wf.syz_t.zero_();
-    wf.m_vxx_t.zero_();
-    wf.m_vxy_t.zero_();
-    wf.m_vxz_t.zero_();
-    wf.m_vyx_t.zero_();
-    wf.m_vyy_t.zero_();
-    wf.m_vyz_t.zero_();
-    wf.m_vzx_t.zero_();
-    wf.m_vzy_t.zero_();
-    wf.m_vzz_t.zero_();
-    wf.m_sxxx_t.zero_();
-    wf.m_sxxy_t.zero_();
-    wf.m_sxxz_t.zero_();
-    wf.m_syyx_t.zero_();
-    wf.m_syyy_t.zero_();
-    wf.m_syyz_t.zero_();
-    wf.m_szzx_t.zero_();
-    wf.m_szzy_t.zero_();
-    wf.m_szzz_t.zero_();
-    wf.m_sxyx_t.zero_();
-    wf.m_sxyy_t.zero_();
-    wf.m_sxyz_t.zero_();
-    wf.m_sxzx_t.zero_();
-    wf.m_sxzy_t.zero_();
-    wf.m_sxzz_t.zero_();
-    if (wf.m_syzx_t.defined()) wf.m_syzx_t.zero_();
-    wf.m_syzy_t.zero_();
-    wf.m_syzz_t.zero_();
+    TORCH_CHECK(dst.defined() && src.defined(), "Checkpoint copy expects defined tensors.");
+    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "Checkpoint copy expects CUDA tensors.");
+    TORCH_CHECK(dst.scalar_type() == src.scalar_type(), "Checkpoint copy expects matching dtypes.");
+    TORCH_CHECK(dst.numel() == src.numel(), "Checkpoint copy expects matching numel.");
+    TORCH_CHECK(dst.is_contiguous(), "Checkpoint destination must be contiguous.");
+    TORCH_CHECK(src.is_contiguous(), "Checkpoint source must be contiguous.");
+
+    if (dst.numel() == 0) return;
+
+    C10_CUDA_CHECK(cudaMemcpyAsync(
+        dst.data_ptr(),
+        src.data_ptr(),
+        static_cast<size_t>(dst.nbytes()),
+        cudaMemcpyDeviceToDevice,
+        at::cuda::getCurrentCUDAStream()
+    ));
 }
 
 void load_checkpoint_state_3d(
@@ -93,42 +46,47 @@ void load_checkpoint_state_3d(
 )
 {
     if (!dst.m_syzx_t.defined()) dst.m_syzx_t = torch::zeros_like(dst.vx_t);
-    dst.vx_t.copy_(checkpoints[0].select(0, checkpoint_idx));
-    dst.vy_t.copy_(checkpoints[1].select(0, checkpoint_idx));
-    dst.vz_t.copy_(checkpoints[2].select(0, checkpoint_idx));
-    dst.sxx_t.copy_(checkpoints[3].select(0, checkpoint_idx));
-    dst.syy_t.copy_(checkpoints[4].select(0, checkpoint_idx));
-    dst.szz_t.copy_(checkpoints[5].select(0, checkpoint_idx));
-    dst.sxy_t.copy_(checkpoints[6].select(0, checkpoint_idx));
-    dst.sxz_t.copy_(checkpoints[7].select(0, checkpoint_idx));
-    dst.syz_t.copy_(checkpoints[8].select(0, checkpoint_idx));
-    dst.m_vxx_t.copy_(checkpoints[9].select(0, checkpoint_idx));
-    dst.m_vxy_t.copy_(checkpoints[10].select(0, checkpoint_idx));
-    dst.m_vxz_t.copy_(checkpoints[11].select(0, checkpoint_idx));
-    dst.m_vyx_t.copy_(checkpoints[12].select(0, checkpoint_idx));
-    dst.m_vyy_t.copy_(checkpoints[13].select(0, checkpoint_idx));
-    dst.m_vyz_t.copy_(checkpoints[14].select(0, checkpoint_idx));
-    dst.m_vzx_t.copy_(checkpoints[15].select(0, checkpoint_idx));
-    dst.m_vzy_t.copy_(checkpoints[16].select(0, checkpoint_idx));
-    dst.m_vzz_t.copy_(checkpoints[17].select(0, checkpoint_idx));
-    dst.m_sxxx_t.copy_(checkpoints[18].select(0, checkpoint_idx));
-    dst.m_sxxy_t.copy_(checkpoints[19].select(0, checkpoint_idx));
-    dst.m_sxxz_t.copy_(checkpoints[20].select(0, checkpoint_idx));
-    dst.m_syyx_t.copy_(checkpoints[21].select(0, checkpoint_idx));
-    dst.m_syyy_t.copy_(checkpoints[22].select(0, checkpoint_idx));
-    dst.m_syyz_t.copy_(checkpoints[23].select(0, checkpoint_idx));
-    dst.m_szzx_t.copy_(checkpoints[24].select(0, checkpoint_idx));
-    dst.m_szzy_t.copy_(checkpoints[25].select(0, checkpoint_idx));
-    dst.m_szzz_t.copy_(checkpoints[26].select(0, checkpoint_idx));
-    dst.m_sxyx_t.copy_(checkpoints[27].select(0, checkpoint_idx));
-    dst.m_sxyy_t.copy_(checkpoints[28].select(0, checkpoint_idx));
-    dst.m_sxyz_t.copy_(checkpoints[29].select(0, checkpoint_idx));
-    dst.m_sxzx_t.copy_(checkpoints[30].select(0, checkpoint_idx));
-    dst.m_sxzy_t.copy_(checkpoints[31].select(0, checkpoint_idx));
-    dst.m_sxzz_t.copy_(checkpoints[32].select(0, checkpoint_idx));
-    dst.m_syzx_t.copy_(checkpoints[33].select(0, checkpoint_idx));
-    dst.m_syzy_t.copy_(checkpoints[34].select(0, checkpoint_idx));
-    dst.m_syzz_t.copy_(checkpoints[35].select(0, checkpoint_idx));
+    auto copy_ckpt = [&](torch::Tensor& dst_tensor, int idx) {
+        auto src = checkpoints[idx].select(0, checkpoint_idx);
+        copy_tensor_device_async(dst_tensor, src);
+    };
+
+    copy_ckpt(dst.vx_t, 0);
+    copy_ckpt(dst.vy_t, 1);
+    copy_ckpt(dst.vz_t, 2);
+    copy_ckpt(dst.sxx_t, 3);
+    copy_ckpt(dst.syy_t, 4);
+    copy_ckpt(dst.szz_t, 5);
+    copy_ckpt(dst.sxy_t, 6);
+    copy_ckpt(dst.sxz_t, 7);
+    copy_ckpt(dst.syz_t, 8);
+    copy_ckpt(dst.m_vxx_t, 9);
+    copy_ckpt(dst.m_vxy_t, 10);
+    copy_ckpt(dst.m_vxz_t, 11);
+    copy_ckpt(dst.m_vyx_t, 12);
+    copy_ckpt(dst.m_vyy_t, 13);
+    copy_ckpt(dst.m_vyz_t, 14);
+    copy_ckpt(dst.m_vzx_t, 15);
+    copy_ckpt(dst.m_vzy_t, 16);
+    copy_ckpt(dst.m_vzz_t, 17);
+    copy_ckpt(dst.m_sxxx_t, 18);
+    copy_ckpt(dst.m_sxxy_t, 19);
+    copy_ckpt(dst.m_sxxz_t, 20);
+    copy_ckpt(dst.m_syyx_t, 21);
+    copy_ckpt(dst.m_syyy_t, 22);
+    copy_ckpt(dst.m_syyz_t, 23);
+    copy_ckpt(dst.m_szzx_t, 24);
+    copy_ckpt(dst.m_szzy_t, 25);
+    copy_ckpt(dst.m_szzz_t, 26);
+    copy_ckpt(dst.m_sxyx_t, 27);
+    copy_ckpt(dst.m_sxyy_t, 28);
+    copy_ckpt(dst.m_sxyz_t, 29);
+    copy_ckpt(dst.m_sxzx_t, 30);
+    copy_ckpt(dst.m_sxzy_t, 31);
+    copy_ckpt(dst.m_sxzz_t, 32);
+    copy_ckpt(dst.m_syzx_t, 33);
+    copy_ckpt(dst.m_syzy_t, 34);
+    copy_ckpt(dst.m_syzz_t, 35);
 }
 
 ElasticWavefieldTensor make_velocity_view_3d(
@@ -206,7 +164,7 @@ void replay_forward_to_time_3d(
         load_checkpoint_state_3d(forward, p.checkpoints, checkpoint_idx);
         start_time = checkpoint_steps[checkpoint_idx];
     } else {
-        zero_wavefield_state_3d(forward);
+        zero_wavefield_state(forward);
     }
 
     const int forward_nsrc = p.forward_sources_loc.size(1);
@@ -280,7 +238,7 @@ void apply_adjoint_step_3d(
     ElasticCPMLPointer cpml_view,
     SGradParam grad_ctx,
     SolverContext solver,
-    ElasticAdjointWorkspace3D& workspace
+    ElasticAdjointWorkspaceTensor& workspace
 )
 {
     auto adj_view = adjoint.view();
@@ -379,7 +337,7 @@ void backward_segment_3d(
     SolverContext solver,
     const torch::Tensor& source_fields,
     const torch::Tensor& receiver_fields,
-    ElasticAdjointWorkspace3D& workspace,
+    ElasticAdjointWorkspaceTensor& workspace,
     const torch::Tensor& next_segment_vx,
     const torch::Tensor& next_segment_vy,
     const torch::Tensor& next_segment_vz,
@@ -636,8 +594,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto grad_vp = torch::zeros_like(vp);
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
-    ElasticAdjointWorkspace3D workspace;
-    workspace.allocate(vp);
+    ElasticAdjointWorkspaceTensor workspace;
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 3);
 
     // PML coefficients
     ElasticCPMLTensor cpml;
@@ -881,7 +839,7 @@ BackwardOutput backward(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 3);
-    zero_wavefield_state_3d(adjoint);
+    zero_wavefield_state(adjoint);
 
     auto mu  = rho * vs * vs;
     auto lambda = rho * (vp * vp - 2 * vs * vs);
@@ -891,8 +849,8 @@ BackwardOutput backward(const BackwardInput& in)
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
     auto zero_velocity = torch::zeros_like(vp);
-    ElasticAdjointWorkspace3D workspace;
-    workspace.allocate(vp);
+    ElasticAdjointWorkspaceTensor workspace;
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 3);
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 3);
@@ -1001,7 +959,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 3, true);
-    zero_wavefield_state_3d(adjoint);
+    zero_wavefield_state(adjoint);
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 3);
@@ -1018,8 +976,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto grad_vp = torch::zeros_like(vp);
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
-    ElasticAdjointWorkspace3D workspace;
-    workspace.allocate(vp);
+    ElasticAdjointWorkspaceTensor workspace;
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 3);
 
     ElasticWavefieldTensor start_state;
     start_state.allocate(vp, 3, true);
@@ -1037,7 +995,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         int start = chunk_id * chunk_size;
         int end = std::min(static_cast<int>(p.nt), start + chunk_size);
         if (chunk_id == 0) {
-            zero_wavefield_state_3d(start_state);
+            zero_wavefield_state(start_state);
         } else {
             load_checkpoint_state_3d(start_state, p.checkpoints, chunk_id);
         }
@@ -1115,7 +1073,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 3, true);
-    zero_wavefield_state_3d(adjoint);
+    zero_wavefield_state(adjoint);
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 3);
@@ -1132,8 +1090,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto grad_vp = torch::zeros_like(vp);
     auto grad_vs = torch::zeros_like(vp);
     auto grad_rho = torch::zeros_like(vp);
-    ElasticAdjointWorkspace3D workspace;
-    workspace.allocate(vp);
+    ElasticAdjointWorkspaceTensor workspace;
+    init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 3);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
     TORCH_CHECK(

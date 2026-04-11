@@ -553,8 +553,36 @@ class PropCUDA(PropBase, torch.nn.Module):
             receivers += base_shift
 
         # Batch the wavelet, sources and receivers
-        wavelet = torch.from_numpy(wavelet).to(self.dev).float()[None, None, :].repeat(batch_size, 1, 1)  # (B, 1, nt)
-        sources = torch.from_numpy(sources).to(self.dev).int()[:, None, :]
+        wavelet = torch.from_numpy(wavelet).to(self.dev).float()
+        if wavelet.ndim == 1:
+            wavelet = wavelet[None, None, :].repeat(batch_size, 1, 1)
+        elif wavelet.ndim == 2:
+            if wavelet.shape[0] != batch_size:
+                raise ValueError(
+                    f"Expected wavelet batch dimension {batch_size}, got {wavelet.shape[0]}"
+                )
+            wavelet = wavelet[:, None, :]
+        elif wavelet.ndim == 3:
+            if wavelet.shape[0] != batch_size:
+                raise ValueError(
+                    f"Expected wavelet batch dimension {batch_size}, got {wavelet.shape[0]}"
+                )
+        else:
+            raise ValueError(
+                f"wavelet must have shape (nt,), (B, nt), or (B, nsrc, nt), got {tuple(wavelet.shape)}"
+            )
+
+        sources = torch.from_numpy(sources).to(self.dev).int()
+        if sources.ndim == 2:
+            if sources.shape[0] != batch_size:
+                raise ValueError(
+                    f"Expected sources batch dimension {batch_size}, got {sources.shape[0]}"
+                )
+            sources = sources[:, None, :]
+        elif sources.ndim != 3:
+            raise ValueError(
+                f"sources must have shape (B, dim) or (B, nsrc, dim), got {tuple(sources.shape)}"
+            )
         receivers = torch.from_numpy(receivers).to(self.dev).int()
         source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
