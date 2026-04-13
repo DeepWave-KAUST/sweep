@@ -3,7 +3,7 @@ __pycache__
 .codex
 .pytest_cache
 dist
-build
+build*
 tests
 *.egg-info
 *.csv

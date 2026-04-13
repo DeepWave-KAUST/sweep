@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import numpy as np
 
 class PropBase:
@@ -32,7 +34,9 @@ class PropBase:
             receiver_type (list, optional): List of strings for the receiver type. Defaults to [].
             abcn (int, optional): The number of layers of absorbing boundary conditions. Defaults to 50.
             free_surface (bool, optional): If the model has a free surface. Defaults to False.
-            dh (float, optional): Grid spacing (meters). Defaults to 10..
+            dh (float or sequence, optional): Grid spacing in model-axis order.
+                For 2D use ``(dz, dx)`` and for 3D use ``(dz, dy, dx)``.
+                Defaults to 10..
             dt (float, optional): Time step (seconds). Defaults to 0.002.
             dev (str, optional): The device to run the simulation on. Defaults to None.
             use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
@@ -59,16 +63,36 @@ class PropBase:
         self.wavefield_names = equation.wavefields
         self.model_names = equation.models
         self.shape = shape
+        self.ndim = len(shape)
         self.dev = dev
         self.abcn = abcn
         self.free_surface = free_surface
-        self._dh = float(dh)
+        if np.isscalar(dh):
+            self._dh = float(dh)
+            self._grid_spacing = tuple([self._dh] * self.ndim)
+        else:
+            if not isinstance(dh, Sequence) or isinstance(dh, (str, bytes)):
+                raise TypeError(
+                    "dh must be a float or a sequence ordered like shape "
+                    "(2D: (dz, dx), 3D: (dz, dy, dx))."
+                )
+            if len(dh) != self.ndim:
+                raise ValueError(
+                    f"dh must have length {self.ndim} to match shape {shape}, "
+                    f"got {len(dh)}."
+                )
+            if self.__class__.__name__ != "PropCUDA":
+                raise ValueError(
+                    "Anisotropic dh is currently supported only by the CUDA solver. "
+                    "Use a scalar dh for non-CUDA propagators."
+                )
+            self._grid_spacing = tuple(float(v) for v in dh)
+            self._dh = float(self._grid_spacing[-1])
         self._dt = float(dt)
         self.use_ckpt = use_ckpt
         self.ckpt_chunks = ckpt_chunks
         self.ckpt_mode = ckpt_mode
         self.ckpt_num = ckpt_num
-        self.ndim = len(shape)
         self.pml_type = pml_type
 
         self.nt = nt
@@ -147,7 +171,7 @@ class PropBase:
                 accuracy=self.equation.so,
                 fd_pad=kwargs.get('fd_pad', _padding),#[self.equation.so//2 if not self.free_surface else 0] + (2**self.ndim-1) * [self.equation.so//2], #
                 dt=self._dt, 
-                grid_spacing=[self._dh]*self.ndim,
+                grid_spacing=list(self._grid_spacing),
                 max_vel=kwargs.get('max_vel', 4500.0),
                 dtype=np.float32,
                 pml_freq=kwargs.get('pml_freq', 25.0),

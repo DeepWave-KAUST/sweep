@@ -260,7 +260,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         super().__init__(*args, **kwargs)
         
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
-        self.register_buffer('dh', torch.tensor(self._dh, device=self.dev, dtype=torch.float32))
+        self.register_buffer('dh', torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
 
         funcs = self.equation._C()
         self.forward_func = funcs[0]
@@ -297,6 +297,11 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._checkpoint_cache_nt = None
         self._checkpoint_cache_batch = None
         self._workspace_cache_batch = None
+
+    def _cuda_spacing(self):
+        # PropBase stores spacing in model-axis order: (dz, dx) or (dz, dy, dx).
+        # CUDA kernels expect Cartesian order: [dx, dz] or [dx, dy, dz].
+        return list(reversed(self._grid_spacing))
 
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
@@ -644,7 +649,7 @@ class PropCUDA(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu_full, batch_size)
         last_two = self._slice_last_two(batch_size) if use_boundary_saving else self.last_two
 
-        spacing = [self._dh] * self.ndim
+        spacing = self._cuda_spacing()
 
         syn = Warpper.apply(
                 self.forward_func, 
@@ -844,7 +849,7 @@ class PropCUDA(PropBase, torch.nn.Module):
             boundary_cpu = ()
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu_full, batch_size)
         last_two = self._slice_last_two(batch_size) if use_boundary_saving else self.last_two
-        spacing = [self._dh] * self.ndim
+        spacing = self._cuda_spacing()
 
         fwd = _C.ForwardInput()
         fwd.wavefields = list(forward_wavefields) if save_all_wavefields else []
