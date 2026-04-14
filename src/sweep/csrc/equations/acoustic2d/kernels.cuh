@@ -173,3 +173,12 @@ __global__ void calculate_grad_utt(
     float* __restrict__ grad,             // (B, nz, nx)
     int nx, int nz, float dt
 );
+
+__global__ void accumulate_rtm_image_2d(
+    const float* __restrict__ u_forward,
+    const float* __restrict__ u_backward,
+    float* __restrict__ image,
+    float* __restrict__ source_illumination,
+    float* __restrict__ receiver_illumination,
+    int nx, int nz
+);

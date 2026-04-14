@@ -74,6 +74,11 @@ class Acoustic(SecondOrderEquation):
             acoustic2d_backward_recursive_ckpt,
         )
 
+    def _C_rtm(self):
+        from sweep._C import acoustic2d_rtm
+
+        return acoustic2d_rtm
+
     @property
     def base_nvar(self):
         return 3

@@ -693,8 +693,6 @@ class PropCUDA(PropBase, torch.nn.Module):
     def rtm(self, wavelet, sources, receivers, adjoint_source, models=None, **kwargs):
         if self.rtm_func is None:
             raise NotImplementedError(f"RTM is not implemented for {self.equation.__class__.__name__}.")
-        if self.equation.__class__.__name__ != "Acoustic3D":
-            raise NotImplementedError("PropCUDA.rtm currently supports Acoustic3D only.")
 
         use_boundary_saving = kwargs.pop("use_boundary_saving", None)
         boundary_saving_config = kwargs.pop("boundary_saving_config", None)
@@ -723,6 +721,12 @@ class PropCUDA(PropBase, torch.nn.Module):
         boundary_on_cpu = boundary_cfg["storage"] == "cpu"
         transfer_interval = boundary_cfg["transfer_interval"]
         use_pinned_memory = boundary_cfg["pinned_memory"]
+
+        if self.ndim == 2 and (use_boundary_saving or self.use_ckpt):
+            raise NotImplementedError(
+                "PropCUDA.rtm for 2D acoustic currently supports full-wavefield mode only; "
+                "disable boundary saving and checkpointing."
+            )
 
         use_recursive_checkpoint = bool(self.use_ckpt and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None)
         if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
@@ -813,7 +817,7 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         models = [m[None, None, ...].repeat(batch_size, *([1] * (m.ndim + 1))) for m in self.models_padded]
         requires_model_grad = any(m.requires_grad for m in models)
-        save_all_wavefields = bool(requires_model_grad and not use_boundary_saving and not self.use_ckpt)
+        save_all_wavefields = bool(self.ndim == 2 or (requires_model_grad and not use_boundary_saving and not self.use_ckpt))
         self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_model_grad)
         self._ensure_adjoint_workspace_buffers(batch_size)
         if self.use_ckpt:

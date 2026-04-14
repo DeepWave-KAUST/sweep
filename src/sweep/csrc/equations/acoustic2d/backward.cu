@@ -12,12 +12,55 @@
 
 namespace acoustic2d {
 
-BackwardOutput backward(const BackwardInput& in)
+namespace {
+
+void init_rtm_output_2d(RTMOutput& out, const torch::Tensor& vp)
 {
+    out.image = torch::zeros_like(vp);
+    out.source_illumination = torch::zeros_like(vp);
+    out.receiver_illumination = torch::zeros_like(vp);
+}
 
-    const auto& p = in;
-    BackwardOutput out;
+void accumulate_imaging_2d(
+    dim3 wave_grid,
+    dim3 wave_block,
+    const float* forward_ptr,
+    const float* adjoint_ptr,
+    const torch::Tensor& vp,
+    torch::Tensor* grad,
+    RTMOutput* rtm_out,
+    int nx,
+    int nz
+)
+{
+    if (grad != nullptr) {
+        calculate_grad<<<wave_grid, wave_block>>>(
+            forward_ptr,
+            adjoint_ptr,
+            vp.data_ptr<float>(),
+            grad->data_ptr<float>(),
+            nx, nz
+        );
+        return;
+    }
 
+    TORCH_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
+    accumulate_rtm_image_2d<<<wave_grid, wave_block>>>(
+        forward_ptr,
+        adjoint_ptr,
+        rtm_out->image.data_ptr<float>(),
+        rtm_out->source_illumination.data_ptr<float>(),
+        rtm_out->receiver_illumination.data_ptr<float>(),
+        nx, nz
+    );
+}
+
+void run_full_imaging(
+    const BackwardInput& p,
+    torch::Tensor* grad,
+    RTMOutput* rtm_out
+)
+{
     auto vp = p.models[0];
 
     float dx = p.spacing[0];
@@ -39,11 +82,8 @@ BackwardOutput backward(const BackwardInput& in)
     else
         adjoint.allocate(vp, 2, true);
 
-    auto grad = torch::zeros_like(vp);
-
     float* u_thist = nullptr;
 
-    // PML coefficients
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
@@ -80,7 +120,7 @@ BackwardOutput backward(const BackwardInput& in)
             cpml,
             ctx
         );
-        
+
         add_source<<<source_config.grid, source_config.block>>>(
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
@@ -90,20 +130,51 @@ BackwardOutput backward(const BackwardInput& in)
             ctx
         );
 
-        // rotate pointers: u_prev <- u_now <- u_next
         adjoint.swap();
 
-        calculate_grad<<<launch_config.grid, launch_config.block>>>(
+        accumulate_imaging_2d(
+            launch_config.grid,
+            launch_config.block,
             p.u_forward[it].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            grad.data_ptr<float>(),
-            nx, nz
+            vp,
+            grad,
+            rtm_out,
+            nx,
+            nz
         );
-
-
     }
+}
+
+} // namespace
+
+BackwardOutput backward(const BackwardInput& in)
+{
+    BackwardOutput out;
+    auto grad = torch::zeros_like(in.models[0]);
+    run_full_imaging(in, &grad, nullptr);
     out.grads = {grad};
+    return out;
+}
+
+RTMOutput rtm(const BackwardInput& in)
+{
+    TORCH_CHECK(
+        in.u_forward.defined() && in.u_forward.numel() > 0,
+        "Acoustic2D RTM currently requires full forward wavefields."
+    );
+    TORCH_CHECK(
+        !in.u_last_two.defined() || in.u_last_two.numel() == 0,
+        "Acoustic2D RTM does not yet support boundary-saving mode."
+    );
+    TORCH_CHECK(
+        in.checkpoints.empty(),
+        "Acoustic2D RTM does not yet support checkpoint mode."
+    );
+
+    RTMOutput out;
+    init_rtm_output_2d(out, in.models[0]);
+    run_full_imaging(in, nullptr, &out);
     return out;
 }
 
