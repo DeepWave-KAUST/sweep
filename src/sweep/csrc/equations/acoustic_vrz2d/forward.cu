@@ -24,6 +24,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
     auto vp = p.models[0];
     auto z = p.models[1];
+    auto inv_z = torch::reciprocal(z);
 
     float dx = p.spacing[0];
     float dz = p.spacing[1];
@@ -97,13 +98,6 @@ ForwardOutput forward(const ForwardInput& in) {
         buf_idx = it % interval;
 
         auto view = wavefield.view();
-        if (u_allt.defined()) {
-            u_allt.select(0, it).select(0, 0).copy_(wavefield.u_now_t);
-            u_allt.select(0, it).select(0, 1).copy_(wavefield.psix_t);
-            u_allt.select(0, it).select(0, 2).copy_(wavefield.psiz_t);
-            u_allt.select(0, it).select(0, 3).copy_(wavefield.zetax_t);
-            u_allt.select(0, it).select(0, 4).copy_(wavefield.zetaz_t);
-        }
 
         ACOUSTIC_VRZ2D(
             order,
@@ -114,6 +108,7 @@ ForwardOutput forward(const ForwardInput& in) {
             nullptr,
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
+            inv_z.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -140,7 +135,7 @@ ForwardOutput forward(const ForwardInput& in) {
                 right_ptr,
                 staged_boundary ? 0 : it,
                 save_width,
-                -2 * p.M,
+                0,
                 ctx,
                 BOUNDARY_SAVE
             );
@@ -173,6 +168,14 @@ ForwardOutput forward(const ForwardInput& in) {
         );
 
         wavefield.swap();
+
+        if (u_allt.defined()) {
+            u_allt.select(0, it).select(0, 0).copy_(wavefield.u_now_t);
+            u_allt.select(0, it).select(0, 1).copy_(wavefield.psix_t);
+            u_allt.select(0, it).select(0, 2).copy_(wavefield.psiz_t);
+            u_allt.select(0, it).select(0, 3).copy_(wavefield.zetax_t);
+            u_allt.select(0, it).select(0, 4).copy_(wavefield.zetaz_t);
+        }
 
         if (p.use_checkpoint) {
             int ckpt_idx = -1;

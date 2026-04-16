@@ -3,30 +3,29 @@ from .base import SecondOrderEquation
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
               vp, z, dt, h, b, 
               lap_x, lap_z,
-              pml, grad_op
+              pml, grad_op, grad_kernels=None
               ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
 
     w_sum = 0.
 
-    # Calcualte gradients based on 2nd order central finite difference
-    dvpdx = grad_op(vp, h, axis=-1)
-    dvpdz = grad_op(vp, h, axis=-2)
-    dpdx = grad_op(u_now, h, axis=-1)
-    dpdz = grad_op(u_now, h, axis=-2)
-    z1_x = grad_op(1/z, h, axis=-1)
-    z1_z = grad_op(1/z, h, axis=-2)
+    dpdx = grad_op(u_now, h, axis=-1, kernels=grad_kernels)
+    dpdz = grad_op(u_now, h, axis=-2, kernels=grad_kernels)
+    model_b = vp / z
+    kappa = z * vp
+    dbdx = grad_op(model_b, h, axis=-1, kernels=grad_kernels)
+    dbdz = grad_op(model_b, h, axis=-2, kernels=grad_kernels)
 
     # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az*psiz, h, axis=-2)
+    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-2, kernels=grad_kernels)
     w_sum += (1+bz) * tmpz + az * zetaz
 
     psiyn = bz * dpdz + az * psiz
     zetaz = bz * tmpz + az * zetaz
 
     # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + grad_op(ax*psix, h, axis=-1)
+    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + grad_op(ax * psix, h, axis=-1, kernels=grad_kernels)
     w_sum += (1+bx) * tmpx + ax * zetax
 
     psixn = bx * dpdx + ax * psix
@@ -35,12 +34,9 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
     dpdx_cpml = dpdx + psixn
     dpdz_cpml = dpdz + psiyn
 
-    Ax = vp * dvpdx + vp**2 * z * z1_x
-    Az = vp * dvpdz + vp**2 * z * z1_z
-
-    grad_term = Ax * dpdx_cpml + Az * dpdz_cpml
-
-    u_next = 2 * u_now - u_pre + dt**2 * ( vp**2 * w_sum + grad_term )
+    u_next = 2 * u_now - u_pre + dt**2 * kappa * (
+        model_b * w_sum + dbdx * dpdx_cpml + dbdz * dpdz_cpml
+    )
 
     return u_next, u_now, psixn, psiyn, zetax, zetaz
 
@@ -61,6 +57,7 @@ class AcousticVRZ(SecondOrderEquation):
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
         super().init_laplace(ltype='1dsep', backend=backend)
+        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
 
     @property
     def models(self):
@@ -73,7 +70,7 @@ class AcousticVRZ(SecondOrderEquation):
     def func(self, *args, **kwargs):
         dh = args[9]
         lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
 
     def _C(self):
         from sweep._C import (

@@ -1,6 +1,7 @@
 site_name: SWEEP Documentation
 site_description: Seismic Wave Equation Exploration Platform
 repo_url: https://github.com/DeepWave-KAUST/sweep
+site_url: https://deepwave-kaust.github.io/sweep/
 docs_dir: docs
 
 theme:

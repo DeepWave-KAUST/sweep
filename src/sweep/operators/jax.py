@@ -3,6 +3,26 @@ import jax.numpy as jnp
 from jax import vmap, lax
 from jax.scipy.signal import convolve2d as conv2d
 
+
+def _to_nchw(u):
+    if u.ndim == 2:
+        return u[None, None, ...], lambda x: x[0, 0]
+    if u.ndim == 3:
+        return u[:, None, ...], lambda x: x[:, 0]
+    if u.ndim == 4:
+        return u, lambda x: x
+    raise ValueError(f"Expected 2D/3D/4D input for gradient kernel, got shape {u.shape}")
+
+
+def _zero_halo(out, halo):
+    if halo <= 0:
+        return out
+    out = out.at[..., :halo, :].set(0)
+    out = out.at[..., -halo:, :].set(0)
+    out = out.at[..., :, :halo].set(0)
+    out = out.at[..., :, -halo:].set(0)
+    return out
+
 @jax.jit
 def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     """
@@ -103,5 +123,19 @@ def apply_kernels_jax(u, kernels):
     conv_out = single_conv()  # → (b, k, h, w)
     return jnp.sum(conv_out, axis=1, keepdims=True)  # → (b, 1, h, w)
 
-def gradient(u, h, axis):
+def gradient(u, h, axis, kernels=None):
+    if kernels is not None:
+        if axis not in kernels:
+            raise ValueError(f"No gradient kernel configured for axis={axis}.")
+        u_nchw, restore = _to_nchw(u)
+        rhs = jnp.transpose(kernels[axis] / h, (2, 3, 1, 0))[::-1, ::-1, :, :]
+        out = lax.conv_general_dilated(
+            u_nchw,
+            rhs,
+            window_strides=(1, 1),
+            padding='SAME',
+            dimension_numbers=('NCHW', 'HWIO', 'NCHW'),
+        )
+        out = _zero_halo(out, max(kernels[axis].shape[-2] // 2, kernels[axis].shape[-1] // 2))
+        return restore(out)
     return jnp.gradient(u, h, axis=axis)

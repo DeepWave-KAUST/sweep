@@ -1,6 +1,27 @@
 import torch
 import torch.nn.functional as F
 
+
+def _to_nchw(u):
+    if u.ndim == 2:
+        return u.unsqueeze(0).unsqueeze(0), lambda x: x.squeeze(0).squeeze(0)
+    if u.ndim == 3:
+        return u.unsqueeze(1), lambda x: x.squeeze(1)
+    if u.ndim == 4:
+        return u, lambda x: x
+    raise ValueError(f"Expected 2D/3D/4D input for gradient kernel, got shape {tuple(u.shape)}")
+
+
+def _zero_halo(out, halo):
+    if halo <= 0:
+        return out
+    out = out.clone()
+    out[..., :halo, :] = 0
+    out[..., -halo:, :] = 0
+    out[..., :, :halo] = 0
+    out[..., :, -halo:] = 0
+    return out
+
 def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     kz = k1d[None, None, :, None]  # (k,1,1,1)
     kx = k1d[None, None, None, :]  # (1,k,1,1)
@@ -69,5 +90,14 @@ def laplace2d(u: torch.Tensor,
     padding = kernel.shape[-1] // 2
     return torch.nn.functional.conv2d(u, kernel, padding=padding) / (h*h)
 
-def gradient(u, h, axis):
+def gradient(u, h, axis, kernels=None):
+    if kernels is not None:
+        if axis not in kernels:
+            raise ValueError(f"No gradient kernel configured for axis={axis}.")
+        kernel = kernels[axis]
+        padding = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
+        u_nchw, restore = _to_nchw(u)
+        out = F.conv2d(u_nchw, kernel / h, padding=padding)
+        out = _zero_halo(out, max(padding))
+        return restore(out)
     return torch.gradient(u, spacing=h, dim=axis)[0]
