@@ -204,6 +204,8 @@ class Warpper(torch.autograd.Function):
                 gradients = ctx.backward_ckpt_func(params)
         elif not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
+            params.forward_source = ctx.forward_source.contiguous()
+            params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = ctx.backward_func(params)
         else:
             params.boundary_cpu = list(ctx.boundary_cpu) if ctx.boundary_on_cpu else []
@@ -297,6 +299,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._checkpoint_cache_nt = None
         self._checkpoint_cache_batch = None
         self._workspace_cache_batch = None
+        self._workspace_cache_nt = None
 
     def _cuda_spacing(self):
         # PropBase stores spacing in model-axis order: (dz, dx) or (dz, dy, dx).
@@ -425,18 +428,29 @@ class PropCUDA(PropBase, torch.nn.Module):
 
     def _ensure_adjoint_workspace_buffers(self, batch_size):
         workspace_nvar = int(getattr(self.equation, "backward_workspace_nvar", 0))
-        if workspace_nvar <= 0:
+        custom_shapes_fn = getattr(self.equation, "backward_workspace_shapes", None)
+        has_custom_shapes = callable(custom_shapes_fn)
+        if workspace_nvar <= 0 and not has_custom_shapes:
             self.adjoint_workspace = ()
             self._workspace_cache_batch = batch_size
+            self._workspace_cache_nt = self.nt
             return
 
-        if self._workspace_cache_batch is not None and batch_size <= self._workspace_cache_batch:
+        if (
+            self._workspace_cache_batch is not None
+            and batch_size <= self._workspace_cache_batch
+            and self._workspace_cache_nt == self.nt
+        ):
             return
 
         self.workspace_allocator = Allocator(self.dev)
-        workspace_shapes = workspace_nvar * [[self.B, 1, *self.shape_cuda]]
+        if has_custom_shapes:
+            workspace_shapes = custom_shapes_fn(self.B, self.nt, self.shape_cuda)
+        else:
+            workspace_shapes = workspace_nvar * [[self.B, 1, *self.shape_cuda]]
         self.adjoint_workspace = self.workspace_allocator.zeros(workspace_shapes)
         self._workspace_cache_batch = self.B
+        self._workspace_cache_nt = self.nt
 
     def _slice_adjoint_workspace_buffers(self, batch_size):
         if not self.adjoint_workspace:

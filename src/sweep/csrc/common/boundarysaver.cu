@@ -359,4 +359,3 @@ __global__ void boundary_kernel3d(
             u_b[idx3] = right[idx];
     }
 }
-

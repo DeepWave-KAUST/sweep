@@ -74,3 +74,40 @@ class AcousticVRZ(SecondOrderEquation):
         dh = args[9]
         lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
         return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient)
+
+    def _C(self):
+        from sweep._C import (
+            acoustic_vrz2d_forward,
+            acoustic_vrz2d_backward,
+            acoustic_vrz2d_backward_bs,
+            acoustic_vrz2d_backward_ckpt,
+            acoustic_vrz2d_backward_recursive_ckpt,
+        )
+
+        return (
+            acoustic_vrz2d_forward,
+            acoustic_vrz2d_backward,
+            acoustic_vrz2d_backward_bs,
+            acoustic_vrz2d_backward_ckpt,
+            acoustic_vrz2d_backward_recursive_ckpt,
+        )
+
+    @property
+    def base_nvar(self):
+        return 3
+
+    @property
+    def pml_nvar(self):
+        return 4
+
+    @property
+    def last_two_nvar(self):
+        return 2
+
+    @property
+    def last_two_storage_nvar(self):
+        return 1
+
+    @property
+    def checkpoint_nvar(self):
+        return 6
