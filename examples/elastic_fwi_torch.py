@@ -136,7 +136,7 @@ for epoch in tqdm.trange(epochs):
     # coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
     _syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=True)
     _obs = torch.from_numpy(obs[rand_shots]).to(dev)
-    loss = (_syn-_obs).pow(2).mean()
+    loss = (_syn-_obs).pow(2).sum()
     loss.backward()
     # Accumulate the gradients, when the graph is too large to be kept in memory
     # for step in range(step_per_epoch):
