@@ -16,9 +16,12 @@ class SourceTorch(SourceBase, torch.nn.Module):
         self.coords = coords
         self.adj = adj
 
-        for i in range(coords.shape[0]):
-            index = 0 if source_encoding else i
-            self.mask[index, :, *torch.flip(coords, [-1])[i]] = 1.
+        flipped = torch.flip(coords, [-1])
+        batch_idx = torch.zeros(coords.shape[0], dtype=torch.long, device=coords.device)
+        if not source_encoding:
+            batch_idx = torch.arange(coords.shape[0], dtype=torch.long, device=coords.device)
+        index = (batch_idx, slice(None), *flipped.unbind(-1))
+        self.mask[index] = 1.
 
     def forward_source_encoding(self, wavefield, wavelet):
         z = self.coords[..., 1]

@@ -14,7 +14,7 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
         super().__init__()
         batch, nreceivers, _ = coords.shape
         self.coords_r = [c.flatten().to(torch.int64) for c in torch.split(torch.flip(coords, (-1,)), 1, dim=-1)]
-        self.bidx = torch.tensor([[i]*nreceivers for i in range(batch)], dtype=torch.int64).flatten()
+        self.bidx = torch.arange(batch, device=coords.device, dtype=torch.int64).repeat_interleave(nreceivers)
 
     def forward(self, wavefield):
         """Forward pass of the receiver

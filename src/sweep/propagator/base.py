@@ -113,6 +113,7 @@ class PropBase:
         self.transfer_interval = self.boundary_saving_config["transfer_interval"]
         self.boundary_on_cpu = (self.boundary_saving_config["storage"] == "cpu")
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
+        self._abc_cache_key = None
 
         self.source_type = source_type
         self.receiver_type = receiver_type
@@ -165,18 +166,34 @@ class PropBase:
 
     def init_abc(self, **kwargs):
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim
-        self.equation.init_abc(
-                type=self.pml_type,
-                pml_width=[self.abcn if not self.free_surface else 0] + (2**self.ndim-1) * [self.abcn],
-                accuracy=self.equation.so,
-                fd_pad=kwargs.get('fd_pad', _padding),#[self.equation.so//2 if not self.free_surface else 0] + (2**self.ndim-1) * [self.equation.so//2], #
-                dt=self._dt, 
-                grid_spacing=list(self._grid_spacing),
-                max_vel=kwargs.get('max_vel', 4500.0),
-                dtype=np.float32,
-                pml_freq=kwargs.get('pml_freq', 25.0),
-                shape=kwargs.get('shape', self.shape)
+        fd_pad = tuple(kwargs.get('fd_pad', _padding))
+        shape = tuple(kwargs.get('shape', self.shape))
+        abc_key = (
+            self.pml_type,
+            tuple([self.abcn if not self.free_surface else 0] + (2**self.ndim-1) * [self.abcn]),
+            self.equation.so,
+            fd_pad,
+            self._dt,
+            tuple(self._grid_spacing),
+            kwargs.get('max_vel', 4500.0),
+            kwargs.get('pml_freq', 25.0),
+            shape,
         )
+
+        if abc_key != self._abc_cache_key:
+            self.equation.init_abc(
+                    type=self.pml_type,
+                    pml_width=list(abc_key[1]),
+                    accuracy=self.equation.so,
+                    fd_pad=list(fd_pad),
+                    dt=self._dt,
+                    grid_spacing=list(self._grid_spacing),
+                    max_vel=kwargs.get('max_vel', 4500.0),
+                    dtype=np.float32,
+                    pml_freq=kwargs.get('pml_freq', 25.0),
+                    shape=shape
+            )
+            self._abc_cache_key = abc_key
         
         if getattr(self.equation, 'need_init', False):
             self.equation.init(self.shape, self.dev, self._dh)

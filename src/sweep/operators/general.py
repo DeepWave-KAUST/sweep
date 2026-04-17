@@ -2,6 +2,19 @@ import numpy as np
 from sweep.scalars import staggered_grid_coes
 from typing import Callable
 
+
+def _prepare_torch_kernel_bank(kernel):
+    import torch
+
+    if not isinstance(kernel, torch.Tensor):
+        return kernel
+    if kernel.ndim == 3:
+        return kernel.flip(-1, -2).unsqueeze(1).contiguous()
+    if kernel.ndim == 4:
+        return kernel.flip(-1, -2, -3).unsqueeze(1).contiguous()
+    return kernel
+
+
 class PartialDerivative:
 
     def __init__(self, spatial_order:int=4, device='cpu', backend='torch', ndim=2):
@@ -46,6 +59,14 @@ class PartialDerivative:
         if self.ndim == 3:
             self.kyf = to(self.kyf, self.backend, self.device)
             self.kyb = to(self.kyb, self.backend, self.device)
+        if self.backend == 'torch':
+            self.kxf = _prepare_torch_kernel_bank(self.kxf)
+            self.kxb = _prepare_torch_kernel_bank(self.kxb)
+            self.kzf = _prepare_torch_kernel_bank(self.kzf)
+            self.kzb = _prepare_torch_kernel_bank(self.kzb)
+            if self.ndim == 3:
+                self.kyf = _prepare_torch_kernel_bank(self.kyf)
+                self.kyb = _prepare_torch_kernel_bank(self.kyb)
     def x_forward(self, u):
         return self.apply_kernels(u, self.kxf)
 

@@ -5,26 +5,27 @@ def step_cpml(
         vp, dt, h, b, 
         lap_x, lap_z, 
         pml,
-        grad_op
+        grad_op,
+        grad_kernels=None,
         ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
 
     w_sum = 0.
     
-    # Calcualte gradients based on 2nd order central finite difference
-    dudz = grad_op(u_now, h, -2)
-    dudx = grad_op(u_now, h, -1)
+    # Use fixed stencil convolutions when available; this is much cheaper than torch.gradient.
+    dudz = grad_op(u_now, h, -2, kernels=grad_kernels)
+    dudx = grad_op(u_now, h, -1, kernels=grad_kernels)
     
     # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -2)
+    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -2, kernels=grad_kernels)
     w_sum += (1+bz) * tmpz + az * zetaz
 
     psiyn = bz * dudz + az * psiz
     zetaz = bz * tmpz + az * zetaz
 
     # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1)
+    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1, kernels=grad_kernels)
     w_sum += (1+bx) * tmpx + ax * zetax
     psixn = bx * dudx + ax * psix
     zetax = bx * tmpx + ax * zetax
@@ -41,8 +42,12 @@ class Acoustic(SecondOrderEquation):
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
-        super().__init__(spatial_order, device, backend, dim=dim)
+        use_fast_grad_kernels = backend == 'torch' and 'cuda' in str(device)
+        super().__init__(spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels)
         super().init_laplace(ltype='1dsep', backend=backend)
+        self.grad_kernels = None
+        if use_fast_grad_kernels:
+            self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
 
     @property
     def models(self):
@@ -54,8 +59,8 @@ class Acoustic(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[8]
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.kernel, dh, dh)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient)
+        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, dh, dh)
+        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
 
     def _C(self, ):
         # CUDA IMPLEMENTATION

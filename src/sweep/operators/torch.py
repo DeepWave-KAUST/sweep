@@ -15,7 +15,6 @@ def _to_nchw(u):
 def _zero_halo(out, halo):
     if halo <= 0:
         return out
-    out = out.clone()
     out[..., :halo, :] = 0
     out[..., -halo:, :] = 0
     out[..., :, :halo] = 0
@@ -23,9 +22,13 @@ def _zero_halo(out, halo):
     return out
 
 def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
-    kz = k1d[None, None, :, None]  # (k,1,1,1)
-    kx = k1d[None, None, None, :]  # (1,k,1,1)
-    pad = k1d.shape[-1] // 2
+    if isinstance(k1d, tuple):
+        kz, kx = k1d
+        pad = max(kz.shape[-3], kx.shape[-1]) // 2
+    else:
+        kz = k1d[None, None, :, None]  # (1,1,k,1)
+        kx = k1d[None, None, None, :]  # (1,1,1,k)
+        pad = k1d.shape[-1] // 2
     lapx = F.conv2d(u, kx, padding=(0, pad)) / (hx*hx)
     lapz = F.conv2d(u, kz, padding=(pad, 0)) / (hz*hz)
     return lapz, lapx
@@ -52,16 +55,14 @@ def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
 @torch.jit.script
 def apply_kernels_torch(u, kernels):
     # u: (B, 1, H, W), torch.Tensor
-    # kernels: (K, kh, kw), torch.Tensor
+    # kernels: (K, 1, kh, kw), torch.Tensor
 
     B, C, H, W = u.shape
-    K, KH, KW = kernels.shape
-
-    kernels_exp = kernels.flip(-1, -2).unsqueeze(1)  # (K, 1, kh, kw)
+    K, _, KH, KW = kernels.shape
 
     padding = (KH // 2, KW // 2) 
 
-    conv_out = F.conv2d(u, kernels_exp, padding=padding)  # (B, K, H, W)
+    conv_out = F.conv2d(u, kernels, padding=padding)  # (B, K, H, W)
 
     out = conv_out.sum(dim=1, keepdim=True)  # (B, 1, H, W)
 
@@ -70,15 +71,13 @@ def apply_kernels_torch(u, kernels):
 @torch.jit.script
 def apply_kernels_torch3d(u, kernels):
     # u: (B, 1, D, H, W), torch.Tensor
-    # kernels: (K, kD, kH, kW), torch.Tensor
+    # kernels: (K, 1, kD, kH, kW), torch.Tensor
     B, C, D, H, W = u.shape
-    K, KD, KH, KW = kernels.shape
-
-    kernels_exp = kernels.flip(-1, -2, -3).unsqueeze(1)  # (K, 1, kD, kH, kW)
+    K, _, KD, KH, KW = kernels.shape
 
     padding = (KD // 2, KH // 2, KW // 2) 
 
-    conv_out = F.conv3d(u, kernels_exp, padding=padding)  # (B, K, D, H, W)
+    conv_out = F.conv3d(u, kernels, padding=padding)  # (B, K, D, H, W)
 
     out = conv_out.sum(dim=1, keepdim=True)  # (B, 1, D, H, W)
 

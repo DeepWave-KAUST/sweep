@@ -83,6 +83,7 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
         self.use_habc = False
         self.habc_masks = None
         self.abcn = 50 # only useful for HABC
+        self.laplace_kernels = None
 
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
@@ -95,6 +96,16 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
             self.gkernel_x = to_backend(kernel_func(spatial_order, derivative_order=1, mode='x', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
             self.gkernel_z = to_backend(kernel_func(spatial_order, derivative_order=1, mode='z', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
 
+    def _prepare_separable_laplace_kernels(self):
+        if self.backend != 'torch':
+            return self.kernel
+        if self.kernel.ndim == 1:
+            return (
+                self.kernel.view(1, 1, -1, 1).contiguous(),
+                self.kernel.view(1, 1, 1, -1).contiguous(),
+            )
+        return self.kernel
+
     def init_laplace(self, ltype='2dmix', backend='jax'):
         """Overwrting the proporty <laplace>.
 
@@ -103,6 +114,9 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
         """
         if ltype in ['1dsep', '3dsep']:
             self.kernel = to_backend(self.kf(self.so, mode='x')[0,0][self.so//2,:], backend=self.backend, device=self.device)
+            self.laplace_kernels = self._prepare_separable_laplace_kernels()
+        else:
+            self.laplace_kernels = self.kernel
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]
