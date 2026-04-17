@@ -58,6 +58,36 @@ class PropTorch(PropBase, torch.nn.Module):
         self._mark_compile_step_begin()
         return self.step_func(*wavefield, *fixargs)
 
+    def _run_chunk(
+        self,
+        wavefield,
+        fixargs,
+        wavelet,
+        nt,
+        start_t,
+        chunk_size,
+        src,
+        rec,
+        record_shape,
+        adj=False,
+        ):
+        chunk_record = torch.zeros(record_shape, dtype=wavefield[0].dtype, device=wavefield[0].device)
+        for local_i in range(chunk_size):
+            t = start_t + local_i
+            if t >= nt:
+                break
+
+            wavefield = list(self._compiled_step(wavefield, fixargs))
+
+            time = t if not adj else nt - t - 1
+            for source_idx in self.source_indices:
+                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+
+            for ic, receiver_idx in enumerate(self.receiver_indices):
+                chunk_record[:, local_i, :, ic] = rec(wavefield[receiver_idx]).view(record_shape[0], record_shape[2])
+
+        return tuple(wavefield), chunk_record
+
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
         for name, data in zip(self.model_names, model):
@@ -110,33 +140,73 @@ class PropTorch(PropBase, torch.nn.Module):
         self.models_padded = models
         fixargs = models+[self.dt, self.dh, None]
         wavefield = [torch.zeros(shape_wavefield, device=self.dev) for _ in self.wavefield_names]
+        if self.use_ckpt and self.ckpt_mode != "chunk":
+            raise ValueError(
+                f"Unsupported ckpt_mode '{self.ckpt_mode}' for PropTorch. Expected 'chunk'."
+            )
+        if self.use_ckpt and return_wavefield:
+            raise ValueError(
+                "return_wavefield=True is not supported with chunk checkpointing in PropTorch yet."
+            )
         # import numpy as np
         # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ay', 'by', 'ayh', 'byh', 'ax', 'bx', 'axh', 'bxh']):
         #     np.save(f'{name}.npy', b.detach().cpu().numpy())
-        for i in range(nt):
+        if self.use_ckpt:
+            chunk_size = int(max(1, self.ckpt_chunks))
+            record_chunk_shape = (batch_size, chunk_size, receivers.shape[1], len(self.receiver_type))
+            num_chunks = (nt + chunk_size - 1) // chunk_size
+            num_wavefields = len(wavefield)
+            num_models = len(models)
 
-            # # register hook for adjoint wavefield extraction
-            # for w, name in zip(wavefield, self.wavefield_names[:5]):
-            #     if w.requires_grad:
-            #         w.register_hook(hook_it(self.wavefield_names.index(name), i))
+            for chunk_idx in range(num_chunks):
+                start_t = chunk_idx * chunk_size
+                def checkpoint_chunk(*chunk_inputs, start_t=start_t):
+                    state = list(chunk_inputs[:num_wavefields])
+                    chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
+                    chunk_fixargs = chunk_models + [self.dt, self.dh, None]
+                    return self._run_chunk(
+                        state,
+                        chunk_fixargs,
+                        wavelet,
+                        nt,
+                        start_t,
+                        chunk_size,
+                        src,
+                        rec,
+                        record_chunk_shape,
+                        adj=adj,
+                    )
+                wavefield, chunk_record = ckpt_torch(
+                    checkpoint_chunk,
+                    *wavefield,
+                    *models,
+                    use_reentrant=False,
+                )
+                wavefield = list(wavefield)
+                end_t = min(start_t + chunk_size, nt)
+                record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
+        else:
+            for i in range(nt):
 
-            # Time step forward
-            if self.use_ckpt:
-                wavefield = list(ckpt_torch(self.step_func, *wavefield, *fixargs, use_reentrant=False))
-            else:
+                # # register hook for adjoint wavefield extraction
+                # for w, name in zip(wavefield, self.wavefield_names[:5]):
+                #     if w.requires_grad:
+                #         w.register_hook(hook_it(self.wavefield_names.index(name), i))
+
+                # Time step forward
                 wavefield = list(self._compiled_step(wavefield, fixargs))
 
-            if return_wavefield:
-                snapshots[i] = torch.stack([w.detach().cpu() for w in wavefield], 0)
+                if return_wavefield:
+                    snapshots[i] = torch.stack([w.detach().cpu() for w in wavefield], 0)
 
-            # Add source
-            for source_idx in self.source_indices:
-                time = i if not adj else nt - i - 1
-                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+                # Add source
+                for source_idx in self.source_indices:
+                    time = i if not adj else nt - i - 1
+                    wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
 
-            # Record wavefields
-            for ic, receiver_idx in enumerate(self.receiver_indices):
-                record[:, i, :, ic] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+                # Record wavefields
+                for ic, receiver_idx in enumerate(self.receiver_indices):
+                    record[:, i, :, ic] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
 
         for name, data in zip(self.wavefield_names, wavefield):
             setattr(self, name, data)
