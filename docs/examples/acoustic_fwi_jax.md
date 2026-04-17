@@ -1,3 +1,142 @@
+# Acoustic FWI (JAX)
+
+Source file:
+
+- [examples/acoustic_fwi_jax.py](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/acoustic_fwi_jax.py)
+
+## What This Example Does
+
+This example runs a simple acoustic full-waveform inversion workflow with the
+JAX propagator.
+
+The script does four things:
+
+1. Loads a true velocity model and an initial smooth model
+2. Builds a `PropJax(Acoustic(...))` solver
+3. Generates observed shot gathers from the true model
+4. Optimizes the initial model so the synthetic data matches the observed data
+
+## Main Components
+
+The solver is built from:
+
+- `equation`: `Acoustic(..., backend="jax")`
+- `propagator`: `PropJax(...)`
+- `wave`: a Ricker wavelet
+- `sources`: regularly sampled source coordinates
+- `receivers`: regularly sampled receiver coordinates
+- `models`: the velocity model `vp`
+
+## Key Configuration
+
+The example keeps its runtime settings in a single `CONFIG` dictionary.
+
+Important entries include:
+
+- `nt`, `dt`: temporal sampling
+- `dh`: spatial sampling
+- `spatial_order`: finite-difference order
+- `abcn`: absorbing boundary width
+- `src_step`, `rec_step`: acquisition sampling in the x direction
+- `true_model`, `init_model`: `.npy` files loaded from `examples/`
+- `epochs`, `batchsize`, `lr`: inversion hyperparameters
+- `use_ckpt`: whether JAX chunk rematerialization is enabled
+
+## Solver Setup
+
+The equation is created with the JAX backend:
+
+```python
+equation = Acoustic(
+    spatial_order=cfg["spatial_order"],
+    backend="jax",
+)
+```
+
+Shared propagator arguments are collected first:
+
+```python
+prop_kwargs = dict(
+    shape=shape,
+    dev=None,
+    dh=cfg["dh"],
+    dt=cfg["dt"],
+    source_type=["h1"],
+    receiver_type=["h1"],
+    abcn=cfg["abcn"],
+    free_surface=cfg["free_surface"],
+    use_ckpt=cfg["use_ckpt"],
+    pml_type="cpmlr",
+)
+```
+
+Then the solver is created as:
+
+```python
+solver = PropJax(equation, **prop_kwargs)
+```
+
+## Geometry
+
+The example builds a simple fixed-depth acquisition:
+
+- sources are placed every `src_step` grid points
+- receivers are placed every `rec_step` grid points
+- all sources use the same source depth `srcz`
+- all receivers use the same receiver depth `recz`
+
+The final array shapes are:
+
+- `sources`: `(nshots, 2)`
+- `receivers`: `(nshots, nreceivers, 2)`
+
+## Inversion Loop
+
+Observed data is first generated from the true model:
+
+```python
+obs = solver(wave, sources, receivers, models=[true_vp])
+```
+
+Then the inversion updates the smooth initial model with `optax.adam`:
+
+```python
+optimizer = optax.adam(cfg["lr"], eps=1e-22)
+vp = jnp.array(init_model)
+opt_state = optimizer.init(vp)
+```
+
+Each iteration:
+
+- samples a subset of shots
+- computes the synthetic data
+- evaluates the L2 data-misfit loss
+- gets gradients with `jax.value_and_grad`
+- updates the model with `optax`
+
+## Outputs
+
+The script creates an output directory under `examples/` and saves:
+
+- `ricker.png`
+- `observed_data.png`
+- `loss.png`
+- `epoch_XXXX.png` snapshots of
+  - the true model
+  - the current inverted model
+  - the current gradient
+
+## Running the Example
+
+From the repository root:
+
+```bash
+python3 examples/acoustic_fwi_jax.py
+```
+
+## Full Script
+
+```python
 import os
 from pathlib import Path
 
@@ -23,7 +162,7 @@ CONFIG = {
     "dh": 25.0,
     "spatial_order": 8,
     "abcn": 20,
-    "free_surface": False,
+    "free_surface": True,
     "src_step": 2,
     "rec_step": 1,
     "srcz": 1,
@@ -208,3 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```

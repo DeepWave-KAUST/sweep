@@ -1,5 +1,6 @@
 """PyTorch backend capability helpers."""
 
+from . import binding
 from . import cuda
 
 
@@ -12,4 +13,4 @@ def is_available():
     return True
 
 
-__all__ = ["cuda", "is_available"]
+__all__ = ["binding", "cuda", "is_available"]

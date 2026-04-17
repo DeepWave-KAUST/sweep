@@ -1,0 +1,92 @@
+# Equations
+
+This section documents the equation classes in `sweep.equations`.
+
+## Overview
+
+An equation defines:
+
+- the physical model parameters required by the solver
+- the wavefields carried during propagation
+- the numerical update rule used by the propagator
+- whether a compiled PyTorch CUDA binding exists
+
+!!! note
+
+    In equation constructors, the `backend` argument refers to the tensor and
+    operator backend, not the propagator class. If you plan to run with
+    `PropCUDA`, the equation `backend` should still normally be `"torch"`, not
+    `"cuda"`.
+
+## API Tabs
+
+=== "Acoustic"
+
+    ```python
+    class Acoustic(
+        spatial_order=4,
+        device="cpu",
+        backend="torch",
+        dim=2,
+    )
+    ```
+
+    Second-order 2D acoustic equation with CPML-compatible auxiliary fields.
+
+    See [Acoustic](acoustic.md) for parameter meanings.
+
+=== "Acoustic3D"
+
+    ```python
+    class Acoustic3D(
+        spatial_order=4,
+        device="cpu",
+        backend="torch",
+        dim=3,
+    )
+    ```
+
+    Second-order 3D acoustic equation.
+
+    See [Acoustic3D](acoustic3d.md) for parameter meanings.
+
+=== "Elastic"
+
+    ```python
+    class Elastic(
+        spatial_order=4,
+        device="cpu",
+        backend="torch",
+    )
+    ```
+
+    First-order 2D elastic velocity-stress equation.
+
+    See [Elastic](elastic.md) for parameter meanings.
+
+=== "Elastic3D"
+
+    ```python
+    class Elastic3D(
+        spatial_order=4,
+        device="cpu",
+        backend="torch",
+    )
+    ```
+
+    First-order 3D elastic velocity-stress equation.
+
+    See [Elastic3D](elastic3d.md) for parameter meanings.
+
+## Equation Pages
+
+The following pages focus on constructor parameters, required models,
+wavefields, and backend or binding behavior for each equation:
+
+- [Acoustic](acoustic.md)
+- [Acoustic3D](acoustic3d.md)
+- [AcousticVRZ](acoustic_vrz.md)
+- [AcousticLSRTM](acoustic_lsrtm.md)
+- [Acoustic1st](acoustic1st.md)
+- [Elastic](elastic.md)
+- [Elastic3D](elastic3d.md)

@@ -2,16 +2,16 @@
 
 Repository examples live in the `examples/` directory.
 
-## Suggested Organization
+## Available Pages
+
+- [Acoustic FWI (CUDA/Torch)](acoustic_fwi_torch.md)
+- [Acoustic FWI With Source Encoding (CUDA/Torch)](acoustic_fwi_encoding_torch.md)
+- [Acoustic FWI (JAX)](acoustic_fwi_jax.md)
+
+## Example Families
 
 - Acoustic FWI
 - Elastic FWI
 - JAX examples
 - PyTorch examples
 - CUDA binding examples
-
-## TODO
-
-- Add one page per example family
-- Briefly describe the purpose of each script
-- Link each page to the corresponding source file

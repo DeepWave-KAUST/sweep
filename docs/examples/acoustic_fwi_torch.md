@@ -1,3 +1,204 @@
+# Acoustic FWI (CUDA/Torch)
+
+Source file:
+
+- [examples/acoustic_fwi_torch.py](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/acoustic_fwi_torch.py)
+
+## What This Example Does
+
+This example runs a simple acoustic full-waveform inversion workflow with a
+single script that supports two propagator backends:
+
+- `torch`: pure PyTorch propagation with `PropTorch`
+- `cuda`: compiled CUDA propagation with `PropCUDA`
+
+The script does four things:
+
+1. Loads a true velocity model and an initial smooth model
+2. Builds an acoustic solver for the selected backend
+3. Generates observed shot gathers from the true model
+4. Optimizes the initial model so the synthetic data matches the observed data
+
+## Main Components
+
+The solver is built from:
+
+- `equation`: `Acoustic(...)`
+- `propagator`: `PropTorch(...)` or `PropCUDA(...)`
+- `wave`: a Ricker wavelet
+- `sources`: regularly sampled source coordinates
+- `receivers`: regularly sampled receiver coordinates
+- `models`: the velocity model `vp`
+
+## Backend Selection
+
+The entry point is:
+
+```bash
+python3 examples/acoustic_fwi_torch.py --backend torch
+```
+
+or:
+
+```bash
+python3 examples/acoustic_fwi_torch.py --backend cuda
+```
+
+Internally, the script keeps:
+
+- `COMMON_CONFIG`: shared acquisition and inversion settings
+- `BACKEND_CONFIG`: backend-specific options such as
+  - `use_compile` for the PyTorch path
+  - `boundary_saving_config` for the CUDA path
+
+## Key Configuration
+
+Shared configuration includes:
+
+- `nt`, `dt`: temporal sampling
+- `dh`: spatial sampling
+- `spatial_order`: finite-difference order
+- `src_step`, `rec_step`: acquisition sampling in the x direction
+- `true_model`, `init_model`: `.npy` files loaded from `examples/`
+- `epochs`, `batchsize`, `lr`: inversion hyperparameters
+
+Backend-specific configuration includes:
+
+- PyTorch:
+  - `use_compile`
+  - `use_ckpt`
+- CUDA:
+  - `boundary_saving_config`
+  - output gather transpose for visualization
+
+## Solver Setup
+
+The equation side is shared across both modes:
+
+```python
+equation = Acoustic(
+    spatial_order=cfg["spatial_order"],
+    device=dev,
+    backend="torch",
+)
+```
+
+Even when the propagator is `PropCUDA`, the equation `backend` remains
+`"torch"`.
+
+Shared propagator arguments are collected first:
+
+```python
+prop_kwargs = dict(
+    shape=shape,
+    dev=dev,
+    dh=cfg["dh"],
+    dt=cfg["dt"],
+    source_type=["h1"],
+    receiver_type=["h1"],
+    abcn=cfg["abcn"],
+    free_surface=cfg["free_surface"],
+    pml_type="cpmlr",
+)
+```
+
+### PyTorch Mode
+
+```python
+solver = PropTorch(
+    equation,
+    **prop_kwargs,
+    use_ckpt=cfg["use_ckpt"],
+    use_compile=cfg["use_compile"],
+)
+```
+
+### CUDA Mode
+
+```python
+solver = PropCUDA(
+    equation,
+    **prop_kwargs,
+    boundary_saving_config=cfg["boundary_saving_config"],
+)
+```
+
+## Geometry
+
+The example builds a simple fixed-depth acquisition:
+
+- sources are placed every `src_step` grid points
+- receivers are placed every `rec_step` grid points
+- all sources use the same source depth `srcz`
+- all receivers use the same receiver depth `recz`
+
+The final array shapes are:
+
+- `sources`: `(nshots, 2)`
+- `receivers`: `(nshots, nreceivers, 2)`
+
+## Inversion Loop
+
+Observed data is first generated from the true model:
+
+```python
+obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
+```
+
+Then the inversion updates the smooth initial model:
+
+```python
+inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
+optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)
+```
+
+For each epoch:
+
+- a random subset of shots is selected
+- synthetic data is computed
+- the L2 data-misfit loss is evaluated
+- gradients are backpropagated to `inv_vp`
+- the optimizer updates the model
+
+## Outputs
+
+The script creates an output directory under `examples/` and saves:
+
+- `ricker.png`
+- `observed_data.png`
+- `loss.png`
+- `epoch_XXXX.png` snapshots of
+  - the true model
+  - the current inverted model
+  - the current gradient
+
+Each backend writes into its own output directory:
+
+- `acoustic_fwi_torch`
+- `acoustic_fwi_cuda`
+
+## Running the Example
+
+PyTorch mode:
+
+```bash
+python3 examples/acoustic_fwi_torch.py --backend torch
+```
+
+CUDA mode:
+
+```bash
+python3 examples/acoustic_fwi_torch.py --backend cuda
+```
+
+Notes:
+
+- `torch` mode runs on GPU if available and otherwise falls back to CPU
+- `cuda` mode requires a CUDA-capable PyTorch environment and compiled binding
+
+## Full Script
+
+```python
 from pathlib import Path
 import argparse
 import time
@@ -23,8 +224,6 @@ COMMON_CONFIG = {
     "fm": 5.0,
     "dh": 25.0,
     "spatial_order": 8,
-    "abcn": 20,
-    "free_surface": False,
     "src_step": 2,
     "rec_step": 1,
     "srcz": 1,
@@ -35,7 +234,6 @@ COMMON_CONFIG = {
     "show_every": 10,
     "true_model": "marmousi_true.npy",
     "init_model": "marmousi_smooth.npy",
-    "max_time_shift_ratio": 0.2,
 }
 
 
@@ -43,15 +241,15 @@ BACKEND_CONFIG = {
     "torch": {
         "abcn": 20,
         "free_surface": False,
-        "output_dir": "acoustic_fwi_encoding_torch",
-        "use_ckpt": False,
+        "output_dir": "acoustic_fwi_torch",
         "use_compile": True,
+        "use_ckpt": False,
         "transpose_shot": False,
     },
     "cuda": {
         "abcn": 20,
         "free_surface": False,
-        "output_dir": "acoustic_fwi_encoding_cuda",
+        "output_dir": "acoustic_fwi_cuda",
         "transpose_shot": True,
         "boundary_saving_config": {
             "enabled": True,
@@ -79,30 +277,34 @@ def build_solver(shape, dev, cfg):
         backend="torch",
     )
 
-    prop_kwargs = dict(
-        shape=shape,
-        dev=dev,
-        dh=cfg["dh"],
-        dt=cfg["dt"],
-        source_type=["h1"],
-        receiver_type=["h1"],
-        abcn=cfg["abcn"],
-        free_surface=cfg["free_surface"],
-        pml_type="cpmlr",
-    )
-
     if cfg["backend"] == "torch":
         return PropTorch(
             equation,
-            **prop_kwargs,
+            shape=shape,
+            dev=dev,
+            dh=cfg["dh"],
+            dt=cfg["dt"],
+            source_type=["h1"],
+            receiver_type=["h1"],
+            abcn=cfg["abcn"],
+            free_surface=cfg["free_surface"],
             use_ckpt=cfg["use_ckpt"],
+            pml_type="cpmlr",
             use_compile=cfg["use_compile"],
         )
 
     if cfg["backend"] == "cuda":
         return PropCUDA(
             equation,
-            **prop_kwargs,
+            shape=shape,
+            dev=dev,
+            dh=cfg["dh"],
+            dt=cfg["dt"],
+            source_type=["h1"],
+            receiver_type=["h1"],
+            abcn=cfg["abcn"],
+            free_surface=cfg["free_surface"],
+            pml_type="cpmlr",
             boundary_saving_config=cfg["boundary_saving_config"],
         )
 
@@ -171,28 +373,6 @@ def save_observed_figure(obs, output_dir, cfg):
     plt.close()
 
 
-def format_shot_for_display(shot, cfg):
-    shot = np.asarray(shot).squeeze()
-    if cfg.get("transpose_shot", False):
-        shot = shot.T
-    return shot
-
-
-def save_encoded_data_figure(encoded_obs, encoded_syn, epoch, output_dir, cfg):
-    obs_np = format_shot_for_display(encoded_obs, cfg)
-    syn_np = format_shot_for_display(encoded_syn, cfg)
-    vmin, vmax = np.percentile(obs_np, [2, 98])
-
-    fig, axes = plt.subplots(1, 2, figsize=(7, 5))
-    axes[0].imshow(obs_np, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
-    axes[0].set_title("Encoded Observed Data")
-    axes[1].imshow(syn_np, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
-    axes[1].set_title("Encoded Synthetic Data")
-    plt.tight_layout()
-    plt.savefig(output_dir / f"data_epoch_{epoch:04d}.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-
 def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
     nz, nx = true_model.shape
     extent = [0, nx * cfg["dh"], nz * cfg["dh"], 0]
@@ -219,64 +399,6 @@ def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
     plt.close(fig)
 
 
-def record_time_axis(record, cfg):
-    if cfg.get("transpose_shot", False) and np.asarray(record).ndim >= 2:
-        return 1
-    return 0
-
-
-def build_encoded_batch(wave, obs, shot_idx, cfg, dev, backend):
-    nsel = len(shot_idx)
-    nt = cfg["nt"]
-    max_shift = max(1, int(cfg["max_time_shift_ratio"] * nt))
-
-    encoded_wave = np.zeros((nsel, nt), dtype=np.float32)
-    encoded_obs = np.zeros_like(obs[shot_idx[0]], dtype=np.float32)
-    for i, shot in enumerate(shot_idx):
-        polarity = -1.0 if np.random.randint(0, 2) else 1.0
-        tau = int(np.random.randint(0, max_shift))
-        shot_wave = polarity * np.roll(wave, shift=tau, axis=0)
-        shot_wave[:tau] = 0.0
-
-        shot_obs = polarity * np.roll(obs[shot], shift=tau, axis=record_time_axis(obs[shot], cfg))
-        if record_time_axis(obs[shot], cfg) == 0:
-            shot_obs[:tau] = 0.0
-        else:
-            shot_obs[:, :tau] = 0.0
-
-        encoded_wave[i] = shot_wave
-        encoded_obs += shot_obs
-
-    if backend == "cuda":
-        encoded_wave = encoded_wave[None, ...]
-        encoded_obs = torch.as_tensor(encoded_obs[None, ...], dtype=torch.float32, device=dev)
-        return encoded_wave, encoded_obs
-
-    encoded_wave = torch.as_tensor(encoded_wave, dtype=torch.float32, device=dev)
-    encoded_obs = torch.as_tensor(encoded_obs, dtype=torch.float32, device=dev)
-    return encoded_wave, encoded_obs
-
-
-def prepare_encoded_inputs(wave, obs, sources, receivers_shared, shot_idx, cfg, dev):
-    encoded_wave, encoded_obs = build_encoded_batch(wave, obs, shot_idx, cfg, dev, cfg["backend"])
-    sources_sel = sources[shot_idx]
-
-    if cfg["backend"] == "cuda":
-        return (
-            encoded_wave,
-            sources_sel[None, ...],
-            receivers_shared,
-            encoded_obs,
-        )
-
-    return (
-        encoded_wave,
-        sources_sel,
-        receivers_shared,
-        encoded_obs,
-    )
-
-
 def run_fwi(backend="torch"):
     cfg = build_config(backend)
     base_dir = Path(__file__).resolve().parent
@@ -291,7 +413,7 @@ def run_fwi(backend="torch"):
     shape = true_model.shape
 
     if backend == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("The CUDA acoustic FWI encoding example requires a CUDA-capable PyTorch environment.")
+        raise RuntimeError("The CUDA acoustic FWI example requires a CUDA-capable PyTorch environment.")
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     solver = build_solver(shape, dev, cfg)
@@ -308,12 +430,10 @@ def run_fwi(backend="torch"):
     print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
     save_observed_figure(obs, output_dir, cfg)
 
-    receivers_shared = receivers[:1]
-    print("Source shape for inversion:", sources.shape)
-    print("Receiver shape for inversion:", receivers_shared.shape)
-
     inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
     optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)
+
+    obs_torch = torch.from_numpy(obs).to(dev)
     losses = []
     nshots = sources.shape[0]
     batchsize = min(cfg["batchsize"], nshots)
@@ -322,59 +442,10 @@ def run_fwi(backend="torch"):
         optimizer.zero_grad()
 
         shot_idx = np.random.choice(nshots, size=batchsize, replace=False)
-        encoded_wave, encoded_sources, encoded_receivers, encoded_obs = prepare_encoded_inputs(
-            wave,
-            obs,
-            sources,
-            receivers_shared,
-            shot_idx,
-            cfg,
-            dev,
-        )
-        encoded_syn = solver(
-            encoded_wave,
-            encoded_sources,
-            encoded_receivers,
-            models=[inv_vp],
-            source_encoding=True,
-        )
-        
-        loss = (encoded_syn - encoded_obs).pow(2).mean()
+        syn = solver(wave, sources[shot_idx], receivers[shot_idx], models=[inv_vp])
+        loss = (syn - obs_torch[shot_idx]).pow(2).mean()
         loss.backward()
         optimizer.step()
 
-        loss_value = float(loss.item())
-        losses.append(loss_value)
-        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
-
-        if epoch % cfg["show_every"] == 0:
-            vp_np = inv_vp.detach().cpu().numpy()
-            grad_np = inv_vp.grad.detach().cpu().numpy()
-            save_encoded_data_figure(
-                encoded_obs.detach().cpu().numpy(),
-                encoded_syn.detach().cpu().numpy(),
-                epoch,
-                output_dir,
-                cfg,
-            )
-            save_progress_figure(true_model, vp_np, grad_np, losses, epoch, cfg, output_dir)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Acoustic source-encoding FWI example for PyTorch and CUDA propagators.")
-    parser.add_argument(
-        "--backend",
-        choices=("torch", "cuda"),
-        default="torch",
-        help="Select which propagator backend to use.",
-    )
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    run_fwi(backend=args.backend)
-
-
-if __name__ == "__main__":
-    main()
+        losses.append(loss.item())
+```

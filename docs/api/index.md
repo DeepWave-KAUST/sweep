@@ -1,25 +1,24 @@
 # API Reference
 
-This section is a placeholder for API-oriented documentation.
+This section documents SWEEP's runtime-facing APIs based on how they are
+actually used in the codebase.
 
-## Suggested Modules To Cover
+## Covered Modules
 
 - `sweep.equations`
 - `sweep.propagator`
-- `sweep.signal`
-- `sweep.backend`
-- `sweep.operators`
 
-## Recommended Style
+## Current Pages
 
-For each module, document:
+- [Equations](equations/index.md)
+- [Propagators](propagators/index.md)
 
-- Main classes and functions
-- Important constructor arguments
-- Expected input shapes
-- Backend-specific behavior
+## Documentation Approach
 
-## TODO
+The API Reference is written by checking the implementation directly rather than
+copying constructor comments blindly. For each class, the goal is to capture:
 
-- Decide whether to keep this hand-written or auto-generate parts of it
-- Add links back to user-guide pages where helpful
+- the actual constructor arguments
+- backend-specific differences
+- input and output conventions
+- behaviors that are easy to misunderstand

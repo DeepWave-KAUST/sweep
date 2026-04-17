@@ -7,6 +7,7 @@ docs_dir: docs
 theme:
   name: material
   features:
+    - navigation.tabs
     - navigation.sections
     - navigation.expand
     - content.code.copy
@@ -32,5 +33,22 @@ nav:
       - CLI: user-guide/cli.md
   - Examples:
       - Overview: examples/index.md
+      - Acoustic FWI (CUDA/Torch): examples/acoustic_fwi_torch.md
+      - Acoustic FWI With Source Encoding (CUDA/Torch): examples/acoustic_fwi_encoding_torch.md
+      - Acoustic FWI (JAX): examples/acoustic_fwi_jax.md
   - API Reference:
       - Overview: api/index.md
+      - Equations:
+          - Overview: api/equations/index.md
+          - Acoustic: api/equations/acoustic.md
+          - Acoustic3D: api/equations/acoustic3d.md
+          - AcousticVRZ: api/equations/acoustic_vrz.md
+          - AcousticLSRTM: api/equations/acoustic_lsrtm.md
+          - Acoustic1st: api/equations/acoustic1st.md
+          - Elastic: api/equations/elastic.md
+          - Elastic3D: api/equations/elastic3d.md
+      - Propagators:
+          - Overview: api/propagators/index.md
+          - PropTorch: api/propagators/prop_torch.md
+          - PropCUDA: api/propagators/prop_cuda.md
+          - PropJax: api/propagators/prop_jax.md

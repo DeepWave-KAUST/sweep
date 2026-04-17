@@ -10,6 +10,149 @@ This page should contain the smallest working example for new users.
 4. Define sources, receivers, and models
 5. Run forward modeling or inversion
 
+## Build a Solver
+
+In SWEEP, a solver is built from a small set of fixed pieces:
+
+- `equation`: defines the physics and the required model parameters
+- `propagator`: advances the equation in time on a chosen backend
+- `wave`: the source time function, usually shape `(nt,)`
+- `sources`: source coordinates, usually shape `(nshots, ndim)`
+- `receivers`: receiver coordinates, usually shape `(nshots, nreceivers, ndim)`
+- `models`: model tensors, provided in the exact order required by `equation.models`
+
+The structure is:
+
+```text
+solver
+├── equation
+├── propagator
+└── runtime inputs
+    ├── wave
+    ├── sources
+    ├── receivers
+    └── models
+```
+
+You can think of the data flow like this:
+
+```text
+Equation
+  -> defines wave physics, wavefields, and required models
+
+Propagator
+  -> takes an Equation and knows how to run it
+
+Wave + Sources + Receivers + Models
+  -> provide the actual survey and Earth model
+
+Solver Call
+  -> combines all of the above and produces synthetic data
+```
+
+More explicitly:
+
+```text
+                 +----------------------+
+                 |       Equation       |
+                 |  Acoustic / Elastic  |
+                 +----------------------+
+                            |
+                            v
+                 +----------------------+
+                 |      Propagator      |
+                 | PropTorch / PropCUDA |
+                 +----------------------+
+                            |
+         +------------------+-------------------+------------------+
+         |                  |                   |                  |
+         v                  v                   v                  v
+   +-----------+      +-----------+       +-----------+      +-----------+
+   |   wave    |      |  sources  |       | receivers |      |  models   |
+   |  (nt,)    |      | geometry  |       | geometry  |      | vp, vs... |
+   +-----------+      +-----------+       +-----------+      +-----------+
+                            \                 |                 /
+                             \                |                /
+                              \               |               /
+                               v              v              v
+                         +----------------------------------------+
+                         |              solver(...)               |
+                         +----------------------------------------+
+                                            |
+                                            v
+                         +----------------------------------------+
+                         | synthetic records / gradients / images |
+                         +----------------------------------------+
+```
+
+Or in one line:
+
+```text
+Solver = Equation + Propagator + Wave + Sources + Receivers + Models
+```
+
+The equation defines the physics:
+
+```python
+from sweep.equations import Acoustic
+
+equation = Acoustic(
+    spatial_order=8,
+    device=dev,
+    backend="torch",
+)
+```
+
+The propagator defines how the equation is executed:
+
+```python
+from sweep.propagator.torch import PropTorch
+
+solver = PropTorch(
+    equation,
+    shape=(nz, nx),
+    dev=dev,
+    dh=dh,
+    dt=dt,
+    source_type=["h1"],
+    receiver_type=["h1"],
+    abcn=30,
+    free_surface=False,
+    pml_type="cpmlr",
+    use_ckpt=False,
+)
+```
+
+Typical propagator arguments:
+
+- `shape`: model shape, e.g. `(nz, nx)` for 2D or `(nz, ny, nx)` for 3D
+- `dh`: spatial grid spacing
+- `dt`: time step
+- `source_type`: which wavefield component receives the source injection
+- `receiver_type`: which wavefield component is sampled at receiver locations
+- `abcn`: absorbing boundary width
+- `pml_type`: absorbing boundary implementation
+- `use_ckpt`: whether checkpointing is enabled
+
+For CUDA propagation, the pattern is the same, but you use `PropCUDA`:
+
+```python
+from sweep.propagator.cuda import PropCUDA
+
+solver = PropCUDA(
+    equation,
+    shape=(nz, nx),
+    dev=dev,
+    dh=dh,
+    dt=dt,
+    source_type=["h1"],
+    receiver_type=["h1"],
+    abcn=30,
+    free_surface=False,
+    pml_type="cpmlr",
+)
+```
+
 ## Example
 
 === "PyTorch"
