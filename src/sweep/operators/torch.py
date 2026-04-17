@@ -38,13 +38,14 @@ def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
     u: (B, 1, nz, ny, nx)
     k1d: (k,)
     """
-
-    pad = k1d.shape[-1] // 2
-
-    # reshape kernels to 3D
-    kz = k1d.view(1, 1, -1, 1, 1)  # (1,1,k,1,1)
-    ky = k1d.view(1, 1, 1, -1, 1)  # (1,1,1,k,1)
-    kx = k1d.view(1, 1, 1, 1, -1)  # (1,1,1,1,k)
+    if isinstance(k1d, tuple):
+        kz, ky, kx = k1d
+        pad = max(kz.shape[-3], ky.shape[-2], kx.shape[-1]) // 2
+    else:
+        pad = k1d.shape[-1] // 2
+        kz = k1d.view(1, 1, -1, 1, 1)
+        ky = k1d.view(1, 1, 1, -1, 1)
+        kx = k1d.view(1, 1, 1, 1, -1)
 
     lapz = F.conv3d(u, kz, padding=(pad, 0, 0)) / (hz * hz)
     lapy = F.conv3d(u, ky, padding=(0, pad, 0)) / (hy * hy)
@@ -55,33 +56,24 @@ def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
 @torch.jit.script
 def apply_kernels_torch(u, kernels):
     # u: (B, 1, H, W), torch.Tensor
-    # kernels: (K, 1, kh, kw), torch.Tensor
-
-    B, C, H, W = u.shape
-    K, _, KH, KW = kernels.shape
+    # kernels: (1, 1, kh, kw) or (K, 1, kh, kw), torch.Tensor
+    _, _, KH, KW = kernels.shape
 
     padding = (KH // 2, KW // 2) 
 
     conv_out = F.conv2d(u, kernels, padding=padding)  # (B, K, H, W)
-
-    out = conv_out.sum(dim=1, keepdim=True)  # (B, 1, H, W)
-
-    return out
+    return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
 @torch.jit.script
 def apply_kernels_torch3d(u, kernels):
     # u: (B, 1, D, H, W), torch.Tensor
-    # kernels: (K, 1, kD, kH, kW), torch.Tensor
-    B, C, D, H, W = u.shape
-    K, _, KD, KH, KW = kernels.shape
+    # kernels: (1, 1, kD, kH, kW) or (K, 1, kD, kH, kW), torch.Tensor
+    _, _, KD, KH, KW = kernels.shape
 
     padding = (KD // 2, KH // 2, KW // 2) 
 
     conv_out = F.conv3d(u, kernels, padding=padding)  # (B, K, D, H, W)
-
-    out = conv_out.sum(dim=1, keepdim=True)  # (B, 1, D, H, W)
-
-    return out
+    return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
 def laplace2d(u: torch.Tensor, 
             h: float | torch.Tensor, 

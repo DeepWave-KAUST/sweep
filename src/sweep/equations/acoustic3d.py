@@ -41,7 +41,7 @@ def step_cpml(
 
 class Acoustic3D(SecondOrderEquation):
 
-    def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
+    def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=3):
         """Acoustic wave equation solver.
 
         Args:
@@ -61,7 +61,7 @@ class Acoustic3D(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[10]
-        lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.kernel, dh, dh, dh)
+        lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, dh, dh, dh)
         return step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
 
     def _C(self, ):

@@ -77,6 +77,7 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
         OperatorBase.__init__(self, backend=backend)
         WaveEquation.__init__(self, spatial_order, device, backend, **kwargs)
         dim = kwargs.get('dim', 2)
+        self.ndim = dim
         self.so = spatial_order
         self.backend = backend
         self.device = device
@@ -100,6 +101,12 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
         if self.backend != 'torch':
             return self.kernel
         if self.kernel.ndim == 1:
+            if self.ndim == 3:
+                return (
+                    self.kernel.view(1, 1, -1, 1, 1).contiguous(),
+                    self.kernel.view(1, 1, 1, -1, 1).contiguous(),
+                    self.kernel.view(1, 1, 1, 1, -1).contiguous(),
+                )
             return (
                 self.kernel.view(1, 1, -1, 1).contiguous(),
                 self.kernel.view(1, 1, 1, -1).contiguous(),

@@ -9,9 +9,11 @@ def _prepare_torch_kernel_bank(kernel):
     if not isinstance(kernel, torch.Tensor):
         return kernel
     if kernel.ndim == 3:
-        return kernel.flip(-1, -2).unsqueeze(1).contiguous()
+        # The derivative operator is linear: summing the per-offset responses is
+        # equivalent to convolving once with the summed stencil.
+        return kernel.sum(dim=0, keepdim=True).flip(-1, -2).unsqueeze(1).contiguous()
     if kernel.ndim == 4:
-        return kernel.flip(-1, -2, -3).unsqueeze(1).contiguous()
+        return kernel.sum(dim=0, keepdim=True).flip(-1, -2, -3).unsqueeze(1).contiguous()
     return kernel
 
 

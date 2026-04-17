@@ -45,7 +45,9 @@ model = PropTorch(Elastic(spatial_order=spatial_order, device=dev),
             receiver_type=['vx', 'vz'],
             free_surface=False, 
             pml_type='cpmls',
-            use_ckpt=False)
+            use_ckpt=True, 
+            ckpt_chunks=128,
+            )
 
 # Set the true model, the order of the parameters should be 
 # the same as the model names in func <geophyai.equations.elastic.models>
@@ -89,18 +91,18 @@ print(f"Execution time: {elapsed_time:.2f} ms")
 # plt.tight_layout()
 # plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
 # plt.close()
-# vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
-# plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
-# plt.colorbar()
-# plt.tight_layout()
-# plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
-# plt.close()
-# vmin, vmax = np.percentile(obs[-1][...,1], [2, 98])
-# plt.imshow(obs[-1].squeeze()[...,1], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
-# plt.colorbar()
-# plt.tight_layout()
-# plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
-# plt.close()
+vmin, vmax = np.percentile(obs[-1][...,0], [2, 98])
+plt.imshow(obs[-1].squeeze()[...,0], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+plt.colorbar()
+plt.tight_layout()
+plt.savefig(f'{save_path}/elastic_vx.png', dpi=300, bbox_inches='tight')
+plt.close()
+vmin, vmax = np.percentile(obs[-1][...,1], [2, 98])
+plt.imshow(obs[-1].squeeze()[...,1], vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
+plt.colorbar()
+plt.tight_layout()
+plt.savefig(f'{save_path}/elastic_vz.png', dpi=300, bbox_inches='tight')
+plt.close()
 
 
 # ########## Inversion ##########
@@ -128,7 +130,7 @@ for epoch in tqdm.trange(epochs):
     opt.zero_grad()
 
     # rand_shots = np.random.randint(0, sources.shape[0], batchsize)
-    rand_shots = np.array([20])#np.random.choice(sources.shape[0], size=batchsize, replace=False)
+    rand_shots = np.random.choice(sources.shape[0], size=batchsize, replace=False)
     # Source encoding for acceleration
     # coding_syn = model(wave, sources[rand_shots], receivers[rand_shots], models=[vp, vs, rho], use_boundary_saving=False)
     # coding_obs = torch.sum(torch.from_numpy(obs[rand_shots]), dim=0).to(dev)
