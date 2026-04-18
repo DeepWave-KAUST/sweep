@@ -296,3 +296,12 @@ __global__ void accumulate_rtm_image_3d(
     float* __restrict__ receiver_illumination,
     int B, int nx, int ny, int nz
 );
+
+__global__ void accumulate_source_grad_3d(
+    const float* __restrict__ u_backward,
+    float* __restrict__ grad_source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    SolverContext solver
+);

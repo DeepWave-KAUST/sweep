@@ -60,12 +60,14 @@ class Warpper(torch.autograd.Function):
         
         # only forward modeling, no need to save wavefield for backward
         requires_model_grad = any(m.requires_grad for m in models)
+        requires_wavelet_grad = wavelet.requires_grad
+        requires_backward = bool(requires_model_grad or requires_wavelet_grad)
         use_recursive_checkpoint = bool(use_recursive_checkpoint and backward_recursive_ckpt_func is not None)
         use_checkpoint = bool(use_checkpoint and (backward_ckpt_func is not None or use_recursive_checkpoint))
-        save_all_wavefields = requires_model_grad
-        if requires_model_grad and (use_boundary_saving or use_checkpoint):
+        save_all_wavefields = requires_backward
+        if requires_backward and (use_boundary_saving or use_checkpoint):
             save_all_wavefields = False
-        if not requires_model_grad:
+        if not requires_backward:
             save_all_wavefields = False
             use_boundary_saving = False
             use_checkpoint = False
@@ -215,15 +217,21 @@ class Warpper(torch.autograd.Function):
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = ctx.backward_bs_func(params)
 
+        returned_grads = gradients[-1]
+        wavelet_grad = None
+        model_grads = returned_grads
+        if len(returned_grads) == len(ctx.models) + 1:
+            wavelet_grad = returned_grads[0]
+            model_grads = returned_grads[1:]
+
         del ctx.backward_func, ctx.backward_bs_func, ctx.backward_ckpt_func, ctx.backward_recursive_ckpt_func
         del ctx.pml_vals, ctx.forward_source
         del ctx.forward_wavefields
         del ctx.adjoint_workspace
         del ctx.models
-        # print(gradients[0].shape)
         return (
             None, None, None, None, None, # functions
-            None,      # wavelet
+            wavelet_grad,
             None,      # sources_loc
             None,      # receivers_loc
             None,      # source_field_indices
@@ -251,7 +259,7 @@ class Warpper(torch.autograd.Function):
             None,      # last_two
             None,      # boundary cpu
             None,      # boundary gpu
-            *gradients[-1] # models
+            *model_grads # models
         )
 
 class PropCUDA(PropBase, torch.nn.Module):
@@ -572,7 +580,10 @@ class PropCUDA(PropBase, torch.nn.Module):
             receivers += base_shift
 
         # Batch the wavelet, sources and receivers
-        wavelet = torch.from_numpy(wavelet).to(self.dev).float()
+        if isinstance(wavelet, torch.Tensor):
+            wavelet = wavelet.to(self.dev, dtype=torch.float32)
+        else:
+            wavelet = torch.from_numpy(wavelet).to(self.dev).float()
         if wavelet.ndim == 1:
             wavelet = wavelet[None, None, :].repeat(batch_size, 1, 1)
         elif wavelet.ndim == 2:
@@ -626,8 +637,10 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
         requires_model_grad = any(m.requires_grad for m in models)
-        save_all_wavefields = bool(requires_model_grad and not use_boundary_saving and not self.use_ckpt)
-        self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_model_grad)
+        requires_wavelet_grad = wavelet.requires_grad
+        requires_backward = bool(requires_model_grad or requires_wavelet_grad)
+        save_all_wavefields = bool(requires_backward and not use_boundary_saving and not self.use_ckpt)
+        self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_backward)
         self._ensure_adjoint_workspace_buffers(batch_size)
         if self.use_ckpt:
             if use_recursive_checkpoint:

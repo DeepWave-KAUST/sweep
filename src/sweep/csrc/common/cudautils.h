@@ -2,6 +2,21 @@
 
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/extension.h>
+
+#define SWEEP_CUDA_SYNC_CHECK(label)                                                \
+    do {                                                                            \
+        cudaError_t _launch_err = cudaGetLastError();                               \
+        TORCH_CHECK(                                                                 \
+            _launch_err == cudaSuccess,                                             \
+            label, " launch failed: ", cudaGetErrorString(_launch_err)              \
+        );                                                                          \
+        cudaError_t _sync_err = cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()); \
+        TORCH_CHECK(                                                                 \
+            _sync_err == cudaSuccess,                                               \
+            label, " execution failed: ", cudaGetErrorString(_sync_err)             \
+        );                                                                          \
+    } while (0)
 
 struct AsyncCopyContext {
     cudaStream_t compute_stream;

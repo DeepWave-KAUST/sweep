@@ -55,9 +55,35 @@ void accumulate_imaging_2d(
     );
 }
 
+void accumulate_source_gradient_2d(
+    dim3 source_grid,
+    dim3 source_block,
+    const float* adjoint_ptr,
+    const BackwardInput& p,
+    torch::Tensor* grad_wavelet,
+    int it,
+    const SolverContext& ctx,
+    int nsrc
+)
+{
+    if (grad_wavelet == nullptr) {
+        return;
+    }
+
+    accumulate_source_grad_2d<<<source_grid, source_block>>>(
+        adjoint_ptr,
+        grad_wavelet->data_ptr<float>(),
+        p.forward_sources_loc.data_ptr<int>(),
+        it,
+        nsrc,
+        ctx
+    );
+}
+
 void run_full_imaging(
     const BackwardInput& p,
     torch::Tensor* grad,
+    torch::Tensor* grad_wavelet,
     RTMOutput* rtm_out
 )
 {
@@ -70,7 +96,8 @@ void run_full_imaging(
     int C = vp.size(1);
     int nz = vp.size(2);
     int nx = vp.size(3);
-    int nsrc = p.adjoint_source.size(1);
+    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
+    int forward_nsrc = p.forward_sources_loc.size(1);
     int B = N * C;
 
     int M = p.M;
@@ -89,7 +116,8 @@ void run_full_imaging(
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
-    auto source_config = fdtd::Geom::make(nsrc, B);
+    auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
+    auto forward_source_config = fdtd::Geom::make(forward_nsrc, B);
 
     const int order =
         (M <= 4) ? static_cast<int>(2 * M) : -1;
@@ -121,16 +149,27 @@ void run_full_imaging(
             ctx
         );
 
-        add_source<<<source_config.grid, source_config.block>>>(
+        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
             it,
-            nsrc,
+            adjoint_nsrc,
             ctx
         );
 
         adjoint.swap();
+
+        accumulate_source_gradient_2d(
+            forward_source_config.grid,
+            forward_source_config.block,
+            adjoint.u_now_t.data_ptr<float>(),
+            p,
+            grad_wavelet,
+            it,
+            ctx,
+            forward_nsrc
+        );
 
         accumulate_imaging_2d(
             launch_config.grid,
@@ -152,8 +191,9 @@ BackwardOutput backward(const BackwardInput& in)
 {
     BackwardOutput out;
     auto grad = torch::zeros_like(in.models[0]);
-    run_full_imaging(in, &grad, nullptr);
-    out.grads = {grad};
+    auto grad_wavelet = torch::zeros_like(in.forward_source);
+    run_full_imaging(in, &grad, &grad_wavelet, nullptr);
+    out.grads = {grad_wavelet, grad};
     return out;
 }
 
@@ -174,7 +214,7 @@ RTMOutput rtm(const BackwardInput& in)
 
     RTMOutput out;
     init_rtm_output_2d(out, in.models[0]);
-    run_full_imaging(in, nullptr, &out);
+    run_full_imaging(in, nullptr, nullptr, &out);
     return out;
 }
 
@@ -219,6 +259,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
 
     auto grad = torch::zeros_like(vp);
+    auto grad_wavelet = torch::zeros_like(p.forward_source);
 
     // For checking wavefields
     // torch::Tensor u_allt = torch::zeros({nt, B, 1, nz, nx}, vp.options());
@@ -301,6 +342,17 @@ BackwardOutput backward_bs(const BackwardInput& in)
         );
 
         adjoint.swap();
+
+        accumulate_source_gradient_2d(
+            fwd_source_config.grid,
+            fwd_source_config.block,
+            adjoint.u_now_t.data_ptr<float>(),
+            p,
+            &grad_wavelet,
+            it,
+            ctx,
+            forward_nsrc
+        );
         
         ACOUSTIC2D_NOPML(
             order,
@@ -371,7 +423,49 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     }
 
-    out.grads = {grad};
+    if (p.nt > 0) {
+        auto adj_view = adjoint.view();
+
+        ACOUSTIC2D(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            adj_view,
+            false,
+            nullptr,
+            vp.data_ptr<float>(),
+            lap_ctx,
+            grad_ctx,
+            grad_ctx_x,
+            grad_ctx_z,
+            cpml,
+            ctx
+        );
+
+        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+            adj_view.u_next,
+            p.adjoint_source.data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            0,
+            adjoint_nsrc,
+            ctx
+        );
+
+        adjoint.swap();
+
+        accumulate_source_gradient_2d(
+            fwd_source_config.grid,
+            fwd_source_config.block,
+            adjoint.u_now_t.data_ptr<float>(),
+            p,
+            &grad_wavelet,
+            0,
+            ctx,
+            forward_nsrc
+        );
+    }
+
+    out.grads = {grad_wavelet, grad};
     return out;
 
 }
@@ -475,6 +569,7 @@ void process_recursive_interval_2d(
     const BackwardInput& p,
     const torch::Tensor& vp,
     torch::Tensor& grad,
+    torch::Tensor& grad_wavelet,
     int order,
     dim3 wave_grid,
     dim3 wave_block,
@@ -561,6 +656,17 @@ void process_recursive_interval_2d(
 
         adjoint.swap();
 
+        accumulate_source_gradient_2d(
+            forward_source_grid,
+            forward_source_block,
+            adjoint.u_now_t.data_ptr<float>(),
+            p,
+            &grad_wavelet,
+            start,
+            ctx,
+            forward_nsrc
+        );
+
         calculate_grad<<<wave_grid, wave_block>>>(
             u_this.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
@@ -604,6 +710,7 @@ void process_recursive_interval_2d(
         p,
         vp,
         grad,
+        grad_wavelet,
         order,
         wave_grid,
         wave_block,
@@ -631,6 +738,7 @@ void process_recursive_interval_2d(
         p,
         vp,
         grad,
+        grad_wavelet,
         order,
         wave_grid,
         wave_block,
@@ -699,6 +807,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         forward.allocate(vp, 2, true);
 
     auto grad = torch::zeros_like(vp);
+    auto grad_wavelet = torch::zeros_like(p.forward_source);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -790,6 +899,17 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
             adjoint.swap();
 
+            accumulate_source_gradient_2d(
+                fwd_source_config.grid,
+                fwd_source_config.block,
+                adjoint.u_now_t.data_ptr<float>(),
+                p,
+                &grad_wavelet,
+                it,
+                ctx,
+                forward_nsrc
+            );
+
             calculate_grad<<<launch_config.grid, launch_config.block>>>(
                 chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
@@ -800,7 +920,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         }
     }
 
-    out.grads = {grad};
+    out.grads = {grad_wavelet, grad};
     return out;
 }
 
@@ -846,6 +966,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     zero_wavefield_state_2d(adjoint);
 
     auto grad = torch::zeros_like(vp);
+    auto grad_wavelet = torch::zeros_like(p.forward_source);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -892,6 +1013,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             p,
             vp,
             grad,
+            grad_wavelet,
             order,
             launch_config.grid,
             launch_config.block,
@@ -912,7 +1034,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         );
     }
 
-    out.grads = {grad};
+    out.grads = {grad_wavelet, grad};
     return out;
 }
 

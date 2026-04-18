@@ -114,3 +114,36 @@ __global__ void accumulate_rtm_image_3d(
     src_b[idx] += uf * uf;
     rec_b[idx] += ub * ub;
 }
+
+__global__ void accumulate_source_grad_3d(
+    const float* __restrict__ u_backward,
+    float* __restrict__ grad_source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    SolverContext solver
+) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (b >= solver.B || s >= nsrc) {
+        return;
+    }
+
+    int base = (b * nsrc + s) * 3;
+    int ix = sources_loc[base + 0];
+    int iy = sources_loc[base + 1];
+    int iz = sources_loc[base + 2];
+
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz) {
+        return;
+    }
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int u_idx = b * spatial_size + iz * (solver.nx * solver.ny) + iy * solver.nx + ix;
+    int grad_idx = (b * nsrc + s) * solver.nt + it;
+
+    grad_source[grad_idx] = u_backward[u_idx];
+}

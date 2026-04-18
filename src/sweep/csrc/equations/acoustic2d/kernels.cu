@@ -96,3 +96,33 @@ __global__ void accumulate_rtm_image_2d(
     src_b[idx] += uf * uf;
     rec_b[idx] += ub * ub;
 }
+
+__global__ void accumulate_source_grad_2d(
+    const float* __restrict__ u_backward,
+    float* __restrict__ grad_source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nsrc) {
+        return;
+    }
+
+    int base = (b * nsrc + s) * 2;
+    int ix = sources_loc[base + 0];
+    int iz = sources_loc[base + 1];
+
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz) {
+        return;
+    }
+
+    int spatial_size = solver.nx * solver.nz;
+    int u_idx = b * spatial_size + iz * solver.nx + ix;
+    int grad_idx = (b * nsrc + s) * solver.nt + it;
+
+    grad_source[grad_idx] += u_backward[u_idx];
+}
