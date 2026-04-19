@@ -40,6 +40,26 @@ class PropJax(PropBase):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
         for name, data in zip(self.model_names, model):
             setattr(self, name, jnp.array(data))
+
+    def _resolve_snapshot_times(self, nt, return_wavefield, snapshot_times, snapshot_interval):
+        if not return_wavefield:
+            return []
+        if snapshot_times is not None and snapshot_interval is not None:
+            raise ValueError("Use either snapshot_times or snapshot_interval, not both.")
+        if snapshot_times is not None:
+            times = sorted({int(t) for t in snapshot_times})
+        elif snapshot_interval is not None:
+            interval = int(snapshot_interval)
+            if interval < 1:
+                raise ValueError("snapshot_interval must be >= 1.")
+            times = list(range(0, nt, interval))
+        else:
+            times = list(range(nt))
+
+        for t in times:
+            if t < 0 or t >= nt:
+                raise ValueError(f"Snapshot time {t} is outside valid range [0, {nt - 1}].")
+        return times
     
     def forward_base(self, 
                      wavelet, 
@@ -66,6 +86,8 @@ class PropJax(PropBase):
             aux_args (tuple(list), optional): Auxiliary arguments for the wave equation function. Defaults to ().
         """
         fd_pad = [0, 0] * self.ndim
+        snapshot_times = kwargs.pop("snapshot_times", None)
+        snapshot_interval = kwargs.pop("snapshot_interval", None)
         kwargs.setdefault('fd_pad', fd_pad)
         self.init_abc(**kwargs)
         if getattr(self.equation, 'setup_pml', None):
@@ -75,6 +97,13 @@ class PropJax(PropBase):
         wavelet = jnp.atleast_2d(wavelet)
 
         nt = wavelet.shape[-1]
+        snapshot_indices = self._resolve_snapshot_times(
+            nt,
+            return_wavefield,
+            snapshot_times,
+            snapshot_interval,
+        )
+        self.snapshot_times_last = tuple(snapshot_indices)
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
@@ -105,9 +134,15 @@ class PropJax(PropBase):
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = jnp.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=jnp.float32, device=jax.devices('cpu')[0]) #
+            snapshots = jnp.zeros(
+                (len(snapshot_indices), len(self.wavefield_names)) + shape_wavefield,
+                dtype=jnp.float32,
+                device=jax.devices('cpu')[0],
+            )
+            snapshot_targets = jnp.asarray(snapshot_indices + [nt], dtype=jnp.int32)
         else:
             snapshots = None
+            snapshot_targets = None
 
         fixargs = [self._dt, self._dh, None]
 
@@ -135,10 +170,11 @@ class PropJax(PropBase):
             (batch_size, receivers.shape[1], len(self.receiver_type)),
             dtype=jnp.float32
         )
+        num_snapshots = len(snapshot_indices)
 
         def step_fn_single(carry, it):
                 
-            wavefields, fixargs, snapshots = carry
+            wavefields, fixargs, snapshots, snapshot_pos = carry
 
             time = it if not adj else nt - it - 1
             # Forward propagation
@@ -150,7 +186,22 @@ class PropJax(PropBase):
             wavefields_arr = wavefields_arr.at[sidxs].set(wf_src_new)
             # Save snapshots
             if snapshots is not None:
-                snapshots = snapshots.at[it].set(jnp.stack(wavefields, 0))
+                should_save = jnp.logical_and(
+                    snapshot_pos < num_snapshots,
+                    snapshot_targets[snapshot_pos] == it,
+                )
+
+                def save_snapshot(state):
+                    snap_buf, snap_idx = state
+                    snap_buf = snap_buf.at[snap_idx].set(wavefields_arr)
+                    return snap_buf, snap_idx + 1
+
+                snapshots, snapshot_pos = jax.lax.cond(
+                    should_save,
+                    save_snapshot,
+                    lambda state: state,
+                    (snapshots, snapshot_pos),
+                )
 
             # Record receivers
             wf_sel = jnp.take(wavefields_arr, ridxs, axis=0) 
@@ -160,7 +211,7 @@ class PropJax(PropBase):
             all_rec = jax.vmap(one_channel)(wf_sel)
             rec_t = jnp.transpose(all_rec, (1, 2, 0, 3))[..., 0]
 
-            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), fixargs, snapshots), rec_t
+            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), fixargs, snapshots, snapshot_pos), rec_t
 
 
         def step_fn_single_with_skip(carry, it):
@@ -184,7 +235,7 @@ class PropJax(PropBase):
                 jax.lax.scan(inner_step_fn, carry, jnp.arange(chunk_size))
             )(carry, None)
         
-        initial = (wavefields, tuple(fixargs), snapshots)
+        initial = (wavefields, tuple(fixargs), snapshots, jnp.array(0, dtype=jnp.int32))
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
         num_steps = num_chunks if self.use_ckpt else nt
         (final), rec_seq = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
@@ -193,7 +244,7 @@ class PropJax(PropBase):
         rec_seq = rec_seq.reshape(n, batch_size, receivers.shape[1], len(self.receiver_type))
         rec = jnp.transpose(rec_seq, (1, 0, 2, 3))[:, :nt, :, :]
 
-        return rec if not has_aux else (rec, final[-1])
+        return rec if not has_aux else (rec, final[2])
     
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
