@@ -58,6 +58,26 @@ class PropTorch(PropBase, torch.nn.Module):
         self._mark_compile_step_begin()
         return self.step_func(*wavefield, *fixargs)
 
+    def _resolve_snapshot_times(self, nt, return_wavefield, snapshot_times, snapshot_interval):
+        if not return_wavefield:
+            return []
+        if snapshot_times is not None and snapshot_interval is not None:
+            raise ValueError("Use either snapshot_times or snapshot_interval, not both.")
+        if snapshot_times is not None:
+            times = sorted({int(t) for t in snapshot_times})
+        elif snapshot_interval is not None:
+            interval = int(snapshot_interval)
+            if interval < 1:
+                raise ValueError("snapshot_interval must be >= 1.")
+            times = list(range(0, nt, interval))
+        else:
+            times = list(range(nt))
+
+        for t in times:
+            if t < 0 or t >= nt:
+                raise ValueError(f"Snapshot time {t} is outside valid range [0, {nt - 1}].")
+        return times
+
     def _run_chunk(
         self,
         wavefield,
@@ -102,11 +122,21 @@ class PropTorch(PropBase, torch.nn.Module):
             receivers (np.array): Receiver coordinates (nshots, nreceivers, 2)
             models (list): List of model parameters (Must be torch.Tensor)
         """
+        snapshot_times = kwargs.pop("snapshot_times", None)
+        snapshot_interval = kwargs.pop("snapshot_interval", None)
         fd_pad = [0,0]*self.ndim
         kwargs.setdefault('fd_pad', fd_pad)
         self.init_abc(**kwargs)
 
         nt = wavelet.shape[-1]
+        snapshot_indices = self._resolve_snapshot_times(
+            nt,
+            return_wavefield,
+            snapshot_times,
+            snapshot_interval,
+        )
+        snapshot_lookup = {t: i for i, t in enumerate(snapshot_indices)}
+        self.snapshot_times_last = tuple(snapshot_indices)
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
@@ -121,7 +151,11 @@ class PropTorch(PropBase, torch.nn.Module):
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = torch.zeros((nt, len(self.wavefield_names)) + shape_wavefield, dtype=torch.float32, device=torch.device('cpu'))
+            snapshots = torch.zeros(
+                (len(snapshot_indices), len(self.wavefield_names)) + shape_wavefield,
+                dtype=torch.float32,
+                device=torch.device('cpu'),
+            )
         else:
             snapshots = None
 
@@ -136,7 +170,13 @@ class PropTorch(PropBase, torch.nn.Module):
 
         # Get the model parameters
         models = models if models is not None else self.parameters()
-        models = [EdgePadding.apply(para, self.padding) for para in models]
+        models = [
+            EdgePadding.apply(
+                self._as_device_tensor(para, dtype=torch.float32),
+                self.padding,
+            )
+            for para in models
+        ]
         self.models_padded = models
         fixargs = models+[self.dt, self.dh, None]
         wavefield = [torch.zeros(shape_wavefield, device=self.dev) for _ in self.wavefield_names]
@@ -196,13 +236,13 @@ class PropTorch(PropBase, torch.nn.Module):
                 # Time step forward
                 wavefield = list(self._compiled_step(wavefield, fixargs))
 
-                if return_wavefield:
-                    snapshots[i] = torch.stack([w.detach().cpu() for w in wavefield], 0)
-
-                # Add source
+                # Add source so saved snapshots match the propagated state used for records.
                 for source_idx in self.source_indices:
                     time = i if not adj else nt - i - 1
                     wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+
+                if return_wavefield and i in snapshot_lookup:
+                    snapshots[snapshot_lookup[i]] = torch.stack([w.detach().cpu() for w in wavefield], 0)
 
                 # Record wavefields
                 for ic, receiver_idx in enumerate(self.receiver_indices):

@@ -25,7 +25,7 @@ class PropBase:
                  full_mode="full",
                  boundary_saving_config=None,
                  **kwargs):
-        """Base class for the RNN
+        """Base class for the Propagator
 
         Args:
             equation (class): The wave equation class from sweep.equations
@@ -114,6 +114,10 @@ class PropBase:
         self.boundary_on_cpu = (self.boundary_saving_config["storage"] == "cpu")
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
         self._abc_cache_key = None
+
+        # Keep the equation object aware of geometry-dependent boundary behavior.
+        self.equation.free_surface = self.free_surface
+        self.equation.abcn = self.abcn
 
         self.source_type = source_type
         self.receiver_type = receiver_type
