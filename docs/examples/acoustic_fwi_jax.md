@@ -2,7 +2,7 @@
 
 Source file:
 
-- [examples/acoustic_fwi_jax.py](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/acoustic_fwi_jax.py)
+- [examples/FWI/2d/acoustic/jax/fwi_marmousi.py](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/FWI/2d/acoustic/jax/fwi_marmousi.py)
 
 ## What This Example Does
 
@@ -38,7 +38,7 @@ Important entries include:
 - `spatial_order`: finite-difference order
 - `abcn`: absorbing boundary width
 - `src_step`, `rec_step`: acquisition sampling in the x direction
-- `true_model`, `init_model`: `.npy` files loaded from `examples/`
+- `true_model`, `init_model`: `.npy` files loaded from `examples/models/`
 - `epochs`, `batchsize`, `lr`: inversion hyperparameters
 - `use_ckpt`: whether JAX chunk rematerialization is enabled
 
@@ -131,7 +131,7 @@ The script creates an output directory under `examples/` and saves:
 From the repository root:
 
 ```bash
-python3 examples/acoustic_fwi_jax.py
+python3 examples/FWI/2d/acoustic/jax/fwi_marmousi.py
 ```
 
 ## Full Script
@@ -171,8 +171,8 @@ CONFIG = {
     "epochs": 101,
     "batchsize": 8,
     "show_every": 10,
-    "true_model": "marmousi_true.npy",
-    "init_model": "marmousi_smooth.npy",
+    "true_model": "models/marmousi/true.npy",
+    "init_model": "models/marmousi/smooth.npy",
     "output_dir": "acoustic_fwi_jax",
     "use_ckpt": False,
 }

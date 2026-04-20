@@ -26,6 +26,11 @@ def env_flag_enabled(name):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def is_metadata_only_invocation():
+    metadata_commands = {"egg_info", "dist_info", "prepare_metadata_for_build_wheel"}
+    return any(arg in metadata_commands for arg in sys.argv[1:])
+
+
 def patch_packaging_compat():
     if packaging_utils is None:
         return
@@ -121,9 +126,18 @@ def build_setup_kwargs(distribution_name="sweep", build_cuda=None):
     try:
         from torch.utils.cpp_extension import BuildExtension, CUDAExtension
     except ImportError as exc:
+        if is_metadata_only_invocation():
+            log.warn(
+                "Skipping CUDA extension setup during metadata generation because PyTorch "
+                "is not installed in the current build environment."
+            )
+            return kwargs
+
         raise RuntimeError(
-            "Building the 'sweep-cuda' distribution requires PyTorch to be installed "
-            "so setuptools can access torch.utils.cpp_extension."
+            "Building sweep with SWEEP_BUILD_CUDA=1 requires PyTorch to be installed first, "
+            "because the CUDA extension uses torch.utils.cpp_extension. "
+            "In a pure JAX environment, install without SWEEP_BUILD_CUDA or install PyTorch "
+            "before building the CUDA extension."
         ) from exc
 
     SweepBuildExtension = make_build_extension(BuildExtension)

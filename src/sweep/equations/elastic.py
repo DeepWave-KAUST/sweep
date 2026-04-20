@@ -169,6 +169,7 @@ class Elastic(FirstOrderEquation):
     
     def _C(self, ):
         # CUDA IMPLEMENTATION
+        import torch
         import sweep._C as _C
         return (
             _C.elastic2d_forward,

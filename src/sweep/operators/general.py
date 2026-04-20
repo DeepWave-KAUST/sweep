@@ -17,6 +17,20 @@ def _prepare_torch_kernel_bank(kernel):
     return kernel
 
 
+def _prepare_jax_kernel_bank(kernel):
+    try:
+        import jax.numpy as jnp
+    except Exception:
+        return kernel
+
+    if type(kernel).__module__.startswith("jax"):
+        if kernel.ndim == 3:
+            return jnp.sum(kernel, axis=0, keepdims=True)
+        if kernel.ndim == 4:
+            return jnp.sum(kernel, axis=0, keepdims=True)
+    return kernel
+
+
 class PartialDerivative:
 
     def __init__(self, spatial_order:int=4, device='cpu', backend='torch', ndim=2):
@@ -47,6 +61,7 @@ class PartialDerivative:
     def get_ops(self):
         if self.backend == 'jax':
             from sweep.operators.jax import apply_kernels_jax as apply_kernels
+            from sweep.operators.jax import apply_kernels_jax3d as apply_kernels3d
         if self.backend == 'torch':
             from sweep.operators.torch import apply_kernels_torch as apply_kernels
             from sweep.operators.torch import apply_kernels_torch3d as apply_kernels3d
@@ -61,6 +76,14 @@ class PartialDerivative:
         if self.ndim == 3:
             self.kyf = to(self.kyf, self.backend, self.device)
             self.kyb = to(self.kyb, self.backend, self.device)
+        if self.backend == 'jax':
+            self.kxf = _prepare_jax_kernel_bank(self.kxf)
+            self.kxb = _prepare_jax_kernel_bank(self.kxb)
+            self.kzf = _prepare_jax_kernel_bank(self.kzf)
+            self.kzb = _prepare_jax_kernel_bank(self.kzb)
+            if self.ndim == 3:
+                self.kyf = _prepare_jax_kernel_bank(self.kyf)
+                self.kyb = _prepare_jax_kernel_bank(self.kyb)
         if self.backend == 'torch':
             self.kxf = _prepare_torch_kernel_bank(self.kxf)
             self.kxb = _prepare_torch_kernel_bank(self.kxb)

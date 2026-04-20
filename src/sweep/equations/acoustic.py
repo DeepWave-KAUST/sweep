@@ -64,6 +64,7 @@ class Acoustic(SecondOrderEquation):
 
     def _C(self, ):
         # CUDA IMPLEMENTATION
+        import torch
         from sweep._C import (
             acoustic2d_forward,
             acoustic2d_backward,
@@ -80,6 +81,7 @@ class Acoustic(SecondOrderEquation):
         )
 
     def _C_rtm(self):
+        import torch
         from sweep._C import acoustic2d_rtm
 
         return acoustic2d_rtm

@@ -160,7 +160,7 @@ class PropJax(PropBase):
 
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
 
-        chunk_size = self.ckpt_chunks
+        chunk_size = int(max(1, self.ckpt_chunks))
 
         num_chunks = (nt + chunk_size - 1) // chunk_size
 
@@ -226,14 +226,31 @@ class PropJax(PropBase):
 
             return carry, rec_t
 
-        def chunked_step_fn(carry, chunk_idx):
+        def run_chunk(carry, chunk_start):
+            chunk_record = jnp.zeros(
+                (chunk_size, batch_size, receivers.shape[1], len(self.receiver_type)),
+                dtype=jnp.float32,
+            )
 
-            def inner_step_fn(carry, it):
-                t = chunk_idx * chunk_size + it
-                return step_fn_single_with_skip(carry, t)
-            return jax.checkpoint(lambda carry, idxs: 
-                jax.lax.scan(inner_step_fn, carry, jnp.arange(chunk_size))
-            )(carry, None)
+            def body_fn(local_i, state):
+                current_carry, current_record = state
+                t = chunk_start + local_i
+                next_carry, rec_t = step_fn_single_with_skip(current_carry, t)
+                current_record = current_record.at[local_i].set(rec_t)
+                return next_carry, current_record
+
+            return jax.lax.fori_loop(
+                0,
+                chunk_size,
+                body_fn,
+                (carry, chunk_record),
+            )
+
+        checkpointed_run_chunk = jax.checkpoint(run_chunk)
+
+        def chunked_step_fn(carry, chunk_idx):
+            chunk_start = chunk_idx * chunk_size
+            return checkpointed_run_chunk(carry, chunk_start)
         
         initial = (wavefields, tuple(fixargs), snapshots, jnp.array(0, dtype=jnp.int32))
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn

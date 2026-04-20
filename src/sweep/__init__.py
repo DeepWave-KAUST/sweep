@@ -2,6 +2,7 @@
 
 from importlib import import_module
 from importlib.util import find_spec
+from pathlib import Path
 
 
 _LAZY_SUBMODULES = {
@@ -17,6 +18,27 @@ _LAZY_SUBMODULES = {
     "torch",
     "utils",
 }
+
+
+def _extend_package_path_with_build_outputs():
+    package_dir = Path(__file__).resolve().parent
+    repo_root = package_dir.parents[1]
+    build_dir = repo_root / "build"
+
+    if not build_dir.exists():
+        return
+
+    package_path = globals().get("__path__")
+    if package_path is None:
+        return
+
+    for candidate in sorted(build_dir.glob("lib*/sweep")):
+        candidate_str = str(candidate)
+        if candidate.is_dir() and candidate_str not in package_path:
+            package_path.append(candidate_str)
+
+
+_extend_package_path_with_build_outputs()
 
 
 def is_torch_binding_available():

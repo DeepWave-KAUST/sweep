@@ -106,22 +106,60 @@ def laplace3d(u, kernel=None, h=1.0):
                                        dn)      # dimension_numbers
     return out / (h ** 2)
 
+def _normalize_2d_kernel_bank(kernels):
+    kernels = jnp.asarray(kernels)
+    if kernels.ndim == 3:
+        return kernels[:, None, :, :]
+    if kernels.ndim == 4:
+        return kernels
+    raise ValueError(f"Expected 2D kernels with shape (K, kh, kw) or (K, 1, kh, kw), got {kernels.shape}")
+
+
+def _normalize_3d_kernel_bank(kernels):
+    kernels = jnp.asarray(kernels)
+    if kernels.ndim == 4:
+        return kernels[:, None, :, :, :]
+    if kernels.ndim == 5:
+        return kernels
+    raise ValueError(
+        f"Expected 3D kernels with shape (K, kD, kH, kW) or (K, 1, kD, kH, kW), got {kernels.shape}"
+    )
+
+
+@jax.jit
 def apply_kernels_jax(u, kernels):
-    # u: (b, 1, h, w)
-    # kernels: (k, kh, kw)
-    B, C, H, W = u.shape
-    K, KH, KW = kernels.shape
-    kernels_exp = kernels[:, None, ::-1, ::-1]  # (K, 1, kh, kw), need reverse for lax conv
-    def single_conv():
-        return jax.lax.conv_general_dilated(
-            lhs=u,  # (b, k, h, w)
-            rhs=kernels_exp, # (1, k, kh, kw)
-            window_strides=(1, 1),
-            padding='SAME',
-            dimension_numbers=('NCHW', 'OIHW', 'NCHW'), 
-        )  # → (b, k, 1, h, w)
-    conv_out = single_conv()  # → (b, k, h, w)
-    return jnp.sum(conv_out, axis=1, keepdims=True)  # → (b, 1, h, w)
+    # u: (B, 1, H, W)
+    # kernels: (K, kh, kw) or (K, 1, kh, kw)
+    kernel_bank = _normalize_2d_kernel_bank(kernels)
+    kernel_bank = jnp.flip(kernel_bank, axis=(-2, -1))
+    _, _, kh, kw = kernel_bank.shape
+    padding = ((kh // 2, kh // 2), (kw // 2, kw // 2))
+    conv_out = lax.conv_general_dilated(
+        lhs=u,
+        rhs=kernel_bank,
+        window_strides=(1, 1),
+        padding=padding,
+        dimension_numbers=("NCHW", "OIHW", "NCHW"),
+    )
+    return conv_out if conv_out.shape[1] == 1 else conv_out.sum(axis=1, keepdims=True)
+
+
+@jax.jit
+def apply_kernels_jax3d(u, kernels):
+    # u: (B, 1, D, H, W)
+    # kernels: (K, kD, kH, kW) or (K, 1, kD, kH, kW)
+    kernel_bank = _normalize_3d_kernel_bank(kernels)
+    kernel_bank = jnp.flip(kernel_bank, axis=(-3, -2, -1))
+    _, _, kd, kh, kw = kernel_bank.shape
+    padding = ((kd // 2, kd // 2), (kh // 2, kh // 2), (kw // 2, kw // 2))
+    conv_out = lax.conv_general_dilated(
+        lhs=u,
+        rhs=kernel_bank,
+        window_strides=(1, 1, 1),
+        padding=padding,
+        dimension_numbers=("NCDHW", "OIDHW", "NCDHW"),
+    )
+    return conv_out if conv_out.shape[1] == 1 else conv_out.sum(axis=1, keepdims=True)
 
 def gradient(u, h, axis, kernels=None):
     if kernels is not None:

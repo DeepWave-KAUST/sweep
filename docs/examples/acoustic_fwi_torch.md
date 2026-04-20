@@ -232,8 +232,8 @@ COMMON_CONFIG = {
     "epochs": 101,
     "batchsize": 8,
     "show_every": 10,
-    "true_model": "marmousi_true.npy",
-    "init_model": "marmousi_smooth.npy",
+    "true_model": "models/marmousi/true.npy",
+    "init_model": "models/marmousi/smooth.npy",
 }
 
 

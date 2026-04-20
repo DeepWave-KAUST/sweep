@@ -65,6 +65,7 @@ class Acoustic3D(SecondOrderEquation):
         return step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
 
     def _C(self, ):
+        import torch
         from sweep._C import (
             acoustic3d_forward,
             acoustic3d_backward,
@@ -81,6 +82,7 @@ class Acoustic3D(SecondOrderEquation):
         )
 
     def _C_rtm(self):
+        import torch
         from sweep._C import acoustic3d_rtm
 
         return acoustic3d_rtm

@@ -73,6 +73,7 @@ class AcousticVRZ(SecondOrderEquation):
         return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
 
     def _C(self):
+        import torch
         from sweep._C import (
             acoustic_vrz2d_forward,
             acoustic_vrz2d_backward,
