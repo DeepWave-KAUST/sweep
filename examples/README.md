@@ -24,6 +24,8 @@ Current populated examples include:
 
 - `FWI/2d/acoustic/jax/fwi_marmousi.py`
 - `FWI/2d/acoustic/torch/fwi_marmousi.py`
+- `FWI/3d/acoustic/jax/fwi_overthrust.py`
+- `FWI/3d/acoustic/torch/fwi_overthrust.py`
 - `FWI/2d/elastic/jax/fwi_marmousi.py`
 - `FWI/2d/elastic/jax/fwi_overthrust.py`
 - `FWI/2d/elastic/torch/fwi_overthrust.py`

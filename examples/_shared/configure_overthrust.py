@@ -58,6 +58,28 @@ _FWI_2D_ELASTIC_COMMON = {
     "init_model": smooth_path,
 }
 
+_FWI_3D_ACOUSTIC_COMMON = {
+    **_SHARED_BASE,
+    "fm": float(fm),
+    "spatial_order": 2,
+    "abcn": abcn,
+    "free_surface": free_surface,
+    "src_step": 16,
+    "rec_step": 4,
+    "srcz": srcz,
+    "recz": recz,
+    "src_margin": 8,
+    "rec_margin": 4,
+    "lr": 20.0,
+    "batchsize": 4,
+    "forward_batchsize": 1,
+    "true_model": "models/overthrust/true_3d.npy",
+    "init_model": "models/overthrust/smooth_3d.npy",
+    "model_stride_z": 1,
+    "model_stride_y": 4,
+    "model_stride_x": 4,
+}
+
 
 _CONFIGS = {
     "fwi_2d_elastic_jax": {
@@ -84,6 +106,30 @@ _CONFIGS = {
             "enabled": True,
             "storage": "gpu",
             "transfer_interval": 10,
+            "pinned_memory": True,
+        },
+    },
+    "fwi_3d_acoustic_jax": {
+        **_FWI_3D_ACOUSTIC_COMMON,
+        "output_dir": "acoustic_3d_jax_overthrust",
+        "use_ckpt": True,
+        "ckpt_chunks": 16,
+    },
+    "fwi_3d_acoustic_torch_common": {
+        **_FWI_3D_ACOUSTIC_COMMON,
+    },
+    "fwi_3d_acoustic_torch_torch": {
+        "output_dir": "acoustic_3d_fwi_overthrust_torch",
+        "use_compile": True,
+        "use_ckpt": True,
+        "ckpt_chunks": 16,
+    },
+    "fwi_3d_acoustic_torch_cuda": {
+        "output_dir": "acoustic_3d_fwi_overthrust_cuda",
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "gpu",
+            "transfer_interval": 4,
             "pinned_memory": True,
         },
     },
