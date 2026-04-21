@@ -8,7 +8,7 @@ from sweep.utils.jax import edge_pad
 class PropJax(PropBase):
 
     def __init__(self, *args, **kwargs):
-        
+
         super().__init__(*args, **kwargs)
 
     def pad(self, d, padding=None):
@@ -263,14 +263,59 @@ class PropJax(PropBase):
 
         return rec if not has_aux else (rec, final[2])
     
-    def forward(self, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
+    def forward(
+        self,
+        wavelet,
+        sources,
+        receivers,
+        models=None,
+        source_encoding=False,
+        return_wavefield=False,
+        adj=False,
+        wave_equation=None,
+        aux_args=tuple(),
+        **kwargs,
+    ):
+        return self.__call__(
+            wavelet,
+            sources,
+            receivers,
+            models=models,
+            source_encoding=source_encoding,
+            return_wavefield=return_wavefield,
+            adj=adj,
+            wave_equation=wave_equation,
+            aux_args=aux_args,
+            **kwargs,
+        )
 
-    def __call__(self, *args, **kwargs):
-        models = kwargs.pop("models", None)
+    def __call__(
+        self,
+        wavelet,
+        sources,
+        receivers,
+        models=None,
+        source_encoding=False,
+        return_wavefield=False,
+        adj=False,
+        wave_equation=None,
+        aux_args=tuple(),
+        **kwargs,
+    ):
         models = models if models is not None else self.parameters()
         models = [self.pad(para, self.padding) for para in models]
-        return self.forward_base(*args, models=models, **kwargs)
+        return self.forward_base(
+            wavelet,
+            sources,
+            receivers,
+            models=models,
+            source_encoding=source_encoding,
+            return_wavefield=return_wavefield,
+            adj=adj,
+            wave_equation=wave_equation,
+            aux_args=aux_args,
+            **kwargs,
+        )
     
     def __call_forward__(self,*args, **kwargs):
         """ This function is useful when you want to compile forward modeling.

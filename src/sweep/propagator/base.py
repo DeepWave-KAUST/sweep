@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+import inspect
 
 import numpy as np
 
@@ -133,6 +134,20 @@ class PropBase:
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
+        self._set_call_signature()
+
+    def _set_call_signature(self):
+        forward = getattr(type(self), "forward", None)
+        if forward is None:
+            return
+        try:
+            signature = inspect.signature(forward)
+        except (TypeError, ValueError):
+            return
+        parameters = list(signature.parameters.values())
+        if parameters and parameters[0].name == "self":
+            signature = signature.replace(parameters=parameters[1:])
+        self.__signature__ = signature
 
     def _normalize_boundary_saving_config(self, config):
         default = {

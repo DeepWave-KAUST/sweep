@@ -10,6 +10,7 @@ from sweep.utils.torch import EdgePadding
 class PropTorch(PropBase, torch.nn.Module):
     
     def __init__(self, *args, **kwargs):
+        self.store_last_wavefield = kwargs.pop('store_last_wavefield', False)
         self.use_compile = kwargs.pop('use_compile', False)
         self.compile_backend = kwargs.pop('compile_backend', None)
         self.compile_mode = kwargs.pop('compile_mode', 'default')
@@ -26,6 +27,7 @@ class PropTorch(PropBase, torch.nn.Module):
         self.register_buffer('coord_offset', torch.tensor(coord_offset, device=self.dev, dtype=torch.long))
         self.source_indices = [self.wavefield_names.index(name) for name in self.source_type]
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
+        self._workspace_cache = {}
         self.step_func = self._build_step_func()
 
     def _as_device_tensor(self, value, *, dtype):
@@ -78,6 +80,42 @@ class PropTorch(PropBase, torch.nn.Module):
                 raise ValueError(f"Snapshot time {t} is outside valid range [0, {nt - 1}].")
         return times
 
+    def _workspace_cache_key(self, kind, shape, *, device, dtype):
+        return (kind, tuple(shape), str(device), str(dtype))
+
+    def _get_cached_tensor(self, kind, shape, *, device, dtype):
+        key = self._workspace_cache_key(kind, shape, device=device, dtype=dtype)
+        cached = self._workspace_cache.get(key)
+        if cached is None:
+            cached = torch.zeros(shape, dtype=dtype, device=device)
+            self._workspace_cache[key] = cached
+        else:
+            # Reused workspaces may still be attached to the previous autograd graph.
+            # Detach before zeroing so each forward starts from fresh graph leaves.
+            cached.detach_()
+            cached.zero_()
+        return cached
+
+    def _get_wavefield_buffers(self, shape_wavefield, *, dtype=torch.float32):
+        return [
+            self._get_cached_tensor(
+                f"wavefield:{index}",
+                shape_wavefield,
+                device=self.dev,
+                dtype=dtype,
+            )
+            for index, _ in enumerate(self.wavefield_names)
+        ]
+
+    def _get_record_buffer(self, record_shape, *, dtype=torch.float32):
+        return self._get_cached_tensor("record", record_shape, device=self.dev, dtype=dtype)
+
+    def _get_chunk_record_buffer(self, record_shape, *, dtype=torch.float32):
+        return self._get_cached_tensor("chunk_record", record_shape, device=self.dev, dtype=dtype)
+
+    def _get_snapshot_buffer(self, snapshot_shape, *, dtype=torch.float32):
+        return self._get_cached_tensor("snapshots", snapshot_shape, device=torch.device('cpu'), dtype=dtype)
+
     def _run_chunk(
         self,
         wavefield,
@@ -91,7 +129,7 @@ class PropTorch(PropBase, torch.nn.Module):
         record_shape,
         adj=False,
         ):
-        chunk_record = torch.zeros(record_shape, dtype=wavefield[0].dtype, device=wavefield[0].device)
+        chunk_record = self._get_chunk_record_buffer(record_shape, dtype=wavefield[0].dtype)
         for local_i in range(chunk_size):
             t = start_t + local_i
             if t >= nt:
@@ -151,10 +189,8 @@ class PropTorch(PropBase, torch.nn.Module):
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = torch.zeros(
+            snapshots = self._get_snapshot_buffer(
                 (len(snapshot_indices), len(self.wavefield_names)) + shape_wavefield,
-                dtype=torch.float32,
-                device=torch.device('cpu'),
             )
         else:
             snapshots = None
@@ -166,7 +202,7 @@ class PropTorch(PropBase, torch.nn.Module):
         #         self.adjoint_wavefields[t, index] = grad.detach().clone()
         #     return _hook
 
-        record = torch.zeros((batch_size, nt, receivers.shape[1], len(self.receiver_type)), dtype=torch.float32, device=self.dev)
+        record = self._get_record_buffer((batch_size, nt, receivers.shape[1], len(self.receiver_type)))
 
         # Get the model parameters
         models = models if models is not None else self.parameters()
@@ -179,7 +215,7 @@ class PropTorch(PropBase, torch.nn.Module):
         ]
         self.models_padded = models
         fixargs = models+[self.dt, self.dh, None]
-        wavefield = [torch.zeros(shape_wavefield, device=self.dev) for _ in self.wavefield_names]
+        wavefield = self._get_wavefield_buffers(shape_wavefield)
         if self.use_ckpt and self.ckpt_mode != "chunk":
             raise ValueError(
                 f"Unsupported ckpt_mode '{self.ckpt_mode}' for PropTorch. Expected 'chunk'."
@@ -248,8 +284,10 @@ class PropTorch(PropBase, torch.nn.Module):
                 for ic, receiver_idx in enumerate(self.receiver_indices):
                     record[:, i, :, ic] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
 
-        for name, data in zip(self.wavefield_names, wavefield):
-            setattr(self, name, data)
+        if self.store_last_wavefield:
+            self.last_wavefields = tuple(wavefield)
+        else:
+            self.last_wavefields = None
 
         if not has_aux:
             return record
