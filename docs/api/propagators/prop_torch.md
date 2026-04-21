@@ -11,15 +11,13 @@ class PropTorch(
     dh=10.0,
     dt=0.002,
     dev=None,
+    backend="eager",
+    backend_options=None,
+    eager_options=None,
+    cuda_options=None,
     use_ckpt=True,
     ckpt_chunks=100,
-    ckpt_mode="chunk",
     pml_type="spml",
-    use_compile=False,
-    compile_backend=None,
-    compile_mode="default",
-    compile_dynamic=False,
-    compile_fullgraph=False,
 )
 ```
 
@@ -27,13 +25,21 @@ Implementation:
 
 - `src/sweep/propagator/torch.py`
 
-Pure PyTorch propagator with optional `torch.compile` on the single-step
-equation update.
+Torch-family propagator facade.
+
+- `backend="eager"` uses the Python/Torch implementation
+- `backend="cuda"` dispatches to the compiled CUDA implementation
+
+In other words, the CUDA path is part of the `PropTorch` API surface now. The
+lower-level CUDA implementation details sit underneath
+`PropTorch(..., backend="cuda")`.
 
 !!! note
 
-    `PropTorch` is the easiest backend to inspect and modify, because the time
-    loop and source/receiver logic are implemented directly in Python.
+    `PropTorch` is the main Torch-facing solver entry point. If you choose
+    `backend="eager"`, the time loop and source/receiver logic live directly in
+    Python. If you choose `backend="cuda"`, `PropTorch` forwards to the
+    compiled CUDA backend while keeping the same top-level constructor style.
 
 ## Parameters
 
@@ -54,24 +60,28 @@ equation update.
   supported in `PropTorch`.
 - `dt` (`float`, optional): Time step in seconds.
 - `dev` (device, optional): Execution device, typically a `torch.device`.
-- `use_ckpt` (`bool`, optional): Enables chunk checkpointing to reduce memory
-  use during backpropagation.
+- `backend` (`"eager"` or `"cuda"`, optional): Selects which Torch-family
+  implementation is used.
+- `backend_options` (dict or dataclass, optional): Backend-specific options
+  block merged after top-level kwargs. See [backend_options](options.md#backend_options).
+- `eager_options` ([`EagerOptions`](options.md#eageroptions) or dict, optional):
+  eager-only options such as `use_compile`, `compile_mode`, and
+  `store_last_wavefield`.
+- `cuda_options` ([`CUDAOptions`](options.md#cudaoptions) or dict, optional):
+  CUDA-only options. The main CUDA-specific block is
+  [`CUDAOptions(memory=...)`](options.md#cudaoptions).
+- `use_ckpt` (`bool`, optional): Enables chunk checkpointing on the eager
+  backend. For CUDA usage, prefer
+  [`CUDAOptions(memory=MemoryOptions(strategy="ckpt", ...))`](options.md#memoryoptions)
+  instead of relying on this top-level flag.
 - `ckpt_chunks` (`int`, optional): Number of time steps per checkpoint chunk
-  when `use_ckpt=True`.
-- `ckpt_mode` (`str`, optional): Checkpointing mode. For `PropTorch`, only
-  `"chunk"` is currently supported.
+  when `use_ckpt=True` on the eager backend. For CUDA usage, prefer
+  [`CkptOptions(chunks=...)`](options.md#ckptoptions).
 - `pml_type` (`str`, optional): Absorbing boundary implementation passed into
   the equation setup.
-- `use_compile` (`bool`, optional): If `True`, wraps the single-step equation
-  update with `torch.compile`. This does not compile the full forward loop.
-- `compile_backend` (`str or callable`, optional): Optional backend argument
-  passed to `torch.compile`.
-- `compile_mode` (`str`, optional): Compile mode passed to `torch.compile`,
-  such as `"default"`.
-- `compile_dynamic` (`bool`, optional): Whether to allow dynamic behavior in
-  the compiled step graph.
-- `compile_fullgraph` (`bool`, optional): Whether to request full-graph
-  compilation for the single-step function.
+
+See the full [Propagator Options](options.md) reference for field-by-field
+descriptions and validation rules.
 
 ## Forward Parameters
 

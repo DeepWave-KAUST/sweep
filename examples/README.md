@@ -30,7 +30,12 @@ Current populated examples include:
 - `FWI/2d/elastic/jax/fwi_overthrust.py`
 - `FWI/2d/elastic/torch/fwi_overthrust.py`
 - `LSRTM/2d/acoustic/jax/lsrtm.py`
-- `wavefields/elastic_free_surface_view_torch.py`
-- `reducingmemory/acoustic/jax/source_encoding_fwi.py`
-- `reducingmemory/acoustic/torch/source_encoding_fwi.py`
+- `wavefields/cuda_fd_orders/acoustic_fd_orders.py`
+- `wavefields/cuda_fd_orders/elastic_fd_orders.py`
+- `wavefields/free_surface_forward/acoustic_free_surface.py`
+- `wavefields/free_surface_forward/elastic_free_surface.py`
+- `reducingmemory/source_encoding/jax/source_encoding_fwi.py`
+- `reducingmemory/source_encoding/torch/source_encoding_fwi.py`
+- `reducingmemory/method_compare/acoustic2d_memory_benchmark.py`
+- `reducingmemory/method_compare/acoustic3d_memory_benchmark.py`
 - `reducingmemory/acoustic/torch/vrz_forward_compare.py`

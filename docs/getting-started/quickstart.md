@@ -61,7 +61,7 @@ More explicitly:
                             v
                  +----------------------+
                  |      Propagator      |
-                 | PropTorch / PropCUDA |
+                 | PropTorch / PropJax  |
                  +----------------------+
                             |
          +------------------+-------------------+------------------+
@@ -107,6 +107,7 @@ The propagator defines how the equation is executed:
 
 ```python
 from sweep.propagator.torch import PropTorch
+from sweep.propagator.options import EagerOptions
 
 solver = PropTorch(
     equation,
@@ -119,6 +120,8 @@ solver = PropTorch(
     abcn=30,
     free_surface=False,
     pml_type="cpmlr",
+    backend="eager",
+    eager_options=EagerOptions(use_compile=False),
     use_ckpt=False,
 )
 ```
@@ -132,14 +135,18 @@ Typical propagator arguments:
 - `receiver_type`: which wavefield component is sampled at receiver locations
 - `abcn`: absorbing boundary width
 - `pml_type`: absorbing boundary implementation
+- `backend`: choose `"eager"` or `"cuda"` inside the Torch-family interface
 - `use_ckpt`: whether checkpointing is enabled
+- `eager_options` / `cuda_options`: grouped backend-specific runtime options
 
-For CUDA propagation, the pattern is the same, but you use `PropCUDA`:
+For CUDA propagation, the pattern is the same, but the recommended user-facing
+entry point is still `PropTorch`:
 
 ```python
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.torch import PropTorch
+from sweep.propagator.options import CUDAOptions, MemoryOptions, BoundaryOptions
 
-solver = PropCUDA(
+solver = PropTorch(
     equation,
     shape=(nz, nx),
     dev=dev,
@@ -150,8 +157,18 @@ solver = PropCUDA(
     abcn=30,
     free_surface=False,
     pml_type="cpmlr",
+    backend="cuda",
+    cuda_options=CUDAOptions(
+        memory=MemoryOptions(
+            strategy="boundary",
+            boundary=BoundaryOptions(storage="gpu"),
+        )
+    ),
 )
 ```
+
+`PropCUDA` is still available as the lower-level CUDA-specific class, but most
+new Torch-side examples now use `PropTorch(..., backend="cuda")`.
 
 ## Example
 
@@ -161,6 +178,7 @@ solver = PropCUDA(
     import torch
 
     from sweep.propagator.torch import PropTorch
+    from sweep.propagator.options import EagerOptions
     from sweep.equations import Acoustic
     from sweep.signal import ricker
 
@@ -196,7 +214,12 @@ solver = PropCUDA(
         pml_type="cpmlr",
         use_ckpt=False,
     )
-    solver_torch = PropTorch(Acoustic(**eq_kwargs, backend="torch"), **solver_kwargs)
+    solver_torch = PropTorch(
+        Acoustic(**eq_kwargs, backend="torch"),
+        **solver_kwargs,
+        backend="eager",
+        eager_options=EagerOptions(use_compile=False),
+    )
 
     # Create a wavelet
     t = np.arange(0, int(nt // 2) * dt, dt)
@@ -235,7 +258,8 @@ solver = PropCUDA(
     ```python
     import torch
 
-    from sweep.propagator.cuda import PropCUDA
+    from sweep.propagator.torch import PropTorch
+    from sweep.propagator.options import CUDAOptions, MemoryOptions, BoundaryOptions
     from sweep.equations import Acoustic
     from sweep.signal import ricker
 
@@ -269,14 +293,18 @@ solver = PropCUDA(
         abcn=30,
         free_surface=False,
         pml_type="cpmlr",
-        boundary_saving_config=dict(
-            enabled=True,
-            storage="gpu",
-            transfer_interval=1,
-            pinned_memory=False,
+    )
+    solver_cuda = PropTorch(
+        Acoustic(**eq_kwargs, backend="torch"),
+        **solver_kwargs,
+        backend="cuda",
+        cuda_options=CUDAOptions(
+            memory=MemoryOptions(
+                strategy="boundary",
+                boundary=BoundaryOptions(storage="gpu"),
+            )
         ),
     )
-    solver_cuda = PropCUDA(Acoustic(**eq_kwargs), **solver_kwargs)
 
     # Create a wavelet
     t = np.arange(0, int(nt // 2) * dt, dt)
@@ -396,18 +424,27 @@ The figure below shows the gradient result produced by the example above.
 
 ## Checkpointing and Boundary Saving
 
-`use_ckpt` controls gradient checkpointing during backpropagation. This is the memory-saving option supported by the PyTorch and JAX propagators.
+`use_ckpt` controls gradient checkpointing during backpropagation. This is the
+memory-saving option supported by the eager PyTorch and JAX propagators.
 
-`boundary_saving_config` configures boundary saving for the CUDA propagator. This mode stores boundary wavefields instead of all forward wavefields, which can significantly reduce memory usage during backward propagation.
+For Torch-family CUDA usage through `PropTorch(..., backend="cuda")`, memory
+configuration is grouped under `cuda_options`.
 
-Use `boundary_saving_config` with `sweep.propagator.cuda.PropCUDA`. The main fields are:
+Use `CUDAOptions(memory=MemoryOptions(...))`. The main choices are:
 
-- `enabled`: turn boundary saving on or off
-- `storage`: where saved boundaries are kept, either `"gpu"` or `"cpu"`
-- `transfer_interval`: how often boundary data is transferred when CPU storage is used
-- `pinned_memory`: whether to use pinned host memory for CPU transfers
+- `MemoryOptions(strategy="boundary", boundary=BoundaryOptions(...))`
+- `MemoryOptions(strategy="ckpt", ckpt=CkptOptions(...))`
 
-PyTorch and JAX propagators currently support checkpointing through `use_ckpt`, but they do not support boundary saving.
+For boundary saving:
+
+- `BoundaryOptions.storage`
+- `BoundaryOptions.transfer_interval`
+- `BoundaryOptions.pinned_memory`
+
+For CUDA checkpointing:
+
+- `CkptOptions(mode="chunk", chunks=...)`
+- `CkptOptions(mode="recursive", count=...)`
 
 
 ## Verify the Installation

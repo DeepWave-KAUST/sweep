@@ -1,7 +1,12 @@
 # SWEEP
-Seismic Wave Equation Exploration Platform (SWEEP) is a Python package designed for seismic wave equation modeling and inversion.
+Seismic Wave Equation Exploration Platform (SWEEP) is a Python package for seismic wave-equation modeling, migration, and inversion.
 
-** Note: From this version on, lazy imports are supported. You no longer need to install both JAX and PyTorch—you only need to install whichever backend you intend to use.
+Recent interface updates:
+
+- lazy imports are supported, so you only need to install the backend you plan to use
+- `PropTorch` is now the main Torch-family entry point, with `backend="eager"` or `backend="cuda"`
+- backend-specific options are grouped through `EagerOptions`, `CUDAOptions`, `MemoryOptions`, `BoundaryOptions`, and `CkptOptions`
+- examples are reorganized by task family under `examples/`, including new `wavefields/` and `reducingmemory/` groups
 
 ## Installation
 
@@ -25,13 +30,11 @@ SWEEP_BUILD_CUDA=1 pip install -v .[cuda] --no-build-isolation
 ```
 
 ## Usage
-The following example shows how to compute the gradient of the a toy model with respect to the velocity model.
+The following example shows how to compute the gradient of a toy model with respect to the velocity model.
 ```python
 import torch
-# import jax
-torch.backends.cudnn.benchmark = True
 from sweep.propagator.torch import PropTorch
-# from sweep.propagator.jax import PropJax
+from sweep.propagator.options import EagerOptions
 from sweep.equations import Acoustic
 from sweep.signal import ricker
 import numpy as np
@@ -62,12 +65,12 @@ model = PropTorch(Acoustic(spatial_order=spatial_order, device=dev, backend='tor
             source_type=['h1'],
             receiver_type=['h1'],
             pml_type='cpmlr',
-            free_surface=False)
+            free_surface=False,
+            backend="eager",
+            eager_options=EagerOptions(use_compile=False))
             
 # Set the model parameters (Pytorch)
 vp = torch.from_numpy(true_model).to(dev).requires_grad_(True)
-# Set the model parameters (Jax)
-# model.set_parameters([jnp.array(true_model)])
 # Create a wavelet
 t = np.arange(0, int(nt//2)*dt, dt)
 wave = ricker(t-delay, f=fm)
@@ -80,11 +83,6 @@ receivers = np.array([[[99, 1]]]) # in grid, shape=(nshots, nreceivers, 2)
 # Backward propagation (Pytorch)
 obs = model.forward(wave, sources, receivers, models=[vp])
 obs.pow(2).sum().backward()
-# Backward propagation (Jax)
-# def fwi(vp):
-#     return (model(wave, sources, receivers, models=[vp])**2).sum()
-# grad = jax.grad(fwi)(model.vp)
-
 # Show the results
 fig, axes=plt.subplots(1,3, figsize=(12,3))
 
@@ -92,7 +90,6 @@ axes[0].imshow(true_model, cmap='seismic', aspect='auto')
 axes[0].set_title('True model')
 axes[1].plot(obs.detach().cpu().numpy().squeeze(), label='Observed data')
 grad = vp.grad.detach().cpu().numpy() # Pytorch
-# grad = jax.device_get(grad) # Jax
 vmin,vmax=np.percentile(grad, [1,99])
 axes[1].set_title('Observed data')
 axes[2].imshow(grad, cmap='seismic', aspect='auto', vmin=vmin, vmax=vmax)
@@ -101,11 +98,19 @@ fig.tight_layout()
 fig.savefig('grad_vp.png', dpi=300, bbox_inches='tight')
 plt.close()
 ```
-The ground truth model, observed data and the gradient of the velocity model are shown below.
+The ground truth model, observed data, and the gradient of the velocity model are shown below.
 ![grad_vp](figures/grad_vp.png)
 
 # Examples
-Some examples are provided in the `examples` folder (Still working on it since some of the APIs are changed). 
+Examples are organized by task family under `examples/`:
+
+- `FWI/`
+- `LSRTM/`
+- `wavefields/`
+- `reducingmemory/`
+- `multi-gpu/`
+
+See [examples/README.md](examples/README.md) for the current layout.
 
 ## License
 This project is licensed under the MIT License.

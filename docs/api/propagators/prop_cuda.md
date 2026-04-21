@@ -30,6 +30,10 @@ Implementation:
 
 Compiled CUDA propagator backed by equation-specific bindings from `sweep._C`.
 
+In current Torch-side examples, this backend is often reached through
+`PropTorch(..., backend="cuda")`. `PropCUDA` remains the lower-level CUDA
+class when you want to work with CUDA-specific runtime details directly.
+
 !!! note
 
     `PropCUDA` is the backend with the most runtime-specific behavior:

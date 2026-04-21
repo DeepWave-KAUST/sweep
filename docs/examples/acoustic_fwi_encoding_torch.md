@@ -2,15 +2,15 @@
 
 Source file:
 
-- [examples/acoustic_fwi_encoding_torch.py](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/acoustic_fwi_encoding_torch.py)
+- `examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py`
 
 ## What This Example Does
 
 This example runs acoustic full-waveform inversion with source encoding using a
 single script that supports two propagator backends:
 
-- `torch`: pure PyTorch propagation with `PropTorch`
-- `cuda`: compiled CUDA propagation with `PropCUDA`
+- `eager`: pure PyTorch propagation through `PropTorch(..., backend="eager")`
+- `cuda`: compiled CUDA propagation through `PropTorch(..., backend="cuda")`
 
 Compared with the standard acoustic FWI example, this script does not invert on
 individual shot gathers. Instead, it builds encoded super-shots by:
@@ -25,7 +25,7 @@ individual shot gathers. Instead, it builds encoded super-shots by:
 The solver is built from:
 
 - `equation`: `Acoustic(...)`
-- `propagator`: `PropTorch(...)` or `PropCUDA(...)`
+- `propagator`: `PropTorch(...)`
 - `wave`: a Ricker wavelet
 - `sources`: regularly sampled source coordinates
 - `receivers`: a shared receiver line
@@ -36,21 +36,21 @@ The solver is built from:
 The entry point is:
 
 ```bash
-python3 examples/acoustic_fwi_encoding_torch.py --backend torch
+python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend eager
 ```
 
 or:
 
 ```bash
-python3 examples/acoustic_fwi_encoding_torch.py --backend cuda
+python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend cuda
 ```
 
 Internally, the script keeps:
 
 - `COMMON_CONFIG`: shared acquisition, encoding, and inversion settings
 - `BACKEND_CONFIG`: backend-specific options such as
-  - `use_compile` for the PyTorch path
-  - `boundary_saving_config` for the CUDA path
+  - `EagerOptions(...)` for the eager path
+  - `CUDAOptions(memory=...)` for the CUDA path
   - display transpose rules for saved figures
 
 ## Key Configuration
@@ -67,11 +67,11 @@ Shared configuration includes:
 
 Backend-specific configuration includes:
 
-- PyTorch:
-  - `use_compile`
+- eager:
+  - `EagerOptions(use_compile=...)`
   - `use_ckpt`
 - CUDA:
-  - `boundary_saving_config`
+  - `CUDAOptions(memory=MemoryOptions(...))`
   - gather transpose for visualization
 
 ## Solver Setup
@@ -86,8 +86,8 @@ equation = Acoustic(
 )
 ```
 
-Even when the propagator is `PropCUDA`, the equation `backend` remains
-`"torch"`.
+Even when the solver runs with `backend="cuda"`, the equation `backend`
+remains `"torch"`.
 
 Shared propagator arguments are collected first:
 
@@ -112,17 +112,24 @@ solver = PropTorch(
     equation,
     **prop_kwargs,
     use_ckpt=cfg["use_ckpt"],
-    use_compile=cfg["use_compile"],
+    backend="eager",
+    eager_options=EagerOptions(use_compile=cfg["use_compile"]),
 )
 ```
 
 ### CUDA Mode
 
 ```python
-solver = PropCUDA(
+solver = PropTorch(
     equation,
     **prop_kwargs,
-    boundary_saving_config=cfg["boundary_saving_config"],
+    backend="cuda",
+    cuda_options=CUDAOptions(
+        memory=MemoryOptions(
+            strategy="boundary",
+            boundary=BoundaryOptions(...),
+        )
+    ),
 )
 ```
 
@@ -137,9 +144,9 @@ For each inversion step, the script:
 4. sums the encoded gathers into a super-shot target
 5. runs forward modeling with `source_encoding=True`
 
-The CUDA and PyTorch paths differ in two important ways:
+The CUDA and eager paths differ in two important ways:
 
-### PyTorch Source Encoding
+### Eager Source Encoding
 
 The PyTorch propagator keeps one encoded source per selected shot and collapses
 them internally into a single batch when `source_encoding=True`.
@@ -172,7 +179,7 @@ super-shot.
 
 The recorded data layout also differs between backends:
 
-- `torch` uses a time-major shot layout for the encoded gathers
+- `eager` uses a time-major shot layout for the encoded gathers
 - `cuda` returns a layout where the receiver and time axes are ordered
   differently
 
@@ -219,21 +226,21 @@ Each backend writes into its own output directory:
 
 ## Running the Example
 
-PyTorch mode:
+Eager mode:
 
 ```bash
-python3 examples/acoustic_fwi_encoding_torch.py --backend torch
+python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend eager
 ```
 
 CUDA mode:
 
 ```bash
-python3 examples/acoustic_fwi_encoding_torch.py --backend cuda
+python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend cuda
 ```
 
 Notes:
 
-- `torch` mode runs on GPU if available and otherwise falls back to CPU
+- `eager` mode runs on GPU if available and otherwise falls back to CPU
 - `cuda` mode requires a CUDA-capable PyTorch environment and compiled binding
 - encoded data layout is backend-dependent internally, but saved figures are
   normalized for easier comparison

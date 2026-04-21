@@ -3,6 +3,10 @@ site_description: Seismic Wave Equation Exploration Platform
 repo_url: https://github.com/DeepWave-KAUST/sweep
 site_url: https://deepwave-kaust.github.io/sweep/
 docs_dir: docs
+watch:
+  - README.md
+  - examples
+  - src
 
 theme:
   name: material
@@ -11,6 +15,21 @@ theme:
     - navigation.sections
     - navigation.expand
     - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
 
 markdown_extensions:
   - admonition
@@ -49,6 +68,6 @@ nav:
           - Elastic3D: api/equations/elastic3d.md
       - Propagators:
           - Overview: api/propagators/index.md
+          - Propagator Options: api/propagators/options.md
           - PropTorch: api/propagators/prop_torch.md
-          - PropCUDA: api/propagators/prop_cuda.md
           - PropJax: api/propagators/prop_jax.md

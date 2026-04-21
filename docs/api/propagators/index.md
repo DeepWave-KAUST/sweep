@@ -11,11 +11,19 @@ All propagators combine the same core pieces:
 - source and receiver field selection
 - runtime inputs such as `wavelet`, `sources`, `receivers`, and `models`
 
-The main solver classes are:
+The main user-facing solver classes are:
 
 - `PropTorch`
-- `PropCUDA`
 - `PropJax`
+
+For most Torch-based workflows, `PropTorch` is now the main user-facing entry
+point. Use:
+
+- `PropTorch(..., backend="eager")` for the pure PyTorch implementation
+- `PropTorch(..., backend="cuda")` for the compiled CUDA implementation
+
+`PropCUDA` remains available as the lower-level CUDA-specific implementation,
+but the Torch-side API is centered on `PropTorch(..., backend="cuda")`.
 
 ## API Tabs
 
@@ -32,52 +40,21 @@ The main solver classes are:
         dh=10.0,
         dt=0.002,
         dev=None,
+        backend="eager",
+        backend_options=None,
+        eager_options=None,
+        cuda_options=None,
         use_ckpt=True,
         ckpt_chunks=100,
-        ckpt_mode="chunk",
         pml_type="spml",
-        use_compile=False,
-        compile_backend=None,
-        compile_mode="default",
-        compile_dynamic=False,
-        compile_fullgraph=False,
     )
     ```
 
-    Pure PyTorch propagator with optional `torch.compile` on the single-step
-    update.
+    Torch-family propagator facade. `backend="eager"` uses the Python/Torch
+    implementation, while `backend="cuda"` dispatches to the compiled CUDA
+    backend.
 
     See [PropTorch](prop_torch.md) for parameter meanings.
-
-=== "PropCUDA"
-
-    ```python
-    class PropCUDA(
-        equation,
-        shape,
-        source_type=[],
-        receiver_type=[],
-        abcn=50,
-        free_surface=False,
-        dh=10.0,
-        dt=0.002,
-        dev=None,
-        use_ckpt=False,
-        ckpt_chunks=100,
-        ckpt_mode="chunk",
-        ckpt_num=0,
-        pml_type="spml",
-        nt=-1,
-        B=1,
-        allow_growth=True,
-        boundary_saving_config=None,
-    )
-    ```
-
-    Compiled CUDA propagator with runtime buffer reuse, checkpointing, and RTM
-    support.
-
-    See [PropCUDA](prop_cuda.md) for parameter meanings.
 
 === "PropJax"
 
@@ -104,9 +81,10 @@ The main solver classes are:
 
 ## Parameter Pages
 
-The following pages use a class-reference style layout and focus on what each
-parameter means for one specific propagator:
+The following pages use a class-reference style layout:
 
+- [Propagator Options](options.md)
 - [PropTorch](prop_torch.md)
-- [PropCUDA](prop_cuda.md)
 - [PropJax](prop_jax.md)
+
+For lower-level CUDA-specific runtime details, see [PropCUDA](prop_cuda.md).

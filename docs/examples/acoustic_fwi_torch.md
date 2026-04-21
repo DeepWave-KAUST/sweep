@@ -2,15 +2,15 @@
 
 Source file:
 
-- [examples/acoustic_fwi_torch.py](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/acoustic_fwi_torch.py)
+- `examples/FWI/2d/acoustic/torch/fwi_marmousi.py`
 
 ## What This Example Does
 
 This example runs a simple acoustic full-waveform inversion workflow with a
 single script that supports two propagator backends:
 
-- `torch`: pure PyTorch propagation with `PropTorch`
-- `cuda`: compiled CUDA propagation with `PropCUDA`
+- `eager`: pure PyTorch propagation through `PropTorch(..., backend="eager")`
+- `cuda`: compiled CUDA propagation through `PropTorch(..., backend="cuda")`
 
 The script does four things:
 
@@ -24,7 +24,7 @@ The script does four things:
 The solver is built from:
 
 - `equation`: `Acoustic(...)`
-- `propagator`: `PropTorch(...)` or `PropCUDA(...)`
+- `propagator`: `PropTorch(...)`
 - `wave`: a Ricker wavelet
 - `sources`: regularly sampled source coordinates
 - `receivers`: regularly sampled receiver coordinates
@@ -35,21 +35,21 @@ The solver is built from:
 The entry point is:
 
 ```bash
-python3 examples/acoustic_fwi_torch.py --backend torch
+python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend eager
 ```
 
 or:
 
 ```bash
-python3 examples/acoustic_fwi_torch.py --backend cuda
+python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend cuda
 ```
 
 Internally, the script keeps:
 
 - `COMMON_CONFIG`: shared acquisition and inversion settings
 - `BACKEND_CONFIG`: backend-specific options such as
-  - `use_compile` for the PyTorch path
-  - `boundary_saving_config` for the CUDA path
+  - `EagerOptions(...)` for the eager path
+  - `CUDAOptions(memory=...)` for the CUDA path
 
 ## Key Configuration
 
@@ -64,11 +64,11 @@ Shared configuration includes:
 
 Backend-specific configuration includes:
 
-- PyTorch:
-  - `use_compile`
+- eager:
+  - `EagerOptions(use_compile=...)`
   - `use_ckpt`
 - CUDA:
-  - `boundary_saving_config`
+  - `CUDAOptions(memory=MemoryOptions(...))`
   - output gather transpose for visualization
 
 ## Solver Setup
@@ -83,8 +83,8 @@ equation = Acoustic(
 )
 ```
 
-Even when the propagator is `PropCUDA`, the equation `backend` remains
-`"torch"`.
+Even when the solver runs with `backend="cuda"`, the equation `backend`
+remains `"torch"`.
 
 Shared propagator arguments are collected first:
 
@@ -109,17 +109,24 @@ solver = PropTorch(
     equation,
     **prop_kwargs,
     use_ckpt=cfg["use_ckpt"],
-    use_compile=cfg["use_compile"],
+    backend="eager",
+    eager_options=EagerOptions(use_compile=cfg["use_compile"]),
 )
 ```
 
 ### CUDA Mode
 
 ```python
-solver = PropCUDA(
+solver = PropTorch(
     equation,
     **prop_kwargs,
-    boundary_saving_config=cfg["boundary_saving_config"],
+    backend="cuda",
+    cuda_options=CUDAOptions(
+        memory=MemoryOptions(
+            strategy="boundary",
+            boundary=BoundaryOptions(...),
+        )
+    ),
 )
 ```
 
@@ -179,21 +186,21 @@ Each backend writes into its own output directory:
 
 ## Running the Example
 
-PyTorch mode:
+Eager mode:
 
 ```bash
-python3 examples/acoustic_fwi_torch.py --backend torch
+python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend eager
 ```
 
 CUDA mode:
 
 ```bash
-python3 examples/acoustic_fwi_torch.py --backend cuda
+python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend cuda
 ```
 
 Notes:
 
-- `torch` mode runs on GPU if available and otherwise falls back to CPU
+- `eager` mode runs on GPU if available and otherwise falls back to CPU
 - `cuda` mode requires a CUDA-capable PyTorch environment and compiled binding
 
 ## Full Script

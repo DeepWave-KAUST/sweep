@@ -22,3 +22,7 @@ copying constructor comments blindly. For each class, the goal is to capture:
 - backend-specific differences
 - input and output conventions
 - behaviors that are easy to misunderstand
+
+For Torch-family propagation, read `PropTorch` as the primary API surface.
+The compiled CUDA runtime is documented separately as `PropCUDA`, but it is now
+typically reached through `PropTorch(..., backend="cuda")`.

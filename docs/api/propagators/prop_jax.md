@@ -13,14 +13,7 @@ class PropJax(
     dev=None,
     use_ckpt=True,
     ckpt_chunks=100,
-    ckpt_mode="chunk",
-    ckpt_num=0,
     pml_type="spml",
-    nt=-1,
-    B=1,
-    allow_growth=True,
-    full_mode="full",
-    boundary_saving_config=None,
 )
 ```
 
@@ -56,23 +49,8 @@ JAX propagator built around `jax.lax.scan` and chunk-style rematerialization.
 - `use_ckpt` (`bool`, optional): Enables chunk-based rematerialization in the
   scanned time loop.
 - `ckpt_chunks` (`int`, optional): Chunk size used when `use_ckpt=True`.
-- `ckpt_mode` (`str`, optional): Stored on the base class. The implemented JAX
-  path uses chunk-style checkpointing rather than CUDA-style recursive
-  checkpointing.
-- `ckpt_num` (`int`, optional): Stored on the base class and not currently used
-  by the JAX checkpoint path.
 - `pml_type` (`str`, optional): PML implementation passed into the equation
   setup.
-- `nt` (`int`, optional): Stored time-step count. The active forward path
-  normally infers the runtime value from the wavelet.
-- `B` (`int`, optional): Stored on the base class and not used for CUDA-style
-  preallocation here.
-- `allow_growth` (`bool`, optional): Stored on the base class and not currently
-  a main control flag in this backend.
-- `full_mode` (`str`, optional): Stored on the base class and currently not a
-  major runtime switch in `PropJax`.
-- `boundary_saving_config` (`dict`, optional): Accepted through `PropBase`, but
-  CUDA-style boundary-saving buffers are not used in this backend.
 
 ## Forward Parameters
 
