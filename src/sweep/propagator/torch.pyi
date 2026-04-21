@@ -2,14 +2,25 @@ from typing import Any
 
 import torch
 
-from .base import PropBase
+from .options import CUDAOptions, EagerOptions
 
 
-class PropTorch(PropBase, torch.nn.Module):
-    use_compile: bool
-    store_last_wavefield: bool
+class PropTorch(torch.nn.Module):
+    backend: str
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+    def __init__(
+        self,
+        *args: Any,
+        backend: str = ...,
+        backend_options: dict[str, Any] | None = ...,
+        eager_options: dict[str, Any] | EagerOptions | None = ...,
+        cuda_options: dict[str, Any] | CUDAOptions | None = ...,
+        **kwargs: Any,
+    ) -> None: ...
+
+    def parameters(self) -> Any: ...
+    def get_parameters(self, key: str) -> Any: ...
+    def set_parameters(self, model: Any) -> Any: ...
 
     def forward(
         self,

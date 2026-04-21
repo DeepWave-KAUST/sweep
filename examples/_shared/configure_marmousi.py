@@ -83,7 +83,7 @@ _CONFIGS = {
     "fwi_2d_acoustic_torch_common": {
         **_FWI_2D_ACOUSTIC_COMMON,
     },
-    "fwi_2d_acoustic_torch_torch": {
+    "fwi_2d_acoustic_torch_eager": {
         "output_dir": "acoustic_fwi_torch",
         "use_compile": True,
         "use_ckpt": False,

@@ -32,7 +32,7 @@ from fwi3d_overthrust import (
     save_wavelet_figure,
 )
 from sweep.equations import Acoustic3D
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.options import BoundaryOptions, CUDAOptions, EagerOptions, MemoryOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -42,8 +42,8 @@ torch.backends.cudnn.benchmark = True
 
 def build_config(backend):
     backend_key = f"fwi_3d_acoustic_torch_{backend}"
-    if backend not in ("torch", "cuda"):
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'torch'].")
+    if backend not in ("eager", "cuda"):
+        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'eager'].")
     cfg = shared_config.get_config("fwi_3d_acoustic_torch_common")
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
@@ -69,28 +69,45 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "torch":
+    if cfg["backend"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
+            backend="eager",
+            eager_options=EagerOptions(
+                use_compile=cfg["use_compile"],
+            ),
             use_ckpt=cfg["use_ckpt"],
             ckpt_chunks=cfg["ckpt_chunks"],
-            use_compile=cfg["use_compile"],
         )
 
     if cfg["backend"] == "cuda":
-        return PropCUDA(
+        return PropTorch(
             equation,
             **prop_kwargs,
-            boundary_saving_config=cfg["boundary_saving_config"],
+            backend="cuda",
+            cuda_options=CUDAOptions(
+                memory=MemoryOptions(
+                    strategy="boundary",
+                    boundary=build_boundary_options(cfg["boundary_saving_config"]),
+                ),
+            ),
         )
 
     raise ValueError(f"Unsupported backend '{cfg['backend']}'.")
 
 
+def build_boundary_options(boundary_cfg):
+    kwargs = {"storage": boundary_cfg["storage"]}
+    if boundary_cfg["storage"] == "cpu":
+        kwargs["transfer_interval"] = boundary_cfg["transfer_interval"]
+        kwargs["pinned_memory"] = boundary_cfg["pinned_memory"]
+    return BoundaryOptions(**kwargs)
+
+
 def timed_forward(solver, wave, sources, receivers, models):
     kwargs = {}
-    if isinstance(solver, PropCUDA):
+    if getattr(solver, "backend", "eager") == "cuda":
         kwargs["use_boundary_saving"] = False
 
     if solver.dev.type == "cuda":
@@ -126,7 +143,7 @@ def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsi
             for start in progress:
                 stop = min(start + shot_batchsize, nshots)
                 solver_kwargs = {}
-                if isinstance(solver, PropCUDA):
+                if getattr(solver, "backend", "eager") == "cuda":
                     solver_kwargs["use_boundary_saving"] = False
                 batch_obs = solver(
                     wave,
@@ -158,7 +175,7 @@ def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsi
     return obs, elapsed_ms
 
 
-def run_fwi(backend="torch"):
+def run_fwi(backend="eager"):
     cfg = build_config(backend)
     script_dir = Path(__file__).resolve().parent
     output_dir = script_dir / cfg["output_dir"]
@@ -217,7 +234,7 @@ def run_fwi(backend="torch"):
 
         shot_idx = np.random.choice(nshots, size=batchsize, replace=False)
         solver_kwargs = {}
-        if isinstance(solver, PropCUDA):
+        if getattr(solver, "backend", "eager") == "cuda":
             solver_kwargs["use_boundary_saving"] = True
 
         syn = solver(wave, sources[shot_idx], receivers[shot_idx], models=[inv_vp], **solver_kwargs)
@@ -245,9 +262,9 @@ def parse_args():
     )
     parser.add_argument(
         "--backend",
-        choices=("torch", "cuda"),
-        default="torch",
-        help="Select which propagator backend to use.",
+        choices=("eager", "cuda"),
+        default="eager",
+        help="Select which PropTorch backend to use.",
     )
     return parser.parse_args()
 

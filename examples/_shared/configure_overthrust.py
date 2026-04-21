@@ -92,7 +92,7 @@ _CONFIGS = {
         **_FWI_2D_ELASTIC_COMMON,
         "fix_top_layers": 0,
     },
-    "fwi_2d_elastic_torch_torch": {
+    "fwi_2d_elastic_torch_eager": {
         "output_dir": "elastic_fwi_overthrust_torch",
         "use_compile": True,
         "use_ckpt": True,
@@ -118,7 +118,7 @@ _CONFIGS = {
     "fwi_3d_acoustic_torch_common": {
         **_FWI_3D_ACOUSTIC_COMMON,
     },
-    "fwi_3d_acoustic_torch_torch": {
+    "fwi_3d_acoustic_torch_eager": {
         "output_dir": "acoustic_3d_fwi_overthrust_torch",
         "use_compile": True,
         "use_ckpt": True,

@@ -24,7 +24,7 @@ import torch
 import tqdm
 
 from sweep.equations import Acoustic
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.options import BoundaryOptions, CUDAOptions, EagerOptions, MemoryOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -56,10 +56,10 @@ COMMON_CONFIG = {
 
 
 BACKEND_CONFIG = {
-    "torch": {
+    "eager": {
         "abcn": 20,
         "free_surface": False,
-        "output_dir": "acoustic_fwi_encoding_torch",
+        "output_dir": "acoustic_fwi_encoding_eager",
         "use_ckpt": False,
         "use_compile": True,
         "transpose_shot": False,
@@ -107,22 +107,39 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "torch":
+    if cfg["backend"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
+            backend="eager",
+            eager_options=EagerOptions(
+                use_compile=cfg["use_compile"],
+            ),
             use_ckpt=cfg["use_ckpt"],
-            use_compile=cfg["use_compile"],
         )
 
     if cfg["backend"] == "cuda":
-        return PropCUDA(
+        return PropTorch(
             equation,
             **prop_kwargs,
-            boundary_saving_config=cfg["boundary_saving_config"],
+            backend="cuda",
+            cuda_options=CUDAOptions(
+                memory=MemoryOptions(
+                    strategy="boundary",
+                    boundary=build_boundary_options(cfg["boundary_saving_config"]),
+                ),
+            ),
         )
 
     raise ValueError(f"Unsupported backend '{cfg['backend']}'.")
+
+
+def build_boundary_options(boundary_cfg):
+    kwargs = {"storage": boundary_cfg["storage"]}
+    if boundary_cfg["storage"] == "cpu":
+        kwargs["transfer_interval"] = boundary_cfg["transfer_interval"]
+        kwargs["pinned_memory"] = boundary_cfg["pinned_memory"]
+    return BoundaryOptions(**kwargs)
 
 
 def build_geometry(shape, cfg):
@@ -293,7 +310,7 @@ def prepare_encoded_inputs(wave, obs, sources, receivers_shared, shot_idx, cfg, 
     )
 
 
-def run_fwi(backend="torch"):
+def run_fwi(backend="eager"):
     cfg = build_config(backend)
     script_dir = Path(__file__).resolve().parent
     output_dir = script_dir / cfg["output_dir"]
@@ -386,9 +403,9 @@ def parse_args():
     )
     parser.add_argument(
         "--backend",
-        choices=("torch", "cuda"),
-        default="torch",
-        help="Select which propagator backend to use.",
+        choices=("eager", "cuda"),
+        default="eager",
+        help="Select which PropTorch backend to use.",
     )
     return parser.parse_args()
 
