@@ -6,7 +6,8 @@ from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.propagator.base import PropBase
 from sweep.utils.torch import EdgePadding
-from sweep.scalars import fd_coefficients
+from sweep.scalars import fd_coefficients, staggered_grid_coes
+from sweep.equations.base import FirstOrderEquation
 
 
 def _get_C():
@@ -322,6 +323,27 @@ class PropCUDA(PropBase, torch.nn.Module):
         # CUDA kernels expect Cartesian order: [dx, dz] or [dx, dy, dz].
         return list(reversed(self._grid_spacing))
 
+    def _build_fd_coefficients(self, M):
+        lap_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
+
+        lap_coes[1:] = torch.from_numpy(fd_coefficients(2, 2 * M)).to(self.dev).float()
+        lap_coes[0] = torch.sum(lap_coes[1:]) * 2
+
+        # First-order CUDA equations use staggered-grid forward/backward
+        # derivatives (`sgradient`), so their first-derivative coefficients
+        # must match the staggered stencil rather than the centered gradient
+        # coefficients used by second-order equations.
+        if isinstance(self.equation, FirstOrderEquation):
+            # Runtime staggered kernels read coeff[0..M-1] directly.
+            grad_coes = torch.from_numpy(staggered_grid_coes(M)).to(self.dev).float()
+        else:
+            # Runtime centered-gradient kernels read coeff[1..M], leaving
+            # coeff[0] unused for consistency with the Laplacian layout.
+            grad_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
+            grad_coes[1:] = torch.from_numpy(fd_coefficients(1, 2 * M)).to(self.dev).float()
+            grad_coes[0] = 0.0
+        return lap_coes, grad_coes
+
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), f'Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}'
         for name, data in zip(self.model_names, model):
@@ -635,12 +657,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         # for b, name in zip(self.equation.b, ['az', 'bz', 'azh', 'bzh', 'ax', 'bx', 'axh', 'bxh']):
         #     np.save(f'{name}.npy', b.detach().cpu().numpy())
 
-        lap_coes = torch.zeros(M+1, dtype=torch.float32, device=self.dev)
-        grad_coes = torch.zeros(M+1, dtype=torch.float32, device=self.dev)
-        lap_coes[1:] = torch.from_numpy(fd_coefficients(2, 2*M)).to(self.dev).float()
-        lap_coes[0] = torch.sum(lap_coes[1:]) * 2
-        grad_coes[1:] = torch.from_numpy(fd_coefficients(1, 2*M)).to(self.dev).float()
-        grad_coes[0] = 0.
+        lap_coes, grad_coes = self._build_fd_coefficients(M)
 
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
         requires_model_grad = any(m.requires_grad for m in models)
@@ -848,12 +865,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
 
-        lap_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
-        grad_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
-        lap_coes[1:] = torch.from_numpy(fd_coefficients(2, 2 * M)).to(self.dev).float()
-        lap_coes[0] = torch.sum(lap_coes[1:]) * 2
-        grad_coes[1:] = torch.from_numpy(fd_coefficients(1, 2 * M)).to(self.dev).float()
-        grad_coes[0] = 0.
+        lap_coes, grad_coes = self._build_fd_coefficients(M)
 
         models = [m[None, None, ...].repeat(batch_size, *([1] * (m.ndim + 1))) for m in self.models_padded]
         requires_model_grad = any(m.requires_grad for m in models)
