@@ -11,13 +11,13 @@ from .elastic import Elastic
 from .elastic3d import Elastic as Elastic3D
 
 # from .acoustic_vrr import AcousticVRR
-# from .qP_tti import AcousticTTI
+from .qP_tti import AcousticTTI
 # from .aec import AEC
 # from .visco_acoustic import ViscoAcoustic
-# from .qP_vti import AcousticVTI
+from .qP_vti import AcousticVTI
 # from .elasticP import ElasticP
 from .acoustic import Acoustic
-# from .qP_tariq import AcousticTariq
+from .qP_tariq import AcousticTariq
 from .acoustic3d import Acoustic3D
 
 
