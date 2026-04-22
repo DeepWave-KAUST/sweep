@@ -144,7 +144,7 @@ class PropJax(PropBase):
             snapshots = None
             snapshot_targets = None
 
-        fixargs = [self._dt, self._dh, None]
+        fixargs = [self._dt, jnp.asarray(self._grid_spacing, dtype=jnp.float32), None]
 
         source_idx_at = []
         receiver_idx_at = []

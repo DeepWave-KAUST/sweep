@@ -57,6 +57,10 @@ class PartialDerivative:
         self.get_ops()
 
         self.device = device
+        if ndim == 2:
+            self._spacing = {"z": 1.0, "x": 1.0}
+        else:
+            self._spacing = {"z": 1.0, "y": 1.0, "x": 1.0}
 
     def get_ops(self):
         if self.backend == 'jax':
@@ -92,23 +96,49 @@ class PartialDerivative:
             if self.ndim == 3:
                 self.kyf = _prepare_torch_kernel_bank(self.kyf)
                 self.kyb = _prepare_torch_kernel_bank(self.kyb)
-    def x_forward(self, u):
-        return self.apply_kernels(u, self.kxf)
 
-    def x_backward(self, u):
-        return self.apply_kernels(u, self.kxb)
+    def set_spacing(self, spacing):
+        if np.isscalar(spacing):
+            value = float(spacing)
+            if self.ndim == 2:
+                self._spacing = {"z": value, "x": value}
+            else:
+                self._spacing = {"z": value, "y": value, "x": value}
+            return
 
-    def y_forward(self, u):
-        return self.apply_kernels(u, self.kyf)
-    
-    def y_backward(self, u):
-        return self.apply_kernels(u, self.kyb)
-    
-    def z_forward(self, u):
-        return self.apply_kernels(u, self.kzf)
-    
-    def z_backward(self, u):
-        return self.apply_kernels(u, self.kzb)
+        spacing = tuple(float(v) for v in spacing)
+        if len(spacing) != self.ndim:
+            raise ValueError(f"Expected spacing length {self.ndim}, got {len(spacing)}.")
+        if self.ndim == 2:
+            self._spacing = {"z": spacing[0], "x": spacing[1]}
+        else:
+            self._spacing = {"z": spacing[0], "y": spacing[1], "x": spacing[2]}
+
+    def _apply(self, u, kernels, h=None, axis=None):
+        out = self.apply_kernels(u, kernels)
+        if h is None and axis is not None:
+            h = self._spacing[axis]
+        if h is None:
+            return out
+        return out / h
+
+    def x_forward(self, u, h=None):
+        return self._apply(u, self.kxf, h=h, axis="x")
+
+    def x_backward(self, u, h=None):
+        return self._apply(u, self.kxb, h=h, axis="x")
+
+    def y_forward(self, u, h=None):
+        return self._apply(u, self.kyf, h=h, axis="y")
+
+    def y_backward(self, u, h=None):
+        return self._apply(u, self.kyb, h=h, axis="y")
+
+    def z_forward(self, u, h=None):
+        return self._apply(u, self.kzf, h=h, axis="z")
+
+    def z_backward(self, u, h=None):
+        return self._apply(u, self.kzb, h=h, axis="z")
 
 def pad_kernels2d(kernels, target_shape):
     # pads 2D kernels to same shape (H, W)

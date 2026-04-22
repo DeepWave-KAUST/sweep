@@ -2,6 +2,25 @@ import torch
 import torch.nn.functional as F
 
 
+def _resolve_spacing_for_axis(h, axis, ndim):
+    if isinstance(h, torch.Tensor):
+        if h.ndim == 0:
+            return h
+        spatial_ndim = h.shape[0]
+    elif isinstance(h, (tuple, list)):
+        spatial_ndim = len(h)
+    else:
+        return h
+
+    normalized_axis = axis if axis >= 0 else ndim + axis
+    spatial_axis = normalized_axis - (ndim - spatial_ndim)
+    if spatial_axis < 0 or spatial_axis >= spatial_ndim:
+        raise ValueError(
+            f"Axis {axis} is incompatible with spacing of length {spatial_ndim} for tensor ndim={ndim}."
+        )
+    return h[spatial_axis]
+
+
 def _to_nchw(u):
     if u.ndim == 2:
         return u.unsqueeze(0).unsqueeze(0), lambda x: x.squeeze(0).squeeze(0)
@@ -82,13 +101,14 @@ def laplace2d(u: torch.Tensor,
     return torch.nn.functional.conv2d(u, kernel, padding=padding) / (h*h)
 
 def gradient(u, h, axis, kernels=None):
+    h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)
     if kernels is not None:
         if axis not in kernels:
             raise ValueError(f"No gradient kernel configured for axis={axis}.")
         kernel = kernels[axis]
         padding = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
         u_nchw, restore = _to_nchw(u)
-        out = F.conv2d(u_nchw, kernel / h, padding=padding)
+        out = F.conv2d(u_nchw, kernel / h_axis, padding=padding)
         out = _zero_halo(out, max(padding))
         return restore(out)
-    return torch.gradient(u, spacing=h, dim=axis)[0]
+    return torch.gradient(u, spacing=h_axis, dim=axis)[0]

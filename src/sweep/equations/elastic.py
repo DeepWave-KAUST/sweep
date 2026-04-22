@@ -100,13 +100,13 @@ def step(vx, vz, sxx, szz, sxz,
     tzz_z = tzz_z + m_tzzz
     m_txzx = ax * m_txzx + bx * txz_x
     txz_x = txz_x + m_txzx
-    vz = vz + dt / (rho * h) * (tzz_z + txz_x)
+    vz = vz + dt / rho * (tzz_z + txz_x)
 
     m_txzz = az * m_txzz + bz * txz_z
     txz_z = txz_z + m_txzz
     m_txxx = axh * m_txxx + bxh * txx_x
     txx_x = txx_x + m_txxx
-    vx = vx + dt / (rho * h) * (txx_x + txz_z)
+    vx = vx + dt / rho * (txx_x + txz_z)
 
     # Update Stress fields
     vx_x = pd.x_backward(vx)
@@ -126,14 +126,14 @@ def step(vx, vz, sxx, szz, sxz,
     m_vxx = ax * m_vxx + bx * vx_x
     vx_x = vx_x + m_vxx
 
-    szz = szz + dt * (lame_lambda + 2 * lame_mu) / h * vz_z + dt * lame_lambda / h * vx_x
-    sxx = sxx + dt * (lame_lambda + 2 * lame_mu) / h * vx_x + dt * lame_lambda / h * vz_z
+    szz = szz + dt * ((lame_lambda + 2 * lame_mu) * vz_z + lame_lambda * vx_x)
+    sxx = sxx + dt * ((lame_lambda + 2 * lame_mu) * vx_x + lame_lambda * vz_z)
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
     m_vzx = axh * m_vzx + bxh * vz_x
     vz_x = vz_x + m_vzx
-    sxz = sxz + dt * lame_mu / h * (vx_z + vz_x)
+    sxz = sxz + dt * lame_mu * (vx_z + vz_x)
 
     if free_surface:
         szz = _zero_top_row(szz)

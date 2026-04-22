@@ -82,7 +82,8 @@ class AcousticLSRTM(SecondOrderEquation):
     
     def func(self, *args, **kwargs):
         dh = args[15]
-        lap_uz, lap_ux = self.laplace1d_sep(args[0], self.laplace_kernels, dh, dh)
-        lap_suz, lap_sux = self.laplace1d_sep(args[6], self.laplace_kernels, dh, dh)
+        hz, hx = self._spacings_2d(dh)
+        lap_uz, lap_ux = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
+        lap_suz, lap_sux = self.laplace1d_sep(args[6], self.laplace_kernels, hz, hx)
         return step(*args, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient)
     

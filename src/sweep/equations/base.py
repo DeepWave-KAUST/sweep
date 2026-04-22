@@ -55,12 +55,36 @@ class FirstOrderEquation(WaveEquation, ):
         WaveEquation.__init__(self, spatial_order, device, backend, **kwargs)
         self.so = spatial_order
         self.backend = backend
+        self.ndim = ndim
         self.use_habc = False
         self.pd = PartialDerivative(spatial_order, device, backend, ndim=ndim)
         self.pd.to_backend(to_backend)
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]
+
+    def _axis_spacing(self, h, axis):
+        axis = axis if axis >= 0 else self.ndim + axis
+        if axis < 0 or axis >= self.ndim:
+            raise ValueError(f"Axis {axis} is out of bounds for ndim={self.ndim}.")
+
+        if np.isscalar(h):
+            return h
+
+        if hasattr(h, "ndim") and getattr(h, "ndim", 0) == 0:
+            return h
+
+        return h[axis]
+
+    def _spacings_2d(self, h):
+        return self._axis_spacing(h, 0), self._axis_spacing(h, 1)
+
+    def _spacings_3d(self, h):
+        return (
+            self._axis_spacing(h, 0),
+            self._axis_spacing(h, 1),
+            self._axis_spacing(h, 2),
+        )
 
 class SecondOrderEquation(OperatorBase, WaveEquation):
     """
@@ -127,6 +151,29 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]
+
+    def _axis_spacing(self, h, axis):
+        axis = axis if axis >= 0 else self.ndim + axis
+        if axis < 0 or axis >= self.ndim:
+            raise ValueError(f"Axis {axis} is out of bounds for ndim={self.ndim}.")
+
+        if np.isscalar(h):
+            return h
+
+        if hasattr(h, "ndim") and getattr(h, "ndim", 0) == 0:
+            return h
+
+        return h[axis]
+
+    def _spacings_2d(self, h):
+        return self._axis_spacing(h, 0), self._axis_spacing(h, 1)
+
+    def _spacings_3d(self, h):
+        return (
+            self._axis_spacing(h, 0),
+            self._axis_spacing(h, 1),
+            self._axis_spacing(h, 2),
+        )
 
 
     

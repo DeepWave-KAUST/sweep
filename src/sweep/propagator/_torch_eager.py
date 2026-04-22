@@ -19,7 +19,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         super().__init__(*args, **kwargs)
 
         self.register_buffer("dt", torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
-        self.register_buffer("dh", torch.tensor(self._dh, device=self.dev, dtype=torch.float32))
+        self.register_buffer("dh", torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
         coord_offset = [self.abcn] * self.ndim
         if self.free_surface:
             coord_offset[-1] = 0

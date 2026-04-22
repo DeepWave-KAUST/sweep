@@ -64,8 +64,8 @@ class ViscoAcoustic(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         
-        # Second order laplace kernel (Second derivative), Full kernel
         super().__init__(spatial_order, device, backend, dim=dim)
+        super().init_laplace(ltype='1dsep', backend=backend)
 
         self.backend = backend
 
@@ -92,5 +92,7 @@ class ViscoAcoustic(SecondOrderEquation):
         return ['h1', 'h2']
     
     def func(self, *args, **kwargs):
-        laplace_u_now = self.laplace(args[0], args[6], self.kernel)
+        hz, hx = self._spacings_2d(args[6])
+        laplace_u_now_z, laplace_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
+        laplace_u_now = laplace_u_now_x + laplace_u_now_z
         return step(*args, self.k, laplace_u_now, self.phase_shift, self.amplitude_damping, self.op, self.cond_op, **kwargs)

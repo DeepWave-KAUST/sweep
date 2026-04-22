@@ -82,11 +82,6 @@ class PropBase:
                     f"dh must have length {self.ndim} to match shape {shape}, "
                     f"got {len(dh)}."
                 )
-            if self.__class__.__name__ != "PropCUDA":
-                raise ValueError(
-                    "Anisotropic dh is currently supported only by the CUDA solver. "
-                    "Use a scalar dh for non-CUDA propagators."
-                )
             self._grid_spacing = tuple(float(v) for v in dh)
             self._dh = float(self._grid_spacing[-1])
         self._dt = float(dt)
@@ -119,6 +114,8 @@ class PropBase:
         # Keep the equation object aware of geometry-dependent boundary behavior.
         self.equation.free_surface = self.free_surface
         self.equation.abcn = self.abcn
+        if getattr(self.equation, "pd", None) is not None and hasattr(self.equation.pd, "set_spacing"):
+            self.equation.pd.set_spacing(self._grid_spacing)
 
         self.source_type = source_type
         self.receiver_type = receiver_type

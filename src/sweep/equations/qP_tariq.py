@@ -34,6 +34,7 @@ class AcousticTariq(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
+        super().init_laplace(ltype='1dsep', backend=backend)
 
     @property
     def models(self):
@@ -44,8 +45,8 @@ class AcousticTariq(SecondOrderEquation):
         return ['h1', 'h2', 'f1', 'f2']
     
     def func(self, *args, **kwargs):
-        nabla_x = self.laplace(args[0], args[8], self.lkernel_x)
-        nabla_z = self.laplace(args[0], args[8], self.lkernel_z)
-        dpdx2 = self.laplace(args[2], args[8], self.lkernel_x)
-        dpdx2dz2 = self.laplace(dpdx2, args[8], self.lkernel_z)
+        hz, hx = self._spacings_2d(args[8])
+        nabla_z, nabla_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
+        _, dpdx2 = self.laplace1d_sep(args[2], self.laplace_kernels, hz, hx)
+        dpdx2dz2, _ = self.laplace1d_sep(dpdx2, self.laplace_kernels, hz, hx)
         return step(*args, nabla_x, nabla_z, dpdx2dz2, **kwargs)

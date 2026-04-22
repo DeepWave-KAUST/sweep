@@ -1,6 +1,3 @@
-import torch
-import jax.numpy as jnp
-import numpy as np
 from .base import SecondOrderEquation
 
 def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz):
@@ -23,8 +20,8 @@ class AcousticVRR(SecondOrderEquation):
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
-        
         super().__init__(spatial_order, device, backend, other_kernels=True)
+        super().init_laplace(ltype='1dsep', backend=backend)
 
     @property
     def models(self):
@@ -35,21 +32,11 @@ class AcousticVRR(SecondOrderEquation):
         return ['h1', 'h2']
     
     def func(self, *args, **kwargs):
-        _func = {'torch': self.func_torch, 'jax': self.func_jax}[self.backend]
-        return _func(*args, **kwargs)
-
-    def func_jax(self, *args, **kwargs):
-        lap_u_now = self.laplace(args[0], args[6], self.kernel)
-        dvpdx = jnp.gradient(args[2],args[6], axis=-1) # 2nd Center Difference
-        dvpdz = jnp.gradient(args[2],args[6], axis=-2)
-        dpdx = jnp.gradient(args[0], args[6], axis=-1)
-        dpdz = jnp.gradient(args[0], args[6], axis=-2)
-        return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz)
-      
-    def func_torch(self, *args, **kwargs):
-        lap_u_now = self.laplace(args[0], args[6], self.kernel)
-        dvpdx = torch.gradient(args[2], spacing=args[6], dim=-1)[0] # 2nd Center Difference
-        dvpdz = torch.gradient(args[2], spacing=args[6], dim=-2)[0]
-        dpdx = torch.gradient(args[0], spacing=args[6], dim=-1)[0]
-        dpdz = torch.gradient(args[0], spacing=args[6], dim=-2)[0]
+        hz, hx = self._spacings_2d(args[6])
+        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
+        lap_u_now = lap_u_now_x + lap_u_now_z
+        dvpdx = self.gradient(args[2], args[6], axis=-1)
+        dvpdz = self.gradient(args[2], args[6], axis=-2)
+        dpdx = self.gradient(args[0], args[6], axis=-1)
+        dpdz = self.gradient(args[0], args[6], axis=-2)
         return step(*args, lap_u_now, dpdx, dpdz, dvpdx, dvpdz)

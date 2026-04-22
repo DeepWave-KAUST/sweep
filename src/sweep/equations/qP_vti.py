@@ -36,8 +36,9 @@ class AcousticVTI(SecondOrderEquation):
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
-        
         super().__init__(spatial_order, device, backend, other_kernels=True)
+        super().init_laplace(ltype='1dsep', backend=backend)
+        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
     
     @property
     def models(self):
@@ -48,8 +49,8 @@ class AcousticVTI(SecondOrderEquation):
         return ['h1', 'h2']
     
     def func(self, *args, **kwargs):
-        nabla_x = self.laplace(args[0], 1.0, self.lkernel_x/(args[6]**2))
-        nabla_z = self.laplace(args[0], 1.0, self.lkernel_z/(args[6]**2))
-        dpdx = self.laplace(args[0], 1.0, self.gkernel_x/args[6])
-        dpdz = self.laplace(args[0], 1.0, self.gkernel_z/args[6])
+        hz, hx = self._spacings_2d(args[6])
+        nabla_z, nabla_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
+        dpdx = self.gradient(args[0], args[6], axis=-1, kernels=self.grad_kernels)
+        dpdz = self.gradient(args[0], args[6], axis=-2, kernels=self.grad_kernels)
         return step(*args, nabla_x, nabla_z, dpdx, dpdz, **kwargs)

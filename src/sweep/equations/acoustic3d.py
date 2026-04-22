@@ -61,7 +61,8 @@ class Acoustic3D(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[10]
-        lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, dh, dh, dh)
+        hz, hy, hx = self._spacings_3d(dh)
+        lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, hz, hy, hx)
         return step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
 
     def _C(self, ):

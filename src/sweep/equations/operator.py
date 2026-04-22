@@ -4,6 +4,29 @@ import jax.numpy as jnp
 import torch.nn.functional as F
 from sweep.scalars import staggered_grid_coes
 
+
+def _resolve_spacing_for_axis(h, axis, ndim):
+    if isinstance(h, torch.Tensor):
+        if h.ndim == 0:
+            return h
+        spatial_ndim = h.shape[0]
+    elif hasattr(h, "ndim"):
+        if h.ndim == 0:
+            return h
+        spatial_ndim = h.shape[0]
+    elif isinstance(h, (tuple, list)):
+        spatial_ndim = len(h)
+    else:
+        return h
+
+    normalized_axis = axis if axis >= 0 else ndim + axis
+    spatial_axis = normalized_axis - (ndim - spatial_ndim)
+    if spatial_axis < 0 or spatial_axis >= spatial_ndim:
+        raise ValueError(
+            f"Axis {axis} is incompatible with spacing of length {spatial_ndim} for tensor ndim={ndim}."
+        )
+    return h[spatial_axis]
+
 # @torch.jit.script
 def laplace(u: torch.Tensor, 
             h: float | torch.Tensor, 
@@ -38,7 +61,7 @@ def gradient(u: torch.Tensor,
     return torch.nn.functional.conv2d(u, operator, padding=padding)
 
 def gradientO2(u, h, axis):
+    h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)
     if isinstance(u, torch.Tensor):
-        return torch.gradient(u, spacing=h, dim=axis)[0]
-    return jnp.gradient(u, h, axis=axis)
-
+        return torch.gradient(u, spacing=h_axis, dim=axis)[0]
+    return jnp.gradient(u, h_axis, axis=axis)

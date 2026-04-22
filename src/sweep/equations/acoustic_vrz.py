@@ -69,7 +69,8 @@ class AcousticVRZ(SecondOrderEquation):
 
     def func(self, *args, **kwargs):
         dh = args[9]
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, dh, dh)
+        hz, hx = self._spacings_2d(dh)
+        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
         return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
 
     def _C(self):

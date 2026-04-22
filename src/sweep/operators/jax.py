@@ -4,6 +4,25 @@ from jax import vmap, lax
 from jax.scipy.signal import convolve2d as conv2d
 
 
+def _resolve_spacing_for_axis(h, axis, ndim):
+    if hasattr(h, "ndim"):
+        if h.ndim == 0:
+            return h
+        spatial_ndim = h.shape[0]
+    elif isinstance(h, (tuple, list)):
+        spatial_ndim = len(h)
+    else:
+        return h
+
+    normalized_axis = axis if axis >= 0 else ndim + axis
+    spatial_axis = normalized_axis - (ndim - spatial_ndim)
+    if spatial_axis < 0 or spatial_axis >= spatial_ndim:
+        raise ValueError(
+            f"Axis {axis} is incompatible with spacing of length {spatial_ndim} for tensor ndim={ndim}."
+        )
+    return h[spatial_axis]
+
+
 def _to_nchw(u):
     if u.ndim == 2:
         return u[None, None, ...], lambda x: x[0, 0]
@@ -162,11 +181,12 @@ def apply_kernels_jax3d(u, kernels):
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(axis=1, keepdims=True)
 
 def gradient(u, h, axis, kernels=None):
+    h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)
     if kernels is not None:
         if axis not in kernels:
             raise ValueError(f"No gradient kernel configured for axis={axis}.")
         u_nchw, restore = _to_nchw(u)
-        rhs = jnp.transpose(kernels[axis] / h, (2, 3, 1, 0))[::-1, ::-1, :, :]
+        rhs = jnp.transpose(kernels[axis] / h_axis, (2, 3, 1, 0))[::-1, ::-1, :, :]
         out = lax.conv_general_dilated(
             u_nchw,
             rhs,
@@ -176,4 +196,4 @@ def gradient(u, h, axis, kernels=None):
         )
         out = _zero_halo(out, max(kernels[axis].shape[-2] // 2, kernels[axis].shape[-1] // 2))
         return restore(out)
-    return jnp.gradient(u, h, axis=axis)
+    return jnp.gradient(u, h_axis, axis=axis)

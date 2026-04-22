@@ -56,9 +56,9 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     m_syzy = ay * m_syzy + by * dsyz_dy
     dsyz_dy = dsyz_dy + m_syzy
 
-    vx = vx + dt / (rho * h) * (dsxx_dx + dsxy_dy + dsxz_dz)
-    vy = vy + dt / (rho * h) * (dsxy_dx + dsyy_dy + dsyz_dz)
-    vz = vz + dt / (rho * h) * (dsxz_dx + dsyz_dy + dszz_dz)
+    vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
+    vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
+    vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
 
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
@@ -94,12 +94,12 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
 
     div_v = dvx_dx + dvy_dy + dvz_dz
 
-    sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx) / h
-    syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy) / h
-    szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz) / h
-    sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx) / h
-    sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx) / h
-    syz = syz + dt * lame_mu * (dvy_dz + dvz_dy) / h
+    sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx)
+    syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy)
+    szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz)
+    sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx)
+    sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx)
+    syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
     
     return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
            m_vxx, m_vxy, m_vxz, \

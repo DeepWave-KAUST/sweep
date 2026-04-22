@@ -118,19 +118,17 @@ def set_cpml_profiles_s(
         ]
         for dim in range(ndim)
     ]
-    physical_widths: List[float] = []
-    for dim in range(ndim):
-        physical_widths.append(pml_width[dim * 2] * grid_spacing[dim])
-        physical_widths.append(pml_width[dim * 2 + 1] * grid_spacing[dim])
-    max_pml = max(physical_widths)
-
     pml_profiles = []
     for dim in range(ndim):
+        dim_pml = max(
+            pml_width[dim * 2] * grid_spacing[dim],
+            pml_width[dim * 2 + 1] * grid_spacing[dim],
+        )
 
         a, b = setup_pml(
             pml_width[2 * dim : 2 * dim + 2],
             pml_start[dim],
-            max_pml,
+            dim_pml,
             dt,
             shape[dim],
             max_vel,
@@ -141,7 +139,7 @@ def set_cpml_profiles_s(
         ah, bh = setup_pml(
             pml_width[2 * dim : 2 * dim + 2],
             pml_start[dim],
-            max_pml,
+            dim_pml,
             dt,
             shape[dim],
             max_vel,
@@ -182,19 +180,17 @@ def set_cpml_profiles_r(
         for dim in range(ndim)
     ]
 
-    physical_widths: List[float] = []
-    for dim in range(ndim):
-        physical_widths.append(pml_width[dim * 2] * grid_spacing[dim])
-        physical_widths.append(pml_width[dim * 2 + 1] * grid_spacing[dim])
-    max_pml = max(physical_widths) if physical_widths else 0.0
-
     pml_profiles: List[np.ndarray] = []
 
     for dim in range(ndim):
+        dim_pml = max(
+            pml_width[dim * 2] * grid_spacing[dim],
+            pml_width[dim * 2 + 1] * grid_spacing[dim],
+        )
         a, b = setup_pml(
             pml_width[2 * dim : 2 * dim + 2],
             pml_start[dim],
-            max_pml,
+            dim_pml,
             dt,
             shape[dim],
             max_vel,
