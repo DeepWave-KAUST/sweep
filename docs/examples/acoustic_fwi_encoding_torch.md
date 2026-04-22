@@ -1,246 +1,253 @@
-# Acoustic FWI With Source Encoding (CUDA/Torch)
+# Acoustic FWI with Source Encoding
 
 Source file:
 
 - `examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py`
 
+This example demonstrates how to run acoustic full-waveform inversion (FWI)
+with source encoding.
+
+The example supports two propagation backends:
+
+- `torch`: PyTorch-based wave propagation
+- `cuda`: CUDA-accelerated wave propagation with boundary saving
+
+Source encoding is used to reduce the cost of FWI. Instead of modeling all
+shots independently at every iteration, the script randomly selects several
+shots, applies random time shifts and polarity changes, and combines them into
+one encoded super-shot.
+
 ## What This Example Does
 
-This example runs acoustic full-waveform inversion with source encoding using a
-single script that supports two propagator backends:
+This example performs the following steps:
 
-- `eager`: pure PyTorch propagation through `PropTorch(..., backend="eager")`
-- `cuda`: compiled CUDA propagation through `PropTorch(..., backend="cuda")`
+1. loads a true velocity model and an initial velocity model
+2. builds a Ricker wavelet
+3. defines source and receiver geometry
+4. generates observed data from the true model
+5. runs source-encoded FWI from the initial model
+6. saves figures showing the inversion progress
 
-Compared with the standard acoustic FWI example, this script does not invert on
-individual shot gathers. Instead, it builds encoded super-shots by:
+The output includes:
 
-- sampling a subset of shots
-- applying random polarity flips
-- applying random time shifts
-- summing the encoded data into one source-encoded gather
+- the source wavelet
+- the observed data
+- encoded observed and synthetic data during inversion
+- the inverted model
+- the gradient
+- the loss curve
 
-## Main Components
+## When to Use This Example
 
-The solver is built from:
+Use this example if you want to:
 
-- `equation`: `Acoustic(...)`
-- `propagator`: `PropTorch(...)`
-- `wave`: a Ricker wavelet
-- `sources`: regularly sampled source coordinates
-- `receivers`: a shared receiver line
-- `models`: the velocity model `vp`
+- test acoustic FWI with source encoding
+- compare PyTorch and CUDA propagation backends
+- reduce memory usage during FWI
+- run a simple Marmousi-style inversion example
+- understand how encoded shots are used in inversion
 
-## Backend Selection
+## Required input files
 
-The entry point is:
+The script expects two NumPy model files in the same folder as the script:
 
-```bash
-python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend eager
+```text
+marmousi_true.npy    -> true velocity model
+marmousi_smooth.npy  -> initial velocity model
 ```
 
-or:
+Both files should have the same 2D shape:
 
-```bash
-python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend cuda
+```text
+(nz, nx)
 ```
 
-Internally, the script keeps:
+## How to Run
 
-- `COMMON_CONFIG`: shared acquisition, encoding, and inversion settings
-- `BACKEND_CONFIG`: backend-specific options such as
-  - `EagerOptions(...)` for the eager path
-  - `CUDAOptions(memory=...)` for the CUDA path
-  - display transpose rules for saved figures
+Step 1. Choose the backend you want to use.
 
-## Key Configuration
+=== "PyTorch"
 
-Shared configuration includes:
+    ```bash
+    python source_encoding_fwi.py --backend eager
+    ```
 
-- `nt`, `dt`: temporal sampling
-- `dh`: spatial sampling
-- `spatial_order`: finite-difference order
-- `src_step`, `rec_step`: acquisition sampling in the x direction
-- `true_model`, `init_model`: `.npy` files loaded from `examples/`
-- `epochs`, `batchsize`, `lr`: inversion hyperparameters
-- `max_time_shift_ratio`: maximum random encoding shift as a fraction of `nt`
+    This mode uses the PyTorch propagator.
 
-Backend-specific configuration includes:
+=== "CUDA"
 
-- eager:
-  - `EagerOptions(use_compile=...)`
-  - `use_ckpt`
-- CUDA:
-  - `CUDAOptions(memory=MemoryOptions(...))`
-  - gather transpose for visualization
+    ```bash
+    python source_encoding_fwi.py --backend cuda
+    ```
 
-## Solver Setup
+    This mode uses the CUDA propagator.
 
-The equation side is shared across both modes:
+    The CUDA backend requires a CUDA-capable PyTorch environment and the CUDA propagation module to be available.
+
+Step 2. Check the backend-specific output folder for figures and inversion
+progress.
+
+## Output Folders
+
+Each backend writes results to a separate folder.
+
+=== "PyTorch"
+
+    ```text
+    acoustic_fwi_encoding_torch/
+    ```
+
+=== "CUDA"
+
+    ```text
+    acoustic_fwi_encoding_cuda/
+    ```
+
+## Output Files
+
+After running the script, the output directory contains:
+
+```text
+ricker.png
+observed_data.png
+loss.png
+data_epoch_XXXX.png
+epoch_XXXX.png
+```
+
+- `ricker.png`: Shows the Ricker wavelet used as the seismic source.
+- `observed_data.png`: Shows one observed shot gather generated from the true velocity model.
+- `data_epoch_XXXX.png`: Shows the encoded observed data and encoded synthetic
+  data at a given epoch. This is useful for checking whether the synthetic data
+  are gradually matching the encoded observations.
+- `epoch_XXXX.png`: Shows three panels: 1) true model; 2) current inverted
+  model; 3) current gradient. This figure helps monitor the inversion process.
+- `loss.png`: Shows the FWI loss curve during optimization.
+
+## Example Figures
+
+The following figures show two common outputs from a completed
+source-encoding FWI run.
+
+`data_epoch_0100.png`: the encoded observed data and encoded synthetic data at
+a late inversion epoch, useful for checking whether the encoded prediction is
+matching the encoded target.
+
+![Encoded data at a late epoch](../figures/examples/acoustic_fwi_encoding_data_epoch_0100.png)
+
+`loss.png`: the source-encoding FWI loss curve across optimization steps.
+
+![Source-encoding loss curve](../figures/examples/acoustic_fwi_encoding_loss.png)
+
+## Main Configuration
+
+Most parameters are defined in the `COMMON_CONFIG` parameter.
 
 ```python
-equation = Acoustic(
-    spatial_order=cfg["spatial_order"],
-    device=dev,
-    backend="torch",
-)
+COMMON_CONFIG = {
+    "nt": 2500,
+    "dt": 0.002,
+    "delay": 0.256,
+    "fm": 5.0,
+    "dh": 25.0,
+    "spatial_order": 8,
+    "abcn": 20,
+    "free_surface": False,
+    "src_step": 2,
+    "rec_step": 1,
+    "srcz": 1,
+    "recz": 18,
+    "lr": 25.0,
+    "epochs": 101,
+    "batchsize": 8,
+    "show_every": 10,
+    "true_model": "marmousi_true.npy",
+    "init_model": "marmousi_smooth.npy",
+    "max_time_shift_ratio": 0.2,
+}
 ```
 
-Even when the solver runs with `backend="cuda"`, the equation `backend`
-remains `"torch"`.
+Important parameters:
 
-Shared propagator arguments are collected first:
+- `nt, dt`: These define the number of time samples and the time interval.
+- `fm, delay`: These define the dominant frequency and delay of the Ricker wavelet.
+- `dh`: This is the grid spacing of the velocity model.
+- `src_step, rec_step, srcz, recz`: Acquisition geometry settings. `src_step`
+  is source spacing in grid points; `rec_step` is the receiver spacing in grid
+  points; `srcz` is source depth index; `recz` is receiver depth index.
+- `epochs, batchsize, lr`: These control the number of inversion iterations,
+  the number of shots used per encoded batch, and the learning rate.
+- `max_time_shift_ratio`: This controls the maximum random time shift used in
+  source encoding. For example, if `nt=2500`, then the maximum shift is:
+  `0.2 × 2500 = 500`.
 
-```python
-prop_kwargs = dict(
-    shape=shape,
-    dev=dev,
-    dh=cfg["dh"],
-    dt=cfg["dt"],
-    source_type=["h1"],
-    receiver_type=["h1"],
-    abcn=cfg["abcn"],
-    free_surface=cfg["free_surface"],
-    pml_type="cpmlr",
-)
-```
+## Backend-Specific Settings
 
-### PyTorch Mode
+Backend-specific settings are defined in `BACKEND_CONFIG`.
 
-```python
-solver = PropTorch(
-    equation,
-    **prop_kwargs,
-    use_ckpt=cfg["use_ckpt"],
-    backend="eager",
-    eager_options=EagerOptions(use_compile=cfg["use_compile"]),
-)
-```
+=== "PyTorch"
 
-### CUDA Mode
+    ```python
+    "torch": {
+        "output_dir": "acoustic_fwi_encoding_torch",
+        "use_ckpt": False,
+        "use_compile": True,
+        "transpose_shot": False,
+    }
+    ```
 
-```python
-solver = PropTorch(
-    equation,
-    **prop_kwargs,
-    backend="cuda",
-    cuda_options=CUDAOptions(
-        memory=MemoryOptions(
-            strategy="boundary",
-            boundary=BoundaryOptions(...),
-        )
-    ),
-)
-```
+    This backend is useful for testing and debugging.
 
-## Source Encoding Workflow
+=== "CUDA"
 
-For each inversion step, the script:
+    ```python
+    "cuda": {
+        "output_dir": "acoustic_fwi_encoding_cuda",
+        "transpose_shot": True,
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "gpu",
+            "transfer_interval": 10,
+            "pinned_memory": True,
+        }
+    ```
 
-1. selects a random subset of shots
-2. generates an encoded wavelet for each selected shot
-3. applies the same random polarity and time shift to the corresponding
-   observed gather
-4. sums the encoded gathers into a super-shot target
-5. runs forward modeling with `source_encoding=True`
+    The CUDA backend is intended for faster propagation.
 
-The CUDA and eager paths differ in two important ways:
+    Boundary saving is enabled to reduce memory usage during backpropagation.
 
-### Eager Source Encoding
+## Source Encoding Call Shapes
 
-The PyTorch propagator keeps one encoded source per selected shot and collapses
-them internally into a single batch when `source_encoding=True`.
+The eager and CUDA paths both support source encoding, but they expect
+different input layouts when `source_encoding=True`.
 
-The script therefore calls `PropTorch` with:
+=== "Eager"
 
-- `wavelet`: `(nsel, nt)`
-- `sources`: `(nsel, 2)`
-- `receivers`: `(1, nreceivers, 2)`
+    The eager path keeps one encoded source per selected shot and collapses the
+    selected shots internally.
 
-where `nsel` is the number of randomly selected shots in the current inversion
-step.
+    Use:
 
-### CUDA Source Encoding
+    - `wavelet`: `(nsel, nt)`
+    - `sources`: `(nsel, 2)`
+    - `receivers`: `(1, nreceivers, 2)`
 
-The CUDA propagator uses a different convention. When `source_encoding=True`,
-it expects a single batch that contains multiple encoded sources inside that
-batch.
+    Here `nsel` is the number of randomly selected shots in the current
+    inversion step.
 
-The script therefore calls `PropCUDA` with:
+=== "CUDA"
 
-- `wavelet`: `(1, nsrc, nt)`
-- `sources`: `(1, nsrc, 2)`
-- `receivers`: `(1, nreceivers, 2)`
+    The CUDA path expects a single batch that already contains multiple encoded
+    sources inside that batch.
 
-where `nsrc` is the number of encoded sources combined into the current
-super-shot.
+    Use:
 
-### Record Layout Difference
+    - `wavelet`: `(1, nsrc, nt)`
+    - `sources`: `(1, nsrc, 2)`
+    - `receivers`: `(1, nreceivers, 2)`
 
-The recorded data layout also differs between backends:
+    Here `nsrc` is the number of encoded sources combined into the current
+    super-shot.
 
-- `eager` uses a time-major shot layout for the encoded gathers
-- `cuda` returns a layout where the receiver and time axes are ordered
-  differently
-
-For that reason, the script:
-
-- applies time shifts along the true time axis for each backend
-- keeps each backend in its native layout during loss computation
-- only normalizes the orientation when saving figures for display
-
-## Geometry
-
-The example builds a simple fixed-depth acquisition:
-
-- sources are placed every `src_step` grid points
-- receivers are placed every `rec_step` grid points
-- all sources use the same source depth `srcz`
-- all receivers use the same receiver depth `recz`
-
-The final array shapes are:
-
-- `sources`: `(nshots, 2)`
-- `receivers`: `(nshots, nreceivers, 2)`
-- inversion receivers: `(1, nreceivers, 2)`
-
-## Outputs
-
-The script creates an output directory under `examples/` and saves:
-
-- `ricker.png`
-- `observed_data.png`
-- `loss.png`
-- `data_epoch_XXXX.png` with
-  - encoded observed data
-  - encoded synthetic data
-- `epoch_XXXX.png` snapshots of
-  - the true model
-  - the current inverted model
-  - the current gradient
-
-Each backend writes into its own output directory:
-
-- `acoustic_fwi_encoding_torch`
-- `acoustic_fwi_encoding_cuda`
-
-## Running the Example
-
-Eager mode:
-
-```bash
-python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend eager
-```
-
-CUDA mode:
-
-```bash
-python3 examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py --backend cuda
-```
-
-Notes:
-
-- `eager` mode runs on GPU if available and otherwise falls back to CPU
-- `cuda` mode requires a CUDA-capable PyTorch environment and compiled binding
-- encoded data layout is backend-dependent internally, but saved figures are
-  normalized for easier comparison
+In practice, the main difference is that eager passes selected sources as a
+plain shot list, while CUDA passes them as one batched encoded-source block.

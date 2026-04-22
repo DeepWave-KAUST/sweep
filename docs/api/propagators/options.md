@@ -124,22 +124,14 @@ This block controls CUDA boundary saving.
 
 Fields:
 
-- `storage`
-  - `"gpu"` keeps saved boundaries on device
-  - `"cpu"` stages saved boundaries on host memory
-- `transfer_interval`
-  - only meaningful when `storage="cpu"`
-  - controls how often boundary values are transferred/staged
-- `pinned_memory`
-  - only meaningful when `storage="cpu"`
-  - enables pinned host memory for transfers
+- `storage`: `"gpu"` keeps saved boundaries on device, and `"cpu"` stages saved boundaries on host memory
+- `transfer_interval`: only meaningful when `storage="cpu"`; controls how often boundary values are transferred or staged
+- `pinned_memory`: only meaningful when `storage="cpu"`; enables pinned host memory for transfers
 
 Validation rules:
 
 - `transfer_interval >= 1`
-- if `storage="gpu"`, then:
-  - `transfer_interval` must stay at `1`
-  - `pinned_memory` must stay `False`
+- if `storage="gpu"`, then `transfer_interval` must stay at `1` and `pinned_memory` must stay `False`
 
 ## CkptOptions
 
@@ -155,22 +147,14 @@ This block controls CUDA checkpointing.
 
 Fields:
 
-- `mode`
-  - `"chunk"`: periodic chunk-based replay
-  - `"recursive"`: fixed checkpoint-budget replay
-- `chunks`
-  - used only when `mode="chunk"`
-- `count`
-  - used only when `mode="recursive"`
+- `mode`: `"chunk"` means periodic chunk-based replay, and `"recursive"` means fixed checkpoint-budget replay
+- `chunks`: used only when `mode="chunk"`
+- `count`: used only when `mode="recursive"`
 
 Validation rules:
 
-- for `mode="chunk"`:
-  - `chunks >= 1`
-  - `count` must remain `0`
-- for `mode="recursive"`:
-  - `count >= 1`
-  - `chunks` must remain at its default chunk-mode value
+- for `mode="chunk"`, `chunks >= 1` and `count` must remain `0`
+- for `mode="recursive"`, `count >= 1` and `chunks` must remain at its default chunk-mode value
 
 ## backend_options
 

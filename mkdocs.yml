@@ -52,9 +52,22 @@ nav:
       - CLI: user-guide/cli.md
   - Examples:
       - Overview: examples/index.md
-      - Acoustic FWI (CUDA/Torch): examples/acoustic_fwi_torch.md
-      - Acoustic FWI With Source Encoding (CUDA/Torch): examples/acoustic_fwi_encoding_torch.md
-      - Acoustic FWI (JAX): examples/acoustic_fwi_jax.md
+      - Acoustic FWI with Torch and CUDA: examples/acoustic_fwi_torch.md
+      - 3D Acoustic FWI with Torch and CUDA: examples/acoustic_fwi_3d_torch.md
+      - Acoustic FWI with JAX: examples/acoustic_fwi_jax.md
+      - Reducing Memory:
+          - Overview: examples/reducing_memory.md
+          - Acoustic FWI with Source Encoding: examples/acoustic_fwi_encoding_torch.md
+          - Source Encoding Overview: examples/source_encoding_overview.md
+          - Memory Method Compare: examples/memory_method_compare.md
+      - Wavefield Examples:
+          - Overview: examples/wavefields.md
+          - CUDA FD Orders: examples/wavefields_cuda_fd_orders.md
+          - Free Surface Forward: examples/wavefields_free_surface.md
+          - Anisotropic Wavefields: examples/wavefields_anisotropic.md
+      - Multi-GPU: examples/multi_gpu.md
+      - Joint Migration Inversion: examples/joint_migration_inversion.md
+      - Model Assets: examples/model_assets.md
   - API Reference:
       - Overview: api/index.md
       - Equations:

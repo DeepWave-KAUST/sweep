@@ -175,8 +175,49 @@ def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsi
     return obs, elapsed_ms
 
 
-def run_fwi(backend="eager"):
+def inversion_step_batched(
+    solver,
+    wave,
+    sources,
+    receivers,
+    obs_torch,
+    inv_vp,
+    dev,
+    shot_idx,
+    train_shot_batchsize,
+):
+    train_shot_batchsize = max(1, min(int(train_shot_batchsize), shot_idx.shape[0]))
+    total_loss = 0.0
+
+    for start in range(0, shot_idx.shape[0], train_shot_batchsize):
+        stop = min(start + train_shot_batchsize, shot_idx.shape[0])
+        batch_idx = shot_idx[start:stop]
+        solver_kwargs = {}
+        if getattr(solver, "backend", "eager") == "cuda":
+            solver_kwargs["use_boundary_saving"] = True
+
+        syn = solver(wave, sources[batch_idx], receivers[batch_idx], models=[inv_vp], **solver_kwargs)
+        obs_batch = obs_torch[batch_idx].to(dev)
+        loss = (syn - obs_batch).pow(2).sum()
+        loss.backward()
+        total_loss += loss.item()
+
+    return total_loss
+
+
+def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_override=None):
     cfg = build_config(backend)
+    if batchsize_override is not None:
+        cfg["batchsize"] = int(batchsize_override)
+    if train_shot_batchsize_override is not None:
+        cfg["train_shot_batchsize"] = int(train_shot_batchsize_override)
+    if int(cfg["batchsize"]) < 1:
+        raise ValueError(f"batchsize must be >= 1, got {cfg['batchsize']}.")
+    if int(cfg.get("train_shot_batchsize", cfg["batchsize"])) < 1:
+        raise ValueError(
+            "train_shot_batchsize must be >= 1, "
+            f"got {cfg.get('train_shot_batchsize')}."
+        )
     script_dir = Path(__file__).resolve().parent
     output_dir = script_dir / cfg["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +227,7 @@ def run_fwi(backend="eager"):
 
     true_model, init_model = load_models(EXAMPLES_DIR, cfg)
     shape = true_model.shape
-
+    
     if backend == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("The CUDA acoustic 3D FWI example requires a CUDA-capable PyTorch environment.")
 
@@ -228,23 +269,32 @@ def run_fwi(backend="eager"):
     losses = []
     nshots = sources.shape[0]
     batchsize = min(cfg["batchsize"], nshots)
+    train_shot_batchsize = min(int(cfg.get("train_shot_batchsize", batchsize)), batchsize)
+    print(
+        "Training shot selection:",
+        f"batchsize={batchsize},",
+        f"train_shot_batchsize={train_shot_batchsize}",
+    )
 
     for epoch in tqdm.trange(cfg["epochs"]):
         optimizer.zero_grad()
 
         shot_idx = np.random.choice(nshots, size=batchsize, replace=False)
-        solver_kwargs = {}
-        if getattr(solver, "backend", "eager") == "cuda":
-            solver_kwargs["use_boundary_saving"] = True
-
-        syn = solver(wave, sources[shot_idx], receivers[shot_idx], models=[inv_vp], **solver_kwargs)
-        obs_batch = obs_torch[shot_idx].to(dev)
-        loss = (syn - obs_batch).pow(2).sum()
-        loss.backward()
+        loss_value = inversion_step_batched(
+            solver,
+            wave,
+            sources,
+            receivers,
+            obs_torch,
+            inv_vp,
+            dev,
+            shot_idx,
+            train_shot_batchsize,
+        )
         optimizer.step()
 
-        losses.append(loss.item())
-        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss.item():.6e}")
+        losses.append(loss_value)
+        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
 
         if epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
@@ -266,12 +316,28 @@ def parse_args():
         default="eager",
         help="Select which PropTorch backend to use.",
     )
+    parser.add_argument(
+        "--batchsize",
+        type=int,
+        default=None,
+        help="Override the number of randomly selected shots used in each optimization step.",
+    )
+    parser.add_argument(
+        "--train-shot-batchsize",
+        type=int,
+        default=None,
+        help="Process the selected training shots in smaller chunks during each optimizer step. Use 1 to run one shot at a time while accumulating gradients.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    run_fwi(backend=args.backend)
+    run_fwi(
+        backend=args.backend,
+        batchsize_override=args.batchsize,
+        train_shot_batchsize_override=args.train_shot_batchsize,
+    )
 
 
 if __name__ == "__main__":

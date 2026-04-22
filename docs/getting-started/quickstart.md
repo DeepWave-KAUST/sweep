@@ -1,101 +1,64 @@
 # Quick Start
 
-This page should contain the smallest working example for new users.
+This page walks through the smallest useful SWEEP workflow step by step.
 
-## Minimal Workflow
+The goal is simple:
 
-1. Choose a backend
-2. Choose an equation
-3. Create a propagator
-4. Define sources, receivers, and models
-5. Run forward modeling or inversion
+1. create a tiny 2D velocity model
+2. build one acoustic solver
+3. run forward modeling
+4. run backward propagation and get a gradient
 
-## Build a Solver
+This quick start uses the simplest path:
 
-In SWEEP, a solver is built from a small set of fixed pieces:
+- equation: `Acoustic`
+- propagator: `PropTorch`
+- backend: `eager`
 
-- `equation`: defines the physics and the required model parameters
-- `propagator`: advances the equation in time on a chosen backend
-- `wave`: the source time function, usually shape `(nt,)`
-- `sources`: source coordinates, usually shape `(nshots, ndim)`
-- `receivers`: receiver coordinates, usually shape `(nshots, nreceivers, ndim)`
-- `models`: model tensors, provided in the exact order required by `equation.models`
+If you want CUDA binding or JAX after this, see the User Guide and Examples.
 
-The structure is:
-
-```text
-solver
-├── equation
-├── propagator
-└── runtime inputs
-    ├── wave
-    ├── sources
-    ├── receivers
-    └── models
-```
-
-You can think of the data flow like this:
-
-```text
-Equation
-  -> defines wave physics, wavefields, and required models
-
-Propagator
-  -> takes an Equation and knows how to run it
-
-Wave + Sources + Receivers + Models
-  -> provide the actual survey and Earth model
-
-Solver Call
-  -> combines all of the above and produces synthetic data
-```
-
-More explicitly:
-
-```text
-                 +----------------------+
-                 |       Equation       |
-                 |  Acoustic / Elastic  |
-                 +----------------------+
-                            |
-                            v
-                 +----------------------+
-                 |      Propagator      |
-                 | PropTorch / PropJax  |
-                 +----------------------+
-                            |
-         +------------------+-------------------+------------------+
-         |                  |                   |                  |
-         v                  v                   v                  v
-   +-----------+      +-----------+       +-----------+      +-----------+
-   |   wave    |      |  sources  |       | receivers |      |  models   |
-   |  (nt,)    |      | geometry  |       | geometry  |      | vp, vs... |
-   +-----------+      +-----------+       +-----------+      +-----------+
-                            \                 |                 /
-                             \                |                /
-                              \               |               /
-                               v              v              v
-                         +----------------------------------------+
-                         |              solver(...)               |
-                         +----------------------------------------+
-                                            |
-                                            v
-                         +----------------------------------------+
-                         | synthetic records / gradients / images |
-                         +----------------------------------------+
-```
-
-Or in one line:
-
-```text
-Solver = Equation + Propagator + Wave + Sources + Receivers + Models
-```
-
-The equation defines the physics:
+## Step 1. Import the minimal pieces
 
 ```python
-from sweep.equations import Acoustic
+import numpy as np
+import torch
 
+from sweep.equations import Acoustic
+from sweep.propagator.torch import PropTorch
+from sweep.signal import ricker
+```
+
+These are the only SWEEP objects you need for the smallest Torch example:
+
+- `Acoustic`: defines the wave equation
+- `PropTorch`: runs the equation
+- `ricker`: builds a source wavelet
+
+## Step 2. Define a small model and basic settings
+
+```python
+nt = 750
+dt = 0.002
+dh = 10.0
+delay = 0.1
+fm = 8.0
+shape = (100, 100)
+
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+vp_np = np.full(shape, 1500.0, dtype=np.float32)
+vp_np[50:, :] = 2000.0
+```
+
+This creates:
+
+- a `100 x 100` 2D velocity model
+- a two-layer Earth model
+- a Torch device that uses GPU if available
+
+## Step 3. Build the equation
+
+```python
 equation = Acoustic(
     spatial_order=8,
     device=dev,
@@ -103,375 +66,177 @@ equation = Acoustic(
 )
 ```
 
-The propagator defines how the equation is executed:
+At this stage you are only defining the physics. Nothing has run yet.
+
+## Step 4. Build the solver
 
 ```python
-from sweep.propagator.torch import PropTorch
-from sweep.propagator.options import EagerOptions
-
 solver = PropTorch(
     equation,
-    shape=(nz, nx),
+    shape=shape,
     dev=dev,
     dh=dh,
     dt=dt,
     source_type=["h1"],
     receiver_type=["h1"],
-    abcn=30,
+    abcn=20,
     free_surface=False,
     pml_type="cpmlr",
     backend="eager",
-    eager_options=EagerOptions(use_compile=False),
-    use_ckpt=False,
 )
 ```
 
-Typical propagator arguments:
+The most important arguments are:
 
-- `shape`: model shape, e.g. `(nz, nx)` for 2D or `(nz, ny, nx)` for 3D
-- `dh`: spatial grid spacing
+- `shape`: model size
+- `dh`: grid spacing
 - `dt`: time step
-- `source_type`: which wavefield component receives the source injection
-- `receiver_type`: which wavefield component is sampled at receiver locations
-- `abcn`: absorbing boundary width
-- `pml_type`: absorbing boundary implementation
-- `backend`: choose `"eager"` or `"cuda"` inside the Torch-family interface
-- `use_ckpt`: whether checkpointing is enabled
-- `eager_options` / `cuda_options`: grouped backend-specific runtime options
+- `source_type`: which wavefield gets the source injection
+- `receiver_type`: which wavefield gets sampled at receivers
 
-For CUDA propagation, the pattern is the same, but the recommended user-facing
-entry point is still `PropTorch`:
+For a first example, you can treat `source_type=["h1"]` and
+`receiver_type=["h1"]` as the standard acoustic setup.
+
+## Step 5. Create the wavelet
 
 ```python
+t = np.arange(nt, dtype=np.float32) * dt
+wave = ricker(t - delay, f=fm).astype(np.float32)
+```
+
+`wave` has shape `(nt,)`.
+
+## Step 6. Define one source and one receiver line
+
+```python
+sources = np.array([[50, 2]], dtype=np.int32)
+receivers = np.array([[[ix, 2] for ix in range(10, 90)]], dtype=np.int32)
+```
+
+The expected shapes are:
+
+- `sources`: `(nshots, ndim)`
+- `receivers`: `(nshots, nreceivers, ndim)`
+
+Here that means:
+
+- one shot
+- a 2D model, so coordinates are `(x, z)` in grid indices
+- one receiver line for that shot
+
+## Step 7. Prepare the model tensor
+
+```python
+vp = torch.from_numpy(vp_np).to(dev).requires_grad_(True)
+```
+
+`models=[vp]` is how you pass the model list required by `Acoustic`.
+
+## Step 8. Run forward modeling
+
+```python
+obs = solver(wave, sources, receivers, models=[vp])
+```
+
+`obs` is the simulated receiver data.
+
+For this example, the output shape is approximately:
+
+```python
+(nshots, nt, nreceivers, 1)
+```
+
+depending on the backend and equation details.
+
+## Step 9. Run backward propagation and get a gradient
+
+```python
+loss = obs.pow(2).sum()
+loss.backward()
+
+grad = vp.grad.detach().cpu().numpy()
+```
+
+Now `grad` is the gradient of the scalar loss with respect to the velocity
+model.
+
+## Step 10. Full minimal example
+
+```python
+import numpy as np
+import torch
+
+from sweep.equations import Acoustic
 from sweep.propagator.torch import PropTorch
-from sweep.propagator.options import CUDAOptions, MemoryOptions, BoundaryOptions
+from sweep.signal import ricker
+
+nt = 750
+dt = 0.002
+dh = 10.0
+delay = 0.1
+fm = 8.0
+shape = (100, 100)
+
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+vp_np = np.full(shape, 1500.0, dtype=np.float32)
+vp_np[50:, :] = 2000.0
+
+equation = Acoustic(
+    spatial_order=8,
+    device=dev,
+    backend="torch",
+)
 
 solver = PropTorch(
     equation,
-    shape=(nz, nx),
+    shape=shape,
     dev=dev,
     dh=dh,
     dt=dt,
     source_type=["h1"],
     receiver_type=["h1"],
-    abcn=30,
+    abcn=20,
     free_surface=False,
     pml_type="cpmlr",
-    backend="cuda",
-    cuda_options=CUDAOptions(
-        memory=MemoryOptions(
-            strategy="boundary",
-            boundary=BoundaryOptions(storage="gpu"),
-        )
-    ),
+    backend="eager",
 )
+
+t = np.arange(nt, dtype=np.float32) * dt
+wave = ricker(t - delay, f=fm).astype(np.float32)
+
+sources = np.array([[50, 2]], dtype=np.int32)
+receivers = np.array([[[ix, 2] for ix in range(10, 90)]], dtype=np.int32)
+
+vp = torch.from_numpy(vp_np).to(dev).requires_grad_(True)
+
+obs = solver(wave, sources, receivers, models=[vp])
+
+loss = obs.pow(2).sum()
+loss.backward()
+
+print("obs shape:", tuple(obs.shape))
+print("loss:", float(loss.detach().cpu()))
+print("grad shape:", tuple(vp.grad.shape))
 ```
 
-`PropCUDA` is still available as the lower-level CUDA-specific class, but most
-new Torch-side examples now use `PropTorch(..., backend="cuda")`.
+## Step 11. What to remember
 
-## Example
+Every SWEEP run follows the same pattern:
 
-=== "PyTorch"
+1. choose an equation
+2. build a propagator
+3. create `wave`, `sources`, `receivers`, and `models`
+4. call `solver(...)`
 
-    ```python
-    import torch
+The minimal call is always conceptually:
 
-    from sweep.propagator.torch import PropTorch
-    from sweep.propagator.options import EagerOptions
-    from sweep.equations import Acoustic
-    from sweep.signal import ricker
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    # Model parameters
-    nt = 1500
-    dt = 0.002
-    dh = 10
-    delay = 0.1
-    fm = 5
-    spatial_order = 8
-    shape = (100, 100)
-
-    # Device
-    dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-    # Create a 2-layer velocity model
-    true_model = np.ones(shape, dtype=np.float32) * 1500
-    true_model[50:, :] = 2000
-
-    eq_kwargs = dict(spatial_order=spatial_order, device=dev)
-    solver_kwargs = dict(
-        shape=shape,
-        dev=dev,
-        dh=dh,
-        dt=dt,
-        source_type=["h1"],
-        receiver_type=["h1"],
-        abcn=30,
-        free_surface=False,
-        pml_type="cpmlr",
-        use_ckpt=False,
-    )
-    solver_torch = PropTorch(
-        Acoustic(**eq_kwargs, backend="torch"),
-        **solver_kwargs,
-        backend="eager",
-        eager_options=EagerOptions(use_compile=False),
-    )
-
-    # Create a wavelet
-    t = np.arange(0, int(nt // 2) * dt, dt)
-    wave = ricker(t - delay, f=fm)
-
-    # Acquisition geometry
-    sources = np.array([[1, 1]])      # shape = (nshots, 2)
-    receivers = np.array([[[99, 1]]]) # shape = (nshots, nreceivers, 2)
-
-    # Forward modeling + backward propagation
-    vp = torch.from_numpy(true_model).to(dev).requires_grad_(True)
-    obs_torch = solver_torch(wave, sources, receivers, models=[vp])
-    obs_torch.pow(2).sum().backward()
-    grad_torch = vp.grad.detach().cpu().numpy()
-
-    # Show the results
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-
-    axes[0].imshow(true_model, cmap="seismic", aspect="auto")
-    axes[0].set_title("True model")
-
-    axes[1].plot(obs_torch.detach().cpu().numpy().squeeze(), label="Observed data")
-    axes[1].set_title("Observed (PyTorch)")
-
-    vmin, vmax = np.percentile(grad_torch, [1, 99])
-    axes[2].imshow(grad_torch, cmap="seismic", aspect="auto", vmin=vmin, vmax=vmax)
-    axes[2].set_title("Gradient of vp (PyTorch)")
-
-    fig.tight_layout()
-    plt.savefig("fwi_torch.png", dpi=300, bbox_inches="tight")
-    plt.show()
-    ```
-
-=== "CUDA"
-
-    ```python
-    import torch
-
-    from sweep.propagator.torch import PropTorch
-    from sweep.propagator.options import CUDAOptions, MemoryOptions, BoundaryOptions
-    from sweep.equations import Acoustic
-    from sweep.signal import ricker
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    # Model parameters
-    nt = 1500
-    dt = 0.002
-    dh = 10
-    delay = 0.1
-    fm = 5
-    spatial_order = 8
-    shape = (100, 100)
-
-    # Device
-    dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-    # Create a 2-layer velocity model
-    true_model = np.ones(shape, dtype=np.float32) * 1500
-    true_model[50:, :] = 2000
-
-    eq_kwargs = dict(spatial_order=spatial_order, device=dev)
-    solver_kwargs = dict(
-        shape=shape,
-        dev=dev,
-        dh=dh,
-        dt=dt,
-        source_type=["h1"],
-        receiver_type=["h1"],
-        abcn=30,
-        free_surface=False,
-        pml_type="cpmlr",
-    )
-    solver_cuda = PropTorch(
-        Acoustic(**eq_kwargs, backend="torch"),
-        **solver_kwargs,
-        backend="cuda",
-        cuda_options=CUDAOptions(
-            memory=MemoryOptions(
-                strategy="boundary",
-                boundary=BoundaryOptions(storage="gpu"),
-            )
-        ),
-    )
-
-    # Create a wavelet
-    t = np.arange(0, int(nt // 2) * dt, dt)
-    wave = ricker(t - delay, f=fm)
-
-    # Acquisition geometry
-    sources = np.array([[1, 1]])      # shape = (nshots, 2)
-    receivers = np.array([[[99, 1]]]) # shape = (nshots, nreceivers, 2)
-
-    # Forward modeling + backward propagation
-    vp = torch.from_numpy(true_model).to(dev).requires_grad_(True)
-    obs_cuda = solver_cuda(wave, sources, receivers, models=[vp])
-    obs_cuda.pow(2).sum().backward()
-    grad_cuda = vp.grad.detach().cpu().numpy()
-
-    # Show the results
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-
-    axes[0].imshow(true_model, cmap="seismic", aspect="auto")
-    axes[0].set_title("True model")
-
-    axes[1].plot(obs_cuda.detach().cpu().numpy().squeeze(), label="Observed data")
-    axes[1].set_title("Observed (CUDA)")
-
-    vmin, vmax = np.percentile(grad_cuda, [1, 99])
-    axes[2].imshow(grad_cuda, cmap="seismic", aspect="auto", vmin=vmin, vmax=vmax)
-    axes[2].set_title("Gradient of vp (CUDA)")
-
-    fig.tight_layout()
-    plt.savefig("fwi_cuda.png", dpi=300, bbox_inches="tight")
-    plt.show()
-    ```
-
-=== "JAX"
-
-    ```python
-    import jax
-    import jax.numpy as jnp
-
-    from sweep.propagator.jax import PropJax
-    from sweep.equations import Acoustic
-    from sweep.signal import ricker
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    # Model parameters
-    nt = 1500
-    dt = 0.002
-    dh = 10
-    delay = 0.1
-    fm = 5
-    spatial_order = 8
-    shape = (100, 100)
-
-    # Create a 2-layer velocity model
-    true_model = np.ones(shape, dtype=np.float32) * 1500
-    true_model[50:, :] = 2000
-
-    eq_kwargs = dict(spatial_order=spatial_order)
-    solver_kwargs = dict(
-        shape=shape,
-        dev=None,
-        dh=dh,
-        dt=dt,
-        source_type=["h1"],
-        receiver_type=["h1"],
-        abcn=30,
-        free_surface=False,
-        pml_type="cpmlr",
-        use_ckpt=False,
-    )
-    solver_jax = PropJax(Acoustic(**eq_kwargs, backend="jax"), **solver_kwargs)
-
-    # Create a wavelet
-    t = np.arange(0, int(nt // 2) * dt, dt)
-    wave = ricker(t - delay, f=fm)
-
-    # Acquisition geometry
-    sources = np.array([[1, 1]], dtype=np.int32)      # shape = (nshots, 2)
-    receivers = np.array([[[99, 1]]], dtype=np.int32) # shape = (nshots, nreceivers, 2)
-
-    wave_jax = jnp.array(wave)
-    sources_jax = jnp.array(sources)
-    receivers_jax = jnp.array(receivers)
-    vp0 = jnp.array(true_model)
-
-    def loss_fn(vp):
-        obs_jax = solver_jax(wave_jax, sources_jax, receivers_jax, models=[vp])
-        return jnp.sum(obs_jax ** 2), obs_jax
-
-    (loss, obs_jax), grad_jax = jax.value_and_grad(loss_fn, has_aux=True)(vp0)
-    obs_jax = np.array(obs_jax)
-    grad_jax = np.array(grad_jax)
-
-    # Show the results
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-
-    axes[0].imshow(true_model, cmap="seismic", aspect="auto")
-    axes[0].set_title("True model")
-
-    axes[1].plot(obs_jax.squeeze(), label="Observed data")
-    axes[1].set_title("Observed (JAX)")
-
-    vmin, vmax = np.percentile(grad_jax, [1, 99])
-    axes[2].imshow(grad_jax, cmap="seismic", aspect="auto", vmin=vmin, vmax=vmax)
-    axes[2].set_title("Gradient of vp (JAX)")
-
-    fig.tight_layout()
-    plt.savefig("fwi_jax.png", dpi=300, bbox_inches="tight")
-    plt.show()
-    ```
-
-The figure below shows the gradient result produced by the example above.
-
-![Gradient of vp result](../figures/grad_vp.png)
-
-## Checkpointing and Boundary Saving
-
-`use_ckpt` controls gradient checkpointing during backpropagation. This is the
-memory-saving option supported by the eager PyTorch and JAX propagators.
-
-For Torch-family CUDA usage through `PropTorch(..., backend="cuda")`, memory
-configuration is grouped under `cuda_options`.
-
-Use `CUDAOptions(memory=MemoryOptions(...))`. The main choices are:
-
-- `MemoryOptions(strategy="boundary", boundary=BoundaryOptions(...))`
-- `MemoryOptions(strategy="ckpt", ckpt=CkptOptions(...))`
-
-For boundary saving:
-
-- `BoundaryOptions.storage`
-- `BoundaryOptions.transfer_interval`
-- `BoundaryOptions.pinned_memory`
-
-For CUDA checkpointing:
-
-- `CkptOptions(mode="chunk", chunks=...)`
-- `CkptOptions(mode="recursive", count=...)`
-
-
-## Verify the Installation
-
-After installing SWEEP, you can run a lightweight smoke test with `pytest` to confirm that the package import, equation registry, and CLI are working:
-
-```bash
-pytest test/test_installation_smoke.py -q
+```python
+obs = solver(wave, sources, receivers, models=[...])
 ```
 
-If `pytest` is not installed in your environment yet, install it first:
+## Next steps
 
-```bash
-pip install pytest
-```
-
-This test checks that:
-
-- `import sweep` works
-- backend availability helpers can be queried
-- core equations are registered correctly
-- the installed `sweep` CLI can list equations
-
-
-## What To Explain Here Later
-
-- What `models=[vp]` means
-- How `source_type` and `receiver_type` are chosen
-- How geometry arrays are shaped
-- How this changes for JAX or CUDA bindings
+- For installation choices, see [Installation](installation.md).
+- For backend differences, see [Backends](../user-guide/backends.md).
+- For complete runnable scripts, see [Examples](../examples/index.md).

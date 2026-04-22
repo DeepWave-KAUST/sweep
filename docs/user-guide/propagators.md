@@ -10,25 +10,18 @@ and model tensors into a callable solver.
 
 ## Recommended Entry Points
 
-- For Torch-family workflows, prefer `PropTorch(...)`.
-  - `backend="eager"` uses the Python/Torch implementation.
-  - `backend="cuda"` dispatches to the compiled CUDA backend.
+- For Torch-family workflows, prefer `PropTorch(...)`. `backend="eager"` uses the Python/Torch implementation, while `backend="cuda"` dispatches to the compiled CUDA backend.
 - `PropCUDA` remains available as the lower-level CUDA-specific class when you
   need to work directly with CUDA-only runtime behavior.
 - Use `PropJax` for JAX-based propagation.
 
 ## Backend-Specific Options
 
-- `EagerOptions`
-  - groups compile-related Torch options such as `use_compile` and `compile_mode`
-- `CUDAOptions`
-  - groups CUDA-only runtime options
-- `MemoryOptions`
-  - selects one CUDA memory-saving strategy
-- `BoundaryOptions`
-  - controls CUDA boundary saving
-- `CkptOptions`
-  - controls CUDA checkpointing mode and tuning parameters
+- `EagerOptions`: groups compile-related Torch options such as `use_compile` and `compile_mode`
+- `CUDAOptions`: groups CUDA-only runtime options
+- `MemoryOptions`: selects one CUDA memory-saving strategy
+- `BoundaryOptions`: controls CUDA boundary saving
+- `CkptOptions`: controls CUDA checkpointing mode and tuning parameters
 
 ## Geometry Conventions
 
