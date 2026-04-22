@@ -1,4 +1,6 @@
 from .base import SecondOrderEquation
+from .cuda_layout import CUDALayoutSpec
+from .fields import FieldSpec
 
 def step(u_now, u_pre, psix, psiz, zetax, zetaz, 
          su_now, su_pre, spsix, spsiz, szetax, szetaz, 
@@ -61,6 +63,20 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
             su_next, su_now, spsixn, spsiyn, szetax, szetaz
 
 class AcousticLSRTM(SecondOrderEquation):
+    FIELD_SPECS = (
+        FieldSpec("h1", aliases=("pressure", "p", "background"), description="Background acoustic pressure-like wavefield.", supports_source=True),
+        FieldSpec("h2", aliases=("pressure_prev", "background_prev"), description="Previous-step background wavefield.", internal=True),
+        FieldSpec("psix", description="Background CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiz", description="Background CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("zetax", description="Background CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetaz", description="Background CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+        FieldSpec("sh1", aliases=("scattered", "scattered_pressure", "data"), description="Scattered acoustic wavefield used for LSRTM data prediction.", supports_receiver=True),
+        FieldSpec("sh2", aliases=("scattered_prev",), description="Previous-step scattered wavefield.", internal=True),
+        FieldSpec("spsix", description="Scattered-wave CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("spsiz", description="Scattered-wave CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("szetax", description="Scattered-wave CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("szetaz", description="Scattered-wave CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+    )
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Acoustic wave equation solver.
@@ -79,6 +95,10 @@ class AcousticLSRTM(SecondOrderEquation):
     def wavefields(self):
         return ['h1', 'h2', 'psix', 'psiz', 'zetax', 'zetaz',
                 'sh1', 'sh2', 'spsix', 'spsiz', 'szetax', 'szetaz']
+
+    @property
+    def field_specs(self):
+        return list(self.FIELD_SPECS)
     
     def func(self, *args, **kwargs):
         dh = args[15]
@@ -86,4 +106,31 @@ class AcousticLSRTM(SecondOrderEquation):
         lap_uz, lap_ux = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
         lap_suz, lap_sux = self.laplace1d_sep(args[6], self.laplace_kernels, hz, hx)
         return step(*args, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient)
+
+    def _C(self):
+        from sweep._C import (
+            acoustic_lsrtm2d_forward,
+            acoustic_lsrtm2d_backward,
+            acoustic_lsrtm2d_backward_bs,
+            acoustic_lsrtm2d_backward_ckpt,
+            acoustic_lsrtm2d_backward_recursive_ckpt,
+        )
+
+        return (
+            acoustic_lsrtm2d_forward,
+            acoustic_lsrtm2d_backward,
+            acoustic_lsrtm2d_backward_bs,
+            acoustic_lsrtm2d_backward_ckpt,
+            acoustic_lsrtm2d_backward_recursive_ckpt,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=6,
+            pml_nvar=8,
+            last_two_nvar=2,
+            last_two_storage_nvar=1,
+            checkpoint_nvar=6,
+        )
     

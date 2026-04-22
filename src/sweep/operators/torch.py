@@ -31,13 +31,17 @@ def _to_nchw(u):
     raise ValueError(f"Expected 2D/3D/4D input for gradient kernel, got shape {tuple(u.shape)}")
 
 
-def _zero_halo(out, halo):
-    if halo <= 0:
-        return out
-    out[..., :halo, :] = 0
-    out[..., -halo:, :] = 0
-    out[..., :, :halo] = 0
-    out[..., :, -halo:] = 0
+def _zero_halo(out, padding):
+    if isinstance(padding, int):
+        pad_z = pad_x = padding
+    else:
+        pad_z, pad_x = padding
+    if pad_z > 0:
+        out[..., :pad_z, :] = 0
+        out[..., -pad_z:, :] = 0
+    if pad_x > 0:
+        out[..., :, :pad_x] = 0
+        out[..., :, -pad_x:] = 0
     return out
 
 def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
@@ -109,6 +113,6 @@ def gradient(u, h, axis, kernels=None):
         padding = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
         u_nchw, restore = _to_nchw(u)
         out = F.conv2d(u_nchw, kernel / h_axis, padding=padding)
-        out = _zero_halo(out, max(padding))
+        out = _zero_halo(out, padding)
         return restore(out)
     return torch.gradient(u, spacing=h_axis, dim=axis)[0]

@@ -212,8 +212,13 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     record[:, i, :, ic] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
 
         self.last_wavefields = tuple(wavefield) if self.store_last_wavefield else None
+        # The eager backend reuses internal workspace buffers across calls.
+        # Return clones so previous outputs do not alias buffers that a later
+        # forward pass will overwrite.
+        record_out = record.clone()
         if not has_aux:
-            return record
-        return record, snapshots
+            return record_out
+        snapshots_out = snapshots.clone()
+        return record_out, snapshots_out
 
     forward_base = forward

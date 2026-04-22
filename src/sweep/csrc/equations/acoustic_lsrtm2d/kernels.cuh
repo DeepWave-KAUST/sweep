@@ -1,0 +1,271 @@
+#pragma once
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#include "../../common/acoustic.h"
+#include "../../common/context.h"
+#include "../../operators/gradient.cuh"
+#include "../../operators/laplace.cuh"
+
+#define ACOUSTIC_LSRTM2D_SINGLE(order, grid, block, ...)                         \
+    do {                                                                         \
+        if      ((order) == 2) acoustic2nd<2><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 4) acoustic2nd<4><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 6) acoustic2nd<6><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 8) acoustic2nd<8><<<grid, block>>>(__VA_ARGS__);    \
+        else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);   \
+    } while (0)
+
+#define ACOUSTIC_LSRTM2D_SINGLE_NOPML(order, grid, block, ...)                   \
+    do {                                                                         \
+        if      ((order) == 2) acoustic2nd_nopml<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) acoustic2nd_nopml<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) acoustic2nd_nopml<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) acoustic2nd_nopml<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   acoustic2nd_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
+    } while (0)
+
+#define ACOUSTIC_LSRTM2D_COUPLED(order, grid, block, ...)                        \
+    do {                                                                         \
+        if      ((order) == 2) acoustic_lsrtm2nd<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) acoustic_lsrtm2nd<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) acoustic_lsrtm2nd<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) acoustic_lsrtm2nd<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   acoustic_lsrtm2nd<-1><<<grid, block>>>(__VA_ARGS__); \
+    } while (0)
+
+template<int Order>
+__device__ __forceinline__ float acoustic_lsrtm_grad_coeff(int m, const float* coeff)
+{
+    if constexpr (Order == 2) {
+        return m == 1 ? 0.5f : 0.0f;
+    } else if constexpr (Order == 4) {
+        return m == 1 ? (8.0f / 12.0f) : (m == 2 ? (-1.0f / 12.0f) : 0.0f);
+    } else if constexpr (Order == 6) {
+        return m == 1 ? 0.75f : (m == 2 ? (-3.0f / 20.0f) : (m == 3 ? (1.0f / 60.0f) : 0.0f));
+    } else if constexpr (Order == 8) {
+        return m == 1 ? (4.0f / 5.0f)
+             : (m == 2 ? (-1.0f / 5.0f)
+             : (m == 3 ? (4.0f / 105.0f)
+             : (m == 4 ? (-1.0f / 280.0f) : 0.0f)));
+    } else {
+        return coeff[m];
+    }
+}
+
+template<int Order, int Direction>
+__device__ inline float acoustic_lsrtm_grad_product_2d(
+    const float* __restrict__ a_1d,
+    const float* __restrict__ psi,
+    int ix,
+    int iz,
+    int nx,
+    const GradParam& grad_ctx
+) {
+    constexpr bool along_x = (Direction & X);
+    constexpr bool along_z = (Direction & Z);
+    static_assert(along_x || along_z, "Direction must include X or Z.");
+
+    const int half_order = (Order == -1) ? grad_ctx.M : (Order / 2);
+    const int stride = along_x ? 1 : nx;
+    const int coord = along_x ? ix : iz;
+    const float spacing = along_x ? grad_ctx.dx : grad_ctx.dz;
+    const int center = iz * nx + ix;
+
+    float grad = 0.0f;
+    for (int m = 1; m <= half_order; ++m) {
+        const float c = acoustic_lsrtm_grad_coeff<Order>(m, grad_ctx.coeff);
+        grad += c * (
+            a_1d[coord + m] * psi[center + m * stride] -
+            a_1d[coord - m] * psi[center - m * stride]
+        );
+    }
+    return grad / spacing;
+}
+
+template <int Order>
+__device__ inline float acoustic_cpml_update_2d(
+    AcousticWavefieldPointer f,
+    int ix,
+    int iz,
+    int idx,
+    const AcousticCPMLPointer& cpml,
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_z
+) {
+    float ax_ = cpml.ax[ix];
+    float az_ = cpml.az[iz];
+    float bx_ = cpml.bx[ix];
+    float bz_ = cpml.bz[iz];
+    float dbxdx_ = cpml.dbxdx[ix];
+    float dbzdz_ = cpml.dbzdz[iz];
+
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+
+    float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
+    float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
+    float daipsiz_dz = acoustic_lsrtm_grad_product_2d<Order, Z>(cpml.az, f.psiz, ix, iz, lap_ctx.nx, grad_ctx);
+    float daipxix_dx = acoustic_lsrtm_grad_product_2d<Order, X>(cpml.ax, f.psix, ix, iz, lap_ctx.nx, grad_ctx);
+
+    float w_sum = 0.0f;
+
+    float tmpx = ((1.0f + bx_) * lap_x + dbxdx_ * dudx) + daipxix_dx;
+    w_sum += (1.0f + bx_) * tmpx + ax_ * f.zetax[idx];
+    f.psix[idx] = bx_ * dudx + ax_ * f.psix[idx];
+    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+
+    float tmpz = ((1.0f + bz_) * lap_z + dbzdz_ * dudz) + daipsiz_dz;
+    w_sum += (1.0f + bz_) * tmpz + az_ * f.zetaz[idx];
+    f.psiz[idx] = bz_ * dudz + az_ * f.psiz[idx];
+    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+
+    return w_sum;
+}
+
+template <int Order>
+__global__ void acoustic2nd(
+    AcousticWavefieldPointer wf,
+    bool save_all_wavefields,
+    float* __restrict__ u_this,
+    const float* __restrict__ vp,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    const float* vp_b = vp + b * spatial_size;
+
+    float w_sum = acoustic_cpml_update_2d<Order>(f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z);
+    float v = vp_b[idx];
+    float utt = (v * v) * w_sum;
+
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
+    if (save_all_wavefields && u_this_b != nullptr)
+        u_this_b[idx] = utt;
+}
+
+template <int Order>
+__global__ void acoustic2nd_nopml(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ vp,
+    LaplaceParam lap_ctx,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    int M = (Order == -1) ? solver.M : (Order / 2);
+    int halo = solver.abcn > 0 ? solver.abcn + 2 * M + 1 : 2 * M;
+    int top_halo = solver.free_surface ? 2 * M : halo;
+    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+    const float* vp_b = vp + b * spatial_size;
+
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+    float w_sum = lap_x + lap_z;
+    float v = vp_b[idx];
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * (v * v) * w_sum;
+}
+
+template <int Order>
+__global__ void acoustic_lsrtm2nd(
+    AcousticWavefieldPointer bg,
+    AcousticWavefieldPointer sc,
+    bool save_all_wavefields,
+    float* __restrict__ bg_utt,
+    const float* __restrict__ vp,
+    const float* __restrict__ mp,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto bg_f = bg.offset(b, spatial_size);
+    auto sc_f = sc.offset(b, spatial_size);
+    float* bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
+    const float* vp_b = vp + b * spatial_size;
+    const float* mp_b = mp + b * spatial_size;
+
+    float bg_w_sum = acoustic_cpml_update_2d<Order>(bg_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z);
+    float sc_w_sum = acoustic_cpml_update_2d<Order>(sc_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z);
+
+    float v = vp_b[idx];
+    float bg_utt_val = (v * v) * bg_w_sum;
+    float sc_utt_val = (v * v) * sc_w_sum;
+
+    bg_f.u_next[idx] = 2.0f * bg_f.u_now[idx] - bg_f.u_prev[idx] + solver.dt * solver.dt * bg_utt_val;
+    sc_f.u_next[idx] = 2.0f * sc_f.u_now[idx] - sc_f.u_prev[idx] + solver.dt * solver.dt * (sc_utt_val + mp_b[idx] * bg_utt_val);
+
+    if (save_all_wavefields && bg_utt_b != nullptr)
+        bg_utt_b[idx] = bg_utt_val;
+}
+
+__global__ void calculate_grad_lsrtm_mp(
+    const float* __restrict__ u_tt_bg,
+    const float* __restrict__ u_backward,
+    float* __restrict__ grad_mp,
+    int nx,
+    int nz,
+    float dt
+);
+
+__global__ void calculate_grad_lsrtm_mp_utt(
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,
+    const float* __restrict__ u_forward_prev,
+    const float* __restrict__ u_backward,
+    float* __restrict__ grad_mp,
+    int nx,
+    int nz,
+    float dt
+);

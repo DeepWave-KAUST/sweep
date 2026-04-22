@@ -33,13 +33,17 @@ def _to_nchw(u):
     raise ValueError(f"Expected 2D/3D/4D input for gradient kernel, got shape {u.shape}")
 
 
-def _zero_halo(out, halo):
-    if halo <= 0:
-        return out
-    out = out.at[..., :halo, :].set(0)
-    out = out.at[..., -halo:, :].set(0)
-    out = out.at[..., :, :halo].set(0)
-    out = out.at[..., :, -halo:].set(0)
+def _zero_halo(out, padding):
+    if isinstance(padding, int):
+        pad_z = pad_x = padding
+    else:
+        pad_z, pad_x = padding
+    if pad_z > 0:
+        out = out.at[..., :pad_z, :].set(0)
+        out = out.at[..., -pad_z:, :].set(0)
+    if pad_x > 0:
+        out = out.at[..., :, :pad_x].set(0)
+        out = out.at[..., :, -pad_x:].set(0)
     return out
 
 @jax.jit
@@ -194,6 +198,6 @@ def gradient(u, h, axis, kernels=None):
             padding='SAME',
             dimension_numbers=('NCHW', 'HWIO', 'NCHW'),
         )
-        out = _zero_halo(out, max(kernels[axis].shape[-2] // 2, kernels[axis].shape[-1] // 2))
+        out = _zero_halo(out, (kernels[axis].shape[-2] // 2, kernels[axis].shape[-1] // 2))
         return restore(out)
     return jnp.gradient(u, h_axis, axis=axis)
