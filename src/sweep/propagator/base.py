@@ -2,6 +2,7 @@ from collections.abc import Sequence
 import inspect
 
 import numpy as np
+from sweep.equations.fields import build_field_index, format_field_specs
 
 class PropBase:
 
@@ -63,6 +64,8 @@ class PropBase:
             self.equation.setup_pml(pml_type)
         self.wavefield_names = equation.wavefields
         self.model_names = equation.models
+        self.wavefield_specs = list(getattr(equation, "field_specs", []))
+        self._wavefield_spec_index = build_field_index(self.wavefield_specs)
         self.shape = shape
         self.ndim = len(shape)
         self.dev = dev
@@ -117,8 +120,8 @@ class PropBase:
         if getattr(self.equation, "pd", None) is not None and hasattr(self.equation.pd, "set_spacing"):
             self.equation.pd.set_spacing(self._grid_spacing)
 
-        self.source_type = source_type
-        self.receiver_type = receiver_type
+        self.source_type = self._resolve_field_types(source_type, role="source")
+        self.receiver_type = self._resolve_field_types(receiver_type, role="receiver")
 
         if self.free_surface:
             self.padding_z = (0, self.abcn)
@@ -132,6 +135,37 @@ class PropBase:
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
         self._set_call_signature()
+
+    def _default_field_types(self, role):
+        attr = "default_source_fields" if role == "source" else "default_receiver_fields"
+        defaults = getattr(self.equation, attr, None)
+        if defaults:
+            return list(defaults)
+        return [self.wavefield_names[0]]
+
+    def _resolve_field_types(self, kinds, role):
+        resolved = self._default_field_types(role) if not kinds else list(kinds)
+        attr = "supports_source" if role == "source" else "supports_receiver"
+        output = []
+        for name in resolved:
+            spec = self._wavefield_spec_index.get(name)
+            if spec is None:
+                available = [
+                    spec for spec in self.wavefield_specs
+                    if getattr(spec, attr, False)
+                ]
+                role_name = f"{role}_type"
+                raise ValueError(
+                    f"Unknown {role_name} entry '{name}'. Available {role_name} values:\n"
+                    f"{format_field_specs(available)}"
+                )
+            if not getattr(spec, attr, False):
+                role_name = f"{role}_type"
+                raise ValueError(
+                    f"Field '{name}' resolves to '{spec.name}', but `{spec.name}` is not valid for {role_name}."
+                )
+            output.append(spec.name)
+        return output
 
     def _set_call_signature(self):
         forward = getattr(type(self), "forward", None)

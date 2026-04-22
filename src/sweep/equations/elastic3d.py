@@ -1,5 +1,7 @@
 import numpy as np
 from .base import FirstOrderEquation
+from .cuda_layout import CUDALayoutSpec
+from .fields import FieldSpec
 
 def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          m_vxx, m_vxy, m_vxz,
@@ -118,9 +120,39 @@ class Elastic(FirstOrderEquation):
 
        Reference: Jean Virieux, 10.1190/1.1442147
     """
+    FIELD_SPECS = (
+        FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
+        FieldSpec("vy", aliases=("velocity_y",), description="Particle velocity in the y direction.", supports_receiver=True),
+        FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
+        FieldSpec("sxx", aliases=("stress_xx",), description="Normal stress in the x direction.", supports_source=True),
+        FieldSpec("syy", aliases=("stress_yy",), description="Normal stress in the y direction.", supports_source=True),
+        FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True),
+        FieldSpec("sxy", aliases=("stress_xy", "shear_xy"), description="Shear stress component.", supports_source=True),
+        FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
+        FieldSpec("syz", aliases=("stress_yz", "shear_yz"), description="Shear stress component.", supports_source=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True),
+        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True),
+        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True),
+        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True),
+        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
+    )
+
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend, ndim=3)
-
+    
     @property
     def models(self):
         return ['vp', 'vs', 'rho']
@@ -135,6 +167,18 @@ class Elastic(FirstOrderEquation):
                 'm_sxyx', 'm_sxyy',
                 'm_sxzx', 'm_sxzz',
                 'm_syyy', 'm_syzy', 'm_syzz']
+
+    @property
+    def field_specs(self):
+        return list(self.FIELD_SPECS)
+
+    @property
+    def default_source_fields(self):
+        return ["sxx", "syy", "szz"]
+
+    @property
+    def default_receiver_fields(self):
+        return ["vx", "vy", "vz"]
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, pml=self.b, **kwargs)
@@ -152,21 +196,11 @@ class Elastic(FirstOrderEquation):
         )
     
     @property
-    def base_nvar(self,):
-        return 9
-    
-    @property
-    def pml_nvar(self,):
-        return 27
-
-    @property
-    def last_two_nvar(self):
-        return 1
-
-    @property
-    def last_two_storage_nvar(self):
-        return self.base_nvar
-
-    @property
-    def backward_workspace_nvar(self):
-        return 18
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=9,
+            pml_nvar=27,
+            last_two_nvar=1,
+            last_two_storage_nvar=9,
+            backward_workspace_nvar=18,
+        )

@@ -8,8 +8,38 @@ An equation defines:
 
 - the physical model parameters required by the solver
 - the wavefields carried during propagation
+- the user-facing source and receiver field choices
 - the numerical update rule used by the propagator
 - whether a compiled PyTorch CUDA binding exists
+
+## Shared Equation Interface
+
+Every equation exposes:
+
+- `models`: ordered model names required by `solver(..., models=[...])`
+- `wavefields`: full internal wavefield list, including auxiliary and CPML fields
+
+Most user-facing equations now also expose structured field metadata through
+`FieldSpec` and helper methods on the base `WaveEquation`:
+
+- `available_fields()`
+- `available_fields(role="source")`
+- `available_fields(role="receiver")`
+- `describe_field(name)`
+- `default_source_fields`
+- `default_receiver_fields`
+
+`available_fields()` is the recommended way to discover what users should pass
+into `source_type` and `receiver_type`. By default it filters out internal and
+boundary-related fields such as CPML memory variables.
+
+For equations that support the compiled CUDA backend, runtime buffer metadata is
+now grouped under:
+
+- `cuda_layout`
+
+This replaces the older pattern of scattering CUDA-specific scalar properties
+through the equation class.
 
 !!! note
 

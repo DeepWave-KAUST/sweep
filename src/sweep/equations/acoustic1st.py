@@ -1,4 +1,5 @@
 from .base import FirstOrderEquation
+from .fields import FieldSpec, ensure_field_specs
 
 def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None):
 
@@ -83,6 +84,25 @@ class Acoustic1st(FirstOrderEquation):
 
     def wavefields_spml(self):
         return ['px', 'pz', 'vx', 'vz']
+
+    @property
+    def field_specs(self):
+        specs = []
+        if "p" in self.wavefields:
+            specs.append(
+                FieldSpec("p", aliases=("pressure",), description="Acoustic pressure field.", supports_source=True, supports_receiver=True)
+            )
+        specs.extend([
+            FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
+            FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
+            FieldSpec("px", description="Split-field pressure component in the x direction.", internal=True, boundary_related=True),
+            FieldSpec("pz", description="Split-field pressure component in the z direction.", internal=True, boundary_related=True),
+            FieldSpec("phix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+            FieldSpec("phiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+            FieldSpec("psix", description="CPML auxiliary field in the x direction.", internal=True, boundary_related=True),
+            FieldSpec("psiz", description="CPML auxiliary field in the z direction.", internal=True, boundary_related=True),
+        ])
+        return ensure_field_specs(self.wavefields, specs)
     
     @property
     def supported_pml(self):

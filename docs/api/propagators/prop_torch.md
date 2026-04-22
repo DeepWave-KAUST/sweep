@@ -48,16 +48,19 @@ lower-level CUDA implementation details sit underneath
 - `shape` (`tuple[int, ...]`): Physical model shape before absorbing
   boundaries are added. Use `(nz, nx)` in 2D and `(nz, ny, nx)` in 3D.
 - `source_type` (`list[str]`, optional): Wavefield names that receive source
-  injection. These names must exist in `equation.wavefields`. `PropTorch` does
-  not auto-fill defaults, so they should usually be set explicitly.
+  injection. These names are resolved against the equation field metadata, so
+  aliases such as `pressure` or `stress_xx` may also be accepted depending on
+  the equation. If omitted, `PropTorch` uses `equation.default_source_fields`.
 - `receiver_type` (`list[str]`, optional): Wavefield names sampled at receiver
-  locations. These names must also exist in `equation.wavefields`.
+  locations. These are also resolved through the equation field metadata and
+  default to `equation.default_receiver_fields` when omitted.
 - `abcn` (`int`, optional): Absorbing boundary width.
 - `free_surface` (`bool`, optional): Whether the top boundary is treated as a
   free surface. This changes how source and receiver coordinates are offset
   internally.
-- `dh` (`float`, optional): Scalar grid spacing. Tuple-valued spacing is not
-  supported in `PropTorch`.
+- `dh` (`float or tuple[float, ...]`, optional): Grid spacing. Scalar input is
+  broadcast to every spatial axis. Directional spacing is also supported:
+  `(dz, dx)` in 2D and `(dz, dy, dx)` in 3D.
 - `dt` (`float`, optional): Time step in seconds.
 - `dev` (device, optional): Execution device, typically a `torch.device`.
 - `backend` (`"eager"` or `"cuda"`, optional): Selects which Torch-family
@@ -82,6 +85,19 @@ lower-level CUDA implementation details sit underneath
 
 See the full [Propagator Options](options.md) reference for field-by-field
 descriptions and validation rules.
+
+## Field Selection Helpers
+
+To discover valid `source_type` and `receiver_type` values, prefer the equation
+helpers instead of reading `equation.wavefields` directly:
+
+- `equation.available_fields()`
+- `equation.available_fields(role="source")`
+- `equation.available_fields(role="receiver")`
+- `equation.describe_field(name)`
+
+These helpers return the user-facing physical fields and filter out internal
+boundary variables by default.
 
 ## Forward Parameters
 

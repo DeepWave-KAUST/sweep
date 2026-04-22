@@ -5,6 +5,20 @@ from sweep.operators.general import PartialDerivative
 from sweep.scalars import generate_convolution_kernel
 from sweep.operators.factory import OperatorBase
 from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
+from .fields import available_role_specs, ensure_field_specs, format_field_specs
+from .cuda_layout import CUDALayoutSpec
+
+
+class hybridmethod:
+    def __init__(self, func):
+        self.func = func
+
+    def __get__(self, obj, cls):
+        def wrapper(*args, **kwargs):
+            target = obj if obj is not None else cls
+            return self.func(target, *args, **kwargs)
+
+        return wrapper
 
 
 
@@ -39,6 +53,95 @@ class WaveEquation:
         pml_func = {'cpmls': set_cpml_profiles_s, 'cpmlr': set_cpml_profiles_r,'spml': set_spml_profiles}[type]
         self.b = pml_func(**kwargs)
         self.b = to_backend(self.b, self.backend, self.device)
+
+    @property
+    def field_specs(self):
+        return ensure_field_specs(self.wavefields, [])
+
+    @classmethod
+    def _field_specs_for_query(cls):
+        field_specs = getattr(cls, "FIELD_SPECS", None)
+        if field_specs is not None:
+            return list(field_specs)
+
+        try:
+            equation = cls()
+        except Exception as exc:
+            raise TypeError(
+                f"{cls.__name__} does not define class-level FIELD_SPECS, so querying fields "
+                "from the class requires instantiation. Instantiate the equation first or "
+                "define FIELD_SPECS on the class."
+            ) from exc
+
+        return list(equation.field_specs)
+
+    @classmethod
+    def _field_specs_from_target(cls, target):
+        if isinstance(target, WaveEquation):
+            return list(target.field_specs)
+        if isinstance(target, type) and issubclass(target, WaveEquation):
+            return target._field_specs_for_query()
+        raise TypeError("target must be a WaveEquation instance or subclass")
+
+    @property
+    def default_source_fields(self):
+        source_specs = available_role_specs(self.field_specs, "source")
+        if source_specs:
+            return [source_specs[0].name]
+        return [self.wavefields[0]]
+
+    @property
+    def default_receiver_fields(self):
+        receiver_specs = available_role_specs(self.field_specs, "receiver")
+        if receiver_specs:
+            return [receiver_specs[0].name]
+        return [self.wavefields[0]]
+
+    @hybridmethod
+    def available_source_fields(target):
+        specs = WaveEquation._field_specs_from_target(target)
+        return [
+            spec for spec in available_role_specs(specs, "source")
+            if not spec.internal and not spec.boundary_related
+        ]
+
+    @hybridmethod
+    def available_receiver_fields(target):
+        specs = WaveEquation._field_specs_from_target(target)
+        return [
+            spec for spec in available_role_specs(specs, "receiver")
+            if not spec.internal and not spec.boundary_related
+        ]
+
+    @hybridmethod
+    def available_fields(target, role=None, include_internal=False, include_boundary=False):
+        specs = WaveEquation._field_specs_from_target(target)
+        if role is None:
+            selected = list(specs)
+        elif role in {"source", "receiver"}:
+            selected = available_role_specs(specs, role)
+        else:
+            raise ValueError("role must be one of None, 'source', or 'receiver'.")
+
+        if not include_internal:
+            selected = [spec for spec in selected if not spec.internal]
+        if not include_boundary:
+            selected = [spec for spec in selected if not spec.boundary_related]
+        return selected
+
+    @hybridmethod
+    def describe_field(target, name):
+        specs = WaveEquation._field_specs_from_target(target)
+        for spec in specs:
+            if spec.name == name or name in spec.aliases:
+                alias_text = f" Aliases: {', '.join(spec.aliases)}." if spec.aliases else ""
+                return f"{spec.name}: {spec.description}{alias_text}".strip()
+        available = format_field_specs(specs)
+        raise KeyError(f"Unknown field '{name}'. Available fields:\n{available}")
+
+    @property
+    def cuda_layout(self):
+        return None
 
 class FirstOrderEquation(WaveEquation, ):
     """

@@ -1,4 +1,5 @@
 from .base import SecondOrderEquation
+from .cuda_layout import CUDALayoutSpec
 
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
               vp, z, dt, h, b, 
@@ -92,21 +93,11 @@ class AcousticVRZ(SecondOrderEquation):
         )
 
     @property
-    def base_nvar(self):
-        return 3
-
-    @property
-    def pml_nvar(self):
-        return 4
-
-    @property
-    def last_two_nvar(self):
-        return 2
-
-    @property
-    def last_two_storage_nvar(self):
-        return 1
-
-    @property
-    def checkpoint_nvar(self):
-        return 6
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=3,
+            pml_nvar=4,
+            last_two_nvar=2,
+            last_two_storage_nvar=1,
+            checkpoint_nvar=6,
+        )

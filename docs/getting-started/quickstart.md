@@ -68,7 +68,33 @@ equation = Acoustic(
 
 At this stage you are only defining the physics. Nothing has run yet.
 
-## Step 4. Build the solver
+## Step 4. Query available source and receiver fields
+
+You can ask the equation class which user-facing fields are valid for source
+injection and receiver sampling before you even instantiate it:
+
+```python
+print([field.name for field in Acoustic.available_fields()])
+print([field.name for field in Acoustic.available_fields(role="source")])
+print([field.name for field in Acoustic.available_fields(role="receiver")])
+print(Acoustic.describe_field("pressure"))
+```
+
+After instantiation, the same queries also work on the object:
+
+```python
+print([field.name for field in equation.available_fields()])
+print(equation.describe_field("p"))
+```
+
+For this acoustic example, the main user-facing field is the pressure-like
+field `h1`, which also accepts aliases such as `pressure` and `p`.
+
+`available_fields()` filters out internal boundary variables by default, so you
+do not need to look through CPML helper fields when choosing
+`source_type` or `receiver_type`.
+
+## Step 5. Build the solver
 
 ```python
 solver = PropTorch(
@@ -97,7 +123,7 @@ The most important arguments are:
 For a first example, you can treat `source_type=["h1"]` and
 `receiver_type=["h1"]` as the standard acoustic setup.
 
-## Step 5. Create the wavelet
+## Step 6. Create the wavelet
 
 ```python
 t = np.arange(nt, dtype=np.float32) * dt
@@ -106,7 +132,7 @@ wave = ricker(t - delay, f=fm).astype(np.float32)
 
 `wave` has shape `(nt,)`.
 
-## Step 6. Define one source and one receiver line
+## Step 7. Define one source and one receiver line
 
 ```python
 sources = np.array([[50, 2]], dtype=np.int32)
@@ -124,7 +150,7 @@ Here that means:
 - a 2D model, so coordinates are `(x, z)` in grid indices
 - one receiver line for that shot
 
-## Step 7. Prepare the model tensor
+## Step 8. Prepare the model tensor
 
 ```python
 vp = torch.from_numpy(vp_np).to(dev).requires_grad_(True)
@@ -132,7 +158,7 @@ vp = torch.from_numpy(vp_np).to(dev).requires_grad_(True)
 
 `models=[vp]` is how you pass the model list required by `Acoustic`.
 
-## Step 8. Run forward modeling
+## Step 9. Run forward modeling
 
 ```python
 obs = solver(wave, sources, receivers, models=[vp])
@@ -148,7 +174,7 @@ For this example, the output shape is approximately:
 
 depending on the backend and equation details.
 
-## Step 9. Run backward propagation and get a gradient
+## Step 10. Run backward propagation and get a gradient
 
 ```python
 loss = obs.pow(2).sum()
@@ -160,7 +186,7 @@ grad = vp.grad.detach().cpu().numpy()
 Now `grad` is the gradient of the scalar loss with respect to the velocity
 model.
 
-## Step 10. Full minimal example
+## Step 11. Full minimal example
 
 ```python
 import numpy as np
@@ -220,7 +246,7 @@ print("loss:", float(loss.detach().cpu()))
 print("grad shape:", tuple(vp.grad.shape))
 ```
 
-## Step 11. What to remember
+## Step 12. What to remember
 
 Every SWEEP run follows the same pattern:
 

@@ -1,5 +1,7 @@
 import numpy as np
 from .base import FirstOrderEquation
+from .cuda_layout import CUDALayoutSpec
+from .fields import FieldSpec
 
 
 def _flip(u, axis):
@@ -152,6 +154,24 @@ class Elastic(FirstOrderEquation):
 
        Reference: Jean Virieux, 10.1190/1.1442147
     """
+    FIELD_SPECS = (
+        FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
+        FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
+        FieldSpec("sxx", aliases=("stress_xx",), description="Normal stress in the x direction.", supports_source=True),
+        FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True),
+        FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_txxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_txxz", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True),
+        FieldSpec("m_tzzx", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True),
+        FieldSpec("m_tzzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_txzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
+        FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
+    )
+
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
 
@@ -163,6 +183,18 @@ class Elastic(FirstOrderEquation):
     def wavefields(self):
         return ['vx', 'vz', 'sxx', 'szz', 'sxz', 
                 'm_vxx', 'm_vxz', 'm_vzx', 'm_vzz', 'm_txxx', 'm_txxz', 'm_tzzx', 'm_tzzz', 'm_txzx', 'm_txzz']
+
+    @property
+    def field_specs(self):
+        return list(self.FIELD_SPECS)
+
+    @property
+    def default_source_fields(self):
+        return ["sxx", "szz"]
+
+    @property
+    def default_receiver_fields(self):
+        return ["vx", "vz"]
     
     def func(self, *args, **kwargs):
         return step(*args, pd=self.pd, pml=self.b, free_surface=getattr(self, "free_surface", False), **kwargs)
@@ -180,21 +212,11 @@ class Elastic(FirstOrderEquation):
         )
 
     @property
-    def base_nvar(self,):
-        return 5
-
-    @property
-    def pml_nvar(self,):
-        return 10
-
-    @property
-    def last_two_nvar(self):
-        return 1
-
-    @property
-    def last_two_storage_nvar(self):
-        return self.base_nvar
-
-    @property
-    def backward_workspace_nvar(self):
-        return 8
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=5,
+            pml_nvar=10,
+            last_two_nvar=1,
+            last_two_storage_nvar=5,
+            backward_workspace_nvar=8,
+        )

@@ -44,17 +44,17 @@ class when you want to work with CUDA-specific runtime details directly.
 
 - `equation` (equation instance): Equation instance whose compiled CUDA
   binding will be used. `PropCUDA` expects the equation to expose `_C()`, and
-  optionally `_C_rtm()` for RTM.
+  optionally `_C_rtm()` for RTM. It also expects a `cuda_layout` spec for CUDA
+  runtime buffer allocation.
 - `shape` (`tuple[int, ...]`): Physical model shape before absorbing
   boundaries are added. Use `(nz, nx)` in 2D and `(nz, ny, nx)` in 3D.
 - `source_type` (`list[str]`, optional): Wavefield names used for source
-  injection. If omitted, `PropCUDA` can infer defaults: acoustic-like equations
-  use the first wavefield, 2D elastic uses `["sxx", "szz"]`, and 3D elastic
-  uses `["sxx", "syy", "szz"]`.
+  injection. These names are resolved through the equation field metadata, so
+  aliases may also be accepted. If omitted, `PropCUDA` uses
+  `equation.default_source_fields`.
 - `receiver_type` (`list[str]`, optional): Wavefield names sampled at receiver
-  locations. If omitted, `PropCUDA` can infer defaults: acoustic-like equations
-  use the first wavefield, 2D elastic uses `["vx", "vz"]`, and 3D elastic uses
-  `["vx", "vy", "vz"]`.
+  locations. These are also resolved through the equation field metadata and
+  default to `equation.default_receiver_fields` when omitted.
 - `abcn` (`int`, optional): Absorbing boundary width.
 - `free_surface` (`bool`, optional): Whether the top boundary is treated as a
   free surface. This affects coordinate shifts before entering the CUDA
@@ -96,6 +96,21 @@ class when you want to work with CUDA-specific runtime details directly.
     effective interval is forced to `1`.
   - `pinned_memory` (`bool`): Whether to use pinned host memory when
     `storage="cpu"`. When `storage="gpu"`, this is effectively disabled.
+
+## Equation Requirements
+
+For the CUDA path, an equation should expose:
+
+- `_C()`: compiled forward/backward CUDA entry points
+- `_C_rtm()` when RTM support exists
+- `cuda_layout`: a `CUDALayoutSpec` instance describing CUDA buffer layout
+
+For field discovery, equations may also expose:
+
+- `available_fields()`
+- `describe_field(name)`
+- `default_source_fields`
+- `default_receiver_fields`
 
 ## Forward Parameters
 

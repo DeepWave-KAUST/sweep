@@ -47,11 +47,47 @@ You must provide one model tensor:
 The first two are the main second-order wavefield states, and the remaining
 entries are CPML auxiliary fields.
 
+## Field Metadata
+
+This class defines structured field metadata through `FieldSpec`.
+
+User-facing fields:
+
+- `h1` aliases: `pressure`, `p`
+  Meaning: primary acoustic pressure-like wavefield
+
+Internal fields:
+
+- `h2`: previous-step pressure-like state
+- `psix`, `psiz`, `zetax`, `zetaz`: CPML auxiliary fields
+
+Useful helpers:
+
+- `available_fields()`: returns the user-facing fields, excluding CPML fields
+- `available_fields(role="source")`: valid source injection fields
+- `available_fields(role="receiver")`: valid receiver sampling fields
+- `describe_field("h1")` or `describe_field("pressure")`: returns the field description
+
+Defaults:
+
+- `default_source_fields`: `["h1"]`
+- `default_receiver_fields`: `["h1"]`
+
 ## Backend Behavior
 
 - PyTorch path uses separable Laplace operators
 - CUDA-backed PyTorch binding is available through `_C()`
 - JAX path is also supported
+
+## CUDA Layout
+
+For the compiled CUDA propagator, this equation exposes:
+
+- `cuda_layout`
+
+This groups the CUDA runtime buffer metadata needed by `PropCUDA` instead of
+storing separate `base_nvar`, `pml_nvar`, and checkpoint-count properties on
+the equation class.
 
 ## Torch Binding
 

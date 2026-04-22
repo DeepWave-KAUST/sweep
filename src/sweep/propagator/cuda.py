@@ -369,6 +369,15 @@ class PropCUDA(PropBase, torch.nn.Module):
         indices = [self.wavefield_names.index(name) for name in resolved]
         return torch.tensor(indices, dtype=torch.int32, device=self.dev)
 
+    def _cuda_layout(self):
+        layout = getattr(self.equation, "cuda_layout", None)
+        if layout is not None:
+            return layout
+
+        raise AttributeError(
+            f"{type(self.equation).__name__} must define `cuda_layout` to run with the CUDA propagator."
+        )
+
     def _ensure_boundary_buffers(self, boundary_on_cpu, transfer_interval, use_pinned_memory):
         if (
             self._boundary_cache_batch == self.B
@@ -380,9 +389,10 @@ class PropCUDA(PropBase, torch.nn.Module):
         ):
             return
 
+        cuda_layout = self._cuda_layout()
         layout = Layout(
             self.shape_cuda,
-            self.equation.base_nvar,
+            cuda_layout.base_nvar,
             self.nt,
             self.abcn,
             self.equation.so // 2,
@@ -394,8 +404,13 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         self.boundary_cpu_allocator = Allocator('cpu')
         self.boundary_gpu_allocator = Allocator(self.dev)
-        last_two_storage_nvar = getattr(self.equation, "last_two_storage_nvar", self.equation.base_nvar)
-        last_two_shape = [last_two_storage_nvar, self.equation.last_two_nvar, self.B, 1, *self.shape_cuda]
+        last_two_shape = [
+            cuda_layout.resolved_last_two_storage_nvar(),
+            cuda_layout.last_two_nvar,
+            self.B,
+            1,
+            *self.shape_cuda,
+        ]
 
         if boundary_on_cpu:
             self.boundary_cpu = self.boundary_cpu_allocator.zeros(
@@ -445,7 +460,8 @@ class PropCUDA(PropBase, torch.nn.Module):
             target_capacity = max(self.B, batch_size)
 
         self.B = target_capacity
-        total_wavefields = self.equation.base_nvar + self.equation.pml_nvar
+        cuda_layout = self._cuda_layout()
+        total_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
         wavefield_shapes = total_wavefields * [[self.B, 1, *self.shape_cuda]]
         if batch_size > (current_capacity or 0):
             self.forward_allocator = Allocator(self.dev)
@@ -465,8 +481,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         return tuple(t[:batch_size] for t in self.forward_wavefields), tuple(t[:batch_size] for t in self.adjoint_wavefields)
 
     def _ensure_adjoint_workspace_buffers(self, batch_size):
-        workspace_nvar = int(getattr(self.equation, "backward_workspace_nvar", 0))
-        custom_shapes_fn = getattr(self.equation, "backward_workspace_shapes", None)
+        cuda_layout = self._cuda_layout()
+        workspace_nvar = int(cuda_layout.backward_workspace_nvar)
+        custom_shapes_fn = cuda_layout.backward_workspace_shapes
         has_custom_shapes = callable(custom_shapes_fn)
         if workspace_nvar <= 0 and not has_custom_shapes:
             self.adjoint_workspace = ()
@@ -523,9 +540,8 @@ class PropCUDA(PropBase, torch.nn.Module):
             return
 
         checkpoint_shape = [n_checkpoints, self.B, 1, *self.shape_cuda]
-        num_checkpoint_tensors = int(
-            getattr(self.equation, "checkpoint_nvar", self.equation.base_nvar + self.equation.pml_nvar)
-        )
+        cuda_layout = self._cuda_layout()
+        num_checkpoint_tensors = int(cuda_layout.resolved_checkpoint_nvar())
         self.checkpoint_allocator = Allocator(self.dev)
         self.checkpoints = tuple(self.checkpoint_allocator.zeros([checkpoint_shape] * num_checkpoint_tensors))
         self._checkpoint_cache_batch = self.B

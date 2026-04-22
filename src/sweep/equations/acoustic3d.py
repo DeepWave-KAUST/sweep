@@ -1,4 +1,6 @@
 from .base import SecondOrderEquation
+from .cuda_layout import CUDALayoutSpec
+from .fields import FieldSpec
 
 def step_cpml(
         u_now, u_pre, psix, psiy, psiz, zetax, zetay, zetaz, 
@@ -40,6 +42,16 @@ def step_cpml(
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
 class Acoustic3D(SecondOrderEquation):
+    FIELD_SPECS = (
+        FieldSpec("h1", aliases=("pressure", "p"), description="Primary 3D acoustic pressure-like wavefield.", supports_source=True, supports_receiver=True),
+        FieldSpec("h2", aliases=("pressure_prev",), description="Previous-step pressure-like wavefield.", internal=True),
+        FieldSpec("psix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiy", description="CPML memory variable for the y-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("zetax", description="CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetay", description="CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetaz", description="CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+    )
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=3):
         """Acoustic wave equation solver.
@@ -58,6 +70,10 @@ class Acoustic3D(SecondOrderEquation):
     @property
     def wavefields(self):
         return ['h1', 'h2', 'psix', 'psiy', 'psiz', 'zetax', 'zetay', 'zetaz']
+
+    @property
+    def field_specs(self):
+        return list(self.FIELD_SPECS)
 
     def func(self, *args, **kwargs):
         dh = args[10]
@@ -89,21 +105,11 @@ class Acoustic3D(SecondOrderEquation):
         return acoustic3d_rtm
 
     @property
-    def base_nvar(self):
-        return 3
-
-    @property
-    def pml_nvar(self):
-        return 6
-
-    @property
-    def last_two_nvar(self):
-        return 2
-
-    @property
-    def last_two_storage_nvar(self):
-        return 1
-
-    @property
-    def checkpoint_nvar(self):
-        return 8
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=3,
+            pml_nvar=6,
+            last_two_nvar=2,
+            last_two_storage_nvar=1,
+            checkpoint_nvar=8,
+        )
