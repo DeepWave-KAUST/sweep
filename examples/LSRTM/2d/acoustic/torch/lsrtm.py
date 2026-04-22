@@ -37,6 +37,7 @@ def build_config():
     cfg.update(
         {
             "output_dir": "acoustic_lsrtm_torch",
+            "fm": 10.0,
             "backend": "eager",
             "cuda_memory": "full",
             "use_compile": False,
@@ -203,23 +204,19 @@ def save_observed_figure(obs, output_dir):
 def save_progress_figure(true_model, ref, grad_ref, losses, epoch, cfg, output_dir):
     nz, nx = true_model.shape
     extent = [0, nx * cfg["dh"], nz * cfg["dh"], 0]
-    vmin_true, vmax_true = true_model.min(), true_model.max()
     vmin_ref, vmax_ref = np.percentile(ref, [2, 98])
     vmin_grad, vmax_grad = np.percentile(grad_ref, [2, 98])
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    im0 = axes[0].imshow(true_model, vmin=vmin_true, vmax=vmax_true, cmap="seismic", aspect="auto", extent=extent)
-    axes[0].set_title("True Velocity")
-    im1 = axes[1].imshow(ref, vmin=vmin_ref, vmax=vmax_ref, cmap="gray", aspect="auto", extent=extent)
-    axes[1].set_title("Reflectivity")
-    im2 = axes[2].imshow(grad_ref, vmin=vmin_grad, vmax=vmax_grad, cmap="gray", aspect="auto", extent=extent)
-    axes[2].set_title("Reflectivity Gradient")
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+    im0 = axes[0].imshow(ref, vmin=vmin_ref, vmax=vmax_ref, cmap="gray", aspect="auto", extent=extent)
+    axes[0].set_title("Reflectivity")
+    im1 = axes[1].imshow(grad_ref, vmin=vmin_grad, vmax=vmax_grad, cmap="gray", aspect="auto", extent=extent)
+    axes[1].set_title("Reflectivity Gradient")
     for ax in axes:
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Z (m)")
-    fig.colorbar(im0, ax=axes[0], shrink=0.85, label="Velocity (m/s)")
-    fig.colorbar(im1, ax=axes[1], shrink=0.85, label="Reflectivity")
-    fig.colorbar(im2, ax=axes[2], shrink=0.85, label="Gradient")
+    fig.colorbar(im0, ax=axes[0], shrink=0.85, label="Reflectivity")
+    fig.colorbar(im1, ax=axes[1], shrink=0.85, label="Gradient")
     fig.tight_layout()
     fig.savefig(output_dir / f"epoch_{epoch:04d}.png", dpi=300, bbox_inches="tight")
     plt.close(fig)

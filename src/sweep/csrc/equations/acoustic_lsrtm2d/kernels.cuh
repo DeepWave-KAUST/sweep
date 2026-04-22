@@ -35,55 +35,6 @@
         else                   acoustic_lsrtm2nd<-1><<<grid, block>>>(__VA_ARGS__); \
     } while (0)
 
-template<int Order>
-__device__ __forceinline__ float acoustic_lsrtm_grad_coeff(int m, const float* coeff)
-{
-    if constexpr (Order == 2) {
-        return m == 1 ? 0.5f : 0.0f;
-    } else if constexpr (Order == 4) {
-        return m == 1 ? (8.0f / 12.0f) : (m == 2 ? (-1.0f / 12.0f) : 0.0f);
-    } else if constexpr (Order == 6) {
-        return m == 1 ? 0.75f : (m == 2 ? (-3.0f / 20.0f) : (m == 3 ? (1.0f / 60.0f) : 0.0f));
-    } else if constexpr (Order == 8) {
-        return m == 1 ? (4.0f / 5.0f)
-             : (m == 2 ? (-1.0f / 5.0f)
-             : (m == 3 ? (4.0f / 105.0f)
-             : (m == 4 ? (-1.0f / 280.0f) : 0.0f)));
-    } else {
-        return coeff[m];
-    }
-}
-
-template<int Order, int Direction>
-__device__ inline float acoustic_lsrtm_grad_product_2d(
-    const float* __restrict__ a_1d,
-    const float* __restrict__ psi,
-    int ix,
-    int iz,
-    int nx,
-    const GradParam& grad_ctx
-) {
-    constexpr bool along_x = (Direction & X);
-    constexpr bool along_z = (Direction & Z);
-    static_assert(along_x || along_z, "Direction must include X or Z.");
-
-    const int half_order = (Order == -1) ? grad_ctx.M : (Order / 2);
-    const int stride = along_x ? 1 : nx;
-    const int coord = along_x ? ix : iz;
-    const float spacing = along_x ? grad_ctx.dx : grad_ctx.dz;
-    const int center = iz * nx + ix;
-
-    float grad = 0.0f;
-    for (int m = 1; m <= half_order; ++m) {
-        const float c = acoustic_lsrtm_grad_coeff<Order>(m, grad_ctx.coeff);
-        grad += c * (
-            a_1d[coord + m] * psi[center + m * stride] -
-            a_1d[coord - m] * psi[center - m * stride]
-        );
-    }
-    return grad / spacing;
-}
-
 template <int Order>
 __device__ inline float acoustic_cpml_update_2d(
     AcousticWavefieldPointer f,
@@ -108,8 +59,12 @@ __device__ inline float acoustic_cpml_update_2d(
 
     float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
     float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-    float daipsiz_dz = acoustic_lsrtm_grad_product_2d<Order, Z>(cpml.az, f.psiz, ix, iz, lap_ctx.nx, grad_ctx);
-    float daipxix_dx = acoustic_lsrtm_grad_product_2d<Order, X>(cpml.ax, f.psix, ix, iz, lap_ctx.nx, grad_ctx);
+    float dpsizdz = gradient<2, Order, Z>(f.psiz, ix, 0, iz, grad_ctx);
+    float dpsixdx = gradient<2, Order, X>(f.psix, ix, 0, iz, grad_ctx);
+    float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
+    float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
+    float daipsiz_dz = az_ * dpsizdz + dazdz * f.psiz[idx];
+    float daipxix_dx = ax_ * dpsixdx + daxdx * f.psix[idx];
 
     float w_sum = 0.0f;
 
@@ -253,6 +208,7 @@ __global__ void acoustic_lsrtm2nd(
 __global__ void calculate_grad_lsrtm_mp(
     const float* __restrict__ u_tt_bg,
     const float* __restrict__ u_backward,
+    const float* __restrict__ vp,
     float* __restrict__ grad_mp,
     int nx,
     int nz,
@@ -264,6 +220,7 @@ __global__ void calculate_grad_lsrtm_mp_utt(
     const float* __restrict__ u_forward_now,
     const float* __restrict__ u_forward_prev,
     const float* __restrict__ u_backward,
+    const float* __restrict__ vp,
     float* __restrict__ grad_mp,
     int nx,
     int nz,

@@ -5,6 +5,7 @@ Repository examples live in the `examples/` directory.
 ## Available Pages
 
 - [Acoustic FWI with Torch and CUDA](acoustic_fwi_torch.md)
+- [Acoustic LSRTM with Torch and CUDA](acoustic_lsrtm_torch.md)
 - [3D Acoustic FWI with Torch and CUDA](acoustic_fwi_3d_torch.md)
 - [Acoustic FWI with JAX](acoustic_fwi_jax.md)
 - [Reducing Memory](reducing_memory.md)
@@ -22,6 +23,7 @@ Repository examples live in the `examples/` directory.
 ## Current Example Coverage
 
 - acoustic FWI with Torch eager and CUDA backends
+- acoustic LSRTM with Torch eager and CUDA backends
 - 3D acoustic FWI on Overthrust with Torch eager and CUDA backends
 - acoustic FWI with source encoding
 - acoustic FWI with JAX

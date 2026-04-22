@@ -53,6 +53,7 @@ nav:
   - Examples:
       - Overview: examples/index.md
       - Acoustic FWI with Torch and CUDA: examples/acoustic_fwi_torch.md
+      - Acoustic LSRTM with Torch and CUDA: examples/acoustic_lsrtm_torch.md
       - 3D Acoustic FWI with Torch and CUDA: examples/acoustic_fwi_3d_torch.md
       - Acoustic FWI with JAX: examples/acoustic_fwi_jax.md
       - Reducing Memory:

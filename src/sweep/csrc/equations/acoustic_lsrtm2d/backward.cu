@@ -201,6 +201,7 @@ void process_recursive_interval_2d(
         calculate_grad_lsrtm_mp<<<wave_grid, wave_block>>>(
             bg_utt.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
+            vp.data_ptr<float>(),
             grad_mp.data_ptr<float>(),
             nx,
             nz,
@@ -360,6 +361,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
         calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
             p.u_forward[it].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
+            vp.data_ptr<float>(),
             grad_mp.data_ptr<float>(),
             nx,
             nz,
@@ -568,6 +570,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             forward.u_now_t.data_ptr<float>(),
             forward.u_prev_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
+            vp.data_ptr<float>(),
             grad_mp.data_ptr<float>(),
             nx, nz, dt
         );
@@ -740,6 +743,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
                 chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
+                vp.data_ptr<float>(),
                 grad_mp.data_ptr<float>(),
                 nx,
                 nz,

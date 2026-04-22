@@ -269,3 +269,51 @@ class PropBase:
 
     def parameters(self, ):
         return [getattr(self, name) for name in self.model_names]
+
+    def _runtime_fd_halo(self):
+        return self.equation.so // 2
+
+    def _runtime_shape(self):
+        halo = self._runtime_fd_halo()
+        if halo <= 0:
+            return self.shape
+        return tuple(s + 2 * halo for s in self.shape)
+
+    def _runtime_padding(self):
+        halo = self._runtime_fd_halo()
+        if halo <= 0:
+            return self.padding
+        return tuple(p + halo for p in self.padding)
+
+    def _runtime_fd_pad(self):
+        halo = self._runtime_fd_halo()
+        return [halo, halo] * self.ndim
+
+    def _runtime_coord_offset(self):
+        halo = self._runtime_fd_halo()
+        if halo <= 0:
+            offset = [self.abcn] * self.ndim
+            if self.free_surface:
+                offset[-1] = 0
+            return tuple(offset)
+
+        offset = [self.abcn + halo] * self.ndim
+        if self.free_surface:
+            offset[-1] = halo
+        return tuple(offset)
+
+    def _runtime_crop_slices(self):
+        halo = self._runtime_fd_halo()
+        if halo <= 0:
+            return (slice(None),) * self.ndim
+        return tuple(slice(halo, -halo) for _ in range(self.ndim))
+
+    def _crop_runtime_halo(self, data):
+        halo = self._runtime_fd_halo()
+        if halo <= 0:
+            return data
+        return data[(...,) + self._runtime_crop_slices()]
+
+    def _spatial_pad_pairs(self, flat_padding):
+        pairs = [(flat_padding[2 * i], flat_padding[2 * i + 1]) for i in range(len(flat_padding) // 2)]
+        return tuple(reversed(pairs))

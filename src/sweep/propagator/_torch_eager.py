@@ -20,9 +20,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
 
         self.register_buffer("dt", torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer("dh", torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
-        coord_offset = [self.abcn] * self.ndim
-        if self.free_surface:
-            coord_offset[-1] = 0
+        coord_offset = list(self._runtime_coord_offset())
         self.register_buffer("coord_offset", torch.tensor(coord_offset, device=self.dev, dtype=torch.long))
         self.source_indices = [self.wavefield_names.index(name) for name in self.source_type]
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
@@ -131,8 +129,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
     def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, **kwargs):
         snapshot_times = kwargs.pop("snapshot_times", None)
         snapshot_interval = kwargs.pop("snapshot_interval", None)
-        fd_pad = [0, 0] * self.ndim
-        kwargs.setdefault("fd_pad", fd_pad)
+        kwargs.setdefault("fd_pad", self._runtime_fd_pad())
+        kwargs.setdefault("shape", self._runtime_shape())
         self.init_abc(**kwargs)
 
         nt = wavelet.shape[-1]
@@ -142,7 +140,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
-        shape_wavefield = (batch_size, 1) + self.shape
+        shape_wavefield = (batch_size, 1) + self._runtime_shape()
         wavelet = self._as_device_tensor(wavelet, dtype=torch.float32)
         sources = self._as_device_tensor(sources, dtype=torch.long) + self.coord_offset
         receivers = self._as_device_tensor(receivers, dtype=torch.long) + self.coord_offset
@@ -153,14 +151,15 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         has_aux = False
         if return_wavefield:
             has_aux = True
-            snapshots = self._get_snapshot_buffer((len(snapshot_indices), len(self.wavefield_names)) + shape_wavefield)
+            snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
+            snapshots = self._get_snapshot_buffer(snapshot_shape)
         else:
             snapshots = None
 
         record = self._get_record_buffer((batch_size, nt, receivers.shape[1], len(self.receiver_type)))
 
         models = models if models is not None else self.parameters()
-        models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self.padding) for para in models]
+        models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
         self.models_padded = models
         fixargs = models + [self.dt, self.dh, None]
         wavefield = self._get_wavefield_buffers(shape_wavefield)
@@ -207,7 +206,10 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     time = i if not adj else nt - i - 1
                     wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
                 if return_wavefield and i in snapshot_lookup:
-                    snapshots[snapshot_lookup[i]] = torch.stack([w.detach().cpu() for w in wavefield], 0)
+                    snapshots[snapshot_lookup[i]] = torch.stack(
+                        [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
+                        0,
+                    )
                 for ic, receiver_idx in enumerate(self.receiver_indices):
                     record[:, i, :, ic] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
 

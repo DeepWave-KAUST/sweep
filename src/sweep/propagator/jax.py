@@ -18,8 +18,10 @@ class PropJax(PropBase):
             padding (list): 4 elements list for padding the model parameters
         """
         if padding is None:
-            padding = self.padding
-        padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
+            padding = self._runtime_padding()
+        else:
+            padding = tuple(padding)
+        padding = self._spatial_pad_pairs(padding)
         padding = (((0,0),)*(d.ndim-self.ndim)+padding)
         return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
         # return jnp.pad(d, padding, mode='edge')
@@ -31,8 +33,10 @@ class PropJax(PropBase):
             padding (list): 4 elements list for padding the model parameters
         """
         if padding is None:
-            padding = self.padding
-        padding = (self.padding_z,) + ((self.abcn,self.abcn), )* (self.ndim-1) 
+            padding = self._runtime_padding()
+        else:
+            padding = tuple(padding)
+        padding = self._spatial_pad_pairs(padding)
         padding = (((0,0),)*(d.ndim-self.ndim)+padding)
         return jnp.pad(d, padding, mode='edge')
     
@@ -85,10 +89,11 @@ class PropJax(PropBase):
             wave_equation (callable, optional): The wave equation function to use. If None, use the equation defined in the class. Defaults to None.
             aux_args (tuple(list), optional): Auxiliary arguments for the wave equation function. Defaults to ().
         """
-        fd_pad = [0, 0] * self.ndim
+        fd_pad = self._runtime_fd_pad()
         snapshot_times = kwargs.pop("snapshot_times", None)
         snapshot_interval = kwargs.pop("snapshot_interval", None)
         kwargs.setdefault('fd_pad', fd_pad)
+        kwargs.setdefault('shape', self._runtime_shape())
         self.init_abc(**kwargs)
         if getattr(self.equation, 'setup_pml', None):
             self.equation.setup_pml(self.pml_type)
@@ -107,7 +112,7 @@ class PropJax(PropBase):
         nshots = sources.shape[0]
 
         batch_size = 1 if source_encoding else nshots
-        shape_wavefield = (batch_size, 1) + self.shape
+        shape_wavefield = (batch_size, 1) + self._runtime_shape()
 
         sources = sources.copy()
         receivers = receivers.copy()
@@ -115,12 +120,9 @@ class PropJax(PropBase):
         sources = jnp.array(sources, dtype=jnp.int32)
         receivers = jnp.array(receivers, dtype=jnp.int32)
 
-        if self.free_surface:
-            sources = sources.at[..., :-1].add(self.abcn)
-            receivers = receivers.at[..., :-1].add(self.abcn)
-        else:
-            sources = sources.at[...].add(self.abcn)
-            receivers = receivers.at[...].add(self.abcn)
+        coord_offset = jnp.asarray(self._runtime_coord_offset(), dtype=jnp.int32)
+        sources = sources + coord_offset
+        receivers = receivers + coord_offset
 
         src = SourceJax(sources, shape_wavefield, source_encoding, adj)
         rec = ReceiverJax(receivers)
@@ -135,7 +137,7 @@ class PropJax(PropBase):
         if return_wavefield:
             has_aux = True
             snapshots = jnp.zeros(
-                (len(snapshot_indices), len(self.wavefield_names)) + shape_wavefield,
+                (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape,
                 dtype=jnp.float32,
                 device=jax.devices('cpu')[0],
             )
@@ -193,7 +195,8 @@ class PropJax(PropBase):
 
                 def save_snapshot(state):
                     snap_buf, snap_idx = state
-                    snap_buf = snap_buf.at[snap_idx].set(wavefields_arr)
+                    cropped = self._crop_runtime_halo(wavefields_arr)
+                    snap_buf = snap_buf.at[snap_idx].set(cropped)
                     return snap_buf, snap_idx + 1
 
                 snapshots, snapshot_pos = jax.lax.cond(
@@ -303,7 +306,7 @@ class PropJax(PropBase):
         **kwargs,
     ):
         models = models if models is not None else self.parameters()
-        models = [self.pad(para, self.padding) for para in models]
+        models = [self.pad(para, self._runtime_padding()) for para in models]
         return self.forward_base(
             wavelet,
             sources,
@@ -322,5 +325,5 @@ class PropJax(PropBase):
         """
         models = kwargs.pop("models", None)
         models = models if models is not None else self.parameters()
-        models = [self.jaxpad(para, self.padding) for para in models]
+        models = [self.jaxpad(para, self._runtime_padding()) for para in models]
         return self.forward_base(*args, models=models, **kwargs)

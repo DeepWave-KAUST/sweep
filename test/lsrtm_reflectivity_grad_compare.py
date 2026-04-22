@@ -276,9 +276,26 @@ def compute_metrics(reference, candidate):
         cand_flat.reshape(1, -1),
         ref_flat.reshape(1, -1),
     ).item()
+    ref_img = reference.to(torch.float64)
+    cand_img = candidate.to(torch.float64)
+    data_min = torch.minimum(ref_img.min(), cand_img.min())
+    data_max = torch.maximum(ref_img.max(), cand_img.max())
+    data_range = (data_max - data_min).clamp_min(torch.tensor(1e-8, dtype=torch.float64))
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+    mu_x = ref_img.mean()
+    mu_y = cand_img.mean()
+    sigma_x = ((ref_img - mu_x) ** 2).mean()
+    sigma_y = ((cand_img - mu_y) ** 2).mean()
+    sigma_xy = ((ref_img - mu_x) * (cand_img - mu_y)).mean()
+    ssim = (
+        ((2 * mu_x * mu_y + c1) * (2 * sigma_xy + c2))
+        / ((mu_x * mu_x + mu_y * mu_y + c1) * (sigma_x + sigma_y + c2))
+    ).item()
     return {
         "rel_l2": rel_l2,
         "cosine": cosine,
+        "ssim": ssim,
         "diff_l2": torch.linalg.norm(diff).item(),
         "diff_linf": torch.max(torch.abs(diff)).item(),
     }
@@ -362,8 +379,6 @@ def save_gradient_figure(results):
     for ax, mode in zip(axes, mode_names):
         grad = results[mode]["grad"].numpy()
         vmin, vmax = np.percentile(grad, [2, 98])
-        if np.isclose(vmin, vmax):
-            vmax = vmin + 1e-6
         im = ax.imshow(grad, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
         ax.set_title(mode)
         ax.set_xlabel("X")
@@ -521,7 +536,7 @@ def main():
         metrics = compute_metrics(ref_grad, results[label]["grad"])
         results[label]["metrics"] = metrics
         line = (
-            f"{label}: rel_l2={metrics['rel_l2']:.6f}, cosine={metrics['cosine']:.6f}, "
+            f"{label}: rel_l2={metrics['rel_l2']:.6f}, cosine={metrics['cosine']:.6f}, ssim={metrics['ssim']:.6f}, "
             f"diff_l2={metrics['diff_l2']:.6e}, diff_linf={metrics['diff_linf']:.6e}"
         )
         print(" ", line)
