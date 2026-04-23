@@ -1,4 +1,4 @@
-# 3D Acoustic FWI with Torch and CUDA
+# 3D Acoustic FWI on Overthrust with Torch
 
 Source file:
 

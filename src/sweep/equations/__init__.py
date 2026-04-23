@@ -4,6 +4,7 @@ from .base import WaveEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec
 from .acoustic_lsrtm import AcousticLSRTM
+from .acoustic_lsrtm3d import AcousticLSRTM3D
 from .acoustic1st import Acoustic1st
 # from .elasticz import ElasticZ
 from .acoustic_vrz import AcousticVRZ
@@ -13,7 +14,10 @@ from .elastic import Elastic
 from .elastic3d import Elastic as Elastic3D
 
 # from .acoustic_vrr import AcousticVRR
-from .qP_tti import AcousticTTI
+try:
+    from .qP_tti import AcousticTTI
+except ModuleNotFoundError:
+    AcousticTTI = None
 # from .aec import AEC
 # from .visco_acoustic import ViscoAcoustic
 from .qP_vti import AcousticVTI

@@ -3,6 +3,8 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
+from plotting import gather_extent, plot_loss_curve
+
 
 def prepare_model(model, cfg):
     stride_z = int(cfg.get("model_stride_z", 1))
@@ -72,7 +74,7 @@ def save_wavelet_figure(wave, output_dir):
     plt.close(fig)
 
 
-def save_observed_figure(obs, output_dir):
+def save_observed_figure(obs, receivers, cfg, output_dir):
     arr = np.asarray(obs)
     if arr.ndim == 4:
         shot = arr[-1, :, :, 0]
@@ -83,11 +85,18 @@ def save_observed_figure(obs, output_dir):
         raise ValueError(f"Expected observed data with 3 or 4 dims, got shape {arr.shape}")
     vmin, vmax = np.percentile(shot, [2, 98])
     fig, ax = plt.subplots(1, 1, figsize=(7, 4))
-    im = ax.imshow(shot, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+    im = ax.imshow(
+        shot,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="seismic",
+        aspect="auto",
+        extent=gather_extent(shot.shape[0], cfg["dt"], receivers, cfg["dh"]),
+    )
     fig.colorbar(im, ax=ax, shrink=0.9, label="Amplitude")
     ax.set_title("Observed Shot Gather")
-    ax.set_xlabel("Receiver Index")
-    ax.set_ylabel("Time Sample")
+    ax.set_xlabel("Distance (m)")
+    ax.set_ylabel("Time (s)")
     fig.tight_layout()
     fig.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -112,7 +121,7 @@ def _slice_extent(shape, dh, plane):
     return extents[plane]
 
 
-def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
+def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir, loss_ylabel):
     fig, axes = plt.subplots(3, 3, figsize=(12, 10))
     dh = float(cfg["dh"])
     model_limits = (float(true_model.min()), float(true_model.max()))
@@ -143,10 +152,8 @@ def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black")
+    plot_loss_curve(ax, losses, loss_ylabel)
     ax.set_title("FWI Loss")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
     fig.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
     plt.close(fig)

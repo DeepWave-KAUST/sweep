@@ -18,6 +18,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from plotting import gather_extent, plot_loss_curve
 
 import jax
 import jax.numpy as jnp
@@ -89,18 +90,25 @@ def save_wavelet_figure(wave, output_dir):
     plt.close(fig)
 
 
-def save_observed_figure(obs, output_dir):
+def save_observed_figure(obs, receivers, cfg, output_dir):
     vx = np.asarray(obs[-1][..., 0])
     vz = np.asarray(obs[-1][..., 1])
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), squeeze=False)
     for ax, data, title in zip(axes[0], [vx, vz], ["Observed Vx", "Observed Vz"]):
         vmin, vmax = np.percentile(data, [2, 98])
-        im = ax.imshow(data, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+        im = ax.imshow(
+            data,
+            vmin=vmin,
+            vmax=vmax,
+            cmap="seismic",
+            aspect="auto",
+            extent=gather_extent(data.shape[0], cfg["dt"], receivers, cfg["dh"]),
+        )
         fig.colorbar(im, ax=ax, shrink=0.85, label="Amplitude")
         ax.set_title(title)
-        ax.set_xlabel("Receiver Index")
-        ax.set_ylabel("Time Sample")
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("Time (s)")
     fig.tight_layout()
     fig.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -134,11 +142,8 @@ def save_progress_figure(vp_true, vs_true, vp, vs, grad_vp, grad_vs, losses, epo
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black", label="Loss")
-    ax.legend()
+    plot_loss_curve(ax, losses, "Sum of Squared Error")
     ax.set_title("FWI Loss")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
     fig.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -172,7 +177,7 @@ def main():
         receivers,
         models=[jnp.asarray(vp_true), jnp.asarray(vs_true), jnp.asarray(rho_true)],
     )
-    save_observed_figure(obs, output_dir)
+    save_observed_figure(obs, receivers, cfg, output_dir)
 
     wave_jax = jnp.asarray(wave)
     sources_jax = jnp.asarray(sources)

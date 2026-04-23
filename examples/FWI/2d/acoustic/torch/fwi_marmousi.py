@@ -17,6 +17,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from plotting import gather_extent, plot_loss_curve
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -144,17 +145,24 @@ def save_wavelet_figure(wave, output_dir):
     plt.close()
 
 
-def save_observed_figure(obs, output_dir, cfg):
+def save_observed_figure(obs, receivers, output_dir, cfg):
     shot = obs[-1].squeeze()
     if cfg.get("transpose_shot", False):
         shot = shot.T
     vmin, vmax = np.percentile(shot, [2, 98])
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-    im = ax.imshow(shot, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+    im = ax.imshow(
+        shot,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="seismic",
+        aspect="auto",
+        extent=gather_extent(shot.shape[0], cfg["dt"], receivers, cfg["dh"]),
+    )
     fig.colorbar(im, ax=ax, shrink=0.9, label="Amplitude")
     ax.set_title("Observed Shot Gather")
-    ax.set_xlabel("Receiver Index")
-    ax.set_ylabel("Time Sample")
+    ax.set_xlabel("Distance (m)")
+    ax.set_ylabel("Time (s)")
     fig.tight_layout()
     fig.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -184,8 +192,7 @@ def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black", label="Loss")
-    ax.legend()
+    plot_loss_curve(ax, losses, "Mean Squared Error")
     ax.set_title("FWI Loss")
     plt.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
@@ -221,7 +228,7 @@ def run_fwi(backend="eager"):
     true_vp = torch.from_numpy(true_model).to(dev)
     obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
     print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
-    save_observed_figure(obs, output_dir, cfg)
+    save_observed_figure(obs, receivers, output_dir, cfg)
 
     inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
     optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)

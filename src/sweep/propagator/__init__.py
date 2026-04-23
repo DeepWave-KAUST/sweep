@@ -1,16 +1,26 @@
-from .cuda import PropCUDA
 from .options import BoundaryOptions, CkptOptions, CUDAOptions, EagerOptions, MemoryOptions
-from .torch import PropTorch
 
 __all__ = [
-    "PropTorch",
-    "PropCUDA",
     "EagerOptions",
     "CUDAOptions",
     "MemoryOptions",
     "BoundaryOptions",
     "CkptOptions",
 ]
+
+try:
+    from .torch import PropTorch
+except ModuleNotFoundError:
+    PropTorch = None
+else:
+    __all__.append("PropTorch")
+
+try:
+    from .cuda import PropCUDA
+except ModuleNotFoundError:
+    PropCUDA = None
+else:
+    __all__.append("PropCUDA")
 
 try:
     from .jax import PropJax

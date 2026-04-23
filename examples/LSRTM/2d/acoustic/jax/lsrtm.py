@@ -17,6 +17,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from plotting import gather_extent, plot_loss_curve
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -105,15 +106,22 @@ def save_wavelet_figure(wave, output_dir):
     plt.close(fig)
 
 
-def save_observed_figure(obs, output_dir):
+def save_observed_figure(obs, receivers, cfg, output_dir):
     shot = np.asarray(obs[-1]).squeeze().T
     vmin, vmax = np.percentile(shot, [2, 98])
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-    im = ax.imshow(shot, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+    im = ax.imshow(
+        shot,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="seismic",
+        aspect="auto",
+        extent=gather_extent(shot.shape[0], cfg["dt"], receivers, cfg["dh"]),
+    )
     fig.colorbar(im, ax=ax, shrink=0.9, label="Amplitude")
     ax.set_title("Scattered Observed Shot Gather")
-    ax.set_xlabel("Receiver Index")
-    ax.set_ylabel("Time Sample")
+    ax.set_xlabel("Distance (m)")
+    ax.set_ylabel("Time (s)")
     fig.tight_layout()
     fig.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -140,8 +148,7 @@ def save_progress_figure(ref, grad_ref, losses, epoch, cfg, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black", label="Loss")
-    ax.legend()
+    plot_loss_curve(ax, losses, "Mean Squared Error")
     ax.set_title("LSRTM Loss")
     fig.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
@@ -215,7 +222,7 @@ def run_lsrtm(epochs=None):
     print("(nshots, nreceivers, ndim):", receivers.shape)
 
     obs = generate_observed_data(acoustic_solver, wave, sources, receivers, true_model, smooth_model)
-    save_observed_figure(np.asarray(obs), output_dir)
+    save_observed_figure(np.asarray(obs), receivers, cfg, output_dir)
 
     vp = jnp.asarray(smooth_model, dtype=jnp.float32)
     ref = jnp.zeros_like(vp)

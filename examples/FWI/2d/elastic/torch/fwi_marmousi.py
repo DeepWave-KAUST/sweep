@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import tqdm
 
-import configure_overthrust as shared_config
+import configure_marmousi as shared_config
 from sweep.equations import Elastic
 from sweep.propagator.options import BoundaryOptions, CUDAOptions, EagerOptions, MemoryOptions
 from sweep.propagator.torch import PropTorch
@@ -32,6 +32,7 @@ from sweep.signal import ricker
 
 
 torch.backends.cudnn.benchmark = True
+
 
 def build_config(backend):
     backend_key = f"fwi_2d_elastic_torch_{backend}"
@@ -41,6 +42,14 @@ def build_config(backend):
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
     return cfg
+
+
+def build_boundary_options(boundary_cfg):
+    kwargs = {"storage": boundary_cfg["storage"]}
+    if boundary_cfg["storage"] == "cpu":
+        kwargs["transfer_interval"] = boundary_cfg["transfer_interval"]
+        kwargs["pinned_memory"] = boundary_cfg["pinned_memory"]
+    return BoundaryOptions(**kwargs)
 
 
 def build_solver(shape, dev, cfg):
@@ -88,14 +97,6 @@ def build_solver(shape, dev, cfg):
         )
 
     raise ValueError(f"Unsupported backend '{cfg['backend']}'.")
-
-
-def build_boundary_options(boundary_cfg):
-    kwargs = {"storage": boundary_cfg["storage"]}
-    if boundary_cfg["storage"] == "cpu":
-        kwargs["transfer_interval"] = boundary_cfg["transfer_interval"]
-        kwargs["pinned_memory"] = boundary_cfg["pinned_memory"]
-    return BoundaryOptions(**kwargs)
 
 
 def build_geometry(shape, cfg):
@@ -377,7 +378,7 @@ def run_fwi(backend="eager"):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Elastic Overthrust FWI example for PyTorch and CUDA propagators.")
+    parser = argparse.ArgumentParser(description="Elastic Marmousi FWI example for PyTorch and CUDA propagators.")
     parser.add_argument(
         "--import-mode",
         choices=("env", "source"),

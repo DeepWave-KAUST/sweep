@@ -1,4 +1,4 @@
-# Acoustic LSRTM with Torch and CUDA
+# 2D Acoustic LSRTM on Marmousi with Torch
 
 Source file:
 
@@ -140,7 +140,7 @@ stored under `docs/figures/examples/`.
 
 `loss.png`: the LSRTM loss curve across optimization steps.
 
-![Acoustic LSRTM loss curve](../figures/examples/acoustic_lsrtm_torch_loss.png)
+<img src="../../figures/examples/acoustic_lsrtm_torch_loss.png" alt="Acoustic LSRTM loss curve" width="420">
 
 `epoch_0100.png`: the saved panel at epoch 100, showing the migrated reflectivity
 and the current reflectivity gradient.

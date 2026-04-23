@@ -18,6 +18,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from plotting import gather_extent, plot_loss_curve
 
 import jax
 import jax.numpy as jnp
@@ -85,13 +86,22 @@ def save_wavelet_figure(wave, output_dir):
     plt.close()
 
 
-def save_observed_figure(obs, output_dir):
+def save_observed_figure(obs, receivers, cfg, output_dir):
     shot = np.asarray(obs[-1].squeeze())
     vmin, vmax = np.percentile(shot, [2, 98])
     plt.figure(figsize=(6, 4))
-    plt.imshow(shot, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
-    plt.colorbar()
+    plt.imshow(
+        shot,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="seismic",
+        aspect="auto",
+        extent=gather_extent(shot.shape[0], cfg["dt"], receivers, cfg["dh"]),
+    )
+    plt.colorbar(label="Amplitude")
     plt.title("Observed Shot Gather")
+    plt.xlabel("Distance (m)")
+    plt.ylabel("Time (s)")
     plt.tight_layout()
     plt.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close()
@@ -115,8 +125,7 @@ def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black", label="Loss")
-    ax.legend()
+    plot_loss_curve(ax, losses, "Mean Squared Error")
     ax.set_title("FWI Loss")
     plt.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
@@ -146,7 +155,7 @@ def main():
 
     true_vp = jnp.array(true_model)
     obs = solver(wave, sources, receivers, models=[true_vp])
-    save_observed_figure(obs, output_dir)
+    save_observed_figure(obs, receivers, cfg, output_dir)
 
     wave_jax = jnp.asarray(wave)
     sources_jax = jnp.asarray(sources)

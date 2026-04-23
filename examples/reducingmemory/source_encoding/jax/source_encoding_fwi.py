@@ -18,6 +18,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from plotting import gather_extent, plot_loss_curve
 
 import jax
 import jax.numpy as jnp
@@ -108,28 +109,42 @@ def save_wavelet_figure(wave, output_dir):
     plt.close()
 
 
-def save_observed_figure(obs, output_dir):
+def save_observed_figure(obs, receivers, cfg, output_dir):
     shot = np.asarray(obs[-1].squeeze())
     vmin, vmax = np.percentile(shot, [2, 98])
     plt.figure(figsize=(6, 4))
-    plt.imshow(shot, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
-    plt.colorbar()
+    plt.imshow(
+        shot,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="seismic",
+        aspect="auto",
+        extent=gather_extent(shot.shape[0], cfg["dt"], receivers, cfg["dh"]),
+    )
+    plt.colorbar(label="Amplitude")
     plt.title("Observed Shot Gather")
+    plt.xlabel("Distance (m)")
+    plt.ylabel("Time (s)")
     plt.tight_layout()
     plt.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def save_encoded_data_figure(encoded_obs, encoded_syn, epoch, output_dir):
+def save_encoded_data_figure(encoded_obs, encoded_syn, receivers, cfg, epoch, output_dir):
     obs_np = np.asarray(encoded_obs).squeeze()
     syn_np = np.asarray(encoded_syn).squeeze()
     vmin, vmax = np.percentile(obs_np, [2, 98])
 
     fig, axes = plt.subplots(1, 2, figsize=(7, 5))
-    axes[0].imshow(obs_np, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+    extent = gather_extent(obs_np.shape[0], cfg["dt"], receivers, cfg["dh"])
+    axes[0].imshow(obs_np, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto", extent=extent)
     axes[0].set_title("Encoded Observed Data")
-    axes[1].imshow(syn_np, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+    axes[0].set_xlabel("Distance (m)")
+    axes[0].set_ylabel("Time (s)")
+    axes[1].imshow(syn_np, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto", extent=extent)
     axes[1].set_title("Encoded Synthetic Data")
+    axes[1].set_xlabel("Distance (m)")
+    axes[1].set_ylabel("Time (s)")
     plt.tight_layout()
     plt.savefig(output_dir / f"data_epoch_{epoch:04d}.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -153,8 +168,7 @@ def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black", label="Loss")
-    ax.legend()
+    plot_loss_curve(ax, losses, "Mean Squared Error")
     ax.set_title("FWI Loss")
     plt.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
@@ -185,7 +199,7 @@ def main():
 
     true_vp = jnp.array(true_model)
     obs = solver(wave, sources, receivers, models=[true_vp])
-    save_observed_figure(obs, output_dir)
+    save_observed_figure(obs, receivers, cfg, output_dir)
 
     sources_jax = jnp.array(sources)
     receivers_shared = jnp.array(receivers[:1])
@@ -255,7 +269,7 @@ def main():
         print(f"Epoch {epoch:04d} | Loss: {loss_value:.6e}")
 
         if epoch % cfg["show_every"] == 0:
-            save_encoded_data_figure(encoded_obs, encoded_syn, epoch, output_dir)
+            save_encoded_data_figure(encoded_obs, encoded_syn, receivers_shared, cfg, epoch, output_dir)
             save_progress_figure(
                 true_model,
                 np.asarray(vp),

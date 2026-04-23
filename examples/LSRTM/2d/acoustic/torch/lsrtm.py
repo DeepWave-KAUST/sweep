@@ -16,6 +16,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from plotting import gather_extent, plot_loss_curve
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -187,15 +188,22 @@ def save_wavelet_figure(wave, output_dir):
     plt.close(fig)
 
 
-def save_observed_figure(obs, output_dir):
+def save_observed_figure(obs, receivers, cfg, output_dir):
     shot = obs[-1].squeeze().T
     vmin, vmax = np.percentile(shot, [2, 98])
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-    im = ax.imshow(shot, vmin=vmin, vmax=vmax, cmap="seismic", aspect="auto")
+    im = ax.imshow(
+        shot,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="seismic",
+        aspect="auto",
+        extent=gather_extent(shot.shape[0], cfg["dt"], receivers, cfg["dh"]),
+    )
     fig.colorbar(im, ax=ax, shrink=0.9, label="Amplitude")
     ax.set_title("Scattered Observed Shot Gather")
-    ax.set_xlabel("Receiver Index")
-    ax.set_ylabel("Time Sample")
+    ax.set_xlabel("Distance (m)")
+    ax.set_ylabel("Time (s)")
     fig.tight_layout()
     fig.savefig(output_dir / "observed_data.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -222,8 +230,7 @@ def save_progress_figure(true_model, ref, grad_ref, losses, epoch, cfg, output_d
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 3))
-    ax.plot(losses, color="black", label="Loss")
-    ax.legend()
+    plot_loss_curve(ax, losses, "Mean Squared Error")
     ax.set_title("LSRTM Loss")
     fig.tight_layout()
     fig.savefig(output_dir / "loss.png", dpi=300, bbox_inches="tight")
@@ -277,7 +284,7 @@ def run_lsrtm(backend="eager", cuda_memory="full", epochs=None):
 
     obs = generate_observed_data(acoustic_solver, wave, sources, receivers, true_model, smooth_model, dev)
     obs_np = obs.detach().cpu().numpy()
-    save_observed_figure(obs_np, output_dir)
+    save_observed_figure(obs_np, receivers, cfg, output_dir)
 
     vp = torch.from_numpy(smooth_model).to(dev)
     ref = torch.zeros_like(vp, requires_grad=True)

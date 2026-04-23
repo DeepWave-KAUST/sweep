@@ -44,4 +44,4 @@ Source encoding is most useful when:
 `loss.png` from the JAX source-encoding run: the source-encoding FWI loss curve
 for the JAX example under `examples/reducingmemory/source_encoding/jax/`.
 
-![JAX source-encoding loss curve](../figures/examples/source_encoding_jax_loss.png)
+<img src="../../figures/examples/source_encoding_jax_loss.png" alt="JAX source-encoding loss curve" width="420">

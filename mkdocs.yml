@@ -52,14 +52,16 @@ nav:
       - CLI: user-guide/cli.md
   - Examples:
       - Overview: examples/index.md
-      - Acoustic FWI with Torch and CUDA: examples/acoustic_fwi_torch.md
-      - Acoustic LSRTM with Torch and CUDA: examples/acoustic_lsrtm_torch.md
-      - 3D Acoustic FWI with Torch and CUDA: examples/acoustic_fwi_3d_torch.md
-      - Acoustic FWI with JAX: examples/acoustic_fwi_jax.md
+      - 2D Acoustic FWI on Marmousi with Torch: examples/acoustic_fwi_torch.md
+      - 2D Elastic FWI on Marmousi with Torch: examples/elastic_fwi_torch_marmousi.md
+      - 2D Elastic FWI on Overthrust with Torch: examples/elastic_fwi_torch_overthrust.md
+      - 2D Acoustic LSRTM on Marmousi with Torch: examples/acoustic_lsrtm_torch.md
+      - 2D Acoustic FWI on Marmousi with JAX: examples/acoustic_fwi_jax.md
+      - 3D Acoustic FWI on Overthrust with Torch: examples/acoustic_fwi_3d_torch.md
+      - 3D Acoustic LSRTM on Overthrust with Torch: examples/acoustic_lsrtm_3d_torch.md
       - Reducing Memory:
           - Overview: examples/reducing_memory.md
-          - Acoustic FWI with Source Encoding: examples/acoustic_fwi_encoding_torch.md
-          - Source Encoding Overview: examples/source_encoding_overview.md
+          - 2D Acoustic FWI with Source Encoding on Marmousi with Torch: examples/acoustic_fwi_encoding_torch.md
           - Memory Method Compare: examples/memory_method_compare.md
       - Wavefield Examples:
           - Overview: examples/wavefields.md
@@ -77,6 +79,7 @@ nav:
           - Acoustic3D: api/equations/acoustic3d.md
           - AcousticVRZ: api/equations/acoustic_vrz.md
           - AcousticLSRTM: api/equations/acoustic_lsrtm.md
+          - AcousticLSRTM3D: api/equations/acoustic_lsrtm3d.md
           - Acoustic1st: api/equations/acoustic1st.md
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md

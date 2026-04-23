@@ -117,6 +117,7 @@ wavefields, and backend or binding behavior for each equation:
 - [Acoustic3D](acoustic3d.md)
 - [AcousticVRZ](acoustic_vrz.md)
 - [AcousticLSRTM](acoustic_lsrtm.md)
+- [AcousticLSRTM3D](acoustic_lsrtm3d.md)
 - [Acoustic1st](acoustic1st.md)
 - [Elastic](elastic.md)
 - [Elastic3D](elastic3d.md)

@@ -25,7 +25,7 @@ batchsize = 8
 step_per_epoch = 4
 batch_per_step = int(batchsize / step_per_epoch)
 show_every = 10
-source_encoding = False
+source_encoding = True
 wavelet_scale = 1e6
 
 
@@ -80,6 +80,16 @@ _FWI_3D_ACOUSTIC_COMMON = {
     "model_stride_x": 4,
 }
 
+_LSRTM_3D_ACOUSTIC_COMMON = {
+    **_FWI_3D_ACOUSTIC_COMMON,
+    "output_dir": "acoustic_3d_lsrtm_overthrust",
+    "epochs": 51,
+    "show_every": 10,
+    "batchsize": 2,
+    "forward_batchsize": 1,
+    "lr_ref": 5e-2,
+}
+
 
 _CONFIGS = {
     "fwi_2d_elastic_jax": {
@@ -126,6 +136,30 @@ _CONFIGS = {
     },
     "fwi_3d_acoustic_torch_cuda": {
         "output_dir": "acoustic_3d_fwi_overthrust_cuda",
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "gpu",
+            "transfer_interval": 4,
+            "pinned_memory": True,
+        },
+    },
+    "lsrtm_3d_acoustic_jax": {
+        **_LSRTM_3D_ACOUSTIC_COMMON,
+        "output_dir": "acoustic_3d_lsrtm_overthrust_jax",
+        "use_ckpt": True,
+        "ckpt_chunks": 16,
+    },
+    "lsrtm_3d_acoustic_torch_common": {
+        **_LSRTM_3D_ACOUSTIC_COMMON,
+    },
+    "lsrtm_3d_acoustic_torch_eager": {
+        "output_dir": "acoustic_3d_lsrtm_overthrust_torch",
+        "use_compile": True,
+        "use_ckpt": True,
+        "ckpt_chunks": 16,
+    },
+    "lsrtm_3d_acoustic_torch_cuda": {
+        "output_dir": "acoustic_3d_lsrtm_overthrust_cuda",
         "boundary_saving_config": {
             "enabled": True,
             "storage": "gpu",

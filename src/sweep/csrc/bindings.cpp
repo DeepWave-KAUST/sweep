@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include "equations/acoustic2d/acoustic2d.h"
 #include "equations/acoustic_lsrtm2d/acoustic_lsrtm2d.h"
+#include "equations/acoustic_lsrtm3d/acoustic_lsrtm3d.h"
 #include "equations/acoustic_vrz2d/acoustic_vrz2d.h"
 #include "equations/acoustic3d/acoustic3d.h"
 #include "equations/elastic2d/elastic2d.h"
@@ -19,6 +20,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic_lsrtm2d_backward_bs", wrap_backward(acoustic_lsrtm2d::backward_bs), "Acoustic LSRTM backward with boundary saving 2D (CUDA)");
     m.def("acoustic_lsrtm2d_backward_ckpt", wrap_backward(acoustic_lsrtm2d::backward_ckpt), "Acoustic LSRTM backward with checkpointing 2D (CUDA)");
     m.def("acoustic_lsrtm2d_backward_recursive_ckpt", wrap_backward(acoustic_lsrtm2d::backward_recursive_ckpt), "Acoustic LSRTM backward with recursive checkpointing 2D (CUDA)");
+    m.def("acoustic_lsrtm3d_forward", wrap_forward(acoustic_lsrtm3d::forward), "Acoustic LSRTM forward 3D (CUDA)");
+    m.def("acoustic_lsrtm3d_backward", wrap_backward(acoustic_lsrtm3d::backward), "Acoustic LSRTM backward 3D (CUDA)");
+    m.def("acoustic_lsrtm3d_backward_bs", wrap_backward(acoustic_lsrtm3d::backward_bs), "Acoustic LSRTM backward with boundary saving 3D (CUDA)");
+    m.def("acoustic_lsrtm3d_backward_ckpt", wrap_backward(acoustic_lsrtm3d::backward_ckpt), "Acoustic LSRTM backward with checkpointing 3D (CUDA)");
+    m.def("acoustic_lsrtm3d_backward_recursive_ckpt", wrap_backward(acoustic_lsrtm3d::backward_recursive_ckpt), "Acoustic LSRTM backward with recursive checkpointing 3D (CUDA)");
     m.def("acoustic_vrz2d_forward", wrap_forward(acoustic_vrz2d::forward), "Acoustic VRZ forward 2D (CUDA)");
     m.def("acoustic_vrz2d_backward", wrap_backward(acoustic_vrz2d::backward), "Acoustic VRZ backward 2D (CUDA)");
     m.def("acoustic_vrz2d_backward_bs", wrap_backward(acoustic_vrz2d::backward_bs), "Acoustic VRZ backward with boundary saving 2D (CUDA)");

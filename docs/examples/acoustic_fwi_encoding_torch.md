@@ -1,4 +1,4 @@
-# Acoustic FWI with Source Encoding
+# 2D Acoustic FWI with Source Encoding on Marmousi with Torch
 
 Source file:
 
@@ -137,7 +137,7 @@ matching the encoded target.
 
 `loss.png`: the source-encoding FWI loss curve across optimization steps.
 
-![Source-encoding loss curve](../figures/examples/acoustic_fwi_encoding_loss.png)
+<img src="../../figures/examples/acoustic_fwi_encoding_loss.png" alt="Source-encoding loss curve" width="420">
 
 ## Main Configuration
 

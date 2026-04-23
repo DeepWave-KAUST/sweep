@@ -1,6 +1,8 @@
 # SWEEP
 Seismic Wave Equation Exploration Platform (SWEEP) is a Python package for seismic wave-equation modeling, migration, and inversion.
 
+Documentation: https://deepwave-kaust.github.io/sweep/
+
 Recent interface updates:
 
 - lazy imports are supported, so you only need to install the backend you plan to use

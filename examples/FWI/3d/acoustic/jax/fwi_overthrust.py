@@ -128,7 +128,7 @@ def main():
             models=[true_vp],
             shot_batchsize=forward_batchsize,
         )
-    save_observed_figure(obs, output_dir)
+    save_observed_figure(obs, receivers, cfg, output_dir)
 
     wave_jax = jnp.asarray(wave)
     sources_jax = jnp.asarray(sources)
@@ -180,6 +180,7 @@ def main():
                 epoch,
                 cfg,
                 output_dir,
+                loss_ylabel="Mean Squared Error",
             )
 
 

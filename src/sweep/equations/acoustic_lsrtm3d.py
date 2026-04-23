@@ -1,0 +1,199 @@
+from .base import SecondOrderEquation
+from .cuda_layout import CUDALayoutSpec
+from .fields import FieldSpec
+
+
+def step_cpml(
+    u_now,
+    u_pre,
+    psix,
+    psiy,
+    psiz,
+    zetax,
+    zetay,
+    zetaz,
+    su_now,
+    su_pre,
+    spsix,
+    spsiy,
+    spsiz,
+    szetax,
+    szetay,
+    szetaz,
+    vp,
+    ref,
+    dt,
+    h,
+    b,
+    lap_x,
+    lap_y,
+    lap_z,
+    lap_sx,
+    lap_sy,
+    lap_sz,
+    pml,
+    grad_op,
+):
+    az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = pml
+
+    dudz = grad_op(u_now, h, -3)
+    dudy = grad_op(u_now, h, -2)
+    dudx = grad_op(u_now, h, -1)
+    dsudz = grad_op(su_now, h, -3)
+    dsudy = grad_op(su_now, h, -2)
+    dsudx = grad_op(su_now, h, -1)
+
+    w_sum = 0.0
+
+    tmpz = ((1 + bz) * lap_z + dbzdz * dudz) + grad_op(az * psiz, h, -3)
+    w_sum += (1 + bz) * tmpz + az * zetaz
+    psizn = bz * dudz + az * psiz
+    zetaz = bz * tmpz + az * zetaz
+
+    tmpy = ((1 + by) * lap_y + dbydy * dudy) + grad_op(ay * psiy, h, -2)
+    w_sum += (1 + by) * tmpy + ay * zetay
+    psiyn = by * dudy + ay * psiy
+    zetay = by * tmpy + ay * zetay
+
+    tmpx = ((1 + bx) * lap_x + dbxdx * dudx) + grad_op(ax * psix, h, -1)
+    w_sum += (1 + bx) * tmpx + ax * zetax
+    psixn = bx * dudx + ax * psix
+    zetax = bx * tmpx + ax * zetax
+
+    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
+
+    sw_sum = 0.0
+
+    stmpz = ((1 + bz) * lap_sz + dbzdz * dsudz) + grad_op(az * spsiz, h, -3)
+    sw_sum += (1 + bz) * stmpz + az * szetaz
+    spsizn = bz * dsudz + az * spsiz
+    szetaz = bz * stmpz + az * szetaz
+
+    stmpy = ((1 + by) * lap_sy + dbydy * dsudy) + grad_op(ay * spsiy, h, -2)
+    sw_sum += (1 + by) * stmpy + ay * szetay
+    spsiyn = by * dsudy + ay * spsiy
+    szetay = by * stmpy + ay * szetay
+
+    stmpx = ((1 + bx) * lap_sx + dbxdx * dsudx) + grad_op(ax * spsix, h, -1)
+    sw_sum += (1 + bx) * stmpx + ax * szetax
+    spsixn = bx * dsudx + ax * spsix
+    szetax = bx * stmpx + ax * szetax
+
+    su_next = 2 * su_now - su_pre + vp**2 * dt**2 * sw_sum + ref * vp**2 * dt**2 * w_sum
+
+    return (
+        u_next,
+        u_now,
+        psixn,
+        psiyn,
+        psizn,
+        zetax,
+        zetay,
+        zetaz,
+        su_next,
+        su_now,
+        spsixn,
+        spsiyn,
+        spsizn,
+        szetax,
+        szetay,
+        szetaz,
+    )
+
+
+class AcousticLSRTM3D(SecondOrderEquation):
+    FIELD_SPECS = (
+        FieldSpec("h1", aliases=("pressure", "p", "background"), description="Background 3D acoustic pressure-like wavefield.", supports_source=True),
+        FieldSpec("h2", aliases=("pressure_prev", "background_prev"), description="Previous-step background wavefield.", internal=True),
+        FieldSpec("psix", description="Background CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiy", description="Background CPML memory variable for the y-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiz", description="Background CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("zetax", description="Background CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetay", description="Background CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetaz", description="Background CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+        FieldSpec("sh1", aliases=("scattered", "scattered_pressure", "data"), description="Scattered 3D acoustic wavefield used for LSRTM data prediction.", supports_receiver=True),
+        FieldSpec("sh2", aliases=("scattered_prev",), description="Previous-step scattered wavefield.", internal=True),
+        FieldSpec("spsix", description="Scattered-wave CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("spsiy", description="Scattered-wave CPML memory variable for the y-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("spsiz", description="Scattered-wave CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("szetax", description="Scattered-wave CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("szetay", description="Scattered-wave CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True),
+        FieldSpec("szetaz", description="Scattered-wave CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+    )
+
+    def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        super().__init__(spatial_order, device, backend, dim=3)
+        super().init_laplace(ltype="3dsep")
+
+    @property
+    def models(self):
+        return ["vp", "mp"]
+
+    @property
+    def wavefields(self):
+        return [
+            "h1",
+            "h2",
+            "psix",
+            "psiy",
+            "psiz",
+            "zetax",
+            "zetay",
+            "zetaz",
+            "sh1",
+            "sh2",
+            "spsix",
+            "spsiy",
+            "spsiz",
+            "szetax",
+            "szetay",
+            "szetaz",
+        ]
+
+    @property
+    def field_specs(self):
+        return list(self.FIELD_SPECS)
+
+    def func(self, *args, **kwargs):
+        dh = args[19]
+        hz, hy, hx = self._spacings_3d(dh)
+        lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, hz, hy, hx)
+        lap_sz, lap_sy, lap_sx = self.laplace3d_sep(args[8], self.laplace_kernels, hz, hy, hx)
+        return step_cpml(
+            *args,
+            lap_x,
+            lap_y,
+            lap_z,
+            lap_sx,
+            lap_sy,
+            lap_sz,
+            self.b,
+            self.gradient,
+        )
+
+    def _C(self):
+        from sweep._C import (
+            acoustic_lsrtm3d_forward,
+            acoustic_lsrtm3d_backward,
+            acoustic_lsrtm3d_backward_bs,
+            acoustic_lsrtm3d_backward_ckpt,
+            acoustic_lsrtm3d_backward_recursive_ckpt,
+        )
+
+        return (
+            acoustic_lsrtm3d_forward,
+            acoustic_lsrtm3d_backward,
+            acoustic_lsrtm3d_backward_bs,
+            acoustic_lsrtm3d_backward_ckpt,
+            acoustic_lsrtm3d_backward_recursive_ckpt,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=6,
+            pml_nvar=12,
+            last_two_nvar=2,
+            last_two_storage_nvar=1,
+            checkpoint_nvar=8,
+        )

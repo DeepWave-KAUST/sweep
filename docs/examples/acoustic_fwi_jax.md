@@ -1,4 +1,4 @@
-# Acoustic FWI with JAX
+# 2D Acoustic FWI on Marmousi with JAX
 
 Source file:
 

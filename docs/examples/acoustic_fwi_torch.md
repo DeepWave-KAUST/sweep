@@ -1,4 +1,4 @@
-# Acoustic FWI with Torch and CUDA
+# 2D Acoustic FWI on Marmousi with Torch
 
 Source file:
 
@@ -183,7 +183,7 @@ The following figures show two common outputs from a completed acoustic FWI run.
 
 `loss.png`: the inversion loss curve across optimization steps.
 
-![Acoustic FWI loss curve](../figures/examples/acoustic_fwi_torch_loss.png)
+<img src="../../figures/examples/acoustic_fwi_torch_loss.png" alt="Acoustic FWI loss curve" width="420">
 
 `epoch_0100.png`: the saved progress panel at the final shown epoch, including
 the true model, the current inverted model, and the current gradient.

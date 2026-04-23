@@ -105,6 +105,27 @@ _CONFIGS = {
         "use_ckpt": False,
         "ckpt_chunks": 128,
     },
+    "fwi_2d_elastic_torch_common": {
+        **_FWI_2D_ELASTIC_COMMON,
+        "fix_top_layers": 0,
+    },
+    "fwi_2d_elastic_torch_eager": {
+        "output_dir": "elastic_fwi_marmousi_torch",
+        "use_compile": True,
+        "use_ckpt": False,
+        "ckpt_chunks": 128,
+        "record_layout": "standard",
+    },
+    "fwi_2d_elastic_torch_cuda": {
+        "output_dir": "elastic_fwi_marmousi_cuda",
+        "record_layout": "cuda",
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "gpu",
+            "transfer_interval": 10,
+            "pinned_memory": True,
+        },
+    },
 }
 
 

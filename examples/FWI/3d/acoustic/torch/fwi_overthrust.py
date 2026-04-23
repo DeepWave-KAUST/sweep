@@ -260,7 +260,7 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
             f"Forward modeling time ({backend}, batched {forward_batchsize} shots/step): "
             f"{elapsed_ms:.2f} ms"
         )
-    save_observed_figure(obs, output_dir)
+    save_observed_figure(obs, receivers, cfg, output_dir)
 
     inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
     optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)
@@ -299,7 +299,16 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
         if epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
             grad_np = inv_vp.grad.detach().cpu().numpy()
-            save_progress_figure(true_model, vp_np, grad_np, losses, epoch, cfg, output_dir)
+            save_progress_figure(
+                true_model,
+                vp_np,
+                grad_np,
+                losses,
+                epoch,
+                cfg,
+                output_dir,
+                loss_ylabel="Sum of Squared Error",
+            )
 
 
 def parse_args():
