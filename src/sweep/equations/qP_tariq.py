@@ -1,4 +1,5 @@
 from .base import SecondOrderEquation
+from .fields import ModelSpec
 
 
 def step_cpml(
@@ -59,6 +60,11 @@ class AcousticTariq(SecondOrderEquation):
 
        Reference: Alkhalifah Tariq, 10.1190/1.1444815
     """
+    MODEL_SPECS = (
+        ModelSpec("vv", description="Squared vertical velocity-like parameter for the Tariq qP formulation."),
+        ModelSpec("v", aliases=("velocity",), description="Velocity-like parameter for the Tariq qP formulation.", unit="m/s"),
+        ModelSpec("eta", description="Anellipticity parameter for the Tariq qP formulation."),
+    )
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         super().__init__(spatial_order, device, backend, other_kernels=True)
@@ -67,7 +73,7 @@ class AcousticTariq(SecondOrderEquation):
 
     @property
     def models(self):
-        return ["vv", "v", "eta"]
+        return [spec.name for spec in self.MODEL_SPECS]
 
     @property
     def wavefields(self):

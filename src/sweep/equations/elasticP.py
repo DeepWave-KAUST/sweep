@@ -1,6 +1,7 @@
 import torch
 import jax.numpy as jnp
 from .base import FirstOrderEquation
+from .fields import ModelSpec
 
 def step(vx, vz, txx, tzz, txz,
          vp, vs, rho, 
@@ -57,6 +58,11 @@ class ElasticP(FirstOrderEquation):
     """This class implements the 2D elastic wave equation for pure P-mode waves.
        Mu and Alkhalifah, 2024, 10.1111/1365-2478.13610
     """
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
+        ModelSpec("vs", aliases=("s_velocity",), description="Elastic S-wave velocity model.", unit="m/s"),
+        ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
+    )
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         self.backend = backend
@@ -69,7 +75,7 @@ class ElasticP(FirstOrderEquation):
 
     @property
     def models(self):
-        return ['vp', 'vs', 'rho']
+        return [spec.name for spec in self.MODEL_SPECS]
     
     @property
     def wavefields(self):

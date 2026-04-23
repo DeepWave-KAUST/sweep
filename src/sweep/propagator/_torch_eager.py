@@ -55,6 +55,12 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         self._mark_compile_step_begin()
         return self.step_func(*wavefield, *fixargs)
 
+    def _prepare_runtime_models(self, models):
+        prepare = getattr(self.equation, "prepare_models", None)
+        if callable(prepare):
+            return prepare(models)
+        return models
+
     def _resolve_snapshot_times(self, nt, return_wavefield, snapshot_times, snapshot_interval):
         if not return_wavefield:
             return []
@@ -105,6 +111,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
 
     def _run_chunk(self, wavefield, fixargs, wavelet, nt, start_t, chunk_size, src, rec, record_shape, adj=False):
         chunk_record = self._get_chunk_record_buffer(record_shape, dtype=wavefield[0].dtype)
+        multi_receiver = len(self.receiver_indices) > 1
         for local_i in range(chunk_size):
             t = start_t + local_i
             if t >= nt:
@@ -113,8 +120,12 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             time = t if not adj else nt - t - 1
             for source_idx in self.source_indices:
                 wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
-            for ic, receiver_idx in enumerate(self.receiver_indices):
-                chunk_record[:, local_i, :, ic] = rec(wavefield[receiver_idx]).view(
+            if multi_receiver:
+                sampled = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+                chunk_record[:, local_i, :, :] = sampled
+            else:
+                receiver_idx = self.receiver_indices[0]
+                chunk_record[:, local_i, :, 0] = rec(wavefield[receiver_idx]).view(
                     record_shape[0], record_shape[2]
                 )
         return tuple(wavefield), chunk_record
@@ -162,7 +173,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
         self.models_padded = models
-        fixargs = models + [self.dt, self.dh, None]
+        runtime_models = self._prepare_runtime_models(models)
+        fixargs = runtime_models + [self.dt, self.dh, None]
         wavefield = self._get_wavefield_buffers(shape_wavefield)
         if self.use_ckpt and self.ckpt_mode != "chunk":
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}' for PropTorch. Expected 'chunk'.")
@@ -182,7 +194,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 def checkpoint_chunk(*chunk_inputs, start_t=start_t):
                     state = list(chunk_inputs[:num_wavefields])
                     chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
-                    chunk_fixargs = chunk_models + [self.dt, self.dh, None]
+                    chunk_runtime_models = self._prepare_runtime_models(chunk_models)
+                    chunk_fixargs = chunk_runtime_models + [self.dt, self.dh, None]
                     return self._run_chunk(
                         state,
                         chunk_fixargs,
@@ -201,18 +214,22 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 end_t = min(start_t + chunk_size, nt)
                 record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
         else:
+            multi_receiver = len(self.receiver_indices) > 1
             for i in range(nt):
                 wavefield = list(self._compiled_step(wavefield, fixargs))
+                time = i if not adj else nt - i - 1
                 for source_idx in self.source_indices:
-                    time = i if not adj else nt - i - 1
                     wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
                 if return_wavefield and i in snapshot_lookup:
                     snapshots[snapshot_lookup[i]] = torch.stack(
                         [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
                         0,
                     )
-                for ic, receiver_idx in enumerate(self.receiver_indices):
-                    record[:, i, :, ic] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+                if multi_receiver:
+                    record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+                else:
+                    receiver_idx = self.receiver_indices[0]
+                    record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
 
         self.last_wavefields = tuple(wavefield) if self.store_last_wavefield else None
         # The eager backend reuses internal workspace buffers across calls.

@@ -1,6 +1,6 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
-from .fields import FieldSpec
+from .fields import FieldSpec, ModelSpec
 
 def step(u_now, u_pre, psix, psiz, zetax, zetaz, 
          su_now, su_pre, spsix, spsiz, szetax, szetaz, 
@@ -63,6 +63,10 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
             su_next, su_now, spsixn, spsiyn, szetax, szetaz
 
 class AcousticLSRTM(SecondOrderEquation):
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("velocity",), description="Background acoustic velocity model.", unit="m/s"),
+        ModelSpec("mp", aliases=("reflectivity", "ref"), description="Acoustic reflectivity perturbation used for LSRTM."),
+    )
     FIELD_SPECS = (
         FieldSpec("h1", aliases=("pressure", "p", "background"), description="Background acoustic pressure-like wavefield.", supports_source=True),
         FieldSpec("h2", aliases=("pressure_prev", "background_prev"), description="Previous-step background wavefield.", internal=True),
@@ -89,17 +93,16 @@ class AcousticLSRTM(SecondOrderEquation):
     
     @property
     def models(self):
-        return ['vp', 'mp']
+        return [spec.name for spec in self.MODEL_SPECS]
     
     @property
     def wavefields(self):
-        return ['h1', 'h2', 'psix', 'psiz', 'zetax', 'zetaz',
-                'sh1', 'sh2', 'spsix', 'spsiz', 'szetax', 'szetaz']
+        return [spec.name for spec in self.FIELD_SPECS]
 
     @property
     def field_specs(self):
         return list(self.FIELD_SPECS)
-    
+
     def func(self, *args, **kwargs):
         dh = args[15]
         hz, hx = self._spacings_2d(dh)

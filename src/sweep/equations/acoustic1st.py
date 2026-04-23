@@ -1,5 +1,5 @@
 from .base import FirstOrderEquation
-from .fields import FieldSpec, ensure_field_specs
+from .fields import FieldSpec, ModelSpec, ensure_field_specs
 
 def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None):
 
@@ -62,6 +62,11 @@ class Acoustic1st(FirstOrderEquation):
 
     References: 10.1190/GEO2011-0345.1
     """
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("velocity",), description="Acoustic P-wave velocity model.", unit="m/s"),
+        ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
+    )
+
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
         super().__init__(spatial_order, device, backend)
 
@@ -77,7 +82,7 @@ class Acoustic1st(FirstOrderEquation):
     
     @property
     def models(self):
-        return ['vp', 'rho']
+        return [spec.name for spec in self.MODEL_SPECS]
     
     def wavefields_cpml(self):
         return ['p', 'vx', 'vz', 'phix', 'phiz', 'psix', 'psiz']

@@ -78,6 +78,8 @@ print([field.name for field in Acoustic.available_fields()])
 print([field.name for field in Acoustic.available_fields(role="source")])
 print([field.name for field in Acoustic.available_fields(role="receiver")])
 print(Acoustic.describe_field("pressure"))
+print([model.name for model in Acoustic.available_models()])
+print(Acoustic.describe_model("vp"))
 ```
 
 After instantiation, the same queries also work on the object:
@@ -85,6 +87,8 @@ After instantiation, the same queries also work on the object:
 ```python
 print([field.name for field in equation.available_fields()])
 print(equation.describe_field("p"))
+print([model.name for model in equation.available_models()])
+print(equation.describe_model("vp"))
 ```
 
 For this acoustic example, the main user-facing field is the pressure-like
@@ -93,6 +97,9 @@ field `h1`, which also accepts aliases such as `pressure` and `p`.
 `available_fields()` filters out internal boundary variables by default, so you
 do not need to look through CPML helper fields when choosing
 `source_type` or `receiver_type`.
+
+`available_models()` returns the ordered model parameter list expected by
+`solver(..., models=[...])`.
 
 ## Step 5. Build the solver
 

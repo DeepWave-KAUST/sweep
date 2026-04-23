@@ -1,4 +1,5 @@
 from .base import FirstOrderEquation
+from .fields import ModelSpec
 
 # 10.1190/GEO2016-0254.1
 def step(vx, vz, txx, tzz, txz,
@@ -63,12 +64,19 @@ class ElasticLSRTM(FirstOrderEquation):
 
        Reference: Feng & Schuster, 10.1190/geo2016-0254.1
     """
+    MODEL_SPECS = (
+        ModelSpec("mp", aliases=("p_reflectivity",), description="P-wave reflectivity perturbation for elastic LSRTM."),
+        ModelSpec("ms", aliases=("s_reflectivity",), description="S-wave reflectivity perturbation for elastic LSRTM."),
+        ModelSpec("vp", aliases=("p_velocity",), description="Background elastic P-wave velocity model.", unit="m/s"),
+        ModelSpec("vs", aliases=("s_velocity",), description="Background elastic S-wave velocity model.", unit="m/s"),
+        ModelSpec("rho", aliases=("density",), description="Background density model.", unit="kg/m^3"),
+    )
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
 
     @property
     def models(self):
-        return ['mp', 'ms', 'vp', 'vs', 'rho']
+        return [spec.name for spec in self.MODEL_SPECS]
     
     @property
     def wavefields(self):

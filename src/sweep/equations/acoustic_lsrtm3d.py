@@ -1,6 +1,6 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
-from .fields import FieldSpec
+from .fields import FieldSpec, ModelSpec
 
 
 def step_cpml(
@@ -102,6 +102,10 @@ def step_cpml(
 
 
 class AcousticLSRTM3D(SecondOrderEquation):
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("velocity",), description="Background 3D acoustic velocity model.", unit="m/s"),
+        ModelSpec("mp", aliases=("reflectivity", "ref"), description="3D acoustic reflectivity perturbation used for LSRTM."),
+    )
     FIELD_SPECS = (
         FieldSpec("h1", aliases=("pressure", "p", "background"), description="Background 3D acoustic pressure-like wavefield.", supports_source=True),
         FieldSpec("h2", aliases=("pressure_prev", "background_prev"), description="Previous-step background wavefield.", internal=True),
@@ -127,28 +131,11 @@ class AcousticLSRTM3D(SecondOrderEquation):
 
     @property
     def models(self):
-        return ["vp", "mp"]
+        return [spec.name for spec in self.MODEL_SPECS]
 
     @property
     def wavefields(self):
-        return [
-            "h1",
-            "h2",
-            "psix",
-            "psiy",
-            "psiz",
-            "zetax",
-            "zetay",
-            "zetaz",
-            "sh1",
-            "sh2",
-            "spsix",
-            "spsiy",
-            "spsiz",
-            "szetax",
-            "szetay",
-            "szetaz",
-        ]
+        return [spec.name for spec in self.FIELD_SPECS]
 
     @property
     def field_specs(self):

@@ -2,7 +2,7 @@
 
 from .base import WaveEquation
 from .cuda_layout import CUDALayoutSpec
-from .fields import FieldSpec
+from .fields import FieldSpec, ModelSpec
 from .acoustic_lsrtm import AcousticLSRTM
 from .acoustic_lsrtm3d import AcousticLSRTM3D
 from .acoustic1st import Acoustic1st

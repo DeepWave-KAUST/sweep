@@ -1,4 +1,5 @@
 from .base import FirstOrderEquation
+from .fields import ModelSpec
 
 def step(vx, vz, txx, tzz, txz,
          vpz, vsz, rho, 
@@ -32,13 +33,18 @@ def step(vx, vz, txx, tzz, txz,
 
 
 class ElasticZ(FirstOrderEquation):
+    MODEL_SPECS = (
+        ModelSpec("vpz", aliases=("vp",), description="Depth-dependent P-wave velocity parameter.", unit="m/s"),
+        ModelSpec("vsz", aliases=("vs",), description="Depth-dependent S-wave velocity parameter.", unit="m/s"),
+        ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
+    )
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
 
     @property
     def models(self):
-        return ['vpz', 'vsz', 'rho']
+        return [spec.name for spec in self.MODEL_SPECS]
     
     @property
     def wavefields(self):

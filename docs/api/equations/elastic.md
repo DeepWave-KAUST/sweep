@@ -50,6 +50,22 @@ entries are CPML memory variables.
 
 This class defines structured field metadata through `FieldSpec`.
 
+## Model Metadata
+
+This class defines structured model metadata through `ModelSpec`.
+
+Required models:
+
+- `vp` alias: `p_velocity`
+  Meaning: elastic P-wave velocity model
+  Units: `m/s`
+- `vs` alias: `s_velocity`
+  Meaning: elastic S-wave velocity model
+  Units: `m/s`
+- `rho` alias: `density`
+  Meaning: density model
+  Units: `kg/m^3`
+
 User-facing fields:
 
 - `vx` alias: `velocity_x`

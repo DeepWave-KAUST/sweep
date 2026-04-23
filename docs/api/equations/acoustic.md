@@ -51,6 +51,16 @@ entries are CPML auxiliary fields.
 
 This class defines structured field metadata through `FieldSpec`.
 
+## Model Metadata
+
+This class defines structured model metadata through `ModelSpec`.
+
+Required models:
+
+- `vp` alias: `velocity`
+  Meaning: acoustic P-wave velocity model
+  Units: `m/s`
+
 User-facing fields:
 
 - `h1` aliases: `pressure`, `p`

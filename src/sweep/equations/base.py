@@ -5,7 +5,13 @@ from sweep.operators.general import PartialDerivative
 from sweep.scalars import generate_convolution_kernel
 from sweep.operators.factory import OperatorBase
 from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
-from .fields import available_role_specs, ensure_field_specs, format_field_specs
+from .fields import (
+    available_role_specs,
+    ensure_field_specs,
+    ensure_model_specs,
+    format_field_specs,
+    format_model_specs,
+)
 from .cuda_layout import CUDALayoutSpec
 
 
@@ -56,7 +62,16 @@ class WaveEquation:
 
     @property
     def field_specs(self):
+        # FieldSpec order is semantically significant. The propagators map
+        # source/receiver names to positional wavefield indices, and equation
+        # step functions are expected to return tensors in the same order.
+        # Reordering field specs therefore changes forward/backward behavior,
+        # source injection, receiver sampling, checkpointing, and CUDA bindings.
         return ensure_field_specs(self.wavefields, [])
+
+    @property
+    def model_specs(self):
+        return ensure_model_specs(self.models, [])
 
     @classmethod
     def _field_specs_for_query(cls):
@@ -76,11 +91,51 @@ class WaveEquation:
         return list(equation.field_specs)
 
     @classmethod
+    def _model_specs_for_query(cls):
+        model_specs = getattr(cls, "MODEL_SPECS", None)
+        if model_specs is not None:
+            return ensure_model_specs(cls._model_names_for_query(), list(model_specs))
+
+        try:
+            equation = cls()
+        except Exception as exc:
+            raise TypeError(
+                f"{cls.__name__} does not define class-level MODEL_SPECS, so querying models "
+                "from the class requires instantiation. Instantiate the equation first or "
+                "define MODEL_SPECS on the class."
+            ) from exc
+
+        return list(equation.model_specs)
+
+    @classmethod
+    def _model_names_for_query(cls):
+        model_specs = getattr(cls, "MODEL_SPECS", None)
+        if model_specs is not None:
+            return [spec.name for spec in model_specs]
+        try:
+            equation = cls()
+        except Exception as exc:
+            raise TypeError(
+                f"{cls.__name__} does not define class-level MODEL_SPECS, so querying model names "
+                "from the class requires instantiation. Instantiate the equation first or "
+                "define MODEL_SPECS on the class."
+            ) from exc
+        return list(equation.models)
+
+    @classmethod
     def _field_specs_from_target(cls, target):
         if isinstance(target, WaveEquation):
             return list(target.field_specs)
         if isinstance(target, type) and issubclass(target, WaveEquation):
             return target._field_specs_for_query()
+        raise TypeError("target must be a WaveEquation instance or subclass")
+
+    @classmethod
+    def _model_specs_from_target(cls, target):
+        if isinstance(target, WaveEquation):
+            return list(target.model_specs)
+        if isinstance(target, type) and issubclass(target, WaveEquation):
+            return target._model_specs_for_query()
         raise TypeError("target must be a WaveEquation instance or subclass")
 
     @property
@@ -138,6 +193,22 @@ class WaveEquation:
                 return f"{spec.name}: {spec.description}{alias_text}".strip()
         available = format_field_specs(specs)
         raise KeyError(f"Unknown field '{name}'. Available fields:\n{available}")
+
+    @hybridmethod
+    def available_models(target):
+        return WaveEquation._model_specs_from_target(target)
+
+    @hybridmethod
+    def describe_model(target, name):
+        specs = WaveEquation._model_specs_from_target(target)
+        for spec in specs:
+            if spec.name == name or name in spec.aliases:
+                alias_text = f" Aliases: {', '.join(spec.aliases)}." if spec.aliases else ""
+                unit_text = f" Units: {spec.unit}." if spec.unit else ""
+                req_text = "" if spec.required else " Optional."
+                return f"{spec.name}: {spec.description}{alias_text}{unit_text}{req_text}".strip()
+        available = format_model_specs(specs)
+        raise KeyError(f"Unknown model '{name}'. Available models:\n{available}")
 
     @property
     def cuda_layout(self):

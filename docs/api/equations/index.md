@@ -19,8 +19,10 @@ Every equation exposes:
 - `models`: ordered model names required by `solver(..., models=[...])`
 - `wavefields`: full internal wavefield list, including auxiliary and CPML fields
 
-Most user-facing equations now also expose structured field metadata through
-`FieldSpec` and helper methods on the base `WaveEquation`:
+Most user-facing equations now also expose structured metadata through
+`FieldSpec` and `ModelSpec`, plus helper methods on the base `WaveEquation`.
+
+Field metadata helpers:
 
 - `available_fields()`
 - `available_fields(role="source")`
@@ -29,9 +31,39 @@ Most user-facing equations now also expose structured field metadata through
 - `default_source_fields`
 - `default_receiver_fields`
 
+Model metadata helpers:
+
+- `available_models()`
+- `describe_model(name)`
+
 `available_fields()` is the recommended way to discover what users should pass
 into `source_type` and `receiver_type`. By default it filters out internal and
 boundary-related fields such as CPML memory variables.
+
+`available_models()` is the recommended way to discover the expected model
+order for `solver(..., models=[...])`.
+
+## Metadata Types
+
+- `FieldSpec`
+  Describes one wavefield entry. It carries the canonical name, aliases,
+  description, source/receiver support flags, and whether the field is internal
+  or boundary-related.
+- `ModelSpec`
+  Describes one model parameter. It carries the canonical name, aliases,
+  description, units, and whether the parameter is required.
+
+## Ordering Semantics
+
+Field and model metadata are not just documentation.
+
+- `FieldSpec` order is semantically significant.
+  The propagators map source and receiver names to positional wavefield
+  indices, and equation step functions are expected to return tensors in the
+  same order.
+- `ModelSpec` order defines the required order of `solver(..., models=[...])`.
+  If an equation lists `["vp", "vs", "rho"]`, then the runtime model list must
+  follow the same order.
 
 For equations that support the compiled CUDA backend, runtime buffer metadata is
 now grouped under:

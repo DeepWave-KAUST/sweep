@@ -5,6 +5,7 @@ except ImportError:  # pragma: no cover - optional dependency
     jnp = None
 
 from .base import SecondOrderEquation
+from .fields import ModelSpec
 
 
 def step_cpml(
@@ -82,6 +83,12 @@ class AcousticTTI(SecondOrderEquation):
 
        Reference: Liang K., et.al, 10.1190/geo2022-0292.1
     """
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("velocity",), description="TTI acoustic reference velocity.", unit="m/s"),
+        ModelSpec("epsilon", description="Thomsen epsilon parameter."),
+        ModelSpec("delta", description="Thomsen delta parameter."),
+        ModelSpec("theta", description="Tilt angle parameter.", unit="rad"),
+    )
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         super().__init__(spatial_order, device, backend, other_kernels=True)
@@ -93,7 +100,7 @@ class AcousticTTI(SecondOrderEquation):
 
     @property
     def models(self):
-        return ["vp", "epsilon", "delta", "theta"]
+        return [spec.name for spec in self.MODEL_SPECS]
 
     @property
     def wavefields(self):

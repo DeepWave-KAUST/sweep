@@ -31,9 +31,6 @@ class SourceTorch(SourceBase, torch.nn.Module):
         return out
     
     def forward_adjoint_modeling(self, wavefield, wavelet):
-
-        # for i in range(self.coords.shape[0]): # Loop over each shot
-        #     wavefield = wavefield.at[i, 0, self.coords[i, :, 1], self.coords[i, :, 0]].add(wavelet[i])
         indices = [torch.arange(self.coords.shape[0]).repeat(self.coords.shape[1]), 0, self.coords[..., 1].reshape(-1), self.coords[..., 0].reshape(-1)]
         wavefield[indices] = wavefield[indices] + wavelet.reshape(-1)
         return wavefield

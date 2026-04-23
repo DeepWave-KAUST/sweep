@@ -1,7 +1,7 @@
 import numpy as np
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
-from .fields import FieldSpec
+from .fields import FieldSpec, ModelSpec
 
 
 def _flip(u, axis):
@@ -71,6 +71,7 @@ def step(vx, vz, sxx, szz, sxz,
          m_txxx, m_txxz, m_tzzx, m_tzzz,
          m_txzx, m_txzz,
          vp, vs, rho, 
+         lame_lambda, lame_mu,
          dt, h, b, pd, 
          pml=None,
          free_surface=False,
@@ -81,9 +82,6 @@ def step(vx, vz, sxx, szz, sxz,
     vp = _match_reference_shape(vp, vx)
     vs = _match_reference_shape(vs, vx)
     rho = _match_reference_shape(rho, vx)
-
-    lame_lambda = rho*(vp**2-2*vs**2)
-    lame_mu = rho*vs**2
 
     txx_x = pd.x_forward(sxx)
     if free_surface:
@@ -154,6 +152,11 @@ class Elastic(FirstOrderEquation):
 
        Reference: Jean Virieux, 10.1190/1.1442147
     """
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
+        ModelSpec("vs", aliases=("s_velocity",), description="Elastic S-wave velocity model.", unit="m/s"),
+        ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
+    )
     FIELD_SPECS = (
         FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
         FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
@@ -177,12 +180,11 @@ class Elastic(FirstOrderEquation):
 
     @property
     def models(self):
-        return ['vp', 'vs', 'rho']
+        return [spec.name for spec in self.MODEL_SPECS]
     
     @property
     def wavefields(self):
-        return ['vx', 'vz', 'sxx', 'szz', 'sxz', 
-                'm_vxx', 'm_vxz', 'm_vzx', 'm_vzz', 'm_txxx', 'm_txxz', 'm_tzzx', 'm_tzzz', 'm_txzx', 'm_txzz']
+        return [spec.name for spec in self.FIELD_SPECS]
 
     @property
     def field_specs(self):
@@ -195,9 +197,38 @@ class Elastic(FirstOrderEquation):
     @property
     def default_receiver_fields(self):
         return ["vx", "vz"]
+
+    def prepare_models(self, models):
+        vp, vs, rho = models
+        lame_lambda = rho * (vp**2 - 2 * vs**2)
+        lame_mu = rho * vs**2
+        return [vp, vs, rho, lame_lambda, lame_mu]
     
     def func(self, *args, **kwargs):
-        return step(*args, pd=self.pd, pml=self.b, free_surface=getattr(self, "free_surface", False), **kwargs)
+        if len(args) == 23:
+            return step(*args, pd=self.pd, pml=self.b, free_surface=getattr(self, "free_surface", False), **kwargs)
+        if len(args) == 21:
+            wavefields = args[:15]
+            vp, vs, rho = args[15:18]
+            dt, h, b = args[18:21]
+            lame_lambda = rho * (vp**2 - 2 * vs**2)
+            lame_mu = rho * vs**2
+            return step(
+                *wavefields,
+                vp,
+                vs,
+                rho,
+                lame_lambda,
+                lame_mu,
+                dt,
+                h,
+                b,
+                pd=self.pd,
+                pml=self.b,
+                free_surface=getattr(self, "free_surface", False),
+                **kwargs,
+            )
+        raise ValueError(f"Elastic.func expected 21 or 23 positional args, got {len(args)}")
     
     def _C(self, ):
         # CUDA IMPLEMENTATION

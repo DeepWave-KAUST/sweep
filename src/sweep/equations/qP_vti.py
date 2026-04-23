@@ -1,4 +1,5 @@
 from .base import SecondOrderEquation
+from .fields import ModelSpec
 
 
 def step_cpml(
@@ -59,6 +60,11 @@ class AcousticVTI(SecondOrderEquation):
 
        Reference: Liang K., et.al, 10.1190/geo2022-0292.1
     """
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("velocity",), description="VTI acoustic reference velocity.", unit="m/s"),
+        ModelSpec("epsilon", description="Thomsen epsilon parameter."),
+        ModelSpec("delta", description="Thomsen delta parameter."),
+    )
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         super().__init__(spatial_order, device, backend, other_kernels=True)
@@ -67,7 +73,7 @@ class AcousticVTI(SecondOrderEquation):
 
     @property
     def models(self):
-        return ["vp", "epsilon", "delta"]
+        return [spec.name for spec in self.MODEL_SPECS]
 
     @property
     def wavefields(self):

@@ -1,5 +1,6 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
+from .fields import ModelSpec
 
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
               vp, z, dt, h, b, 
@@ -50,6 +51,10 @@ class AcousticVRZ(SecondOrderEquation):
 
     Reference: 10.3997/2214-4609.202010332
     """
+    MODEL_SPECS = (
+        ModelSpec("vp", aliases=("velocity",), description="Acoustic velocity model.", unit="m/s"),
+        ModelSpec("z", description="Auxiliary parameter used by the VRZ formulation."),
+    )
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.
 
@@ -62,7 +67,7 @@ class AcousticVRZ(SecondOrderEquation):
 
     @property
     def models(self):
-        return ['vp', 'z']
+        return [spec.name for spec in self.MODEL_SPECS]
 
     @property
     def wavefields(self):
