@@ -67,17 +67,29 @@ forward(
 )
 ```
 
-- `wavelet` (array-like): Source time function. Typical shape: `(nt,)`.
-- `sources` (array-like): Source coordinates. Typical shape: `(nshots, ndim)`.
+- `wavelet` (array-like): Source time function. Common layouts are `(nt,)`,
+  `(B, nt)`, `(B, nsrc, nt)`, and the source-encoding super-shot layout
+  `(1, nsrc, nt)`.
+- `sources` (array-like): Source coordinates. Common layouts are `(B, dim)`,
+  `(B, nsrc, dim)`, and `(1, nsrc, dim)` for a source-encoding super-shot.
 - `receivers` (array-like): Receiver coordinates. Typical shape:
-  `(nshots, nreceivers, ndim)`.
+  `(B, nreceivers, dim)`, including `(1, nreceivers, dim)` for a
+  source-encoding super-shot.
 - `models` (list of arrays, optional): List of model arrays in the exact order
   required by `equation.models`.
 - `source_encoding` (`bool`, optional): If `True`, collapses shots into a
-  single encoded batch.
+  single encoded batch. `PropJax` also auto-detects source encoding when the
+  runtime inputs use `(1, nsrc, nt)`, `(1, nsrc, dim)`, and
+  `(1, nreceivers, dim)`.
 - `return_wavefield` (`bool`, optional): If `True`, returns an auxiliary
   wavefield output in addition to the recorded data.
 - `adj` (`bool`, optional): Adjoint-style forward switch.
+
+In the shape descriptions above:
+
+- `B` is the runtime batch size
+- `nsrc` is the number of sources inside one batch element
+- `dim` is `2` in 2D and `3` in 3D
 
 ## Return Value
 

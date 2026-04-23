@@ -25,6 +25,35 @@ point. Use:
 `PropCUDA` remains available as the lower-level CUDA-specific implementation,
 but the Torch-side API is centered on `PropTorch(..., backend="cuda")`.
 
+## Runtime Shape Conventions
+
+Across `PropTorch`, `PropJax`, and `PropCUDA`, runtime inputs usually follow
+one of these patterns:
+
+- Single-source batched shots:
+  - `wavelet`: `(nt,)` or `(B, nt)`
+  - `sources`: `(B, dim)`
+  - `receivers`: `(B, nrec, dim)`
+- Multi-source batched shots or blended shots:
+  - `wavelet`: `(B, nsrc, nt)`
+  - `sources`: `(B, nsrc, dim)`
+  - `receivers`: `(B, nrec, dim)`
+- Source-encoding super-shot:
+  - `wavelet`: `(1, nsrc, nt)`
+  - `sources`: `(1, nsrc, dim)`
+  - `receivers`: `(1, nrec, dim)`
+
+Here:
+
+- `B` is the runtime batch size
+- `nsrc` is the number of sources inside one batch element
+- `nrec` is the number of receivers
+- `dim` is `2` in 2D and `3` in 3D
+
+When the inputs use the super-shot layout
+`(1, nsrc, nt) / (1, nsrc, dim) / (1, nrec, dim)`, all three propagators now
+auto-detect this pattern and treat it as `source_encoding=True`.
+
 ## API Tabs
 
 === "PropTorch"

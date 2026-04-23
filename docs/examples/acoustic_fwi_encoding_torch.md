@@ -218,6 +218,9 @@ Backend-specific settings are defined in
 The eager and CUDA paths both support source encoding, but they expect
 different input layouts when `source_encoding=True`.
 
+For the broader runtime shape conventions used by `PropTorch`, `PropJax`, and
+`PropCUDA`, see [API Reference > Propagators](../api/propagators/index.md).
+
 === "Eager"
 
     The eager path keeps one encoded source per selected shot and collapses the

@@ -115,20 +115,32 @@ forward(
 ```
 
 - `wavelet` (array-like): Source time function. It is converted to
-  `torch.float32` on `dev`. Typical shape: `(nt,)`.
+  `torch.float32` on `dev`. Common layouts are `(nt,)`, `(B, nt)`,
+  `(B, nsrc, nt)`, and the source-encoding super-shot layout
+  `(1, nsrc, nt)`.
 - `sources` (array-like): Source coordinates. They are converted to integer
-  tensors on `dev`. Typical shape: `(nshots, ndim)`.
+  tensors on `dev`. Common layouts are `(B, dim)`, `(B, nsrc, dim)`, and
+  `(1, nsrc, dim)` for a source-encoding super-shot.
 - `receivers` (array-like): Receiver coordinates. They are converted to integer
-  tensors on `dev`. Typical shape: `(nshots, nreceivers, ndim)`.
+  tensors on `dev`. Common layout is `(B, nreceivers, dim)`, including
+  `(1, nreceivers, dim)` for a source-encoding super-shot.
 - `models` (`list[torch.Tensor]`, optional): List of model tensors, provided in
   the exact order required by `equation.models`.
 - `source_encoding` (`bool`, optional): If `True`, collapses shots into a
-  single encoded batch during propagation.
+  single encoded batch during propagation. The eager and CUDA-backed Torch
+  paths also auto-detect source encoding when the runtime inputs use
+  `(1, nsrc, nt)`, `(1, nsrc, dim)`, and `(1, nreceivers, dim)`.
 - `adj` (`bool`, optional): Switches source time indexing for adjoint-style
   forward usage.
 - `return_wavefield` (`bool`, optional): If `True`, returns snapshots in
   addition to recorded data. This option is not supported together with
   checkpointing in the current implementation.
+
+In the shape descriptions above:
+
+- `B` is the runtime batch size
+- `nsrc` is the number of sources inside one batch element
+- `dim` is `2` in 2D and `3` in 3D
 
 ## Return Value
 

@@ -130,16 +130,21 @@ forward(
 ```
 
 - `wavelet` (array-like): Source time function. Accepted layouts are `(nt,)`,
-  `(B, nt)`, and `(B, nsrc, nt)`.
+  `(B, nt)`, `(B, nsrc, nt)`, and the source-encoding super-shot layout
+  `(1, nsrc, nt)`.
 - `sources` (array-like): Source coordinates. Accepted layouts are `(B, dim)`
-  and `(B, nsrc, dim)`.
+  and `(B, nsrc, dim)`, including `(1, nsrc, dim)` for a source-encoding
+  super-shot.
 - `receivers` (array-like): Receiver coordinates. This path expects batched
-  receiver coordinates as well.
+  receiver coordinates as well, typically `(B, nreceivers, dim)` and
+  `(1, nreceivers, dim)` for a source-encoding super-shot.
 - `models` (`list[torch.Tensor]`, optional): List of model tensors in the exact
   order required by `equation.models`. They are padded and expanded across the
   active batch before being passed into the binding.
 - `source_encoding` (`bool`, optional): If `True`, runs with a single encoded
-  batch instead of one batch element per shot.
+  batch instead of one batch element per shot. `PropCUDA` also auto-detects
+  source encoding when the runtime inputs use `(1, nsrc, nt)`,
+  `(1, nsrc, dim)`, and `(1, nreceivers, dim)`.
 - `adj` (`bool`, optional): Adjoint-style forward switch.
 - `return_wavefield` (`bool`, optional): Present in the signature, but the
   current main CUDA forward path still returns only the synthetic data.
@@ -147,6 +152,12 @@ forward(
   boundary saving.
 - `boundary_saving_config` (`dict`, optional): Runtime override for the
   boundary-saving policy.
+
+In the shape descriptions above:
+
+- `B` is the runtime batch size
+- `nsrc` is the number of sources inside one batch element
+- `dim` is `2` in 2D and `3` in 3D
 
 ## RTM Parameters
 
