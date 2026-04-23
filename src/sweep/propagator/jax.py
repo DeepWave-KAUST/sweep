@@ -97,6 +97,7 @@ class PropJax(PropBase):
         self.init_abc(**kwargs)
         if getattr(self.equation, 'setup_pml', None):
             self.equation.setup_pml(self.pml_type)
+        source_encoding = bool(source_encoding or self._auto_detect_source_encoding(wavelet, sources, receivers))
 
         wavelet = jnp.array(wavelet, dtype=jnp.float32)
         wavelet = jnp.atleast_2d(wavelet)

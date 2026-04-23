@@ -132,6 +132,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         kwargs.setdefault("fd_pad", self._runtime_fd_pad())
         kwargs.setdefault("shape", self._runtime_shape())
         self.init_abc(**kwargs)
+        source_encoding = bool(source_encoding or self._auto_detect_source_encoding(wavelet, sources, receivers))
 
         nt = wavelet.shape[-1]
         snapshot_indices = self._resolve_snapshot_times(nt, return_wavefield, snapshot_times, snapshot_interval)

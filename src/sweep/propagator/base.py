@@ -180,6 +180,31 @@ class PropBase:
             signature = signature.replace(parameters=parameters[1:])
         self.__signature__ = signature
 
+    def _shape_tuple(self, value):
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            shape = np.shape(value)
+        return tuple(int(dim) for dim in shape)
+
+    def _auto_detect_source_encoding(self, wavelet, sources, receivers):
+        wavelet_shape = self._shape_tuple(wavelet)
+        sources_shape = self._shape_tuple(sources)
+        receivers_shape = self._shape_tuple(receivers)
+
+        if len(wavelet_shape) != 3 or len(sources_shape) != 3 or len(receivers_shape) != 3:
+            return False
+
+        if wavelet_shape[0] != 1 or sources_shape[0] != 1 or receivers_shape[0] != 1:
+            return False
+
+        if sources_shape[-1] != self.ndim or receivers_shape[-1] != self.ndim:
+            return False
+
+        if wavelet_shape[1] != sources_shape[1]:
+            return False
+
+        return True
+
     def _normalize_boundary_saving_config(self, config):
         default = {
             "enabled": False,

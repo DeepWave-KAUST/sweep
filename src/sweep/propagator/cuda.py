@@ -577,6 +577,8 @@ class PropCUDA(PropBase, torch.nn.Module):
         elif legacy_override:
             boundary_saving_config = {**legacy_override, **boundary_saving_config}
 
+        source_encoding = bool(source_encoding or self._auto_detect_source_encoding(wavelet, sources, receivers))
+
         boundary_cfg = self.resolve_boundary_saving_config(
             override=boundary_saving_config,
             use_boundary_saving=use_boundary_saving,

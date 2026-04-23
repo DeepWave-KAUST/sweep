@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import tqdm
 
+import configure_marmousi as shared_config
 from sweep.equations import Acoustic
 from sweep.propagator.options import BoundaryOptions, CUDAOptions, EagerOptions, MemoryOptions
 from sweep.propagator.torch import PropTorch
@@ -33,58 +34,10 @@ from sweep.signal import ricker
 torch.backends.cudnn.benchmark = True
 
 
-COMMON_CONFIG = {
-    "nt": 2500,
-    "dt": 0.002,
-    "delay": 0.256,
-    "fm": 5.0,
-    "dh": 25.0,
-    "spatial_order": 8,
-    "abcn": 20,
-    "free_surface": False,
-    "src_step": 2,
-    "rec_step": 1,
-    "srcz": 1,
-    "recz": 18,
-    "lr": 25.0,
-    "epochs": 101,
-    "batchsize": 8,
-    "show_every": 10,
-    "true_model": "models/marmousi/true.npy",
-    "init_model": "models/marmousi/smooth.npy",
-    "max_time_shift_ratio": 0.2,
-}
-
-
-BACKEND_CONFIG = {
-    "eager": {
-        "abcn": 20,
-        "free_surface": False,
-        "output_dir": "acoustic_fwi_encoding_eager",
-        "use_ckpt": False,
-        "use_compile": True,
-        "transpose_shot": False,
-    },
-    "cuda": {
-        "abcn": 20,
-        "free_surface": False,
-        "output_dir": "acoustic_fwi_encoding_cuda",
-        "transpose_shot": True,
-        "boundary_saving_config": {
-            "enabled": True,
-            "storage": "gpu",
-            "transfer_interval": 10,
-            "pinned_memory": True,
-        },
-    },
-}
-
-
 def build_config(backend):
-    if backend not in BACKEND_CONFIG:
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of {sorted(BACKEND_CONFIG)}.")
-    cfg = COMMON_CONFIG.copy()
-    cfg.update(BACKEND_CONFIG[backend])
+    if backend not in ("eager", "cuda"):
+        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'eager'].")
+    cfg = shared_config.get_config(f"fwi_2d_acoustic_encoding_torch_{backend}")
     cfg["backend"] = backend
     return cfg
 

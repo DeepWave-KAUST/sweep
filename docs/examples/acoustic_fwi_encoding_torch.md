@@ -42,7 +42,7 @@ The output includes:
 Use this example if you want to:
 
 - test acoustic FWI with source encoding
-- compare PyTorch and CUDA propagation backends
+- run the same workflow on either eager or CUDA backends
 - reduce memory usage during FWI
 - run a simple Marmousi-style inversion example
 - understand how encoded shots are used in inversion
@@ -94,7 +94,7 @@ Each backend writes results to a separate folder.
 === "PyTorch"
 
     ```text
-    acoustic_fwi_encoding_torch/
+    acoustic_fwi_encoding_eager/
     ```
 
 === "CUDA"
@@ -126,45 +126,40 @@ epoch_XXXX.png
 
 ## Example Figures
 
-The following figures show two common outputs from a completed
-source-encoding FWI run.
+The following figures show one completed CUDA run from
+`examples/reducingmemory/source_encoding/torch/acoustic_fwi_encoding_cuda/`.
+The eager backend produces the same file set with the same naming pattern.
+
+`observed_data.png`: one observed shot gather generated from the true Marmousi
+model.
+
+![Observed shot gather](../figures/examples/acoustic_fwi_encoding_torch_observed_data.png)
 
 `data_epoch_0100.png`: the encoded observed data and encoded synthetic data at
 a late inversion epoch, useful for checking whether the encoded prediction is
 matching the encoded target.
 
-![Encoded data at a late epoch](../figures/examples/acoustic_fwi_encoding_data_epoch_0100.png)
+![Encoded data at a late epoch](../figures/examples/acoustic_fwi_encoding_torch_data_epoch_0100.png)
+
+`epoch_0100.png`: the true model, inverted model, and gradient near the end of
+the run.
+
+![Late inversion snapshot](../figures/examples/acoustic_fwi_encoding_torch_epoch_0100.png)
 
 `loss.png`: the source-encoding FWI loss curve across optimization steps.
 
-<img src="../../figures/examples/acoustic_fwi_encoding_loss.png" alt="Source-encoding loss curve" width="420">
+<img src="../../figures/examples/acoustic_fwi_encoding_torch_loss.png" alt="Source-encoding loss curve" width="420">
 
 ## Main Configuration
 
-Most parameters are defined in the `COMMON_CONFIG` parameter.
+Most parameters now come from the shared Marmousi configuration in
+`examples/_shared/configure_marmousi.py`. This example adds the
+source-encoding-specific output directories and `max_time_shift_ratio` there as
+well.
 
 ```python
-COMMON_CONFIG = {
-    "nt": 2500,
-    "dt": 0.002,
-    "delay": 0.256,
-    "fm": 5.0,
-    "dh": 25.0,
-    "spatial_order": 8,
-    "abcn": 20,
-    "free_surface": False,
-    "src_step": 2,
-    "rec_step": 1,
-    "srcz": 1,
-    "recz": 18,
-    "lr": 25.0,
-    "epochs": 101,
-    "batchsize": 8,
-    "show_every": 10,
-    "true_model": "marmousi_true.npy",
-    "init_model": "marmousi_smooth.npy",
-    "max_time_shift_ratio": 0.2,
-}
+shared_config.get_config("fwi_2d_acoustic_encoding_torch_eager")
+shared_config.get_config("fwi_2d_acoustic_encoding_torch_cuda")
 ```
 
 Important parameters:
@@ -183,13 +178,14 @@ Important parameters:
 
 ## Backend-Specific Settings
 
-Backend-specific settings are defined in `BACKEND_CONFIG`.
+Backend-specific settings are defined in
+`examples/_shared/configure_marmousi.py`.
 
 === "PyTorch"
 
     ```python
-    "torch": {
-        "output_dir": "acoustic_fwi_encoding_torch",
+    {
+        "output_dir": "acoustic_fwi_encoding_eager",
         "use_ckpt": False,
         "use_compile": True,
         "transpose_shot": False,
@@ -201,7 +197,7 @@ Backend-specific settings are defined in `BACKEND_CONFIG`.
 === "CUDA"
 
     ```python
-    "cuda": {
+    {
         "output_dir": "acoustic_fwi_encoding_cuda",
         "transpose_shot": True,
         "boundary_saving_config": {
@@ -210,6 +206,7 @@ Backend-specific settings are defined in `BACKEND_CONFIG`.
             "transfer_interval": 10,
             "pinned_memory": True,
         }
+    }
     ```
 
     The CUDA backend is intended for faster propagation.

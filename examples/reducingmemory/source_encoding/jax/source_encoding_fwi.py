@@ -28,34 +28,13 @@ import numpy as np
 import optax
 import tqdm
 
+import configure_marmousi as shared_config
 from sweep.equations import Acoustic
 from sweep.propagator.jax import PropJax
 from sweep.signal import ricker
 
 
-CONFIG = {
-    "nt": 2500,
-    "dt": 0.002,
-    "delay": 0.256,
-    "fm": 5.0,
-    "dh": 25.0,
-    "spatial_order": 8,
-    "abcn": 20,
-    "free_surface": False,
-    "src_step": 2,
-    "rec_step": 1,
-    "srcz": 1,
-    "recz": 18,
-    "lr": 25.0,
-    "epochs": 101,
-    "batchsize": 8,
-    "show_every": 10,
-    "true_model": "models/marmousi/true.npy",
-    "init_model": "models/marmousi/smooth.npy",
-    "output_dir": "acoustic_fwi_encoding_jax",
-    "use_ckpt": False,
-    "max_time_shift_ratio": 0.2,
-}
+CONFIG = shared_config.get_config("fwi_2d_acoustic_encoding_jax")
 
 
 def build_solver(shape, cfg):

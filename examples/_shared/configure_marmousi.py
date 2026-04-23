@@ -99,6 +99,35 @@ _CONFIGS = {
             "pinned_memory": True,
         },
     },
+    "fwi_2d_acoustic_encoding_common": {
+        "max_time_shift_ratio": 0.2,
+    },
+    "fwi_2d_acoustic_encoding_jax": {
+        **_FWI_2D_ACOUSTIC_COMMON,
+        "output_dir": "acoustic_fwi_encoding_jax",
+        "use_ckpt": False,
+        "max_time_shift_ratio": 0.2,
+    },
+    "fwi_2d_acoustic_encoding_torch_eager": {
+        **_FWI_2D_ACOUSTIC_COMMON,
+        "output_dir": "acoustic_fwi_encoding_eager",
+        "use_compile": True,
+        "use_ckpt": False,
+        "transpose_shot": False,
+        "max_time_shift_ratio": 0.2,
+    },
+    "fwi_2d_acoustic_encoding_torch_cuda": {
+        **_FWI_2D_ACOUSTIC_COMMON,
+        "output_dir": "acoustic_fwi_encoding_cuda",
+        "transpose_shot": True,
+        "max_time_shift_ratio": 0.2,
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "gpu",
+            "transfer_interval": 10,
+            "pinned_memory": True,
+        },
+    },
     "fwi_2d_elastic_jax": {
         **_FWI_2D_ELASTIC_COMMON,
         "output_dir": "elastic_jax_marmousi",
