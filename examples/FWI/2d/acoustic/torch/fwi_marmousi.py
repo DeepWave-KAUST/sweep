@@ -168,25 +168,70 @@ def save_observed_figure(obs, receivers, output_dir, cfg):
     plt.close(fig)
 
 
-def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir):
+def robust_positive_limits(data):
+    vmax = float(np.percentile(data, 99))
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = float(np.max(data)) if data.size else 1.0
+    return 0.0, max(vmax, 1e-12)
+
+
+def save_progress_figure(
+    true_model,
+    vp,
+    grad,
+    losses,
+    epoch,
+    cfg,
+    output_dir,
+    source_illumination=None,
+    receiver_illumination=None,
+):
     nz, nx = true_model.shape
     extent = [0, nx * cfg["dh"], nz * cfg["dh"], 0]
     vmin_model, vmax_model = true_model.min(), true_model.max()
     vmin_grad, vmax_grad = np.percentile(grad, [2, 98])
+    show_illumination = source_illumination is not None and receiver_illumination is not None
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    ncols = 5 if show_illumination else 3
+    fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 4))
     im0 = axes[0].imshow(true_model, vmin=vmin_model, vmax=vmax_model, cmap="seismic", aspect="auto", extent=extent)
     axes[0].set_title("True Model")
     im1 = axes[1].imshow(vp, vmin=vmin_model, vmax=vmax_model, cmap="seismic", aspect="auto", extent=extent)
     axes[1].set_title("Inverted Model")
     im2 = axes[2].imshow(grad, vmin=vmin_grad, vmax=vmax_grad, cmap="seismic", aspect="auto", extent=extent)
     axes[2].set_title("Gradient")
+    images = [im0, im1, im2]
+    colorbar_labels = ["Velocity (m/s)", "Velocity (m/s)", "Gradient"]
+
+    if show_illumination:
+        vmin_src, vmax_src = robust_positive_limits(source_illumination)
+        im3 = axes[3].imshow(
+            source_illumination,
+            vmin=vmin_src,
+            vmax=vmax_src,
+            cmap="magma",
+            aspect="auto",
+            extent=extent,
+        )
+        axes[3].set_title("Source Illumination")
+        vmin_rec, vmax_rec = robust_positive_limits(receiver_illumination)
+        im4 = axes[4].imshow(
+            receiver_illumination,
+            vmin=vmin_rec,
+            vmax=vmax_rec,
+            cmap="magma",
+            aspect="auto",
+            extent=extent,
+        )
+        axes[4].set_title("Receiver Illumination")
+        images.extend([im3, im4])
+        colorbar_labels.extend(["Illumination", "Illumination"])
+
     for ax in axes:
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Z (m)")
-    fig.colorbar(im0, ax=axes[0], shrink=0.85, label="Velocity (m/s)")
-    fig.colorbar(im1, ax=axes[1], shrink=0.85, label="Velocity (m/s)")
-    fig.colorbar(im2, ax=axes[2], shrink=0.85, label="Gradient")
+    for ax, image, label in zip(axes, images, colorbar_labels):
+        fig.colorbar(image, ax=ax, shrink=0.85, label=label)
     plt.tight_layout()
     plt.savefig(output_dir / f"epoch_{epoch:04d}.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -253,7 +298,29 @@ def run_fwi(backend="eager"):
         if epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
             grad_np = inv_vp.grad.detach().cpu().numpy()
-            save_progress_figure(true_model, vp_np, grad_np, losses, epoch, cfg, output_dir)
+            source_illumination = getattr(solver, "source_illumination", None)
+            receiver_illumination = getattr(solver, "receiver_illumination", None)
+            source_illumination_np = (
+                source_illumination.detach().cpu().numpy()
+                if isinstance(source_illumination, torch.Tensor)
+                else None
+            )
+            receiver_illumination_np = (
+                receiver_illumination.detach().cpu().numpy()
+                if isinstance(receiver_illumination, torch.Tensor)
+                else None
+            )
+            save_progress_figure(
+                true_model,
+                vp_np,
+                grad_np,
+                losses,
+                epoch,
+                cfg,
+                output_dir,
+                source_illumination=source_illumination_np,
+                receiver_illumination=receiver_illumination_np,
+            )
 
 
 def parse_args():

@@ -11,4 +11,10 @@ tests
 test/3drtm
 examples/test_figures
 examples/models/models
+examples/models/**
+!examples/models/
+!examples/models/**/
+!examples/models/**/*.py
+!examples/models/*/README*
+!examples/models/**/.gitkeep
 test/cuda

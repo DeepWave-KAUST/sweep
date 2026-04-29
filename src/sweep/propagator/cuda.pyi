@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -7,6 +7,8 @@ from .base import PropBase
 
 class PropCUDA(PropBase, torch.nn.Module):
     store_last_wavefield: bool
+    source_illumination: Optional[torch.Tensor]
+    receiver_illumination: Optional[torch.Tensor]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 

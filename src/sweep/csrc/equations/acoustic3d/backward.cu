@@ -88,11 +88,11 @@ void accumulate_imaging_3d(
             grad->data_ptr<float>(),
             B, nx, ny, nz
         );
-        return;
     }
 
-    TORCH_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
-    accumulate_rtm_3d(wave_grid, wave_block, forward_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
+    if (rtm_out != nullptr) {
+        accumulate_rtm_3d(wave_grid, wave_block, forward_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
+    }
 }
 
 void accumulate_imaging_utt_3d(
@@ -122,11 +122,11 @@ void accumulate_imaging_utt_3d(
             grad->data_ptr<float>(),
             B, nx, ny, nz, dt
         );
-        return;
     }
 
-    TORCH_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
-    accumulate_rtm_3d(wave_grid, wave_block, u_now_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
+    if (rtm_out != nullptr) {
+        accumulate_rtm_3d(wave_grid, wave_block, u_now_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
+    }
 }
 
 void accumulate_source_gradient_3d(
@@ -363,28 +363,19 @@ void process_recursive_interval_3d(
             forward_nsrc
         );
 
-        if (grad != nullptr) {
-            calculate_grad_3d<<<wave_grid, wave_block>>>(
-                u_this.data_ptr<float>(),
-                adjoint.u_now_t.data_ptr<float>(),
-                vp.data_ptr<float>(),
-                grad->data_ptr<float>(),
-                B, nx, ny, nz
-            );
-        } else {
-            TORCH_CHECK(rtm_out != nullptr, "Recursive RTM accumulation requested without RTM output.");
-            accumulate_rtm_3d(
-                wave_grid,
-                wave_block,
-                u_this.data_ptr<float>(),
-                adjoint.u_now_t.data_ptr<float>(),
-                *rtm_out,
-                B,
-                nx,
-                ny,
-                nz
-            );
-        }
+        accumulate_imaging_3d(
+            wave_grid,
+            wave_block,
+            u_this.data_ptr<float>(),
+            adjoint.u_now_t.data_ptr<float>(),
+            vp,
+            grad,
+            rtm_out,
+            B,
+            nx,
+            ny,
+            nz
+        );
         return;
     }
 
@@ -590,8 +581,12 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
-    run_full_imaging(p, &grad, &grad_wavelet, nullptr);
+    RTMOutput illumination;
+    init_rtm_output_3d(illumination, p.models[0]);
+    run_full_imaging(p, &grad, &grad_wavelet, &illumination);
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 
@@ -880,8 +875,12 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
-    run_bs_imaging(p, &grad, &grad_wavelet, nullptr);
+    RTMOutput illumination;
+    init_rtm_output_3d(illumination, p.models[0]);
+    run_bs_imaging(p, &grad, &grad_wavelet, &illumination);
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 
@@ -1060,8 +1059,12 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
-    run_ckpt_imaging(p, &grad, &grad_wavelet, nullptr);
+    RTMOutput illumination;
+    init_rtm_output_3d(illumination, p.models[0]);
+    run_ckpt_imaging(p, &grad, &grad_wavelet, &illumination);
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 
@@ -1187,8 +1190,12 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
-    run_recursive_imaging(p, &grad, &grad_wavelet, nullptr);
+    RTMOutput illumination;
+    init_rtm_output_3d(illumination, p.models[0]);
+    run_recursive_imaging(p, &grad, &grad_wavelet, &illumination);
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 

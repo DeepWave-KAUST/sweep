@@ -25,7 +25,9 @@ auto wrap_backward(Func f)
 
         return std::make_tuple(
             out.checkpoints,
-            out.grads
+            out.grads,
+            out.source_illumination,
+            out.receiver_illumination
         );
     };
 }

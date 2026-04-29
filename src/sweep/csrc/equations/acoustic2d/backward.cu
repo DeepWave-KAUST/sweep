@@ -41,18 +41,18 @@ void accumulate_imaging_2d(
             grad->data_ptr<float>(),
             nx, nz
         );
-        return;
     }
 
-    TORCH_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
-    accumulate_rtm_image_2d<<<wave_grid, wave_block>>>(
-        forward_ptr,
-        adjoint_ptr,
-        rtm_out->image.data_ptr<float>(),
-        rtm_out->source_illumination.data_ptr<float>(),
-        rtm_out->receiver_illumination.data_ptr<float>(),
-        nx, nz
-    );
+    if (rtm_out != nullptr) {
+        accumulate_rtm_image_2d<<<wave_grid, wave_block>>>(
+            forward_ptr,
+            adjoint_ptr,
+            rtm_out->image.data_ptr<float>(),
+            rtm_out->source_illumination.data_ptr<float>(),
+            rtm_out->receiver_illumination.data_ptr<float>(),
+            nx, nz
+        );
+    }
 }
 
 void accumulate_source_gradient_2d(
@@ -192,8 +192,12 @@ BackwardOutput backward(const BackwardInput& in)
     BackwardOutput out;
     auto grad = torch::zeros_like(in.models[0]);
     auto grad_wavelet = torch::zeros_like(in.forward_source);
-    run_full_imaging(in, &grad, &grad_wavelet, nullptr);
+    RTMOutput illumination;
+    init_rtm_output_2d(illumination, in.models[0]);
+    run_full_imaging(in, &grad, &grad_wavelet, &illumination);
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 
@@ -260,6 +264,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
+    RTMOutput illumination;
+    init_rtm_output_2d(illumination, vp);
 
     // For checking wavefields
     // torch::Tensor u_allt = torch::zeros({nt, B, 1, nz, nx}, vp.options());
@@ -420,6 +426,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
             grad.data_ptr<float>(),
             nx, nz, dt
         );
+        accumulate_rtm_image_2d<<<launch_config.grid, launch_config.block>>>(
+            forward.u_now_t.data_ptr<float>(),
+            adjoint.u_now_t.data_ptr<float>(),
+            illumination.image.data_ptr<float>(),
+            illumination.source_illumination.data_ptr<float>(),
+            illumination.receiver_illumination.data_ptr<float>(),
+            nx, nz
+        );
 
     }
 
@@ -466,6 +480,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     }
 
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 
 }
@@ -568,8 +584,9 @@ void process_recursive_interval_2d(
     AcousticWavefieldTensor& adjoint,
     const BackwardInput& p,
     const torch::Tensor& vp,
-    torch::Tensor& grad,
-    torch::Tensor& grad_wavelet,
+    torch::Tensor* grad,
+    torch::Tensor* grad_wavelet,
+    RTMOutput* rtm_out,
     int order,
     dim3 wave_grid,
     dim3 wave_block,
@@ -661,18 +678,22 @@ void process_recursive_interval_2d(
             forward_source_block,
             adjoint.u_now_t.data_ptr<float>(),
             p,
-            &grad_wavelet,
+            grad_wavelet,
             start,
             ctx,
             forward_nsrc
         );
 
-        calculate_grad<<<wave_grid, wave_block>>>(
+        accumulate_imaging_2d(
+            wave_grid,
+            wave_block,
             u_this.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            grad.data_ptr<float>(),
-            nx, nz
+            vp,
+            grad,
+            rtm_out,
+            nx,
+            nz
         );
         return;
     }
@@ -711,6 +732,7 @@ void process_recursive_interval_2d(
         vp,
         grad,
         grad_wavelet,
+        rtm_out,
         order,
         wave_grid,
         wave_block,
@@ -739,6 +761,7 @@ void process_recursive_interval_2d(
         vp,
         grad,
         grad_wavelet,
+        rtm_out,
         order,
         wave_grid,
         wave_block,
@@ -808,6 +831,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
+    RTMOutput illumination;
+    init_rtm_output_2d(illumination, vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -910,17 +935,23 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 forward_nsrc
             );
 
-            calculate_grad<<<launch_config.grid, launch_config.block>>>(
+            accumulate_imaging_2d(
+                launch_config.grid,
+                launch_config.block,
                 chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                vp.data_ptr<float>(),
-                grad.data_ptr<float>(),
-                nx, nz
+                vp,
+                &grad,
+                &illumination,
+                nx,
+                nz
             );
         }
     }
 
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 
@@ -967,6 +998,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
+    RTMOutput illumination;
+    init_rtm_output_2d(illumination, vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -1012,8 +1045,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             adjoint,
             p,
             vp,
-            grad,
-            grad_wavelet,
+            &grad,
+            &grad_wavelet,
+            &illumination,
             order,
             launch_config.grid,
             launch_config.block,
@@ -1035,6 +1069,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     }
 
     out.grads = {grad_wavelet, grad};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
     return out;
 }
 

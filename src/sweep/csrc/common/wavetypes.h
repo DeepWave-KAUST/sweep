@@ -61,6 +61,10 @@ struct BackwardOutput {
     std::vector<torch::Tensor> checkpoints;
 
     std::vector<torch::Tensor> grads;
+
+    torch::Tensor source_illumination;
+
+    torch::Tensor receiver_illumination;
 };
 
 struct RTMOutput {

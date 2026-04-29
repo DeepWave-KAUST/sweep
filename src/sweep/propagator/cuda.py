@@ -54,6 +54,9 @@ class Warpper(torch.autograd.Function):
         last_two: torch.Tensor=None,
         boundary_cpu: tuple=(),
         boundary_gpu: tuple=(),
+        source_illumination_buffer: torch.Tensor=None,
+        receiver_illumination_buffer: torch.Tensor=None,
+        illumination_padding: tuple=(),
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -154,6 +157,9 @@ class Warpper(torch.autograd.Function):
             ctx.forward_wavefields = forward_wavefields
             ctx.adjoint_wavefields = adjoint_wavefields
             ctx.adjoint_workspace = adjoint_workspace
+            ctx.source_illumination_buffer = source_illumination_buffer
+            ctx.receiver_illumination_buffer = receiver_illumination_buffer
+            ctx.illumination_padding = tuple(illumination_padding)
 
         return syn
     
@@ -226,7 +232,51 @@ class Warpper(torch.autograd.Function):
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = ctx.backward_bs_func(params)
 
-        returned_grads = gradients[-1]
+        returned_grads = gradients[1] if len(gradients) >= 2 else gradients[-1]
+        if len(gradients) >= 4:
+            source_illumination, receiver_illumination = gradients[2], gradients[3]
+            source_buffer = getattr(ctx, "source_illumination_buffer", None)
+            receiver_buffer = getattr(ctx, "receiver_illumination_buffer", None)
+
+            def fit_illumination_to_model(illumination, target):
+                while illumination.dim() > target.dim():
+                    illumination = illumination.sum(dim=0)
+
+                slices = [slice(None)] * illumination.dim()
+                pad = getattr(ctx, "illumination_padding", ())
+                pad_pairs = min(len(pad) // 2, illumination.dim(), target.dim())
+                for i in range(pad_pairs):
+                    left = int(pad[2 * i])
+                    right = int(pad[2 * i + 1])
+                    dim = -(i + 1)
+                    end = -right if right > 0 else None
+                    slices[dim] = slice(left, end)
+
+                illumination = illumination[tuple(slices)]
+                if illumination.shape != target.shape:
+                    trim = []
+                    for size, target_size in zip(illumination.shape, target.shape):
+                        trim.append(slice(0, target_size))
+                    illumination = illumination[tuple(trim)]
+                return illumination
+
+            try:
+                if (
+                    isinstance(source_buffer, torch.Tensor)
+                    and isinstance(source_illumination, torch.Tensor)
+                ):
+                    source_buffer.copy_(fit_illumination_to_model(source_illumination, source_buffer))
+            except RuntimeError:
+                pass
+            try:
+                if (
+                    isinstance(receiver_buffer, torch.Tensor)
+                    and isinstance(receiver_illumination, torch.Tensor)
+                ):
+                    receiver_buffer.copy_(fit_illumination_to_model(receiver_illumination, receiver_buffer))
+            except RuntimeError:
+                pass
+
         wavelet_grad = None
         model_grads = returned_grads
         if len(returned_grads) == len(ctx.models) + 1:
@@ -237,6 +287,8 @@ class Warpper(torch.autograd.Function):
         del ctx.pml_vals, ctx.forward_source
         del ctx.forward_wavefields
         del ctx.adjoint_workspace
+        del ctx.source_illumination_buffer, ctx.receiver_illumination_buffer
+        del ctx.illumination_padding
         del ctx.models
         return (
             None, None, None, None, None, # functions
@@ -268,6 +320,9 @@ class Warpper(torch.autograd.Function):
             None,      # last_two
             None,      # boundary cpu
             None,      # boundary gpu
+            None,      # source illumination buffer
+            None,      # receiver illumination buffer
+            None,      # illumination padding
             *model_grads # models
         )
 
@@ -317,6 +372,8 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._checkpoint_cache_batch = None
         self._workspace_cache_batch = None
         self._workspace_cache_nt = None
+        self.source_illumination = None
+        self.receiver_illumination = None
 
     def _cuda_spacing(self):
         # PropBase stores spacing in model-axis order: (dz, dx) or (dz, dy, dx).
@@ -665,7 +722,8 @@ class PropCUDA(PropBase, torch.nn.Module):
         receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
         # Get the model parameters
 
-        models = models if models is not None else self.parameters()
+        models = list(models if models is not None else self.parameters())
+        unpadded_models = models
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
         # self.equation.b = pad_pml_vals(self.equation.b, pml_padding)
@@ -681,6 +739,12 @@ class PropCUDA(PropBase, torch.nn.Module):
         requires_model_grad = any(m.requires_grad for m in models)
         requires_wavelet_grad = wavelet.requires_grad
         requires_backward = bool(requires_model_grad or requires_wavelet_grad)
+        if requires_backward:
+            self.source_illumination = torch.zeros_like(unpadded_models[0])
+            self.receiver_illumination = torch.zeros_like(unpadded_models[0])
+        else:
+            self.source_illumination = None
+            self.receiver_illumination = None
         use_checkpoint = bool(self.use_ckpt and requires_backward)
         if not requires_backward:
             use_boundary_saving = False
@@ -760,6 +824,9 @@ class PropCUDA(PropBase, torch.nn.Module):
                 last_two,
                 boundary_cpu,
                 boundary_gpu,
+                self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
+                self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
+                tuple(padding),
                 *models,
             )
         
