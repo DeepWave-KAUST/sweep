@@ -30,6 +30,34 @@ The solver is built from:
 - `receivers`: regularly sampled surface receivers
 - `models`: `vp`, `vs`, and `rho`
 
+## Prepare the Overthrust Model Files
+
+This 2D example reads an extracted Overthrust slice:
+
+- `examples/models/overthrust/true_2d.npy`
+- `examples/models/overthrust/smooth_2d.npy`
+
+Generate the 3D volume, smooth it, and extract the 2D slice before running the
+example:
+
+```bash
+python3 examples/models/overthrust/download_3d_overthrust.py --extract
+python3 examples/models/overthrust/convert_3d_overthrust_vites_to_npy.py
+python3 examples/models/overthrust/make_smooth_model.py \
+  --input examples/models/overthrust/true_3d.npy \
+  --output examples/models/overthrust/smooth_3d.npy \
+  --radii 6,6,6 \
+  --passes 3
+python3 examples/models/overthrust/extract_2d_slice.py \
+  --input examples/models/overthrust/true_3d.npy \
+  --output examples/models/overthrust/true_2d.npy \
+  --axis y
+python3 examples/models/overthrust/extract_2d_slice.py \
+  --input examples/models/overthrust/smooth_3d.npy \
+  --output examples/models/overthrust/smooth_2d.npy \
+  --axis y
+```
+
 ## Backend Selection
 
 Run the example with:

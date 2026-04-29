@@ -30,6 +30,35 @@ The solver is built from:
 - `receivers`: a surface receiver grid repeated for each shot
 - `models`: the 3D velocity model `vp`
 
+## Prepare the Overthrust Model Files
+
+This example reads:
+
+- `examples/models/overthrust/true_3d.npy`
+- `examples/models/overthrust/smooth_3d.npy`
+
+Generate them from the official SEG/EAGE Overthrust archive before running the
+example:
+
+```bash
+python3 examples/models/overthrust/download_3d_overthrust.py --extract
+python3 examples/models/overthrust/convert_3d_overthrust_vites_to_npy.py
+python3 examples/models/overthrust/make_smooth_model.py \
+  --input examples/models/overthrust/true_3d.npy \
+  --output examples/models/overthrust/smooth_3d.npy \
+  --radii 6,6,6 \
+  --passes 3
+```
+
+Optional preview:
+
+```bash
+python3 examples/models/overthrust/plot_true_smooth.py
+```
+
+The generated model files under `examples/models/` are ignored by git. The
+helper scripts in that directory remain tracked.
+
 ## Backend Selection
 
 Run the example with:
@@ -160,9 +189,8 @@ current gradient.
 
 ## Running the Example
 
-Step 1. Make sure the Overthrust 3D models have been prepared.
-
-See [Model Assets](model_assets.md) for the download and conversion steps.
+Step 1. Prepare the Overthrust 3D `.npy` files listed above if they do not
+already exist.
 
 Step 2. Choose the backend you want to use.
 

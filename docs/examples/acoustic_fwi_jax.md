@@ -26,6 +26,28 @@ The solver is built from:
 - `receivers`: regularly sampled receiver coordinates
 - `models`: the velocity model `vp`
 
+## Prepare the Marmousi Model Files
+
+This example reads the same prepared Marmousi acoustic files as the Torch FWI
+example:
+
+- `examples/models/marmousi/true.npy`
+- `examples/models/marmousi/smooth.npy`
+
+Generate them before running the example:
+
+```bash
+python3 examples/models/marmousi/download_marmousi.py --extract
+python3 examples/models/marmousi/extract_model_segy.py
+python3 examples/models/marmousi/convert_segy_to_npy.py
+python3 examples/models/marmousi/prepare_fwi_models.py \
+  --input examples/models/marmousi/npy/vp_1p25m.npy \
+  --source-dh 1.25 \
+  --target-dh 25.0 \
+  --radii 8,8 \
+  --passes 3
+```
+
 ## Entry Point
 
 Run the example with:
@@ -125,13 +147,16 @@ The output directory is:
 
 ## Running the Example
 
-Step 1. Run the JAX Marmousi script from the repository root.
+Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
+exist.
+
+Step 2. Run the JAX Marmousi script from the repository root.
 
 ```bash
 python3 examples/FWI/2d/acoustic/jax/fwi_marmousi.py
 ```
 
-Step 2. Check `acoustic_fwi_jax` for the saved wavelet, observed data, loss, and epoch figures.
+Step 3. Check `acoustic_fwi_jax` for the saved wavelet, observed data, loss, and epoch figures.
 
 Notes:
 

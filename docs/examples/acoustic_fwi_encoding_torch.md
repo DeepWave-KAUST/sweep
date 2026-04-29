@@ -47,13 +47,13 @@ Use this example if you want to:
 - run a simple Marmousi-style inversion example
 - understand how encoded shots are used in inversion
 
-## Required input files
+## Prepare the Marmousi Model Files
 
-The script expects two NumPy model files in the same folder as the script:
+This example uses the shared Marmousi acoustic configuration and reads:
 
 ```text
-marmousi_true.npy    -> true velocity model
-marmousi_smooth.npy  -> initial velocity model
+examples/models/marmousi/true.npy    -> true velocity model
+examples/models/marmousi/smooth.npy  -> initial velocity model
 ```
 
 Both files should have the same 2D shape:
@@ -62,9 +62,27 @@ Both files should have the same 2D shape:
 (nz, nx)
 ```
 
+Generate them from the official Elastic Marmousi archive before running the
+example:
+
+```bash
+python3 examples/models/marmousi/download_marmousi.py --extract
+python3 examples/models/marmousi/extract_model_segy.py
+python3 examples/models/marmousi/convert_segy_to_npy.py
+python3 examples/models/marmousi/prepare_fwi_models.py \
+  --input examples/models/marmousi/npy/vp_1p25m.npy \
+  --source-dh 1.25 \
+  --target-dh 25.0 \
+  --radii 8,8 \
+  --passes 3
+```
+
 ## How to Run
 
-Step 1. Choose the backend you want to use.
+Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
+exist.
+
+Step 2. Choose the backend you want to use.
 
 === "PyTorch"
 
@@ -84,7 +102,7 @@ Step 1. Choose the backend you want to use.
 
     The CUDA backend requires a CUDA-capable PyTorch environment and the CUDA propagation module to be available.
 
-Step 2. Check the backend-specific output folder for figures and inversion
+Step 3. Check the backend-specific output folder for figures and inversion
 progress.
 
 ## Output Folders

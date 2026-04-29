@@ -30,6 +30,28 @@ The solver is built from:
 - `receivers`: regularly sampled surface receivers
 - `models`: `vp`, `vs`, and `rho`
 
+## Prepare the Marmousi Model Files
+
+This example reads the prepared Marmousi `vp` files and derives `vs` and `rho`
+inside the script:
+
+- `examples/models/marmousi/true.npy`
+- `examples/models/marmousi/smooth.npy`
+
+Generate the files before running the example:
+
+```bash
+python3 examples/models/marmousi/download_marmousi.py --extract
+python3 examples/models/marmousi/extract_model_segy.py
+python3 examples/models/marmousi/convert_segy_to_npy.py
+python3 examples/models/marmousi/prepare_fwi_models.py \
+  --input examples/models/marmousi/npy/vp_1p25m.npy \
+  --source-dh 1.25 \
+  --target-dh 25.0 \
+  --radii 8,8 \
+  --passes 3
+```
+
 ## Backend Selection
 
 Run the example with:

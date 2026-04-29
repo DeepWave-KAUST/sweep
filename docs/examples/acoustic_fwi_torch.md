@@ -30,6 +30,37 @@ The solver is built from:
 - `receivers`: regularly sampled receiver coordinates
 - `models`: the velocity model `vp`
 
+## Prepare the Marmousi Model Files
+
+This example reads:
+
+- `examples/models/marmousi/true.npy`
+- `examples/models/marmousi/smooth.npy`
+
+Generate them from the official Elastic Marmousi archive before running the
+example:
+
+```bash
+python3 examples/models/marmousi/download_marmousi.py --extract
+python3 examples/models/marmousi/extract_model_segy.py
+python3 examples/models/marmousi/convert_segy_to_npy.py
+python3 examples/models/marmousi/prepare_fwi_models.py \
+  --input examples/models/marmousi/npy/vp_1p25m.npy \
+  --source-dh 1.25 \
+  --target-dh 25.0 \
+  --radii 8,8 \
+  --passes 3
+```
+
+Optional preview:
+
+```bash
+python3 examples/models/marmousi/plot_models.py
+```
+
+The generated model files under `examples/models/` are ignored by git. The
+helper scripts in that directory remain tracked.
+
 ## Backend Selection
 
 Run the example with:
@@ -192,7 +223,10 @@ the true model, the current inverted model, and the current gradient.
 
 ## Running the Example
 
-Step 1. Choose the backend you want to use.
+Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
+exist.
+
+Step 2. Choose the backend you want to use.
 
 === "PyTorch"
 
@@ -206,7 +240,7 @@ Step 1. Choose the backend you want to use.
     python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend cuda
     ```
 
-Step 2. Check the output directory for the saved figures.
+Step 3. Check the output directory for the saved figures.
 
 Notes:
 

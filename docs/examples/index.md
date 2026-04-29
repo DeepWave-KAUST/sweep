@@ -34,4 +34,4 @@ Repository examples live in the `examples/` directory.
   - [Anisotropic Wavefields](wavefields_anisotropic.md)
 - [Multi-GPU](multi_gpu.md)
 - [Joint Migration Inversion](joint_migration_inversion.md)
-- [Model Assets](model_assets.md)
+- [Model Helper Scripts](model_assets.md)

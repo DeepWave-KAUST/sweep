@@ -28,6 +28,27 @@ The workflow is built from:
 - `receivers`: surface receivers sampled every `rec_step`
 - `models`: the smooth velocity model `vp` and the reflectivity model `mp`
 
+## Prepare the Marmousi Model Files
+
+This example reads:
+
+- `examples/models/marmousi/true.npy`
+- `examples/models/marmousi/smooth.npy`
+
+Generate them from the official Elastic Marmousi archive before running LSRTM:
+
+```bash
+python3 examples/models/marmousi/download_marmousi.py --extract
+python3 examples/models/marmousi/extract_model_segy.py
+python3 examples/models/marmousi/convert_segy_to_npy.py
+python3 examples/models/marmousi/prepare_fwi_models.py \
+  --input examples/models/marmousi/npy/vp_1p25m.npy \
+  --source-dh 1.25 \
+  --target-dh 25.0 \
+  --radii 8,8 \
+  --passes 3
+```
+
 ## Backend Selection
 
 Run the example with:
@@ -149,7 +170,10 @@ and the current reflectivity gradient.
 
 ## Running the Example
 
-Step 1. Choose the backend and memory mode you want to test.
+Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
+exist.
+
+Step 2. Choose the backend and memory mode you want to test.
 
 === "PyTorch"
 
@@ -163,7 +187,7 @@ Step 1. Choose the backend and memory mode you want to test.
     python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend cuda --cuda-memory full
     ```
 
-Step 2. Check the output directory for the saved wavelet, observed data, loss,
+Step 3. Check the output directory for the saved wavelet, observed data, loss,
 and epoch figures.
 
 Notes:

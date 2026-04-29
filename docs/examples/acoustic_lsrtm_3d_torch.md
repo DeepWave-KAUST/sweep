@@ -19,7 +19,30 @@ The workflow is:
 4. optimize the reflectivity model `mp` while keeping the background velocity
    fixed
 
+## Prepare the Overthrust Model Files
+
+This example reads:
+
+- `examples/models/overthrust/true_3d.npy`
+- `examples/models/overthrust/smooth_3d.npy`
+
+Generate them from the official SEG/EAGE Overthrust archive before running the
+example:
+
+```bash
+python3 examples/models/overthrust/download_3d_overthrust.py --extract
+python3 examples/models/overthrust/convert_3d_overthrust_vites_to_npy.py
+python3 examples/models/overthrust/make_smooth_model.py \
+  --input examples/models/overthrust/true_3d.npy \
+  --output examples/models/overthrust/smooth_3d.npy \
+  --radii 6,6,6 \
+  --passes 3
+```
+
 ## Run
+
+Prepare the Overthrust `.npy` files listed above if they do not already exist,
+then choose a backend.
 
 Eager:
 
