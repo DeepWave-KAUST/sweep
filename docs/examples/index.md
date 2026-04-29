@@ -33,5 +33,7 @@ Repository examples live in the `examples/` directory.
   - [Free Surface Forward](wavefields_free_surface.md)
   - [Anisotropic Wavefields](wavefields_anisotropic.md)
 - [Multi-GPU](multi_gpu.md)
+  - [Torch Distributed Multi-GPU FWI](multi_gpu_torch.md)
+  - [JAX pmap Multi-GPU FWI](multi_gpu_jax.md)
 - [Joint Migration Inversion](joint_migration_inversion.md)
 - [Model Helper Scripts](model_assets.md)

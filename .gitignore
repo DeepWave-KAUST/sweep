@@ -10,6 +10,8 @@ tests
 *.json
 test/3drtm
 examples/test_figures
+examples/multi-gpu/torch/multi_gpu_acoustic_fwi_*/
+examples/multi-gpu/jax/multi_gpu_acoustic_fwi_*/
 examples/models/models
 examples/models/**
 !examples/models/
