@@ -7,7 +7,7 @@ from .acoustic_lsrtm import AcousticLSRTM
 from .acoustic_lsrtm3d import AcousticLSRTM3D
 from .acoustic1st import Acoustic1st
 # from .elasticz import ElasticZ
-from .acoustic_vrz import AcousticVRZ
+from .acoustic_vrz import AcousticVRZ, AcousticVRZ3D
 # from .aec_lsrtm import AECLSRTM
 # from .elastic_lsrtm import ElasticLSRTM
 from .elastic import Elastic

@@ -31,6 +31,16 @@ def _to_nchw(u):
     raise ValueError(f"Expected 2D/3D/4D input for gradient kernel, got shape {tuple(u.shape)}")
 
 
+def _to_ncdhw(u):
+    if u.ndim == 3:
+        return u.unsqueeze(0).unsqueeze(0), lambda x: x.squeeze(0).squeeze(0)
+    if u.ndim == 4:
+        return u.unsqueeze(1), lambda x: x.squeeze(1)
+    if u.ndim == 5:
+        return u, lambda x: x
+    raise ValueError(f"Expected 3D/4D/5D input for 3D gradient kernel, got shape {tuple(u.shape)}")
+
+
 def _zero_halo(out, padding):
     if isinstance(padding, int):
         pad_z = pad_x = padding
@@ -42,6 +52,23 @@ def _zero_halo(out, padding):
     if pad_x > 0:
         out[..., :, :pad_x] = 0
         out[..., :, -pad_x:] = 0
+    return out
+
+
+def _zero_halo_3d(out, padding):
+    if isinstance(padding, int):
+        pad_z = pad_y = pad_x = padding
+    else:
+        pad_z, pad_y, pad_x = padding
+    if pad_z > 0:
+        out[..., :pad_z, :, :] = 0
+        out[..., -pad_z:, :, :] = 0
+    if pad_y > 0:
+        out[..., :, :pad_y, :] = 0
+        out[..., :, -pad_y:, :] = 0
+    if pad_x > 0:
+        out[..., :, :, :pad_x] = 0
+        out[..., :, :, -pad_x:] = 0
     return out
 
 def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
@@ -110,9 +137,17 @@ def gradient(u, h, axis, kernels=None):
         if axis not in kernels:
             raise ValueError(f"No gradient kernel configured for axis={axis}.")
         kernel = kernels[axis]
-        padding = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
-        u_nchw, restore = _to_nchw(u)
-        out = F.conv2d(u_nchw, kernel / h_axis, padding=padding)
-        out = _zero_halo(out, padding)
+        if kernel.ndim == 4:
+            padding = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
+            u_nchw, restore = _to_nchw(u)
+            out = F.conv2d(u_nchw, kernel / h_axis, padding=padding)
+            out = _zero_halo(out, padding)
+        elif kernel.ndim == 5:
+            padding = (kernel.shape[-3] // 2, kernel.shape[-2] // 2, kernel.shape[-1] // 2)
+            u_ncdhw, restore = _to_ncdhw(u)
+            out = F.conv3d(u_ncdhw, kernel / h_axis, padding=padding)
+            out = _zero_halo_3d(out, padding)
+        else:
+            raise ValueError(f"Expected 2D or 3D gradient kernel, got shape {tuple(kernel.shape)}")
         return restore(out)
     return torch.gradient(u, spacing=h_axis, dim=axis)[0]

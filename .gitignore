@@ -4,6 +4,7 @@ __pycache__
 .pytest_cache
 dist
 build*
+src/sweep/*.so
 tests
 *.egg-info
 *.csv
@@ -20,3 +21,4 @@ examples/models/**
 !examples/models/*/README*
 !examples/models/**/.gitkeep
 test/cuda
+test/test_outputs/
