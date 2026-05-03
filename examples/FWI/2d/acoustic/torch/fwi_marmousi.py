@@ -1,7 +1,16 @@
 from pathlib import Path
 import argparse
+import os
 import time
 import sys
+
+_ALLOC_CONF = (
+    os.environ.get("PYTORCH_ALLOC_CONF")
+    or os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+    or "expandable_segments:True"
+)
+os.environ.setdefault("PYTORCH_ALLOC_CONF", _ALLOC_CONF)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", _ALLOC_CONF)
 
 
 def find_examples_root():
@@ -71,6 +80,7 @@ def build_solver(shape, dev, cfg):
                 use_compile=cfg["use_compile"],
             ),
             use_ckpt=cfg["use_ckpt"],
+            ckpt_chunks=cfg.get("ckpt_chunks", 100),
         )
 
     if cfg["backend"] == "cuda":
@@ -118,22 +128,73 @@ def build_wavelet(cfg):
 
 
 def timed_forward(solver, wave, sources, receivers, models):
+    kwargs = {}
+    if getattr(solver, "backend", "eager") == "cuda":
+        kwargs["use_boundary_saving"] = False
+
     if solver.dev.type == "cuda":
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
         with torch.no_grad():
-            obs = solver(wave, sources, receivers, models=models)
+            obs = solver(wave, sources, receivers, models=models, **kwargs)
         end_event.record()
         torch.cuda.synchronize()
         elapsed_ms = start_event.elapsed_time(end_event)
     else:
         t0 = time.perf_counter()
         with torch.no_grad():
-            obs = solver(wave, sources, receivers, models=models)
+            obs = solver(wave, sources, receivers, models=models, **kwargs)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
     return obs.detach().cpu().numpy(), elapsed_ms
+
+
+def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsize):
+    nshots = sources.shape[0]
+    shot_batchsize = max(1, min(int(shot_batchsize), nshots))
+    obs_batches = []
+    batch_starts = list(range(0, nshots, shot_batchsize))
+    progress = tqdm.tqdm(batch_starts, desc="Forward shots", unit="batch")
+
+    if solver.dev.type == "cuda":
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        with torch.no_grad():
+            for start in progress:
+                stop = min(start + shot_batchsize, nshots)
+                solver_kwargs = {}
+                if getattr(solver, "backend", "eager") == "cuda":
+                    solver_kwargs["use_boundary_saving"] = False
+                batch_obs = solver(
+                    wave,
+                    sources[start:stop],
+                    receivers[start:stop],
+                    models=models,
+                    **solver_kwargs,
+                )
+                obs_batches.append(batch_obs.detach().cpu())
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_ms = start_event.elapsed_time(end_event)
+    else:
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for start in progress:
+                stop = min(start + shot_batchsize, nshots)
+                batch_obs = solver(
+                    wave,
+                    sources[start:stop],
+                    receivers[start:stop],
+                    models=models,
+                )
+                obs_batches.append(batch_obs.detach().cpu())
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+    progress.close()
+    obs = torch.cat(obs_batches, dim=0).numpy()
+    return obs, elapsed_ms
 
 
 def save_wavelet_figure(wave, output_dir):
@@ -244,8 +305,73 @@ def save_progress_figure(
     plt.close(fig)
 
 
-def run_fwi(backend="eager"):
+def inversion_step_batched(
+    solver,
+    wave,
+    sources,
+    receivers,
+    obs_torch,
+    inv_vp,
+    dev,
+    shot_idx,
+    train_shot_batchsize,
+):
+    train_shot_batchsize = max(1, min(int(train_shot_batchsize), shot_idx.shape[0]))
+    total_elements = int(obs_torch[shot_idx].numel())
+    total_loss_sum = 0.0
+
+    for start in range(0, shot_idx.shape[0], train_shot_batchsize):
+        stop = min(start + train_shot_batchsize, shot_idx.shape[0])
+        batch_idx = shot_idx[start:stop]
+        solver_kwargs = {}
+        if getattr(solver, "backend", "eager") == "cuda":
+            solver_kwargs["use_boundary_saving"] = True
+
+        syn = solver(wave, sources[batch_idx], receivers[batch_idx], models=[inv_vp], **solver_kwargs)
+        obs_batch = obs_torch[batch_idx].to(dev)
+        loss_sum = (syn - obs_batch).pow(2).sum()
+        (loss_sum / total_elements).backward()
+        total_loss_sum += float(loss_sum.detach().cpu())
+
+    return total_loss_sum / total_elements
+
+
+def run_fwi(
+    backend="eager",
+    batchsize_override=None,
+    train_shot_batchsize_override=None,
+    forward_batchsize_override=None,
+    epochs_override=None,
+    use_compile_override=None,
+    use_ckpt_override=None,
+    ckpt_chunks_override=None,
+):
     cfg = build_config(backend)
+    if batchsize_override is not None:
+        cfg["batchsize"] = int(batchsize_override)
+    if train_shot_batchsize_override is not None:
+        cfg["train_shot_batchsize"] = int(train_shot_batchsize_override)
+    if forward_batchsize_override is not None:
+        cfg["forward_batchsize"] = int(forward_batchsize_override)
+    if epochs_override is not None:
+        cfg["epochs"] = int(epochs_override)
+    if use_compile_override is not None:
+        cfg["use_compile"] = bool(use_compile_override)
+    if use_ckpt_override is not None:
+        cfg["use_ckpt"] = bool(use_ckpt_override)
+    if ckpt_chunks_override is not None:
+        cfg["ckpt_chunks"] = int(ckpt_chunks_override)
+
+    if int(cfg["batchsize"]) < 1:
+        raise ValueError(f"batchsize must be >= 1, got {cfg['batchsize']}.")
+    if int(cfg.get("forward_batchsize", 1)) < 1:
+        raise ValueError(f"forward_batchsize must be >= 1, got {cfg['forward_batchsize']}.")
+    if int(cfg.get("train_shot_batchsize", cfg["batchsize"])) < 1:
+        raise ValueError(
+            "train_shot_batchsize must be >= 1, "
+            f"got {cfg.get('train_shot_batchsize')}."
+        )
+
     script_dir = Path(__file__).resolve().parent
     output_dir = script_dir / cfg["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -271,29 +397,64 @@ def run_fwi(backend="eager"):
     print("(nshots, nreceivers, ndim):", receivers.shape)
 
     true_vp = torch.from_numpy(true_model).to(dev)
-    obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
-    print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
+    forward_batchsize = min(int(cfg.get("forward_batchsize", sources.shape[0])), sources.shape[0])
+    if forward_batchsize >= sources.shape[0]:
+        obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
+        print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
+    else:
+        obs, elapsed_ms = timed_forward_batched(
+            solver,
+            wave,
+            sources,
+            receivers,
+            models=[true_vp],
+            shot_batchsize=forward_batchsize,
+        )
+        print(
+            f"Forward modeling time ({backend}, batched {forward_batchsize} shots/step): "
+            f"{elapsed_ms:.2f} ms"
+        )
+    del true_vp
+    if dev.type == "cuda":
+        torch.cuda.empty_cache()
     save_observed_figure(obs, receivers, output_dir, cfg)
 
     inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
     optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)
 
-    obs_torch = torch.from_numpy(obs).to(dev)
+    obs_torch = torch.from_numpy(obs)
     losses = []
     nshots = sources.shape[0]
     batchsize = min(cfg["batchsize"], nshots)
+    train_shot_batchsize = min(int(cfg.get("train_shot_batchsize", batchsize)), batchsize)
+    print(
+        "Training shot selection:",
+        f"batchsize={batchsize},",
+        f"train_shot_batchsize={train_shot_batchsize},",
+        f"use_ckpt={cfg.get('use_ckpt', False)},",
+        f"ckpt_chunks={cfg.get('ckpt_chunks', None)},",
+        f"use_compile={cfg.get('use_compile', False)}",
+    )
 
     for epoch in tqdm.trange(cfg["epochs"]):
         optimizer.zero_grad()
 
         shot_idx = np.random.choice(nshots, size=batchsize, replace=False)
-        syn = solver(wave, sources[shot_idx], receivers[shot_idx], models=[inv_vp])
-        loss = (syn - obs_torch[shot_idx]).pow(2).mean()
-        loss.backward()
+        loss_value = inversion_step_batched(
+            solver,
+            wave,
+            sources,
+            receivers,
+            obs_torch,
+            inv_vp,
+            dev,
+            shot_idx,
+            train_shot_batchsize,
+        )
         optimizer.step()
 
-        losses.append(loss.item())
-        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss.item():.6e}")
+        losses.append(loss_value)
+        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
 
         if epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
@@ -337,12 +498,79 @@ def parse_args():
         default="eager",
         help="Select which PropTorch backend to use.",
     )
+    parser.add_argument(
+        "--batchsize",
+        type=int,
+        default=None,
+        help="Override the number of randomly selected shots used in each optimization step.",
+    )
+    parser.add_argument(
+        "--train-shot-batchsize",
+        type=int,
+        default=None,
+        help="Process selected training shots in smaller chunks while accumulating gradients.",
+    )
+    parser.add_argument(
+        "--forward-batchsize",
+        type=int,
+        default=None,
+        help="Generate observed data in shot batches to limit memory use.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Override the number of FWI optimization epochs.",
+    )
+    compile_group = parser.add_mutually_exclusive_group()
+    compile_group.add_argument(
+        "--compile",
+        dest="use_compile",
+        action="store_true",
+        default=None,
+        help="Enable torch.compile for the eager backend step function.",
+    )
+    compile_group.add_argument(
+        "--no-compile",
+        dest="use_compile",
+        action="store_false",
+        help="Disable torch.compile for the eager backend step function.",
+    )
+    ckpt_group = parser.add_mutually_exclusive_group()
+    ckpt_group.add_argument(
+        "--ckpt",
+        dest="use_ckpt",
+        action="store_true",
+        default=None,
+        help="Enable eager checkpointing to reduce activation memory.",
+    )
+    ckpt_group.add_argument(
+        "--no-ckpt",
+        dest="use_ckpt",
+        action="store_false",
+        help="Disable eager checkpointing. This can require much more GPU memory.",
+    )
+    parser.add_argument(
+        "--ckpt-chunks",
+        type=int,
+        default=None,
+        help="Override eager checkpoint chunk length in time steps.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    run_fwi(backend=args.backend)
+    run_fwi(
+        backend=args.backend,
+        batchsize_override=args.batchsize,
+        train_shot_batchsize_override=args.train_shot_batchsize,
+        forward_batchsize_override=args.forward_batchsize,
+        epochs_override=args.epochs,
+        use_compile_override=args.use_compile,
+        use_ckpt_override=args.use_ckpt,
+        ckpt_chunks_override=args.ckpt_chunks,
+    )
 
 
 if __name__ == "__main__":
