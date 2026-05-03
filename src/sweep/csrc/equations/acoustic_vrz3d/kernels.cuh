@@ -136,6 +136,34 @@ __device__ __forceinline__ float vrz3d_q_gradp(
 }
 
 template<int Order, int Direction>
+struct VRZ3DGradientProductAccessor {
+    const float* q;
+    const float* p;
+    int ix;
+    int iy;
+    int iz;
+    int sx;
+    int sy;
+    int sz;
+    GradParam grad_ctx;
+    SolverContext solver;
+
+    __device__ __forceinline__
+    float operator()(int offset) const
+    {
+        return vrz3d_q_gradp<Order, Direction>(
+            q,
+            p,
+            ix + offset * sx,
+            iy + offset * sy,
+            iz + offset * sz,
+            grad_ctx,
+            solver
+        );
+    }
+};
+
+template<int Order, int Direction>
 __device__ __forceinline__ float vrz3d_grad_q_gradp(
     const float* __restrict__ q,
     const float* __restrict__ p,
@@ -159,77 +187,14 @@ __device__ __forceinline__ float vrz3d_grad_q_gradp(
         h = grad_ctx.dz;
     }
 
-    if constexpr (Order == 2) {
-        return (
-            vrz3d_q_gradp<Order, Direction>(q, p, ix + sx, iy + sy, iz + sz, grad_ctx, solver)
-          - vrz3d_q_gradp<Order, Direction>(q, p, ix - sx, iy - sy, iz - sz, grad_ctx, solver)
-        ) / (2.f * h);
-    } else if constexpr (Order == 4) {
-        constexpr float c1 = 8.f / 12.f;
-        constexpr float c2 = -1.f / 12.f;
-        return (
-            c1 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + sx, iy + sy, iz + sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - sx, iy - sy, iz - sz, grad_ctx, solver)
-            )
-          + c2 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + 2 * sx, iy + 2 * sy, iz + 2 * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - 2 * sx, iy - 2 * sy, iz - 2 * sz, grad_ctx, solver)
-            )
-        ) / h;
-    } else if constexpr (Order == 6) {
-        constexpr float c1 = 3.f / 4.f;
-        constexpr float c2 = -3.f / 20.f;
-        constexpr float c3 = 1.f / 60.f;
-        return (
-            c1 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + sx, iy + sy, iz + sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - sx, iy - sy, iz - sz, grad_ctx, solver)
-            )
-          + c2 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + 2 * sx, iy + 2 * sy, iz + 2 * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - 2 * sx, iy - 2 * sy, iz - 2 * sz, grad_ctx, solver)
-            )
-          + c3 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + 3 * sx, iy + 3 * sy, iz + 3 * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - 3 * sx, iy - 3 * sy, iz - 3 * sz, grad_ctx, solver)
-            )
-        ) / h;
-    } else if constexpr (Order == 8) {
-        constexpr float c1 = 4.f / 5.f;
-        constexpr float c2 = -1.f / 5.f;
-        constexpr float c3 = 4.f / 105.f;
-        constexpr float c4 = -1.f / 280.f;
-        return (
-            c1 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + sx, iy + sy, iz + sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - sx, iy - sy, iz - sz, grad_ctx, solver)
-            )
-          + c2 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + 2 * sx, iy + 2 * sy, iz + 2 * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - 2 * sx, iy - 2 * sy, iz - 2 * sz, grad_ctx, solver)
-            )
-          + c3 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + 3 * sx, iy + 3 * sy, iz + 3 * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - 3 * sx, iy - 3 * sy, iz - 3 * sz, grad_ctx, solver)
-            )
-          + c4 * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + 4 * sx, iy + 4 * sy, iz + 4 * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - 4 * sx, iy - 4 * sy, iz - 4 * sz, grad_ctx, solver)
-            )
-        ) / h;
-    } else {
-        float acc = 0.f;
-        #pragma unroll 1
-        for (int k = 1; k <= solver.M; ++k) {
-            float coeff = grad_ctx.coeff[k];
-            acc += coeff * (
-                vrz3d_q_gradp<Order, Direction>(q, p, ix + k * sx, iy + k * sy, iz + k * sz, grad_ctx, solver)
-              - vrz3d_q_gradp<Order, Direction>(q, p, ix - k * sx, iy - k * sy, iz - k * sz, grad_ctx, solver)
-            );
-        }
-        return acc / h;
-    }
+    return centered_gradient_stencil<Order>(
+        VRZ3DGradientProductAccessor<Order, Direction>{
+            q, p, ix, iy, iz, sx, sy, sz, grad_ctx, solver
+        },
+        solver.M,
+        grad_ctx.coeff,
+        h
+    );
 }
 
 template<int Order>

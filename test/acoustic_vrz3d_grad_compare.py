@@ -230,8 +230,9 @@ def symmetric_limit(*arrays):
     return max(max_abs, 1e-20)
 
 
-def percentile_limits(array):
-    return tuple(float(value) for value in np.percentile(array, [2, 98]))
+def percentile_limits(*arrays):
+    values = np.concatenate([np.asarray(array).reshape(-1) for array in arrays])
+    return tuple(float(value) for value in np.percentile(values, [2, 98]))
 
 
 def load_pyplot(show):
@@ -289,10 +290,11 @@ def plot_gradient_slices(results, output_dir, plot_path=None, show=False):
         eager = results["eager"]["grads"][model_name].numpy()
         cuda = results["cuda"]["grads"][model_name].numpy()
         diff = cuda - eager
+        model_limits = percentile_limits(eager, cuda)
         row_specs.extend(
             (
-                (f"{model_name} eager", eager, percentile_limits(eager)),
-                (f"{model_name} cuda", cuda, percentile_limits(cuda)),
+                (f"{model_name} eager", eager, model_limits),
+                (f"{model_name} cuda", cuda, model_limits),
                 (f"{model_name} cuda-eager", diff, percentile_limits(diff)),
             )
         )
