@@ -107,6 +107,129 @@ __global__ void calculate_grad_vrz2d(
         else                   calculate_grad_vrz2d<-1><<<grid, block>>>(__VA_ARGS__);       \
     } while (0)
 
+template<int Order, int Direction>
+__device__ __forceinline__ bool vrz2d_grad_product_interior(
+    SolverContext solver,
+    int ix,
+    int iz
+) {
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+
+    return ix >= halo && ix < solver.nx - halo
+        && iz >= halo && iz < solver.nz - halo;
+}
+
+template<int Order, int Direction>
+__device__ __forceinline__ float vrz2d_q_gradp(
+    const float* __restrict__ q,
+    const float* __restrict__ p,
+    int ix,
+    int iz,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    if (!vrz2d_grad_product_interior<Order, Direction>(solver, ix, iz))
+        return 0.f;
+
+    int idx = iz * solver.nx + ix;
+    return q[idx] * gradient<2, Order, Direction>(p, ix, 0, iz, grad_ctx);
+}
+
+template<int Order, int Direction>
+__device__ __forceinline__ float vrz2d_grad_q_gradp(
+    const float* __restrict__ q,
+    const float* __restrict__ p,
+    int ix,
+    int iz,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    int sx = 0, sz = 0;
+    float h = 1.f;
+
+    if constexpr (Direction & X) {
+        sx = 1;
+        h = grad_ctx.dx;
+    } else {
+        sz = 1;
+        h = grad_ctx.dz;
+    }
+
+    if constexpr (Order == 2) {
+        return (
+            vrz2d_q_gradp<Order, Direction>(q, p, ix + sx, iz + sz, grad_ctx, solver)
+          - vrz2d_q_gradp<Order, Direction>(q, p, ix - sx, iz - sz, grad_ctx, solver)
+        ) / (2.f * h);
+    } else if constexpr (Order == 4) {
+        constexpr float c1 = 8.f / 12.f;
+        constexpr float c2 = -1.f / 12.f;
+        return (
+            c1 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + sx, iz + sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - sx, iz - sz, grad_ctx, solver)
+            )
+          + c2 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + 2 * sx, iz + 2 * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - 2 * sx, iz - 2 * sz, grad_ctx, solver)
+            )
+        ) / h;
+    } else if constexpr (Order == 6) {
+        constexpr float c1 = 3.f / 4.f;
+        constexpr float c2 = -3.f / 20.f;
+        constexpr float c3 = 1.f / 60.f;
+        return (
+            c1 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + sx, iz + sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - sx, iz - sz, grad_ctx, solver)
+            )
+          + c2 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + 2 * sx, iz + 2 * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - 2 * sx, iz - 2 * sz, grad_ctx, solver)
+            )
+          + c3 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + 3 * sx, iz + 3 * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - 3 * sx, iz - 3 * sz, grad_ctx, solver)
+            )
+        ) / h;
+    } else if constexpr (Order == 8) {
+        constexpr float c1 = 4.f / 5.f;
+        constexpr float c2 = -1.f / 5.f;
+        constexpr float c3 = 4.f / 105.f;
+        constexpr float c4 = -1.f / 280.f;
+        return (
+            c1 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + sx, iz + sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - sx, iz - sz, grad_ctx, solver)
+            )
+          + c2 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + 2 * sx, iz + 2 * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - 2 * sx, iz - 2 * sz, grad_ctx, solver)
+            )
+          + c3 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + 3 * sx, iz + 3 * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - 3 * sx, iz - 3 * sz, grad_ctx, solver)
+            )
+          + c4 * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + 4 * sx, iz + 4 * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - 4 * sx, iz - 4 * sz, grad_ctx, solver)
+            )
+        ) / h;
+    } else {
+        float acc = 0.f;
+        #pragma unroll 1
+        for (int k = 1; k <= solver.M; ++k) {
+            float coeff = grad_ctx.coeff[k];
+            acc += coeff * (
+                vrz2d_q_gradp<Order, Direction>(q, p, ix + k * sx, iz + k * sz, grad_ctx, solver)
+              - vrz2d_q_gradp<Order, Direction>(q, p, ix - k * sx, iz - k * sz, grad_ctx, solver)
+            );
+        }
+        return acc / h;
+    }
+}
+
 template<int Order>
 __global__ void acoustic_vrz2nd(
     AcousticWavefieldPointer wf,
@@ -417,12 +540,12 @@ __global__ void calculate_grad_vrz2d(
     float dbdz = dvpdz * inv_z0 + v * z1z;
     float div_b_grad_p = beta * (lap_x + lap_z) + dbdx * dpdx + dbdz * dpdz;
 
-    float dqdx = gradient<2, Order, X>(q_b, ix, 0, iz, grad_ctx);
-    float dqdz = gradient<2, Order, Z>(q_b, ix, 0, iz, grad_ctx);
+    float d_q_dpdx = vrz2d_grad_q_gradp<Order, X>(q_b, p_b, ix, iz, grad_ctx, solver);
+    float d_q_dpdz = vrz2d_grad_q_gradp<Order, Z>(q_b, p_b, ix, iz, grad_ctx, solver);
 
     float dt2 = solver.dt * solver.dt;
     float g_kappa = -dt2 * lambda_b[idx] * div_b_grad_p;
-    float g_beta = dt2 * (dpdx * dqdx + dpdz * dqdz);
+    float g_beta = dt2 * (d_q_dpdx + d_q_dpdz - q_b[idx] * (lap_x + lap_z));
 
     grad_vp_b[idx] += z_b[idx] * g_kappa + inv_z0 * g_beta;
     grad_z_b[idx] += v * g_kappa - beta * inv_z0 * g_beta;
