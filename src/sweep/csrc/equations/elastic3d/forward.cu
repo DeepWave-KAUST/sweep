@@ -165,8 +165,7 @@ ForwardOutput forward(const ForwardInput& in)
         true, !p.boundary_on_cpu, p.transfer_interval,
         p.boundary_on_cpu ? p.boundary_cpu : std::vector<torch::Tensor>{},
         p.boundary_gpu,
-        p.last_two,
-        false, p.use_pinned_memory
+        p.last_two, p.use_pinned_memory
     );
     // auto bs = boundary_saver.view();
 

@@ -57,6 +57,7 @@ class PropBase:
                 - storage (str): Where to store the boundary wavefields. Options are 'gpu' and 'cpu'. If 'gpu', the boundary wavefields will be stored in GPU memory. If 'cpu', the boundary wavefields will be transferred to CPU memory. Defaults to 'gpu'.
                 - transfer_interval (int): The interval (in time steps) at which to transfer the boundary wavefields to CPU memory if storage is 'cpu'. For example, if transfer_interval is 10, then every 10 time steps the boundary wavefields will be transferred to CPU memory. Defaults to 1.
                 - pinned_memory (bool): Whether to use pinned memory for the boundary wavefields when storage is 'cpu'. Using pinned memory can speed up the transfer between GPU and CPU. Defaults to False.
+                - disk_async_read (bool): Whether to read disk boundary chunks asynchronously during backward when storage is 'disk'. Defaults to False.
         """
         
         self.equation = equation
@@ -102,6 +103,7 @@ class PropBase:
             "transfer_interval": kwargs.pop("transfer_interval", 1),
             "storage": "cpu" if kwargs.pop("boundary_on_cpu", False) else "gpu",
             "pinned_memory": kwargs.pop("use_pinned_memory", False),
+            "disk_async_read": kwargs.pop("boundary_disk_async_read", False),
         }
         if boundary_saving_config is None:
             boundary_saving_config = legacy_boundary_config
@@ -213,10 +215,14 @@ class PropBase:
             "pinned_memory": False,
             "disk_dir": None,
             "ring_buffers": 1,
+            "disk_async_read": False,
         }
 
         if config is None:
             return default
+        if "boundary_disk_async_read" in config:
+            config = dict(config)
+            config["disk_async_read"] = config.pop("boundary_disk_async_read")
 
         merged = default.copy()
         merged.update(config)
@@ -234,12 +240,16 @@ class PropBase:
             merged["pinned_memory"] = False
             merged["disk_dir"] = None
             merged["ring_buffers"] = 1
+            merged["disk_async_read"] = False
 
         if merged["storage"] == "cpu":
             merged["disk_dir"] = None
+            merged["disk_async_read"] = False
 
         if merged["storage"] == "disk":
             merged["pinned_memory"] = False
+            if merged["disk_async_read"] and merged["ring_buffers"] < 2:
+                merged["ring_buffers"] = 2
 
         return merged
 

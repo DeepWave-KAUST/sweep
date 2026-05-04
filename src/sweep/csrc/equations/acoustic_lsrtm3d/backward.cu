@@ -674,12 +674,12 @@ void run_bs_imaging(
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            {}, false, p.use_pinned_memory
+            {}, p.use_pinned_memory
         );
     } else {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, {}, false, p.use_pinned_memory
+            true, true, 1, {}, p.boundary_gpu, {}, p.use_pinned_memory
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);

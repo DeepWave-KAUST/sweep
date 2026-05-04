@@ -22,6 +22,7 @@ STRATEGIES = (
     "boundary_gpu",
     "boundary_cpu",
     "boundary_disk",
+    "boundary_disk_async",
     "ckpt_chunk",
 )
 
@@ -145,13 +146,15 @@ def solver_kwargs_for_strategy(strategy, args):
             "boundary_saving_config": {"enabled": False},
         }
 
-    storage = strategy.removeprefix("boundary_")
+    disk_async_read = strategy == "boundary_disk_async"
+    storage = "disk" if disk_async_read else strategy.removeprefix("boundary_")
     cfg = {
         "enabled": True,
         "storage": storage,
         "transfer_interval": args.transfer_interval,
         "ring_buffers": args.ring_buffers,
         "pinned_memory": False,
+        "disk_async_read": disk_async_read,
     }
     if storage == "disk" and args.disk_dir is not None:
         cfg["disk_dir"] = str(args.disk_dir)
@@ -279,6 +282,7 @@ def run_worker(args):
 
     result = {
         "strategy": args.strategy,
+        "boundary_disk_async_read": args.strategy == "boundary_disk_async",
         "dim": args.dim,
         "shape": [args.nz, args.nx] if args.dim == "2d" else [args.nz, args.ny, args.nx],
         "nt": args.nt,
@@ -377,6 +381,8 @@ def run_all(args):
         results.append(result)
         print_result(result)
 
+    print_disk_async_speedup(results)
+
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(results, indent=2), encoding="utf-8")
@@ -396,6 +402,29 @@ def print_result(result):
         f"b_cpu {result['boundary_cpu_mb']:.1f} MB "
         f"b_gpu {result['boundary_gpu_mb']:.1f} MB "
         f"b_disk {result['boundary_disk_mb']:.1f} MB"
+    )
+
+
+def print_disk_async_speedup(results):
+    by_strategy = {result["strategy"]: result for result in results}
+    sync_disk = by_strategy.get("boundary_disk")
+    async_disk = by_strategy.get("boundary_disk_async")
+    if sync_disk is None or async_disk is None:
+        return
+
+    sync_time = sync_disk["time_mean_s"]
+    async_time = async_disk["time_mean_s"]
+    if async_time <= 0:
+        return
+
+    speedup = sync_time / async_time
+    saved = sync_time - async_time
+    pct = 100.0 * saved / sync_time if sync_time > 0 else 0.0
+    print(
+        f"{'disk_async_speedup':>14} | "
+        f"{speedup:.3f}x "
+        f"saved {saved:.4f}s ({pct:.1f}%) "
+        f"sync {sync_time:.4f}s async {async_time:.4f}s"
     )
 
 

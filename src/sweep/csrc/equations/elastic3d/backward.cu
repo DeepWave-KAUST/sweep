@@ -610,7 +610,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         true, !p.boundary_on_cpu, p.transfer_interval,
         p.boundary_on_cpu ? p.boundary_cpu : std::vector<torch::Tensor>{},
         p.boundary_gpu,
-        {}, false, p.use_pinned_memory
+        {}, p.use_pinned_memory
     );
     // auto bs = boundary_saver.view();
 

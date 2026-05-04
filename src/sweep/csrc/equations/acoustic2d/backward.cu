@@ -7,6 +7,7 @@
 #include "../../common/acoustic.h"
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
+#include "../../common/boundary_runtime.cuh"
 #include "../../launch/config.h"
 #include "../../common/wavetypes.h"
 
@@ -280,9 +281,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
-        boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, false, p.use_pinned_memory);
+        boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, p.use_pinned_memory);
     } else {
-        boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true, 1, {}, p.boundary_gpu, {}, false, p.use_pinned_memory);
+        boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true, 1, {}, p.boundary_gpu, {}, p.use_pinned_memory);
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
     }
@@ -300,27 +301,24 @@ BackwardOutput backward_bs(const BackwardInput& in)
     GradParam grad_ctx{1, 0, nx, M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
-    int interval = p.transfer_interval;
-    int buf_idx = 0;
 
     AsyncCopyContext async_copy(staged_boundary);
-    if (staged_boundary) {
-        int it0 = p.nt - 1;
-        int buf_idx0 = (it0 - 1) % interval;
-        int chunk_start = it0 - buf_idx0 - 1;
-        int chunk_len = buf_idx0 + 1;
-        if (p.boundary_on_disk) {
-            boundary_saver.load_disk_to_cpu_2d(chunk_start, chunk_len, p.boundary_disk_files);
-            boundary_saver.load_cpu_to_gpu(0, chunk_len, async_copy.copy_stream);
-        } else {
-            boundary_saver.load_cpu_to_gpu(chunk_start, chunk_len, async_copy.copy_stream);
-        }
-        async_copy.record_copy_ready();
-    }
+    BoundaryRuntime boundary_runtime(
+        boundary_saver,
+        2,
+        true,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        p.boundary_disk_files,
+        async_copy.compute_stream,
+        async_copy.copy_stream
+    );
+    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
     for (int it = p.nt - 1; it >= 1; --it) {
-        buf_idx = (it - 1) % interval;
-
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
@@ -384,48 +382,20 @@ BackwardOutput backward_bs(const BackwardInput& in)
             ctx
         );
 
-        if (staged_boundary && buf_idx == interval - 1)
-            async_copy.wait_for_copy();
-
-        float* top_ptr = staged_boundary ? boundary_saver.top_gpu.data_ptr<float>() + buf_idx * boundary_saver.top_stride
-                                         : bs.top;
-        float* bottom_ptr = staged_boundary ? boundary_saver.bottom_gpu.data_ptr<float>() + buf_idx * boundary_saver.bottom_stride
-                                            : bs.bottom;
-        float* left_ptr = staged_boundary ? boundary_saver.left_gpu.data_ptr<float>() + buf_idx * boundary_saver.left_stride
-                                          : bs.left;
-        float* right_ptr = staged_boundary ? boundary_saver.right_gpu.data_ptr<float>() + buf_idx * boundary_saver.right_stride
-                                           : bs.right;
-
-        boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
+        boundary_runtime.restore_backward_2d(
+            it,
             for_view.u_next,
-            top_ptr,
-            bottom_ptr,
-            left_ptr,
-            right_ptr,
-            staged_boundary ? 0 : it-1,
+            launch_config.grid,
+            launch_config.block,
+            bs,
             save_width,
             0,
-            ctx,
-            BOUNDARY_RESTORE
+            ctx
         );
 
         forward.swap();
 
-        if (staged_boundary && buf_idx == 0 && it > 1) {
-            int next_chunk = (it - 1) / interval - 1;
-            if (next_chunk >= 0) {
-                int next_start = next_chunk * interval;
-                int remain = static_cast<int>(p.nt) - next_start;
-                int next_len = std::min(interval, remain);
-                if (p.boundary_on_disk) {
-                    boundary_saver.load_disk_to_cpu_2d(next_start, next_len, p.boundary_disk_files);
-                    boundary_saver.load_cpu_to_gpu(0, next_len, async_copy.copy_stream);
-                } else {
-                    boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
-                }
-                async_copy.record_copy_ready();
-            }
-        }
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
         
         calculate_grad_utt<<<launch_config.grid, launch_config.block>>>(
             forward.u_next_t.data_ptr<float>(),

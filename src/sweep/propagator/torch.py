@@ -72,6 +72,8 @@ class PropTorch(torch.nn.Module):
                 "transfer_interval": boundary.get("transfer_interval", 1),
                 "pinned_memory": boundary.get("pinned_memory", False),
                 "disk_dir": boundary.get("disk_dir"),
+                "ring_buffers": boundary.get("ring_buffers", 1),
+                "disk_async_read": boundary.get("disk_async_read", False),
             }
             merged["use_ckpt"] = False
             return merged

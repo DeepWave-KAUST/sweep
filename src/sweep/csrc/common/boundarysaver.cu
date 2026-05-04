@@ -1,5 +1,5 @@
 #include "context.h"
-#include "boundarysaver.cuh"
+#include "boundary/kernels.cuh"
 #include <cuda_runtime.h>
 
 __global__ void boundary_kernel2d(

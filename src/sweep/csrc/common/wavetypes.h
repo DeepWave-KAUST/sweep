@@ -37,6 +37,7 @@ struct ForwardInput {
     bool use_recursive_checkpoint = false;
     bool boundary_on_cpu = false;
     bool boundary_on_disk = false;
+    bool boundary_disk_async_read = false;
     bool use_pinned_memory = false;
     bool free_surface;
 
@@ -135,6 +136,7 @@ struct BackwardInput {
     bool free_surface;
     bool boundary_on_cpu = false;
     bool boundary_on_disk = false;
+    bool boundary_disk_async_read = false;
     bool use_pinned_memory = false;
     int transfer_interval = 1; // Transfer every time step by default
     int boundary_ring_buffers = 1;

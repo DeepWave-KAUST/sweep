@@ -53,6 +53,7 @@ class Warpper(torch.autograd.Function):
         boundary_ring_buffers: int=1,
         boundary_on_cpu: bool=False,
         boundary_on_disk: bool=False,
+        boundary_disk_async_read: bool=False,
         forward_wavefields: tuple=(),
         adjoint_wavefields: tuple=(),
         adjoint_workspace: tuple=(),
@@ -117,6 +118,7 @@ class Warpper(torch.autograd.Function):
         params.use_recursive_checkpoint = use_recursive_checkpoint
         params.boundary_on_cpu = boundary_on_cpu
         params.boundary_on_disk = boundary_on_disk
+        params.boundary_disk_async_read = boundary_disk_async_read
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.nt = nt
@@ -148,6 +150,7 @@ class Warpper(torch.autograd.Function):
             ctx.models = models
             ctx.boundary_on_cpu = boundary_on_cpu
             ctx.boundary_on_disk = boundary_on_disk
+            ctx.boundary_disk_async_read = boundary_disk_async_read
             ctx.boundary_cpu = boundary_cpu if boundary_on_cpu else ()
             ctx.boundary_gpu = boundary_gpu if use_boundary_saving else ()
             ctx.boundary_disk_files = tuple(boundary_disk_files) if boundary_on_disk else ()
@@ -222,6 +225,7 @@ class Warpper(torch.autograd.Function):
         params.free_surface = ctx.free_surface
         params.boundary_on_cpu = ctx.boundary_on_cpu
         params.boundary_on_disk = ctx.boundary_on_disk
+        params.boundary_disk_async_read = ctx.boundary_disk_async_read
         params.use_pinned_memory = ctx.use_pinned_memory
 
         if ctx.use_checkpoint:
@@ -331,6 +335,7 @@ class Warpper(torch.autograd.Function):
             None,      # boundary_ring_buffers
             None,      # boundary_on_cpu
             None,      # boundary_on_disk
+            None,      # boundary_disk_async_read
             None,      # forward wavefields
             None,      # adjoint wavefields
             None,      # adjoint workspace
@@ -693,6 +698,8 @@ class PropCUDA(PropBase, torch.nn.Module):
             legacy_override["pinned_memory"] = kwargs.pop("use_pinned_memory")
         if "boundary_ring_buffers" in kwargs:
             legacy_override["ring_buffers"] = kwargs.pop("boundary_ring_buffers")
+        if "boundary_disk_async_read" in kwargs:
+            legacy_override["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
         if boundary_saving_config is None and legacy_override:
             boundary_saving_config = legacy_override
         elif legacy_override:
@@ -710,6 +717,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         boundary_on_disk = boundary_storage == "disk"
         transfer_interval = boundary_cfg["transfer_interval"]
         boundary_ring_buffers = boundary_cfg["ring_buffers"]
+        boundary_disk_async_read = boundary_cfg["disk_async_read"]
         use_pinned_memory = boundary_cfg["pinned_memory"]
         boundary_disk_dir = boundary_cfg.get("disk_dir")
 
@@ -887,6 +895,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 boundary_ring_buffers,
                 boundary_on_cpu,
                 boundary_on_disk,
+                boundary_disk_async_read,
                 forward_wavefields,
                 adjoint_wavefields,
                 adjoint_workspace,
@@ -922,6 +931,10 @@ class PropCUDA(PropBase, torch.nn.Module):
             legacy_override["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
         if "use_pinned_memory" in kwargs:
             legacy_override["pinned_memory"] = kwargs.pop("use_pinned_memory")
+        if "boundary_ring_buffers" in kwargs:
+            legacy_override["ring_buffers"] = kwargs.pop("boundary_ring_buffers")
+        if "boundary_disk_async_read" in kwargs:
+            legacy_override["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
         if boundary_saving_config is None and legacy_override:
             boundary_saving_config = legacy_override
         elif legacy_override:
@@ -936,6 +949,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         boundary_on_disk = boundary_storage == "disk"
         transfer_interval = boundary_cfg["transfer_interval"]
         boundary_ring_buffers = boundary_cfg["ring_buffers"]
+        boundary_disk_async_read = boundary_cfg["disk_async_read"]
         use_pinned_memory = boundary_cfg["pinned_memory"]
         boundary_disk_dir = boundary_cfg.get("disk_dir")
 
@@ -1093,6 +1107,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         fwd.use_recursive_checkpoint = use_recursive_checkpoint
         fwd.boundary_on_cpu = boundary_on_cpu
         fwd.boundary_on_disk = boundary_on_disk
+        fwd.boundary_disk_async_read = boundary_disk_async_read
         fwd.use_pinned_memory = use_pinned_memory
         fwd.free_surface = self.free_surface
         fwd.nt = self.nt
@@ -1136,6 +1151,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         bwd.free_surface = self.free_surface
         bwd.boundary_on_cpu = boundary_on_cpu
         bwd.boundary_on_disk = boundary_on_disk
+        bwd.boundary_disk_async_read = boundary_disk_async_read
         bwd.use_pinned_memory = use_pinned_memory
         bwd.transfer_interval = transfer_interval
         bwd.boundary_ring_buffers = boundary_ring_buffers

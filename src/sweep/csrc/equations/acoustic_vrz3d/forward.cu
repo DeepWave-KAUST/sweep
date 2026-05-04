@@ -74,11 +74,10 @@ ForwardOutput forward(const ForwardInput& in)
     bool staged_boundary = p.boundary_on_cpu;
     if (staged_boundary) {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, false,
-                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two,
-                                false, p.use_pinned_memory);
+                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
     } else {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true,
-                                1, {}, p.boundary_gpu, p.last_two, false, p.use_pinned_memory);
+                                1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory);
     }
     auto bs = boundary_saver.view();
 

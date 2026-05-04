@@ -21,6 +21,7 @@ class BoundaryOptions:
     pinned_memory: bool = False
     disk_dir: str | None = None
     ring_buffers: int = 1
+    disk_async_read: bool = False
 
     def __post_init__(self):
         if self.storage not in {"gpu", "cpu", "disk"}:
@@ -32,7 +33,7 @@ class BoundaryOptions:
         if self.storage == "gpu":
             if self.transfer_interval != 1:
                 raise ValueError(
-                    "BoundaryOptions.transfer_interval is only valid when storage='cpu'."
+                    "BoundaryOptions.transfer_interval is only valid when storage='cpu' or storage='disk'."
                 )
             if self.ring_buffers != 1:
                 raise ValueError(
@@ -42,9 +43,17 @@ class BoundaryOptions:
                 raise ValueError(
                     "BoundaryOptions.pinned_memory is only valid when storage='cpu'."
                 )
+            if self.disk_async_read:
+                raise ValueError(
+                    "BoundaryOptions.disk_async_read is only valid when storage='disk'."
+                )
         if self.storage == "disk" and self.pinned_memory:
             raise ValueError(
                 "BoundaryOptions.pinned_memory is only valid when storage='cpu'."
+            )
+        if self.storage == "cpu" and self.disk_async_read:
+            raise ValueError(
+                "BoundaryOptions.disk_async_read is only valid when storage='disk'."
             )
 
 
