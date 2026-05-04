@@ -244,9 +244,9 @@ class PropBase:
             merged["disk_dir"] = None
             merged["disk_async_read"] = False
             if merged["transfer_interval"] is None:
-                merged["transfer_interval"] = 16
+                merged["transfer_interval"] = 64
             if merged["ring_buffers"] is None:
-                merged["ring_buffers"] = 2
+                merged["ring_buffers"] = 1
             if merged["pinned_memory"] is None:
                 merged["pinned_memory"] = True
 
@@ -255,7 +255,7 @@ class PropBase:
             if merged["transfer_interval"] is None:
                 merged["transfer_interval"] = 16 if merged["disk_async_read"] else 32
             if merged["ring_buffers"] is None:
-                merged["ring_buffers"] = 2
+                merged["ring_buffers"] = 2 if merged["disk_async_read"] else 3
             if merged["disk_async_read"] and merged["ring_buffers"] < 2:
                 merged["ring_buffers"] = 2
 

@@ -107,7 +107,7 @@ def apply_dim_defaults(args):
 
 def default_transfer_interval(strategy):
     if strategy == "boundary_cpu":
-        return 16
+        return 64
     if strategy == "boundary_disk":
         return 32
     if strategy == "boundary_disk_async":
@@ -117,9 +117,9 @@ def default_transfer_interval(strategy):
 
 def default_ring_buffers(strategy):
     if strategy == "boundary_cpu":
-        return 2
+        return 1
     if strategy == "boundary_disk":
-        return 2
+        return 3
     if strategy == "boundary_disk_async":
         return 2
     return 1
