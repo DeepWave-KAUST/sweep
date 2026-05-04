@@ -67,8 +67,8 @@ def build_parser():
     parser.add_argument("--delay", type=float, default=0.08)
     parser.add_argument("--spatial-order", type=int, default=2)
     parser.add_argument("--abcn", type=int, default=20)
-    parser.add_argument("--transfer-interval", type=int, default=8)
-    parser.add_argument("--ring-buffers", type=int, default=1)
+    parser.add_argument("--transfer-interval", type=int, default=None)
+    parser.add_argument("--ring-buffers", type=int, default=None)
     parser.add_argument("--checkpoint-chunks", type=int, default=100)
     parser.add_argument("--receiver-stride", type=int, default=8)
     parser.add_argument("--source-x", type=int, default=None)
@@ -103,6 +103,39 @@ def apply_dim_defaults(args):
         args.nx = 64
     if args.nt is None:
         args.nt = 400
+
+
+def default_transfer_interval(strategy):
+    if strategy == "boundary_cpu":
+        return 16
+    if strategy == "boundary_disk":
+        return 32
+    if strategy == "boundary_disk_async":
+        return 16
+    return 8
+
+
+def default_ring_buffers(strategy):
+    if strategy == "boundary_cpu":
+        return 2
+    if strategy == "boundary_disk":
+        return 2
+    if strategy == "boundary_disk_async":
+        return 2
+    return 1
+
+
+def resolve_transfer_interval(strategy, args):
+    return args.transfer_interval if args.transfer_interval is not None else default_transfer_interval(strategy)
+
+
+def resolve_ring_buffers(strategy, args):
+    return args.ring_buffers if args.ring_buffers is not None else default_ring_buffers(strategy)
+
+
+def apply_strategy_defaults(args, strategy):
+    args.transfer_interval = resolve_transfer_interval(strategy, args)
+    args.ring_buffers = resolve_ring_buffers(strategy, args)
 
 
 def build_case(args):
@@ -277,6 +310,7 @@ def run_once(solver, vp_np, wave, sources, receivers, device):
 def run_worker(args):
     if args.strategy is None:
         raise ValueError("--strategy is required in --worker mode.")
+    apply_strategy_defaults(args, args.strategy)
 
     profile_boundary = args.strategy in {"boundary_disk", "boundary_disk_async"}
     if profile_boundary:
@@ -310,6 +344,8 @@ def run_worker(args):
         "dim": args.dim,
         "shape": [args.nz, args.nx] if args.dim == "2d" else [args.nz, args.ny, args.nx],
         "nt": args.nt,
+        "transfer_interval": args.transfer_interval,
+        "ring_buffers": args.ring_buffers,
         "repeats": args.repeats,
         "time_mean_s": float(np.mean(times)),
         "time_min_s": float(np.min(times)),
@@ -342,6 +378,8 @@ def run_all(args):
         grad_dir.mkdir(parents=True, exist_ok=True)
 
     for strategy in strategies:
+        transfer_interval = resolve_transfer_interval(strategy, args)
+        ring_buffers = resolve_ring_buffers(strategy, args)
         cmd = [
             sys.executable,
             str(Path(__file__).resolve()),
@@ -369,9 +407,9 @@ def run_all(args):
             "--abcn",
             str(args.abcn),
             "--transfer-interval",
-            str(args.transfer_interval),
+            str(transfer_interval),
             "--ring-buffers",
-            str(args.ring_buffers),
+            str(ring_buffers),
             "--checkpoint-chunks",
             str(args.checkpoint_chunks),
             "--receiver-stride",
@@ -433,6 +471,8 @@ def print_result(result):
     line = (
         f"{result['strategy']:>14} | "
         f"time {result['time_mean_s']:.4f}s "
+        f"ti {result['transfer_interval']} "
+        f"rb {result['ring_buffers']} "
         f"cuda_alloc {result['cuda_peak_allocated_mb']:.1f} MB "
         f"cuda_reserved {result['cuda_peak_reserved_mb']:.1f} MB "
         f"rss {result['rss_peak_mb']:.1f} MB "
