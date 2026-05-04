@@ -483,6 +483,7 @@ class PropCUDA(PropBase, torch.nn.Module):
 
     def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1):
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
+        staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
         if (
             self._boundary_cache_batch == self.B
@@ -490,7 +491,7 @@ class PropCUDA(PropBase, torch.nn.Module):
             self._boundary_cache_mode == boundary_storage
             and self._boundary_cache_interval == transfer_interval
             and self._boundary_cache_ring_buffers == ring_buffers
-            and self._boundary_cache_pinned == use_pinned_memory
+            and self._boundary_cache_pinned == staging_pinned
             and self._boundary_cache_disk_dir == disk_dir
             and self._boundary_cache_nt == self.nt
         ):
@@ -528,14 +529,14 @@ class PropCUDA(PropBase, torch.nn.Module):
                     layout.gpu_shapes,
                     dtype=torch.float32,
                     dev='cpu',
-                    pin_memory=False,
+                    pin_memory=staging_pinned,
                 )
             else:
                 self.boundary_cpu = self.boundary_cpu_allocator.zeros(
                     layout.cpu_shapes,
                     dtype=torch.float32,
                     dev='cpu',
-                    pin_memory=use_pinned_memory,
+                    pin_memory=staging_pinned,
                 )
             self.boundary_gpu = self.boundary_gpu_allocator.zeros(layout.gpu_shapes)
             self.boundary_gpu_full = ()
@@ -543,7 +544,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 [last_two_shape],
                 dtype=torch.float32,
                 dev='cpu',
-                pin_memory=use_pinned_memory,
+                pin_memory=staging_pinned,
             )[0]
         else:
             self.boundary_cpu = ()
@@ -554,7 +555,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._boundary_cache_mode = boundary_storage
         self._boundary_cache_interval = transfer_interval
         self._boundary_cache_ring_buffers = ring_buffers
-        self._boundary_cache_pinned = use_pinned_memory
+        self._boundary_cache_pinned = staging_pinned
         self._boundary_cache_disk_dir = disk_dir
         self._boundary_cache_nt = self.nt
         self._boundary_cache_batch = self.B

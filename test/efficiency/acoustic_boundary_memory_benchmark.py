@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,22 @@ STRATEGIES = (
     "boundary_disk",
     "boundary_disk_async",
     "ckpt_chunk",
+)
+
+PROFILE_RE = re.compile(
+    r"SWEEP_BOUNDARY_PROFILE "
+    r"backward_disk_read_time=(?P<disk>[0-9.eE+-]+) "
+    r"backward_task_wait_time=(?P<task_wait>[0-9.eE+-]+) "
+    r"backward_h2d_enqueue_time=(?P<h2d_enqueue>[0-9.eE+-]+) "
+    r"backward_copy_stream_wait_time=(?P<copy_wait>[0-9.eE+-]+) "
+    r"backward_h2d_time=(?P<h2d>[0-9.eE+-]+) "
+    r"backward_copy_ready_wait_time=(?P<ready_wait>[0-9.eE+-]+) "
+    r"backward_chunk_cpu_time=(?P<chunk_cpu>[0-9.eE+-]+) "
+    r"forward_copy_write_time=(?P<write>[0-9.eE+-]+) "
+    r"forward_slot_reuse_wait_time=(?P<reuse>[0-9.eE+-]+) "
+    r"chunks=(?P<chunks>[0-9]+) "
+    r"forward_chunks=(?P<forward_chunks>[0-9]+) "
+    r"async=(?P<async>[01])"
 )
 
 
@@ -261,12 +278,19 @@ def run_worker(args):
     if args.strategy is None:
         raise ValueError("--strategy is required in --worker mode.")
 
+    profile_boundary = args.strategy in {"boundary_disk", "boundary_disk_async"}
+    if profile_boundary:
+        os.environ.pop("SWEEP_BOUNDARY_PROFILE", None)
+
     device = torch.device("cuda:0")
     vp_np, wave, sources, receivers = build_case(args)
     solver = build_solver(args.strategy, args, device)
 
     for _ in range(args.warmup):
         run_once(solver, vp_np, wave, sources, receivers, device)
+
+    if profile_boundary:
+        os.environ["SWEEP_BOUNDARY_PROFILE"] = "1"
 
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
@@ -375,9 +399,22 @@ def run_all(args):
             grad_paths[strategy] = grad_path
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src") + os.pathsep + env.get("PYTHONPATH", "")
-        proc = subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+        if strategy in {"boundary_disk", "boundary_disk_async"}:
+            env["SWEEP_BOUNDARY_PROFILE"] = "1"
+        proc = subprocess.run(cmd, text=True, capture_output=True, env=env)
+        if proc.returncode != 0:
+            print(f"worker failed for strategy={strategy} with exit code {proc.returncode}", file=sys.stderr)
+            print("worker command:", " ".join(cmd), file=sys.stderr)
+            if proc.stdout:
+                print("----- worker stdout -----", file=sys.stderr)
+                print(proc.stdout, file=sys.stderr, end="" if proc.stdout.endswith("\n") else "\n")
+            if proc.stderr:
+                print("----- worker stderr -----", file=sys.stderr)
+                print(proc.stderr, file=sys.stderr, end="" if proc.stderr.endswith("\n") else "\n")
+            proc.check_returncode()
         line = proc.stdout.strip().splitlines()[-1]
         result = json.loads(line)
+        result.update(parse_boundary_profile(proc.stderr, result["repeats"]))
         results.append(result)
         print_result(result)
 
@@ -393,7 +430,7 @@ def run_all(args):
 
 
 def print_result(result):
-    print(
+    line = (
         f"{result['strategy']:>14} | "
         f"time {result['time_mean_s']:.4f}s "
         f"cuda_alloc {result['cuda_peak_allocated_mb']:.1f} MB "
@@ -403,6 +440,55 @@ def print_result(result):
         f"b_gpu {result['boundary_gpu_mb']:.1f} MB "
         f"b_disk {result['boundary_disk_mb']:.1f} MB"
     )
+    if "disk_read_wait_time_s" in result:
+        line += (
+            f" bwd_disk_read {result['backward_disk_read_time_s']:.4f}s"
+            f" bwd_task_wait {result['backward_task_wait_time_s']:.4f}s"
+            f" bwd_h2d_enqueue {result['backward_h2d_enqueue_time_s']:.4f}s"
+            f" bwd_copy_wait {result['backward_copy_stream_wait_time_s']:.4f}s"
+            f" bwd_h2d {result['backward_h2d_time_s']:.4f}s"
+            f" bwd_ready_wait {result['backward_copy_ready_wait_time_s']:.4f}s"
+            f" bwd_chunk_cpu {result['backward_chunk_cpu_time_s']:.4f}s"
+            f" fwd_write {result['forward_copy_write_time_s']:.4f}s"
+            f" fwd_reuse_wait {result['forward_slot_reuse_wait_time_s']:.4f}s"
+            f" chunks {result['boundary_profile_chunks']:.1f}"
+            f" fwd_chunks {result['boundary_forward_profile_chunks']:.1f}"
+        )
+    print(line)
+
+
+def parse_boundary_profile(stderr, repeats=1):
+    matches = [PROFILE_RE.search(line) for line in stderr.splitlines()]
+    rows = [match for match in matches if match is not None]
+    if not rows:
+        return {}
+
+    disk = np.array([float(row.group("disk")) for row in rows], dtype=np.float64)
+    task_wait = np.array([float(row.group("task_wait")) for row in rows], dtype=np.float64)
+    h2d_enqueue = np.array([float(row.group("h2d_enqueue")) for row in rows], dtype=np.float64)
+    copy_wait = np.array([float(row.group("copy_wait")) for row in rows], dtype=np.float64)
+    h2d = np.array([float(row.group("h2d")) for row in rows], dtype=np.float64)
+    ready_wait = np.array([float(row.group("ready_wait")) for row in rows], dtype=np.float64)
+    chunk_cpu = np.array([float(row.group("chunk_cpu")) for row in rows], dtype=np.float64)
+    write = np.array([float(row.group("write")) for row in rows], dtype=np.float64)
+    reuse = np.array([float(row.group("reuse")) for row in rows], dtype=np.float64)
+    chunks = np.array([float(row.group("chunks")) for row in rows], dtype=np.float64)
+    forward_chunks = np.array([float(row.group("forward_chunks")) for row in rows], dtype=np.float64)
+    scale = max(int(repeats), 1)
+    return {
+        "disk_read_wait_time_s": float(disk.sum() / scale),
+        "backward_disk_read_time_s": float(disk.sum() / scale),
+        "backward_task_wait_time_s": float(task_wait.sum() / scale),
+        "backward_h2d_enqueue_time_s": float(h2d_enqueue.sum() / scale),
+        "backward_copy_stream_wait_time_s": float(copy_wait.sum() / scale),
+        "backward_h2d_time_s": float(h2d.sum() / scale),
+        "backward_copy_ready_wait_time_s": float(ready_wait.sum() / scale),
+        "backward_chunk_cpu_time_s": float(chunk_cpu.sum() / scale),
+        "forward_copy_write_time_s": float(write.sum() / scale),
+        "forward_slot_reuse_wait_time_s": float(reuse.sum() / scale),
+        "boundary_profile_chunks": float(chunks.sum() / scale),
+        "boundary_forward_profile_chunks": float(forward_chunks.sum() / scale),
+    }
 
 
 def print_disk_async_speedup(results):
