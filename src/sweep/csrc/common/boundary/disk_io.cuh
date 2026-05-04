@@ -3,6 +3,7 @@
 #include <array>
 #include <condition_variable>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -142,12 +143,30 @@ inline void write_boundary_disk_2d_task(const BoundaryDisk2DWriteTask& task)
 
 inline void write_boundary_disk_3d_task(const BoundaryDisk3DWriteTask& task)
 {
-    write_boundary_file_chunk(task.paths[0], task.top_offset, task.top.data(), task.top_elems);
-    write_boundary_file_chunk(task.paths[1], task.top_offset, task.bottom.data(), task.top_elems);
-    write_boundary_file_chunk(task.paths[2], task.front_offset, task.front.data(), task.front_elems);
-    write_boundary_file_chunk(task.paths[3], task.front_offset, task.back.data(), task.front_elems);
-    write_boundary_file_chunk(task.paths[4], task.left_offset, task.left.data(), task.left_elems);
-    write_boundary_file_chunk(task.paths[5], task.left_offset, task.right.data(), task.left_elems);
+    std::exception_ptr write_error = nullptr;
+    std::mutex write_error_mutex;
+    auto write_one = [&](std::string path, size_t offset, const float* data, size_t elems) {
+        try {
+            write_boundary_file_chunk(path, offset, data, elems);
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(write_error_mutex);
+            if (!write_error)
+                write_error = std::current_exception();
+        }
+    };
+
+    std::vector<std::thread> writers;
+    writers.reserve(6);
+    writers.emplace_back(write_one, task.paths[0], task.top_offset, task.top.data(), task.top_elems);
+    writers.emplace_back(write_one, task.paths[1], task.top_offset, task.bottom.data(), task.top_elems);
+    writers.emplace_back(write_one, task.paths[2], task.front_offset, task.front.data(), task.front_elems);
+    writers.emplace_back(write_one, task.paths[3], task.front_offset, task.back.data(), task.front_elems);
+    writers.emplace_back(write_one, task.paths[4], task.left_offset, task.left.data(), task.left_elems);
+    writers.emplace_back(write_one, task.paths[5], task.left_offset, task.right.data(), task.left_elems);
+    for (auto& writer : writers)
+        writer.join();
+    if (write_error)
+        std::rethrow_exception(write_error);
 }
 
 inline void launch_boundary_disk_write_2d(std::shared_ptr<BoundaryDisk2DWriteTask> task)
