@@ -115,11 +115,11 @@ def default_transfer_interval(strategy):
     return 8
 
 
-def default_ring_buffers(strategy):
+def default_ring_buffers(strategy, dim=None):
     if strategy == "boundary_cpu":
         return 1
     if strategy == "boundary_disk":
-        return 3
+        return 3 if dim == "2d" else 2
     if strategy == "boundary_disk_async":
         return 2
     return 1
@@ -130,7 +130,7 @@ def resolve_transfer_interval(strategy, args):
 
 
 def resolve_ring_buffers(strategy, args):
-    return args.ring_buffers if args.ring_buffers is not None else default_ring_buffers(strategy)
+    return args.ring_buffers if args.ring_buffers is not None else default_ring_buffers(strategy, args.dim)
 
 
 def apply_strategy_defaults(args, strategy):
