@@ -68,7 +68,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
     EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary)
         boundary_saver.allocate(p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, false, p.use_pinned_memory);
     else
@@ -88,12 +88,25 @@ ForwardOutput forward(const ForwardInput& in) {
     int interval = p.transfer_interval;
     int buf_idx = 0;
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    int ring_buffers = p.boundary_ring_buffers > 0 ? p.boundary_ring_buffers : 1;
+    std::vector<cudaEvent_t> boundary_compute_ready(ring_buffers, nullptr);
+    std::vector<cudaEvent_t> boundary_copy_ready(ring_buffers, nullptr);
+    std::vector<char> boundary_copy_pending(ring_buffers, 0);
+    if (staged_boundary && p.use_boundary_saving) {
+        for (int i = 0; i < ring_buffers; ++i) {
+            cudaEventCreateWithFlags(&boundary_compute_ready[i], cudaEventDisableTiming);
+            cudaEventCreateWithFlags(&boundary_copy_ready[i], cudaEventDisableTiming);
+        }
+    }
     int next_ckpt_idx = 0;
     int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
     const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     for (int it = 0; it < p.nt; ++it) {
         buf_idx = it % interval;
+        int chunk_id = it / interval;
+        int ring_slot = chunk_id % ring_buffers;
+        int ring_start = ring_slot * interval;
 
         auto view = wavefield.view();
 
@@ -116,13 +129,18 @@ ForwardOutput forward(const ForwardInput& in) {
         );
 
         if (p.use_boundary_saving) {
-            float* top_ptr = staged_boundary ? boundary_saver.top_gpu.data_ptr<float>() + buf_idx * boundary_saver.top_stride
+            if (staged_boundary && boundary_copy_pending[ring_slot] && buf_idx == 0) {
+                cudaStreamWaitEvent(async_copy.compute_stream, boundary_copy_ready[ring_slot], 0);
+                boundary_copy_pending[ring_slot] = 0;
+            }
+
+            float* top_ptr = staged_boundary ? boundary_saver.top_gpu.data_ptr<float>() + (ring_start + buf_idx) * boundary_saver.top_stride
                                              : bs.top;
-            float* bottom_ptr = staged_boundary ? boundary_saver.bottom_gpu.data_ptr<float>() + buf_idx * boundary_saver.bottom_stride
+            float* bottom_ptr = staged_boundary ? boundary_saver.bottom_gpu.data_ptr<float>() + (ring_start + buf_idx) * boundary_saver.bottom_stride
                                                 : bs.bottom;
-            float* left_ptr = staged_boundary ? boundary_saver.left_gpu.data_ptr<float>() + buf_idx * boundary_saver.left_stride
+            float* left_ptr = staged_boundary ? boundary_saver.left_gpu.data_ptr<float>() + (ring_start + buf_idx) * boundary_saver.left_stride
                                               : bs.left;
-            float* right_ptr = staged_boundary ? boundary_saver.right_gpu.data_ptr<float>() + buf_idx * boundary_saver.right_stride
+            float* right_ptr = staged_boundary ? boundary_saver.right_gpu.data_ptr<float>() + (ring_start + buf_idx) * boundary_saver.right_stride
                                                : bs.right;
 
             boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
@@ -142,9 +160,14 @@ ForwardOutput forward(const ForwardInput& in) {
                 int start = it - buf_idx;
                 int len = buf_idx + 1;
 
-                async_copy.record_compute_ready();
-                async_copy.wait_for_compute();
-                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
+                cudaEventRecord(boundary_compute_ready[ring_slot], async_copy.compute_stream);
+                cudaStreamWaitEvent(async_copy.copy_stream, boundary_compute_ready[ring_slot], 0);
+                if (p.boundary_on_disk)
+                    boundary_saver.flush_gpu_to_disk_2d(start, len, p.boundary_disk_files, async_copy.copy_stream, ring_start, ring_start);
+                else
+                    boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream, ring_start);
+                cudaEventRecord(boundary_copy_ready[ring_slot], async_copy.copy_stream);
+                boundary_copy_pending[ring_slot] = 1;
             }
         }
         
@@ -196,6 +219,12 @@ ForwardOutput forward(const ForwardInput& in) {
     }
 
     async_copy.synchronize_copy();
+    for (int i = 0; i < ring_buffers; ++i) {
+        if (boundary_compute_ready[i] != nullptr)
+            cudaEventDestroy(boundary_compute_ready[i]);
+        if (boundary_copy_ready[i] != nullptr)
+            cudaEventDestroy(boundary_copy_ready[i]);
+    }
 
     out.wavefield = u_allt;
     out.last_two = boundary_saver.last_two_t;

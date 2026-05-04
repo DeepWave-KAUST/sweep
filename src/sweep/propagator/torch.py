@@ -71,6 +71,7 @@ class PropTorch(torch.nn.Module):
                 "storage": boundary.get("storage", "gpu"),
                 "transfer_interval": boundary.get("transfer_interval", 1),
                 "pinned_memory": boundary.get("pinned_memory", False),
+                "disk_dir": boundary.get("disk_dir"),
             }
             merged["use_ckpt"] = False
             return merged

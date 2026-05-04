@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <string>
 #include <vector>
 
 
@@ -26,6 +27,7 @@ struct ForwardInput {
 
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
+    std::vector<std::string> boundary_disk_files; // Bind from python
     std::vector<torch::Tensor> checkpoints; // Bind from python
     torch::Tensor checkpoint_steps;
 
@@ -34,6 +36,7 @@ struct ForwardInput {
     bool use_checkpoint = false;
     bool use_recursive_checkpoint = false;
     bool boundary_on_cpu = false;
+    bool boundary_on_disk = false;
     bool use_pinned_memory = false;
     bool free_surface;
 
@@ -43,6 +46,7 @@ struct ForwardInput {
     std::vector<float> spacing;
 
     int transfer_interval = 1; // Transfer every time step by default
+    int boundary_ring_buffers = 1;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 };
@@ -95,6 +99,7 @@ struct BackwardInput {
     // Wavefields
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
+    std::vector<std::string> boundary_disk_files; // Bind from python
 
     // models
     std::vector<torch::Tensor> models;
@@ -129,8 +134,10 @@ struct BackwardInput {
     // options
     bool free_surface;
     bool boundary_on_cpu = false;
+    bool boundary_on_disk = false;
     bool use_pinned_memory = false;
     int transfer_interval = 1; // Transfer every time step by default
+    int boundary_ring_buffers = 1;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 

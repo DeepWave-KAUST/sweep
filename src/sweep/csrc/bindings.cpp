@@ -72,17 +72,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("use_checkpoint", &ForwardInput::use_checkpoint)
         .def_readwrite("use_recursive_checkpoint", &ForwardInput::use_recursive_checkpoint)
         .def_readwrite("boundary_on_cpu", &ForwardInput::boundary_on_cpu)
+        .def_readwrite("boundary_on_disk", &ForwardInput::boundary_on_disk)
         .def_readwrite("use_pinned_memory", &ForwardInput::use_pinned_memory)
         .def_readwrite("free_surface", &ForwardInput::free_surface)
         .def_readwrite("nt", &ForwardInput::nt)
         .def_readwrite("dt", &ForwardInput::dt)
         .def_readwrite("spacing", &ForwardInput::spacing)
         .def_readwrite("transfer_interval", &ForwardInput::transfer_interval)
+        .def_readwrite("boundary_ring_buffers", &ForwardInput::boundary_ring_buffers)
         .def_readwrite("checkpoint_interval", &ForwardInput::checkpoint_interval)
         .def_readwrite("checkpoint_count", &ForwardInput::checkpoint_count)
         .def_readwrite("wavefields", &ForwardInput::wavefields)
         .def_readwrite("boundary_cpu", &ForwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu)
+        .def_readwrite("boundary_disk_files", &ForwardInput::boundary_disk_files)
         .def_readwrite("checkpoints", &ForwardInput::checkpoints)
         .def_readwrite("checkpoint_steps", &ForwardInput::checkpoint_steps);
 
@@ -109,8 +112,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("spacing", &BackwardInput::spacing)
         .def_readwrite("free_surface", &BackwardInput::free_surface)
         .def_readwrite("boundary_on_cpu", &BackwardInput::boundary_on_cpu)
+        .def_readwrite("boundary_on_disk", &BackwardInput::boundary_on_disk)
         .def_readwrite("use_pinned_memory", &BackwardInput::use_pinned_memory)
         .def_readwrite("transfer_interval", &BackwardInput::transfer_interval)
+        .def_readwrite("boundary_ring_buffers", &BackwardInput::boundary_ring_buffers)
         .def_readwrite("checkpoint_interval", &BackwardInput::checkpoint_interval)
         .def_readwrite("checkpoint_count", &BackwardInput::checkpoint_count)
         .def_readwrite("forward_wavefields", &BackwardInput::forward_wavefields)
@@ -118,6 +123,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("adjoint_workspace", &BackwardInput::adjoint_workspace)
         .def_readwrite("boundary_cpu", &BackwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu)
+        .def_readwrite("boundary_disk_files", &BackwardInput::boundary_disk_files)
         .def_readwrite("checkpoint_steps", &BackwardInput::checkpoint_steps);
 
 

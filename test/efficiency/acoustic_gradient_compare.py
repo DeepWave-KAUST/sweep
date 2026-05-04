@@ -34,7 +34,7 @@ def build_parser():
     parser.add_argument("--ckpt-mode", choices=("chunk", "recursive"), default="chunk")
     parser.add_argument("--checkpoint-chunks", type=int, default=None)
     parser.add_argument("--checkpoint-count", type=int, default=4)
-    parser.add_argument("--boundary-storage", choices=("gpu", "cpu"), default="gpu")
+    parser.add_argument("--boundary-storage", choices=("gpu", "cpu", "disk"), default="gpu")
     parser.add_argument("--transfer-interval", type=int, default=1)
     parser.add_argument("--pinned-memory", action="store_true")
     parser.add_argument("--source-x", type=int, default=None)

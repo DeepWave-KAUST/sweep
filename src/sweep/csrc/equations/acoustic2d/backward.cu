@@ -278,7 +278,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // Boundary wavefields (for saving all wavefields)
     int save_width = p.abcn > 0 ? M + 1 : M;
     EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, false, p.use_pinned_memory);
     } else {
@@ -309,7 +309,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
         int buf_idx0 = (it0 - 1) % interval;
         int chunk_start = it0 - buf_idx0 - 1;
         int chunk_len = buf_idx0 + 1;
-        boundary_saver.load_cpu_to_gpu(chunk_start, chunk_len, async_copy.copy_stream);
+        if (p.boundary_on_disk) {
+            boundary_saver.load_disk_to_cpu_2d(chunk_start, chunk_len, p.boundary_disk_files);
+            boundary_saver.load_cpu_to_gpu(0, chunk_len, async_copy.copy_stream);
+        } else {
+            boundary_saver.load_cpu_to_gpu(chunk_start, chunk_len, async_copy.copy_stream);
+        }
         async_copy.record_copy_ready();
     }
 
@@ -412,7 +417,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 int next_start = next_chunk * interval;
                 int remain = static_cast<int>(p.nt) - next_start;
                 int next_len = std::min(interval, remain);
-                boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
+                if (p.boundary_on_disk) {
+                    boundary_saver.load_disk_to_cpu_2d(next_start, next_len, p.boundary_disk_files);
+                    boundary_saver.load_cpu_to_gpu(0, next_len, async_copy.copy_stream);
+                } else {
+                    boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
+                }
                 async_copy.record_copy_ready();
             }
         }

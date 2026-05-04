@@ -2,6 +2,11 @@
 #include "context.h"
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <array>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <vector>
 
 enum BoundaryMode {
     BOUNDARY_SAVE = 0,
@@ -61,6 +66,93 @@ struct EffectiveBoundarySaver {
     size_t left_bytes;
     size_t front_bytes;
     size_t bottom_bytes;
+
+    struct Disk2DMeta {
+        std::array<std::string, 4> paths;
+        int len = 0;
+        size_t top_time_block = 0;
+        size_t left_time_block = 0;
+        size_t top_elems = 0;
+        size_t left_elems = 0;
+        size_t start_top_offset = 0;
+        size_t start_left_offset = 0;
+        float* top = nullptr;
+        float* bottom = nullptr;
+        float* left = nullptr;
+        float* right = nullptr;
+    };
+
+    struct Disk3DMeta {
+        std::array<std::string, 6> paths;
+        size_t top_elems = 0;
+        size_t front_elems = 0;
+        size_t left_elems = 0;
+        size_t top_offset = 0;
+        size_t front_offset = 0;
+        size_t left_offset = 0;
+        float* top = nullptr;
+        float* bottom = nullptr;
+        float* front = nullptr;
+        float* back = nullptr;
+        float* left = nullptr;
+        float* right = nullptr;
+    };
+
+    static void write_file_chunk(const std::string& path, size_t offset_elems, const float* data, size_t elems)
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!out)
+            throw std::runtime_error("Failed to open boundary disk file for writing: " + path);
+        out.seekp(static_cast<std::streamoff>(offset_elems * sizeof(float)));
+        out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(elems * sizeof(float)));
+        if (!out)
+            throw std::runtime_error("Failed to write boundary disk file: " + path);
+    }
+
+    static void read_file_chunk(const std::string& path, size_t offset_elems, float* data, size_t elems)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+            throw std::runtime_error("Failed to open boundary disk file for reading: " + path);
+        in.seekg(static_cast<std::streamoff>(offset_elems * sizeof(float)));
+        in.read(reinterpret_cast<char*>(data), static_cast<std::streamsize>(elems * sizeof(float)));
+        if (!in)
+            throw std::runtime_error("Failed to read boundary disk file: " + path);
+    }
+
+    static void CUDART_CB write_disk_2d_callback(void* user_data)
+    {
+        std::unique_ptr<Disk2DMeta> meta(static_cast<Disk2DMeta*>(user_data));
+        std::vector<float> buffer;
+
+        buffer.assign(meta->top, meta->top + meta->top_elems);
+        write_file_chunk(meta->paths[0], meta->start_top_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->bottom, meta->bottom + meta->top_elems);
+        write_file_chunk(meta->paths[1], meta->start_top_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->left, meta->left + meta->left_elems);
+        write_file_chunk(meta->paths[2], meta->start_left_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->right, meta->right + meta->left_elems);
+        write_file_chunk(meta->paths[3], meta->start_left_offset, buffer.data(), buffer.size());
+    }
+
+    static void CUDART_CB write_disk_3d_callback(void* user_data)
+    {
+        std::unique_ptr<Disk3DMeta> meta(static_cast<Disk3DMeta*>(user_data));
+        std::vector<float> buffer;
+
+        buffer.assign(meta->top, meta->top + meta->top_elems);
+        write_file_chunk(meta->paths[0], meta->top_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->bottom, meta->bottom + meta->top_elems);
+        write_file_chunk(meta->paths[1], meta->top_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->front, meta->front + meta->front_elems);
+        write_file_chunk(meta->paths[2], meta->front_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->back, meta->back + meta->front_elems);
+        write_file_chunk(meta->paths[3], meta->front_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->left, meta->left + meta->left_elems);
+        write_file_chunk(meta->paths[4], meta->left_offset, buffer.data(), buffer.size());
+        buffer.assign(meta->right, meta->right + meta->left_elems);
+        write_file_chunk(meta->paths[5], meta->left_offset, buffer.data(), buffer.size());
+    }
 
 
     void allocate(
@@ -380,7 +472,7 @@ struct EffectiveBoundarySaver {
             }
         }
 
-    inline void flush_gpu_to_cpu(int start, int len, cudaStream_t stream)
+    inline void flush_gpu_to_cpu(int start, int len, cudaStream_t stream, int gpu_start = 0)
     {
         if (dim == 2)
         {
@@ -389,7 +481,9 @@ struct EffectiveBoundarySaver {
             size_t left_var_block = left_t.stride(0);
             size_t left_time_block = left_t.stride(1);
             size_t top_gpu_var_block = top_gpu.stride(0);
+            size_t top_gpu_time_block = top_gpu.stride(1);
             size_t left_gpu_var_block = left_gpu.stride(0);
+            size_t left_gpu_time_block = left_gpu.stride(1);
 
             size_t top_bytes = len * top_time_block * sizeof(float);
             size_t left_bytes = len * left_time_block * sizeof(float);
@@ -399,7 +493,7 @@ struct EffectiveBoundarySaver {
                 cudaMemcpy2DAsync(
                     top_t.data_ptr<float>() + start * top_time_block,
                     top_var_block * sizeof(float),
-                    top_gpu.data_ptr<float>(),
+                    top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
                     top_gpu_var_block * sizeof(float),
                     top_bytes,
                     nvar,
@@ -410,7 +504,7 @@ struct EffectiveBoundarySaver {
                 cudaMemcpy2DAsync(
                     bottom_t.data_ptr<float>() + start * top_time_block,
                     top_var_block * sizeof(float),
-                    bottom_gpu.data_ptr<float>(),
+                    bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
                     top_gpu_var_block * sizeof(float),
                     top_bytes,
                     nvar,
@@ -421,7 +515,7 @@ struct EffectiveBoundarySaver {
                 cudaMemcpy2DAsync(
                     left_t.data_ptr<float>() + start * left_time_block,
                     left_var_block * sizeof(float),
-                    left_gpu.data_ptr<float>(),
+                    left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
                     left_gpu_var_block * sizeof(float),
                     left_bytes,
                     nvar,
@@ -432,7 +526,7 @@ struct EffectiveBoundarySaver {
                 cudaMemcpy2DAsync(
                     right_t.data_ptr<float>() + start * left_time_block,
                     left_var_block * sizeof(float),
-                    right_gpu.data_ptr<float>(),
+                    right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
                     left_gpu_var_block * sizeof(float),
                     left_bytes,
                     nvar,
@@ -447,10 +541,16 @@ struct EffectiveBoundarySaver {
         size_t left_block   = left_t.stride(0);
         size_t front_block  = front_t.stride(0);
         size_t bottom_block = bottom_t.stride(0);
+        size_t left_gpu_block   = left_gpu.stride(0);
+        size_t front_gpu_block  = front_gpu.stride(0);
+        size_t bottom_gpu_block = bottom_gpu.stride(0);
 
         size_t left_elems   = len * nvar * left_block;
         size_t front_elems  = len * nvar * front_block;
         size_t bottom_elems = len * nvar * bottom_block;
+        size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
+        size_t front_gpu_offset = static_cast<size_t>(gpu_start) * nvar * front_gpu_block;
+        size_t bottom_gpu_offset = static_cast<size_t>(gpu_start) * nvar * bottom_gpu_block;
 
 
         if (left_t.dtype() == torch::kFloat32)
@@ -458,7 +558,7 @@ struct EffectiveBoundarySaver {
 
             cudaMemcpyAsync(
                 left_t.data_ptr<float>() + start * nvar * left_block,
-                left_gpu.data_ptr<float>(),
+                left_gpu.data_ptr<float>() + left_gpu_offset,
                 left_elems * sizeof(float),
                 cudaMemcpyDeviceToHost,
                 stream
@@ -466,7 +566,7 @@ struct EffectiveBoundarySaver {
 
             cudaMemcpyAsync(
                 right_t.data_ptr<float>() + start * nvar * left_block,
-                right_gpu.data_ptr<float>(),
+                right_gpu.data_ptr<float>() + left_gpu_offset,
                 left_elems * sizeof(float),
                 cudaMemcpyDeviceToHost,
                 stream
@@ -474,7 +574,7 @@ struct EffectiveBoundarySaver {
 
             cudaMemcpyAsync(
                 front_t.data_ptr<float>() + start * nvar * front_block,
-                front_gpu.data_ptr<float>(),
+                front_gpu.data_ptr<float>() + front_gpu_offset,
                 front_elems * sizeof(float),
                 cudaMemcpyDeviceToHost,
                 stream
@@ -482,7 +582,7 @@ struct EffectiveBoundarySaver {
 
             cudaMemcpyAsync(
                 back_t.data_ptr<float>() + start * nvar * front_block,
-                back_gpu.data_ptr<float>(),
+                back_gpu.data_ptr<float>() + front_gpu_offset,
                 front_elems * sizeof(float),
                 cudaMemcpyDeviceToHost,
                 stream
@@ -490,7 +590,7 @@ struct EffectiveBoundarySaver {
 
             cudaMemcpyAsync(
                 top_t.data_ptr<float>() + start * nvar * bottom_block,
-                top_gpu.data_ptr<float>(),
+                top_gpu.data_ptr<float>() + bottom_gpu_offset,
                 bottom_elems * sizeof(float),
                 cudaMemcpyDeviceToHost,
                 stream
@@ -498,7 +598,7 @@ struct EffectiveBoundarySaver {
 
             cudaMemcpyAsync(
                 bottom_t.data_ptr<float>() + start * nvar * bottom_block,
-                bottom_gpu.data_ptr<float>(),
+                bottom_gpu.data_ptr<float>() + bottom_gpu_offset,
                 bottom_elems * sizeof(float),
                 cudaMemcpyDeviceToHost,
                 stream
@@ -506,6 +606,228 @@ struct EffectiveBoundarySaver {
             return;
         }
 
+    }
+
+    inline void flush_gpu_to_disk_2d(
+        int start,
+        int len,
+        const std::vector<std::string>& paths,
+        cudaStream_t stream,
+        int gpu_start = 0,
+        int stage_start = 0)
+    {
+        if (dim != 2)
+            throw std::runtime_error("flush_gpu_to_disk_2d only supports 2D boundaries.");
+        if (paths.size() != 4)
+            throw std::runtime_error("2D disk boundary expects 4 file paths.");
+
+        size_t top_var_block = top_t.stride(0);
+        size_t top_time_block = top_t.stride(1);
+        size_t left_var_block = left_t.stride(0);
+        size_t left_time_block = left_t.stride(1);
+        size_t top_gpu_var_block = top_gpu.stride(0);
+        size_t top_gpu_time_block = top_gpu.stride(1);
+        size_t left_gpu_var_block = left_gpu.stride(0);
+        size_t left_gpu_time_block = left_gpu.stride(1);
+
+        size_t top_bytes = len * top_time_block * sizeof(float);
+        size_t left_bytes = len * left_time_block * sizeof(float);
+
+        cudaMemcpy2DAsync(
+            top_t.data_ptr<float>() + stage_start * top_time_block,
+            top_var_block * sizeof(float),
+            top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+            top_gpu_var_block * sizeof(float),
+            top_bytes,
+            nvar,
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpy2DAsync(
+            bottom_t.data_ptr<float>() + stage_start * top_time_block,
+            top_var_block * sizeof(float),
+            bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+            top_gpu_var_block * sizeof(float),
+            top_bytes,
+            nvar,
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpy2DAsync(
+            left_t.data_ptr<float>() + stage_start * left_time_block,
+            left_var_block * sizeof(float),
+            left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+            left_gpu_var_block * sizeof(float),
+            left_bytes,
+            nvar,
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpy2DAsync(
+            right_t.data_ptr<float>() + stage_start * left_time_block,
+            left_var_block * sizeof(float),
+            right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+            left_gpu_var_block * sizeof(float),
+            left_bytes,
+            nvar,
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+
+        auto* meta = new Disk2DMeta();
+        meta->paths = {paths[0], paths[1], paths[2], paths[3]};
+        meta->len = len;
+        meta->top_time_block = top_time_block;
+        meta->left_time_block = left_time_block;
+        meta->top_elems = len * top_time_block;
+        meta->left_elems = len * left_time_block;
+        meta->start_top_offset = static_cast<size_t>(start) * top_time_block;
+        meta->start_left_offset = static_cast<size_t>(start) * left_time_block;
+        meta->top = top_t.data_ptr<float>() + stage_start * top_time_block;
+        meta->bottom = bottom_t.data_ptr<float>() + stage_start * top_time_block;
+        meta->left = left_t.data_ptr<float>() + stage_start * left_time_block;
+        meta->right = right_t.data_ptr<float>() + stage_start * left_time_block;
+        cudaLaunchHostFunc(stream, write_disk_2d_callback, meta);
+    }
+
+    inline void flush_gpu_to_disk_3d(
+        int start,
+        int len,
+        const std::vector<std::string>& paths,
+        cudaStream_t stream,
+        int gpu_start = 0,
+        int stage_start = 0)
+    {
+        if (dim != 3)
+            throw std::runtime_error("flush_gpu_to_disk_3d only supports 3D boundaries.");
+        if (paths.size() != 6)
+            throw std::runtime_error("3D disk boundary expects 6 file paths.");
+
+        size_t top_block = top_t.stride(0);
+        size_t front_block = front_t.stride(0);
+        size_t left_block = left_t.stride(0);
+        size_t top_gpu_block = top_gpu.stride(0);
+        size_t front_gpu_block = front_gpu.stride(0);
+        size_t left_gpu_block = left_gpu.stride(0);
+
+        size_t top_elems = len * nvar * top_block;
+        size_t front_elems = len * nvar * front_block;
+        size_t left_elems = len * nvar * left_block;
+        size_t top_stage_offset = static_cast<size_t>(stage_start) * nvar * top_block;
+        size_t front_stage_offset = static_cast<size_t>(stage_start) * nvar * front_block;
+        size_t left_stage_offset = static_cast<size_t>(stage_start) * nvar * left_block;
+        size_t top_gpu_offset = static_cast<size_t>(gpu_start) * nvar * top_gpu_block;
+        size_t front_gpu_offset = static_cast<size_t>(gpu_start) * nvar * front_gpu_block;
+        size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
+
+        cudaMemcpyAsync(
+            top_t.data_ptr<float>() + top_stage_offset,
+            top_gpu.data_ptr<float>() + top_gpu_offset,
+            top_elems * sizeof(float),
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpyAsync(
+            bottom_t.data_ptr<float>() + top_stage_offset,
+            bottom_gpu.data_ptr<float>() + top_gpu_offset,
+            top_elems * sizeof(float),
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpyAsync(
+            front_t.data_ptr<float>() + front_stage_offset,
+            front_gpu.data_ptr<float>() + front_gpu_offset,
+            front_elems * sizeof(float),
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpyAsync(
+            back_t.data_ptr<float>() + front_stage_offset,
+            back_gpu.data_ptr<float>() + front_gpu_offset,
+            front_elems * sizeof(float),
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpyAsync(
+            left_t.data_ptr<float>() + left_stage_offset,
+            left_gpu.data_ptr<float>() + left_gpu_offset,
+            left_elems * sizeof(float),
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+        cudaMemcpyAsync(
+            right_t.data_ptr<float>() + left_stage_offset,
+            right_gpu.data_ptr<float>() + left_gpu_offset,
+            left_elems * sizeof(float),
+            cudaMemcpyDeviceToHost,
+            stream
+        );
+
+        auto* meta = new Disk3DMeta();
+        meta->paths = {paths[0], paths[1], paths[2], paths[3], paths[4], paths[5]};
+        meta->top_elems = top_elems;
+        meta->front_elems = front_elems;
+        meta->left_elems = left_elems;
+        meta->top_offset = static_cast<size_t>(start) * nvar * top_block;
+        meta->front_offset = static_cast<size_t>(start) * nvar * front_block;
+        meta->left_offset = static_cast<size_t>(start) * nvar * left_block;
+        meta->top = top_t.data_ptr<float>() + top_stage_offset;
+        meta->bottom = bottom_t.data_ptr<float>() + top_stage_offset;
+        meta->front = front_t.data_ptr<float>() + front_stage_offset;
+        meta->back = back_t.data_ptr<float>() + front_stage_offset;
+        meta->left = left_t.data_ptr<float>() + left_stage_offset;
+        meta->right = right_t.data_ptr<float>() + left_stage_offset;
+        cudaLaunchHostFunc(stream, write_disk_3d_callback, meta);
+    }
+
+    inline void load_disk_to_cpu_2d(int start, int len, const std::vector<std::string>& paths, int stage_start = 0)
+    {
+        if (dim != 2)
+            throw std::runtime_error("load_disk_to_cpu_2d only supports 2D boundaries.");
+        if (paths.size() != 4)
+            throw std::runtime_error("2D disk boundary expects 4 file paths.");
+
+        size_t top_time_block = top_t.stride(1);
+        size_t left_time_block = left_t.stride(1);
+        size_t top_elems = len * top_time_block;
+        size_t left_elems = len * left_time_block;
+        size_t top_offset = static_cast<size_t>(start) * top_time_block;
+        size_t left_offset = static_cast<size_t>(start) * left_time_block;
+
+        read_file_chunk(paths[0], top_offset, top_t.data_ptr<float>() + stage_start * top_time_block, top_elems);
+        read_file_chunk(paths[1], top_offset, bottom_t.data_ptr<float>() + stage_start * top_time_block, top_elems);
+        read_file_chunk(paths[2], left_offset, left_t.data_ptr<float>() + stage_start * left_time_block, left_elems);
+        read_file_chunk(paths[3], left_offset, right_t.data_ptr<float>() + stage_start * left_time_block, left_elems);
+    }
+
+    inline void load_disk_to_cpu_3d(int start, int len, const std::vector<std::string>& paths, int stage_start = 0)
+    {
+        if (dim != 3)
+            throw std::runtime_error("load_disk_to_cpu_3d only supports 3D boundaries.");
+        if (paths.size() != 6)
+            throw std::runtime_error("3D disk boundary expects 6 file paths.");
+
+        size_t top_block = top_t.stride(0);
+        size_t front_block = front_t.stride(0);
+        size_t left_block = left_t.stride(0);
+
+        size_t top_elems = len * nvar * top_block;
+        size_t front_elems = len * nvar * front_block;
+        size_t left_elems = len * nvar * left_block;
+
+        size_t top_offset = static_cast<size_t>(start) * nvar * top_block;
+        size_t front_offset = static_cast<size_t>(start) * nvar * front_block;
+        size_t left_offset = static_cast<size_t>(start) * nvar * left_block;
+        size_t top_stage_offset = static_cast<size_t>(stage_start) * nvar * top_block;
+        size_t front_stage_offset = static_cast<size_t>(stage_start) * nvar * front_block;
+        size_t left_stage_offset = static_cast<size_t>(stage_start) * nvar * left_block;
+
+        read_file_chunk(paths[0], top_offset, top_t.data_ptr<float>() + top_stage_offset, top_elems);
+        read_file_chunk(paths[1], top_offset, bottom_t.data_ptr<float>() + top_stage_offset, top_elems);
+        read_file_chunk(paths[2], front_offset, front_t.data_ptr<float>() + front_stage_offset, front_elems);
+        read_file_chunk(paths[3], front_offset, back_t.data_ptr<float>() + front_stage_offset, front_elems);
+        read_file_chunk(paths[4], left_offset, left_t.data_ptr<float>() + left_stage_offset, left_elems);
+        read_file_chunk(paths[5], left_offset, right_t.data_ptr<float>() + left_stage_offset, left_elems);
     }
 
     inline void load_cpu_to_gpu(int start, int len, cudaStream_t stream)

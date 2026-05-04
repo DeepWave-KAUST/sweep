@@ -211,6 +211,8 @@ class PropBase:
             "storage": "gpu",
             "transfer_interval": 1,
             "pinned_memory": False,
+            "disk_dir": None,
+            "ring_buffers": 1,
         }
 
         if config is None:
@@ -219,14 +221,24 @@ class PropBase:
         merged = default.copy()
         merged.update(config)
 
-        if merged["storage"] not in {"gpu", "cpu"}:
-            raise ValueError("boundary_saving_config['storage'] must be 'gpu' or 'cpu'")
+        if merged["storage"] not in {"gpu", "cpu", "disk"}:
+            raise ValueError("boundary_saving_config['storage'] must be 'gpu', 'cpu', or 'disk'")
 
         if merged["transfer_interval"] < 1:
             raise ValueError("boundary_saving_config['transfer_interval'] must be >= 1")
+        if merged["ring_buffers"] < 1:
+            raise ValueError("boundary_saving_config['ring_buffers'] must be >= 1")
 
         if merged["storage"] == "gpu":
             merged["transfer_interval"] = 1
+            merged["pinned_memory"] = False
+            merged["disk_dir"] = None
+            merged["ring_buffers"] = 1
+
+        if merged["storage"] == "cpu":
+            merged["disk_dir"] = None
+
+        if merged["storage"] == "disk":
             merged["pinned_memory"] = False
 
         return merged
