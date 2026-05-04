@@ -95,8 +95,15 @@ class Warpper(torch.autograd.Function):
         params = _C.ForwardInput()
         params.wavefields = forward_wavefields
         params.last_two = last_two
-        params.boundary_cpu = [b.zero_() for b in boundary_cpu] if boundary_on_cpu else []
-        params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
+        if boundary_on_disk:
+            params.boundary_cpu = [b.zero_() for b in boundary_cpu]
+            params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
+        elif boundary_on_cpu:
+            params.boundary_cpu = list(boundary_cpu)
+            params.boundary_gpu = list(boundary_gpu) if use_boundary_saving else []
+        else:
+            params.boundary_cpu = []
+            params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
         params.boundary_disk_files = list(boundary_disk_files) if boundary_on_disk else []
         params.checkpoints = [c.zero_() for c in checkpoint_buffers] if use_checkpoint else []
         params.transfer_interval = transfer_interval
@@ -852,8 +859,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         if boundary_on_cpu:
             if use_boundary_saving:
                 self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
-            self.boundary_cpu_allocator.zero_()
-            self.boundary_gpu_allocator.zero_()
+            if boundary_on_disk:
+                self.boundary_cpu_allocator.zero_()
+                self.boundary_gpu_allocator.zero_()
             boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size)
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
@@ -978,7 +986,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         if use_boundary_saving:
             self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
         if boundary_on_cpu:
-            if use_boundary_saving:
+            if boundary_on_disk and use_boundary_saving:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
             boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size) if use_boundary_saving else ()
@@ -1068,8 +1076,9 @@ class PropCUDA(PropBase, torch.nn.Module):
         if boundary_on_cpu:
             if use_boundary_saving:
                 self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
-            self.boundary_cpu_allocator.zero_()
-            self.boundary_gpu_allocator.zero_()
+            if boundary_on_disk:
+                self.boundary_cpu_allocator.zero_()
+                self.boundary_gpu_allocator.zero_()
             boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size)
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
@@ -1086,8 +1095,15 @@ class PropCUDA(PropBase, torch.nn.Module):
         fwd = _C.ForwardInput()
         fwd.wavefields = list(forward_wavefields) if save_all_wavefields else []
         fwd.last_two = last_two
-        fwd.boundary_cpu = [b.zero_() for b in boundary_cpu] if boundary_on_cpu and use_boundary_saving else []
-        fwd.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
+        if boundary_on_disk and use_boundary_saving:
+            fwd.boundary_cpu = [b.zero_() for b in boundary_cpu]
+            fwd.boundary_gpu = [b.zero_() for b in boundary_gpu]
+        elif boundary_on_cpu and use_boundary_saving:
+            fwd.boundary_cpu = list(boundary_cpu)
+            fwd.boundary_gpu = list(boundary_gpu)
+        else:
+            fwd.boundary_cpu = []
+            fwd.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
         fwd.boundary_disk_files = list(self._boundary_disk_files) if boundary_on_disk and use_boundary_saving else []
         fwd.checkpoints = [c.zero_() for c in checkpoint_buffers] if self.use_ckpt else []
         fwd.checkpoint_steps = checkpoint_steps if self.use_ckpt else torch.empty(0, dtype=torch.int32)
