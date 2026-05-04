@@ -99,14 +99,17 @@ class PropBase:
         self.B = B
         self.allow_growth = allow_growth
         self.full_mode = full_mode
-        legacy_boundary_config = {
-            "transfer_interval": kwargs.pop("transfer_interval", 1),
-            "storage": "cpu" if kwargs.pop("boundary_on_cpu", False) else "gpu",
-            "pinned_memory": kwargs.pop("use_pinned_memory", False),
-            "disk_async_read": kwargs.pop("boundary_disk_async_read", False),
-        }
+        legacy_boundary_config = {}
+        if "transfer_interval" in kwargs:
+            legacy_boundary_config["transfer_interval"] = kwargs.pop("transfer_interval")
+        if "boundary_on_cpu" in kwargs:
+            legacy_boundary_config["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
+        if "use_pinned_memory" in kwargs:
+            legacy_boundary_config["pinned_memory"] = kwargs.pop("use_pinned_memory")
+        if "boundary_disk_async_read" in kwargs:
+            legacy_boundary_config["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
         if boundary_saving_config is None:
-            boundary_saving_config = legacy_boundary_config
+            boundary_saving_config = legacy_boundary_config or None
         else:
             boundary_saving_config = {**legacy_boundary_config, **boundary_saving_config}
 
@@ -211,15 +214,15 @@ class PropBase:
         default = {
             "enabled": False,
             "storage": "gpu",
-            "transfer_interval": 1,
-            "pinned_memory": False,
+            "transfer_interval": None,
+            "pinned_memory": None,
             "disk_dir": None,
-            "ring_buffers": 1,
+            "ring_buffers": None,
             "disk_async_read": False,
         }
 
         if config is None:
-            return default
+            config = {}
         if "boundary_disk_async_read" in config:
             config = dict(config)
             config["disk_async_read"] = config.pop("boundary_disk_async_read")
@@ -229,11 +232,6 @@ class PropBase:
 
         if merged["storage"] not in {"gpu", "cpu", "disk"}:
             raise ValueError("boundary_saving_config['storage'] must be 'gpu', 'cpu', or 'disk'")
-
-        if merged["transfer_interval"] < 1:
-            raise ValueError("boundary_saving_config['transfer_interval'] must be >= 1")
-        if merged["ring_buffers"] < 1:
-            raise ValueError("boundary_saving_config['ring_buffers'] must be >= 1")
 
         if merged["storage"] == "gpu":
             merged["transfer_interval"] = 1
@@ -245,11 +243,26 @@ class PropBase:
         if merged["storage"] == "cpu":
             merged["disk_dir"] = None
             merged["disk_async_read"] = False
+            if merged["transfer_interval"] is None:
+                merged["transfer_interval"] = 16
+            if merged["ring_buffers"] is None:
+                merged["ring_buffers"] = 2
+            if merged["pinned_memory"] is None:
+                merged["pinned_memory"] = True
 
         if merged["storage"] == "disk":
             merged["pinned_memory"] = False
+            if merged["transfer_interval"] is None:
+                merged["transfer_interval"] = 16 if merged["disk_async_read"] else 32
+            if merged["ring_buffers"] is None:
+                merged["ring_buffers"] = 2
             if merged["disk_async_read"] and merged["ring_buffers"] < 2:
                 merged["ring_buffers"] = 2
+
+        if merged["transfer_interval"] < 1:
+            raise ValueError("boundary_saving_config['transfer_interval'] must be >= 1")
+        if merged["ring_buffers"] < 1:
+            raise ValueError("boundary_saving_config['ring_buffers'] must be >= 1")
 
         return merged
 
