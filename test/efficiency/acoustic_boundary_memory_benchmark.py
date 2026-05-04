@@ -170,7 +170,7 @@ def solver_kwargs_for_strategy(strategy, args):
         "storage": storage,
         "transfer_interval": args.transfer_interval,
         "ring_buffers": args.ring_buffers,
-        "pinned_memory": False,
+        "pinned_memory": strategy == "boundary_cpu",
         "disk_async_read": disk_async_read,
     }
     if storage == "disk" and args.disk_dir is not None:
