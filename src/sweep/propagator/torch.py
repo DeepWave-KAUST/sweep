@@ -66,15 +66,20 @@ class PropTorch(torch.nn.Module):
             raise ValueError("CUDA memory options must set strategy to 'boundary' or 'ckpt'.")
         if strategy == "boundary":
             boundary = memory.get("boundary") or {}
-            merged["boundary_saving_config"] = {
+            boundary_config = {
                 "enabled": True,
                 "storage": boundary.get("storage", "gpu"),
-                "transfer_interval": boundary.get("transfer_interval", 1),
-                "pinned_memory": boundary.get("pinned_memory", False),
-                "disk_dir": boundary.get("disk_dir"),
-                "ring_buffers": boundary.get("ring_buffers", 1),
-                "disk_async_read": boundary.get("disk_async_read", False),
             }
+            for key in (
+                "transfer_interval",
+                "pinned_memory",
+                "disk_dir",
+                "ring_buffers",
+                "disk_async_read",
+            ):
+                if key in boundary:
+                    boundary_config[key] = boundary[key]
+            merged["boundary_saving_config"] = boundary_config
             merged["use_ckpt"] = False
             return merged
         if strategy == "ckpt":

@@ -17,25 +17,25 @@ class EagerOptions:
 class BoundaryOptions:
     # storage='cpu' keeps boundary buffers off device and uses pinned memory optionally.
     storage: Literal["gpu", "cpu", "disk"] = "gpu"
-    transfer_interval: int = 1
-    pinned_memory: bool = False
+    transfer_interval: int | None = None
+    pinned_memory: bool | None = None
     disk_dir: str | None = None
-    ring_buffers: int = 1
+    ring_buffers: int | None = None
     disk_async_read: bool = False
 
     def __post_init__(self):
         if self.storage not in {"gpu", "cpu", "disk"}:
             raise ValueError("BoundaryOptions.storage must be 'gpu', 'cpu', or 'disk'.")
-        if self.transfer_interval < 1:
+        if self.transfer_interval is not None and self.transfer_interval < 1:
             raise ValueError("BoundaryOptions.transfer_interval must be >= 1.")
-        if self.ring_buffers < 1:
+        if self.ring_buffers is not None and self.ring_buffers < 1:
             raise ValueError("BoundaryOptions.ring_buffers must be >= 1.")
         if self.storage == "gpu":
-            if self.transfer_interval != 1:
+            if self.transfer_interval not in (None, 1):
                 raise ValueError(
                     "BoundaryOptions.transfer_interval is only valid when storage='cpu' or storage='disk'."
                 )
-            if self.ring_buffers != 1:
+            if self.ring_buffers not in (None, 1):
                 raise ValueError(
                     "BoundaryOptions.ring_buffers is only valid when storage='cpu' or storage='disk'."
                 )
