@@ -1,6 +1,9 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <exception>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <torch/extension.h>
@@ -704,12 +707,30 @@ struct EffectiveBoundarySaver {
         size_t front_stage_offset = static_cast<size_t>(stage_start) * nvar * front_block;
         size_t left_stage_offset = static_cast<size_t>(stage_start) * nvar * left_block;
 
-        read_boundary_file_chunk(paths[0], top_offset, top_t.data_ptr<float>() + top_stage_offset, top_elems);
-        read_boundary_file_chunk(paths[1], top_offset, bottom_t.data_ptr<float>() + top_stage_offset, top_elems);
-        read_boundary_file_chunk(paths[2], front_offset, front_t.data_ptr<float>() + front_stage_offset, front_elems);
-        read_boundary_file_chunk(paths[3], front_offset, back_t.data_ptr<float>() + front_stage_offset, front_elems);
-        read_boundary_file_chunk(paths[4], left_offset, left_t.data_ptr<float>() + left_stage_offset, left_elems);
-        read_boundary_file_chunk(paths[5], left_offset, right_t.data_ptr<float>() + left_stage_offset, left_elems);
+        std::exception_ptr read_error = nullptr;
+        std::mutex read_error_mutex;
+        auto read_one = [&](std::string path, size_t offset, float* dst, size_t elems) {
+            try {
+                read_boundary_file_chunk(path, offset, dst, elems);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(read_error_mutex);
+                if (!read_error)
+                    read_error = std::current_exception();
+            }
+        };
+
+        std::vector<std::thread> readers;
+        readers.reserve(6);
+        readers.emplace_back(read_one, paths[0], top_offset, top_t.data_ptr<float>() + top_stage_offset, top_elems);
+        readers.emplace_back(read_one, paths[1], top_offset, bottom_t.data_ptr<float>() + top_stage_offset, top_elems);
+        readers.emplace_back(read_one, paths[2], front_offset, front_t.data_ptr<float>() + front_stage_offset, front_elems);
+        readers.emplace_back(read_one, paths[3], front_offset, back_t.data_ptr<float>() + front_stage_offset, front_elems);
+        readers.emplace_back(read_one, paths[4], left_offset, left_t.data_ptr<float>() + left_stage_offset, left_elems);
+        readers.emplace_back(read_one, paths[5], left_offset, right_t.data_ptr<float>() + left_stage_offset, left_elems);
+        for (auto& reader : readers)
+            reader.join();
+        if (read_error)
+            std::rethrow_exception(read_error);
     }
 
     inline void load_cpu_to_gpu(int start, int len, cudaStream_t stream, int gpu_start = 0)
