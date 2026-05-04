@@ -118,9 +118,13 @@ __device__ __forceinline__ bool vrz2d_grad_product_interior(
     int halo = is_runtime ? solver.M : m_static;
 
     return ix >= halo && ix < solver.nx - halo
-        && iz >= halo && iz < solver.nz - halo;
+        && iz >= halo && iz < solver.nz - halo
+        && ix >= solver.phys_x0() && ix < solver.phys_x1()
+        && iz >= solver.phys_z0() && iz < solver.phys_z1();
 }
 
+// Old fused path retained for comparison. It computes d/dx_i(q * d_i p),
+// and the caller subtracted q * lap(p) to recover grad(q) * grad(p).
 template<int Order, int Direction>
 __device__ __forceinline__ float vrz2d_q_gradp(
     const float* __restrict__ q,
@@ -163,7 +167,7 @@ struct VRZ2DGradientProductAccessor {
 };
 
 template<int Order, int Direction>
-__device__ __forceinline__ float vrz2d_grad_q_gradp(
+__device__ __forceinline__ float vrz2d_fused_grad_q_gradp(
     const float* __restrict__ q,
     const float* __restrict__ p,
     int ix,
@@ -190,6 +194,23 @@ __device__ __forceinline__ float vrz2d_grad_q_gradp(
         grad_ctx.coeff,
         h
     );
+}
+
+template<int Order, int Direction>
+__device__ __forceinline__ float vrz2d_split_grad_q_gradp(
+    const float* __restrict__ q,
+    const float* __restrict__ p,
+    int ix,
+    int iz,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    if (!vrz2d_grad_product_interior<Order, Direction>(solver, ix, iz))
+        return 0.f;
+
+    float dq = gradient<2, Order, Direction>(q, ix, 0, iz, grad_ctx);
+    float dp = gradient<2, Order, Direction>(p, ix, 0, iz, grad_ctx);
+    return dq * dp;
 }
 
 template<int Order>
@@ -502,12 +523,12 @@ __global__ void calculate_grad_vrz2d(
     float dbdz = dvpdz * inv_z0 + v * z1z;
     float div_b_grad_p = beta * (lap_x + lap_z) + dbdx * dpdx + dbdz * dpdz;
 
-    float d_q_dpdx = vrz2d_grad_q_gradp<Order, X>(q_b, p_b, ix, iz, grad_ctx, solver);
-    float d_q_dpdz = vrz2d_grad_q_gradp<Order, Z>(q_b, p_b, ix, iz, grad_ctx, solver);
+    float d_q_dpdx = vrz2d_split_grad_q_gradp<Order, X>(q_b, p_b, ix, iz, grad_ctx, solver);
+    float d_q_dpdz = vrz2d_split_grad_q_gradp<Order, Z>(q_b, p_b, ix, iz, grad_ctx, solver);
 
     float dt2 = solver.dt * solver.dt;
     float g_kappa = -dt2 * lambda_b[idx] * div_b_grad_p;
-    float g_beta = dt2 * (d_q_dpdx + d_q_dpdz - q_b[idx] * (lap_x + lap_z));
+    float g_beta = dt2 * (d_q_dpdx + d_q_dpdz);
 
     grad_vp_b[idx] += z_b[idx] * g_kappa + inv_z0 * g_beta;
     grad_z_b[idx] += v * g_kappa - beta * inv_z0 * g_beta;

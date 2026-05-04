@@ -14,7 +14,8 @@ __global__ void boundary_kernel2d(
     int width,
     int offset,
     SolverContext ctx,
-    int mode
+    int mode,
+    int tangent_pad
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -34,6 +35,13 @@ __global__ void boundary_kernel2d(
 
     int nx_phys = ctx.nx_phys();
     int nz_phys = ctx.nz_phys();
+    int nx_boundary = nx_phys + 2 * tangent_pad;
+    int nz_boundary = nz_phys + 2 * tangent_pad;
+
+    int x_t0 = x0 - tangent_pad;
+    int x_t1 = x1 + tangent_pad;
+    int z_t0 = z0 - tangent_pad;
+    int z_t1 = z1 + tangent_pad;
 
     // ---------- symmetric boundary bands ----------
 
@@ -51,19 +59,19 @@ __global__ void boundary_kernel2d(
 
     bool is_top =
         (iz >= top_start && iz < top_end) &&
-        (ix >= x0 && ix < x1);
+        (ix >= x_t0 && ix < x_t1);
 
     bool is_bottom =
         (iz >= bot_start && iz < bot_end) &&
-        (ix >= x0 && ix < x1);
+        (ix >= x_t0 && ix < x_t1);
 
     bool is_left =
         (ix >= left_start && ix < left_end) &&
-        (iz >= z0 && iz < z1);
+        (iz >= z_t0 && iz < z_t1);
 
     bool is_right =
         (ix >= right_start && ix < right_end) &&
-        (iz >= z0 && iz < z1);
+        (iz >= z_t0 && iz < z_t1);
 
     if (!(is_top || is_bottom || is_left || is_right))
         return;
@@ -74,10 +82,10 @@ __global__ void boundary_kernel2d(
     if (is_top)
     {
         int zloc = iz - top_start;
-        int xloc = ix - x0;
+        int xloc = ix - x_t0;
 
         int idx =
-            ((it * ctx.B + b) * width + zloc) * nx_phys + xloc;
+            ((it * ctx.B + b) * width + zloc) * nx_boundary + xloc;
 
         if (mode == BOUNDARY_SAVE) top[idx] = val;
         else u_b[iz * ctx.nx + ix] = top[idx];
@@ -87,10 +95,10 @@ __global__ void boundary_kernel2d(
     if (is_bottom)
     {
         int zloc = iz - bot_start;
-        int xloc = ix - x0;
+        int xloc = ix - x_t0;
 
         int idx =
-            ((it * ctx.B + b) * width + zloc) * nx_phys + xloc;
+            ((it * ctx.B + b) * width + zloc) * nx_boundary + xloc;
 
         if (mode == BOUNDARY_SAVE) bottom[idx] = val;
         else u_b[iz * ctx.nx + ix] = bottom[idx];
@@ -100,10 +108,10 @@ __global__ void boundary_kernel2d(
     if (is_left)
     {
         int xloc = ix - left_start;
-        int zloc = iz - z0;
+        int zloc = iz - z_t0;
 
         int idx =
-            ((it * ctx.B + b) * nz_phys + zloc) * width + xloc;
+            ((it * ctx.B + b) * nz_boundary + zloc) * width + xloc;
 
         if (mode == BOUNDARY_SAVE) left[idx] = val;
         else u_b[iz * ctx.nx + ix] = left[idx];
@@ -113,10 +121,10 @@ __global__ void boundary_kernel2d(
     if (is_right)
     {
         int xloc = ix - right_start;
-        int zloc = iz - z0;
+        int zloc = iz - z_t0;
 
         int idx =
-            ((it * ctx.B + b) * nz_phys + zloc) * width + xloc;
+            ((it * ctx.B + b) * nz_boundary + zloc) * width + xloc;
 
         if (mode == BOUNDARY_SAVE) right[idx] = val;
         else u_b[iz * ctx.nx + ix] = right[idx];
@@ -139,7 +147,8 @@ __global__ void boundary_kernel3d(
     int width,
     int offset,
     SolverContext ctx,
-    int mode
+    int mode,
+    int tangent_pad
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,6 +184,16 @@ __global__ void boundary_kernel3d(
     int nx_phys = ctx.nx_phys();
     int ny_phys = ctx.ny_phys();
     int nz_phys = ctx.nz_phys();
+    int nx_boundary = nx_phys + 2 * tangent_pad;
+    int ny_boundary = ny_phys + 2 * tangent_pad;
+    int nz_boundary = nz_phys + 2 * tangent_pad;
+
+    int x_t0 = x0 - tangent_pad;
+    int x_t1 = x1 + tangent_pad;
+    int y_t0 = y0 - tangent_pad;
+    int y_t1 = y1 + tangent_pad;
+    int z_t0 = z0 - tangent_pad;
+    int z_t1 = z1 + tangent_pad;
 
     // --------------------------------------------------
     // boundary ranges
@@ -200,33 +219,33 @@ __global__ void boundary_kernel3d(
 
     bool is_top =
         iz >= top_start && iz < top_end &&
-        iy >= y0 && iy < y1 &&
-        ix >= x0 && ix < x1;
+        iy >= y_t0 && iy < y_t1 &&
+        ix >= x_t0 && ix < x_t1;
 
     bool is_bottom =
         iz >= bot_start && iz < bot_end &&
-        iy >= y0 && iy < y1 &&
-        ix >= x0 && ix < x1;
+        iy >= y_t0 && iy < y_t1 &&
+        ix >= x_t0 && ix < x_t1;
 
     bool is_front =
         iy >= front_start && iy < front_end &&
-        iz >= z0 && iz < z1 &&
-        ix >= x0 && ix < x1;
+        iz >= z_t0 && iz < z_t1 &&
+        ix >= x_t0 && ix < x_t1;
 
     bool is_back =
         iy >= back_start && iy < back_end &&
-        iz >= z0 && iz < z1 &&
-        ix >= x0 && ix < x1;
+        iz >= z_t0 && iz < z_t1 &&
+        ix >= x_t0 && ix < x_t1;
 
     bool is_left =
         ix >= left_start && ix < left_end &&
-        iz >= z0 && iz < z1 &&
-        iy >= y0 && iy < y1;
+        iz >= z_t0 && iz < z_t1 &&
+        iy >= y_t0 && iy < y_t1;
 
     bool is_right =
         ix >= right_start && ix < right_end &&
-        iz >= z0 && iz < z1 &&
-        iy >= y0 && iy < y1;
+        iz >= z_t0 && iz < z_t1 &&
+        iy >= y_t0 && iy < y_t1;
 
     if (!(is_top || is_bottom || is_front || is_back || is_left || is_right))
         return;
@@ -240,13 +259,13 @@ __global__ void boundary_kernel3d(
     if (is_top)
     {
         int zloc = iz - top_start;
-        int yloc = iy - y0;
-        int xloc = ix - x0;
+        int yloc = iy - y_t0;
+        int xloc = ix - x_t0;
 
         int idx =
             ((((it * ctx.B + b) * width + zloc)
-              * ny_phys + yloc)
-              * nx_phys + xloc);
+              * ny_boundary + yloc)
+              * nx_boundary + xloc);
 
         if (mode == BOUNDARY_SAVE)
             top[idx] = val;
@@ -261,13 +280,13 @@ __global__ void boundary_kernel3d(
     if (is_bottom)
     {
         int zloc = iz - bot_start;
-        int yloc = iy - y0;
-        int xloc = ix - x0;
+        int yloc = iy - y_t0;
+        int xloc = ix - x_t0;
 
         int idx =
             ((((it * ctx.B + b) * width + zloc)
-              * ny_phys + yloc)
-              * nx_phys + xloc);
+              * ny_boundary + yloc)
+              * nx_boundary + xloc);
 
         if (mode == BOUNDARY_SAVE)
             bottom[idx] = val;
@@ -282,13 +301,13 @@ __global__ void boundary_kernel3d(
     if (is_front)
     {
         int yloc = iy - front_start;
-        int zloc = iz - z0;
-        int xloc = ix - x0;
+        int zloc = iz - z_t0;
+        int xloc = ix - x_t0;
 
         int idx =
-            ((((it * ctx.B + b) * nz_phys + zloc)
+            ((((it * ctx.B + b) * nz_boundary + zloc)
               * width + yloc)
-              * nx_phys + xloc);
+              * nx_boundary + xloc);
 
         if (mode == BOUNDARY_SAVE)
             front[idx] = val;
@@ -303,13 +322,13 @@ __global__ void boundary_kernel3d(
     if (is_back)
     {
         int yloc = iy - back_start;
-        int zloc = iz - z0;
-        int xloc = ix - x0;
+        int zloc = iz - z_t0;
+        int xloc = ix - x_t0;
 
         int idx =
-            ((((it * ctx.B + b) * nz_phys + zloc)
+            ((((it * ctx.B + b) * nz_boundary + zloc)
               * width + yloc)
-              * nx_phys + xloc);
+              * nx_boundary + xloc);
 
         if (mode == BOUNDARY_SAVE)
             back[idx] = val;
@@ -324,12 +343,12 @@ __global__ void boundary_kernel3d(
     if (is_left)
     {
         int xloc = ix - left_start;
-        int zloc = iz - z0;
-        int yloc = iy - y0;
+        int zloc = iz - z_t0;
+        int yloc = iy - y_t0;
 
         int idx =
-            ((((it * ctx.B + b) * nz_phys + zloc)
-              * ny_phys + yloc)
+            ((((it * ctx.B + b) * nz_boundary + zloc)
+              * ny_boundary + yloc)
               * width + xloc);
 
         if (mode == BOUNDARY_SAVE)
@@ -345,12 +364,12 @@ __global__ void boundary_kernel3d(
     if (is_right)
     {
         int xloc = ix - right_start;
-        int zloc = iz - z0;
-        int yloc = iy - y0;
+        int zloc = iz - z_t0;
+        int yloc = iy - y_t0;
 
         int idx =
-            ((((it * ctx.B + b) * nz_phys + zloc)
-              * ny_phys + yloc)
+            ((((it * ctx.B + b) * nz_boundary + zloc)
+              * ny_boundary + yloc)
               * width + xloc);
 
         if (mode == BOUNDARY_SAVE)

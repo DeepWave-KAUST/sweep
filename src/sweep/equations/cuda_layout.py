@@ -15,6 +15,7 @@ class CUDALayoutSpec:
     checkpoint_nvar: int | None = None
     backward_workspace_nvar: int = 0
     backward_workspace_shapes: Callable | None = None
+    boundary_tangent_pad: int = 0
 
     def resolved_last_two_storage_nvar(self) -> int:
         return self.base_nvar if self.last_two_storage_nvar is None else self.last_two_storage_nvar

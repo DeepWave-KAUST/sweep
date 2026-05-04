@@ -78,7 +78,8 @@ struct EffectiveBoundarySaver {
         const std::vector<torch::Tensor>& boundary_gpu = {},
         const torch::Tensor& last_two = {},
         bool use_fp16_storage_ = false,
-        bool use_pinned_memory_ = false
+        bool use_pinned_memory_ = false,
+        int tangent_pad = 0
     )
     {
         enabled = use_boundary_saving;
@@ -118,6 +119,10 @@ struct EffectiveBoundarySaver {
         int nx_phys = ctx.nx_phys();
         int nz_phys = ctx.nz_phys();
         int ny_phys = (dim == 3) ? ctx.ny_phys() : 1;
+
+        int nx_boundary = nx_phys + 2 * tangent_pad;
+        int nz_boundary = nz_phys + 2 * tangent_pad;
+        int ny_boundary = (dim == 3) ? ny_phys + 2 * tangent_pad : 1;
         
         // =========================
         // Allocate boundary storage
@@ -171,23 +176,23 @@ struct EffectiveBoundarySaver {
         {   
             if (dim == 3)
                 {
-                    left_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_phys, ny_phys, width}, storage_options);
-                    right_t = torch::zeros({nvar * ctx.nt, ctx.B, nz_phys, ny_phys, width}, storage_options);
+                    left_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, storage_options);
+                    right_t = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, storage_options);
 
-                    front_t = torch::zeros({nvar * ctx.nt, ctx.B, nz_phys, width, nx_phys}, storage_options);
-                    back_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_phys, width, nx_phys}, storage_options);
+                    front_t = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, storage_options);
+                    back_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, storage_options);
 
-                    bottom_t = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_phys, nx_phys}, storage_options);
-                    top_t    = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_phys, nx_phys}, storage_options);
+                    bottom_t = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, storage_options);
+                    top_t    = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, storage_options);
 
                 }
             else
                 {
-                    left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width}, storage_options);
-                    right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_phys, width}, storage_options);
+                    left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, storage_options);
+                    right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, storage_options);
 
-                    bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_phys}, storage_options);
-                    top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_phys}, storage_options);
+                    bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, storage_options);
+                    top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, storage_options);
 
                     front_t = torch::Tensor();
                     back_t  = torch::Tensor();
@@ -227,22 +232,22 @@ struct EffectiveBoundarySaver {
             {
                 if (dim == 3)
                 {
-                    left_gpu  = torch::zeros({nvar * transfer_interval, ctx.B, nz_phys, ny_phys, width}, gpu_options);
-                    right_gpu = torch::zeros({nvar * transfer_interval, ctx.B, nz_phys, ny_phys, width}, gpu_options);
+                    left_gpu  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, gpu_options);
+                    right_gpu = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, gpu_options);
 
-                    front_gpu = torch::zeros({nvar * transfer_interval, ctx.B, nz_phys, width, nx_phys}, gpu_options);
-                    back_gpu  = torch::zeros({nvar * transfer_interval, ctx.B, nz_phys, width, nx_phys}, gpu_options);
+                    front_gpu = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, gpu_options);
+                    back_gpu  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, gpu_options);
 
-                    bottom_gpu = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_phys, nx_phys}, gpu_options);
-                    top_gpu    = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_phys, nx_phys}, gpu_options);
+                    bottom_gpu = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, gpu_options);
+                    top_gpu    = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, gpu_options);
                 }
                 else
                 {
-                    left_gpu  = torch::zeros({nvar,transfer_interval,ctx.B,nz_phys,width}, gpu_options);
-                    right_gpu = torch::zeros({nvar,transfer_interval,ctx.B,nz_phys,width}, gpu_options);
+                    left_gpu  = torch::zeros({nvar,transfer_interval,ctx.B,nz_boundary,width}, gpu_options);
+                    right_gpu = torch::zeros({nvar,transfer_interval,ctx.B,nz_boundary,width}, gpu_options);
 
-                    bottom_gpu = torch::zeros({nvar,transfer_interval,ctx.B,width,nx_phys}, gpu_options);
-                    top_gpu    = torch::zeros({nvar,transfer_interval,ctx.B,width,nx_phys}, gpu_options);
+                    bottom_gpu = torch::zeros({nvar,transfer_interval,ctx.B,width,nx_boundary}, gpu_options);
+                    top_gpu    = torch::zeros({nvar,transfer_interval,ctx.B,width,nx_boundary}, gpu_options);
                 }
             }
         }
@@ -646,7 +651,8 @@ __global__ void boundary_kernel2d(
     int width,
     int offset,
     SolverContext ctx,
-    int mode
+    int mode,
+    int tangent_pad = 0
 );
 
 __global__ void boundary_kernel3d(
@@ -665,5 +671,6 @@ __global__ void boundary_kernel3d(
     int width,
     int offset,
     SolverContext ctx,
-    int mode
+    int mode,
+    int tangent_pad = 0
 );

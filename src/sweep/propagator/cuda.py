@@ -457,6 +457,7 @@ class PropCUDA(PropBase, torch.nn.Module):
             transfer_interval,
             self.free_surface,
             self.equation.so // 2 + 1,
+            tangent_pad=cuda_layout.boundary_tangent_pad,
         )
 
         self.boundary_cpu_allocator = Allocator('cpu')

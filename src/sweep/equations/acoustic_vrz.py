@@ -192,6 +192,7 @@ class AcousticVRZ(SecondOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
+            boundary_tangent_pad=self.so // 2,
         )
 
 
@@ -276,4 +277,5 @@ class AcousticVRZ3D(SecondOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,
+            boundary_tangent_pad=self.so // 2,
         )

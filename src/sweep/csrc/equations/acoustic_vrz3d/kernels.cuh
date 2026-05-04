@@ -22,6 +22,17 @@ __global__ void acoustic_vrz3nd(
     SolverContext solver
 );
 
+template<int Order>
+__global__ void acoustic_vrz3nd_nopml(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    SolverContext solver
+);
+
 static __global__ void build_kappa_lambda_vrz3d(
     const float* __restrict__ lambda_now,
     const float* __restrict__ vp,
@@ -52,6 +63,15 @@ __global__ void calculate_grad_vrz3d(
         else if ((order) == 6) acoustic_vrz3nd<6><<<grid, block>>>(__VA_ARGS__);            \
         else if ((order) == 8) acoustic_vrz3nd<8><<<grid, block>>>(__VA_ARGS__);            \
         else                   acoustic_vrz3nd<-1><<<grid, block>>>(__VA_ARGS__);           \
+    } while (0)
+
+#define ACOUSTIC_VRZ3D_NOPML(order, grid, block, ...)                                      \
+    do {                                                                                    \
+        if      ((order) == 2) acoustic_vrz3nd_nopml<2><<<grid, block>>>(__VA_ARGS__);      \
+        else if ((order) == 4) acoustic_vrz3nd_nopml<4><<<grid, block>>>(__VA_ARGS__);      \
+        else if ((order) == 6) acoustic_vrz3nd_nopml<6><<<grid, block>>>(__VA_ARGS__);      \
+        else if ((order) == 8) acoustic_vrz3nd_nopml<8><<<grid, block>>>(__VA_ARGS__);      \
+        else                   acoustic_vrz3nd_nopml<-1><<<grid, block>>>(__VA_ARGS__);     \
     } while (0)
 
 #define ACOUSTIC_VRZ3D_ADJOINT(order, grid, block, ...)                                     \
@@ -115,9 +135,15 @@ __device__ __forceinline__ bool vrz3d_grad_product_interior(
 
     return ix >= halo && ix < solver.nx - halo
         && iy >= halo && iy < solver.ny - halo
-        && iz >= halo && iz < solver.nz - halo;
+        && iz >= halo && iz < solver.nz - halo
+        && ix >= solver.phys_x0() && ix < solver.phys_x1()
+        && iy >= solver.phys_y0() && iy < solver.phys_y1()
+        && iz >= solver.phys_z0() && iz < solver.phys_z1();
 }
 
+#if 0
+// Old fused path retained for comparison. It computes d/dx_i(q * d_i p),
+// and the caller subtracted q * lap(p) to recover grad(q) * grad(p).
 template<int Order, int Direction>
 __device__ __forceinline__ float vrz3d_q_gradp(
     const float* __restrict__ q,
@@ -195,6 +221,25 @@ __device__ __forceinline__ float vrz3d_grad_q_gradp(
         grad_ctx.coeff,
         h
     );
+}
+#endif
+
+template<int Order, int Direction>
+__device__ __forceinline__ float vrz3d_grad_q_gradp(
+    const float* __restrict__ q,
+    const float* __restrict__ p,
+    int ix,
+    int iy,
+    int iz,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    if (!vrz3d_grad_product_interior<Order, Direction>(solver, ix, iy, iz))
+        return 0.f;
+
+    float dq = gradient<3, Order, Direction>(q, ix, iy, iz, grad_ctx);
+    float dp = gradient<3, Order, Direction>(p, ix, iy, iz, grad_ctx);
+    return dq * dp;
 }
 
 template<int Order>
@@ -294,6 +339,72 @@ __global__ void acoustic_vrz3nd(
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
 }
 
+template<int Order>
+__global__ void acoustic_vrz3nd_nopml(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    int ix, iy, iz, b;
+    vrz3d_index<Order>(solver, ix, iy, iz, b);
+
+    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
+        return;
+
+    int x_start = solver.phys_x0() + 1;
+    int x_end = solver.phys_x1() - 1;
+    int y_start = solver.phys_y0() + 1;
+    int y_end = solver.phys_y1() - 1;
+    int z_start = solver.phys_z0() + 1;
+    int z_end = solver.phys_z1() - 1;
+
+    if (ix < x_start || ix >= x_end ||
+        iy < y_start || iy >= y_end ||
+        iz < z_start || iz >= z_end)
+        return;
+
+    int stride_y = solver.nx;
+    int stride_z = solver.nx * solver.ny;
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * stride_z + iy * stride_y + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* vp_b = vp + b * spatial_size;
+    const float* z_b = z + b * spatial_size;
+    const float* inv_z_b = inv_z + b * spatial_size;
+
+    float lap_x = laplace<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_z = laplace<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
+
+    float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
+    float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
+    float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
+
+    float dvpdx = gradient<3, Order, X>(vp_b, ix, iy, iz, grad_ctx);
+    float dvpdy = gradient<3, Order, Y>(vp_b, ix, iy, iz, grad_ctx);
+    float dvpdz = gradient<3, Order, Z>(vp_b, ix, iy, iz, grad_ctx);
+    float z1x = gradient<3, Order, X>(inv_z_b, ix, iy, iz, grad_ctx);
+    float z1y = gradient<3, Order, Y>(inv_z_b, ix, iy, iz, grad_ctx);
+    float z1z = gradient<3, Order, Z>(inv_z_b, ix, iy, iz, grad_ctx);
+
+    float v = vp_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float beta = v * inv_z0;
+    float kappa = v * z_b[idx];
+    float dbdx = dvpdx * inv_z0 + v * z1x;
+    float dbdy = dvpdy * inv_z0 + v * z1y;
+    float dbdz = dvpdz * inv_z0 + v * z1z;
+
+    float rhs = kappa * (beta * (lap_x + lap_y + lap_z) + dbdx * dudx + dbdy * dudy + dbdz * dudz);
+
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
+}
+
 static __global__ void build_kappa_lambda_vrz3d(
     const float* __restrict__ lambda_now,
     const float* __restrict__ vp,
@@ -373,7 +484,7 @@ __global__ void calculate_grad_vrz3d(
 
     float dt2 = solver.dt * solver.dt;
     float g_kappa = -dt2 * lambda_b[idx] * div_b_grad_p;
-    float g_beta = dt2 * (d_q_dpdx + d_q_dpdy + d_q_dpdz - q_b[idx] * (lap_x + lap_y + lap_z));
+    float g_beta = dt2 * (d_q_dpdx + d_q_dpdy + d_q_dpdz);
 
     grad_vp_b[idx] += z_b[idx] * g_kappa + inv_z0 * g_beta;
     grad_z_b[idx] += v * g_kappa - beta * inv_z0 * g_beta;

@@ -211,7 +211,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    int save_width = 2 * p.M + 1;
+    int save_width = p.M + 1;
+    int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu;
     if (staged_boundary) {
@@ -322,7 +323,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             right_ptr,
             staged_boundary ? 0 : it - 1,
             save_width,
-            0,
+            boundary_offset,
             ctx,
             BOUNDARY_RESTORE
         );

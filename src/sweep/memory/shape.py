@@ -11,6 +11,7 @@ class Layout:
         transfer_interval=1,    # number of time steps for each CPU-GPU transfer
         free_surface=False,     # whether the top boundary is free surface (stress=0) or not (absorbing)
         width=-1,               # width of the boundary to be saved, default to M (the stencil radius)
+        tangent_pad=0,           # extra saved cells in tangential directions
         **kwargs
     ):
 
@@ -57,6 +58,11 @@ class Layout:
             self.width = M
         else:
             self.width = width
+        self.tangent_pad = tangent_pad
+
+        self.nx_boundary = self.nx_phys + 2 * tangent_pad
+        self.ny_boundary = self.ny_phys + 2 * tangent_pad
+        self.nz_boundary = self.nz_phys + 2 * tangent_pad
 
 
     # -------------------------
@@ -70,8 +76,8 @@ class Layout:
             return (
                 self.nvar * self.nt,
                 self.B,
-                self.nz_phys,
-                self.ny_phys,
+                self.nz_boundary,
+                self.ny_boundary,
                 self.width,
             )
 
@@ -79,7 +85,7 @@ class Layout:
             self.nvar,
             self.nt,
             self.B,
-            self.nz_phys,
+            self.nz_boundary,
             self.width,
         )
 
@@ -96,9 +102,9 @@ class Layout:
         return (
             self.nvar * self.nt,
             self.B,
-            self.nz_phys,
+            self.nz_boundary,
             self.width,
-            self.nx_phys,
+            self.nx_boundary,
         )
 
     @property
@@ -113,8 +119,8 @@ class Layout:
                 self.nvar * self.nt,
                 self.B,
                 self.width,
-                self.ny_phys,
-                self.nx_phys,
+                self.ny_boundary,
+                self.nx_boundary,
             )
 
         return (
@@ -122,7 +128,7 @@ class Layout:
             self.nt,
             self.B,
             self.width,
-            self.nx_phys,
+            self.nx_boundary,
         )
 
     @property
@@ -140,8 +146,8 @@ class Layout:
             return (
                 self.nvar * self.transfer_interval,
                 self.B,
-                self.nz_phys,
-                self.ny_phys,
+                self.nz_boundary,
+                self.ny_boundary,
                 self.width,
             )
 
@@ -149,7 +155,7 @@ class Layout:
             self.nvar,
             self.transfer_interval,
             self.B,
-            self.nz_phys,
+            self.nz_boundary,
             self.width,
         )
 
@@ -166,9 +172,9 @@ class Layout:
         return (
             self.nvar * self.transfer_interval,
             self.B,
-            self.nz_phys,
+            self.nz_boundary,
             self.width,
-            self.nx_phys,
+            self.nx_boundary,
         )
 
     @property
@@ -183,8 +189,8 @@ class Layout:
                 self.nvar * self.transfer_interval,
                 self.B,
                 self.width,
-                self.ny_phys,
-                self.nx_phys,
+                self.ny_boundary,
+                self.nx_boundary,
             )
 
         return (
@@ -192,7 +198,7 @@ class Layout:
             self.transfer_interval,
             self.B,
             self.width,
-            self.nx_phys,
+            self.nx_boundary,
         )
 
     @property

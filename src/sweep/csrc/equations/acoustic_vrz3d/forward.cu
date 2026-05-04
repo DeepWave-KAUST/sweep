@@ -68,7 +68,8 @@ ForwardOutput forward(const ForwardInput& in)
         TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
     }
 
-    int save_width = 2 * p.M + 1;
+    int save_width = p.M + 1;
+    int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu;
     if (staged_boundary) {
@@ -138,7 +139,7 @@ ForwardOutput forward(const ForwardInput& in)
                 right_ptr,
                 staged_boundary ? 0 : it,
                 save_width,
-                0,
+                boundary_offset,
                 ctx,
                 BOUNDARY_SAVE
             );
