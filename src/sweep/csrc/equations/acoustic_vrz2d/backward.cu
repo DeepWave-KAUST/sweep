@@ -342,6 +342,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
             lap_ctx,
             ctx
         );
+
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
     out.grads = {grad_vp, grad_z};

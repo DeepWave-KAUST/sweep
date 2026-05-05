@@ -361,6 +361,8 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
             lap_ctx,
             ctx
         );
+
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
     const auto normalize_grad = [](const torch::Tensor& model_grad, const torch::Tensor& model) {
