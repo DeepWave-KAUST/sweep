@@ -1,6 +1,7 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from .utils import zero_top_halo_fields
 
 def step(u_now, u_pre, psix, psiz, zetax, zetaz, 
          su_now, su_pre, spsix, spsiz, szetax, szetaz, 
@@ -108,7 +109,10 @@ class AcousticLSRTM(SecondOrderEquation):
         hz, hx = self._spacings_2d(dh)
         lap_uz, lap_ux = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
         lap_suz, lap_sux = self.laplace1d_sep(args[6], self.laplace_kernels, hz, hx)
-        return step(*args, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient)
+        out = step(*args, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient)
+        if getattr(self, "free_surface", False):
+            out = zero_top_halo_fields(out, self.so // 2, axis=-2)
+        return out
 
     def _C(self):
         from sweep._C import (

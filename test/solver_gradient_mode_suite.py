@@ -126,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--freq", type=float, default=10.0)
     parser.add_argument("--delay", type=float, default=0.06)
     parser.add_argument("--spatial-order", type=int, default=4)
-    parser.add_argument("--abcn", type=int, default=8)
+    parser.add_argument("--abcn", type=int, default=30)
     parser.add_argument("--receiver-stride2d", type=int, default=6)
     parser.add_argument("--receiver-stride3d", type=int, default=8)
     parser.add_argument("--ckpt-chunks", type=int, default=24)
@@ -248,7 +248,7 @@ def make_geometry(spec: SolverSpec, shape: tuple[int, ...], scenario: ScenarioSp
 
     if spec.ndim == 2:
         nz, nx = shape
-        source_x = max(0, radius - 1) if scenario.edge_source else nx // 2
+        source_x = nx // 2
         sources = np.array([[min(source_x, nx - 1), min(source_z, nz - 1)]], dtype=np.int32)
         rec_x = np.arange(margin, max(margin + 1, nx - margin), args.receiver_stride2d, dtype=np.int32)
         if rec_x.size == 0:
@@ -259,7 +259,7 @@ def make_geometry(spec: SolverSpec, shape: tuple[int, ...], scenario: ScenarioSp
         return sources, receivers
 
     nz, ny, nx = shape
-    source_x = max(0, radius - 1) if scenario.edge_source else nx // 2
+    source_x = nx // 2
     source_y = max(0, radius - 1) if scenario.edge_source else ny // 2
     sources = np.array(
         [[min(source_x, nx - 1), min(source_y, ny - 1), min(source_z, nz - 1)]],

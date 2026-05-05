@@ -1,6 +1,7 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from .utils import zero_top_halo_fields
 
 
 def step_cpml(
@@ -146,7 +147,7 @@ class AcousticLSRTM3D(SecondOrderEquation):
         hz, hy, hx = self._spacings_3d(dh)
         lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, hz, hy, hx)
         lap_sz, lap_sy, lap_sx = self.laplace3d_sep(args[8], self.laplace_kernels, hz, hy, hx)
-        return step_cpml(
+        out = step_cpml(
             *args,
             lap_x,
             lap_y,
@@ -157,6 +158,9 @@ class AcousticLSRTM3D(SecondOrderEquation):
             self.b,
             self.gradient,
         )
+        if getattr(self, "free_surface", False):
+            out = zero_top_halo_fields(out, self.so // 2, axis=-3)
+        return out
 
     def _C(self):
         from sweep._C import (
