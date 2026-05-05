@@ -70,6 +70,20 @@ Main tuning knobs:
 - `BoundaryOptions.storage`
 - `BoundaryOptions.transfer_interval`
 - `BoundaryOptions.pinned_memory`
+- `BoundaryOptions.disk_dir`
+- `BoundaryOptions.ring_buffers`
+- `BoundaryOptions.disk_async_read`
+
+Supported storage modes:
+
+- `"gpu"`: keep saved boundaries on the GPU for the fastest reconstruction path
+- `"cpu"`: move saved boundaries to host memory to reduce GPU memory pressure
+- `"disk"`: spill saved boundaries to disk for the lowest GPU memory footprint
+
+CPU storage can use pinned memory through `pinned_memory=True`. Disk storage can
+use a small staging ring through `ring_buffers=...`; set `disk_async_read=True`
+to overlap disk readback with backward reconstruction where the runtime supports
+it.
 
 ### CUDA Checkpointing
 
@@ -79,6 +93,10 @@ Supported modes:
 
 - `CkptOptions(mode="chunk", chunks=...)`
 - `CkptOptions(mode="recursive", count=...)`
+
+Checkpoint support depends on the CUDA equation. If a solver does not expose a
+checkpoint backward path, use CUDA full-wavefield or boundary-saving mode for
+that equation.
 
 ## What to Compare
 

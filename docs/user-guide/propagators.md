@@ -34,7 +34,26 @@ and model tensors into a callable solver.
 
 - PyTorch eager checkpointing
 - `torch.compile` on the eager backend
-- CUDA boundary saving
-- CUDA checkpointing in `chunk` and `recursive` modes
+- CUDA boundary saving with GPU, CPU, pinned CPU, and disk-backed storage
+- CUDA boundary saving disk prefetch/readback, including asynchronous disk reads
+- CUDA checkpointing in `chunk` and `recursive` modes where the equation supports it
+
+CUDA boundary saving is configured with `CUDAOptions(memory=MemoryOptions(...))`.
+The most commonly tuned boundary options are:
+
+- `BoundaryOptions.storage`: `"gpu"`, `"cpu"`, or `"disk"`
+- `BoundaryOptions.transfer_interval`: number of time steps between boundary transfers
+- `BoundaryOptions.pinned_memory`: use pinned host memory for CPU boundary storage
+- `BoundaryOptions.disk_dir`: directory used by disk-backed boundary storage
+- `BoundaryOptions.ring_buffers`: number of disk staging buffers
+- `BoundaryOptions.disk_async_read`: enable asynchronous disk readback during backward
 
 See `examples/reducingmemory/` for runnable comparisons of these options.
+
+## Consistency Testing
+
+The CUDA memory modes are covered by `test/solver_gradient_mode_suite.py`. The
+suite compares eager gradients against CUDA full-wavefield, boundary-saving,
+and checkpoint modes across interior, finite-difference-edge, and free-surface
+source placements. It also saves per-mode gradient figures under
+`test/test_outputs/solver_gradient_mode_suite/`.

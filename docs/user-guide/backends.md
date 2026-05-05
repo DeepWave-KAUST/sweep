@@ -32,8 +32,8 @@ solver_cuda = PropTorch(..., backend="cuda")
 
 Some equations provide a compiled PyTorch CUDA binding through `sweep._C`.
 
-At the moment, Torch CUDA binding support is limited to 2D/3D acoustic and
-2D/3D elastic wave equations.
+The CUDA binding currently covers the main 2D and 3D acoustic, VRZ, LSRTM, and
+elastic propagators used by the Torch workflow.
 
 You can inspect backend capability from Python:
 
@@ -79,8 +79,10 @@ Available equations:
   Acoustic       ['vp']               yes            yes
   Acoustic1st    ['vp', 'rho']        no             no
   Acoustic3D     ['vp']               yes            yes
-  AcousticLSRTM  ['vp', 'mp']         no             no
+  AcousticLSRTM  ['vp', 'mp']         yes            yes
+  AcousticLSRTM3D ['vp', 'mp']        yes            yes
   AcousticVRZ    ['vp', 'z']          yes            yes
+  AcousticVRZ3D  ['vp', 'z']          yes            yes
   Elastic        ['vp', 'vs', 'rho']  yes            yes
   Elastic3D      ['vp', 'vs', 'rho']  yes            yes
 ```
@@ -109,7 +111,12 @@ Use the CUDA execution mode inside the Torch family when:
 
 - the compiled binding is installed
 - your equation supports the binding
-- you want CUDA-specific features such as boundary saving or CUDA checkpointing
+- you want CUDA-specific features such as boundary saving, disk-backed boundary
+  storage, or CUDA checkpointing
+
+CUDA memory modes are equation-specific. Full-wavefield and boundary-saving
+modes are available across the CUDA-backed solvers; checkpoint modes are
+available where the equation exposes the corresponding backward implementation.
 
 The lower-level class `sweep.propagator.cuda.PropCUDA` still exists, but for
 most user-facing workflows the recommended entry point is:

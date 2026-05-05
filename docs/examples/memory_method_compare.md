@@ -30,15 +30,22 @@ shot-based objective while changing how wavefields are stored or recomputed.
 - cuda full
 - cuda boundary saving on GPU
 - cuda boundary saving on CPU with transfer tuning
+- cuda boundary saving on pinned CPU memory
+- cuda boundary saving on disk, including asynchronous disk readback
 - cuda chunk checkpointing
 - cuda recursive checkpointing
 
 ## Practical Guidance
 
 - if you need the simplest eager-side memory reduction, start with PyTorch checkpointing
-- if you are already on the CUDA backend and want the best memory/runtime tradeoff, test CUDA boundary saving first
+- if you are already on the CUDA backend and want the best memory/runtime
+  tradeoff, test CUDA boundary saving first
 - if boundary saving is still too memory hungry, try CUDA checkpointing
-- CPU boundary saving is the most aggressive for GPU memory reduction, but often costs the most wall time
+- CPU boundary saving is useful when GPU memory is the bottleneck; pinned CPU
+  storage can improve transfer behavior
+- Disk-backed boundary saving gives the lowest GPU memory footprint among the
+  boundary-saving modes, at the cost of disk I/O and sensitivity to staging
+  buffer settings
 
 ## Example Figures
 
