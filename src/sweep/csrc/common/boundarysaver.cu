@@ -378,3 +378,153 @@ __global__ void boundary_kernel3d(
             u_b[idx3] = right[idx];
     }
 }
+
+__global__ void boundary_kernel3d_compact(
+    float* __restrict__ u,
+
+    float* __restrict__ top,
+    float* __restrict__ bottom,
+
+    float* __restrict__ front,
+    float* __restrict__ back,
+
+    float* __restrict__ left,
+    float* __restrict__ right,
+
+    int it,
+    int width,
+    int offset,
+    SolverContext ctx,
+    int mode,
+    int tangent_pad
+)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int x0 = ctx.phys_x0();
+    int x1 = ctx.phys_x1();
+    int y0 = ctx.phys_y0();
+    int y1 = ctx.phys_y1();
+    int z0 = ctx.phys_z0();
+    int z1 = ctx.phys_z1();
+
+    int nx_phys = ctx.nx_phys();
+    int ny_phys = ctx.ny_phys();
+    int nz_phys = ctx.nz_phys();
+    int nx_boundary = nx_phys + 2 * tangent_pad;
+    int ny_boundary = ny_phys + 2 * tangent_pad;
+    int nz_boundary = nz_phys + 2 * tangent_pad;
+
+    int top_count = width * ny_boundary * nx_boundary;
+    int front_count = nz_boundary * width * nx_boundary;
+    int left_count = nz_boundary * ny_boundary * width;
+    int per_batch = 2 * top_count + 2 * front_count + 2 * left_count;
+    int total = ctx.B * per_batch;
+    if (tid >= total)
+        return;
+
+    int b = tid / per_batch;
+    int local = tid - b * per_batch;
+
+    int x_t0 = x0 - tangent_pad;
+    int y_t0 = y0 - tangent_pad;
+    int z_t0 = z0 - tangent_pad;
+    int top_start = z0 + offset;
+    int bot_end = z1 - offset;
+    int bot_start = bot_end - width;
+    int front_start = y0 + offset;
+    int back_end = y1 - offset;
+    int back_start = back_end - width;
+    int left_start = x0 + offset;
+    int right_end = x1 - offset;
+    int right_start = right_end - width;
+
+    int ix = 0;
+    int iy = 0;
+    int iz = 0;
+    int idx = 0;
+    float* boundary = nullptr;
+
+    if (local < top_count) {
+        int plane = ny_boundary * nx_boundary;
+        int zloc = local / plane;
+        int rem = local - zloc * plane;
+        int yloc = rem / nx_boundary;
+        int xloc = rem - yloc * nx_boundary;
+        iz = top_start + zloc;
+        iy = y_t0 + yloc;
+        ix = x_t0 + xloc;
+        idx = ((((it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
+        boundary = top;
+    } else if (local < 2 * top_count) {
+        local -= top_count;
+        int plane = ny_boundary * nx_boundary;
+        int zloc = local / plane;
+        int rem = local - zloc * plane;
+        int yloc = rem / nx_boundary;
+        int xloc = rem - yloc * nx_boundary;
+        iz = bot_start + zloc;
+        iy = y_t0 + yloc;
+        ix = x_t0 + xloc;
+        idx = ((((it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
+        boundary = bottom;
+    } else if (local < 2 * top_count + front_count) {
+        local -= 2 * top_count;
+        int plane = width * nx_boundary;
+        int zloc = local / plane;
+        int rem = local - zloc * plane;
+        int yloc = rem / nx_boundary;
+        int xloc = rem - yloc * nx_boundary;
+        iz = z_t0 + zloc;
+        iy = front_start + yloc;
+        ix = x_t0 + xloc;
+        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
+        boundary = front;
+    } else if (local < 2 * top_count + 2 * front_count) {
+        local -= 2 * top_count + front_count;
+        int plane = width * nx_boundary;
+        int zloc = local / plane;
+        int rem = local - zloc * plane;
+        int yloc = rem / nx_boundary;
+        int xloc = rem - yloc * nx_boundary;
+        iz = z_t0 + zloc;
+        iy = back_start + yloc;
+        ix = x_t0 + xloc;
+        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
+        boundary = back;
+    } else if (local < 2 * top_count + 2 * front_count + left_count) {
+        local -= 2 * top_count + 2 * front_count;
+        int plane = ny_boundary * width;
+        int zloc = local / plane;
+        int rem = local - zloc * plane;
+        int yloc = rem / width;
+        int xloc = rem - yloc * width;
+        iz = z_t0 + zloc;
+        iy = y_t0 + yloc;
+        ix = left_start + xloc;
+        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
+        boundary = left;
+    } else {
+        local -= 2 * top_count + 2 * front_count + left_count;
+        int plane = ny_boundary * width;
+        int zloc = local / plane;
+        int rem = local - zloc * plane;
+        int yloc = rem / width;
+        int xloc = rem - yloc * width;
+        iz = z_t0 + zloc;
+        iy = y_t0 + yloc;
+        ix = right_start + xloc;
+        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
+        boundary = right;
+    }
+
+    if (ix < 0 || ix >= ctx.nx || iy < 0 || iy >= ctx.ny || iz < 0 || iz >= ctx.nz)
+        return;
+
+    int idx3 = iz * ctx.nx * ctx.ny + iy * ctx.nx + ix;
+    float* u_b = u + b * ctx.nx * ctx.ny * ctx.nz;
+    if (mode == BOUNDARY_SAVE)
+        boundary[idx] = u_b[idx3];
+    else
+        u_b[idx3] = boundary[idx];
+}

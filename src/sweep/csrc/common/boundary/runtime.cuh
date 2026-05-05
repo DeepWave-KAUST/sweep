@@ -256,20 +256,40 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs(chunk, direct);
 
-        boundary_kernel3d<<<grid, block>>>(
-            u,
-            b.top,
-            b.bottom,
-            b.front,
-            b.back,
-            b.left,
-            b.right,
-            boundary_time_index(chunk),
-            width,
-            offset,
-            ctx,
-            BOUNDARY_SAVE
-        );
+        if (use_compact_3d_boundary_kernel()) {
+            int compact_total = compact_boundary_count_3d(ctx, width, 0);
+            int compact_threads = 256;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                boundary_time_index(chunk),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_SAVE
+            );
+        } else {
+            boundary_kernel3d<<<grid, block>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                boundary_time_index(chunk),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_SAVE
+            );
+        }
 
         flush_forward_if_needed(chunk);
     }
@@ -402,20 +422,40 @@ public:
     {
         wait_before_backward_restore(it);
         auto b = backward_restore_ptrs(it, direct);
-        boundary_kernel3d<<<grid, block>>>(
-            u,
-            b.top,
-            b.bottom,
-            b.front,
-            b.back,
-            b.left,
-            b.right,
-            backward_time_index(it),
-            width,
-            offset,
-            ctx,
-            BOUNDARY_RESTORE
-        );
+        if (use_compact_3d_boundary_kernel()) {
+            int compact_total = compact_boundary_count_3d(ctx, width, 0);
+            int compact_threads = 256;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                backward_time_index(it),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_RESTORE
+            );
+        } else {
+            boundary_kernel3d<<<grid, block>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                backward_time_index(it),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_RESTORE
+            );
+        }
         record_backward_restore_done(it);
     }
 
@@ -503,6 +543,22 @@ private:
     int disk_task_len_ = 0;
     int disk_task_slot_ = 0;
     std::exception_ptr disk_reader_exception_ = nullptr;
+
+    inline int compact_boundary_count_3d(const SolverContext& ctx, int width, int tangent_pad) const
+    {
+        int nx_boundary = ctx.nx_phys() + 2 * tangent_pad;
+        int ny_boundary = ctx.ny_phys() + 2 * tangent_pad;
+        int nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
+        int top_count = width * ny_boundary * nx_boundary;
+        int front_count = nz_boundary * width * nx_boundary;
+        int left_count = nz_boundary * ny_boundary * width;
+        return ctx.B * (2 * top_count + 2 * front_count + 2 * left_count);
+    }
+
+    inline bool use_compact_3d_boundary_kernel() const
+    {
+        return !boundary_on_disk_ || boundary_disk_async_read_;
+    }
 
     inline int backward_slot_for_chunk(int chunk_start) const
     {
