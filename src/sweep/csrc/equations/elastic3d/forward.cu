@@ -13,6 +13,7 @@
 #include "../../common/cudautils.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
+#include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/staggered.cuh"
@@ -160,14 +161,15 @@ ForwardOutput forward(const ForwardInput& in)
     
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     boundary_saver.allocate(
         p.use_boundary_saving, 3, 9, solver, vp, save_width, 1,
-        true, !p.boundary_on_cpu, p.transfer_interval,
-        p.boundary_on_cpu ? p.boundary_cpu : std::vector<torch::Tensor>{},
+        true, !staged_boundary, staged_boundary ? p.transfer_interval : 1,
+        staged_boundary ? p.boundary_cpu : std::vector<torch::Tensor>{},
         p.boundary_gpu,
         p.last_two, p.use_pinned_memory
     );
-    // auto bs = boundary_saver.view();
+    auto bs = boundary_saver.view();
 
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
@@ -176,20 +178,27 @@ ForwardOutput forward(const ForwardInput& in)
 
     float* u_this_t = nullptr;
 
-    int interval = p.transfer_interval;
-    int buf_idx = 0;
-
-    int gpu_idx = 0;
-
     // For copying data
-    AsyncCopyContext async_copy(p.boundary_on_cpu && p.use_boundary_saving);
+    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    BoundaryRuntime boundary_runtime(
+        boundary_saver,
+        3,
+        p.use_boundary_saving,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        p.boundary_disk_files,
+        async_copy.compute_stream,
+        async_copy.copy_stream
+    );
     int next_ckpt_idx = 0;
     int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
     const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
-        buf_idx = it % interval;
         u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
 
         LAUNCH_3DELASTIC_VELOCITY(
@@ -253,32 +262,19 @@ ForwardOutput forward(const ForwardInput& in)
             };
 
             for (int f = 0; f < 9; ++f) {
-                gpu_idx = p.boundary_on_cpu ? f * interval + buf_idx : f * p.nt;
-                boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
+                boundary_runtime.save_forward_3d_field(
+                    it,
+                    p.nt,
                     fields[f],
-                    (p.boundary_on_cpu ? boundary_saver.top_gpu : boundary_saver.top_t).data_ptr<float>()    + gpu_idx * boundary_saver.top_stride,
-                    (p.boundary_on_cpu ? boundary_saver.bottom_gpu : boundary_saver.bottom_t).data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride,
-                    (p.boundary_on_cpu ? boundary_saver.front_gpu : boundary_saver.front_t).data_ptr<float>()  + gpu_idx * boundary_saver.front_stride,
-                    (p.boundary_on_cpu ? boundary_saver.back_gpu : boundary_saver.back_t).data_ptr<float>()   + gpu_idx * boundary_saver.back_stride,
-                    (p.boundary_on_cpu ? boundary_saver.left_gpu : boundary_saver.left_t).data_ptr<float>()   + gpu_idx * boundary_saver.left_stride,
-                    (p.boundary_on_cpu ? boundary_saver.right_gpu : boundary_saver.right_t).data_ptr<float>()  + gpu_idx * boundary_saver.right_stride,
-
-                    p.boundary_on_cpu ? 0 : it,
+                    launch_config.grid,
+                    launch_config.block,
+                    bs,
                     save_width,
                     -p.M, // offset
                     solver,
-                    BOUNDARY_SAVE
+                    f,
+                    f == 8
                 );
-            }
-
-            if (p.boundary_on_cpu && (buf_idx == interval - 1 || it == p.nt - 1)) {
-                int start = it - buf_idx;
-                int len = buf_idx + 1;
-
-                async_copy.record_compute_ready();
-                async_copy.wait_for_compute();
-                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
-
             }
 
         }
@@ -310,7 +306,7 @@ ForwardOutput forward(const ForwardInput& in)
         boundary_saver.last_two_t.select(0,8).select(0,0).copy_(wavefield.syz_t);
     }
 
-    async_copy.synchronize_copy();
+    boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
     out.last_two = boundary_saver.last_two_t;

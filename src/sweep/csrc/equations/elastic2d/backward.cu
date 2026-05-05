@@ -8,6 +8,7 @@
 #include "../../common/cudautils.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
+#include "../../common/boundary_runtime.cuh"
 #include "../../launch/config.h"
 #include "../../common/wavetypes.h"
 
@@ -840,7 +841,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
-    bool staged_boundary = p.boundary_on_cpu;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(true, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, p.use_pinned_memory);
     } else {
@@ -848,6 +849,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
     }
+    auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
@@ -862,27 +864,27 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     auto fvz_prev = torch::zeros_like(vp);
     auto fvx_prev = torch::zeros_like(vp);
-    int interval = p.transfer_interval;
-    int buf_idx = 0;
-    int gpu_idx = 0;
 
     AsyncCopyContext async_copy(staged_boundary);
-    if (staged_boundary) {
-
-        int it0 = p.nt - 1;
-        int buf_idx0 = (it0 - 1) % interval;
-        int chunk_start = it0 - buf_idx0 - 1;
-        int chunk_len = buf_idx0 + 1;
-
-        boundary_saver.load_cpu_to_gpu(chunk_start, chunk_len, async_copy.copy_stream);
-        async_copy.record_copy_ready();
-    }
+    BoundaryRuntime boundary_runtime(
+        boundary_saver,
+        2,
+        true,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        p.boundary_disk_files,
+        async_copy.compute_stream,
+        async_copy.copy_stream
+    );
+    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
     // auto u_all_for = torch::zeros({nt, B, 1, nz, nx}, vp.options());
     // auto u_all_adj = torch::zeros({nt, B, 1, nz, nx}, vp.options());
 
     for (int it = p.nt - 1; it >= 1; --it) {
-        buf_idx = (it - 1) % interval;
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
@@ -924,39 +926,19 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         float *field2[3] = {for_view.sxx, for_view.szz, for_view.sxz};
 
-        if (staged_boundary && buf_idx == interval - 1)
-            async_copy.wait_for_copy();
-
         for (int f = 2; f < 5; ++f) {
-            float* top_ptr = nullptr;
-            float* bottom_ptr = nullptr;
-            float* left_ptr = nullptr;
-            float* right_ptr = nullptr;
-
-            if (staged_boundary) {
-                gpu_idx = f * interval + buf_idx;
-                top_ptr = boundary_saver.top_gpu.data_ptr<float>() + gpu_idx * boundary_saver.top_stride;
-                bottom_ptr = boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride;
-                left_ptr = boundary_saver.left_gpu.data_ptr<float>() + gpu_idx * boundary_saver.left_stride;
-                right_ptr = boundary_saver.right_gpu.data_ptr<float>() + gpu_idx * boundary_saver.right_stride;
-            } else {
-                top_ptr = boundary_saver.top_t[f].data_ptr<float>();
-                bottom_ptr = boundary_saver.bottom_t[f].data_ptr<float>();
-                left_ptr = boundary_saver.left_t[f].data_ptr<float>();
-                right_ptr = boundary_saver.right_t[f].data_ptr<float>();
-            }
-
-            boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
+            boundary_runtime.restore_backward_2d_field(
+                it,
                 field2[f-2],
-                top_ptr,
-                bottom_ptr,
-                left_ptr,
-                right_ptr,
-                staged_boundary ? 0 : it-1,
+                launch_config.grid,
+                launch_config.block,
+                bs,
                 save_width,
                 -p.M,
                 solver,
-                BOUNDARY_RESTORE
+                f,
+                f == 2,
+                false
             );
         }
 
@@ -1013,48 +995,22 @@ BackwardOutput backward_bs(const BackwardInput& in)
         float *field1[2] = {for_view.vx, for_view.vz};
 
         for (int f = 0; f < 2; ++f) {
-            float* top_ptr = nullptr;
-            float* bottom_ptr = nullptr;
-            float* left_ptr = nullptr;
-            float* right_ptr = nullptr;
-
-            if (staged_boundary) {
-                gpu_idx = f * interval + buf_idx;
-                top_ptr = boundary_saver.top_gpu.data_ptr<float>() + gpu_idx * boundary_saver.top_stride;
-                bottom_ptr = boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride;
-                left_ptr = boundary_saver.left_gpu.data_ptr<float>() + gpu_idx * boundary_saver.left_stride;
-                right_ptr = boundary_saver.right_gpu.data_ptr<float>() + gpu_idx * boundary_saver.right_stride;
-            } else {
-                top_ptr = boundary_saver.top_t[f].data_ptr<float>();
-                bottom_ptr = boundary_saver.bottom_t[f].data_ptr<float>();
-                left_ptr = boundary_saver.left_t[f].data_ptr<float>();
-                right_ptr = boundary_saver.right_t[f].data_ptr<float>();
-            }
-
-            boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
+            boundary_runtime.restore_backward_2d_field(
+                it,
                 field1[f],
-                top_ptr,
-                bottom_ptr,
-                left_ptr,
-                right_ptr,
-                staged_boundary ? 0 : it-1,
+                launch_config.grid,
+                launch_config.block,
+                bs,
                 save_width,
                 -p.M,
                 solver,
-                BOUNDARY_RESTORE
+                f,
+                false,
+                f == 1
             );
         }
 
-        if (staged_boundary && buf_idx == 0 && it > 1) {
-            int next_chunk = (it - 1) / interval - 1;
-            if (next_chunk >= 0) {
-                int next_start = next_chunk * interval;
-                int remain = (int)p.nt - next_start - 1;
-                int next_len = remain < interval ? remain : interval;
-                boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
-                async_copy.record_copy_ready();
-            }
-        }
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
 
         // u_all_for[it].copy_(forward.vz_t); // for visualization
         // u_all_adj[it].copy_(adjoint.vz_t); // for visualization

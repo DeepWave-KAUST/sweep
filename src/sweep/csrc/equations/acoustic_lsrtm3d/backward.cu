@@ -5,6 +5,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/boundary_runtime.cuh"
 #include "../../common/cudautils.h"
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
@@ -669,7 +670,7 @@ void run_bs_imaging(
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
     EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
@@ -696,23 +697,23 @@ void run_bs_imaging(
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    int interval = p.transfer_interval;
-    int buf_idx = 0;
-    int gpu_idx = 0;
-
     AsyncCopyContext async_copy(staged_boundary);
-    if (staged_boundary) {
-        int it0 = p.nt - 1;
-        int buf_idx0 = (it0 - 1) % interval;
-        int chunk_start = it0 - buf_idx0 - 1;
-        int chunk_len = buf_idx0 + 1;
-        boundary_saver.load_cpu_to_gpu(chunk_start, chunk_len, async_copy.copy_stream);
-        async_copy.record_copy_ready();
-    }
+    BoundaryRuntime boundary_runtime(
+        boundary_saver,
+        3,
+        true,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        p.boundary_disk_files,
+        async_copy.compute_stream,
+        async_copy.copy_stream
+    );
+    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
     for (int it = p.nt - 1; it >= 1; --it) {
-        buf_idx = (it - 1) % interval;
-
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
@@ -775,61 +776,18 @@ void run_bs_imaging(
             ctx
         );
 
-        float* top_ptr = nullptr;
-        float* bottom_ptr = nullptr;
-        float* front_ptr = nullptr;
-        float* back_ptr = nullptr;
-        float* left_ptr = nullptr;
-        float* right_ptr = nullptr;
-
-        if (staged_boundary && buf_idx == interval - 1)
-            async_copy.wait_for_copy();
-
-        if (staged_boundary) {
-            gpu_idx = buf_idx;
-            top_ptr = boundary_saver.top_gpu.data_ptr<float>() + gpu_idx * boundary_saver.top_stride;
-            bottom_ptr = boundary_saver.bottom_gpu.data_ptr<float>() + gpu_idx * boundary_saver.bottom_stride;
-            front_ptr = boundary_saver.front_gpu.data_ptr<float>() + gpu_idx * boundary_saver.front_stride;
-            back_ptr = boundary_saver.back_gpu.data_ptr<float>() + gpu_idx * boundary_saver.back_stride;
-            left_ptr = boundary_saver.left_gpu.data_ptr<float>() + gpu_idx * boundary_saver.left_stride;
-            right_ptr = boundary_saver.right_gpu.data_ptr<float>() + gpu_idx * boundary_saver.right_stride;
-        } else {
-            top_ptr = bs.top;
-            bottom_ptr = bs.bottom;
-            front_ptr = bs.front;
-            back_ptr = bs.back;
-            left_ptr = bs.left;
-            right_ptr = bs.right;
-        }
-
-        boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
+        boundary_runtime.restore_backward_3d(
+            it,
             for_view.u_next,
-            top_ptr,
-            bottom_ptr,
-            front_ptr,
-            back_ptr,
-            left_ptr,
-            right_ptr,
-            staged_boundary ? 0 : it - 1,
+            launch_config.grid,
+            launch_config.block,
+            bs,
             save_width,
             0,
-            ctx,
-            BOUNDARY_RESTORE
+            ctx
         );
 
         forward.swap();
-
-        if (staged_boundary && buf_idx == 0 && it > 1) {
-            int chunk_id = (it - 1) / interval;
-            int next_chunk = chunk_id - 1;
-            if (next_chunk >= 0) {
-                int next_start = next_chunk * interval;
-                int remain = static_cast<int>(p.nt) - next_start;
-                int next_len = std::min(interval, remain);
-                boundary_saver.load_cpu_to_gpu(next_start, next_len, async_copy.copy_stream);
-                async_copy.record_copy_ready();
-            }
-        }
 
         accumulate_imaging_utt_3d(
             launch_config.grid,

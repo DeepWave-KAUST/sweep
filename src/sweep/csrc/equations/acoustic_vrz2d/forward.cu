@@ -4,6 +4,7 @@
 #include "acoustic_vrz2d.h"
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
+#include "../../common/boundary_runtime.cuh"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
@@ -70,7 +71,7 @@ ForwardOutput forward(const ForwardInput& in) {
     int save_width = p.M + 1;
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary)
         boundary_saver.allocate(p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, false,
                                 p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
@@ -87,16 +88,25 @@ ForwardOutput forward(const ForwardInput& in) {
     GradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
-    int interval = p.transfer_interval;
-    int buf_idx = 0;
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    BoundaryRuntime boundary_runtime(
+        boundary_saver,
+        2,
+        p.use_boundary_saving,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        p.boundary_disk_files,
+        async_copy.compute_stream,
+        async_copy.copy_stream
+    );
     int next_ckpt_idx = 0;
     int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
     const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     for (int it = 0; it < p.nt; ++it) {
-        buf_idx = it % interval;
-
         auto view = wavefield.view();
 
         ACOUSTIC_VRZ2D(
@@ -118,35 +128,17 @@ ForwardOutput forward(const ForwardInput& in) {
         );
 
         if (p.use_boundary_saving) {
-            float* top_ptr = staged_boundary ? boundary_saver.top_gpu.data_ptr<float>() + buf_idx * boundary_saver.top_stride
-                                             : bs.top;
-            float* bottom_ptr = staged_boundary ? boundary_saver.bottom_gpu.data_ptr<float>() + buf_idx * boundary_saver.bottom_stride
-                                                : bs.bottom;
-            float* left_ptr = staged_boundary ? boundary_saver.left_gpu.data_ptr<float>() + buf_idx * boundary_saver.left_stride
-                                              : bs.left;
-            float* right_ptr = staged_boundary ? boundary_saver.right_gpu.data_ptr<float>() + buf_idx * boundary_saver.right_stride
-                                               : bs.right;
-
-            boundary_kernel2d<<<launch_config.grid, launch_config.block>>>(
+            boundary_runtime.save_forward_2d(
+                it,
+                p.nt,
                 view.u_now,
-                top_ptr,
-                bottom_ptr,
-                left_ptr,
-                right_ptr,
-                staged_boundary ? 0 : it,
+                launch_config.grid,
+                launch_config.block,
+                bs,
                 save_width,
                 boundary_offset,
-                ctx,
-                BOUNDARY_SAVE
+                ctx
             );
-
-            if (staged_boundary && (buf_idx == interval - 1 || it == p.nt - 1)) {
-                int start = it - buf_idx;
-                int len = buf_idx + 1;
-                async_copy.record_compute_ready();
-                async_copy.wait_for_compute();
-                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
-            }
         }
 
         add_source<<<source_config.grid, source_config.block>>>(
@@ -202,7 +194,7 @@ ForwardOutput forward(const ForwardInput& in) {
         boundary_saver.last_two_t.select(1, 1).copy_(wavefield.u_now_t);
     }
 
-    async_copy.synchronize_copy();
+    boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
     out.last_two = boundary_saver.last_two_t;

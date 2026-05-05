@@ -167,9 +167,69 @@ public:
         return ptr;
     }
 
+    inline GeneralBoundaryPointer forward_save_ptrs_field(
+        const BoundaryChunk& chunk,
+        const GeneralBoundaryPointer& direct,
+        int field_idx
+    )
+    {
+        TORCH_CHECK(field_idx >= 0 && field_idx < saver_.nvar, "Invalid boundary field index.");
+
+        if (dim_ == 2) {
+            GeneralBoundaryPointer ptr{};
+            ptr.last_two = direct.last_two;
+
+            if (staged_) {
+                int gpu_idx = chunk.ring_start + chunk.buf_idx;
+                ptr.top = saver_.top_gpu.data_ptr<float>() +
+                    field_idx * saver_.top_gpu.stride(0) +
+                    gpu_idx * saver_.top_gpu.stride(1);
+                ptr.bottom = saver_.bottom_gpu.data_ptr<float>() +
+                    field_idx * saver_.bottom_gpu.stride(0) +
+                    gpu_idx * saver_.bottom_gpu.stride(1);
+                ptr.left = saver_.left_gpu.data_ptr<float>() +
+                    field_idx * saver_.left_gpu.stride(0) +
+                    gpu_idx * saver_.left_gpu.stride(1);
+                ptr.right = saver_.right_gpu.data_ptr<float>() +
+                    field_idx * saver_.right_gpu.stride(0) +
+                    gpu_idx * saver_.right_gpu.stride(1);
+            } else {
+                ptr.top = direct.top + field_idx * saver_.top_t.stride(0);
+                ptr.bottom = direct.bottom + field_idx * saver_.bottom_t.stride(0);
+                ptr.left = direct.left + field_idx * saver_.left_t.stride(0);
+                ptr.right = direct.right + field_idx * saver_.right_t.stride(0);
+            }
+            return ptr;
+        }
+
+        int time_idx = staged_ ? (chunk.ring_start + chunk.buf_idx) : chunk.it;
+        int64_t flat_idx = static_cast<int64_t>(time_idx) * saver_.nvar + field_idx;
+
+        GeneralBoundaryPointer ptr{};
+        ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
+            flat_idx * saver_.top_stride;
+        ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
+            flat_idx * saver_.bottom_stride;
+        ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
+            flat_idx * saver_.front_stride;
+        ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
+            flat_idx * saver_.back_stride;
+        ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
+            flat_idx * saver_.left_stride;
+        ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
+            flat_idx * saver_.right_stride;
+        ptr.last_two = direct.last_two;
+        return ptr;
+    }
+
     inline int boundary_time_index(const BoundaryChunk& chunk) const
     {
         return staged_ ? 0 : chunk.it;
+    }
+
+    inline int boundary_time_index_field(const BoundaryChunk& chunk) const
+    {
+        return dim_ == 3 ? 0 : boundary_time_index(chunk);
     }
 
     inline void flush_forward_if_needed(const BoundaryChunk& chunk)
@@ -294,6 +354,98 @@ public:
         flush_forward_if_needed(chunk);
     }
 
+    inline void save_forward_2d_field(
+        int it,
+        int nt,
+        float* u,
+        dim3 grid,
+        dim3 block,
+        const GeneralBoundaryPointer& direct,
+        int width,
+        int offset,
+        SolverContext ctx,
+        int field_idx,
+        bool flush_chunk
+    )
+    {
+        BoundaryChunk chunk = forward_chunk(it, nt);
+        wait_before_forward_save(chunk);
+        auto b = forward_save_ptrs_field(chunk, direct, field_idx);
+
+        boundary_kernel2d<<<grid, block>>>(
+            u,
+            b.top,
+            b.bottom,
+            b.left,
+            b.right,
+            boundary_time_index_field(chunk),
+            width,
+            offset,
+            ctx,
+            BOUNDARY_SAVE
+        );
+
+        if (flush_chunk)
+            flush_forward_if_needed(chunk);
+    }
+
+    inline void save_forward_3d_field(
+        int it,
+        int nt,
+        float* u,
+        dim3 grid,
+        dim3 block,
+        const GeneralBoundaryPointer& direct,
+        int width,
+        int offset,
+        SolverContext ctx,
+        int field_idx,
+        bool flush_chunk
+    )
+    {
+        BoundaryChunk chunk = forward_chunk(it, nt);
+        wait_before_forward_save(chunk);
+        auto b = forward_save_ptrs_field(chunk, direct, field_idx);
+
+        if (use_compact_3d_boundary_kernel()) {
+            int compact_total = compact_boundary_count_3d(ctx, width, 0);
+            int compact_threads = 512;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                boundary_time_index_field(chunk),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_SAVE
+            );
+        } else {
+            boundary_kernel3d<<<grid, block>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                boundary_time_index_field(chunk),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_SAVE
+            );
+        }
+
+        if (flush_chunk)
+            flush_forward_if_needed(chunk);
+    }
+
     inline void prefetch_initial_backward_chunk(int nt)
     {
         if (!enabled_ || !staged_)
@@ -376,9 +528,83 @@ public:
         return ptr;
     }
 
+    inline GeneralBoundaryPointer backward_restore_ptrs_field(
+        int it,
+        const GeneralBoundaryPointer& direct,
+        int field_idx
+    )
+    {
+        TORCH_CHECK(field_idx >= 0 && field_idx < saver_.nvar, "Invalid boundary field index.");
+
+        if (dim_ == 2) {
+            GeneralBoundaryPointer ptr{};
+            ptr.last_two = direct.last_two;
+
+            if (staged_) {
+                int buf_idx = (it - 1) % transfer_interval_;
+                int chunk_start = it - 1 - buf_idx;
+                int slot_start = backward_slot_for_chunk(chunk_start) * transfer_interval_;
+                int gpu_idx = slot_start + buf_idx;
+                if (!boundary_disk_async_read_)
+                    gpu_idx = buf_idx;
+
+                ptr.top = saver_.top_gpu.data_ptr<float>() +
+                    field_idx * saver_.top_gpu.stride(0) +
+                    gpu_idx * saver_.top_gpu.stride(1);
+                ptr.bottom = saver_.bottom_gpu.data_ptr<float>() +
+                    field_idx * saver_.bottom_gpu.stride(0) +
+                    gpu_idx * saver_.bottom_gpu.stride(1);
+                ptr.left = saver_.left_gpu.data_ptr<float>() +
+                    field_idx * saver_.left_gpu.stride(0) +
+                    gpu_idx * saver_.left_gpu.stride(1);
+                ptr.right = saver_.right_gpu.data_ptr<float>() +
+                    field_idx * saver_.right_gpu.stride(0) +
+                    gpu_idx * saver_.right_gpu.stride(1);
+            } else {
+                ptr.top = direct.top + field_idx * saver_.top_t.stride(0);
+                ptr.bottom = direct.bottom + field_idx * saver_.bottom_t.stride(0);
+                ptr.left = direct.left + field_idx * saver_.left_t.stride(0);
+                ptr.right = direct.right + field_idx * saver_.right_t.stride(0);
+            }
+            return ptr;
+        }
+
+        int time_idx = it - 1;
+        if (staged_) {
+            int buf_idx = (it - 1) % transfer_interval_;
+            int chunk_start = it - 1 - buf_idx;
+            int slot_start = backward_slot_for_chunk(chunk_start) * transfer_interval_;
+            time_idx = slot_start + buf_idx;
+            if (!boundary_disk_async_read_)
+                time_idx = buf_idx;
+        }
+        int64_t flat_idx = static_cast<int64_t>(time_idx) * saver_.nvar + field_idx;
+
+        GeneralBoundaryPointer ptr{};
+        ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
+            flat_idx * saver_.top_stride;
+        ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
+            flat_idx * saver_.bottom_stride;
+        ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
+            flat_idx * saver_.front_stride;
+        ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
+            flat_idx * saver_.back_stride;
+        ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
+            flat_idx * saver_.left_stride;
+        ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
+            flat_idx * saver_.right_stride;
+        ptr.last_two = direct.last_two;
+        return ptr;
+    }
+
     inline int backward_time_index(int it) const
     {
         return staged_ ? 0 : it - 1;
+    }
+
+    inline int backward_time_index_field(int it) const
+    {
+        return dim_ == 3 ? 0 : backward_time_index(it);
     }
 
     inline void restore_backward_2d(
@@ -457,6 +683,94 @@ public:
             );
         }
         record_backward_restore_done(it);
+    }
+
+    inline void restore_backward_2d_field(
+        int it,
+        float* u,
+        dim3 grid,
+        dim3 block,
+        const GeneralBoundaryPointer& direct,
+        int width,
+        int offset,
+        SolverContext ctx,
+        int field_idx,
+        bool wait_chunk,
+        bool record_done
+    )
+    {
+        if (wait_chunk)
+            wait_before_backward_restore(it);
+        auto b = backward_restore_ptrs_field(it, direct, field_idx);
+        boundary_kernel2d<<<grid, block>>>(
+            u,
+            b.top,
+            b.bottom,
+            b.left,
+            b.right,
+            backward_time_index_field(it),
+            width,
+            offset,
+            ctx,
+            BOUNDARY_RESTORE
+        );
+        if (record_done)
+            record_backward_restore_done(it);
+    }
+
+    inline void restore_backward_3d_field(
+        int it,
+        float* u,
+        dim3 grid,
+        dim3 block,
+        const GeneralBoundaryPointer& direct,
+        int width,
+        int offset,
+        SolverContext ctx,
+        int field_idx,
+        bool wait_chunk,
+        bool record_done
+    )
+    {
+        if (wait_chunk)
+            wait_before_backward_restore(it);
+        auto b = backward_restore_ptrs_field(it, direct, field_idx);
+        if (use_compact_3d_boundary_kernel()) {
+            int compact_total = compact_boundary_count_3d(ctx, width, 0);
+            int compact_threads = 512;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                backward_time_index_field(it),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_RESTORE
+            );
+        } else {
+            boundary_kernel3d<<<grid, block>>>(
+                u,
+                b.top,
+                b.bottom,
+                b.front,
+                b.back,
+                b.left,
+                b.right,
+                backward_time_index_field(it),
+                width,
+                offset,
+                ctx,
+                BOUNDARY_RESTORE
+            );
+        }
+        if (record_done)
+            record_backward_restore_done(it);
     }
 
     inline void prefetch_next_backward_chunk_if_needed(int it, int nt)

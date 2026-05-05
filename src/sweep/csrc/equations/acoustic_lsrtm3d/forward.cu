@@ -4,6 +4,7 @@
 #include "acoustic_lsrtm3d.h"
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
+#include "../../common/boundary_runtime.cuh"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
@@ -90,7 +91,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
     EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu;
+    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
             p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2,
@@ -114,16 +115,25 @@ ForwardOutput forward(const ForwardInput& in) {
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    int interval = p.transfer_interval;
-    int buf_idx = 0;
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    BoundaryRuntime boundary_runtime(
+        boundary_saver,
+        3,
+        p.use_boundary_saving,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        p.boundary_disk_files,
+        async_copy.compute_stream,
+        async_copy.copy_stream
+    );
     int next_ckpt_idx = 0;
     int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
     const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
 
     for (int it = 0; it < p.nt; ++it) {
-        buf_idx = it % interval;
-
         auto bg_view = bg.view();
         auto sc_view = sc.view();
         float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all[it].data_ptr<float>() : nullptr;
@@ -148,51 +158,17 @@ ForwardOutput forward(const ForwardInput& in) {
         );
 
         if (p.use_boundary_saving) {
-            float* top_ptr = nullptr;
-            float* bottom_ptr = nullptr;
-            float* front_ptr = nullptr;
-            float* back_ptr = nullptr;
-            float* left_ptr = nullptr;
-            float* right_ptr = nullptr;
-
-            if (staged_boundary) {
-                top_ptr = boundary_saver.top_gpu.data_ptr<float>() + buf_idx * boundary_saver.top_stride;
-                bottom_ptr = boundary_saver.bottom_gpu.data_ptr<float>() + buf_idx * boundary_saver.bottom_stride;
-                front_ptr = boundary_saver.front_gpu.data_ptr<float>() + buf_idx * boundary_saver.front_stride;
-                back_ptr = boundary_saver.back_gpu.data_ptr<float>() + buf_idx * boundary_saver.back_stride;
-                left_ptr = boundary_saver.left_gpu.data_ptr<float>() + buf_idx * boundary_saver.left_stride;
-                right_ptr = boundary_saver.right_gpu.data_ptr<float>() + buf_idx * boundary_saver.right_stride;
-            } else {
-                top_ptr = bs.top;
-                bottom_ptr = bs.bottom;
-                front_ptr = bs.front;
-                back_ptr = bs.back;
-                left_ptr = bs.left;
-                right_ptr = bs.right;
-            }
-
-            boundary_kernel3d<<<launch_config.grid, launch_config.block>>>(
+            boundary_runtime.save_forward_3d(
+                it,
+                p.nt,
                 bg_view.u_now,
-                top_ptr,
-                bottom_ptr,
-                front_ptr,
-                back_ptr,
-                left_ptr,
-                right_ptr,
-                staged_boundary ? 0 : it,
+                launch_config.grid,
+                launch_config.block,
+                bs,
                 save_width,
                 0,
-                ctx,
-                BOUNDARY_SAVE
+                ctx
             );
-
-            if (staged_boundary && (buf_idx == interval - 1 || it == p.nt - 1)) {
-                int start = it - buf_idx;
-                int len = buf_idx + 1;
-                async_copy.record_compute_ready();
-                async_copy.wait_for_compute();
-                boundary_saver.flush_gpu_to_cpu(start, len, async_copy.copy_stream);
-            }
         }
 
         add_source_3d<<<source_config.grid, source_config.block>>>(
@@ -243,6 +219,8 @@ ForwardOutput forward(const ForwardInput& in) {
         boundary_saver.last_two_t.select(1, 0).copy_(bg.u_prev_t);
         boundary_saver.last_two_t.select(1, 1).copy_(bg.u_now_t);
     }
+
+    boundary_runtime.synchronize();
 
     out.wavefield = bg_utt_all.defined() ? bg_utt_all : torch::Tensor();
     out.last_two = boundary_saver.last_two_t;
