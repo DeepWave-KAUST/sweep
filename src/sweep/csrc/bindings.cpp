@@ -9,6 +9,11 @@
 #include "equations/elastic3d/elastic3d.h"
 #include "bindings_utils.h"
 
+// Some CUDA 12.x / libstdc++ header combinations emit a reference to this
+// glibc 2.32 symbol even when building on older glibc hosts. Defining the weak
+// fallback as 0 keeps libstdc++ on the conservative multi-threaded path.
+extern "C" __attribute__((weak)) char __libc_single_threaded = 0;
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic2d_forward", wrap_forward(acoustic2d::forward));
     m.def("acoustic2d_backward", wrap_backward(acoustic2d::backward), "Acoustic backward (CUDA)");

@@ -31,7 +31,7 @@ __global__ void calculate_grad_3d(
 
     float vp3 = vp_b[idx] * vp_b[idx] * vp_b[idx];
 
-    grad_b[idx] += 32*u_forward_b[idx] * u_backward_b[idx]/vp3;
+    grad_b[idx] += 16*u_forward_b[idx] * u_backward_b[idx]/vp3;
 
 }
 
@@ -72,7 +72,7 @@ __global__ void calculate_grad_utt_3d(
 
     float vp3 = vp_b[idx] * vp_b[idx] * vp_b[idx];
 
-    grad_b[idx] += 32*u_tt * u_backward_b[idx]/vp3;
+    grad_b[idx] += 16*u_tt * u_backward_b[idx]/vp3;
 
 }
 

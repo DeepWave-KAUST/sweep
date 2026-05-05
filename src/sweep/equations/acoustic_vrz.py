@@ -1,7 +1,7 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from .utils import to_backend
+from .utils import to_backend, zero_top_halo_fields
 from sweep.scalars import fd_coefficients
 import numpy as np
 
@@ -164,7 +164,10 @@ class AcousticVRZ(SecondOrderEquation):
         dh = args[9]
         hz, hx = self._spacings_2d(dh)
         lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
-        return step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+        out = step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+        if getattr(self, "free_surface", False):
+            out = zero_top_halo_fields(out, self.so // 2, axis=-2)
+        return out
 
     def _C(self):
         import torch
@@ -249,7 +252,10 @@ class AcousticVRZ3D(SecondOrderEquation):
         dh = args[11]
         hz, hy, hx = self._spacings_3d(dh)
         lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, hz, hy, hx)
-        return step_cpml_3d(*args, lap_x, lap_y, lap_z, self.b, self.gradient, self.grad_kernels)
+        out = step_cpml_3d(*args, lap_x, lap_y, lap_z, self.b, self.gradient, self.grad_kernels)
+        if getattr(self, "free_surface", False):
+            out = zero_top_halo_fields(out, self.so // 2, axis=-3)
+        return out
 
     def _C(self):
         import torch

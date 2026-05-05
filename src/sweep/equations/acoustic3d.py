@@ -1,6 +1,8 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from .utils import zero_top_halo_fields
+
 
 def step_cpml(
         u_now, u_pre, psix, psiy, psiz, zetax, zetay, zetaz, 
@@ -82,7 +84,10 @@ class Acoustic3D(SecondOrderEquation):
         dh = args[10]
         hz, hy, hx = self._spacings_3d(dh)
         lap_z, lap_y, lap_x = self.laplace3d_sep(args[0], self.laplace_kernels, hz, hy, hx)
-        return step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
+        out = step_cpml(*args, lap_x, lap_y, lap_z, self.b, self.gradient)
+        if getattr(self, "free_surface", False):
+            out = zero_top_halo_fields(out, self.so // 2, axis=-3)
+        return out
 
     def _C(self, ):
         import torch

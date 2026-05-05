@@ -744,15 +744,6 @@ void run_bs_imaging(
             ctx
         );
 
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.u_next,
-            p.forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            ctx
-        );
-
         boundary_runtime.restore_backward_3d(
             it,
             for_view.u_next,
@@ -764,16 +755,12 @@ void run_bs_imaging(
             ctx
         );
 
-        forward.swap();
-
-        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
-
         accumulate_imaging_utt_3d(
             launch_config.grid,
             launch_config.block,
-            forward.u_next_t.data_ptr<float>(),
-            forward.u_now_t.data_ptr<float>(),
             forward.u_prev_t.data_ptr<float>(),
+            for_view.u_next,
+            forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp,
             p.dt,
@@ -784,6 +771,19 @@ void run_bs_imaging(
             ny,
             nz
         );
+
+        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            ctx
+        );
+
+        forward.swap();
+
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
     if (p.nt > 0) {

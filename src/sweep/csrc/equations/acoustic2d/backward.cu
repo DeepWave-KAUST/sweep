@@ -373,15 +373,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
             ctx
         );
 
-        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.u_next,
-            p.forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            ctx
-        );
-
         boundary_runtime.restore_backward_2d(
             it,
             for_view.u_next,
@@ -392,20 +383,30 @@ BackwardOutput backward_bs(const BackwardInput& in)
             0,
             ctx
         );
-
-        forward.swap();
-
-        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
         
         calculate_grad_utt<<<launch_config.grid, launch_config.block>>>(
-            forward.u_next_t.data_ptr<float>(),
-            forward.u_now_t.data_ptr<float>(),
             forward.u_prev_t.data_ptr<float>(),
+            for_view.u_next,
+            forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             grad.data_ptr<float>(),
             nx, nz, dt
         );
+
+        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            ctx
+        );
+
+        forward.swap();
+
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
+
         accumulate_rtm_image_2d<<<launch_config.grid, launch_config.block>>>(
             forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
