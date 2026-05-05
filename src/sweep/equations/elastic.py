@@ -1,51 +1,7 @@
-import numpy as np
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-
-
-def _flip(u, axis):
-    module = np
-    if hasattr(u, "flip"):
-        try:
-            return u.flip((axis,))
-        except TypeError:
-            pass
-    return module.flip(u, axis=axis)
-
-
-def _concat(arrays, axis):
-    first = arrays[0]
-    if hasattr(first, "device") and hasattr(first, "dtype"):
-        import torch
-
-        return torch.cat(arrays, dim=axis)
-    try:
-        import jax.numpy as jnp
-
-        if type(first).__module__.startswith("jax"):
-            return jnp.concatenate(arrays, axis=axis)
-    except Exception:
-        pass
-    return np.concatenate(arrays, axis=axis)
-
-
-def _extend_top_free_surface(u, halo, odd):
-    if halo <= 0:
-        return u
-    ghost = _flip(u[..., 1 : halo + 1, :], axis=-2)
-    if odd:
-        ghost = -ghost
-    return _concat([ghost, u], axis=-2)
-
-
-def _top_free_surface_derivative(u, deriv, halo, odd):
-    out = deriv(_extend_top_free_surface(u, halo, odd))
-    return out[..., halo:, :]
-
-
-def _zero_top_row(u):
-    return _concat([u[..., :1, :] * 0, u[..., 1:, :]], axis=-2)
+from ._free_surface import top_free_surface_derivative, zero_top_row
 
 
 def _match_reference_shape(u, ref):
@@ -85,8 +41,8 @@ def step(vx, vz, sxx, szz, sxz,
 
     txx_x = pd.x_forward(sxx)
     if free_surface:
-        txz_z = _top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True)
-        tzz_z = _top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True)
+        txz_z = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
+        tzz_z = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
     else:
         txz_z = pd.z_backward(sxz)
         tzz_z = pd.z_forward(szz)
@@ -111,8 +67,8 @@ def step(vx, vz, sxx, szz, sxz,
     # Update Stress fields
     vx_x = pd.x_backward(vx)
     if free_surface:
-        vz_z = _top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True)
-        vx_z = _top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False)
+        vz_z = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-2)
+        vx_z = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-2)
     else:
         vz_z = pd.z_backward(vz)
         vx_z = pd.z_forward(vx)
@@ -136,8 +92,8 @@ def step(vx, vz, sxx, szz, sxz,
     sxz = sxz + dt * lame_mu * (vx_z + vz_x)
 
     if free_surface:
-        szz = _zero_top_row(szz)
-        sxz = _zero_top_row(sxz)
+        szz = zero_top_row(szz, top_halo, axis=-2)
+        sxz = zero_top_row(sxz, top_halo, axis=-2)
 
 
     return vx, vz, sxx, szz, sxz, \

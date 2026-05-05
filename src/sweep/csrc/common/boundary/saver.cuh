@@ -30,6 +30,7 @@ struct EffectiveBoundarySaver {
     int nvar = 1;
 
     bool store_on_gpu = false;
+    int nt = 0;
 
     // stride for one timestep
     int64_t left_stride = 0;
@@ -209,6 +210,7 @@ struct EffectiveBoundarySaver {
         enabled = use_boundary_saving;
         dim = dim_;
         nvar = nvar_;
+        nt = static_cast<int>(ctx.nt);
 
         if (!enabled) return;
 
@@ -552,6 +554,11 @@ struct EffectiveBoundarySaver {
         meta->left_elems = len * left_time_block;
         meta->start_top_offset = static_cast<size_t>(start) * top_time_block;
         meta->start_left_offset = static_cast<size_t>(start) * left_time_block;
+        meta->top_var_block = top_var_block;
+        meta->left_var_block = left_var_block;
+        meta->top_file_var_block = static_cast<size_t>(nt) * top_time_block;
+        meta->left_file_var_block = static_cast<size_t>(nt) * left_time_block;
+        meta->nvar = nvar;
         meta->top = top_t.data_ptr<float>() + stage_start * top_time_block;
         meta->bottom = bottom_t.data_ptr<float>() + stage_start * top_time_block;
         meta->left = left_t.data_ptr<float>() + stage_start * left_time_block;
@@ -679,10 +686,41 @@ struct EffectiveBoundarySaver {
         size_t top_offset = static_cast<size_t>(start) * top_time_block;
         size_t left_offset = static_cast<size_t>(start) * left_time_block;
 
-        read_boundary_file_chunk(paths[0], top_offset, top_t.data_ptr<float>() + stage_start * top_time_block, top_elems);
-        read_boundary_file_chunk(paths[1], top_offset, bottom_t.data_ptr<float>() + stage_start * top_time_block, top_elems);
-        read_boundary_file_chunk(paths[2], left_offset, left_t.data_ptr<float>() + stage_start * left_time_block, left_elems);
-        read_boundary_file_chunk(paths[3], left_offset, right_t.data_ptr<float>() + stage_start * left_time_block, left_elems);
+        size_t top_var_block = top_t.stride(0);
+        size_t left_var_block = left_t.stride(0);
+        size_t top_file_var_block = static_cast<size_t>(nt) * top_time_block;
+        size_t left_file_var_block = static_cast<size_t>(nt) * left_time_block;
+        float* top_dst = top_t.data_ptr<float>() + stage_start * top_time_block;
+        float* bottom_dst = bottom_t.data_ptr<float>() + stage_start * top_time_block;
+        float* left_dst = left_t.data_ptr<float>() + stage_start * left_time_block;
+        float* right_dst = right_t.data_ptr<float>() + stage_start * left_time_block;
+
+        for (int v = 0; v < nvar; ++v) {
+            read_boundary_file_chunk(
+                paths[0],
+                static_cast<size_t>(v) * top_file_var_block + top_offset,
+                top_dst + static_cast<size_t>(v) * top_var_block,
+                top_elems
+            );
+            read_boundary_file_chunk(
+                paths[1],
+                static_cast<size_t>(v) * top_file_var_block + top_offset,
+                bottom_dst + static_cast<size_t>(v) * top_var_block,
+                top_elems
+            );
+            read_boundary_file_chunk(
+                paths[2],
+                static_cast<size_t>(v) * left_file_var_block + left_offset,
+                left_dst + static_cast<size_t>(v) * left_var_block,
+                left_elems
+            );
+            read_boundary_file_chunk(
+                paths[3],
+                static_cast<size_t>(v) * left_file_var_block + left_offset,
+                right_dst + static_cast<size_t>(v) * left_var_block,
+                left_elems
+            );
+        }
     }
 
     inline void load_disk_to_cpu_3d(int start, int len, const std::vector<std::string>& paths, int stage_start = 0)

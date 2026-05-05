@@ -422,7 +422,7 @@ BackwardOutput backward(const BackwardInput& in)
     const int order =
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, false, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     ElasticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())

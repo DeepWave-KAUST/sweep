@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <cstdio>
@@ -20,6 +21,11 @@ struct BoundaryDisk2DMeta {
     size_t left_elems = 0;
     size_t start_top_offset = 0;
     size_t start_left_offset = 0;
+    size_t top_var_block = 0;
+    size_t left_var_block = 0;
+    size_t top_file_var_block = 0;
+    size_t left_file_var_block = 0;
+    int nvar = 1;
     float* top = nullptr;
     float* bottom = nullptr;
     float* left = nullptr;
@@ -48,6 +54,9 @@ struct BoundaryDisk2DWriteTask {
     size_t left_elems = 0;
     size_t start_top_offset = 0;
     size_t start_left_offset = 0;
+    size_t top_file_var_block = 0;
+    size_t left_file_var_block = 0;
+    int nvar = 1;
     std::vector<float> top;
     std::vector<float> bottom;
     std::vector<float> left;
@@ -135,10 +144,32 @@ inline void read_boundary_file_chunk(const std::string& path, size_t offset_elem
 
 inline void write_boundary_disk_2d_task(const BoundaryDisk2DWriteTask& task)
 {
-    write_boundary_file_chunk(task.paths[0], task.start_top_offset, task.top.data(), task.top_elems);
-    write_boundary_file_chunk(task.paths[1], task.start_top_offset, task.bottom.data(), task.top_elems);
-    write_boundary_file_chunk(task.paths[2], task.start_left_offset, task.left.data(), task.left_elems);
-    write_boundary_file_chunk(task.paths[3], task.start_left_offset, task.right.data(), task.left_elems);
+    for (int v = 0; v < task.nvar; ++v) {
+        write_boundary_file_chunk(
+            task.paths[0],
+            static_cast<size_t>(v) * task.top_file_var_block + task.start_top_offset,
+            task.top.data() + static_cast<size_t>(v) * task.top_elems,
+            task.top_elems
+        );
+        write_boundary_file_chunk(
+            task.paths[1],
+            static_cast<size_t>(v) * task.top_file_var_block + task.start_top_offset,
+            task.bottom.data() + static_cast<size_t>(v) * task.top_elems,
+            task.top_elems
+        );
+        write_boundary_file_chunk(
+            task.paths[2],
+            static_cast<size_t>(v) * task.left_file_var_block + task.start_left_offset,
+            task.left.data() + static_cast<size_t>(v) * task.left_elems,
+            task.left_elems
+        );
+        write_boundary_file_chunk(
+            task.paths[3],
+            static_cast<size_t>(v) * task.left_file_var_block + task.start_left_offset,
+            task.right.data() + static_cast<size_t>(v) * task.left_elems,
+            task.left_elems
+        );
+    }
 }
 
 inline void write_boundary_disk_3d_task(const BoundaryDisk3DWriteTask& task)
@@ -238,10 +269,35 @@ inline void CUDART_CB write_boundary_disk_2d_callback(void* user_data)
         task->left_elems = meta->left_elems;
         task->start_top_offset = meta->start_top_offset;
         task->start_left_offset = meta->start_left_offset;
-        task->top.assign(meta->top, meta->top + meta->top_elems);
-        task->bottom.assign(meta->bottom, meta->bottom + meta->top_elems);
-        task->left.assign(meta->left, meta->left + meta->left_elems);
-        task->right.assign(meta->right, meta->right + meta->left_elems);
+        task->top_file_var_block = meta->top_file_var_block;
+        task->left_file_var_block = meta->left_file_var_block;
+        task->nvar = meta->nvar;
+        task->top.resize(static_cast<size_t>(meta->nvar) * meta->top_elems);
+        task->bottom.resize(static_cast<size_t>(meta->nvar) * meta->top_elems);
+        task->left.resize(static_cast<size_t>(meta->nvar) * meta->left_elems);
+        task->right.resize(static_cast<size_t>(meta->nvar) * meta->left_elems);
+        for (int v = 0; v < meta->nvar; ++v) {
+            std::copy(
+                meta->top + static_cast<size_t>(v) * meta->top_var_block,
+                meta->top + static_cast<size_t>(v) * meta->top_var_block + meta->top_elems,
+                task->top.data() + static_cast<size_t>(v) * meta->top_elems
+            );
+            std::copy(
+                meta->bottom + static_cast<size_t>(v) * meta->top_var_block,
+                meta->bottom + static_cast<size_t>(v) * meta->top_var_block + meta->top_elems,
+                task->bottom.data() + static_cast<size_t>(v) * meta->top_elems
+            );
+            std::copy(
+                meta->left + static_cast<size_t>(v) * meta->left_var_block,
+                meta->left + static_cast<size_t>(v) * meta->left_var_block + meta->left_elems,
+                task->left.data() + static_cast<size_t>(v) * meta->left_elems
+            );
+            std::copy(
+                meta->right + static_cast<size_t>(v) * meta->left_var_block,
+                meta->right + static_cast<size_t>(v) * meta->left_var_block + meta->left_elems,
+                task->right.data() + static_cast<size_t>(v) * meta->left_elems
+            );
+        }
         launch_boundary_disk_write_2d(task);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Boundary disk write callback failed: %s\n", e.what());

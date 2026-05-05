@@ -47,6 +47,8 @@ from sweep.equations import (  # noqa: E402
     AcousticLSRTM3D,
     AcousticVRZ,
     AcousticVRZ3D,
+    Elastic,
+    Elastic3D,
 )
 from sweep.propagator.options import (  # noqa: E402
     BoundaryOptions,
@@ -68,6 +70,7 @@ class SolverSpec:
     receiver_type: tuple[str, ...]
     pml_type: str
     lsrtm: bool = False
+    elastic: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,8 @@ SOLVERS = {
     "vrz3d": SolverSpec("vrz3d", AcousticVRZ3D, 3, ("vp", "z"), ("h1",), ("h1",), "cpmlr"),
     "lsrtm2d": SolverSpec("lsrtm2d", AcousticLSRTM, 2, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
     "lsrtm3d": SolverSpec("lsrtm3d", AcousticLSRTM3D, 3, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
+    "elastic2d": SolverSpec("elastic2d", Elastic, 2, ("vp", "vs", "rho"), ("sxx", "szz"), ("vx", "vz"), "cpmls", False, True),
+    "elastic3d": SolverSpec("elastic3d", Elastic3D, 3, ("vp", "vs", "rho"), ("sxx", "syy", "szz"), ("vx", "vy", "vz"), "cpmls", False, True),
 }
 
 SCENARIOS = {
@@ -164,6 +169,8 @@ def require_cuda_bindings(solver_keys: list[str]):
         "vrz3d": "acoustic_vrz3d",
         "lsrtm2d": "acoustic_lsrtm2d",
         "lsrtm3d": "acoustic_lsrtm3d",
+        "elastic2d": "elastic2d",
+        "elastic3d": "elastic3d",
     }
     for key in solver_keys:
         prefix = prefixes[key]
@@ -231,6 +238,13 @@ def make_models(spec: SolverSpec, shape: tuple[int, ...]):
         mp_init = np.zeros(shape, dtype=np.float32)
         mp_true = add_box(mp_init, 0.08)
         return [vp_init, mp_true], [vp_init, mp_init], [False, True]
+
+    if spec.elastic:
+        vs_init = (vp_init / 1.73).astype(np.float32)
+        vs_true = (vp_true / 1.73).astype(np.float32)
+        rho_init = depth_ramp(shape, 1000.0, 1200.0)
+        rho_true = add_box(rho_init, 60.0)
+        return [vp_true, vs_true, rho_true], [vp_init, vs_init, rho_init], [True, True, True]
 
     if spec.model_names == ("vp",):
         return [vp_true], [vp_init], [True]
@@ -385,17 +399,29 @@ def build_solver(spec: SolverSpec, backend: str, mode: str, scenario: ScenarioSp
 
 
 def normalize_record(record: torch.Tensor, nshots: int, nreceivers: int, nt: int) -> torch.Tensor:
-    if record.ndim == 4:
-        if record.shape[-1] != 1:
-            raise ValueError(f"Expected one receiver channel, got record shape {tuple(record.shape)}")
-        record = record[..., 0]
     if tuple(record.shape) == (nshots, nreceivers, nt):
         return record
     if tuple(record.shape) == (nshots, nt, nreceivers):
         return record.transpose(1, 2)
+    if record.ndim == 4:
+        if record.shape[-1] == 1:
+            squeezed = record[..., 0]
+            if tuple(squeezed.shape) == (nshots, nreceivers, nt):
+                return squeezed
+            if tuple(squeezed.shape) == (nshots, nt, nreceivers):
+                return squeezed.transpose(1, 2)
+        if tuple(record.shape[:3]) == (nshots, nreceivers, nt):
+            return record
+        if (record.shape[0], record.shape[1], record.shape[2]) == (nshots, nt, nreceivers):
+            return record.transpose(1, 2)
+        if tuple(record.shape[1:]) == (nshots, nreceivers, nt):
+            return record.permute(1, 2, 3, 0)
+        if (record.shape[1], record.shape[2], record.shape[3]) == (nshots, nt, nreceivers):
+            return record.permute(1, 3, 2, 0)
     raise ValueError(
         f"Unsupported record shape {tuple(record.shape)}; expected "
-        f"{(nshots, nreceivers, nt)} or {(nshots, nt, nreceivers)}"
+        f"{(nshots, nreceivers, nt)}, {(nshots, nt, nreceivers)}, "
+        f"{(nshots, nreceivers, nt, 'channels')}, or {(nshots, nt, nreceivers, 'channels')}"
     )
 
 
@@ -483,10 +509,10 @@ def metric_pair(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, f
     cand_l2 = float(torch.linalg.vector_norm(cand))
     diff_l2 = float(torch.linalg.vector_norm(diff))
     denom = max(ref_l2, 1e-30)
-    cosine_denom = max(ref_l2 * cand_l2, 1e-30)
+    cosine = math.nan if ref_l2 <= 0.0 or cand_l2 <= 0.0 else float(torch.dot(ref, cand) / (ref_l2 * cand_l2))
     return {
         "rel_l2": diff_l2 / denom,
-        "cosine": float(torch.dot(ref, cand) / cosine_denom),
+        "cosine": cosine,
         "diff_l2": diff_l2,
         "diff_linf": float(diff.abs().max()),
         "ref_l2": ref_l2,

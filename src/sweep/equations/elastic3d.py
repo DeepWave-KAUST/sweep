@@ -1,7 +1,7 @@
-import numpy as np
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from ._free_surface import top_free_surface_derivative, zero_top_row
 
 def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          m_vxx, m_vxy, m_vxz,
@@ -16,20 +16,31 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          lame_lambda, lame_mu,
          dt, h, b, pd, 
          pml=None,
+         free_surface=False,
          ):
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
+    top_halo = pd.coes.shape[0]
 
     dsxx_dx = pd.x_forward(sxx)
     dsxy_dy = pd.y_backward(sxy)
-    dsxz_dz = pd.z_backward(sxz)
+    if free_surface:
+        dsxz_dz = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-3)
+    else:
+        dsxz_dz = pd.z_backward(sxz)
 
     dsxy_dx = pd.x_backward(sxy)
     dsyy_dy = pd.y_forward(syy)
-    dsyz_dz = pd.z_backward(syz)
+    if free_surface:
+        dsyz_dz = top_free_surface_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-3)
+    else:
+        dsyz_dz = pd.z_backward(syz)
 
     dsxz_dx = pd.x_backward(sxz)
     dsyz_dy = pd.y_backward(syz)
-    dszz_dz = pd.z_forward(szz)
+    if free_surface:
+        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-3)
+    else:
+        dszz_dz = pd.z_forward(szz)
 
     m_szzz = azh * m_szzz + bzh * dszz_dz
     dszz_dz = dszz_dz + m_szzz
@@ -61,15 +72,24 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
 
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
-    dvx_dz = pd.z_forward(vx)
+    if free_surface:
+        dvx_dz = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-3)
+    else:
+        dvx_dz = pd.z_forward(vx)
 
     dvy_dx = pd.x_forward(vy)
     dvy_dy = pd.y_backward(vy)
-    dvy_dz = pd.z_forward(vy)
+    if free_surface:
+        dvy_dz = top_free_surface_derivative(vy, pd.z_forward, top_halo, odd=False, axis=-3)
+    else:
+        dvy_dz = pd.z_forward(vy)
 
     dvz_dx = pd.x_forward(vz)
     dvz_dy = pd.y_forward(vz)
-    dvz_dz = pd.z_backward(vz)
+    if free_surface:
+        dvz_dz = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-3)
+    else:
+        dvz_dz = pd.z_backward(vz)
 
     m_vzz = az * m_vzz + bz * dvz_dz
     dvz_dz = dvz_dz + m_vzz
@@ -99,6 +119,11 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx)
     sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx)
     syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
+
+    if free_surface:
+        szz = zero_top_row(szz, top_halo, axis=-3)
+        sxz = zero_top_row(sxz, top_halo, axis=-3)
+        syz = zero_top_row(syz, top_halo, axis=-3)
     
     return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
            m_vxx, m_vxy, m_vxz, \
@@ -183,7 +208,7 @@ class Elastic(FirstOrderEquation):
     
     def func(self, *args, **kwargs):
         if len(args) == 35:
-            return step(*args, pd=self.pd, pml=self.b, **kwargs)
+            return step(*args, pd=self.pd, pml=self.b, free_surface=getattr(self, "free_surface", False), **kwargs)
         if len(args) == 33:
             wavefields = args[:27]
             vp, vs, rho = args[27:30]
@@ -202,6 +227,7 @@ class Elastic(FirstOrderEquation):
                 b,
                 pd=self.pd,
                 pml=self.b,
+                free_surface=getattr(self, "free_surface", False),
                 **kwargs,
             )
         raise ValueError(f"Elastic3D.func expected 33 or 35 positional args, got {len(args)}")

@@ -5,6 +5,7 @@
 #include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"
+#include "../../common/elastic_free_surface.cuh"
 
 #define LAUNCH_ELASTIC_VELOCITY(order, grid, block, ...)                     \
     do {                                                        \
@@ -140,9 +141,9 @@ __global__ void elastic_velocity_kernel(
     float bxh = cpml.bxh[ix];
 
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD> (f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = sgradient<2, Order, Z, DIFF_FORWARD> (f.szz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
 
@@ -209,8 +210,8 @@ __global__ void elastic_stress_kernel(
     float bxh = cpml.bxh[ix];
 
     float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD> (f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD> (f.vz, ix, 0, iz, grad_ctx);
-    float dvx_dz = sgradient<2, Order, Z, DIFF_FORWARD>  (f.vx, ix, 0, iz, grad_ctx);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>  (f.vz, ix, 0, iz, grad_ctx);
 
     float lam = lam_b[idx];
@@ -236,6 +237,11 @@ __global__ void elastic_stress_kernel(
 
     f.sxz[idx] += solver.dt *
         mu_ * (dvx_dz + dvz_dx);
+
+    if (elastic_is_top_free_surface_row(solver, iz)) {
+        f.szz[idx] = 0.f;
+        f.sxz[idx] = 0.f;
+    }
 
     if (u_this_b) {
         int comp_stride  = solver.B * spatial_size;
@@ -268,7 +274,7 @@ __global__ void elastic_velocity_kernel_nopml(
 
     int halo = solver.abcn + M+1;
 
-    int top_halo = solver.free_surface ? M+1: halo;
+    int top_halo = solver.free_surface ? M: halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 
@@ -281,9 +287,9 @@ __global__ void elastic_velocity_kernel_nopml(
     const float* rho_b = rho + b * spatial_size;
 
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD> (f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = sgradient<2, Order, Z, DIFF_FORWARD> (f.szz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
 
@@ -319,7 +325,7 @@ __global__ void elastic_stress_kernel_nopml(
 
     int halo = solver.abcn + M+1;
 
-    int top_halo = solver.free_surface ? M+1: halo;
+    int top_halo = solver.free_surface ? M: halo;
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 
@@ -333,8 +339,8 @@ __global__ void elastic_stress_kernel_nopml(
     const float* mu_b  = mu     + b * spatial_size;
 
     float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD> (f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD> (f.vz, ix, 0, iz, grad_ctx);
-    float dvx_dz = sgradient<2, Order, Z, DIFF_FORWARD>  (f.vx, ix, 0, iz, grad_ctx);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>  (f.vz, ix, 0, iz, grad_ctx);
 
     float lam = lam_b[idx];
@@ -395,10 +401,20 @@ __global__ void elastic_stress_adjoint_prepare(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
-    float bar_dvx_dx = solver.dt * ((lam + 2.f * mu_) * f.sxx[idx] + lam * f.szz[idx]);
-    float bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * f.szz[idx] + lam * f.sxx[idx]);
-    float bar_dvx_dz = solver.dt * mu_ * f.sxz[idx];
-    float bar_dvz_dx = solver.dt * mu_ * f.sxz[idx];
+    float bar_sxx = f.sxx[idx];
+    float bar_szz = f.szz[idx];
+    float bar_sxz = f.sxz[idx];
+    if (elastic_is_top_free_surface_row(solver, iz)) {
+        bar_szz = 0.f;
+        bar_sxz = 0.f;
+        f.szz[idx] = 0.f;
+        f.sxz[idx] = 0.f;
+    }
+
+    float bar_dvx_dx = solver.dt * ((lam + 2.f * mu_) * bar_sxx + lam * bar_szz);
+    float bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * bar_szz + lam * bar_sxx);
+    float bar_dvx_dz = solver.dt * mu_ * bar_sxz;
+    float bar_dvz_dx = solver.dt * mu_ * bar_sxz;
 
     float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
@@ -450,9 +466,9 @@ __global__ void elastic_stress_adjoint_apply(
     const float* qzx_b = qzx + b * spatial_size;
 
     float dqxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(qxx_b, ix, 0, iz, grad_ctx);
-    float dqxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(qxz_b, ix, 0, iz, grad_ctx);
+    float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD> (qxz_b, ix, iz, grad_ctx, solver, false);
     float dqzx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qzx_b, ix, 0, iz, grad_ctx);
-    float dqzz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(qzz_b, ix, 0, iz, grad_ctx);
+    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true);
 
     int idx = iz * solver.nx + ix;
     f.vx[idx] += dqxx_dx + dqxz_dz;
@@ -553,8 +569,8 @@ __global__ void elastic_velocity_adjoint_apply(
     const float* pzx_b = pzx + b * spatial_size;
 
     float dpxx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(pxx_b, ix, 0, iz, grad_ctx);
-    float dpzz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(pzz_b, ix, 0, iz, grad_ctx);
-    float dpxz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(pxz_b, ix, 0, iz, grad_ctx);
+    float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD> (pzz_b, ix, iz, grad_ctx, solver, true);
+    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true);
     float dpzx_dx = sgradient<2, Order, X, DIFF_FORWARD>(pzx_b, ix, 0, iz, grad_ctx);
 
     int idx = iz * solver.nx + ix;
@@ -618,12 +634,14 @@ __global__ void calculate_grad_elastic_bs(
     float* grho = grad_rho + b * spatial_size;
 
     float fvx_x = sgradient<2, Order, X, DIFF_BACKWARD> (f.vx, ix, 0, iz, grad_ctx);
-    float fvz_z = sgradient<2, Order, Z, DIFF_BACKWARD> (f.vz, ix, 0, iz, grad_ctx);
-    float fvx_z = sgradient<2, Order, Z, DIFF_FORWARD> (f.vx, ix, 0, iz, grad_ctx);
+    float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float fvz_x = sgradient<2, Order, X, DIFF_FORWARD> (f.vz, ix, 0, iz, grad_ctx);
 
-    float grad_lambda = (a.sxx[idx] + a.szz[idx]) * (fvx_x + fvz_z);
-    float grad_mu = 2*(a.sxx[idx] * fvx_x + a.szz[idx] * fvz_z) + a.sxz[idx] * (fvx_z + fvz_x);
+    float bar_szz = elastic_is_top_free_surface_row(solver, iz) ? 0.f : a.szz[idx];
+    float bar_sxz = elastic_is_top_free_surface_row(solver, iz) ? 0.f : a.sxz[idx];
+    float grad_lambda = (a.sxx[idx] + bar_szz) * (fvx_x + fvz_z);
+    float grad_mu = 2*(a.sxx[idx] * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
     
     gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
     gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
@@ -693,12 +711,14 @@ __global__ void calculate_grad_elastic_nobs(
     auto a = adjoint.offset(b, spatial_size);
 
     float fvx_x = sgradient<2, Order, X, DIFF_BACKWARD> (fvx_b, ix, 0, iz, grad_ctx);
-    float fvz_z = sgradient<2, Order, Z, DIFF_BACKWARD> (fvz_b, ix, 0, iz, grad_ctx);
-    float fvx_z = sgradient<2, Order, Z, DIFF_FORWARD>  (fvx_b, ix, 0, iz, grad_ctx);
+    float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true);
+    float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
     float fvz_x = sgradient<2, Order, X, DIFF_FORWARD>  (fvz_b, ix, 0, iz, grad_ctx);
 
-    float grad_lambda = (a.sxx[idx] + a.szz[idx]) * (fvx_x + fvz_z);
-    float grad_mu = 2*(a.sxx[idx] * fvx_x + a.szz[idx] * fvz_z) + a.sxz[idx] * (fvx_z + fvz_x);
+    float bar_szz = elastic_is_top_free_surface_row(solver, iz) ? 0.f : a.szz[idx];
+    float bar_sxz = elastic_is_top_free_surface_row(solver, iz) ? 0.f : a.sxz[idx];
+    float grad_lambda = (a.sxx[idx] + bar_szz) * (fvx_x + fvz_z);
+    float grad_mu = 2*(a.sxx[idx] * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
     
     grad_vp_b[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
     grad_vs_b[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
