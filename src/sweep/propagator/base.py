@@ -253,7 +253,10 @@ class PropBase:
         if merged["storage"] == "disk":
             merged["pinned_memory"] = False
             if merged["transfer_interval"] is None:
-                merged["transfer_interval"] = 16 if merged["disk_async_read"] else 32
+                if merged["disk_async_read"]:
+                    merged["transfer_interval"] = 40 if self.ndim == 2 else 16
+                else:
+                    merged["transfer_interval"] = 32
             if merged["ring_buffers"] is None:
                 if merged["disk_async_read"]:
                     merged["ring_buffers"] = 2

@@ -105,13 +105,13 @@ def apply_dim_defaults(args):
         args.nt = 400
 
 
-def default_transfer_interval(strategy):
+def default_transfer_interval(strategy, dim=None):
     if strategy == "boundary_cpu":
         return 64
     if strategy == "boundary_disk":
         return 32
     if strategy == "boundary_disk_async":
-        return 16
+        return 40 if dim == "2d" else 16
     return 8
 
 
@@ -126,7 +126,7 @@ def default_ring_buffers(strategy, dim=None):
 
 
 def resolve_transfer_interval(strategy, args):
-    return args.transfer_interval if args.transfer_interval is not None else default_transfer_interval(strategy)
+    return args.transfer_interval if args.transfer_interval is not None else default_transfer_interval(strategy, args.dim)
 
 
 def resolve_ring_buffers(strategy, args):
