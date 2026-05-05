@@ -258,7 +258,7 @@ public:
 
         if (use_compact_3d_boundary_kernel()) {
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
-            int compact_threads = 256;
+            int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
                 u,
@@ -424,7 +424,7 @@ public:
         auto b = backward_restore_ptrs(it, direct);
         if (use_compact_3d_boundary_kernel()) {
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
-            int compact_threads = 256;
+            int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
                 u,
