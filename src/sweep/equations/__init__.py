@@ -12,6 +12,14 @@ from .acoustic_vrz import AcousticVRZ, AcousticVRZ3D
 # from .elastic_lsrtm import ElasticLSRTM
 from .elastic import Elastic
 from .elastic3d import Elastic as Elastic3D
+from .das import (
+    DAS,
+    DAS3D,
+    DASElastic,
+    DASElastic3D,
+    gauge_average,
+    helical_das_response,
+)
 
 # from .acoustic_vrr import AcousticVRR
 try:
