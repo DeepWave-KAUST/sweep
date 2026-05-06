@@ -7,6 +7,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/checkpoint_runtime.cuh"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
@@ -14,33 +15,6 @@
 #include "../../common/wavetypes.h"
 
 namespace elastic2d {
-
-namespace {
-
-void save_checkpoint_state_2d(
-    const ForwardInput& p,
-    const ElasticWavefieldTensor& wavefield,
-    int checkpoint_idx
-)
-{
-    p.checkpoints[0].select(0, checkpoint_idx).copy_(wavefield.vx_t);
-    p.checkpoints[1].select(0, checkpoint_idx).copy_(wavefield.vz_t);
-    p.checkpoints[2].select(0, checkpoint_idx).copy_(wavefield.sxx_t);
-    p.checkpoints[3].select(0, checkpoint_idx).copy_(wavefield.szz_t);
-    p.checkpoints[4].select(0, checkpoint_idx).copy_(wavefield.sxz_t);
-    p.checkpoints[5].select(0, checkpoint_idx).copy_(wavefield.m_vxx_t);
-    p.checkpoints[6].select(0, checkpoint_idx).copy_(wavefield.m_vxz_t);
-    p.checkpoints[7].select(0, checkpoint_idx).copy_(wavefield.m_vzx_t);
-    p.checkpoints[8].select(0, checkpoint_idx).copy_(wavefield.m_vzz_t);
-    p.checkpoints[9].select(0, checkpoint_idx).copy_(wavefield.m_sxxx_t);
-    p.checkpoints[10].select(0, checkpoint_idx).copy_(wavefield.m_sxxz_t);
-    p.checkpoints[11].select(0, checkpoint_idx).copy_(wavefield.m_szzx_t);
-    p.checkpoints[12].select(0, checkpoint_idx).copy_(wavefield.m_szzz_t);
-    p.checkpoints[13].select(0, checkpoint_idx).copy_(wavefield.m_sxzx_t);
-    p.checkpoints[14].select(0, checkpoint_idx).copy_(wavefield.m_sxzz_t);
-}
-
-} // namespace
 
 ForwardOutput forward(const ForwardInput& in)
 {
@@ -133,9 +107,16 @@ ForwardOutput forward(const ForwardInput& in)
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    int next_ckpt_idx = 0;
-    int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
-    const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        15,
+        p.use_checkpoint,
+        p.use_recursive_checkpoint,
+        p.checkpoint_interval,
+        p.checkpoint_steps,
+        "forward",
+        "elastic2d"
+    );
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
@@ -178,20 +159,7 @@ ForwardOutput forward(const ForwardInput& in)
             );
         }
 
-        if (p.use_checkpoint) {
-            int ckpt_idx = -1;
-            if (p.use_recursive_checkpoint) {
-                if (next_ckpt_idx < num_checkpoint_steps && checkpoint_steps[next_ckpt_idx] == static_cast<int>(it + 1)) {
-                    ckpt_idx = next_ckpt_idx;
-                    ++next_ckpt_idx;
-                }
-            } else if (((it + 1) % p.checkpoint_interval == 0) && (it + 1 < p.nt)) {
-                ckpt_idx = static_cast<int>((it + 1) / p.checkpoint_interval);
-            }
-            if (ckpt_idx >= 0) {
-                save_checkpoint_state_2d(p, wavefield, ckpt_idx);
-            }
-        }
+        checkpoint_runtime.save_forward(static_cast<int>(it), static_cast<int>(p.nt), wavefield.checkpoint_tensors());
 
         if (p.use_boundary_saving) {
 

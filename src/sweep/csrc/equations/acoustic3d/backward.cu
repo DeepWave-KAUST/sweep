@@ -5,6 +5,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../common/checkpoint_runtime.cuh"
 #include "../../common/cudautils.h"
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
@@ -155,49 +156,6 @@ void accumulate_source_gradient_3d(
     );
 }
 
-void zero_wavefield_state_3d(AcousticWavefieldTensor& wf)
-{
-    wf.u_prev_t.zero_();
-    wf.u_now_t.zero_();
-    wf.u_next_t.zero_();
-    wf.psix_t.zero_();
-    wf.psiy_t.zero_();
-    wf.psiz_t.zero_();
-    wf.zetax_t.zero_();
-    wf.zetay_t.zero_();
-    wf.zetaz_t.zero_();
-}
-
-void copy_wavefield_state_3d(AcousticWavefieldTensor& dst, const AcousticWavefieldTensor& src)
-{
-    dst.u_prev_t.copy_(src.u_prev_t);
-    dst.u_now_t.copy_(src.u_now_t);
-    dst.u_next_t.copy_(src.u_next_t);
-    dst.psix_t.copy_(src.psix_t);
-    dst.psiy_t.copy_(src.psiy_t);
-    dst.psiz_t.copy_(src.psiz_t);
-    dst.zetax_t.copy_(src.zetax_t);
-    dst.zetay_t.copy_(src.zetay_t);
-    dst.zetaz_t.copy_(src.zetaz_t);
-}
-
-void load_checkpoint_state_3d(
-    AcousticWavefieldTensor& dst,
-    const std::vector<torch::Tensor>& checkpoints,
-    int checkpoint_idx
-)
-{
-    dst.u_prev_t.copy_(checkpoints[0].select(0, checkpoint_idx));
-    dst.u_now_t.copy_(checkpoints[1].select(0, checkpoint_idx));
-    dst.psix_t.copy_(checkpoints[2].select(0, checkpoint_idx));
-    dst.psiy_t.copy_(checkpoints[3].select(0, checkpoint_idx));
-    dst.psiz_t.copy_(checkpoints[4].select(0, checkpoint_idx));
-    dst.zetax_t.copy_(checkpoints[5].select(0, checkpoint_idx));
-    dst.zetay_t.copy_(checkpoints[6].select(0, checkpoint_idx));
-    dst.zetaz_t.copy_(checkpoints[7].select(0, checkpoint_idx));
-    dst.u_next_t.zero_();
-}
-
 void advance_forward_interval_3d(
     AcousticWavefieldTensor& forward,
     int start,
@@ -252,10 +210,20 @@ void advance_forward_interval_3d(
     }
 }
 
+int recursive_checkpoint_scratch_depth(int interval_length)
+{
+    int depth = 0;
+    while (interval_length > 1) {
+        interval_length = (interval_length + 1) / 2;
+        ++depth;
+    }
+    return depth;
+}
+
 void process_recursive_interval_3d(
     int start,
     int end,
-    const AcousticWavefieldTensor& start_state,
+    AcousticWavefieldTensor& start_state,
     AcousticWavefieldTensor& adjoint,
     const BackwardInput& p,
     const torch::Tensor& vp,
@@ -278,6 +246,10 @@ void process_recursive_interval_3d(
     const SolverContext& ctx,
     int forward_nsrc,
     int adjoint_nsrc,
+    CheckpointRuntime& checkpoint_runtime,
+    std::vector<AcousticWavefieldTensor>& scratch_states,
+    int scratch_depth,
+    torch::Tensor& u_this_scratch,
     int B,
     int nx,
     int ny,
@@ -288,12 +260,9 @@ void process_recursive_interval_3d(
         return;
 
     if (end - start == 1) {
-        AcousticWavefieldTensor forward_step;
-        forward_step.allocate(vp, 3, true);
-        copy_wavefield_state_3d(forward_step, start_state);
-
-        auto u_this = torch::zeros_like(vp);
-        auto fwd_view = forward_step.view();
+        zero_tensor_device_async(u_this_scratch);
+        float* u_this = u_this_scratch.data_ptr<float>();
+        auto fwd_view = start_state.view();
 
         ACOUSTIC3D(
             order,
@@ -301,7 +270,7 @@ void process_recursive_interval_3d(
             wave_block,
             fwd_view,
             true,
-            u_this.data_ptr<float>(),
+            u_this,
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -321,7 +290,7 @@ void process_recursive_interval_3d(
             ctx
         );
 
-        forward_step.swap();
+        start_state.swap();
 
         auto adj_view = adjoint.view();
 
@@ -367,7 +336,7 @@ void process_recursive_interval_3d(
         accumulate_imaging_3d(
             wave_grid,
             wave_block,
-            u_this.data_ptr<float>(),
+            u_this,
             adjoint.u_now_t.data_ptr<float>(),
             vp,
             grad,
@@ -382,9 +351,12 @@ void process_recursive_interval_3d(
 
     int mid = start + (end - start) / 2;
 
-    AcousticWavefieldTensor mid_state;
-    mid_state.allocate(vp, 3, true);
-    copy_wavefield_state_3d(mid_state, start_state);
+    TORCH_CHECK(
+        scratch_depth < static_cast<int>(scratch_states.size()),
+        "Recursive checkpoint scratch depth exhausted."
+    );
+    AcousticWavefieldTensor& mid_state = scratch_states[scratch_depth];
+    checkpoint_runtime.copy_state(mid_state.state_tensors(), start_state.state_tensors());
     advance_forward_interval_3d(
         mid_state,
         start,
@@ -432,6 +404,10 @@ void process_recursive_interval_3d(
         ctx,
         forward_nsrc,
         adjoint_nsrc,
+        checkpoint_runtime,
+        scratch_states,
+        scratch_depth + 1,
+        u_this_scratch,
         B,
         nx,
         ny,
@@ -464,6 +440,10 @@ void process_recursive_interval_3d(
         ctx,
         forward_nsrc,
         adjoint_nsrc,
+        checkpoint_runtime,
+        scratch_states,
+        scratch_depth + 1,
+        u_this_scratch,
         B,
         nx,
         ny,
@@ -890,6 +870,17 @@ void run_ckpt_imaging(
     else
         forward.allocate(vp, 3, true);
 
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        8,
+        true,
+        false,
+        p.checkpoint_interval,
+        p.checkpoint_steps,
+        "backward_chunk",
+        "acoustic3d"
+    );
+
     auto chunk_forward = torch::zeros({p.checkpoint_interval, B, nz, ny, nx}, vp.options());
 
     AcousticCPMLTensor cpml_tensor;
@@ -913,14 +904,7 @@ void run_ckpt_imaging(
         int start = chunk_id * chunk_size;
         int end = std::min(static_cast<int>(p.nt), start + chunk_size);
 
-        forward.u_prev_t.copy_(p.checkpoints[0].select(0, chunk_id));
-        forward.u_now_t.copy_(p.checkpoints[1].select(0, chunk_id));
-        forward.psix_t.copy_(p.checkpoints[2].select(0, chunk_id));
-        forward.psiy_t.copy_(p.checkpoints[3].select(0, chunk_id));
-        forward.psiz_t.copy_(p.checkpoints[4].select(0, chunk_id));
-        forward.zetax_t.copy_(p.checkpoints[5].select(0, chunk_id));
-        forward.zetay_t.copy_(p.checkpoints[6].select(0, chunk_id));
-        forward.zetaz_t.copy_(p.checkpoints[7].select(0, chunk_id));
+        checkpoint_runtime.load(chunk_id, forward.checkpoint_tensors());
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
@@ -1047,6 +1031,16 @@ void run_recursive_imaging(
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
     TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        8,
+        true,
+        true,
+        p.checkpoint_interval,
+        checkpoint_steps_cpu,
+        "backward_recursive",
+        "acoustic3d"
+    );
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -1070,7 +1064,7 @@ void run_recursive_imaging(
         adjoint.bind(p.adjoint_wavefields, 3, true);
     else
         adjoint.allocate(vp, 3, true);
-    zero_wavefield_state_3d(adjoint);
+    checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -1098,6 +1092,18 @@ void run_recursive_imaging(
 
     const int* checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
 
+    int max_segment_length = 0;
+    for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
+        int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];
+        int end = (segment_idx == num_saved_checkpoints) ? static_cast<int>(p.nt) : checkpoint_steps[segment_idx];
+        max_segment_length = std::max(max_segment_length, end - start);
+    }
+
+    std::vector<AcousticWavefieldTensor> scratch_states(recursive_checkpoint_scratch_depth(max_segment_length));
+    for (auto& scratch_state : scratch_states)
+        scratch_state.allocate(vp, 3, true);
+    auto u_this_scratch = torch::empty_like(vp);
+
     AcousticWavefieldTensor start_state;
     start_state.allocate(vp, 3, true);
 
@@ -1106,9 +1112,9 @@ void run_recursive_imaging(
         int end = (segment_idx == num_saved_checkpoints) ? static_cast<int>(p.nt) : checkpoint_steps[segment_idx];
 
         if (segment_idx == 0)
-            zero_wavefield_state_3d(start_state);
+            checkpoint_runtime.zero_state(start_state.state_tensors());
         else
-            load_checkpoint_state_3d(start_state, p.checkpoints, segment_idx - 1);
+            checkpoint_runtime.load(segment_idx - 1, start_state.checkpoint_tensors(), start_state.next_tensors());
 
         process_recursive_interval_3d(
             start,
@@ -1136,6 +1142,10 @@ void run_recursive_imaging(
             ctx,
             forward_nsrc,
             adjoint_nsrc,
+            checkpoint_runtime,
+            scratch_states,
+            0,
+            u_this_scratch,
             B,
             nx,
             ny,

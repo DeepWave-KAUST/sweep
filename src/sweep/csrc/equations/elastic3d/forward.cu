@@ -11,6 +11,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/checkpoint_runtime.cuh"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
@@ -19,79 +20,6 @@
 #include "../../operators/staggered.cuh"
 
 namespace elastic3d {
-
-namespace {
-
-inline void copy_tensor_device_async(torch::Tensor& dst, const torch::Tensor& src)
-{
-    TORCH_CHECK(dst.defined() && src.defined(), "Checkpoint copy expects defined tensors.");
-    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "Checkpoint copy expects CUDA tensors.");
-    TORCH_CHECK(dst.scalar_type() == src.scalar_type(), "Checkpoint copy expects matching dtypes.");
-    TORCH_CHECK(dst.numel() == src.numel(), "Checkpoint copy expects matching numel.");
-    TORCH_CHECK(dst.is_contiguous(), "Checkpoint destination must be contiguous.");
-    TORCH_CHECK(src.is_contiguous(), "Checkpoint source must be contiguous.");
-
-    if (dst.numel() == 0) return;
-
-    C10_CUDA_CHECK(cudaMemcpyAsync(
-        dst.data_ptr(),
-        src.data_ptr(),
-        static_cast<size_t>(dst.nbytes()),
-        cudaMemcpyDeviceToDevice,
-        at::cuda::getCurrentCUDAStream()
-    ));
-}
-
-void save_checkpoint_state_3d(
-    const ForwardInput& p,
-    const ElasticWavefieldTensor& wavefield,
-    int checkpoint_idx
-)
-{
-    auto copy_ckpt = [&](int idx, const torch::Tensor& src) {
-        auto dst = p.checkpoints[idx].select(0, checkpoint_idx);
-        copy_tensor_device_async(dst, src);
-    };
-
-    copy_ckpt(0, wavefield.vx_t);
-    copy_ckpt(1, wavefield.vy_t);
-    copy_ckpt(2, wavefield.vz_t);
-    copy_ckpt(3, wavefield.sxx_t);
-    copy_ckpt(4, wavefield.syy_t);
-    copy_ckpt(5, wavefield.szz_t);
-    copy_ckpt(6, wavefield.sxy_t);
-    copy_ckpt(7, wavefield.sxz_t);
-    copy_ckpt(8, wavefield.syz_t);
-    copy_ckpt(9, wavefield.m_vxx_t);
-    copy_ckpt(10, wavefield.m_vxy_t);
-    copy_ckpt(11, wavefield.m_vxz_t);
-    copy_ckpt(12, wavefield.m_vyx_t);
-    copy_ckpt(13, wavefield.m_vyy_t);
-    copy_ckpt(14, wavefield.m_vyz_t);
-    copy_ckpt(15, wavefield.m_vzx_t);
-    copy_ckpt(16, wavefield.m_vzy_t);
-    copy_ckpt(17, wavefield.m_vzz_t);
-    copy_ckpt(18, wavefield.m_sxxx_t);
-    copy_ckpt(19, wavefield.m_sxxy_t);
-    copy_ckpt(20, wavefield.m_sxxz_t);
-    copy_ckpt(21, wavefield.m_syyx_t);
-    copy_ckpt(22, wavefield.m_syyy_t);
-    copy_ckpt(23, wavefield.m_syyz_t);
-    copy_ckpt(24, wavefield.m_szzx_t);
-    copy_ckpt(25, wavefield.m_szzy_t);
-    copy_ckpt(26, wavefield.m_szzz_t);
-    copy_ckpt(27, wavefield.m_sxyx_t);
-    copy_ckpt(28, wavefield.m_sxyy_t);
-    copy_ckpt(29, wavefield.m_sxyz_t);
-    copy_ckpt(30, wavefield.m_sxzx_t);
-    copy_ckpt(31, wavefield.m_sxzy_t);
-    copy_ckpt(32, wavefield.m_sxzz_t);
-    copy_ckpt(33, wavefield.m_syzx_t);
-    copy_ckpt(34, wavefield.m_syzy_t);
-    copy_ckpt(35, wavefield.m_syzz_t);
-}
-
-} // namespace
 
 ForwardOutput forward(const ForwardInput& in)
 {
@@ -193,9 +121,16 @@ ForwardOutput forward(const ForwardInput& in)
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    int next_ckpt_idx = 0;
-    int num_checkpoint_steps = p.use_recursive_checkpoint ? static_cast<int>(p.checkpoint_steps.numel()) : 0;
-    const int* checkpoint_steps = p.use_recursive_checkpoint ? p.checkpoint_steps.data_ptr<int>() : nullptr;
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        36,
+        p.use_checkpoint,
+        p.use_recursive_checkpoint,
+        p.checkpoint_interval,
+        p.checkpoint_steps,
+        "forward",
+        "elastic3d"
+    );
 
     for (unsigned int it = 0; it < p.nt; ++it) {
 
@@ -238,20 +173,7 @@ ForwardOutput forward(const ForwardInput& in)
             );
         }
 
-        if (p.use_checkpoint) {
-            int ckpt_idx = -1;
-            if (p.use_recursive_checkpoint) {
-                if (next_ckpt_idx < num_checkpoint_steps && checkpoint_steps[next_ckpt_idx] == static_cast<int>(it + 1)) {
-                    ckpt_idx = next_ckpt_idx;
-                    ++next_ckpt_idx;
-                }
-            } else if (((it + 1) % p.checkpoint_interval == 0) && (it + 1 < p.nt)) {
-                ckpt_idx = static_cast<int>((it + 1) / p.checkpoint_interval);
-            }
-            if (ckpt_idx >= 0) {
-                save_checkpoint_state_3d(p, wavefield, ckpt_idx);
-            }
-        }
+        checkpoint_runtime.save_forward(static_cast<int>(it), static_cast<int>(p.nt), wavefield.checkpoint_tensors());
 
         if (p.use_boundary_saving) {
 

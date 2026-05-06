@@ -6,6 +6,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/checkpoint_runtime.cuh"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
@@ -15,29 +16,6 @@
 namespace elastic2d {
 
 namespace {
-
-void load_checkpoint_state_2d(
-    ElasticWavefieldTensor& dst,
-    const std::vector<torch::Tensor>& checkpoints,
-    int checkpoint_idx
-)
-{
-    dst.vx_t.copy_(checkpoints[0].select(0, checkpoint_idx));
-    dst.vz_t.copy_(checkpoints[1].select(0, checkpoint_idx));
-    dst.sxx_t.copy_(checkpoints[2].select(0, checkpoint_idx));
-    dst.szz_t.copy_(checkpoints[3].select(0, checkpoint_idx));
-    dst.sxz_t.copy_(checkpoints[4].select(0, checkpoint_idx));
-    dst.m_vxx_t.copy_(checkpoints[5].select(0, checkpoint_idx));
-    dst.m_vxz_t.copy_(checkpoints[6].select(0, checkpoint_idx));
-    dst.m_vzx_t.copy_(checkpoints[7].select(0, checkpoint_idx));
-    dst.m_vzz_t.copy_(checkpoints[8].select(0, checkpoint_idx));
-    dst.m_sxxx_t.copy_(checkpoints[9].select(0, checkpoint_idx));
-    dst.m_sxxz_t.copy_(checkpoints[10].select(0, checkpoint_idx));
-    dst.m_szzx_t.copy_(checkpoints[11].select(0, checkpoint_idx));
-    dst.m_szzz_t.copy_(checkpoints[12].select(0, checkpoint_idx));
-    dst.m_sxzx_t.copy_(checkpoints[13].select(0, checkpoint_idx));
-    dst.m_sxzz_t.copy_(checkpoints[14].select(0, checkpoint_idx));
-}
 
 void apply_adjoint_step_2d(
     int order,
@@ -136,6 +114,7 @@ void replay_forward_to_time_2d(
     int target_index,
     const int* checkpoint_steps,
     int num_saved_checkpoints,
+    CheckpointRuntime& checkpoint_runtime,
     int order,
     const fdtd::LaunchConfig& launch_config,
     const fdtd::LaunchConfig& fwd_source_config,
@@ -156,10 +135,10 @@ void replay_forward_to_time_2d(
     const int checkpoint_idx = find_previous_checkpoint_idx(checkpoint_steps, num_saved_checkpoints, target_index + 1);
     int start_time = 0;
     if (checkpoint_idx >= 0) {
-        load_checkpoint_state_2d(forward, p.checkpoints, checkpoint_idx);
+        checkpoint_runtime.load(checkpoint_idx, forward.checkpoint_tensors());
         start_time = checkpoint_steps[checkpoint_idx];
     } else {
-        zero_wavefield_state(forward);
+        checkpoint_runtime.zero_state(forward.state_tensors());
     }
 
     const int forward_nsrc = p.forward_sources_loc.size(1);
@@ -228,6 +207,7 @@ void backward_segment_2d(
     const torch::Tensor& rho,
     ElasticWavefieldTensor& start_state,
     ElasticWavefieldTensor& adjoint,
+    CheckpointRuntime& checkpoint_runtime,
     int start,
     int end,
     int order,
@@ -267,23 +247,7 @@ void backward_segment_2d(
     else
         forward.allocate(vp, 2, true);
 
-    load_checkpoint_state_2d(forward, {
-        start_state.vx_t.unsqueeze(0),
-        start_state.vz_t.unsqueeze(0),
-        start_state.sxx_t.unsqueeze(0),
-        start_state.szz_t.unsqueeze(0),
-        start_state.sxz_t.unsqueeze(0),
-        start_state.m_vxx_t.unsqueeze(0),
-        start_state.m_vxz_t.unsqueeze(0),
-        start_state.m_vzx_t.unsqueeze(0),
-        start_state.m_vzz_t.unsqueeze(0),
-        start_state.m_sxxx_t.unsqueeze(0),
-        start_state.m_sxxz_t.unsqueeze(0),
-        start_state.m_szzx_t.unsqueeze(0),
-        start_state.m_szzz_t.unsqueeze(0),
-        start_state.m_sxzx_t.unsqueeze(0),
-        start_state.m_sxzz_t.unsqueeze(0),
-    }, 0);
+    checkpoint_runtime.copy_state(forward.state_tensors(), start_state.state_tensors());
 
     seg_vx.select(0, 0).copy_(forward.vx_t);
     seg_vz.select(0, 0).copy_(forward.vz_t);
@@ -520,6 +484,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
     TORCH_CHECK(p.checkpoints.size() == 15, "Elastic 2D checkpointing expects 15 checkpoint tensors");
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        15,
+        true,
+        false,
+        p.checkpoint_interval,
+        p.checkpoint_steps,
+        "backward_chunk",
+        "elastic2d"
+    );
 
     float dx = p.spacing[0];
     float dz = p.spacing[1];
@@ -545,7 +519,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2, true);
-    zero_wavefield_state(adjoint);
+    checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
@@ -576,9 +550,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         int start = chunk_id * chunk_size;
         int end = std::min(static_cast<int>(p.nt), start + chunk_size);
         if (chunk_id == 0) {
-            zero_wavefield_state(start_state);
+            checkpoint_runtime.zero_state(start_state.state_tensors());
         } else {
-            load_checkpoint_state_2d(start_state, p.checkpoints, chunk_id);
+            checkpoint_runtime.load(chunk_id, start_state.checkpoint_tensors());
         }
         backward_segment_2d(
             p,
@@ -587,6 +561,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             rho,
             start_state,
             adjoint,
+            checkpoint_runtime,
             start,
             end,
             order,
@@ -623,6 +598,16 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
     TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        15,
+        true,
+        true,
+        p.checkpoint_interval,
+        checkpoint_steps_cpu,
+        "backward_recursive",
+        "elastic2d"
+    );
 
     float dx = p.spacing[0];
     float dz = p.spacing[1];
@@ -648,7 +633,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2, true);
-    zero_wavefield_state(adjoint);
+    checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
@@ -715,6 +700,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             it,
             checkpoint_steps,
             num_saved_checkpoints,
+            checkpoint_runtime,
             order,
             launch_config,
             fwd_source_config,

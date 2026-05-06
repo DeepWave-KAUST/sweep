@@ -263,6 +263,28 @@ struct AcousticWavefieldTensor {
         return v;
     }
 
+    std::vector<torch::Tensor> checkpoint_tensors() const
+    {
+        if (dim == 3)
+            return {u_prev_t, u_now_t, psix_t, psiy_t, psiz_t, zetax_t, zetay_t, zetaz_t};
+        return {u_prev_t, u_now_t, psix_t, psiz_t, zetax_t, zetaz_t};
+    }
+
+    std::vector<torch::Tensor> state_tensors() const
+    {
+        if (!use_pml)
+            return {u_prev_t, u_now_t, u_next_t};
+
+        if (dim == 3)
+            return {u_prev_t, u_now_t, u_next_t, psix_t, psiy_t, psiz_t, zetax_t, zetay_t, zetaz_t};
+        return {u_prev_t, u_now_t, u_next_t, psix_t, psiz_t, zetax_t, zetaz_t};
+    }
+
+    std::vector<torch::Tensor> next_tensors() const
+    {
+        return {u_next_t};
+    }
+
     void swap()
     {
         std::swap(u_prev_t, u_now_t);

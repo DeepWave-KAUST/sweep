@@ -9,6 +9,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
@@ -75,7 +76,6 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
     auto kappa_lambda = torch::zeros_like(vp);
-
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(in.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -433,6 +433,20 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
     auto kappa_lambda = torch::zeros_like(vp);
+    auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
+        ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
+        : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
+    const bool recursive_checkpoint = checkpoint_steps_cpu.numel() > 0;
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        8,
+        true,
+        recursive_checkpoint,
+        p.checkpoint_interval,
+        checkpoint_steps_cpu,
+        recursive_checkpoint ? "backward_recursive" : "backward_chunk",
+        "acoustic_vrz3d"
+    );
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -451,26 +465,52 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     int chunk_size = p.checkpoint_interval;
     int nt = static_cast<int>(p.nt);
     int num_chunks = (nt + chunk_size - 1) / chunk_size;
-    TORCH_CHECK(
-        static_cast<int>(p.checkpoints[0].size(0)) >= num_chunks,
-        "AcousticVRZ3D checkpoint buffer is smaller than required chunk count."
-    );
+    int num_segments = num_chunks;
+    int max_segment_length = chunk_size;
+    int num_saved_checkpoints = 0;
+    const int* checkpoint_steps = nullptr;
 
-    auto chunk_forward = torch::zeros({chunk_size, N, C, nz, ny, nx}, vp.options());
+    if (recursive_checkpoint) {
+        num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
+        num_segments = num_saved_checkpoints + 1;
+        checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
+        TORCH_CHECK(
+            static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
+            "AcousticVRZ3D checkpoint buffer is smaller than required chunk count."
+        );
+        max_segment_length = 0;
+        for (int segment_idx = 0; segment_idx < num_segments; ++segment_idx) {
+            int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];
+            int end = (segment_idx == num_saved_checkpoints) ? nt : checkpoint_steps[segment_idx];
+            max_segment_length = std::max(max_segment_length, end - start);
+        }
+    } else {
+        TORCH_CHECK(
+            static_cast<int>(p.checkpoints[0].size(0)) >= num_chunks,
+            "AcousticVRZ3D checkpoint buffer is smaller than required chunk count."
+        );
+    }
 
-    for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
-        int start = chunk_id * chunk_size;
-        int end = std::min(nt, start + chunk_size);
+    auto chunk_forward = torch::zeros({max_segment_length, N, C, nz, ny, nx}, vp.options());
 
-        forward.u_prev_t.copy_(p.checkpoints[0].select(0, chunk_id));
-        forward.u_now_t.copy_(p.checkpoints[1].select(0, chunk_id));
-        forward.psix_t.copy_(p.checkpoints[2].select(0, chunk_id));
-        forward.psiy_t.copy_(p.checkpoints[3].select(0, chunk_id));
-        forward.psiz_t.copy_(p.checkpoints[4].select(0, chunk_id));
-        forward.zetax_t.copy_(p.checkpoints[5].select(0, chunk_id));
-        forward.zetay_t.copy_(p.checkpoints[6].select(0, chunk_id));
-        forward.zetaz_t.copy_(p.checkpoints[7].select(0, chunk_id));
-        forward.u_next_t.zero_();
+    for (int segment_id = num_segments - 1; segment_id >= 0; --segment_id) {
+        int start;
+        int end;
+        int checkpoint_idx;
+        if (recursive_checkpoint) {
+            start = (segment_id == 0) ? 0 : checkpoint_steps[segment_id - 1];
+            end = (segment_id == num_saved_checkpoints) ? nt : checkpoint_steps[segment_id];
+            checkpoint_idx = segment_id - 1;
+        } else {
+            start = segment_id * chunk_size;
+            end = std::min(nt, start + chunk_size);
+            checkpoint_idx = segment_id;
+        }
+
+        if (checkpoint_idx < 0)
+            checkpoint_runtime.zero_state(forward.state_tensors());
+        else
+            checkpoint_runtime.load(checkpoint_idx, forward.checkpoint_tensors(), forward.next_tensors());
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
@@ -501,7 +541,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
             );
 
             forward.swap();
-            chunk_forward[it - start].copy_(forward.u_now_t);
+            copy_tensor_device_to_device_async(chunk_forward[it - start], forward.u_now_t);
         }
 
         for (int it = end - 1; it >= start; --it) {

@@ -362,6 +362,30 @@ struct ElasticWavefieldTensor {
         return v;
     }
 
+    std::vector<torch::Tensor> checkpoint_tensors() const
+    {
+        if (dim == 3) {
+            return {
+                vx_t, vy_t, vz_t, sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t,
+                m_vxx_t, m_vxy_t, m_vxz_t, m_vyx_t, m_vyy_t, m_vyz_t, m_vzx_t, m_vzy_t, m_vzz_t,
+                m_sxxx_t, m_sxxy_t, m_sxxz_t, m_syyx_t, m_syyy_t, m_syyz_t,
+                m_szzx_t, m_szzy_t, m_szzz_t, m_sxyx_t, m_sxyy_t, m_sxyz_t,
+                m_sxzx_t, m_sxzy_t, m_sxzz_t, m_syzx_t, m_syzy_t, m_syzz_t
+            };
+        }
+
+        return {
+            vx_t, vz_t, sxx_t, szz_t, sxz_t,
+            m_vxx_t, m_vxz_t, m_vzx_t, m_vzz_t,
+            m_sxxx_t, m_sxxz_t, m_szzx_t, m_szzz_t, m_sxzx_t, m_sxzz_t
+        };
+    }
+
+    std::vector<torch::Tensor> state_tensors() const
+    {
+        return checkpoint_tensors();
+    }
+
 private:
     void reset_optional_3d()
     {

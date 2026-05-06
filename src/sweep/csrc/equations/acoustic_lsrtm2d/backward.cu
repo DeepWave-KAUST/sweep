@@ -10,49 +10,13 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
 namespace acoustic_lsrtm2d {
 
 namespace {
-
-void zero_wavefield_state_2d(AcousticWavefieldTensor& wf)
-{
-    wf.u_prev_t.zero_();
-    wf.u_now_t.zero_();
-    wf.u_next_t.zero_();
-    wf.psix_t.zero_();
-    wf.psiz_t.zero_();
-    wf.zetax_t.zero_();
-    wf.zetaz_t.zero_();
-}
-
-void copy_wavefield_state_2d(AcousticWavefieldTensor& dst, const AcousticWavefieldTensor& src)
-{
-    dst.u_prev_t.copy_(src.u_prev_t);
-    dst.u_now_t.copy_(src.u_now_t);
-    dst.u_next_t.copy_(src.u_next_t);
-    dst.psix_t.copy_(src.psix_t);
-    dst.psiz_t.copy_(src.psiz_t);
-    dst.zetax_t.copy_(src.zetax_t);
-    dst.zetaz_t.copy_(src.zetaz_t);
-}
-
-void load_checkpoint_state_2d(
-    AcousticWavefieldTensor& dst,
-    const std::vector<torch::Tensor>& checkpoints,
-    int checkpoint_idx
-)
-{
-    dst.u_prev_t.copy_(checkpoints[0].select(0, checkpoint_idx));
-    dst.u_now_t.copy_(checkpoints[1].select(0, checkpoint_idx));
-    dst.psix_t.copy_(checkpoints[2].select(0, checkpoint_idx));
-    dst.psiz_t.copy_(checkpoints[3].select(0, checkpoint_idx));
-    dst.zetax_t.copy_(checkpoints[4].select(0, checkpoint_idx));
-    dst.zetaz_t.copy_(checkpoints[5].select(0, checkpoint_idx));
-    dst.u_next_t.zero_();
-}
 
 void advance_forward_interval_2d(
     AcousticWavefieldTensor& forward,
@@ -129,6 +93,7 @@ void process_recursive_interval_2d(
     const SolverContext& ctx,
     int forward_nsrc,
     int adjoint_nsrc,
+    CheckpointRuntime& checkpoint_runtime,
     int nx,
     int nz
 )
@@ -139,7 +104,7 @@ void process_recursive_interval_2d(
     if (end - start == 1) {
         AcousticWavefieldTensor forward_step;
         forward_step.allocate(vp, 2, true);
-        copy_wavefield_state_2d(forward_step, start_state);
+        checkpoint_runtime.copy_state(forward_step.state_tensors(), start_state.state_tensors());
 
         auto bg_utt = torch::zeros_like(vp);
         auto fwd_view = forward_step.view();
@@ -215,7 +180,7 @@ void process_recursive_interval_2d(
 
     AcousticWavefieldTensor mid_state;
     mid_state.allocate(vp, 2, true);
-    copy_wavefield_state_2d(mid_state, start_state);
+    checkpoint_runtime.copy_state(mid_state.state_tensors(), start_state.state_tensors());
 
     advance_forward_interval_2d(
         mid_state,
@@ -260,6 +225,7 @@ void process_recursive_interval_2d(
         ctx,
         forward_nsrc,
         adjoint_nsrc,
+        checkpoint_runtime,
         nx,
         nz
     );
@@ -287,6 +253,7 @@ void process_recursive_interval_2d(
         ctx,
         forward_nsrc,
         adjoint_nsrc,
+        checkpoint_runtime,
         nx,
         nz
     );
@@ -646,6 +613,17 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        6,
+        true,
+        false,
+        p.checkpoint_interval,
+        p.checkpoint_steps,
+        "backward_chunk",
+        "acoustic_lsrtm2d"
+    );
+
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     auto chunk_forward = torch::zeros({chunk_size, B, nz, nx}, vp.options());
@@ -654,7 +632,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         int start = chunk_id * chunk_size;
         int end = std::min(static_cast<int>(p.nt), start + chunk_size);
 
-        load_checkpoint_state_2d(forward, p.checkpoints, chunk_id);
+        checkpoint_runtime.load(chunk_id, forward.checkpoint_tensors(), forward.next_tensors());
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
@@ -744,6 +722,16 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
     TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
+    CheckpointRuntime checkpoint_runtime(
+        p.checkpoints,
+        6,
+        true,
+        true,
+        p.checkpoint_interval,
+        checkpoint_steps_cpu,
+        "backward_recursive",
+        "acoustic_lsrtm2d"
+    );
 
     float dx = p.spacing[0];
     float dz = p.spacing[1];
@@ -770,7 +758,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 7), 2, true);
     else
         adjoint.allocate(vp, 2, true);
-    zero_wavefield_state_2d(adjoint);
+    checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     auto grad_vp = torch::zeros_like(p.models[0]);
@@ -809,9 +797,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         int end = (segment_idx == num_saved_checkpoints) ? static_cast<int>(p.nt) : checkpoint_steps[segment_idx];
 
         if (segment_idx == 0)
-            zero_wavefield_state_2d(start_state);
+            checkpoint_runtime.zero_state(start_state.state_tensors());
         else
-            load_checkpoint_state_2d(start_state, p.checkpoints, segment_idx - 1);
+            checkpoint_runtime.load(segment_idx - 1, start_state.checkpoint_tensors(), start_state.next_tensors());
 
         process_recursive_interval_2d(
             start,
@@ -836,6 +824,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             ctx,
             forward_nsrc,
             adjoint_nsrc,
+            checkpoint_runtime,
             nx,
             nz
         );

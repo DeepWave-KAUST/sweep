@@ -2,7 +2,45 @@
 
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
+
+inline void copy_tensor_device_to_device_async(const torch::Tensor& dst, const torch::Tensor& src)
+{
+    TORCH_CHECK(dst.defined() && src.defined(), "CUDA copy expects defined tensors.");
+    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "CUDA copy expects CUDA tensors.");
+    TORCH_CHECK(dst.device() == src.device(), "CUDA copy expects tensors on the same device.");
+    TORCH_CHECK(dst.scalar_type() == src.scalar_type(), "CUDA copy expects matching dtypes.");
+    TORCH_CHECK(dst.numel() == src.numel(), "CUDA copy expects matching numel.");
+    TORCH_CHECK(dst.is_contiguous(), "CUDA copy destination must be contiguous.");
+    TORCH_CHECK(src.is_contiguous(), "CUDA copy source must be contiguous.");
+
+    if (dst.numel() == 0) return;
+
+    C10_CUDA_CHECK(cudaMemcpyAsync(
+        dst.data_ptr(),
+        src.data_ptr(),
+        static_cast<size_t>(dst.nbytes()),
+        cudaMemcpyDeviceToDevice,
+        at::cuda::getCurrentCUDAStream()
+    ));
+}
+
+inline void zero_tensor_device_async(const torch::Tensor& dst)
+{
+    TORCH_CHECK(dst.defined(), "CUDA zero expects a defined tensor.");
+    TORCH_CHECK(dst.is_cuda(), "CUDA zero expects a CUDA tensor.");
+    TORCH_CHECK(dst.is_contiguous(), "CUDA zero destination must be contiguous.");
+
+    if (dst.numel() == 0) return;
+
+    C10_CUDA_CHECK(cudaMemsetAsync(
+        dst.data_ptr(),
+        0,
+        static_cast<size_t>(dst.nbytes()),
+        at::cuda::getCurrentCUDAStream()
+    ));
+}
 
 #define SWEEP_CUDA_SYNC_CHECK(label)                                                \
     do {                                                                            \
