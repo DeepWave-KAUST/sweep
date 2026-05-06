@@ -350,11 +350,35 @@ def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOpt
                 ckpt=CkptOptions(mode="chunk", chunks=args.ckpt_chunks),
             )
         )
+    if mode == "ckpt_chunk_cpu":
+        return CUDAOptions(
+            memory=MemoryOptions(
+                strategy="ckpt",
+                ckpt=CkptOptions(
+                    mode="chunk",
+                    chunks=args.ckpt_chunks,
+                    storage="cpu",
+                    pinned_memory=True,
+                ),
+            )
+        )
     if mode == "ckpt_recursive":
         return CUDAOptions(
             memory=MemoryOptions(
                 strategy="ckpt",
                 ckpt=CkptOptions(mode="recursive", count=args.ckpt_count),
+            )
+        )
+    if mode == "ckpt_recursive_cpu":
+        return CUDAOptions(
+            memory=MemoryOptions(
+                strategy="ckpt",
+                ckpt=CkptOptions(
+                    mode="recursive",
+                    count=args.ckpt_count,
+                    storage="cpu",
+                    pinned_memory=True,
+                ),
             )
         )
     raise ValueError(f"Unsupported CUDA mode {mode!r}")
@@ -813,7 +837,9 @@ def main():
         "bs_disk",
         "bs_disk_async",
         "ckpt_chunk",
+        "ckpt_chunk_cpu",
         "ckpt_recursive",
+        "ckpt_recursive_cpu",
     }
     solver_keys = parse_csv(args.solvers, SOLVERS, label="solver")
     scenario_keys = parse_csv(args.scenarios, SCENARIOS, label="scenario")

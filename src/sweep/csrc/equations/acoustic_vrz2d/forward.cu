@@ -110,6 +110,7 @@ ForwardOutput forward(const ForwardInput& in) {
         p.use_recursive_checkpoint,
         p.checkpoint_interval,
         p.checkpoint_steps,
+        p.checkpoint_on_cpu,
         "forward",
         "acoustic_vrz2d"
     );

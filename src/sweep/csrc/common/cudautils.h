@@ -5,15 +5,24 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 
+inline void validate_cuda_copy_tensors(
+    const torch::Tensor& dst,
+    const torch::Tensor& src,
+    const char* label
+)
+{
+    TORCH_CHECK(dst.defined() && src.defined(), label, " expects defined tensors.");
+    TORCH_CHECK(dst.scalar_type() == src.scalar_type(), label, " expects matching dtypes.");
+    TORCH_CHECK(dst.numel() == src.numel(), label, " expects matching numel.");
+    TORCH_CHECK(dst.is_contiguous(), label, " destination must be contiguous.");
+    TORCH_CHECK(src.is_contiguous(), label, " source must be contiguous.");
+}
+
 inline void copy_tensor_device_to_device_async(const torch::Tensor& dst, const torch::Tensor& src)
 {
-    TORCH_CHECK(dst.defined() && src.defined(), "CUDA copy expects defined tensors.");
-    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "CUDA copy expects CUDA tensors.");
-    TORCH_CHECK(dst.device() == src.device(), "CUDA copy expects tensors on the same device.");
-    TORCH_CHECK(dst.scalar_type() == src.scalar_type(), "CUDA copy expects matching dtypes.");
-    TORCH_CHECK(dst.numel() == src.numel(), "CUDA copy expects matching numel.");
-    TORCH_CHECK(dst.is_contiguous(), "CUDA copy destination must be contiguous.");
-    TORCH_CHECK(src.is_contiguous(), "CUDA copy source must be contiguous.");
+    validate_cuda_copy_tensors(dst, src, "CUDA device copy");
+    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "CUDA device copy expects CUDA tensors.");
+    TORCH_CHECK(dst.device() == src.device(), "CUDA device copy expects tensors on the same device.");
 
     if (dst.numel() == 0) return;
 
@@ -22,6 +31,34 @@ inline void copy_tensor_device_to_device_async(const torch::Tensor& dst, const t
         src.data_ptr(),
         static_cast<size_t>(dst.nbytes()),
         cudaMemcpyDeviceToDevice,
+        at::cuda::getCurrentCUDAStream()
+    ));
+}
+
+inline void copy_tensor_cuda_async(const torch::Tensor& dst, const torch::Tensor& src)
+{
+    validate_cuda_copy_tensors(dst, src, "CUDA async copy");
+    TORCH_CHECK(dst.is_cuda() || src.is_cuda(), "CUDA async copy expects at least one CUDA tensor.");
+
+    cudaMemcpyKind kind;
+    if (dst.is_cuda() && src.is_cuda()) {
+        TORCH_CHECK(dst.device() == src.device(), "CUDA async copy expects device tensors on the same device.");
+        kind = cudaMemcpyDeviceToDevice;
+    } else if (dst.is_cuda()) {
+        TORCH_CHECK(src.device().is_cpu(), "CUDA async copy host source must be a CPU tensor.");
+        kind = cudaMemcpyHostToDevice;
+    } else {
+        TORCH_CHECK(dst.device().is_cpu(), "CUDA async copy host destination must be a CPU tensor.");
+        kind = cudaMemcpyDeviceToHost;
+    }
+
+    if (dst.numel() == 0) return;
+
+    C10_CUDA_CHECK(cudaMemcpyAsync(
+        dst.data_ptr(),
+        src.data_ptr(),
+        static_cast<size_t>(dst.nbytes()),
+        kind,
         at::cuda::getCurrentCUDAStream()
     ));
 }

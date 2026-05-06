@@ -24,6 +24,7 @@ public:
         bool recursive,
         int checkpoint_interval,
         const torch::Tensor& checkpoint_steps,
+        bool checkpoint_on_cpu,
         const char* role,
         const char* label = "checkpoint"
     )
@@ -33,6 +34,7 @@ public:
           recursive_(recursive),
           checkpoint_interval_(checkpoint_interval),
           checkpoint_steps_(checkpoint_steps),
+          checkpoint_on_cpu_(checkpoint_on_cpu),
           role_(role == nullptr ? "unknown" : role),
           label_(label == nullptr ? "checkpoint" : label)
     {
@@ -46,6 +48,15 @@ public:
             label_, " checkpointing expects ", expected_tensors_, " checkpoint tensors"
         );
         TORCH_CHECK(checkpoint_interval_ >= 1, "checkpoint_interval must be >= 1");
+        for (const auto& checkpoint : checkpoints_) {
+            TORCH_CHECK(checkpoint.defined(), label_, " checkpoint tensor must be defined");
+            TORCH_CHECK(checkpoint.is_contiguous(), label_, " checkpoint tensor must be contiguous");
+            if (checkpoint_on_cpu_) {
+                TORCH_CHECK(!checkpoint.is_cuda() && checkpoint.device().is_cpu(), label_, " CPU checkpoint storage expects CPU tensors");
+            } else {
+                TORCH_CHECK(checkpoint.is_cuda(), label_, " GPU checkpoint storage expects CUDA tensors");
+            }
+        }
         if (recursive_) {
             TORCH_CHECK(checkpoint_steps_.defined(), "Recursive checkpointing expects checkpoint_steps");
             TORCH_CHECK(checkpoint_steps_.dim() == 1, "checkpoint_steps must be 1-D");
@@ -212,13 +223,13 @@ private:
     inline void copy_to_checkpoint(int idx, int checkpoint_idx, const torch::Tensor& src)
     {
         auto dst = checkpoints_[idx].select(0, checkpoint_idx);
-        copy_tensor_device_to_device_async(dst, src);
+        copy_tensor_cuda_async(dst, src);
     }
 
     inline void copy_from_checkpoint(const torch::Tensor& dst, int idx, int checkpoint_idx)
     {
         auto src = checkpoints_[idx].select(0, checkpoint_idx);
-        copy_tensor_device_to_device_async(dst, src);
+        copy_tensor_cuda_async(dst, src);
     }
 
     inline static void check_tensor_count(
@@ -301,7 +312,7 @@ private:
         std::fprintf(
             stderr,
             "SWEEP_CKPT_PROFILE "
-            "label=%s role=%s expected_tensors=%d "
+            "label=%s role=%s storage=%s expected_tensors=%d "
             "forward_save_time=%.6f forward_save_calls=%d forward_save_tensors=%d forward_save_bytes=%zu "
             "backward_load_time=%.6f backward_load_calls=%d backward_load_tensors=%d backward_load_bytes=%zu "
             "state_copy_time=%.6f state_copy_calls=%d state_copy_tensors=%d state_copy_bytes=%zu "
@@ -309,6 +320,7 @@ private:
             "total_time=%.6f total_bytes=%zu\n",
             label_.c_str(),
             role_.c_str(),
+            checkpoint_on_cpu_ ? "cpu" : "gpu",
             expected_tensors_,
             totals.forward_save_s, totals.forward_save_calls, totals.forward_save_tensors, totals.forward_save_bytes,
             totals.backward_load_s, totals.backward_load_calls, totals.backward_load_tensors, totals.backward_load_bytes,
@@ -325,6 +337,7 @@ private:
     bool recursive_ = false;
     int checkpoint_interval_ = 1;
     const torch::Tensor& checkpoint_steps_;
+    bool checkpoint_on_cpu_ = false;
     std::string role_;
     std::string label_;
     int next_checkpoint_idx_ = 0;

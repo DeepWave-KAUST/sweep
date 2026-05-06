@@ -63,18 +63,26 @@ class CkptOptions:
     mode: Literal["chunk", "recursive"] = "chunk"
     chunks: int = 100
     count: int = 0
+    storage: Literal["gpu", "cpu"] = "gpu"
+    pinned_memory: bool | None = None
 
     def __post_init__(self):
+        if self.storage not in {"gpu", "cpu"}:
+            raise ValueError("CkptOptions.storage must be 'gpu' or 'cpu'.")
+        if self.storage == "gpu" and self.pinned_memory:
+            raise ValueError("CkptOptions.pinned_memory is only valid when storage='cpu'.")
         if self.mode == "chunk":
             if self.chunks < 1:
                 raise ValueError("CkptOptions.chunks must be >= 1 when mode='chunk'.")
             if self.count != 0:
                 raise ValueError("CkptOptions.count is only valid when mode='recursive'.")
-        else:
+        elif self.mode == "recursive":
             if self.count < 1:
                 raise ValueError("CkptOptions.count must be >= 1 when mode='recursive'.")
             if self.chunks != 100:
                 raise ValueError("CkptOptions.chunks is only valid when mode='chunk'.")
+        else:
+            raise ValueError("CkptOptions.mode must be 'chunk' or 'recursive'.")
 
 
 @dataclass

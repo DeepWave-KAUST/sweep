@@ -35,6 +35,7 @@ struct ForwardInput {
     bool use_boundary_saving;
     bool use_checkpoint = false;
     bool use_recursive_checkpoint = false;
+    bool checkpoint_on_cpu = false;
     bool boundary_on_cpu = false;
     bool boundary_on_disk = false;
     bool boundary_disk_async_read = false;
@@ -134,6 +135,7 @@ struct BackwardInput {
 
     // options
     bool free_surface;
+    bool checkpoint_on_cpu = false;
     bool boundary_on_cpu = false;
     bool boundary_on_disk = false;
     bool boundary_disk_async_read = false;

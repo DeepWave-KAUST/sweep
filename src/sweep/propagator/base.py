@@ -20,6 +20,8 @@ class PropBase:
                  ckpt_chunks=100,
                  ckpt_mode="chunk",
                  ckpt_num=0,
+                 ckpt_storage="gpu",
+                 ckpt_pinned_memory=None,
                  pml_type='spml',
                  nt=-1,
                  B=1,
@@ -48,6 +50,10 @@ class PropBase:
                 recursively recomputes intermediate states. Defaults to "chunk".
             ckpt_num (int, optional): Number of persistent checkpoints to save when
                 ckpt_mode="recursive". Defaults to 0.
+            ckpt_storage (str, optional): Store CUDA checkpoints on "gpu" or "cpu".
+                CPU storage uses host memory to reduce device-memory pressure.
+            ckpt_pinned_memory (bool, optional): Use pinned host memory when
+                ckpt_storage="cpu". Defaults to True for CPU checkpoint storage.
             pml_type (str, optional): The type of PML to use. Defaults to 'spml'. Options include 'spml', 'cpml', 'cpmlr', etc.
             nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
             B (int, optional): The batch size for the simulation. Defaults to 1.
@@ -93,6 +99,10 @@ class PropBase:
         self.ckpt_chunks = ckpt_chunks
         self.ckpt_mode = ckpt_mode
         self.ckpt_num = ckpt_num
+        self.ckpt_storage, self.ckpt_pinned_memory = self._normalize_checkpoint_config(
+            ckpt_storage,
+            ckpt_pinned_memory,
+        )
         self.pml_type = pml_type
 
         self.nt = nt
@@ -271,6 +281,17 @@ class PropBase:
             raise ValueError("boundary_saving_config['ring_buffers'] must be >= 1")
 
         return merged
+
+    def _normalize_checkpoint_config(self, storage, pinned_memory):
+        if storage not in {"gpu", "cpu"}:
+            raise ValueError("ckpt_storage must be 'gpu' or 'cpu'")
+        if storage == "gpu":
+            if pinned_memory:
+                raise ValueError("ckpt_pinned_memory is only valid when ckpt_storage='cpu'")
+            return "gpu", False
+        if pinned_memory is None:
+            pinned_memory = True
+        return "cpu", bool(pinned_memory)
 
     def resolve_boundary_saving_config(self, override=None, use_boundary_saving=None):
         config = self.boundary_saving_config.copy()

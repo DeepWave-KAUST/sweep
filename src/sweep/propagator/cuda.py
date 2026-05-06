@@ -46,6 +46,7 @@ class Warpper(torch.autograd.Function):
         use_recursive_checkpoint: bool=False,
         checkpoint_count: int=0,
         checkpoint_steps: torch.Tensor=None,
+        checkpoint_on_cpu: bool=False,
         use_boundary_saving: bool=False,
         use_pinned_memory: bool=False,
         free_surface: bool=False,
@@ -123,6 +124,7 @@ class Warpper(torch.autograd.Function):
         params.use_boundary_saving = use_boundary_saving
         params.use_checkpoint = use_checkpoint
         params.use_recursive_checkpoint = use_recursive_checkpoint
+        params.checkpoint_on_cpu = checkpoint_on_cpu
         params.boundary_on_cpu = boundary_on_cpu
         params.boundary_on_disk = boundary_on_disk
         params.boundary_disk_async_read = boundary_disk_async_read
@@ -171,6 +173,7 @@ class Warpper(torch.autograd.Function):
             ctx.use_boundary_saving = use_boundary_saving
             ctx.use_checkpoint = use_checkpoint
             ctx.use_recursive_checkpoint = use_recursive_checkpoint
+            ctx.checkpoint_on_cpu = checkpoint_on_cpu
             ctx.use_pinned_memory = use_pinned_memory
             ctx.backward_func = backward_func
             ctx.backward_bs_func = backward_bs_func
@@ -234,6 +237,7 @@ class Warpper(torch.autograd.Function):
         params.boundary_on_disk = ctx.boundary_on_disk
         params.boundary_disk_async_read = ctx.boundary_disk_async_read
         params.use_pinned_memory = ctx.use_pinned_memory
+        params.checkpoint_on_cpu = ctx.checkpoint_on_cpu
 
         if ctx.use_checkpoint:
             params.checkpoints = list(checkpoint_tensors)
@@ -335,6 +339,7 @@ class Warpper(torch.autograd.Function):
             None,      # use_recursive_checkpoint
             None,      # checkpoint_count
             None,      # checkpoint_steps
+            None,      # checkpoint_on_cpu
             None,      # use_boundary_saving
             None,      # use_pinned_memory
             None,      # free_surface
@@ -405,6 +410,8 @@ class PropCUDA(PropBase, torch.nn.Module):
         self._checkpoint_cache_count = None
         self._checkpoint_cache_nt = None
         self._checkpoint_cache_batch = None
+        self._checkpoint_cache_storage = None
+        self._checkpoint_cache_pinned = None
         self._workspace_cache_batch = None
         self._workspace_cache_nt = None
         self.source_illumination = None
@@ -663,23 +670,38 @@ class PropCUDA(PropBase, torch.nn.Module):
         else:
             n_checkpoints = max(1, (self.nt + checkpoint_interval - 1) // checkpoint_interval)
 
+        checkpoint_storage = self.ckpt_storage
+        checkpoint_pinned = self.ckpt_pinned_memory if checkpoint_storage == "cpu" else False
+
         if (
             self._checkpoint_cache_batch == self.B
             and self._checkpoint_cache_interval == checkpoint_interval
             and self._checkpoint_cache_count == n_checkpoints
             and self._checkpoint_cache_nt == self.nt
+            and self._checkpoint_cache_storage == checkpoint_storage
+            and self._checkpoint_cache_pinned == checkpoint_pinned
         ):
             return
 
         checkpoint_shape = [n_checkpoints, self.B, 1, *self.shape_cuda]
         cuda_layout = self._cuda_layout()
         num_checkpoint_tensors = int(cuda_layout.resolved_checkpoint_nvar())
-        self.checkpoint_allocator = Allocator(self.dev)
-        self.checkpoints = tuple(self.checkpoint_allocator.zeros([checkpoint_shape] * num_checkpoint_tensors))
+        checkpoint_device = "cpu" if checkpoint_storage == "cpu" else self.dev
+        self.checkpoint_allocator = Allocator(checkpoint_device)
+        self.checkpoints = tuple(
+            self.checkpoint_allocator.zeros(
+                [checkpoint_shape] * num_checkpoint_tensors,
+                dtype=torch.float32,
+                dev=checkpoint_device,
+                pin_memory=checkpoint_pinned,
+            )
+        )
         self._checkpoint_cache_batch = self.B
         self._checkpoint_cache_interval = checkpoint_interval
         self._checkpoint_cache_count = n_checkpoints
         self._checkpoint_cache_nt = self.nt
+        self._checkpoint_cache_storage = checkpoint_storage
+        self._checkpoint_cache_pinned = checkpoint_pinned
 
     def _slice_checkpoint_buffers(self, batch_size):
         if not self.checkpoints:
@@ -835,6 +857,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         use_recursive_checkpoint = bool(
             use_checkpoint and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None
         )
+        checkpoint_on_cpu = bool(use_checkpoint and self.ckpt_storage == "cpu")
         save_all_wavefields = bool(requires_backward and not use_boundary_saving and not use_checkpoint)
         self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_backward)
         self._ensure_adjoint_workspace_buffers(batch_size)
@@ -897,6 +920,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 use_recursive_checkpoint,
                 int(checkpoint_steps.numel()),
                 checkpoint_steps,
+                checkpoint_on_cpu,
                 use_boundary_saving,
                 use_pinned_memory,
                 self.free_surface,
@@ -969,6 +993,7 @@ class PropCUDA(PropBase, torch.nn.Module):
             )
 
         use_recursive_checkpoint = bool(self.use_ckpt and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None)
+        checkpoint_on_cpu = bool(self.use_ckpt and self.ckpt_storage == "cpu")
         if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
         checkpoint_steps = torch.empty(0, dtype=torch.int32)
@@ -1122,6 +1147,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         fwd.use_boundary_saving = use_boundary_saving
         fwd.use_checkpoint = self.use_ckpt
         fwd.use_recursive_checkpoint = use_recursive_checkpoint
+        fwd.checkpoint_on_cpu = checkpoint_on_cpu
         fwd.boundary_on_cpu = boundary_on_cpu
         fwd.boundary_on_disk = boundary_on_disk
         fwd.boundary_disk_async_read = boundary_disk_async_read
@@ -1170,6 +1196,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         bwd.boundary_on_disk = boundary_on_disk
         bwd.boundary_disk_async_read = boundary_disk_async_read
         bwd.use_pinned_memory = use_pinned_memory
+        bwd.checkpoint_on_cpu = checkpoint_on_cpu
         bwd.transfer_interval = transfer_interval
         bwd.boundary_ring_buffers = boundary_ring_buffers
         bwd.checkpoint_interval = self.ckpt_chunks

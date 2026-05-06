@@ -764,6 +764,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         false,
         p.checkpoint_interval,
         p.checkpoint_steps,
+        p.checkpoint_on_cpu,
         "backward_chunk",
         "acoustic2d"
     );
@@ -941,6 +942,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         true,
         p.checkpoint_interval,
         checkpoint_steps_cpu,
+        p.checkpoint_on_cpu,
         "backward_recursive",
         "acoustic2d"
     );

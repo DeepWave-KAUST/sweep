@@ -400,6 +400,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         recursive_checkpoint,
         p.checkpoint_interval,
         checkpoint_steps_cpu,
+        p.checkpoint_on_cpu,
         recursive_checkpoint ? "backward_recursive" : "backward_chunk",
         "acoustic_vrz2d"
     );

@@ -877,6 +877,7 @@ void run_ckpt_imaging(
         false,
         p.checkpoint_interval,
         p.checkpoint_steps,
+        p.checkpoint_on_cpu,
         "backward_chunk",
         "acoustic_lsrtm3d"
     );
@@ -1035,6 +1036,7 @@ void run_recursive_imaging(
         true,
         p.checkpoint_interval,
         checkpoint_steps_cpu,
+        p.checkpoint_on_cpu,
         "backward_recursive",
         "acoustic_lsrtm3d"
     );

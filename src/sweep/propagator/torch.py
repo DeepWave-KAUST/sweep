@@ -86,6 +86,9 @@ class PropTorch(torch.nn.Module):
             ckpt = memory.get("ckpt") or {}
             merged["use_ckpt"] = True
             merged["ckpt_mode"] = ckpt.get("mode", "chunk")
+            merged["ckpt_storage"] = ckpt.get("storage", "gpu")
+            if "pinned_memory" in ckpt:
+                merged["ckpt_pinned_memory"] = ckpt["pinned_memory"]
             if merged["ckpt_mode"] == "chunk":
                 merged["ckpt_chunks"] = ckpt.get("chunks", 100)
             elif merged["ckpt_mode"] == "recursive":
