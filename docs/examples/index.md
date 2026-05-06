@@ -32,6 +32,7 @@ Repository examples live in the `examples/` directory.
   - [CUDA FD Orders](wavefields_cuda_fd_orders.md)
   - [Free Surface Forward](wavefields_free_surface.md)
   - [Anisotropic Wavefields](wavefields_anisotropic.md)
+  - [DAS Figure 4 Reproduction](wavefields_das.md)
 - [Multi-GPU](multi_gpu.md)
   - [Torch Distributed Multi-GPU FWI](multi_gpu_torch.md)
   - [JAX pmap Multi-GPU FWI](multi_gpu_jax.md)

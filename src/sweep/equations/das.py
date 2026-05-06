@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .base import FirstOrderEquation
+from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 
 
@@ -391,6 +392,27 @@ class DASElastic(FirstOrderEquation):
             return step_das_2d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
         raise ValueError(f"DASElastic.func expected 23 or 25 positional args, got {len(args)}")
 
+    def _C(self):
+        import sweep._C as _C
+
+        return (
+            _C.das2d_forward,
+            _C.das2d_backward,
+            _C.das2d_backward_bs,
+            _C.das2d_backward_ckpt,
+            _C.das2d_backward_recursive_ckpt,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=9,
+            pml_nvar=8,
+            last_two_nvar=1,
+            last_two_storage_nvar=9,
+            backward_workspace_nvar=0,
+        )
+
 
 class DASElastic3D(FirstOrderEquation):
     """3D stress and normal-strain-rate elastic DAS equation from Eq. (9)."""
@@ -470,6 +492,27 @@ class DASElastic3D(FirstOrderEquation):
             lame_mu = rho * vs**2
             return step_das_3d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
         raise ValueError(f"DASElastic3D.func expected 37 or 39 positional args, got {len(args)}")
+
+    def _C(self):
+        import sweep._C as _C
+
+        return (
+            _C.das3d_forward,
+            _C.das3d_backward,
+            _C.das3d_backward_bs,
+            _C.das3d_backward_ckpt,
+            _C.das3d_backward_recursive_ckpt,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=13,
+            pml_nvar=18,
+            last_two_nvar=1,
+            last_two_storage_nvar=13,
+            backward_workspace_nvar=0,
+        )
 
 
 DAS = DASElastic

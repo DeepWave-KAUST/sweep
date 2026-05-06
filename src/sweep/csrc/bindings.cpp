@@ -5,6 +5,8 @@
 #include "equations/acoustic_vrz2d/acoustic_vrz2d.h"
 #include "equations/acoustic_vrz3d/acoustic_vrz3d.h"
 #include "equations/acoustic3d/acoustic3d.h"
+#include "equations/das2d/das2d.h"
+#include "equations/das3d/das3d.h"
 #include "equations/elastic2d/elastic2d.h"
 #include "equations/elastic3d/elastic3d.h"
 #include "bindings_utils.h"
@@ -57,6 +59,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic3d_backward_ckpt", wrap_backward(elastic3d::backward_ckpt), "Elastic backward with checkpointing 3D (CUDA)");
     m.def("elastic3d_backward_recursive_ckpt", wrap_backward(elastic3d::backward_recursive_ckpt), "Elastic backward with recursive checkpointing 3D (CUDA)");
     m.def("elastic3d_backward", wrap_backward(elastic3d::backward), "Elastic backward 3D (CUDA)");
+    m.def("das2d_forward", wrap_forward(das2d::forward), "DAS forward 2D (CUDA)");
+    m.def("das2d_backward", wrap_backward(das2d::backward), "DAS backward 2D (CUDA)");
+    m.def("das2d_backward_bs", wrap_backward(das2d::backward_bs), "DAS backward with boundary saving 2D (CUDA)");
+    m.def("das2d_backward_ckpt", wrap_backward(das2d::backward_ckpt), "DAS backward with checkpointing 2D (CUDA)");
+    m.def("das2d_backward_recursive_ckpt", wrap_backward(das2d::backward_recursive_ckpt), "DAS backward with recursive checkpointing 2D (CUDA)");
+    m.def("das3d_forward", wrap_forward(das3d::forward), "DAS forward 3D (CUDA)");
+    m.def("das3d_backward", wrap_backward(das3d::backward), "DAS backward 3D (CUDA)");
+    m.def("das3d_backward_bs", wrap_backward(das3d::backward_bs), "DAS backward with boundary saving 3D (CUDA)");
+    m.def("das3d_backward_ckpt", wrap_backward(das3d::backward_ckpt), "DAS backward with checkpointing 3D (CUDA)");
+    m.def("das3d_backward_recursive_ckpt", wrap_backward(das3d::backward_recursive_ckpt), "DAS backward with recursive checkpointing 3D (CUDA)");
     
     py::class_<ForwardInput>(m, "ForwardInput")
         .def(py::init<>())
