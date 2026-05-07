@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Mapping, Sequence
+
+import numpy as np
+import torch
+
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
+from .elastic import Elastic
+from .elastic3d import Elastic as Elastic3D
 from .fields import FieldSpec, ModelSpec
 
 
@@ -130,6 +138,377 @@ def helical_das_response(
         raise ValueError("Only the paper's 35.3 and 54.7 degree helical windings are supported.")
 
     return gauge_average(out, gauge_cells, gauge_length=gauge_length, spacing=spacing, axis=gauge_axis)
+
+
+_AXIS_TO_COORD = {"x": 0, "y": 1, "z": -1}
+
+
+@dataclass
+class ElasticDASReceiverMap:
+    """Receiver expansion needed to derive DAS from Elastic velocity records."""
+
+    receivers: np.ndarray
+    augmented_receivers: np.ndarray
+    ndim: int
+    spatial_order: int
+    elastic_receiver_type: tuple[str, ...]
+    derivative_velocity: Mapping[str, str]
+    derivative_axis: Mapping[str, str]
+    derivative_indices: Mapping[str, np.ndarray]
+    derivative_weights: Mapping[str, np.ndarray]
+    original_indices: np.ndarray | None = None
+
+    @property
+    def das_receiver_type(self) -> tuple[str, ...]:
+        if self.ndim == 2:
+            return ("exx", "ezz", "das35", "das54x", "das54z")
+        return ("exx", "eyy", "ezz", "das35", "das54x", "das54y", "das54z")
+
+
+def elastic_das_velocity_receiver_type(ndim: int) -> tuple[str, ...]:
+    """Velocity receiver fields required from the Elastic equation."""
+
+    if int(ndim) == 2:
+        return ("vx", "vz")
+    if int(ndim) == 3:
+        return ("vx", "vy", "vz")
+    raise ValueError("ndim must be 2 or 3.")
+
+
+def _axis_spacing(dh, ndim: int, coord_axis: str) -> float:
+    if np.isscalar(dh):
+        return float(dh)
+
+    spacing = tuple(float(v) for v in dh)
+    if len(spacing) != ndim:
+        raise ValueError(
+            f"dh must be scalar or have length {ndim} in model-axis order, got {len(spacing)}."
+        )
+
+    if ndim == 2:
+        return {"z": spacing[0], "x": spacing[1]}[coord_axis]
+    return {"z": spacing[0], "y": spacing[1], "x": spacing[2]}[coord_axis]
+
+
+def _backward_stencil(spatial_order: int, ndim: int, axis: str) -> tuple[np.ndarray, np.ndarray]:
+    equation = Elastic(spatial_order=spatial_order, device="cpu", backend="torch")
+    if ndim == 3:
+        equation = Elastic3D(spatial_order=spatial_order, device="cpu", backend="torch")
+
+    kernel_name = {"x": "kxb", "y": "kyb", "z": "kzb"}[axis]
+    kernel = getattr(equation.pd, kernel_name).detach().cpu().numpy().reshape(-1)
+    center = int(spatial_order) // 2
+    offsets = np.arange(kernel.size, dtype=np.int32) - center
+    mask = kernel != 0.0
+    return offsets[mask], kernel[mask].astype(np.float32)
+
+
+def _receiver_components(ndim: int):
+    if ndim == 2:
+        return (
+            ("exx", "vx", "x"),
+            ("ezz", "vz", "z"),
+        )
+    if ndim == 3:
+        return (
+            ("exx", "vx", "x"),
+            ("eyy", "vy", "y"),
+            ("ezz", "vz", "z"),
+        )
+    raise ValueError("ndim must be 2 or 3.")
+
+
+def build_elastic_das_receivers(
+    receivers,
+    *,
+    spatial_order: int = 4,
+    ndim: int | None = None,
+    include_original: bool = False,
+) -> ElasticDASReceiverMap:
+    """Expand receivers so Elastic velocity records can be converted to DAS.
+
+    Coordinates follow the propagator convention: ``(x, z)`` for 2D and
+    ``(x, y, z)`` for 3D. When ``include_original=True``, the original receiver
+    points are prepended to ``augmented_receivers`` so Elastic fields such as
+    ``vx``, ``vz``, ``sxx`` and ``szz`` can be sampled in the same solver call.
+    """
+
+    receivers_np = np.asarray(receivers, dtype=np.int32)
+    if receivers_np.ndim not in (2, 3):
+        raise ValueError("receivers must have shape (nrec, ndim) or (batch, nrec, ndim).")
+
+    ndim = int(ndim if ndim is not None else receivers_np.shape[-1])
+    if receivers_np.shape[-1] != ndim:
+        raise ValueError(f"receiver coordinate dimension {receivers_np.shape[-1]} does not match ndim={ndim}.")
+
+    squeezed = receivers_np.ndim == 2
+    batched = receivers_np[None, ...] if squeezed else receivers_np
+    batch, nrec, _ = batched.shape
+
+    derivative_velocity: dict[str, str] = {}
+    derivative_axis: dict[str, str] = {}
+    derivative_indices: dict[str, np.ndarray] = {}
+    derivative_weights: dict[str, np.ndarray] = {}
+    stencils = {}
+    for component, velocity, axis in _receiver_components(ndim):
+        stencils[component] = _backward_stencil(spatial_order, ndim, axis)
+        derivative_velocity[component] = velocity
+        derivative_axis[component] = axis
+
+    original_indices = np.arange(nrec, dtype=np.int64) if include_original else None
+    augmented_batches = []
+    for batch_index in range(batch):
+        augmented = []
+        current = 0
+        if include_original:
+            augmented.extend(batched[batch_index])
+            current = nrec
+        for component, _velocity, axis in _receiver_components(ndim):
+            offsets, weights = stencils[component]
+            if batch_index == 0:
+                derivative_indices[component] = np.empty((nrec, offsets.size), dtype=np.int64)
+                derivative_weights[component] = weights
+            coord_axis = _AXIS_TO_COORD[axis]
+            for receiver_index in range(nrec):
+                base = batched[batch_index, receiver_index]
+                for coeff_index, offset in enumerate(offsets):
+                    point = base.copy()
+                    point[coord_axis] += int(offset)
+                    augmented.append(point)
+                    if batch_index == 0:
+                        derivative_indices[component][receiver_index, coeff_index] = current
+                    current += 1
+        augmented_batches.append(np.asarray(augmented, dtype=np.int32))
+
+    augmented_receivers = np.stack(augmented_batches, axis=0)
+    if squeezed:
+        augmented_receivers = augmented_receivers[0]
+
+    return ElasticDASReceiverMap(
+        receivers=receivers_np,
+        augmented_receivers=augmented_receivers,
+        ndim=ndim,
+        spatial_order=int(spatial_order),
+        elastic_receiver_type=elastic_das_velocity_receiver_type(ndim),
+        derivative_velocity=derivative_velocity,
+        derivative_axis=derivative_axis,
+        derivative_indices=derivative_indices,
+        derivative_weights=derivative_weights,
+        original_indices=original_indices,
+    )
+
+
+def _gather_derivative(
+    record: torch.Tensor,
+    receiver_map: ElasticDASReceiverMap,
+    component: str,
+    elastic_field_index: Mapping[str, int],
+    dh,
+) -> torch.Tensor:
+    velocity_name = receiver_map.derivative_velocity[component]
+    if velocity_name not in elastic_field_index:
+        raise ValueError(
+            f"Elastic record is missing '{velocity_name}'. "
+            f"Use receiver_type={list(receiver_map.elastic_receiver_type)} when running Elastic."
+        )
+
+    channel = record[..., elastic_field_index[velocity_name]]
+    indices = torch.as_tensor(
+        receiver_map.derivative_indices[component],
+        dtype=torch.long,
+        device=record.device,
+    )
+    weights = torch.as_tensor(
+        receiver_map.derivative_weights[component],
+        dtype=record.dtype,
+        device=record.device,
+    )
+    spacing = _axis_spacing(dh, receiver_map.ndim, receiver_map.derivative_axis[component])
+    weights = weights / spacing
+
+    samples = channel.index_select(2, indices.reshape(-1))
+    samples = samples.reshape(channel.shape[0], channel.shape[1], indices.shape[0], indices.shape[1])
+    return (samples * weights.reshape(1, 1, 1, -1)).sum(dim=-1)
+
+
+def _augmented_receiver_count(receiver_map: ElasticDASReceiverMap) -> int:
+    return int(receiver_map.augmented_receivers.shape[-2])
+
+
+def standardize_elastic_velocity_record(
+    record: torch.Tensor,
+    receiver_map: ElasticDASReceiverMap,
+    *,
+    elastic_receiver_type: Sequence[str] | None = None,
+) -> torch.Tensor:
+    """Return Elastic velocity records as ``(batch, nt, nrec, nfield)``.
+
+    The eager backend already returns this layout. The CUDA backend currently
+    returns ``(nfield, batch, nrec, nt)``; this helper permutes it without
+    detaching so gradients still flow to the Elastic propagator.
+    """
+
+    if not isinstance(record, torch.Tensor):
+        raise TypeError("record must be a torch.Tensor so gradients can pass through Elastic.")
+    if record.ndim != 4:
+        raise ValueError(f"record must be 4D, got shape {tuple(record.shape)}.")
+
+    elastic_receiver_type = tuple(elastic_receiver_type or receiver_map.elastic_receiver_type)
+    nfields = len(elastic_receiver_type)
+    nreceivers = _augmented_receiver_count(receiver_map)
+
+    if record.shape[-1] == nfields and record.shape[-2] == nreceivers:
+        return record
+    if record.shape[0] == nfields and record.shape[2] == nreceivers:
+        return record.permute(1, 3, 2, 0)
+
+    raise ValueError(
+        "Could not identify Elastic record layout. Expected eager layout "
+        f"(batch, nt, {nreceivers}, {nfields}) or CUDA layout "
+        f"({nfields}, batch, {nreceivers}, nt), got {tuple(record.shape)}."
+    )
+
+
+def original_elastic_das_record(
+    record: torch.Tensor,
+    receiver_map: ElasticDASReceiverMap,
+    *,
+    elastic_receiver_type: Sequence[str] | None = None,
+) -> torch.Tensor:
+    """Select the original receiver samples from an augmented Elastic record."""
+
+    if receiver_map.original_indices is None:
+        raise ValueError("receiver_map was built without include_original=True.")
+    record = standardize_elastic_velocity_record(
+        record,
+        receiver_map,
+        elastic_receiver_type=elastic_receiver_type,
+    )
+    indices = torch.as_tensor(receiver_map.original_indices, dtype=torch.long, device=record.device)
+    return record.index_select(2, indices)
+
+
+def elastic_velocity_record_to_das(
+    record: torch.Tensor,
+    receiver_map: ElasticDASReceiverMap,
+    *,
+    dh=10.0,
+    elastic_receiver_type: Sequence[str] | None = None,
+    receiver_type: Sequence[str] | None = None,
+    gauge_cells: int | None = None,
+    gauge_length: float | None = None,
+    gauge_axis: int = -1,
+) -> tuple[torch.Tensor, tuple[str, ...]]:
+    """Convert Elastic velocity records to DAS strain-rate channels.
+
+    ``record`` must be the differentiable output of ``PropTorch(Elastic, ...)``
+    with the velocity fields required by ``receiver_map.elastic_receiver_type``.
+    The returned tensor uses ``(batch, nt, original_nrec, nfields)`` layout and
+    remains connected to the Elastic computation graph.
+    """
+
+    elastic_receiver_type = tuple(elastic_receiver_type or receiver_map.elastic_receiver_type)
+    receiver_type = tuple(receiver_type or receiver_map.das_receiver_type)
+    record = standardize_elastic_velocity_record(
+        record,
+        receiver_map,
+        elastic_receiver_type=elastic_receiver_type,
+    )
+    elastic_field_index = {name: index for index, name in enumerate(elastic_receiver_type)}
+
+    exx = _gather_derivative(record, receiver_map, "exx", elastic_field_index, dh)
+    ezz = _gather_derivative(record, receiver_map, "ezz", elastic_field_index, dh)
+
+    values = {
+        "exx": exx,
+        "ezz": ezz,
+        "das35": helical_das_response(
+            exx,
+            ezz,
+            angle=35.3,
+            gauge_cells=gauge_cells,
+            gauge_length=gauge_length,
+            spacing=_axis_spacing(dh, receiver_map.ndim, "x"),
+            gauge_axis=gauge_axis,
+        ),
+        "das54x": helical_das_response(
+            exx,
+            ezz,
+            angle=54.7,
+            core_axis="x",
+            gauge_cells=gauge_cells,
+            gauge_length=gauge_length,
+            spacing=_axis_spacing(dh, receiver_map.ndim, "x"),
+            gauge_axis=gauge_axis,
+        ),
+        "das54z": helical_das_response(
+            exx,
+            ezz,
+            angle=54.7,
+            core_axis="z",
+            gauge_cells=gauge_cells,
+            gauge_length=gauge_length,
+            spacing=_axis_spacing(dh, receiver_map.ndim, "z"),
+            gauge_axis=gauge_axis,
+        ),
+    }
+
+    if receiver_map.ndim == 3:
+        eyy = _gather_derivative(record, receiver_map, "eyy", elastic_field_index, dh)
+        values.update(
+            {
+                "eyy": eyy,
+                "das35": helical_das_response(
+                    exx,
+                    ezz,
+                    eyy,
+                    angle=35.3,
+                    gauge_cells=gauge_cells,
+                    gauge_length=gauge_length,
+                    spacing=_axis_spacing(dh, receiver_map.ndim, "x"),
+                    gauge_axis=gauge_axis,
+                ),
+                "das54x": helical_das_response(
+                    exx,
+                    ezz,
+                    eyy,
+                    angle=54.7,
+                    core_axis="x",
+                    gauge_cells=gauge_cells,
+                    gauge_length=gauge_length,
+                    spacing=_axis_spacing(dh, receiver_map.ndim, "x"),
+                    gauge_axis=gauge_axis,
+                ),
+                "das54y": helical_das_response(
+                    exx,
+                    ezz,
+                    eyy,
+                    angle=54.7,
+                    core_axis="y",
+                    gauge_cells=gauge_cells,
+                    gauge_length=gauge_length,
+                    spacing=_axis_spacing(dh, receiver_map.ndim, "y"),
+                    gauge_axis=gauge_axis,
+                ),
+                "das54z": helical_das_response(
+                    exx,
+                    ezz,
+                    eyy,
+                    angle=54.7,
+                    core_axis="z",
+                    gauge_cells=gauge_cells,
+                    gauge_length=gauge_length,
+                    spacing=_axis_spacing(dh, receiver_map.ndim, "z"),
+                    gauge_axis=gauge_axis,
+                ),
+            }
+        )
+
+    missing = [name for name in receiver_type if name not in values]
+    if missing:
+        raise ValueError(f"Unsupported DAS receiver_type entries for {receiver_map.ndim}D: {missing}.")
+
+    return torch.stack([values[name] for name in receiver_type], dim=-1), receiver_type
 
 
 def step_das_2d(

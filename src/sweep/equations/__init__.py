@@ -17,8 +17,14 @@ from .das import (
     DAS3D,
     DASElastic,
     DASElastic3D,
+    ElasticDASReceiverMap,
+    build_elastic_das_receivers,
+    elastic_das_velocity_receiver_type,
+    elastic_velocity_record_to_das,
     gauge_average,
     helical_das_response,
+    original_elastic_das_record,
+    standardize_elastic_velocity_record,
 )
 
 # from .acoustic_vrr import AcousticVRR

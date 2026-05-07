@@ -116,8 +116,8 @@ class Elastic(FirstOrderEquation):
     FIELD_SPECS = (
         FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
         FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
-        FieldSpec("sxx", aliases=("stress_xx",), description="Normal stress in the x direction.", supports_source=True),
-        FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True),
+        FieldSpec("sxx", aliases=("stress_xx",), description="Normal stress in the x direction.", supports_source=True, supports_receiver=True),
+        FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True, supports_receiver=True),
         FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
         FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
         FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),

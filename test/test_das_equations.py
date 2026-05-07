@@ -25,7 +25,7 @@ def test_helical_response_weights_and_gauge_average():
     assert torch.allclose(averaged, expected)
 
 
-def test_das_equations_are_exported_without_cuda_binding():
+def test_das_equations_are_exported_with_cuda_binding():
     import sweep.equations as eq
 
     classes = eq._equation_classes()
@@ -33,8 +33,8 @@ def test_das_equations_are_exported_without_cuda_binding():
     assert classes["DASElastic3D"] is DASElastic3D
     assert DAS is DASElastic
     assert DAS3D is DASElastic3D
-    assert not DASElastic.supports_torch_binding()
-    assert not DASElastic3D.supports_torch_binding()
+    assert DASElastic.supports_torch_binding()
+    assert DASElastic3D.supports_torch_binding()
 
 
 def test_das_elastic_2d_eager_forward_and_gradient():

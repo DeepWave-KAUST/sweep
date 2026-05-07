@@ -1,9 +1,18 @@
 ﻿#!/usr/bin/env python3
-"""Reproduce layered-model DAS figures (Figure 4 and Figure 9) in one script."""
+"""Reproduce layered-model DAS figures and DAS method-comparison panels.
+
+Available figure modes:
+- 4: Figure-4-style vx/vz and exx/ezz common-shot gathers.
+- 7: Figure-7-style vertical-well ezz gathers with different gauge lengths.
+- 9: Figure-9-style helical-wound DAS pressure and strain-rate gathers.
+- both: Figures 4 and 9.
+- compare: direct DAS CUDA/eager records versus Elastic-derived DAS records.
+"""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import time
 from pathlib import Path
@@ -16,18 +25,41 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sweep.equations import Elastic, DASElastic
+from sweep.equations import (
+    DASElastic,
+    Elastic,
+    build_elastic_das_receivers,
+    elastic_velocity_record_to_das,
+    original_elastic_das_record,
+)
 from sweep.propagator.torch import PropTorch
 
 
 PAPER_CITATION = "Zhao et al., Petroleum Science, 23 (2026), 626-642 (https://doi.org/10.1016/j.petsci.2025.09.015)"
 PAPER_TAG4 = "Reproduction of Figure 4 in the above paper."
+PAPER_TAG7 = "Reproduction of Figure 7 in the above paper."
 PAPER_TAG9 = "Reproduction of Figure 9 in the above paper."
+FIGURE7_GAUGE_NOTE = (
+    "Figure 7 gauge-length panels are moving averages along the vertical-well receiver line. "
+    "The paper-grid mode keeps the paper-style 10/20/40 m labels but applies 11/21/41-cell "
+    "windows on the modeled receiver samples; use resampled-meter mode for meter-spaced "
+    "interpolation before averaging."
+)
+FIGURE7_EDGE_NOTE = (
+    "The default Figure 7 edge mode is reflect padding. The top and bottom edge bands need "
+    "receiver samples outside the simulated line, so those edge responses are padding artifacts; "
+    "center traces are unaffected by this padding."
+)
 
 DEFAULT_RECORD_PATHS_FIGURE9 = [
     Path("test/test_outputs/das_paper_reproduction/layered_fig3_paper_geometry_cpml/layered_records.npz"),
     Path("test/test_outputs/das_paper_reproduction/layered_fig3_receivers_exact_cpml/layered_records.npz"),
     Path("test/test_outputs/das_paper_reproduction/layered_fig3_cpml/layered_records.npz"),
+]
+FIGURE7_GAUGE_LENGTHS = [
+    ("gl10m", "Gauge length 10 m", "gauge_length_10m", 10.0),
+    ("gl20m", "Gauge length 20 m", "gauge_length_20m", 20.0),
+    ("gl40m", "Gauge length 40 m", "gauge_length_40m", 40.0),
 ]
 
 
@@ -108,6 +140,32 @@ def build_layered_geometry(
     }
 
 
+def build_dense_vertical_geometry(
+    nz: int,
+    nx: int,
+    dh: float,
+    source_x_km: float = 2.0,
+    source_depth_km: float = 0.0,
+    vertical_x_km: float = 3.0,
+) -> Dict[str, np.ndarray]:
+    source_x = km_to_index(source_x_km, dh, nx - 1)
+    source_depth = km_to_index(source_depth_km, dh, nz - 1)
+    source = np.array([[source_x, source_depth]], dtype=np.int32)
+
+    vertical_x = km_to_index(vertical_x_km, dh, nx - 1)
+    vertical_z = np.arange(nz, dtype=np.int32)
+    vertical = np.stack([np.full(nz, vertical_x, dtype=np.int32), vertical_z], axis=-1)
+    return {
+        "source": source,
+        "receivers": vertical,
+        "slices": {
+            "surface": slice(0, 0),
+            "horizontal": slice(0, 0),
+            "vertical": slice(0, vertical.shape[0]),
+        },
+    }
+
+
 def clip_limits(record: np.ndarray, percentile: tuple[float, float] = (2.0, 98.0)) -> tuple[float, float]:
     finite = np.asarray(record)[np.isfinite(record)]
     if finite.size == 0:
@@ -148,6 +206,21 @@ def normalize_record(record: torch.Tensor, nreceiver: int, nt: int) -> np.ndarra
             return arr.transpose(perm)
 
     raise ValueError(f"Could not map record shape {arr.shape} to (nreceiver, nt, nfield)")
+
+
+def unique_fields(*groups: Iterable[str]) -> list[str]:
+    fields = []
+    for group in groups:
+        for field in group:
+            if field not in fields:
+                fields.append(field)
+    return fields
+
+
+def _tensor_record_to_numpy(record: torch.Tensor) -> np.ndarray:
+    if record.ndim != 4 or record.shape[0] != 1:
+        raise ValueError(f"Expected record layout (1, nt, nrec, nfield), got {tuple(record.shape)}")
+    return record.detach().cpu().numpy()[0].transpose(1, 0, 2)
 
 
 def run_solver(
@@ -208,6 +281,113 @@ def run_solver(
     return records, channels, elapsed_s
 
 
+def run_elastic_derived_das_solver(
+    *,
+    backend: str,
+    geometry: Dict[str, np.ndarray],
+    models: tuple[np.ndarray, np.ndarray, np.ndarray],
+    wavelet: np.ndarray,
+    elastic_receiver_fields: list[str],
+    das_receiver_fields: list[str],
+    args,
+) -> tuple[np.ndarray, Dict[str, int], float]:
+    if args.device == "auto":
+        chosen_device = "cuda:0" if backend == "cuda" else "cpu"
+    else:
+        chosen_device = args.device
+
+    device = torch.device(chosen_device)
+    if backend == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA backend requested but CUDA is not available on this system.")
+    if backend == "cuda" and device.type != "cuda":
+        raise RuntimeError("CUDA backend requires a cuda device, e.g. --device cuda:0")
+
+    receivers = np.asarray(geometry["receivers"], dtype=np.int32)
+    receiver_map = build_elastic_das_receivers(
+        receivers[None, ...],
+        spatial_order=args.spatial_order,
+        include_original=True,
+    )
+    receiver_type = unique_fields(receiver_map.elastic_receiver_type, elastic_receiver_fields)
+
+    requires_backward = bool(getattr(args, "check_backward", False))
+    models_t = tuple(
+        torch.as_tensor(model, dtype=torch.float32, device=device).clone().requires_grad_(requires_backward)
+        for model in models
+    )
+
+    solver = PropTorch(
+        Elastic(spatial_order=args.spatial_order, device=device, backend="torch"),
+        shape=(args.nz, args.nx),
+        source_type=["sxx", "szz"],
+        receiver_type=receiver_type,
+        abcn=args.abcn,
+        dh=args.dh,
+        dt=args.dt,
+        dev=device,
+        pml_type="cpmls",
+        use_ckpt=False,
+        backend=backend,
+    )
+
+    wavelet_t = torch.as_tensor(wavelet, dtype=torch.float32, device=device)
+    source = np.asarray(geometry["source"], dtype=np.int32)
+    if source.ndim == 2:
+        source = source[None, ...]
+
+    start = time.perf_counter()
+    grad_context = nullcontext() if requires_backward else torch.no_grad()
+    with grad_context:
+        elastic_record_t = solver(
+            wavelet_t,
+            sources=source,
+            receivers=receiver_map.augmented_receivers,
+            models=list(models_t),
+        )
+        original_t = original_elastic_das_record(
+            elastic_record_t,
+            receiver_map,
+            elastic_receiver_type=receiver_type,
+        )
+        das_t, das_fields = elastic_velocity_record_to_das(
+            elastic_record_t,
+            receiver_map,
+            dh=args.dh,
+            elastic_receiver_type=receiver_type,
+            receiver_type=das_receiver_fields,
+        )
+        if requires_backward:
+            das_t.pow(2).mean().backward()
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed_s = time.perf_counter() - start
+
+    if requires_backward:
+        for name, model in zip(("vp", "vs", "rho"), models_t):
+            if (
+                model.grad is None
+                or not torch.isfinite(model.grad).all().item()
+                or model.grad.abs().max().item() == 0
+            ):
+                raise RuntimeError(f"DAS backward check did not produce a finite nonzero gradient for {name}.")
+
+    original_index = {name: index for index, name in enumerate(receiver_type)}
+    parts = []
+    if elastic_receiver_fields:
+        parts.append(
+            torch.stack(
+                [original_t[..., original_index[field]] for field in elastic_receiver_fields],
+                dim=-1,
+            )
+        )
+    parts.append(das_t)
+    records_t = torch.cat(parts, dim=-1)
+    records = _tensor_record_to_numpy(records_t)
+    channels = {name: i for i, name in enumerate(elastic_receiver_fields + list(das_fields))}
+    return records, channels, elapsed_s
+
+
 def run_figure4_data(
     *,
     backend: str,
@@ -216,39 +396,15 @@ def run_figure4_data(
     wavelet: np.ndarray,
     args,
 ) -> tuple[np.ndarray, Dict[str, int], float]:
-    nt = wavelet.shape[-1]
-    nrec = geometry["receivers"].shape[0]
-
-    elastic_records, _, elastic_elapsed = run_solver(
+    return run_elastic_derived_das_solver(
         backend=backend,
-        equation_cls=Elastic,
         geometry=geometry,
         models=models,
         wavelet=wavelet,
-        receiver_type=["vx", "vz"],
-        nt=nt,
+        elastic_receiver_fields=["vx", "vz"],
+        das_receiver_fields=["exx", "ezz"],
         args=args,
     )
-
-    das_records, _, das_elapsed = run_solver(
-        backend=backend,
-        equation_cls=DASElastic,
-        geometry=geometry,
-        models=models,
-        wavelet=wavelet,
-        receiver_type=["exx", "ezz"],
-        nt=nt,
-        args=args,
-    )
-
-    if elastic_records.shape[:2] != das_records.shape[:2]:
-        raise RuntimeError(
-            f"Elastic and DAS record shapes do not align: elastic={elastic_records.shape}, das={das_records.shape}"
-        )
-
-    records = np.concatenate([elastic_records[:, :, :2], das_records[:, :, :2]], axis=2)
-    channels = {"vx": 0, "vz": 1, "exx": 2, "ezz": 3}
-    return records, channels, max(elastic_elapsed, das_elapsed)
 
 
 def parse_figure9_records(npz_path: Path) -> tuple[np.ndarray, np.ndarray, Dict[str, int], Optional[float]]:
@@ -358,7 +514,7 @@ def plot_figure4(
         ("ezz", "Strain-rate ezz"),
     ]
 
-    fig, axes = plt.subplots(len(rows), len(cols), figsize=(16.0, 8.5), constrained_layout=True)
+    fig, axes = plt.subplots(len(rows), len(cols), figsize=(16.0, 12.6), constrained_layout=True)
     for row, (geom_name, geom_title) in enumerate(rows):
         sl = geometry["slices"][geom_name]
         for col, (field, title) in enumerate(cols):
@@ -397,6 +553,289 @@ def plot_figure4(
     plt.close(fig)
 
 
+def _figure7_display_indices(ntrace: int, display_trace_count: int) -> np.ndarray:
+    if display_trace_count <= 0 or ntrace <= display_trace_count:
+        return np.arange(ntrace, dtype=np.int32)
+    return np.unique(np.linspace(0, ntrace - 1, display_trace_count).round().astype(np.int32))
+
+
+def _figure7_gauge_windows(gauge_grid_spacing: float) -> list[tuple[str, str, str, int, float]]:
+    if gauge_grid_spacing <= 0.0:
+        raise ValueError(f"Gauge grid spacing must be positive, got {gauge_grid_spacing}.")
+    return [
+        (key, title, npz_key, max(1, int(round(length_m / gauge_grid_spacing)) + 1), length_m)
+        for key, title, npz_key, length_m in FIGURE7_GAUGE_LENGTHS
+    ]
+
+
+def _resample_records_along_receivers(
+    records: np.ndarray,
+    receiver_spacing: float,
+    target_spacing: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if target_spacing <= 0.0:
+        raise ValueError(f"Target receiver spacing must be positive, got {target_spacing}.")
+
+    original_positions = np.arange(records.shape[0], dtype=np.float32) * np.float32(receiver_spacing)
+    if np.isclose(target_spacing, receiver_spacing):
+        return records, original_positions
+
+    max_position = float(original_positions[-1])
+    target_positions = np.arange(0.0, max_position + 0.5 * target_spacing, target_spacing, dtype=np.float32)
+    target_positions = target_positions[target_positions <= max_position + 1e-5]
+    scaled = target_positions / np.float32(receiver_spacing)
+    left = np.floor(scaled).astype(np.int64)
+    left = np.clip(left, 0, records.shape[0] - 1)
+    right = np.clip(left + 1, 0, records.shape[0] - 1)
+    weight = (scaled - left).astype(records.dtype)
+    resampled = (1.0 - weight)[:, None] * records[left] + weight[:, None] * records[right]
+    return resampled.astype(records.dtype, copy=False), target_positions
+
+
+def _valid_gauge_average(record: np.ndarray, gauge_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    if gauge_cells <= 1:
+        centers = np.arange(record.shape[0], dtype=np.int32)
+        return record, centers
+    if gauge_cells > record.shape[0]:
+        raise ValueError(f"Gauge window {gauge_cells} is wider than receiver count {record.shape[0]}.")
+
+    left = gauge_cells // 2
+    right = gauge_cells - 1 - left
+    windows = np.lib.stride_tricks.sliding_window_view(record, gauge_cells, axis=0)
+    averaged = windows.mean(axis=-1)
+    centers = np.arange(left, record.shape[0] - right, dtype=np.int32)
+    return averaged, centers
+
+
+def _partial_gauge_average(record: np.ndarray, gauge_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    if gauge_cells <= 1:
+        centers = np.arange(record.shape[0], dtype=np.int32)
+        return record, centers
+
+    left = gauge_cells // 2
+    right = gauge_cells - 1 - left
+    centers = np.arange(record.shape[0], dtype=np.int32)
+    starts = np.maximum(centers - left, 0)
+    stops = np.minimum(centers + right + 1, record.shape[0])
+
+    prefix = np.concatenate(
+        [np.zeros((1, record.shape[1]), dtype=record.dtype), np.cumsum(record, axis=0)],
+        axis=0,
+    )
+    summed = prefix[stops] - prefix[starts]
+    counts = (stops - starts).astype(record.dtype)[:, None]
+    return summed / counts, centers
+
+
+def _reflect_gauge_average(record: np.ndarray, gauge_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    if gauge_cells <= 1:
+        centers = np.arange(record.shape[0], dtype=np.int32)
+        return record, centers
+    if record.shape[0] < 2:
+        raise ValueError("Reflect gauge edge mode requires at least two receiver traces.")
+
+    left = gauge_cells // 2
+    right = gauge_cells - 1 - left
+    padded = np.pad(record, [(left, right), (0, 0)], mode="reflect")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, gauge_cells, axis=0)
+    averaged = windows.mean(axis=-1)
+    centers = np.arange(record.shape[0], dtype=np.int32)
+    return averaged, centers
+
+
+def _symmetric_gauge_average(record: np.ndarray, gauge_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    if gauge_cells <= 1:
+        centers = np.arange(record.shape[0], dtype=np.int32)
+        return record, centers
+    if record.shape[0] < 2:
+        raise ValueError("Symmetric gauge edge mode requires at least two receiver traces.")
+
+    left = gauge_cells // 2
+    right = gauge_cells - 1 - left
+    padded = np.pad(record, [(left, right), (0, 0)], mode="symmetric")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, gauge_cells, axis=0)
+    averaged = windows.mean(axis=-1)
+    centers = np.arange(record.shape[0], dtype=np.int32)
+    return averaged, centers
+
+
+def _anti_reflect_gauge_average(record: np.ndarray, gauge_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    if gauge_cells <= 1:
+        centers = np.arange(record.shape[0], dtype=np.int32)
+        return record, centers
+    if record.shape[0] < 2:
+        raise ValueError("Anti-reflect gauge edge mode requires at least two receiver traces.")
+
+    left = gauge_cells // 2
+    right = gauge_cells - 1 - left
+    if left >= record.shape[0] or right >= record.shape[0]:
+        raise ValueError(
+            f"Anti-reflect padding for gauge window {gauge_cells} needs more than "
+            f"{max(left, right)} receiver traces; got {record.shape[0]}."
+        )
+
+    left_idx = np.arange(left, 0, -1, dtype=np.int64)
+    right_idx = record.shape[0] - 1 - np.arange(1, right + 1, dtype=np.int64)
+    left_pad = 2.0 * record[0:1] - record[left_idx]
+    right_pad = 2.0 * record[-1:] - record[right_idx]
+    padded = np.concatenate([left_pad, record, right_pad], axis=0)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, gauge_cells, axis=0)
+    averaged = windows.mean(axis=-1)
+    centers = np.arange(record.shape[0], dtype=np.int32)
+    return averaged.astype(record.dtype, copy=False), centers
+
+
+def _figure7_panel_records(
+    ezz_records: np.ndarray,
+    display_trace_count: int,
+    receiver_spacing: float,
+    gauge_grid_spacing: float,
+    gauge_mode: str,
+    edge_mode: str,
+) -> tuple[list[tuple[str, str, np.ndarray]], Dict[str, np.ndarray], np.ndarray, np.ndarray, Dict[str, int]]:
+    if gauge_mode == "paper-grid":
+        working_records = ezz_records
+        receiver_positions_m = np.arange(ezz_records.shape[0], dtype=np.float32) * np.float32(receiver_spacing)
+    elif gauge_mode == "resampled-meter":
+        working_records, receiver_positions_m = _resample_records_along_receivers(
+            ezz_records,
+            receiver_spacing=receiver_spacing,
+            target_spacing=gauge_grid_spacing,
+        )
+    else:
+        raise ValueError(f"Unknown Figure 7 gauge mode {gauge_mode!r}.")
+
+    gauge_windows = _figure7_gauge_windows(gauge_grid_spacing)
+    max_left = max(gauge_cells // 2 for _key, _title, _npz_key, gauge_cells, _length_m in gauge_windows)
+    max_right = max(gauge_cells - 1 - gauge_cells // 2 for _key, _title, _npz_key, gauge_cells, _length_m in gauge_windows)
+    if edge_mode == "valid" and working_records.shape[0] <= max_left + max_right:
+        raise ValueError(
+            f"Need more than {max_left + max_right} receiver traces for Figure 7 gauge windows; "
+            f"got {working_records.shape[0]}."
+        )
+    if edge_mode == "valid":
+        common_centers = np.arange(max_left, working_records.shape[0] - max_right, dtype=np.int32)
+        average_func = _valid_gauge_average
+    elif edge_mode == "partial":
+        common_centers = np.arange(working_records.shape[0], dtype=np.int32)
+        average_func = _partial_gauge_average
+    elif edge_mode == "reflect":
+        common_centers = np.arange(working_records.shape[0], dtype=np.int32)
+        average_func = _reflect_gauge_average
+    elif edge_mode == "symmetric":
+        common_centers = np.arange(working_records.shape[0], dtype=np.int32)
+        average_func = _symmetric_gauge_average
+    elif edge_mode == "anti-reflect":
+        common_centers = np.arange(working_records.shape[0], dtype=np.int32)
+        average_func = _anti_reflect_gauge_average
+    else:
+        raise ValueError(f"Unknown Figure 7 edge mode {edge_mode!r}.")
+    display_local = _figure7_display_indices(common_centers.size, display_trace_count)
+    display_centers = common_centers[display_local]
+    display_positions_m = receiver_positions_m[display_centers]
+
+    panels = [("origin", "Origin seismogram", working_records[display_centers])]
+    records = {"origin": working_records[display_centers]}
+    for key, title, npz_key, gauge_cells, _length_m in gauge_windows:
+        averaged, centers = average_func(working_records, gauge_cells)
+        center_to_local = display_centers - int(centers[0])
+        data = averaged[center_to_local]
+        panels.append((key, title, data))
+        records[npz_key] = data
+    gauge_cell_map = {key: gauge_cells for key, _title, _npz_key, gauge_cells, _length_m in gauge_windows}
+    return panels, records, display_centers, display_positions_m, gauge_cell_map
+
+
+def _figure7_time_slice(nt: int, duration: float, time_min: Optional[float], time_max: Optional[float]) -> tuple[slice, float, float]:
+    dt = float(duration) / float(nt)
+    start_t = 0.0 if time_min is None else max(0.0, float(time_min))
+    stop_t = float(duration) if time_max is None else min(float(duration), float(time_max))
+    if stop_t <= start_t:
+        raise ValueError(f"Invalid Figure 7 time window [{start_t}, {stop_t}].")
+    start_i = int(np.clip(round(start_t / dt), 0, nt - 1))
+    stop_i = int(np.clip(round(stop_t / dt), start_i + 1, nt))
+    return slice(start_i, stop_i), start_i * dt, stop_i * dt
+
+
+def plot_figure7(
+    ezz_records: np.ndarray,
+    duration: float,
+    dh: float,
+    out_path: Path,
+    display_trace_count: int = 201,
+    gauge_grid_spacing: Optional[float] = None,
+    gauge_mode: str = "paper-grid",
+    edge_mode: str = "reflect",
+    time_min: Optional[float] = None,
+    time_max: Optional[float] = None,
+) -> tuple[Dict[str, int], Dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    default_spacing = 1.0 if gauge_mode == "paper-grid" else float(dh)
+    effective_gauge_spacing = float(default_spacing if gauge_grid_spacing is None else gauge_grid_spacing)
+    panels, panel_records, display_indices, display_positions_m, gauge_windows = _figure7_panel_records(
+        ezz_records,
+        display_trace_count,
+        receiver_spacing=float(dh),
+        gauge_grid_spacing=effective_gauge_spacing,
+        gauge_mode=gauge_mode,
+        edge_mode=edge_mode,
+    )
+    time_sl, plot_t0, plot_t1 = _figure7_time_slice(
+        panel_records["origin"].shape[1],
+        duration,
+        time_min,
+        time_max,
+    )
+    fig, axes = plt.subplots(2, 2, figsize=(9.4, 11.8), constrained_layout=True)
+    axes_flat = axes.ravel()
+    for index, (_key, title, data) in enumerate(panels):
+        plot_data = data[:, time_sl]
+        vmin, vmax = clip_limits(plot_data)
+        ax = axes_flat[index]
+        ax.imshow(
+            plot_data.T,
+            cmap="gray",
+            aspect="auto",
+            interpolation="nearest",
+            vmin=vmin,
+            vmax=vmax,
+            extent=[0, plot_data.shape[0], plot_t1, plot_t0],
+        )
+        ax.xaxis.tick_top()
+        ax.xaxis.set_label_position("top")
+        ax.set_xlabel("Trace")
+        ax.set_ylabel("Time (s)")
+        ax.set_title(f"({chr(ord('a') + index)}) {title}")
+    for ax in axes_flat[len(panels):]:
+        ax.set_visible(False)
+
+    fig.suptitle("Fig. 7. Vertical-well z-component strain-rate with different gauge lengths", fontsize=14)
+    fig.savefig(out_path, dpi=260)
+    plt.close(fig)
+    return gauge_windows, panel_records, display_indices, display_positions_m
+
+
+def run_figure7_data(
+    *,
+    backend: str,
+    geometry: Dict[str, np.ndarray],
+    models: tuple[np.ndarray, np.ndarray, np.ndarray],
+    wavelet: np.ndarray,
+    args,
+) -> tuple[np.ndarray, Dict[str, int], float]:
+    records, channels, elapsed = run_solver(
+        backend=backend,
+        equation_cls=DASElastic,
+        geometry=geometry,
+        models=models,
+        wavelet=wavelet,
+        receiver_type=["ezz"],
+        nt=wavelet.shape[-1],
+        args=args,
+    )
+    vertical = geometry["slices"]["vertical"]
+    return records[vertical, :, :], channels, elapsed
+
+
 def plot_figure9(
     records: np.ndarray,
     channels: Dict[str, int],
@@ -415,7 +854,7 @@ def plot_figure9(
         ("das54z", "Axial strain-rate at 54.7°"),
     ]
 
-    fig, axes = plt.subplots(len(rows), len(panels), figsize=(14.4, 9.2), constrained_layout=True)
+    fig, axes = plt.subplots(len(rows), len(panels), figsize=(14.4, 12.6), constrained_layout=True)
     for row_index, (row_name, row_title) in enumerate(rows):
         sl = slices[row_name]
         for col_index, (field, title) in enumerate(panels):
@@ -458,6 +897,246 @@ def plot_figure9(
     plt.close(fig)
 
 
+def _slice_fields(records: np.ndarray, channels: Dict[str, int], fields: list[str]) -> np.ndarray:
+    return np.stack([records[:, :, channels[field]] for field in fields], axis=-1)
+
+
+def _rms(values: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.asarray(values, dtype=np.float64) ** 2)))
+
+
+def summarize_method_comparison(
+    records_by_method: Dict[str, np.ndarray],
+    fields: list[str],
+    reference: str,
+) -> Dict[str, object]:
+    ref = records_by_method[reference]
+    summary: Dict[str, object] = {
+        "reference": reference,
+        "fields": fields,
+        "methods": {},
+        "pairs": {},
+    }
+    for method, records in records_by_method.items():
+        summary["methods"][method] = {
+            "record_shape": list(records.shape),
+            "rms": _rms(records),
+            "max_abs": float(np.max(np.abs(records))),
+        }
+        if method == reference:
+            continue
+        diff = records - ref
+        per_field = {}
+        for index, field in enumerate(fields):
+            field_ref = ref[:, :, index]
+            field_diff = diff[:, :, index]
+            per_field[field] = {
+                "max_abs": float(np.max(np.abs(field_diff))),
+                "rms_abs": _rms(field_diff),
+                "relative_rms": _rms(field_diff) / (_rms(field_ref) + 1.0e-30),
+            }
+        summary["pairs"][f"{method}_minus_{reference}"] = {
+            "max_abs": float(np.max(np.abs(diff))),
+            "rms_abs": _rms(diff),
+            "relative_rms": _rms(diff) / (_rms(ref) + 1.0e-30),
+            "fields": per_field,
+        }
+    return summary
+
+
+def plot_method_records(
+    records_by_method: Dict[str, np.ndarray],
+    fields: list[str],
+    duration: float,
+    out_path: Path,
+) -> None:
+    methods = list(records_by_method)
+    fig, axes = plt.subplots(len(methods), len(fields), figsize=(3.8 * len(fields), 3.0 * len(methods)), constrained_layout=True)
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[None, :]
+
+    for row, method in enumerate(methods):
+        records = records_by_method[method]
+        for col, field in enumerate(fields):
+            data = records[:, :, col]
+            ax = axes[row, col]
+            vmin, vmax = clip_limits(data)
+            ax.imshow(
+                data.T,
+                cmap="gray",
+                aspect="auto",
+                interpolation="nearest",
+                vmin=vmin,
+                vmax=vmax,
+                extent=[0, data.shape[0], duration, 0],
+            )
+            ax.xaxis.tick_top()
+            ax.xaxis.set_label_position("top")
+            ax.set_xlabel("Trace")
+            ax.set_ylabel("Time (s)")
+            if row == 0:
+                ax.set_title(field)
+            if col == 0:
+                ax.text(
+                    0.02,
+                    0.95,
+                    method,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=9,
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8, "pad": 1.5},
+                )
+
+    fig.suptitle("DAS records from direct DAS equation and Elastic-derived observation", fontsize=14)
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+
+
+def plot_method_differences(
+    records_by_method: Dict[str, np.ndarray],
+    fields: list[str],
+    reference: str,
+    duration: float,
+    out_path: Path,
+) -> None:
+    methods = [method for method in records_by_method if method != reference]
+    fig, axes = plt.subplots(len(methods), len(fields), figsize=(3.8 * len(fields), 3.0 * len(methods)), constrained_layout=True)
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[None, :]
+
+    ref = records_by_method[reference]
+    for row, method in enumerate(methods):
+        diff = records_by_method[method] - ref
+        for col, field in enumerate(fields):
+            data = diff[:, :, col]
+            ax = axes[row, col]
+            vmin, vmax = clip_limits(ref[:, :, col])
+            ax.imshow(
+                data.T,
+                cmap="seismic",
+                aspect="auto",
+                interpolation="nearest",
+                vmin=vmin,
+                vmax=vmax,
+                extent=[0, data.shape[0], duration, 0],
+            )
+            ax.xaxis.tick_top()
+            ax.xaxis.set_label_position("top")
+            ax.set_xlabel("Trace")
+            ax.set_ylabel("Time (s)")
+            if row == 0:
+                ax.set_title(field)
+            if col == 0:
+                ax.text(
+                    0.02,
+                    0.95,
+                    f"{method} - {reference}",
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=9,
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8, "pad": 1.5},
+                )
+
+    fig.suptitle(f"DAS method errors (color scale: {reference} records)", fontsize=14)
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+
+
+def run_das_method_comparison(
+    *,
+    geometry: Dict[str, np.ndarray],
+    models: tuple[np.ndarray, np.ndarray, np.ndarray],
+    wavelet: np.ndarray,
+    args,
+    output_dir: Path,
+) -> Dict[str, object]:
+    fields = ["exx", "ezz", "das35", "das54x", "das54z"]
+    method_specs = [
+        ("das_equation_cuda", "direct", "cuda"),
+        ("das_equation_eager", "direct", "eager"),
+        ("elastic_derived_cuda", "derived", "cuda"),
+    ]
+
+    records_by_method: Dict[str, np.ndarray] = {}
+    results: Dict[str, object] = {}
+    for method_name, kind, backend in method_specs:
+        if kind == "direct":
+            records, channels, elapsed = run_solver(
+                backend=backend,
+                equation_cls=DASElastic,
+                geometry=geometry,
+                models=models,
+                wavelet=wavelet,
+                receiver_type=fields,
+                nt=wavelet.shape[-1],
+                args=args,
+            )
+            records = _slice_fields(records, channels, fields)
+        else:
+            records, channels, elapsed = run_elastic_derived_das_solver(
+                backend=backend,
+                geometry=geometry,
+                models=models,
+                wavelet=wavelet,
+                elastic_receiver_fields=[],
+                das_receiver_fields=fields,
+                args=args,
+            )
+
+        records_by_method[method_name] = records
+        out_npz = output_dir / f"{method_name}_records.npz"
+        np.savez_compressed(
+            out_npz,
+            records=records,
+            receiver_type=np.array(fields, dtype="U"),
+            source=geometry["source"][None, ...],
+            receivers=geometry["receivers"][None, ...],
+            duration=args.duration,
+            dt=args.dt,
+            peak_frequency=args.peak_frequency,
+        )
+        results[method_name] = {
+            "backend": backend,
+            "kind": kind,
+            "elapsed_s": elapsed,
+            "record_shape": list(records.shape),
+            "receiver_fields": fields,
+            "records": str(out_npz),
+        }
+
+    records_png = output_dir / "das_method_records.png"
+    diff_png = output_dir / "das_method_differences.png"
+    reference = "das_equation_cuda"
+    plot_method_records(records_by_method, fields, args.duration, records_png)
+    plot_method_differences(records_by_method, fields, reference, args.duration, diff_png)
+    summary = summarize_method_comparison(records_by_method, fields, reference)
+    metadata = {
+        "paper": PAPER_CITATION,
+        "purpose": "Compare direct DAS equation CUDA, direct DAS equation eager, and Elastic-derived DAS records.",
+        "geometry": {
+            "nz": args.nz,
+            "nx": args.nx,
+            "dh": args.dh,
+            "duration": args.duration,
+            "dt": args.dt,
+            "spatial_order": args.spatial_order,
+            "abcn": args.abcn,
+        },
+        "runs": results,
+        "comparison": summary,
+        "figures": {
+            "records": str(records_png),
+            "differences": str(diff_png),
+        },
+    }
+    (output_dir / "das_method_comparison_summary.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return metadata
+
+
 def resolve_records_path(explicit: Optional[Path]) -> Optional[Path]:
     if explicit is not None:
         return explicit if explicit.exists() else None
@@ -475,10 +1154,30 @@ def resolve_backends(choice: str) -> Iterable[str]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Reproduce layered DAS Figure 4/9 in one script.")
-    parser.add_argument("--figure", choices=("4", "9", "both"), default="both")
+    parser = argparse.ArgumentParser(
+        description="Reproduce layered DAS Figure 4, Figure 7, Figure 9, or method-comparison panels.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend cuda\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 7 --backend cuda "
+            "--figure7-edge-mode reflect --figure7-time-min 0.68 --figure7-time-max 2.15\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend cuda\n"
+        ),
+    )
+    parser.add_argument(
+        "--figure",
+        choices=("4", "7", "9", "both", "compare"),
+        default="both",
+        help="Figure set to generate. 'both' runs Figure 4 and Figure 9.",
+    )
     parser.add_argument("--backend", choices=("eager", "cuda", "both"), default="both")
-    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "outputs")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "outputs",
+        help="Directory for generated PNG, NPZ, and JSON artifacts.",
+    )
     parser.add_argument("--records-path", type=Path, default=None, help="Figure 9: path to existing layered_records.npz")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--nz", type=int, default=201)
@@ -490,6 +1189,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=0.08)
     parser.add_argument("--spatial-order", type=int, default=8)
     parser.add_argument("--abcn", type=int, default=50)
+    parser.add_argument("--figure7-trace-count", type=int, default=201)
+    parser.add_argument(
+        "--figure7-gauge-mode",
+        choices=("paper-grid", "resampled-meter"),
+        default="paper-grid",
+        help="Figure 7 gauge interpretation: paper-grid uses paper-style cell windows; resampled-meter interpolates receivers before averaging.",
+    )
+    parser.add_argument(
+        "--figure7-edge-mode",
+        choices=("reflect", "symmetric", "anti-reflect", "partial", "valid"),
+        default="reflect",
+        help="Figure 7 edge handling for gauge windows. reflect keeps all traces with mirror padding.",
+    )
+    parser.add_argument("--figure7-gauge-grid-spacing", type=float, default=None)
+    parser.add_argument("--figure7-time-min", type=float, default=None, help="Figure 7 display start time in seconds.")
+    parser.add_argument("--figure7-time-max", type=float, default=None, help="Figure 7 display end time in seconds.")
+    parser.add_argument("--check-backward", action="store_true")
     return parser.parse_args()
 
 
@@ -499,14 +1215,28 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     geometry = build_layered_geometry(args.nz, args.nx, args.dh)
+    figure7_geometry = build_dense_vertical_geometry(args.nz, args.nx, args.dh)
     nt = int(round(args.duration / args.dt))
     wavelet = ricker(nt, args.dt, args.peak_frequency, args.delay).reshape(1, 1, nt)
     vp_np, vs_np, rho_np = layered_model(args.nz, args.nx, args.dh)
 
     models = (vp_np, vs_np, rho_np)
     run_figure4 = args.figure in {"4", "both"}
+    run_figure7 = args.figure == "7"
     run_figure9 = args.figure in {"9", "both"}
+    run_compare = args.figure == "compare"
     multi_mode = args.figure == "both"
+
+    if run_compare:
+        metadata = run_das_method_comparison(
+            geometry=geometry,
+            models=models,
+            wavelet=wavelet,
+            args=args,
+            output_dir=output_dir,
+        )
+        print(json.dumps(metadata["runs"], indent=2))
+        return
 
     if run_figure4:
         results = {}
@@ -521,8 +1251,9 @@ def main() -> None:
             out_png = output_dir / f"figure4_{backend}.png"
             plot_figure4(records, channels, geometry, args.duration, out_png)
 
+            out_npz = output_dir / f"figure4_records_{backend}.npz"
             np.savez_compressed(
-                output_dir / f"records_{backend}.npz",
+                out_npz,
                 records=records,
                 channels=np.array(list(channels.keys()), dtype="U"),
                 source=geometry["source"],
@@ -536,17 +1267,125 @@ def main() -> None:
                 "record_shape": list(records.shape),
                 "receiver_fields": list(channels.keys()),
                 "figure": str(out_png),
+                "records": str(out_npz),
             }
 
         metadata = {
             "paper": PAPER_CITATION,
             "paper_tag": PAPER_TAG4,
-            "geometry": {"nz": args.nz, "nx": args.nx, "dh": args.dh},
+            "geometry": {
+                "nz": args.nz,
+                "nx": args.nx,
+                "dh": args.dh,
+                "duration": args.duration,
+                "dt": args.dt,
+                "spatial_order": args.spatial_order,
+                "abcn": args.abcn,
+            },
             "runs": results,
         }
         metadata_path = output_dir / ("figure4_metadata.json" if multi_mode else "metadata.json")
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         print(json.dumps(results, indent=2))
+
+    if run_figure7:
+        results = {}
+        for backend in resolve_backends(args.backend):
+            records, channels, elapsed = run_figure7_data(
+                backend=backend,
+                geometry=figure7_geometry,
+                models=models,
+                wavelet=wavelet,
+                args=args,
+            )
+            if "ezz" not in channels:
+                raise RuntimeError(f"Figure 7 requires ezz records, got {list(channels)}")
+            ezz = records[:, :, channels["ezz"]]
+            out_png = output_dir / f"figure7_{backend}.png"
+            gauge_cells, figure7_records, display_indices, display_positions_m = plot_figure7(
+                ezz,
+                args.duration,
+                args.dh,
+                out_png,
+                args.figure7_trace_count,
+                args.figure7_gauge_grid_spacing,
+                args.figure7_gauge_mode,
+                args.figure7_edge_mode,
+                args.figure7_time_min,
+                args.figure7_time_max,
+            )
+            vertical_x = int(figure7_geometry["receivers"][figure7_geometry["slices"]["vertical"]][0, 0])
+            receiver_z_indices = np.rint(display_positions_m / float(args.dh)).astype(np.int32)
+            displayed_receivers = np.stack(
+                [np.full(receiver_z_indices.size, vertical_x, dtype=np.int32), receiver_z_indices],
+                axis=-1,
+            )
+            effective_gauge_grid_spacing = float(
+                (1.0 if args.figure7_gauge_mode == "paper-grid" else args.dh)
+                if args.figure7_gauge_grid_spacing is None
+                else args.figure7_gauge_grid_spacing
+            )
+            out_npz = output_dir / f"figure7_records_{backend}.npz"
+            np.savez_compressed(
+                out_npz,
+                origin=figure7_records["origin"],
+                **{key: value for key, value in figure7_records.items() if key != "origin"},
+                receiver_type=np.array(["ezz"], dtype="U"),
+                source=figure7_geometry["source"][None, ...],
+                receivers=displayed_receivers[None, ...],
+                receiver_positions_m=display_positions_m,
+                dense_receiver_count=ezz.shape[0],
+                display_indices=display_indices,
+                duration=args.duration,
+                dt=args.dt,
+                gauge_cells=json.dumps(gauge_cells),
+                edge_mode=args.figure7_edge_mode,
+                gauge_note=FIGURE7_GAUGE_NOTE,
+                edge_note=FIGURE7_EDGE_NOTE,
+            )
+
+            results[backend] = {
+                "backend": backend,
+                "elapsed_s": elapsed,
+                "dense_record_shape": list(ezz.shape),
+                "display_record_shape": list(figure7_records["origin"].shape),
+                "receiver_field": "ezz",
+                "gauge_cells": gauge_cells,
+                "gauge_mode": args.figure7_gauge_mode,
+                "gauge_grid_spacing": effective_gauge_grid_spacing,
+                "gauge_average_mode": args.figure7_edge_mode,
+                "time_window": [args.figure7_time_min, args.figure7_time_max],
+                "figure": str(out_png),
+                "records": str(out_npz),
+            }
+
+        metadata = {
+            "paper": PAPER_CITATION,
+            "paper_tag": PAPER_TAG7,
+            "geometry": {
+                "nz": args.nz,
+                "nx": args.nx,
+                "dh": args.dh,
+                "duration": args.duration,
+                "dt": args.dt,
+                "spatial_order": args.spatial_order,
+                "abcn": args.abcn,
+                "figure7_trace_count": args.figure7_trace_count,
+                "figure7_gauge_mode": args.figure7_gauge_mode,
+                "figure7_edge_mode": args.figure7_edge_mode,
+                "figure7_gauge_grid_spacing": args.figure7_gauge_grid_spacing,
+                "figure7_time_window": [args.figure7_time_min, args.figure7_time_max],
+                "figure7_gauge_average_mode": args.figure7_edge_mode,
+            },
+            "notes": {
+                "gauge_length": FIGURE7_GAUGE_NOTE,
+                "edge_padding": FIGURE7_EDGE_NOTE,
+            },
+            "runs": results,
+        }
+        (output_dir / "figure7_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        print(json.dumps(results, indent=2))
+        return
 
     if not run_figure9:
         return
@@ -575,22 +1414,22 @@ def main() -> None:
 
     results = {}
     for backend in resolve_backends(args.backend):
-        records, channels, elapsed = run_solver(
+        records, channels, elapsed = run_elastic_derived_das_solver(
             backend=backend,
-            equation_cls=DASElastic,
             geometry=geometry,
             models=models,
             wavelet=wavelet,
-            receiver_type=["sxx", "szz", "das35", "das54x", "das54z"],
-            nt=nt,
+            elastic_receiver_fields=["sxx", "szz"],
+            das_receiver_fields=["das35", "das54x", "das54z"],
             args=args,
         )
         slices = infer_figure9_slices(geometry["receivers"], records)
         out_png = output_dir / f"figure9_{backend}.png"
         plot_figure9(records, channels, slices, args.duration, out_png)
 
+        out_npz = output_dir / f"figure9_records_{backend}.npz"
         np.savez_compressed(
-            output_dir / f"records_{backend}.npz",
+            out_npz,
             records=records,
             receiver_type=np.array(list(channels.keys()), dtype="U"),
             source=geometry["source"][None, ...],
@@ -606,6 +1445,7 @@ def main() -> None:
             "record_shape": list(records.shape),
             "receiver_fields": list(channels.keys()),
             "figure": str(out_png),
+            "records": str(out_npz),
         }
 
     metadata = {
