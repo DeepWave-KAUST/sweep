@@ -23,17 +23,41 @@ class SourceTorch(SourceBase, torch.nn.Module):
         index = (batch_idx, slice(None), *flipped.unbind(-1))
         self.mask[index] = 1.
 
-    def forward_source_encoding(self, wavefield, wavelet):
-        z = self.coords[..., 1]
-        x = self.coords[..., 0]
+    def _source_values(self, wavelet, batch_size, nsrc):
+        values = wavelet.reshape(-1)
+        expected = batch_size * nsrc
+        if values.numel() == 1:
+            return values.expand(expected)
+        if values.numel() == batch_size:
+            return values.repeat_interleave(nsrc)
+        if values.numel() != expected:
+            raise ValueError(
+                f"Wavelet time slice has {values.numel()} values, expected 1, "
+                f"{batch_size}, or {expected} for {batch_size} batch(es) and {nsrc} source(s)."
+            )
+        return values
+
+    def _add_indexed_sources(self, wavefield, wavelet, *, encoded=False):
+        coords = self.coords
+        batch_size, nsrc, ndim = coords.shape
+        values = self._source_values(wavelet, batch_size, nsrc)
+
+        if encoded:
+            batch_idx = torch.zeros(batch_size * nsrc, dtype=torch.long, device=coords.device)
+        else:
+            batch_idx = torch.arange(batch_size, dtype=torch.long, device=coords.device).repeat_interleave(nsrc)
+        channel_idx = torch.zeros(batch_size * nsrc, dtype=torch.long, device=coords.device)
+        spatial = [c.reshape(-1).to(torch.long) for c in torch.flip(coords, [-1]).unbind(-1)]
+
         out = wavefield.clone()
-        out[0, 0, z, x] = wavefield[0, 0, z, x] + wavelet
+        out.index_put_((batch_idx, channel_idx, *spatial), values, accumulate=True)
         return out
+
+    def forward_source_encoding(self, wavefield, wavelet):
+        return self._add_indexed_sources(wavefield, wavelet, encoded=True)
     
     def forward_adjoint_modeling(self, wavefield, wavelet):
-        indices = [torch.arange(self.coords.shape[0]).repeat(self.coords.shape[1]), 0, self.coords[..., 1].reshape(-1), self.coords[..., 0].reshape(-1)]
-        wavefield[indices] = wavefield[indices] + wavelet.reshape(-1)
-        return wavefield
+        return self._add_indexed_sources(wavefield, wavelet, encoded=False)
 
     def forward(self, *args):
         if self.se:

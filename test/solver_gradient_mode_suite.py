@@ -47,6 +47,8 @@ from sweep.equations import (  # noqa: E402
     AcousticLSRTM3D,
     AcousticVRZ,
     AcousticVRZ3D,
+    DASElastic,
+    DASElastic3D,
     Elastic,
     Elastic3D,
 )
@@ -71,6 +73,8 @@ class SolverSpec:
     pml_type: str
     lsrtm: bool = False
     elastic: bool = False
+    supported_modes: tuple[str, ...] | None = None
+    supported_scenarios: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,52 @@ SOLVERS = {
     "vrz3d": SolverSpec("vrz3d", AcousticVRZ3D, 3, ("vp", "z"), ("h1",), ("h1",), "cpmlr"),
     "lsrtm2d": SolverSpec("lsrtm2d", AcousticLSRTM, 2, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
     "lsrtm3d": SolverSpec("lsrtm3d", AcousticLSRTM3D, 3, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
+    "das2d": SolverSpec(
+        "das2d",
+        DASElastic,
+        2,
+        ("vp", "vs", "rho"),
+        ("sxx", "szz"),
+        ("exx", "ezz", "das35", "das54x", "das54z"),
+        "cpmls",
+        elastic=True,
+        supported_modes=(
+            "full",
+            "bs_gpu",
+            "bs_cpu",
+            "bs_cpu_pinned",
+            "bs_disk",
+            "bs_disk_async",
+            "ckpt_chunk",
+            "ckpt_chunk_cpu",
+            "ckpt_recursive",
+            "ckpt_recursive_cpu",
+        ),
+        supported_scenarios=("interior",),
+    ),
+    "das3d": SolverSpec(
+        "das3d",
+        DASElastic3D,
+        3,
+        ("vp", "vs", "rho"),
+        ("sxx", "syy", "szz"),
+        ("exx", "eyy", "ezz", "das35", "das54x", "das54y", "das54z"),
+        "cpmls",
+        elastic=True,
+        supported_modes=(
+            "full",
+            "bs_gpu",
+            "bs_cpu",
+            "bs_cpu_pinned",
+            "bs_disk",
+            "bs_disk_async",
+            "ckpt_chunk",
+            "ckpt_chunk_cpu",
+            "ckpt_recursive",
+            "ckpt_recursive_cpu",
+        ),
+        supported_scenarios=("interior",),
+    ),
     "elastic2d": SolverSpec("elastic2d", Elastic, 2, ("vp", "vs", "rho"), ("sxx", "szz"), ("vx", "vz"), "cpmls", False, True),
     "elastic3d": SolverSpec("elastic3d", Elastic3D, 3, ("vp", "vs", "rho"), ("sxx", "syy", "szz"), ("vx", "vy", "vz"), "cpmls", False, True),
 }
@@ -169,6 +219,8 @@ def require_cuda_bindings(solver_keys: list[str]):
         "vrz3d": "acoustic_vrz3d",
         "lsrtm2d": "acoustic_lsrtm2d",
         "lsrtm3d": "acoustic_lsrtm3d",
+        "das2d": "das2d",
+        "das3d": "das3d",
         "elastic2d": "elastic2d",
         "elastic3d": "elastic3d",
     }
@@ -382,6 +434,20 @@ def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOpt
             )
         )
     raise ValueError(f"Unsupported CUDA mode {mode!r}")
+
+
+def filter_supported_modes(spec: SolverSpec, modes: list[str]) -> list[str]:
+    if spec.supported_modes is None:
+        return modes
+    supported = set(spec.supported_modes)
+    selected = [mode for mode in modes if mode in supported]
+    skipped = [mode for mode in modes if mode not in supported]
+    if skipped:
+        print(
+            f"[{spec.key}] skipping unsupported mode(s): {','.join(skipped)}; "
+            f"supported={','.join(spec.supported_modes)}"
+        )
+    return selected
 
 
 def build_solver(spec: SolverSpec, backend: str, mode: str, scenario: ScenarioSpec, shape, device, args, run_dir, case_key):
@@ -633,7 +699,14 @@ def overlay_geometry(ax, sources, receivers, x_dim: int, y_dim: int, slice_dim: 
         )
 
 
-def save_gradient_plot(path: Path, title: str, grads: dict[str, torch.Tensor], sources=None, receivers=None):
+def save_gradient_plot(
+    path: Path,
+    title: str,
+    grads: dict[str, torch.Tensor],
+    sources=None,
+    receivers=None,
+    scale_grads: dict[str, torch.Tensor] | None = None,
+):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -647,7 +720,8 @@ def save_gradient_plot(path: Path, title: str, grads: dict[str, torch.Tensor], s
     fig, axes = plt.subplots(len(names), ncols, figsize=(4.2 * ncols, 3.2 * len(names)), squeeze=False)
     for row, name in enumerate(names):
         grad = grads[name].numpy()
-        vmin, vmax = percentile_limit(grad)
+        scale_grad = scale_grads.get(name, grads[name]).numpy() if scale_grads is not None else grad
+        vmin, vmax = percentile_limit(scale_grad)
         for col, (slice_name, image, x_dim, y_dim, slice_dim, slice_index) in enumerate(gradient_slices(grad, sources)):
             ax = axes[row, col]
             im = ax.imshow(image, cmap="seismic", origin="upper", aspect="auto", vmin=vmin, vmax=vmax)
@@ -683,6 +757,11 @@ def serializable_metrics(metrics: dict[str, dict[str, float]]) -> str:
 
 
 def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, run_dir: Path, device):
+    modes = filter_supported_modes(spec, modes)
+    if not modes:
+        print(f"\n[{spec.key}_{scenario.key}] no supported modes selected; skipping.")
+        return []
+
     shape = shape_for(spec, args)
     sources, receivers = make_geometry(spec, shape, scenario, args)
     true_models, init_models, grad_flags = make_models(spec, shape)
@@ -771,6 +850,7 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
                     candidate["grads"],
                     sources,
                     receivers,
+                    scale_grads=eager_result["grads"],
                 )
                 plot_path = str(saved) if saved is not None else ""
             row.update(
@@ -867,6 +947,12 @@ def main():
         for solver_key in solver_keys:
             spec = SOLVERS[solver_key]
             for scenario_key in scenario_keys:
+                if spec.supported_scenarios is not None and scenario_key not in spec.supported_scenarios:
+                    print(
+                        f"[{spec.key}] skipping unsupported scenario {scenario_key}; "
+                        f"supported={','.join(spec.supported_scenarios)}"
+                    )
+                    continue
                 rows = run_case(spec, SCENARIOS[scenario_key], modes, args, run_dir, device)
                 all_rows.extend(rows)
                 write_summaries(run_dir, all_rows)

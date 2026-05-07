@@ -21,11 +21,6 @@ ForwardOutput forward(const ForwardInput& in)
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(
-        !p.save_all_wavefields && !p.use_boundary_saving && !p.use_checkpoint,
-        "DAS 3D CUDA currently supports forward inference only; eager mode remains the reference for gradients."
-    );
-
     auto vp = p.models[0];
     auto vs = p.models[1];
     auto rho = p.models[2];
@@ -72,6 +67,10 @@ ForwardOutput forward(const ForwardInput& in)
     auto tmp_tyy_z = torch::zeros_like(vp);
     auto tmp_tzz_x = torch::zeros_like(vp);
     auto tmp_tzz_y = torch::zeros_like(vp);
+    torch::Tensor u_allt;
+    if (p.save_all_wavefields) {
+        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+    }
 
     SolverContext solver{
         3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -150,6 +149,13 @@ ForwardOutput forward(const ForwardInput& in)
             );
         }
 
+        if (u_allt.defined()) {
+            auto history_t = u_allt.select(0, it);
+            history_t.select(0, 0).copy_(wavefield.exx_t.view({B, nz, ny, nx}));
+            history_t.select(0, 1).copy_(wavefield.eyy_t.view({B, nz, ny, nx}));
+            history_t.select(0, 2).copy_(wavefield.ezz_t.view({B, nz, ny, nx}));
+        }
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = das3d_field_ptr(wf, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -164,7 +170,7 @@ ForwardOutput forward(const ForwardInput& in)
         }
     }
 
-    out.wavefield = torch::Tensor();
+    out.wavefield = u_allt;
     out.last_two = torch::empty({0}, vp.options());
     out.record = record;
     return out;

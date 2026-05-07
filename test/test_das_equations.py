@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from sweep.equations import DAS, DAS3D, DASElastic, DASElastic3D, gauge_average, helical_das_response
@@ -162,6 +163,128 @@ def test_das_final_channels_backward_2d():
 
     out.pow(2).mean().backward()
     _assert_nonzero_finite_gradient(vp, vs, rho)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available.")
+@pytest.mark.parametrize(
+    ("name", "boundary_saving_config"),
+    [
+        ("full", {"enabled": False}),
+        ("bs_gpu", {"enabled": True, "storage": "gpu"}),
+    ],
+)
+def test_das_elastic_2d_cuda_backward_matches_eager_with_random_adjoint(name, boundary_saving_config):
+    device = torch.device("cuda:0")
+    nt = 18
+    dt = 0.001
+    shape = (28, 32)
+    wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt), device=device)
+    sources = np.array([[[shape[1] // 2, 7]]], dtype=np.int32)
+    receivers = np.array([[[9, 8], [15, 9], [21, 10]]], dtype=np.int32)
+    receiver_type = ["exx", "ezz", "das35", "das54x", "das54z"]
+
+    def run(backend, adjoint_weight=None):
+        vp = torch.full(shape, 2200.0, dtype=torch.float32, device=device, requires_grad=True)
+        vs = torch.full(shape, 1200.0, dtype=torch.float32, device=device, requires_grad=True)
+        rho = torch.full(shape, 2100.0, dtype=torch.float32, device=device, requires_grad=True)
+        solver = PropTorch(
+            DASElastic(spatial_order=2, device=device, backend="torch"),
+            shape=shape,
+            source_type=["sxx", "szz"],
+            receiver_type=receiver_type,
+            abcn=4,
+            dh=10.0,
+            dt=dt,
+            dev=device,
+            pml_type="cpmls",
+            use_ckpt=False,
+            backend=backend,
+        )
+        out = solver(
+            wavelet,
+            sources=sources,
+            receivers=receivers,
+            models=[vp, vs, rho],
+            boundary_saving_config={"enabled": False} if backend == "eager" else boundary_saving_config,
+        )
+        if backend == "cuda":
+            out = out.permute(1, 3, 2, 0)
+        if adjoint_weight is None:
+            torch.manual_seed(2026)
+            adjoint_weight = torch.randn_like(out)
+        loss = (out * adjoint_weight).sum()
+        loss.backward()
+        torch.cuda.synchronize(device)
+        return out.detach(), vp.grad.detach(), vs.grad.detach(), rho.grad.detach(), adjoint_weight
+
+    eager_out, eager_gvp, eager_gvs, eager_grho, adjoint_weight = run("eager")
+    cuda_out, cuda_gvp, cuda_gvs, cuda_grho, _ = run("cuda", adjoint_weight)
+
+    torch.testing.assert_close(cuda_out, eager_out, rtol=2e-4, atol=1e-12, msg=f"{name} forward mismatch")
+    torch.testing.assert_close(cuda_gvp, eager_gvp, rtol=2e-3, atol=1e-14, msg=f"{name} vp gradient mismatch")
+    torch.testing.assert_close(cuda_gvs, eager_gvs, rtol=2e-3, atol=1e-14, msg=f"{name} vs gradient mismatch")
+    torch.testing.assert_close(cuda_grho, eager_grho, rtol=2e-3, atol=1e-14, msg=f"{name} rho gradient mismatch")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available.")
+@pytest.mark.parametrize(
+    ("name", "boundary_saving_config"),
+    [
+        ("full", {"enabled": False}),
+        ("bs_gpu", {"enabled": True, "storage": "gpu"}),
+    ],
+)
+def test_das_elastic_3d_cuda_backward_matches_eager_with_encoded_wavelet(name, boundary_saving_config):
+    device = torch.device("cuda:0")
+    nt = 16
+    dt = 0.001
+    shape = (14, 12, 14)
+    wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt), device=device)
+    sources = np.array([[[shape[2] // 2, shape[1] // 2, 5]]], dtype=np.int32)
+    receivers = np.array([[[5, 5, 5], [7, 6, 5], [9, 7, 6], [7, 5, 7]]], dtype=np.int32)
+    receiver_type = ["exx", "eyy", "ezz", "das35", "das54x", "das54y", "das54z"]
+
+    def run(backend, adjoint_weight=None):
+        vp = torch.full(shape, 2200.0, dtype=torch.float32, device=device, requires_grad=True)
+        vs = torch.full(shape, 1200.0, dtype=torch.float32, device=device, requires_grad=True)
+        rho = torch.full(shape, 2100.0, dtype=torch.float32, device=device, requires_grad=True)
+        solver = PropTorch(
+            DASElastic3D(spatial_order=2, device=device, backend="torch"),
+            shape=shape,
+            source_type=["sxx", "syy", "szz"],
+            receiver_type=receiver_type,
+            abcn=3,
+            dh=10.0,
+            dt=dt,
+            dev=device,
+            pml_type="cpmls",
+            use_ckpt=False,
+            backend=backend,
+        )
+        out = solver(
+            wavelet,
+            sources=sources,
+            receivers=receivers,
+            models=[vp, vs, rho],
+            boundary_saving_config={"enabled": False} if backend == "eager" else boundary_saving_config,
+        )
+        if backend == "cuda":
+            out = out.permute(1, 3, 2, 0)
+        if adjoint_weight is None:
+            torch.manual_seed(2027)
+            adjoint_weight = torch.randn_like(out)
+        loss = (out * adjoint_weight).sum()
+        loss.backward()
+        torch.cuda.synchronize(device)
+        return out.detach(), vp.grad.detach(), vs.grad.detach(), rho.grad.detach(), adjoint_weight
+
+    eager_out, eager_gvp, eager_gvs, eager_grho, adjoint_weight = run("eager")
+    cuda_out, cuda_gvp, cuda_gvs, cuda_grho, _ = run("cuda", adjoint_weight)
+
+    torch.testing.assert_close(cuda_out, eager_out, rtol=5e-4, atol=1e-12, msg=f"{name} forward mismatch")
+    torch.testing.assert_close(cuda_gvp, eager_gvp, rtol=3e-3, atol=1e-14, msg=f"{name} vp gradient mismatch")
+    torch.testing.assert_close(cuda_gvs, eager_gvs, rtol=5e-3, atol=1e-14, msg=f"{name} vs gradient mismatch")
+    torch.testing.assert_close(cuda_grho, eager_grho, rtol=3e-3, atol=1e-14, msg=f"{name} rho gradient mismatch")
 
 
 def test_das_final_channels_backward_3d():
