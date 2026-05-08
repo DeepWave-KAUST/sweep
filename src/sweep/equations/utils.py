@@ -35,6 +35,14 @@ def backend_concat(arrays, axis):
 def zero_top_halo(field, halo, axis):
     if halo <= 0:
         return field
+    if hasattr(field, "clone") and hasattr(field, "device") and hasattr(field, "dtype"):
+        ndim = len(field.shape)
+        axis = axis if axis >= 0 else ndim + axis
+        out = field.clone()
+        top_slice = [slice(None)] * ndim
+        top_slice[axis] = slice(0, halo)
+        out[tuple(top_slice)] = 0
+        return out
     ndim = len(field.shape)
     axis = axis if axis >= 0 else ndim + axis
     top_slice = [slice(None)] * ndim

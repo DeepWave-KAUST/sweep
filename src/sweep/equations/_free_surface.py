@@ -34,6 +34,17 @@ def _slice_axis(u, axis, start=None, stop=None):
     return u[tuple(slices)]
 
 
+def _zero_axis_index(u, axis, index):
+    if hasattr(u, "clone") and hasattr(u, "device") and hasattr(u, "dtype"):
+        axis = axis if axis >= 0 else u.ndim + axis
+        out = u.clone()
+        slices = [slice(None)] * u.ndim
+        slices[axis] = index
+        out[tuple(slices)] = 0
+        return out
+    return None
+
+
 def extend_top_free_surface(u, halo, odd, axis):
     if halo <= 0:
         return u
@@ -48,6 +59,10 @@ def top_free_surface_derivative(u, deriv, halo, odd, axis):
 
 
 def zero_top_row(u, halo, axis):
+    row = 0 if halo <= 0 else halo
+    out = _zero_axis_index(u, axis, row)
+    if out is not None:
+        return out
     if halo <= 0:
         return _concat([_slice_axis(u, axis, 0, 1) * 0, _slice_axis(u, axis, 1, None)], axis=axis)
     return _concat(
