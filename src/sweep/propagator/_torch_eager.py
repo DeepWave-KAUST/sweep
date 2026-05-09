@@ -25,6 +25,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         self.register_buffer("coord_offset", torch.tensor(coord_offset, device=self.dev, dtype=torch.long))
         self.source_indices = [self.wavefield_names.index(name) for name in self.source_type]
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
+        self._equation_spacing = self._normalize_equation_spacing(self._grid_spacing)
         self._workspace_cache = {}
         self.step_func = self._build_step_func()
 
@@ -32,6 +33,15 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         if isinstance(value, torch.Tensor):
             return value.to(device=self.dev, dtype=dtype)
         return torch.as_tensor(value, device=self.dev, dtype=dtype)
+
+    @staticmethod
+    def _normalize_equation_spacing(spacing):
+        spacing = tuple(float(value) for value in spacing)
+        if not spacing:
+            return 1.0
+        if all(value == spacing[0] for value in spacing):
+            return spacing[0]
+        return spacing
 
     def _build_step_func(self):
         step_func = self.equation.func
@@ -185,7 +195,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
         self.models_padded = models
         runtime_models = self._prepare_runtime_models(models)
-        fixargs = runtime_models + [self.dt, self.dh, None]
+        fixargs = runtime_models + [self.dt, self._equation_spacing, None]
         wavefield = [
             self._get_cached_tensor(f"wavefield:{index}", shape_wavefield, device=self.dev, dtype=torch.float32)
             for index, _ in enumerate(self.wavefield_names)
@@ -209,7 +219,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     state = list(chunk_inputs[:num_wavefields])
                     chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
                     chunk_runtime_models = self._prepare_runtime_models(chunk_models)
-                    chunk_fixargs = chunk_runtime_models + [self.dt, self.dh, None]
+                    chunk_fixargs = chunk_runtime_models + [self.dt, self._equation_spacing, None]
                     return self._run_chunk(
                         state,
                         chunk_fixargs,
