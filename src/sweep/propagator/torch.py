@@ -8,9 +8,112 @@ from sweep.propagator.options import (
     EagerOptions,
     EAGER_OPTION_KEYS,
     CUDA_OPTION_KEYS,
+    BOUNDARY_DEFAULTS,
+    CKPT_DEFAULTS,
     MemoryOptions,
     options_to_dict,
 )
+
+
+SUPPORTED_BACKENDS = {"eager", "cuda"}
+
+
+def _merge_option_dict(base, extra, *, label):
+    if extra is None:
+        return base
+    extra = options_to_dict(extra)
+    overlap = set(base) & set(extra)
+    if overlap:
+        raise ValueError(f"Duplicate option keys between top-level kwargs and {label}: {sorted(overlap)}")
+    return {**base, **extra}
+
+
+def _normalize_cuda_memory_kwargs(merged):
+    memory = merged.pop("memory", None)
+    if memory is None:
+        return merged
+
+    memory = options_to_dict(memory)
+    strategy = memory.get("strategy")
+    if strategy is None:
+        raise ValueError("CUDA memory options must set strategy to 'boundary' or 'ckpt'.")
+
+    if strategy == "boundary":
+        boundary = memory.get("boundary") or {}
+        boundary_config = {
+            "enabled": True,
+            "storage": boundary.get("storage", BOUNDARY_DEFAULTS.storage),
+        }
+        for key in (
+            "transfer_interval",
+            "pinned_memory",
+            "disk_dir",
+            "ring_buffers",
+            "disk_async_read",
+        ):
+            if key in boundary:
+                boundary_config[key] = boundary[key]
+        merged["boundary_saving_config"] = boundary_config
+        merged["use_ckpt"] = False
+        return merged
+
+    if strategy == "ckpt":
+        ckpt = memory.get("ckpt") or {}
+        mode = ckpt.get("mode", CKPT_DEFAULTS.mode)
+        merged.update(
+            {
+                "use_ckpt": True,
+                "ckpt_mode": mode,
+                "ckpt_storage": ckpt.get("storage", CKPT_DEFAULTS.storage),
+            }
+        )
+        if "pinned_memory" in ckpt:
+            merged["ckpt_pinned_memory"] = ckpt["pinned_memory"]
+        if mode == "chunk":
+            merged["ckpt_chunks"] = ckpt.get("chunks", CKPT_DEFAULTS.chunks)
+        elif mode == "recursive":
+            merged["ckpt_num"] = ckpt.get("count", CKPT_DEFAULTS.count)
+        else:
+            raise ValueError(f"Unsupported ckpt mode '{mode}'. Expected 'chunk' or 'recursive'.")
+        return merged
+
+    raise ValueError(f"Unsupported CUDA memory strategy '{strategy}'. Expected 'boundary' or 'ckpt'.")
+
+
+def _resolve_backend_init_kwargs(*, backend, kwargs, backend_options, eager_options, cuda_options):
+    if eager_options is not None and backend != "eager":
+        raise ValueError("eager_options can only be used with backend='eager'.")
+    if cuda_options is not None and backend != "cuda":
+        raise ValueError("cuda_options can only be used with backend='cuda'.")
+
+    wrong_top_level = (CUDA_OPTION_KEYS if backend == "eager" else EAGER_OPTION_KEYS) & set(kwargs)
+    if wrong_top_level:
+        target = "cuda_options" if backend == "cuda" else "eager_options"
+        raise ValueError(
+            f"Top-level kwargs {sorted(wrong_top_level)} do not belong to backend='{backend}'. "
+            f"Pass backend-specific options through {target} or switch backend."
+        )
+
+    merged = _merge_option_dict(dict(kwargs), backend_options, label="backend_options")
+    selected_options = eager_options if backend == "eager" else cuda_options
+    option_label = "eager_options" if backend == "eager" else "cuda_options"
+    merged = _merge_option_dict(merged, selected_options, label=option_label)
+
+    wrong_merged = (CUDA_OPTION_KEYS if backend == "eager" else EAGER_OPTION_KEYS) & set(merged)
+    if wrong_merged:
+        raise ValueError(f"Invalid {option_label} for backend='{backend}': {sorted(wrong_merged)}")
+
+    if backend == "cuda":
+        merged = _normalize_cuda_memory_kwargs(merged)
+    return merged
+
+
+def _public_forward_signature(forward):
+    signature = inspect.signature(forward)
+    parameters = list(signature.parameters.values())
+    if parameters and parameters[0].name == "self":
+        signature = signature.replace(parameters=parameters[1:])
+    return signature
 
 
 class PropTorch(torch.nn.Module):
@@ -25,11 +128,11 @@ class PropTorch(torch.nn.Module):
     ):
         torch.nn.Module.__init__(self)
         backend = str(backend).lower()
-        if backend not in {"eager", "cuda"}:
+        if backend not in SUPPORTED_BACKENDS:
             raise ValueError(f"Unsupported PropTorch backend '{backend}'. Expected 'eager' or 'cuda'.")
 
         self.backend = backend
-        init_kwargs = self._resolve_backend_init_kwargs(
+        init_kwargs = _resolve_backend_init_kwargs(
             backend=backend,
             kwargs=kwargs,
             backend_options=backend_options,
@@ -43,95 +146,7 @@ class PropTorch(torch.nn.Module):
 
             impl = PropCUDA(*args, **init_kwargs)
         self._backend_impl = impl
-        self.__signature__ = self._forward_signature()
-
-    def _merge_option_dict(self, base, extra, *, label):
-        if extra is None:
-            return base
-        extra = options_to_dict(extra)
-        overlap = set(base) & set(extra)
-        if overlap:
-            raise ValueError(f"Duplicate option keys between top-level kwargs and {label}: {sorted(overlap)}")
-        merged = dict(base)
-        merged.update(extra)
-        return merged
-
-    def _normalize_cuda_kwargs(self, merged):
-        memory = merged.pop("memory", None)
-        if memory is None:
-            return merged
-        memory = options_to_dict(memory)
-        strategy = memory.get("strategy")
-        if strategy is None:
-            raise ValueError("CUDA memory options must set strategy to 'boundary' or 'ckpt'.")
-        if strategy == "boundary":
-            boundary = memory.get("boundary") or {}
-            boundary_config = {
-                "enabled": True,
-                "storage": boundary.get("storage", "gpu"),
-            }
-            for key in (
-                "transfer_interval",
-                "pinned_memory",
-                "disk_dir",
-                "ring_buffers",
-                "disk_async_read",
-            ):
-                if key in boundary:
-                    boundary_config[key] = boundary[key]
-            merged["boundary_saving_config"] = boundary_config
-            merged["use_ckpt"] = False
-            return merged
-        if strategy == "ckpt":
-            ckpt = memory.get("ckpt") or {}
-            merged["use_ckpt"] = True
-            merged["ckpt_mode"] = ckpt.get("mode", "chunk")
-            merged["ckpt_storage"] = ckpt.get("storage", "gpu")
-            if "pinned_memory" in ckpt:
-                merged["ckpt_pinned_memory"] = ckpt["pinned_memory"]
-            if merged["ckpt_mode"] == "chunk":
-                merged["ckpt_chunks"] = ckpt.get("chunks", 100)
-            elif merged["ckpt_mode"] == "recursive":
-                merged["ckpt_num"] = ckpt.get("count", 0)
-            else:
-                raise ValueError(f"Unsupported ckpt mode '{merged['ckpt_mode']}'. Expected 'chunk' or 'recursive'.")
-            return merged
-        raise ValueError(f"Unsupported CUDA memory strategy '{strategy}'. Expected 'boundary' or 'ckpt'.")
-
-    def _resolve_backend_init_kwargs(self, *, backend, kwargs, backend_options, eager_options, cuda_options):
-        if eager_options is not None and backend != "eager":
-            raise ValueError("eager_options can only be used with backend='eager'.")
-        if cuda_options is not None and backend != "cuda":
-            raise ValueError("cuda_options can only be used with backend='cuda'.")
-
-        wrong_top_level = (CUDA_OPTION_KEYS if backend == "eager" else EAGER_OPTION_KEYS) & set(kwargs)
-        if wrong_top_level:
-            target = "cuda_options" if backend == "cuda" else "eager_options"
-            raise ValueError(
-                f"Top-level kwargs {sorted(wrong_top_level)} do not belong to backend='{backend}'. "
-                f"Pass backend-specific options through {target} or switch backend."
-            )
-
-        merged = dict(kwargs)
-        merged = self._merge_option_dict(merged, backend_options, label="backend_options")
-        selected_options = eager_options if backend == "eager" else cuda_options
-        option_label = "eager_options" if backend == "eager" else "cuda_options"
-        merged = self._merge_option_dict(merged, selected_options, label=option_label)
-
-        wrong_merged = (CUDA_OPTION_KEYS if backend == "eager" else EAGER_OPTION_KEYS) & set(merged)
-        if wrong_merged:
-            raise ValueError(f"Invalid {option_label} for backend='{backend}': {sorted(wrong_merged)}")
-
-        if backend == "cuda":
-            merged = self._normalize_cuda_kwargs(merged)
-        return merged
-
-    def _forward_signature(self):
-        signature = inspect.signature(type(self).forward)
-        parameters = list(signature.parameters.values())
-        if parameters and parameters[0].name == "self":
-            signature = signature.replace(parameters=parameters[1:])
-        return signature
+        self.__signature__ = _public_forward_signature(type(self).forward)
 
     def __getattr__(self, name):
         try:
@@ -142,12 +157,6 @@ class PropTorch(torch.nn.Module):
 
     def parameters(self):
         return self._backend_impl.parameters()
-
-    def get_parameters(self, key):
-        return self._backend_impl.get_parameters(key)
-
-    def set_parameters(self, model):
-        return self._backend_impl.set_parameters(model)
 
     def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, **kwargs):
         return self._backend_impl(

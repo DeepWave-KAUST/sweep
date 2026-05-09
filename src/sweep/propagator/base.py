@@ -3,30 +3,31 @@ import inspect
 
 import numpy as np
 from sweep.equations.fields import build_field_index, format_field_specs
+from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFAULTS
 
 class PropBase:
 
     def __init__(self,
                  equation, 
                  shape, 
-                 source_type: list=[],
-                 receiver_type: list=[],
-                 abcn=50, 
-                 free_surface=False, 
-                 dh=10., 
-                 dt=0.002, 
-                 dev=None, 
-                 use_ckpt=True,
-                 ckpt_chunks=100,
-                 ckpt_mode="chunk",
-                 ckpt_num=0,
-                 ckpt_storage="gpu",
-                 ckpt_pinned_memory=None,
-                 pml_type='spml',
-                 nt=-1,
-                 B=1,
-                 allow_growth=True,
-                 full_mode="full",
+                 source_type=None,
+                 receiver_type=None,
+                 abcn=PROP_DEFAULTS.abcn,
+                 free_surface=PROP_DEFAULTS.free_surface,
+                 dh=PROP_DEFAULTS.dh,
+                 dt=PROP_DEFAULTS.dt,
+                 dev=PROP_DEFAULTS.dev,
+                 use_ckpt=PROP_DEFAULTS.use_ckpt,
+                 ckpt_chunks=CKPT_DEFAULTS.chunks,
+                 ckpt_mode=CKPT_DEFAULTS.mode,
+                 ckpt_num=CKPT_DEFAULTS.count,
+                 ckpt_storage=CKPT_DEFAULTS.storage,
+                 ckpt_pinned_memory=CKPT_DEFAULTS.pinned_memory,
+                 pml_type=PROP_DEFAULTS.pml_type,
+                 nt=PROP_DEFAULTS.nt,
+                 B=PROP_DEFAULTS.batch_size,
+                 allow_growth=PROP_DEFAULTS.allow_growth,
+                 full_mode=PROP_DEFAULTS.full_mode,
                  boundary_saving_config=None,
                  **kwargs):
         """Base class for the Propagator
@@ -44,7 +45,7 @@ class PropBase:
             dt (float, optional): Time step (seconds). Defaults to 0.002.
             dev (str, optional): The device to run the simulation on. Defaults to None.
             use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
-            ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 50.
+            ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 100.
             ckpt_mode (str, optional): Checkpointing mode. "chunk" stores periodic checkpoints and
                 replays each chunk, while "recursive" stores a fixed number of checkpoints and
                 recursively recomputes intermediate states. Defaults to "chunk".
@@ -222,13 +223,13 @@ class PropBase:
 
     def _normalize_boundary_saving_config(self, config):
         default = {
-            "enabled": False,
-            "storage": "gpu",
-            "transfer_interval": None,
-            "pinned_memory": None,
-            "disk_dir": None,
-            "ring_buffers": None,
-            "disk_async_read": False,
+            "enabled": BOUNDARY_DEFAULTS.enabled,
+            "storage": BOUNDARY_DEFAULTS.storage,
+            "transfer_interval": BOUNDARY_DEFAULTS.transfer_interval,
+            "pinned_memory": BOUNDARY_DEFAULTS.pinned_memory,
+            "disk_dir": BOUNDARY_DEFAULTS.disk_dir,
+            "ring_buffers": BOUNDARY_DEFAULTS.ring_buffers,
+            "disk_async_read": BOUNDARY_DEFAULTS.disk_async_read,
         }
 
         if config is None:
@@ -244,36 +245,44 @@ class PropBase:
             raise ValueError("boundary_saving_config['storage'] must be 'gpu', 'cpu', or 'disk'")
 
         if merged["storage"] == "gpu":
-            merged["transfer_interval"] = 1
-            merged["pinned_memory"] = False
+            merged["transfer_interval"] = BOUNDARY_DEFAULTS.gpu_transfer_interval
+            merged["pinned_memory"] = BOUNDARY_DEFAULTS.gpu_pinned_memory
             merged["disk_dir"] = None
-            merged["ring_buffers"] = 1
-            merged["disk_async_read"] = False
+            merged["ring_buffers"] = BOUNDARY_DEFAULTS.gpu_ring_buffers
+            merged["disk_async_read"] = BOUNDARY_DEFAULTS.disk_async_read
 
         if merged["storage"] == "cpu":
             merged["disk_dir"] = None
-            merged["disk_async_read"] = False
+            merged["disk_async_read"] = BOUNDARY_DEFAULTS.disk_async_read
             if merged["transfer_interval"] is None:
-                merged["transfer_interval"] = 64
+                merged["transfer_interval"] = BOUNDARY_DEFAULTS.cpu_transfer_interval
             if merged["ring_buffers"] is None:
-                merged["ring_buffers"] = 1
+                merged["ring_buffers"] = BOUNDARY_DEFAULTS.cpu_ring_buffers
             if merged["pinned_memory"] is None:
-                merged["pinned_memory"] = True
+                merged["pinned_memory"] = BOUNDARY_DEFAULTS.cpu_pinned_memory
 
         if merged["storage"] == "disk":
             merged["pinned_memory"] = False
             if merged["transfer_interval"] is None:
                 if merged["disk_async_read"]:
-                    merged["transfer_interval"] = 40 if self.ndim == 2 else 16
+                    merged["transfer_interval"] = (
+                        BOUNDARY_DEFAULTS.disk_async_transfer_interval_2d
+                        if self.ndim == 2
+                        else BOUNDARY_DEFAULTS.disk_async_transfer_interval_3d
+                    )
                 else:
-                    merged["transfer_interval"] = 32
+                    merged["transfer_interval"] = BOUNDARY_DEFAULTS.disk_transfer_interval
             if merged["ring_buffers"] is None:
                 if merged["disk_async_read"]:
-                    merged["ring_buffers"] = 2
+                    merged["ring_buffers"] = BOUNDARY_DEFAULTS.disk_async_ring_buffers
                 else:
-                    merged["ring_buffers"] = 3 if self.ndim == 2 else 2
-            if merged["disk_async_read"] and merged["ring_buffers"] < 2:
-                merged["ring_buffers"] = 2
+                    merged["ring_buffers"] = (
+                        BOUNDARY_DEFAULTS.disk_ring_buffers_2d
+                        if self.ndim == 2
+                        else BOUNDARY_DEFAULTS.disk_ring_buffers_3d
+                    )
+            if merged["disk_async_read"] and merged["ring_buffers"] < BOUNDARY_DEFAULTS.disk_async_ring_buffers:
+                merged["ring_buffers"] = BOUNDARY_DEFAULTS.disk_async_ring_buffers
 
         if merged["transfer_interval"] < 1:
             raise ValueError("boundary_saving_config['transfer_interval'] must be >= 1")
@@ -290,7 +299,7 @@ class PropBase:
                 raise ValueError("ckpt_pinned_memory is only valid when ckpt_storage='cpu'")
             return "gpu", False
         if pinned_memory is None:
-            pinned_memory = True
+            pinned_memory = CKPT_DEFAULTS.cpu_pinned_memory
         return "cpu", bool(pinned_memory)
 
     def resolve_boundary_saving_config(self, override=None, use_boundary_saving=None):
