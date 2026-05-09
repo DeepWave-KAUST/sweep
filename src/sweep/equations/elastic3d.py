@@ -206,31 +206,30 @@ class Elastic(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu]
     
-    def func(self, *args, **kwargs):
-        if len(args) == 35:
-            return step(*args, pd=self.pd, pml=self.b, free_surface=getattr(self, "free_surface", False), **kwargs)
-        if len(args) == 33:
-            wavefields = args[:27]
-            vp, vs, rho = args[27:30]
-            dt, h, b = args[30:33]
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        if len(models) == 5:
+            vp, vs, rho, lame_lambda, lame_mu = models
+        elif len(models) == 3:
+            vp, vs, rho = models
             lame_lambda = rho * (vp**2 - 2 * vs**2)
             lame_mu = rho * vs**2
-            return step(
-                *wavefields,
-                vp,
-                vs,
-                rho,
-                lame_lambda,
-                lame_mu,
-                dt,
-                h,
-                b,
-                pd=self.pd,
-                pml=self.b,
-                free_surface=getattr(self, "free_surface", False),
-                **kwargs,
-            )
-        raise ValueError(f"Elastic3D.func expected 33 or 35 positional args, got {len(args)}")
+        else:
+            raise ValueError(f"Elastic3D.func expected 3 or 5 models, got {len(models)}")
+        return step(
+            *wavefields,
+            vp,
+            vs,
+            rho,
+            lame_lambda,
+            lame_mu,
+            dt,
+            h,
+            b,
+            pd=self.pd,
+            pml=self.b,
+            free_surface=getattr(self, "free_surface", False),
+            **kwargs,
+        )
     
     def _C(self, ):
         # CUDA IMPLEMENTATION

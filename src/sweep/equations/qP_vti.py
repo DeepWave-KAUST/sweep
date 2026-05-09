@@ -79,7 +79,7 @@ class AcousticVTI(SecondOrderEquation):
     def wavefields(self):
         return ["h1", "h2", "psix", "psiz", "zetax", "zetaz"]
 
-    def func(self, *args, **kwargs):
-        hz, hx = self._spacings_2d(args[10])
-        nabla_z, nabla_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
-        return step_cpml(*args, self.b, nabla_x, nabla_z, self.gradient, self.grad_kernels, **kwargs)
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        hz, hx = self._spacings_2d(h)
+        nabla_z, nabla_x = self.laplace1d_sep(wavefields[0], self.laplace_kernels, hz, hx)
+        return step_cpml(*wavefields, *models, dt, h, b, self.b, nabla_x, nabla_z, self.gradient, self.grad_kernels, **kwargs)

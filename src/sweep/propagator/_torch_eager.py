@@ -44,7 +44,15 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         return spacing
 
     def _build_step_func(self):
-        step_func = self.equation.func
+        equation_step = self.equation.func
+        num_wavefields = len(self.wavefield_names)
+
+        def step_func(*flat_args):
+            wavefields = flat_args[:num_wavefields]
+            models = flat_args[num_wavefields:-3]
+            dt, h, b = flat_args[-3:]
+            return equation_step(wavefields, models, dt, h, b)
+
         if not self.use_compile or not hasattr(torch, "compile"):
             return step_func
         compile_kwargs = {
@@ -62,9 +70,9 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
                 compiler.cudagraph_mark_step_begin()
 
-    def _compiled_step(self, wavefield, fixargs):
+    def _compiled_step(self, wavefields, models, dt, h, b):
         self._mark_compile_step_begin()
-        return self.step_func(*wavefield, *fixargs)
+        return self.step_func(*wavefields, *models, dt, h, b)
 
     def _prepare_runtime_models(self, models):
         prepare = getattr(self.equation, "prepare_models", None)
@@ -102,7 +110,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             cached.zero_()
         return cached
 
-    def _run_chunk(self, wavefield, fixargs, wavelet, nt, start_t, chunk_size, src, rec, record_shape, adj=False):
+    def _run_chunk(self, wavefield, models, dt, h, b, wavelet, nt, start_t, chunk_size, src, rec, record_shape, adj=False):
         chunk_record = self._get_cached_tensor(
             "chunk_record",
             record_shape,
@@ -114,7 +122,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             t = start_t + local_i
             if t >= nt:
                 break
-            wavefield = list(self._compiled_step(wavefield, fixargs))
+            wavefield = list(self._compiled_step(wavefield, models, dt, h, b))
             time = t if not adj else nt - t - 1
             for source_idx in self.source_indices:
                 wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
@@ -195,7 +203,6 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
         self.models_padded = models
         runtime_models = self._prepare_runtime_models(models)
-        fixargs = runtime_models + [self.dt, self._equation_spacing, None]
         wavefield = [
             self._get_cached_tensor(f"wavefield:{index}", shape_wavefield, device=self.dev, dtype=torch.float32)
             for index, _ in enumerate(self.wavefield_names)
@@ -219,10 +226,12 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     state = list(chunk_inputs[:num_wavefields])
                     chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
                     chunk_runtime_models = self._prepare_runtime_models(chunk_models)
-                    chunk_fixargs = chunk_runtime_models + [self.dt, self._equation_spacing, None]
                     return self._run_chunk(
                         state,
-                        chunk_fixargs,
+                        chunk_runtime_models,
+                        self.dt,
+                        self._equation_spacing,
+                        None,
                         wavelet,
                         nt,
                         start_t,
@@ -240,7 +249,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         else:
             multi_receiver = len(self.receiver_indices) > 1
             for i in range(nt):
-                wavefield = list(self._compiled_step(wavefield, fixargs))
+                wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None))
                 time = i if not adj else nt - i - 1
                 for source_idx in self.source_indices:
                     wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])

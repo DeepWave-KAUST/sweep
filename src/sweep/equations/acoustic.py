@@ -76,11 +76,12 @@ class Acoustic(SecondOrderEquation):
     def field_specs(self):
         return list(self.FIELD_SPECS)
 
-    def func(self, *args, **kwargs):
-        dh = args[8]
-        hz, hx = self._spacings_2d(dh)
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(args[0], self.laplace_kernels, hz, hx)
-        out = step_cpml(*args, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        u_now = wavefields[0]
+        (vp,) = models
+        hz, hx = self._spacings_2d(h)
+        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out

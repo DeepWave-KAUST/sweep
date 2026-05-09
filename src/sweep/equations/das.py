@@ -759,17 +759,16 @@ class DASElastic(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu]
 
-    def func(self, *args, **kwargs):
-        if len(args) == 25:
-            return step_das_2d(*args, pd=self.pd, pml=self.b, **kwargs)
-        if len(args) == 23:
-            wavefields = args[:17]
-            vp, vs, rho = args[17:20]
-            dt, h, b = args[20:23]
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        if len(models) == 5:
+            vp, vs, rho, lame_lambda, lame_mu = models
+        elif len(models) == 3:
+            vp, vs, rho = models
             lame_lambda = rho * (vp**2 - 2 * vs**2)
             lame_mu = rho * vs**2
-            return step_das_2d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
-        raise ValueError(f"DASElastic.func expected 23 or 25 positional args, got {len(args)}")
+        else:
+            raise ValueError(f"DASElastic.func expected 3 or 5 models, got {len(models)}")
+        return step_das_2d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
 
     def _C(self):
         import sweep._C as _C
@@ -860,17 +859,16 @@ class DASElastic3D(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu]
 
-    def func(self, *args, **kwargs):
-        if len(args) == 39:
-            return step_das_3d(*args, pd=self.pd, pml=self.b, **kwargs)
-        if len(args) == 37:
-            wavefields = args[:31]
-            vp, vs, rho = args[31:34]
-            dt, h, b = args[34:37]
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        if len(models) == 5:
+            vp, vs, rho, lame_lambda, lame_mu = models
+        elif len(models) == 3:
+            vp, vs, rho = models
             lame_lambda = rho * (vp**2 - 2 * vs**2)
             lame_mu = rho * vs**2
-            return step_das_3d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
-        raise ValueError(f"DASElastic3D.func expected 37 or 39 positional args, got {len(args)}")
+        else:
+            raise ValueError(f"DASElastic3D.func expected 3 or 5 models, got {len(models)}")
+        return step_das_3d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
 
     def _C(self):
         import sweep._C as _C

@@ -147,7 +147,7 @@ class PropJax(PropBase):
             snapshots = None
             snapshot_targets = None
 
-        fixargs = [self._dt, jnp.asarray(self._grid_spacing, dtype=jnp.float32), None]
+        step_args = (self._dt, jnp.asarray(self._grid_spacing, dtype=jnp.float32), None)
 
         source_idx_at = []
         receiver_idx_at = []
@@ -177,11 +177,12 @@ class PropJax(PropBase):
 
         def step_fn_single(carry, it):
                 
-            wavefields, fixargs, snapshots, snapshot_pos = carry
+            wavefields, step_args, snapshots, snapshot_pos = carry
+            dt, h, b = step_args
 
             time = it if not adj else nt - it - 1
             # Forward propagation
-            wavefields = wave_equation(*wavefields, *models, *fixargs, *aux_args)
+            wavefields = wave_equation(wavefields, models, dt, h, b, *aux_args)
             wavefields_arr = jnp.stack(wavefields, axis=0)
             # Add source
             wf_src = jnp.take(wavefields_arr, sidxs, axis=0)
@@ -215,7 +216,7 @@ class PropJax(PropBase):
             all_rec = jax.vmap(one_channel)(wf_sel)
             rec_t = jnp.transpose(all_rec, (1, 2, 0, 3))[..., 0]
 
-            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), fixargs, snapshots, snapshot_pos), rec_t
+            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), step_args, snapshots, snapshot_pos), rec_t
 
 
         def step_fn_single_with_skip(carry, it):
@@ -256,7 +257,7 @@ class PropJax(PropBase):
             chunk_start = chunk_idx * chunk_size
             return checkpointed_run_chunk(carry, chunk_start)
         
-        initial = (wavefields, tuple(fixargs), snapshots, jnp.array(0, dtype=jnp.int32))
+        initial = (wavefields, step_args, snapshots, jnp.array(0, dtype=jnp.int32))
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
         num_steps = num_chunks if self.use_ckpt else nt
         (final), rec_seq = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))

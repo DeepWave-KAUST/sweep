@@ -194,6 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "test" / "test_outputs" / "solver_gradient_mode_suite")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument(
+        "--gradient-plot-scale",
+        choices=("reference", "self"),
+        default="reference",
+        help="Use eager/reference scale for candidate plots or each gradient's own scale.",
+    )
     parser.add_argument("--no-fail", action="store_true", help="Always exit 0 after writing summaries.")
     return parser
 
@@ -844,13 +850,14 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
             status, failures = row_status(metrics, args)
             plot_path = ""
             if not args.no_plot:
+                scale_grads = eager_result["grads"] if args.gradient_plot_scale == "reference" else None
                 saved = save_gradient_plot(
                     case_dir / f"{case_key}_{mode}_gradient.png",
                     f"{case_key} {mode}",
                     candidate["grads"],
                     sources,
                     receivers,
-                    scale_grads=eager_result["grads"],
+                    scale_grads=scale_grads,
                 )
                 plot_path = str(saved) if saved is not None else ""
             row.update(

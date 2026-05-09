@@ -31,13 +31,12 @@ def step(vx, vz, sxx, szz, sxz,
          dt, h, b, pd, 
          pml=None,
          free_surface=False,
+         lame_lambda_2mu=None,
          ):
 
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
-    vp = _match_reference_shape(vp, vx)
-    vs = _match_reference_shape(vs, vx)
-    rho = _match_reference_shape(rho, vx)
+    lame_lambda_2mu = lame_lambda + 2 * lame_mu if lame_lambda_2mu is None else lame_lambda_2mu
 
     txx_x = pd.x_forward(sxx)
     if free_surface:
@@ -46,10 +45,7 @@ def step(vx, vz, sxx, szz, sxz,
     else:
         txz_z = pd.z_backward(sxz)
         tzz_z = pd.z_forward(szz)
-    txz_z = _match_reference_shape(txz_z, vx)
-    tzz_z = _match_reference_shape(tzz_z, vx)
     txz_x = pd.x_backward(sxz)
-    txz_x = _match_reference_shape(txz_x, vx)
 
     # Update Veclocity fields
     m_tzzz = azh * m_tzzz + bzh * tzz_z
@@ -72,18 +68,15 @@ def step(vx, vz, sxx, szz, sxz,
     else:
         vz_z = pd.z_backward(vz)
         vx_z = pd.z_forward(vx)
-    vz_z = _match_reference_shape(vz_z, vx)
-    vx_z = _match_reference_shape(vx_z, vx)
     vz_x = pd.x_forward(vz)
-    vz_x = _match_reference_shape(vz_x, vx)
 
     m_vzz = az * m_vzz + bz * vz_z
     vz_z = vz_z + m_vzz
     m_vxx = ax * m_vxx + bx * vx_x
     vx_x = vx_x + m_vxx
 
-    szz = szz + dt * ((lame_lambda + 2 * lame_mu) * vz_z + lame_lambda * vx_x)
-    sxx = sxx + dt * ((lame_lambda + 2 * lame_mu) * vx_x + lame_lambda * vz_z)
+    szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
+    sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
@@ -158,33 +151,37 @@ class Elastic(FirstOrderEquation):
         vp, vs, rho = models
         lame_lambda = rho * (vp**2 - 2 * vs**2)
         lame_mu = rho * vs**2
-        return [vp, vs, rho, lame_lambda, lame_mu]
+        return [vp, vs, rho, lame_lambda, lame_mu, lame_lambda + 2 * lame_mu]
     
-    def func(self, *args, **kwargs):
-        if len(args) == 23:
-            return step(*args, pd=self.pd, pml=self.b, free_surface=getattr(self, "free_surface", False), **kwargs)
-        if len(args) == 21:
-            wavefields = args[:15]
-            vp, vs, rho = args[15:18]
-            dt, h, b = args[18:21]
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        if len(models) == 6:
+            vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = models
+        elif len(models) == 5:
+            vp, vs, rho, lame_lambda, lame_mu = models
+            lame_lambda_2mu = lame_lambda + 2 * lame_mu
+        elif len(models) == 3:
+            vp, vs, rho = models
             lame_lambda = rho * (vp**2 - 2 * vs**2)
             lame_mu = rho * vs**2
-            return step(
-                *wavefields,
-                vp,
-                vs,
-                rho,
-                lame_lambda,
-                lame_mu,
-                dt,
-                h,
-                b,
-                pd=self.pd,
-                pml=self.b,
-                free_surface=getattr(self, "free_surface", False),
-                **kwargs,
-            )
-        raise ValueError(f"Elastic.func expected 21 or 23 positional args, got {len(args)}")
+            lame_lambda_2mu = lame_lambda + 2 * lame_mu
+        else:
+            raise ValueError(f"Elastic.func expected 3, 5, or 6 models, got {len(models)}")
+        return step(
+            *wavefields,
+            vp,
+            vs,
+            rho,
+            lame_lambda,
+            lame_mu,
+            dt,
+            h,
+            b,
+            pd=self.pd,
+            pml=self.b,
+            free_surface=getattr(self, "free_surface", False),
+            lame_lambda_2mu=lame_lambda_2mu,
+            **kwargs,
+        )
     
     def _C(self, ):
         # CUDA IMPLEMENTATION

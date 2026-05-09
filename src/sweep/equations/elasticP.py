@@ -81,5 +81,5 @@ class ElasticP(FirstOrderEquation):
     def wavefields(self):
         return ['vx', 'vz', 'txx', 'tzz', 'txz']
     
-    def func(self, *args, **kwargs):
-        return step(*args, self.k, self.pd, self.op, **kwargs)
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        return step(*wavefields, *models, dt, h, b, self.k, self.pd, self.op, **kwargs)

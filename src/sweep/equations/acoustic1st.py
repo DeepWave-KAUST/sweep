@@ -113,5 +113,5 @@ class Acoustic1st(FirstOrderEquation):
     def supported_pml(self):
         return ['cpmls', 'spml']
 
-    def func(self, *args, **kwargs):
-        return self.step(*args, pd=self.pd, pml=self.b, **kwargs)
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        return self.step(*wavefields, *models, dt, h, b, pd=self.pd, pml=self.b, **kwargs)

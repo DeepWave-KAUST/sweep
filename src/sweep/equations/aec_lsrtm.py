@@ -90,5 +90,5 @@ class AECLSRTM(FirstOrderEquation):
     def wavefields(self):
         return ['p', 'vx', 'vz', 'txx', 'tzz', 'txz', 'ps', 'vxs', 'vzs', 'txxs', 'tzzs', 'txzs']
     
-    def func(self, *args, **kwargs):
-        return step(*args, pd=self.pd, **kwargs)
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        return step(*wavefields, *models, dt, h, b, pd=self.pd, **kwargs)
