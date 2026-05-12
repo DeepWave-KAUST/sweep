@@ -1,4 +1,7 @@
 # SWEEP
+
+English | [中文](README.zh-CN.md)
+
 Seismic Wave Equation Exploration Platform (SWEEP) is a Python package for seismic wave-equation modeling, migration, and inversion.
 
 Documentation: https://deepwave-kaust.github.io/sweep/
@@ -6,7 +9,7 @@ Documentation: https://deepwave-kaust.github.io/sweep/
 Recent interface updates:
 
 - lazy imports are supported, so you only need to install the backend you plan to use
-- `PropTorch` is now the main Torch-family entry point, with `backend="eager"` or `backend="cuda"`
+- `PropTorch` is now the main Torch-family entry point, with `backend="eager"` for PyTorch operators or `backend="cuda"` for the compiled C++/CUDA extension
 - backend-specific options are grouped through `EagerOptions`, `CUDAOptions`, `MemoryOptions`, `BoundaryOptions`, and `CkptOptions`
 - examples are reorganized by task family under `examples/`, including new `wavefields/` and `reducingmemory/` groups
 
@@ -15,21 +18,74 @@ Recent interface updates:
 Install SWEEP from the repository root. If you have not downloaded the source code yet, clone the repository first and change into the project directory:
 
 ```bash
-git clone <repository-url>
-cd geophyai
+git clone git@github.com:DeepWave-KAUST/sweep.git
+cd sweep
 ```
 
-### Pytorch/Jax only
+### PyTorch/JAX only
 This is the simplest way to install SWEEP, but it may not be the most efficient way to use it. If you only want to use sweep with PyTorch or JAX APIs, you can install the package with the following command:
 ```bash
 pip install .
 ```
 
-### Pytorch Bindings
-Faster, recommended, but may take more time to install due to the need to compile CUDA kernels. If you have a compatible NVIDIA GPU and CUDA toolkit installed, you can install the PyTorch bindings with CUDA support using the following command:
+### C++/CUDA bindings
+Faster, recommended, but may take more time to install because it compiles the C++ CPU kernels and CUDA kernels. If you have PyTorch and a compatible CUDA toolkit installed, build the compiled extension with:
+
 ```bash
 SWEEP_BUILD_CUDA=1 pip install -v .[cuda] --no-build-isolation
 ```
+
+If CUDA architectures cannot be detected automatically during installation, set them explicitly before running the install command. For example:
+
+```bash
+# V100
+export TORCH_CUDA_ARCH_LIST="7.0"
+
+# A100
+export TORCH_CUDA_ARCH_LIST="8.0"
+
+# Build one wheel that supports both V100 and A100
+export TORCH_CUDA_ARCH_LIST="7.0;8.0"
+```
+
+If the CUDA toolkit you want is not the default one on the system, also set `CUDA_HOME`:
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.9
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+```
+
+`SWEEP_CUDA_ARCH_LIST` can be used as a package-specific alias for `TORCH_CUDA_ARCH_LIST`. If neither variable is set, the build defaults to V100-compatible `7.0` to avoid PyTorch's empty architecture auto-detection on CPU-only build nodes.
+
+## Backends and Devices
+
+For `PropTorch`, the public backends are:
+
+| `PropTorch` backend | Tensor device | Implementation |
+| --- | --- | --- |
+| `backend="eager"` | CPU or CUDA | PyTorch eager operators and PyTorch autograd |
+| `backend="cuda"` | CPU | compiled C++ CPU kernels |
+| `backend="cuda"` | CUDA | compiled CUDA kernels |
+
+In the FWI example scripts, the CLI separates implementation and device:
+
+```bash
+# PyTorch eager on GPU when available
+python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend pytorch --device auto
+
+# compiled CUDA kernels
+python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend c --device cuda
+
+# compiled C++ CPU kernels
+python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend c --device cpu
+
+# compiled C++ CPU kernels with MPI shot parallelism
+mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi.py \
+    --backend c --device cpu --mpi --mpi-forward-batchsize 4
+```
+
+`--device auto` uses CUDA when PyTorch reports that CUDA is available; otherwise it falls back to CPU.
 
 ## Usage
 The following example shows how to compute the gradient of a toy model with respect to the velocity model.
@@ -77,9 +133,9 @@ vp = torch.from_numpy(true_model).to(dev).requires_grad_(True)
 t = np.arange(0, int(nt//2)*dt, dt)
 wave = ricker(t-delay, f=fm)
 
-# Acquicition geometry
-sources = np.array([[1, 1]]) # in grid, shape=(nshots, 2)
-receivers = np.array([[[99, 1]]]) # in grid, shape=(nshots, nreceivers, 2)
+# Acquisition geometry
+sources = np.array([[[1, 1]]], dtype=np.int32) # in grid, shape=(nshots, nsources, 2)
+receivers = np.array([[[99, 1]]], dtype=np.int32) # in grid, shape=(nshots, nreceivers, 2)
 
 # Forward modeling
 # Backward propagation (Pytorch)
@@ -111,8 +167,6 @@ Examples are organized by task family under `examples/`:
 - `wavefields/`
 - `reducingmemory/`
 - `multi-gpu/`
-
-See [examples/README.md](examples/README.md) for the current layout.
 
 ## License
 This project is licensed under the MIT License.

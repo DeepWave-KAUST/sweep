@@ -1,7 +1,7 @@
 #pragma once
 
 #include <tuple>
-#include "./common/wavetypes.h"
+#include "shared/wavetypes.h"
 
 template <typename Func>
 auto wrap_forward(Func f)

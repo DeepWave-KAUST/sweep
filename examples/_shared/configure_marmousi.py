@@ -99,6 +99,16 @@ _CONFIGS = {
             "pinned_memory": True,
         },
     },
+    "fwi_2d_acoustic_torch_cpu": {
+        "output_dir": "acoustic_fwi_cpu",
+        "transpose_shot": True,
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "cpu",
+            "transfer_interval": 10,
+            "pinned_memory": False,
+        },
+    },
     "fwi_2d_acoustic_encoding_common": {
         "max_time_shift_ratio": 0.2,
     },
@@ -153,6 +163,16 @@ _CONFIGS = {
             "storage": "gpu",
             "transfer_interval": 10,
             "pinned_memory": True,
+        },
+    },
+    "fwi_2d_elastic_torch_cpu": {
+        "output_dir": "elastic_fwi_marmousi_cpu",
+        "record_layout": "cuda",
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "cpu",
+            "transfer_interval": 10,
+            "pinned_memory": False,
         },
     },
 }

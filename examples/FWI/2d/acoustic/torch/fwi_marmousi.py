@@ -27,6 +27,16 @@ from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
 from plotting import gather_extent, plot_loss_curve
+from mpi_utils import (
+    allgather_shot_records,
+    allreduce_gradients,
+    allreduce_tensors,
+    barrier,
+    init_mpi,
+    rank_zero_print,
+    reduce_scalar,
+    split_indices,
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,14 +52,59 @@ from sweep.signal import ricker
 
 torch.backends.cudnn.benchmark = True
 
-def build_config(backend):
-    backend_key = f"fwi_2d_acoustic_torch_{backend}"
-    if backend not in ("eager", "cuda"):
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'eager'].")
+PUBLIC_BACKENDS = ("pytorch", "c")
+DEVICES = ("auto", "cuda", "cpu")
+LEGACY_BACKEND_ALIASES = {
+    "eager": "pytorch",
+    "compiled": "c",
+}
+LEGACY_BACKEND_DEVICES = {
+    "cuda": ("c", "cuda"),
+    "cpu": ("c", "cpu"),
+}
+
+
+def resolve_backend_device(backend, device="auto"):
+    backend = str(backend).lower()
+    device = str(device).lower()
+    if device not in DEVICES:
+        raise ValueError(f"Unsupported device '{device}'. Expected one of {list(DEVICES)}.")
+
+    if backend in LEGACY_BACKEND_DEVICES:
+        legacy_backend = backend
+        backend, legacy_device = LEGACY_BACKEND_DEVICES[legacy_backend]
+        if device != "auto" and device != legacy_device:
+            raise ValueError(
+                f"Legacy --backend {legacy_backend} implies --device {legacy_device}, got --device {device}."
+            )
+        device = legacy_device
+    elif backend in LEGACY_BACKEND_ALIASES:
+        backend = LEGACY_BACKEND_ALIASES[backend]
+    elif backend not in PUBLIC_BACKENDS:
+        expected = list(PUBLIC_BACKENDS) + list(LEGACY_BACKEND_ALIASES) + list(LEGACY_BACKEND_DEVICES)
+        raise ValueError(f"Unsupported backend '{backend}'. Expected one of {expected}.")
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but torch.cuda.is_available() is False.")
+    return backend, device
+
+
+def build_config(backend, device="auto"):
+    backend, device = resolve_backend_device(backend, device)
+    backend_key = f"fwi_2d_acoustic_torch_{'eager' if backend == 'pytorch' else device}"
     cfg = shared_config.get_config("fwi_2d_acoustic_torch_common")
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
+    cfg["device"] = device
+    if backend == "pytorch" and device == "cpu":
+        cfg["output_dir"] = f"{cfg['output_dir']}_cpu"
     return cfg
+
+
+def select_device(cfg):
+    return torch.device(cfg["device"])
 
 
 def build_solver(shape, dev, cfg):
@@ -71,7 +126,7 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "eager":
+    if cfg["backend"] == "pytorch":
         return PropTorch(
             equation,
             **prop_kwargs,
@@ -83,7 +138,7 @@ def build_solver(shape, dev, cfg):
             ckpt_chunks=cfg.get("ckpt_chunks", 100),
         )
 
-    if cfg["backend"] == "cuda":
+    if cfg["backend"] == "c":
         return PropTorch(
             equation,
             **prop_kwargs,
@@ -150,12 +205,12 @@ def timed_forward(solver, wave, sources, receivers, models):
     return obs.detach().cpu().numpy(), elapsed_ms
 
 
-def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsize):
+def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsize, disable_progress=False):
     nshots = sources.shape[0]
     shot_batchsize = max(1, min(int(shot_batchsize), nshots))
     obs_batches = []
     batch_starts = list(range(0, nshots, shot_batchsize))
-    progress = tqdm.tqdm(batch_starts, desc="Forward shots", unit="batch")
+    progress = tqdm.tqdm(batch_starts, desc="Forward shots", unit="batch", disable=disable_progress)
 
     if solver.dev.type == "cuda":
         start_event = torch.cuda.Event(enable_timing=True)
@@ -194,6 +249,81 @@ def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsi
 
     progress.close()
     obs = torch.cat(obs_batches, dim=0).numpy()
+    return obs, elapsed_ms
+
+
+def mpi_forward_batchsize(cfg, local_count):
+    batchsize = int(cfg.get("mpi_forward_batchsize", cfg.get("forward_batchsize", 1)))
+    return max(1, min(batchsize, max(1, int(local_count))))
+
+
+def generate_observed_data(solver, wave, sources, receivers, models, cfg, mpi):
+    nshots = sources.shape[0]
+    if not mpi.enabled:
+        forward_batchsize = min(int(cfg.get("forward_batchsize", nshots)), nshots)
+        if forward_batchsize >= nshots:
+            return timed_forward(solver, wave, sources, receivers, models=models)
+        return timed_forward_batched(
+            solver,
+            wave,
+            sources,
+            receivers,
+            models=models,
+            shot_batchsize=forward_batchsize,
+        )
+
+    local_idx = split_indices(np.arange(nshots, dtype=np.int64), mpi)
+    local_batchsize = mpi_forward_batchsize(cfg, local_idx.size)
+    local_rounds = (local_idx.size + local_batchsize - 1) // local_batchsize
+    rounds = int(reduce_scalar(local_rounds, mpi, op="max"))
+    progress = tqdm.tqdm(
+        total=nshots,
+        desc="MPI forward shots",
+        unit="shot",
+        disable=not mpi.is_root,
+        file=sys.stdout,
+        dynamic_ncols=False,
+    )
+
+    local_obs_batches = []
+    elapsed_ms = 0.0
+    completed_total = 0
+    progress_t0 = time.perf_counter()
+    for round_idx in range(rounds):
+        start = round_idx * local_batchsize
+        stop = min(start + local_batchsize, local_idx.size)
+        completed = 0
+        if start < local_idx.size:
+            batch_idx = local_idx[start:stop]
+            batch_obs, batch_elapsed_ms = timed_forward(
+                solver,
+                wave,
+                sources[batch_idx],
+                receivers[batch_idx],
+                models=models,
+            )
+            local_obs_batches.append(batch_obs)
+            elapsed_ms += batch_elapsed_ms
+            completed = batch_idx.size
+        completed = int(reduce_scalar(completed, mpi, op="sum"))
+        if mpi.is_root:
+            completed_total += completed
+            progress.update(completed)
+            wall = max(time.perf_counter() - progress_t0, 1e-12)
+            rate = completed_total / wall
+            remaining = max(nshots - completed_total, 0)
+            eta = remaining / rate if rate > 0.0 else float("inf")
+            print(
+                f"MPI forward progress: {completed_total}/{nshots} shots "
+                f"({100.0 * completed_total / nshots:.1f}%), "
+                f"{rate:.2f} shot/s, eta={eta / 60.0:.1f} min",
+                flush=True,
+            )
+    progress.close()
+
+    local_obs = np.concatenate(local_obs_batches, axis=0) if local_obs_batches else None
+    elapsed_ms = reduce_scalar(elapsed_ms, mpi, op="max")
+    obs = allgather_shot_records(local_idx, local_obs, nshots, shot_axis=0, mpi=mpi)
     return obs, elapsed_ms
 
 
@@ -315,9 +445,9 @@ def inversion_step_batched(
     dev,
     shot_idx,
     train_shot_batchsize,
+    normalization_elements,
 ):
     train_shot_batchsize = max(1, min(int(train_shot_batchsize), shot_idx.shape[0]))
-    total_elements = int(obs_torch[shot_idx].numel())
     total_loss_sum = 0.0
 
     for start in range(0, shot_idx.shape[0], train_shot_batchsize):
@@ -330,14 +460,15 @@ def inversion_step_batched(
         syn = solver(wave, sources[batch_idx], receivers[batch_idx], models=[inv_vp], **solver_kwargs)
         obs_batch = obs_torch[batch_idx].to(dev)
         loss_sum = (syn - obs_batch).pow(2).sum()
-        (loss_sum / total_elements).backward()
+        (loss_sum / normalization_elements).backward()
         total_loss_sum += float(loss_sum.detach().cpu())
 
-    return total_loss_sum / total_elements
+    return total_loss_sum
 
 
 def run_fwi(
-    backend="eager",
+    backend="pytorch",
+    device="auto",
     batchsize_override=None,
     train_shot_batchsize_override=None,
     forward_batchsize_override=None,
@@ -345,8 +476,11 @@ def run_fwi(
     use_compile_override=None,
     use_ckpt_override=None,
     ckpt_chunks_override=None,
+    mpi_forward_batchsize_override=None,
+    use_mpi=False,
 ):
-    cfg = build_config(backend)
+    cfg = build_config(backend, device)
+    mpi = init_mpi(use_mpi, cfg["backend"], cfg["device"])
     if batchsize_override is not None:
         cfg["batchsize"] = int(batchsize_override)
     if train_shot_batchsize_override is not None:
@@ -361,6 +495,8 @@ def run_fwi(
         cfg["use_ckpt"] = bool(use_ckpt_override)
     if ckpt_chunks_override is not None:
         cfg["ckpt_chunks"] = int(ckpt_chunks_override)
+    if mpi_forward_batchsize_override is not None:
+        cfg["mpi_forward_batchsize"] = int(mpi_forward_batchsize_override)
 
     if int(cfg["batchsize"]) < 1:
         raise ValueError(f"batchsize must be >= 1, got {cfg['batchsize']}.")
@@ -371,53 +507,58 @@ def run_fwi(
             "train_shot_batchsize must be >= 1, "
             f"got {cfg.get('train_shot_batchsize')}."
         )
+    if int(cfg.get("mpi_forward_batchsize", 1)) < 1:
+        raise ValueError(f"mpi_forward_batchsize must be >= 1, got {cfg['mpi_forward_batchsize']}.")
 
     script_dir = Path(__file__).resolve().parent
     output_dir = script_dir / cfg["output_dir"]
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if mpi.is_root:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    barrier(mpi)
 
     torch.manual_seed(0)
     np.random.seed(0)
+    if mpi.enabled:
+        rank_zero_print(
+            mpi,
+            f"MPI enabled: ranks={mpi.size}, backend=c, device=cpu, "
+            f"mpi_forward_batchsize={cfg.get('mpi_forward_batchsize', cfg.get('forward_batchsize', 1))}",
+        )
 
     true_model = np.load(EXAMPLES_DIR / cfg["true_model"]).astype(np.float32)
     init_model = np.load(EXAMPLES_DIR / cfg["init_model"]).astype(np.float32)
     shape = true_model.shape
 
-    if backend == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("The CUDA acoustic FWI example requires a CUDA-capable PyTorch environment.")
-
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = select_device(cfg)
     solver = build_solver(shape, dev, cfg)
+    run_label = f"{cfg['backend']}/{cfg['device']}"
 
     _, wave = build_wavelet(cfg)
-    save_wavelet_figure(wave, output_dir)
+    if mpi.is_root:
+        save_wavelet_figure(wave, output_dir)
 
     sources, receivers = build_geometry(shape, cfg)
-    print("(nshots, ndim):", sources.shape)
-    print("(nshots, nreceivers, ndim):", receivers.shape)
+    rank_zero_print(mpi, "(nshots, ndim):", sources.shape)
+    rank_zero_print(mpi, "(nshots, nreceivers, ndim):", receivers.shape)
+    if mpi.enabled:
+        rank_zero_print(mpi, f"MPI ranks: {mpi.size} (CPU backend, shot-parallel)")
 
     true_vp = torch.from_numpy(true_model).to(dev)
-    forward_batchsize = min(int(cfg.get("forward_batchsize", sources.shape[0])), sources.shape[0])
-    if forward_batchsize >= sources.shape[0]:
-        obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
-        print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
-    else:
-        obs, elapsed_ms = timed_forward_batched(
-            solver,
-            wave,
-            sources,
-            receivers,
-            models=[true_vp],
-            shot_batchsize=forward_batchsize,
-        )
-        print(
-            f"Forward modeling time ({backend}, batched {forward_batchsize} shots/step): "
-            f"{elapsed_ms:.2f} ms"
-        )
+    obs, elapsed_ms = generate_observed_data(
+        solver,
+        wave,
+        sources,
+        receivers,
+        models=[true_vp],
+        cfg=cfg,
+        mpi=mpi,
+    )
+    rank_zero_print(mpi, f"Forward modeling time ({run_label}): {elapsed_ms:.2f} ms")
     del true_vp
     if dev.type == "cuda":
         torch.cuda.empty_cache()
-    save_observed_figure(obs, receivers, output_dir, cfg)
+    if mpi.is_root:
+        save_observed_figure(obs, receivers, output_dir, cfg)
 
     inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
     optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)
@@ -427,7 +568,8 @@ def run_fwi(
     nshots = sources.shape[0]
     batchsize = min(cfg["batchsize"], nshots)
     train_shot_batchsize = min(int(cfg.get("train_shot_batchsize", batchsize)), batchsize)
-    print(
+    rank_zero_print(
+        mpi,
         "Training shot selection:",
         f"batchsize={batchsize},",
         f"train_shot_batchsize={train_shot_batchsize},",
@@ -436,11 +578,14 @@ def run_fwi(
         f"use_compile={cfg.get('use_compile', False)}",
     )
 
-    for epoch in tqdm.trange(cfg["epochs"]):
+    progress = tqdm.trange(cfg["epochs"], disable=mpi.enabled and not mpi.is_root)
+    for epoch in progress:
         optimizer.zero_grad()
 
         shot_idx = np.random.choice(nshots, size=batchsize, replace=False)
-        loss_value = inversion_step_batched(
+        local_shot_idx = split_indices(shot_idx, mpi)
+        normalization_elements = int(obs_torch[shot_idx].numel())
+        local_loss_sum = inversion_step_batched(
             solver,
             wave,
             sources,
@@ -448,15 +593,28 @@ def run_fwi(
             obs_torch,
             inv_vp,
             dev,
-            shot_idx,
+            local_shot_idx,
             train_shot_batchsize,
+            normalization_elements,
+        )
+        if mpi.enabled and local_shot_idx.size == 0:
+            solver.source_illumination = torch.zeros_like(inv_vp)
+            solver.receiver_illumination = torch.zeros_like(inv_vp)
+        allreduce_gradients([inv_vp], mpi)
+        allreduce_tensors(
+            [
+                getattr(solver, "source_illumination", None),
+                getattr(solver, "receiver_illumination", None),
+            ],
+            mpi,
         )
         optimizer.step()
 
+        loss_value = reduce_scalar(local_loss_sum, mpi, op="sum") / normalization_elements
         losses.append(loss_value)
-        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
+        rank_zero_print(mpi, f"[{run_label}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
 
-        if epoch % cfg["show_every"] == 0:
+        if mpi.is_root and epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
             grad_np = inv_vp.grad.detach().cpu().numpy()
             source_illumination = getattr(solver, "source_illumination", None)
@@ -485,7 +643,12 @@ def run_fwi(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Acoustic FWI example for PyTorch and CUDA propagators.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Acoustic FWI example. Choose implementation with --backend and device with --device. "
+            "Use --backend c --device cpu for the C++ CPU binding."
+        )
+    )
     parser.add_argument(
         "--import-mode",
         choices=("env", "source"),
@@ -494,9 +657,15 @@ def parse_args():
     )
     parser.add_argument(
         "--backend",
-        choices=("eager", "cuda"),
-        default="eager",
-        help="Select which PropTorch backend to use.",
+        metavar="{pytorch,c}",
+        default="pytorch",
+        help="Implementation backend. Legacy aliases 'eager', 'compiled', 'cuda', and 'cpu' are still accepted.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=DEVICES,
+        default="auto",
+        help="Execution device. 'auto' uses CUDA when available, otherwise CPU.",
     )
     parser.add_argument(
         "--batchsize",
@@ -528,13 +697,13 @@ def parse_args():
         dest="use_compile",
         action="store_true",
         default=None,
-        help="Enable torch.compile for the eager backend step function.",
+        help="Enable torch.compile for the PyTorch backend step function.",
     )
     compile_group.add_argument(
         "--no-compile",
         dest="use_compile",
         action="store_false",
-        help="Disable torch.compile for the eager backend step function.",
+        help="Disable torch.compile for the PyTorch backend step function.",
     )
     ckpt_group = parser.add_mutually_exclusive_group()
     ckpt_group.add_argument(
@@ -542,19 +711,30 @@ def parse_args():
         dest="use_ckpt",
         action="store_true",
         default=None,
-        help="Enable eager checkpointing to reduce activation memory.",
+        help="Enable PyTorch checkpointing to reduce activation memory.",
     )
     ckpt_group.add_argument(
         "--no-ckpt",
         dest="use_ckpt",
         action="store_false",
-        help="Disable eager checkpointing. This can require much more GPU memory.",
+        help="Disable PyTorch checkpointing. This can require much more GPU memory.",
     )
     parser.add_argument(
         "--ckpt-chunks",
         type=int,
         default=None,
-        help="Override eager checkpoint chunk length in time steps.",
+        help="Override PyTorch checkpoint chunk length in time steps.",
+    )
+    parser.add_argument(
+        "--mpi",
+        action="store_true",
+        help="Enable MPI shot parallelism for --backend c --device cpu. Launch with mpirun or mpiexec.",
+    )
+    parser.add_argument(
+        "--mpi-forward-batchsize",
+        type=int,
+        default=None,
+        help="Number of local shots per MPI forward batch. Defaults to 1 for visible progress.",
     )
     return parser.parse_args()
 
@@ -563,6 +743,7 @@ def main():
     args = parse_args()
     run_fwi(
         backend=args.backend,
+        device=args.device,
         batchsize_override=args.batchsize,
         train_shot_batchsize_override=args.train_shot_batchsize,
         forward_batchsize_override=args.forward_batchsize,
@@ -570,6 +751,8 @@ def main():
         use_compile_override=args.use_compile,
         use_ckpt_override=args.use_ckpt,
         ckpt_chunks_override=args.ckpt_chunks,
+        mpi_forward_batchsize_override=args.mpi_forward_batchsize,
+        use_mpi=args.mpi,
     )
 
 

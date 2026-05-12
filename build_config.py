@@ -26,6 +26,28 @@ def env_flag_enabled(name):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def openmp_flags():
+    if sys.platform == "win32":
+        return ["/openmp"]
+    if sys.platform == "darwin":
+        return []
+    return ["-fopenmp"]
+
+
+def configure_cuda_arch_list():
+    """Avoid PyTorch's empty GPU-arch auto-detection on login/CPU nodes."""
+    if os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        return
+
+    arch_list = os.environ.get("SWEEP_CUDA_ARCH_LIST", "7.0")
+    os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+    log.warn(
+        "TORCH_CUDA_ARCH_LIST is not set; defaulting to %s. "
+        "Set TORCH_CUDA_ARCH_LIST or SWEEP_CUDA_ARCH_LIST to target other GPUs.",
+        arch_list,
+    )
+
+
 def is_metadata_only_invocation():
     metadata_commands = {"egg_info", "dist_info", "prepare_metadata_for_build_wheel"}
     return any(arg in metadata_commands for arg in sys.argv[1:])
@@ -51,9 +73,10 @@ def patch_packaging_compat():
 
 def get_sources():
     return (
-        glob.glob("src/sweep/csrc/common/**/*.cu", recursive=True)
-        + glob.glob("src/sweep/csrc/equations/**/*.cu", recursive=True)
-        + ["src/sweep/csrc/bindings.cpp"]
+        glob.glob("src/sweep/csrc/cpu/**/*.cpp", recursive=True)
+        + glob.glob("src/sweep/csrc/cuda/common/**/*.cu", recursive=True)
+        + glob.glob("src/sweep/csrc/cuda/equations/**/*.cu", recursive=True)
+        + ["src/sweep/csrc/bindings/module.cpp"]
     )
 
 
@@ -141,6 +164,8 @@ def build_setup_kwargs(distribution_name="sweep", build_cuda=None):
         ) from exc
 
     SweepBuildExtension = make_build_extension(BuildExtension)
+    omp_flags = openmp_flags()
+    configure_cuda_arch_list()
 
     kwargs["ext_modules"] = [
         CUDAExtension(
@@ -148,17 +173,22 @@ def build_setup_kwargs(distribution_name="sweep", build_cuda=None):
             sources=get_sources(),
             include_dirs=[
                 os.path.join(ROOT_DIR, "src/sweep/csrc"),
-                os.path.join(ROOT_DIR, "src/sweep/csrc/common"),
-                os.path.join(ROOT_DIR, "src/sweep/csrc/equations"),
+                os.path.join(ROOT_DIR, "src/sweep/csrc/bindings"),
+                os.path.join(ROOT_DIR, "src/sweep/csrc/shared"),
+                os.path.join(ROOT_DIR, "src/sweep/csrc/cuda"),
+                os.path.join(ROOT_DIR, "src/sweep/csrc/cuda/common"),
+                os.path.join(ROOT_DIR, "src/sweep/csrc/cuda/equations"),
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-Wno-attributes"],
+                "cxx": ["-O3", "-Wno-attributes", *omp_flags],
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
                     "--threads=16",
+                    "-Xcompiler=-Wno-deprecated-declarations",
                 ],
             },
+            extra_link_args=omp_flags,
         )
     ]
     kwargs["cmdclass"] = {

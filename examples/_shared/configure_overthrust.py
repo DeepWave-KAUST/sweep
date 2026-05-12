@@ -119,6 +119,16 @@ _CONFIGS = {
             "pinned_memory": True,
         },
     },
+    "fwi_2d_elastic_torch_cpu": {
+        "output_dir": "elastic_fwi_overthrust_cpu",
+        "record_layout": "cuda",
+        "boundary_saving_config": {
+            "enabled": True,
+            "storage": "cpu",
+            "transfer_interval": 10,
+            "pinned_memory": False,
+        },
+    },
     "fwi_3d_acoustic_jax": {
         **_FWI_3D_ACOUSTIC_COMMON,
         "output_dir": "acoustic_3d_jax_overthrust",

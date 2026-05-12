@@ -22,3 +22,6 @@ examples/models/**
 !examples/models/**/.gitkeep
 test/cuda
 test/test_outputs/
+test/outputs/
+slurm_logs/
+dcgm/

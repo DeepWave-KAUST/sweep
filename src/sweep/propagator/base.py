@@ -160,7 +160,7 @@ class PropBase:
         return [self.wavefield_names[0]]
 
     def _resolve_field_types(self, kinds, role):
-        resolved = self._default_field_types(role) if not kinds else list(kinds)
+        resolved = PropBase._default_field_types(self, role) if not kinds else list(kinds)
         attr = "supports_source" if role == "source" else "supports_receiver"
         output = []
         for name in resolved:
