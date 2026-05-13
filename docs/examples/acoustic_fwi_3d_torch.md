@@ -7,10 +7,10 @@ Source file:
 ## What This Example Does
 
 This example runs 3D acoustic full-waveform inversion on the Overthrust model
-with one script that supports two propagator backends:
+with one script that supports two Torch implementations:
 
-- `eager`: pure PyTorch propagation through `PropTorch(..., backend="eager")`
-- `cuda`: compiled CUDA propagation through `PropTorch(..., backend="cuda")`
+- `eager`: pure PyTorch propagation through `PropTorch(..., backend="torch", impl="eager")`
+- `c`: compiled CUDA propagation through `PropTorch(..., backend="torch", impl="c")`
 
 The script:
 
@@ -59,20 +59,20 @@ python3 examples/models/overthrust/plot_true_smooth.py
 The generated model files under `examples/models/` are ignored by git. The
 helper scripts in that directory remain tracked.
 
-## Backend Selection
+## Backend / Implementation Selection
 
 Run the example with:
 
 === "PyTorch"
 
     ```bash
-    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend eager
+    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend cuda
+    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda
     ```
 
 ## Key Configuration
@@ -113,7 +113,7 @@ If GPU memory is tight, keep the optimization batch at four shots but process
 them sequentially with gradient accumulation:
 
 ```bash
-python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend cuda --train-shot-batchsize 1
+python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda --train-shot-batchsize 1
 ```
 
 This runs one selected shot at a time inside each optimizer step and usually
@@ -124,7 +124,7 @@ model storage, optimizer state, PML buffers, and other fixed allocations remain.
 If needed, you can also reduce the number of selected shots per optimizer step:
 
 ```bash
-python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend cuda --batchsize 1
+python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda --batchsize 1
 ```
 
 That further lowers memory use, but it also changes the optimization behavior
@@ -166,7 +166,7 @@ and saves:
 - `loss.png`: the inversion loss curve
 - `epoch_XXXX.png`: three orthogonal slices of the true model, the current inverted model, and the current gradient
 
-Each backend writes into its own output directory:
+Each implementation/device combination writes into its own output directory:
 
 === "PyTorch"
 
@@ -192,24 +192,24 @@ current gradient.
 Step 1. Prepare the Overthrust 3D `.npy` files listed above if they do not
 already exist.
 
-Step 2. Choose the backend you want to use.
+Step 2. Choose the implementation you want to use.
 
 === "PyTorch"
 
     ```bash
-    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend eager
+    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend cuda
+    python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda
     ```
 
 Step 3. If memory is tight, retry with one-shot accumulation.
 
 ```bash
-python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend cuda --train-shot-batchsize 1
+python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda --train-shot-batchsize 1
 ```
 
 Step 4. Check the backend output directory for `loss.png`,

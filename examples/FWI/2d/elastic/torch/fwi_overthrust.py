@@ -18,6 +18,7 @@ from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
 from plotting import gather_extent, plot_loss_curve
+from backend_cli import DEVICES, add_backend_impl_device_args, resolve_backend_impl_device
 from mpi_utils import (
     allgather_shot_records,
     allreduce_gradients,
@@ -43,53 +44,16 @@ from sweep.signal import ricker
 
 torch.backends.cudnn.benchmark = True
 
-PUBLIC_BACKENDS = ("pytorch", "c")
-DEVICES = ("auto", "cuda", "cpu")
-LEGACY_BACKEND_ALIASES = {
-    "eager": "pytorch",
-    "compiled": "c",
-}
-LEGACY_BACKEND_DEVICES = {
-    "cuda": ("c", "cuda"),
-    "cpu": ("c", "cpu"),
-}
 
-
-def resolve_backend_device(backend, device="auto"):
-    backend = str(backend).lower()
-    device = str(device).lower()
-    if device not in DEVICES:
-        raise ValueError(f"Unsupported device '{device}'. Expected one of {list(DEVICES)}.")
-
-    if backend in LEGACY_BACKEND_DEVICES:
-        legacy_backend = backend
-        backend, legacy_device = LEGACY_BACKEND_DEVICES[legacy_backend]
-        if device != "auto" and device != legacy_device:
-            raise ValueError(
-                f"Legacy --backend {legacy_backend} implies --device {legacy_device}, got --device {device}."
-            )
-        device = legacy_device
-    elif backend in LEGACY_BACKEND_ALIASES:
-        backend = LEGACY_BACKEND_ALIASES[backend]
-    elif backend not in PUBLIC_BACKENDS:
-        expected = list(PUBLIC_BACKENDS) + list(LEGACY_BACKEND_ALIASES) + list(LEGACY_BACKEND_DEVICES)
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of {expected}.")
-
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but torch.cuda.is_available() is False.")
-    return backend, device
-
-
-def build_config(backend, device="auto"):
-    backend, device = resolve_backend_device(backend, device)
-    backend_key = f"fwi_2d_elastic_torch_{'eager' if backend == 'pytorch' else device}"
+def build_config(backend, impl=None, device="auto"):
+    backend, impl, device = resolve_backend_impl_device(backend, impl, device)
+    backend_key = f"fwi_2d_elastic_torch_{'eager' if impl == 'eager' else device}"
     cfg = shared_config.get_config("fwi_2d_elastic_torch_common")
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
+    cfg["impl"] = impl
     cfg["device"] = device
-    if backend == "pytorch" and device == "cpu":
+    if impl == "eager" and device == "cpu":
         cfg["output_dir"] = f"{cfg['output_dir']}_cpu"
     return cfg
 
@@ -117,11 +81,12 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmls",
     )
 
-    if cfg["backend"] == "pytorch":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(
                 use_compile=cfg["use_compile"],
             ),
@@ -129,11 +94,12 @@ def build_solver(shape, dev, cfg):
             ckpt_chunks=cfg["ckpt_chunks"],
         )
 
-    if cfg["backend"] == "c":
+    if cfg["impl"] == "c":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="cuda",
+            backend="torch",
+            impl="c",
             cuda_options=CUDAOptions(
                 memory=MemoryOptions(
                     strategy="boundary",
@@ -142,7 +108,7 @@ def build_solver(shape, dev, cfg):
             ),
         )
 
-    raise ValueError(f"Unsupported backend '{cfg['backend']}'.")
+    raise ValueError(f"Unsupported backend/impl '{cfg['backend']}'.")
 
 
 def build_boundary_options(boundary_cfg):
@@ -187,7 +153,7 @@ def to_backend_layout(record, cfg):
 
 def timed_forward(solver, wave, sources, receivers, models, cfg):
     kwargs = {}
-    if cfg["backend"] == "c":
+    if cfg["impl"] == "c":
         kwargs["use_boundary_saving"] = False
 
     if solver.dev.type == "cuda":
@@ -350,7 +316,7 @@ def build_encoded_batch(wave, obs, shot_idx, cfg):
     signs = np.random.choice(np.array([-1.0, 1.0], dtype=np.float32), size=(shot_idx.size,))
     encoded_wave = signs[:, None] * wave[None, :]
     encoded_obs = np.sum(selected_obs * signs[:, None, None, None], axis=0, keepdims=True)
-    if cfg["backend"] == "c":
+    if cfg["impl"] == "c":
         encoded_wave = encoded_wave[None, ...]
     return encoded_wave.astype(np.float32), to_backend_layout(encoded_obs, cfg).astype(np.float32)
 
@@ -361,9 +327,9 @@ def select_observed_batch(obs_torch, shot_idx, cfg):
     return obs_torch[shot_idx]
 
 
-def run_fwi(backend="pytorch", device="auto", use_mpi=False, mpi_forward_batchsize_override=None):
-    cfg = build_config(backend, device)
-    mpi = init_mpi(use_mpi, cfg["backend"], cfg["device"])
+def run_fwi(backend="torch", impl=None, device="auto", use_mpi=False, mpi_forward_batchsize_override=None):
+    cfg = build_config(backend, impl, device)
+    mpi = init_mpi(use_mpi, cfg["backend"], cfg["device"], cfg["impl"])
     if mpi_forward_batchsize_override is not None:
         cfg["mpi_forward_batchsize"] = int(mpi_forward_batchsize_override)
     if int(cfg.get("mpi_forward_batchsize", 1)) < 1:
@@ -378,7 +344,7 @@ def run_fwi(backend="pytorch", device="auto", use_mpi=False, mpi_forward_batchsi
     if mpi.enabled:
         rank_zero_print(
             mpi,
-            f"MPI enabled: ranks={mpi.size}, backend=c, device=cpu, "
+            f"MPI enabled: ranks={mpi.size}, backend={cfg['backend']}, impl={cfg['impl']}, device={cfg['device']}, "
             f"mpi_forward_batchsize={cfg.get('mpi_forward_batchsize', 1)}",
         )
 
@@ -390,7 +356,7 @@ def run_fwi(backend="pytorch", device="auto", use_mpi=False, mpi_forward_batchsi
 
     dev = select_device(cfg)
     solver = build_solver(shape, dev, cfg)
-    run_label = f"{cfg['backend']}/{cfg['device']}"
+    run_label = f"{cfg['backend']}/{cfg['impl']}/{cfg['device']}"
 
     _, wave = build_wavelet(cfg)
     if mpi.is_root:
@@ -459,7 +425,7 @@ def run_fwi(backend="pytorch", device="auto", use_mpi=False, mpi_forward_batchsi
         shot_idx = split_indices(global_shot_idx, mpi)
 
         forward_kwargs = {}
-        if cfg["backend"] == "c":
+        if cfg["impl"] == "c":
             forward_kwargs["use_boundary_saving"] = True
 
         local_loss_sum = 0.0
@@ -468,7 +434,7 @@ def run_fwi(backend="pytorch", device="auto", use_mpi=False, mpi_forward_batchsi
             encoded_wave, encoded_obs = build_encoded_batch(wave, obs, shot_idx, cfg)
             encoded_sources = sources[shot_idx]
             encoded_receivers = receivers[:1]
-            if cfg["backend"] == "c":
+            if cfg["impl"] == "c":
                 encoded_sources = encoded_sources[None, ...]
             syn = solver(
                 encoded_wave,
@@ -532,8 +498,8 @@ def run_fwi(backend="pytorch", device="auto", use_mpi=False, mpi_forward_batchsi
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Elastic Overthrust FWI example. Choose implementation with --backend and device with --device. "
-            "Use --backend c --device cpu for the C++ CPU binding."
+            "Elastic Overthrust FWI example. Choose backend with --backend, implementation with --impl, "
+            "and device with --device. Use --backend torch --impl c --device cpu for the C++ CPU binding."
         )
     )
     parser.add_argument(
@@ -542,22 +508,11 @@ def parse_args():
         default=IMPORT_MODE,
         help="Load sweep from the current environment or from the repository source tree.",
     )
-    parser.add_argument(
-        "--backend",
-        metavar="{pytorch,c}",
-        default="pytorch",
-        help="Implementation backend. Legacy aliases 'eager', 'compiled', 'cuda', and 'cpu' are still accepted.",
-    )
-    parser.add_argument(
-        "--device",
-        choices=DEVICES,
-        default="auto",
-        help="Execution device. 'auto' uses CUDA when available, otherwise CPU.",
-    )
+    add_backend_impl_device_args(parser)
     parser.add_argument(
         "--mpi",
         action="store_true",
-        help="Enable MPI shot parallelism for --backend c --device cpu. Launch with mpirun or mpiexec.",
+        help="Enable MPI shot parallelism for --backend torch --impl c --device cpu. Launch with mpirun or mpiexec.",
     )
     parser.add_argument(
         "--mpi-forward-batchsize",
@@ -572,6 +527,7 @@ def main():
     args = parse_args()
     run_fwi(
         backend=args.backend,
+        impl=args.impl,
         device=args.device,
         use_mpi=args.mpi,
         mpi_forward_batchsize_override=args.mpi_forward_batchsize,

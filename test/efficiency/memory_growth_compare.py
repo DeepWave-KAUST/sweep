@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from sweep.equations import Acoustic, Acoustic3D, Elastic, Elastic3D
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator._c import _CompiledPropagator
 from sweep.propagator.torch import PropTorch
 
 
@@ -197,7 +197,7 @@ def build_case_factories(args, device):
     )
 
     def make_cuda_factory(**solver_kwargs):
-        return lambda: PropCUDA(equation, **common_kwargs, **solver_kwargs)
+        return lambda: _CompiledPropagator(equation, **common_kwargs, **solver_kwargs)
 
     def make_torch_factory():
         return lambda: PropTorch(equation, use_ckpt=False, **common_kwargs)

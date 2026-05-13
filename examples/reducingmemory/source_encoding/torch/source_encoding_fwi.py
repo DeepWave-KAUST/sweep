@@ -17,6 +17,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from backend_cli import add_backend_impl_device_args, resolve_backend_impl_device
 from plotting import gather_extent, plot_loss_curve
 
 import matplotlib.pyplot as plt
@@ -34,12 +35,21 @@ from sweep.signal import ricker
 torch.backends.cudnn.benchmark = True
 
 
-def build_config(backend):
-    if backend not in ("eager", "cuda"):
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'eager'].")
-    cfg = shared_config.get_config(f"fwi_2d_acoustic_encoding_torch_{backend}")
+def build_config(backend, impl=None, device="auto"):
+    backend, impl, device = resolve_backend_impl_device(backend, impl, device)
+    if impl == "c" and device != "cuda":
+        raise ValueError("The source-encoding FWI example currently supports the c implementation only on CUDA.")
+    mode = "eager" if impl == "eager" else "cuda"
+    cfg = shared_config.get_config(f"fwi_2d_acoustic_encoding_torch_{mode}")
     cfg["backend"] = backend
+    cfg["impl"] = impl
+    cfg["device"] = device
+    cfg["mode"] = mode
     return cfg
+
+
+def select_device(cfg):
+    return torch.device(cfg["device"])
 
 
 def build_solver(shape, dev, cfg):
@@ -61,22 +71,24 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(
                 use_compile=cfg["use_compile"],
             ),
             use_ckpt=cfg["use_ckpt"],
         )
 
-    if cfg["backend"] == "cuda":
+    if cfg["impl"] == "c":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="cuda",
+            backend="torch",
+            impl="c",
             cuda_options=CUDAOptions(
                 memory=MemoryOptions(
                     strategy="boundary",
@@ -85,7 +97,7 @@ def build_solver(shape, dev, cfg):
             ),
         )
 
-    raise ValueError(f"Unsupported backend '{cfg['backend']}'.")
+    raise ValueError(f"Unsupported backend/impl '{cfg['backend']}/{cfg['impl']}'.")
 
 
 def build_boundary_options(boundary_cfg):
@@ -225,7 +237,7 @@ def record_time_axis(record, cfg):
     return 0
 
 
-def build_encoded_batch(wave, obs, shot_idx, cfg, dev, backend):
+def build_encoded_batch(wave, obs, shot_idx, cfg, dev):
     nsel = len(shot_idx)
     nt = cfg["nt"]
     max_shift = max(1, int(cfg["max_time_shift_ratio"] * nt))
@@ -247,7 +259,7 @@ def build_encoded_batch(wave, obs, shot_idx, cfg, dev, backend):
         encoded_wave[i] = shot_wave
         encoded_obs += shot_obs
 
-    if backend == "cuda":
+    if cfg["impl"] == "c":
         encoded_wave = encoded_wave[None, ...]
         encoded_obs = torch.as_tensor(encoded_obs[None, ...], dtype=torch.float32, device=dev)
         return encoded_wave, encoded_obs
@@ -258,10 +270,10 @@ def build_encoded_batch(wave, obs, shot_idx, cfg, dev, backend):
 
 
 def prepare_encoded_inputs(wave, obs, sources, receivers_shared, shot_idx, cfg, dev):
-    encoded_wave, encoded_obs = build_encoded_batch(wave, obs, shot_idx, cfg, dev, cfg["backend"])
+    encoded_wave, encoded_obs = build_encoded_batch(wave, obs, shot_idx, cfg, dev)
     sources_sel = sources[shot_idx]
 
-    if cfg["backend"] == "cuda":
+    if cfg["impl"] == "c":
         return (
             encoded_wave,
             sources_sel[None, ...],
@@ -277,8 +289,8 @@ def prepare_encoded_inputs(wave, obs, sources, receivers_shared, shot_idx, cfg, 
     )
 
 
-def run_fwi(backend="eager"):
-    cfg = build_config(backend)
+def run_fwi(backend="torch", impl=None, device="auto"):
+    cfg = build_config(backend, impl, device)
     script_dir = Path(__file__).resolve().parent
     output_dir = script_dir / cfg["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -290,11 +302,9 @@ def run_fwi(backend="eager"):
     init_model = np.load(EXAMPLES_DIR / cfg["init_model"]).astype(np.float32)
     shape = true_model.shape
 
-    if backend == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("The CUDA acoustic FWI encoding example requires a CUDA-capable PyTorch environment.")
-
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = select_device(cfg)
     solver = build_solver(shape, dev, cfg)
+    run_label = f"{cfg['backend']}/{cfg['impl']}/{cfg['device']}"
 
     _, wave = build_wavelet(cfg)
     save_wavelet_figure(wave, output_dir)
@@ -305,7 +315,7 @@ def run_fwi(backend="eager"):
 
     true_vp = torch.from_numpy(true_model).to(dev)
     obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
-    print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
+    print(f"Forward modeling time ({run_label}): {elapsed_ms:.2f} ms")
     save_observed_figure(obs, receivers, output_dir, cfg)
 
     receivers_shared = receivers[:1]
@@ -345,7 +355,7 @@ def run_fwi(backend="eager"):
 
         loss_value = float(loss.item())
         losses.append(loss_value)
-        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
+        print(f"[{run_label}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
 
         if epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
@@ -362,25 +372,20 @@ def run_fwi(backend="eager"):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Acoustic source-encoding FWI example for PyTorch and CUDA propagators.")
+    parser = argparse.ArgumentParser(description="Acoustic source-encoding FWI example for Torch eager and c propagators.")
     parser.add_argument(
         "--import-mode",
         choices=("env", "source"),
         default=IMPORT_MODE,
         help="Load sweep from the current environment or from the repository source tree.",
     )
-    parser.add_argument(
-        "--backend",
-        choices=("eager", "cuda"),
-        default="eager",
-        help="Select which PropTorch backend to use.",
-    )
+    add_backend_impl_device_args(parser)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    run_fwi(backend=args.backend)
+    run_fwi(backend=args.backend, impl=args.impl, device=args.device)
 
 
 if __name__ == "__main__":

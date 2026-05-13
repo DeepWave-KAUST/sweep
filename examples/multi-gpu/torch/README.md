@@ -26,7 +26,7 @@ Run on two GPUs:
 
 ```bash
 torchrun --standalone --nproc_per_node=2 \
-  examples/multi-gpu/torch/fwi_marmousi_dist.py --backend cuda
+  examples/multi-gpu/torch/fwi_marmousi_dist.py --backend torch --impl c --device cuda
 ```
 
 The script splits each global shot batch across ranks, sums model gradients

@@ -1,8 +1,8 @@
 # Installation
 
 This page explains how to install SWEEP depending on whether your working
-environment is based on JAX, plain PyTorch, or PyTorch with the compiled CUDA
-binding.
+environment is based on JAX, plain PyTorch, or PyTorch with the compiled
+C++/CUDA Torch extension binding.
 
 ## Get the Source Code
 
@@ -14,11 +14,11 @@ git clone https://github.com/DeepWave-KAUST/sweep
 cd sweep
 ```
 
-## Install by Backend
+## Install by Backend and Binding
 
-=== "PyTorch + CUDA Binding"
+=== "PyTorch + Extension Binding"
 
-    Use this path when you want the compiled CUDA backend in addition to the
+    Use this path when you want compiled C++/CUDA kernels in addition to the
     regular PyTorch interface.
 
     1. Install a compatible PyTorch + CUDA environment first.
@@ -32,16 +32,14 @@ cd sweep
     Notes:
 
     - This build produces the compiled extension module `sweep._C`.
-    - After installation, you can use the CUDA backend through:
+    - After installation, you can use the compiled extension implementation through:
 
     ```python
     from sweep.propagator.torch import PropTorch
 
-    solver = PropTorch(..., backend="cuda")
+    solver = PropTorch(..., backend="torch", impl="c")
     ```
 
-    - The lower-level CUDA-specific class `sweep.propagator.cuda.PropCUDA`
-      remains available as well.
     - The compiled binding currently supports:
       - 2D/3D acoustic equations
       - 2D/3D elastic equations
@@ -61,14 +59,14 @@ cd sweep
     Notes:
 
     - This path gives you the Torch-family Python interface, including
-      `PropTorch(..., backend="eager")`.
+      `PropTorch(..., backend="torch", impl="eager")`.
     - You can still use checkpointing and `torch.compile` through
       `EagerOptions`.
 
 === "JAX"
 
     Use this path when your environment is JAX-first and you do not need the
-    PyTorch CUDA binding.
+    PyTorch extension binding.
 
     1. Install a working JAX environment first.
     2. Install SWEEP from the repository root:
@@ -89,7 +87,7 @@ cd sweep
 - A working [PyTorch](https://pytorch.org/get-started/locally/) or
   [JAX](https://docs.jax.dev/en/latest/installation.html) environment depending
   on your backend
-- CUDA toolkit and compatible NVIDIA drivers if building CUDA bindings
+- CUDA toolkit and compatible NVIDIA drivers if building the CUDA side of the extension binding
 
 ## Verify the Installation
 
@@ -109,7 +107,7 @@ print(sweep.backend.jax.is_available())
 print(sweep.backend.torch.cuda.is_available())
 ```
 
-If you built the CUDA binding, you can also verify that the extension is
+If you built the extension binding, you can also verify that the extension is
 importable:
 
 ```python
@@ -122,7 +120,7 @@ print(importlib.util.find_spec("sweep._C") is not None)
 
 - Lazy imports mean you do not need to install both JAX and PyTorch unless you
   plan to use both.
-- If you want the compiled Torch CUDA binding, use the `PyTorch + CUDA Binding`
+- If you want the compiled Torch extension binding, use the `PyTorch + Extension Binding`
   path rather than the base install.
 - CUDA source files are needed for source builds, but not for normal runtime
   imports after installation.

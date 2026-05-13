@@ -5,7 +5,7 @@ Run from the repository root after installing the package, for example:
     PYTHONPATH=src python test/cpu_binding_gradient_consistency.py
 
 The script intentionally keeps the grids small.  It compares the CPU path of
-the compiled ``backend="cuda"`` binding across full, boundary-saving,
+``backend="torch", impl="c"`` across full, boundary-saving,
 chunk-checkpoint, and recursive-checkpoint backward requests for every
 equation currently exported through the compiled binding.  When CUDA is
 available it also compares each C/CPU mode against the matching C/CUDA mode.
@@ -220,7 +220,8 @@ def make_solver(case: Case, mode: str, device: torch.device | None = None, confi
     if mode == "full":
         return PropTorch(
             equation,
-            backend="cuda",
+            backend="torch",
+            impl="c",
             use_ckpt=False,
             boundary_saving_config={"enabled": False},
             **common,
@@ -228,7 +229,8 @@ def make_solver(case: Case, mode: str, device: torch.device | None = None, confi
     if mode == "bs":
         return PropTorch(
             equation,
-            backend="cuda",
+            backend="torch",
+            impl="c",
             use_ckpt=False,
             boundary_saving_config={"enabled": True, "storage": "cpu", "transfer_interval": config.transfer_interval},
             **common,
@@ -237,12 +239,12 @@ def make_solver(case: Case, mode: str, device: torch.device | None = None, confi
         cuda_options = CUDAOptions(
             memory=MemoryOptions(strategy="ckpt", ckpt=CkptOptions(mode="chunk", chunks=config.ckpt_chunks))
         )
-        return PropTorch(equation, backend="cuda", cuda_options=cuda_options, **common)
+        return PropTorch(equation, backend="torch", impl="c", cuda_options=cuda_options, **common)
     if mode == "ckpt_recursive":
         cuda_options = CUDAOptions(
             memory=MemoryOptions(strategy="ckpt", ckpt=CkptOptions(mode="recursive", count=config.ckpt_count))
         )
-        return PropTorch(equation, backend="cuda", cuda_options=cuda_options, **common)
+        return PropTorch(equation, backend="torch", impl="c", cuda_options=cuda_options, **common)
     raise ValueError(mode)
 
 

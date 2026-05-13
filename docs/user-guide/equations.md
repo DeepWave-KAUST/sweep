@@ -87,7 +87,7 @@ Roughly:
 
 ### Torch Binding Support
 
-`Acoustic` supports the compiled PyTorch CUDA binding through `sweep._C`.
+`Acoustic` supports the compiled PyTorch extension binding through `sweep._C`.
 
 That means:
 

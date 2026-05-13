@@ -13,9 +13,10 @@ This quick start uses the simplest path:
 
 - equation: `Acoustic`
 - propagator: `PropTorch`
-- backend: `eager`
+- backend: `torch`
+- impl: `eager`
 
-If you want CUDA binding or JAX after this, see the User Guide and Examples.
+If you want the compiled extension binding or JAX after this, see the User Guide and Examples.
 
 ## Step 1. Import the minimal pieces
 
@@ -115,7 +116,8 @@ solver = PropTorch(
     abcn=20,
     free_surface=False,
     pml_type="cpmlr",
-    backend="eager",
+    backend="torch",
+    impl="eager",
 )
 ```
 
@@ -232,7 +234,8 @@ solver = PropTorch(
     abcn=20,
     free_surface=False,
     pml_type="cpmlr",
-    backend="eager",
+    backend="torch",
+    impl="eager",
 )
 
 t = np.arange(nt, dtype=np.float32) * dt

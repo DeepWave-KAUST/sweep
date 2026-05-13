@@ -21,8 +21,8 @@ scattered wavefields.
   even number.
 - `device` (device or `str`, optional): Target device used to place operator
   kernels and backend-specific tensors.
-- `backend` (`str`, optional): Numerical backend. If you plan to run with
-  `PropCUDA`, this should still normally be `"torch"` rather than `"cuda"`.
+- `backend` (`str`, optional): Numerical backend. For the compiled `c`
+  implementation, this should still normally be `"torch"` rather than `"cuda"`.
 
 ## Models
 

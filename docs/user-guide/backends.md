@@ -5,35 +5,36 @@ SWEEP supports two main user-facing backend families:
 - `torch`
 - `jax`
 
-Within the Torch family, `PropTorch` now selects the actual execution mode:
+Within the Torch family, `PropTorch` now selects the actual implementation:
 
-- `backend="eager"`: Python/Torch implementation
-- `backend="cuda"`: compiled CUDA implementation through the Torch binding
+- `backend="torch", impl="eager"`: Python/Torch implementation
+- `backend="torch", impl="c"`: compiled C++/CUDA implementation through the Torch extension
 
 ## User-Facing Backend Families
 
 - `torch`: PyTorch-based propagation and differentiation
 - `jax`: JAX-based propagation and differentiation
 
-`cuda` is no longer treated here as a separate top-level backend alongside
-`torch` and `jax`. Instead, it is the accelerated execution mode inside the
-Torch family.
+`cuda` is not a separate top-level backend alongside `torch` and `jax`. It is a
+device choice. The compiled Torch extension can run C++ CPU kernels or CUDA
+kernels depending on the tensor device.
 
 Typical Torch-family usage:
 
 ```python
 from sweep.propagator.torch import PropTorch
 
-solver_eager = PropTorch(..., backend="eager")
-solver_cuda = PropTorch(..., backend="cuda")
+solver_eager = PropTorch(..., backend="torch", impl="eager")
+solver_c = PropTorch(..., backend="torch", impl="c")
 ```
 
-## CUDA Binding
+## Torch Extension Binding
 
-Some equations provide a compiled PyTorch CUDA binding through `sweep._C`.
+Some equations provide compiled PyTorch extension kernels through `sweep._C`.
 
-The CUDA binding currently covers the main 2D and 3D acoustic, VRZ, LSRTM, and
-elastic propagators used by the Torch workflow.
+The extension binding currently covers the main 2D and 3D acoustic, VRZ,
+LSRTM, elastic, and DAS propagators used by the Torch workflow. CPU tensors use
+the C++ CPU kernels; CUDA tensors use the CUDA kernels.
 
 You can inspect backend capability from Python:
 
@@ -97,30 +98,28 @@ The table distinguishes:
 Choose `torch` when:
 
 - you want the Torch ecosystem and autograd workflow
-- you want to use `PropTorch(..., backend="eager")`
-- you want to use the compiled CUDA path through `PropTorch(..., backend="cuda")`
+- you want to use `PropTorch(..., backend="torch", impl="eager")`
+- you want to use the compiled C++/CUDA path through `PropTorch(..., backend="torch", impl="c")`
 
 Choose `jax` when:
 
 - you want JAX transformations and device placement
 - you plan to use `PropJax`
 
-## CUDA in the Torch Family
+## Extension Kernels in the Torch Family
 
-Use the CUDA execution mode inside the Torch family when:
+Use the `c` implementation inside the Torch family when:
 
 - the compiled binding is installed
 - your equation supports the binding
-- you want CUDA-specific features such as boundary saving, disk-backed boundary
-  storage, or CUDA checkpointing
+- you want hand-written CPU/CUDA kernels or memory modes such as boundary
+  saving, disk-backed boundary storage, or `c` checkpointing
 
-CUDA memory modes are equation-specific. Full-wavefield and boundary-saving
-modes are available across the CUDA-backed solvers; checkpoint modes are
-available where the equation exposes the corresponding backward implementation.
-
-The lower-level class `sweep.propagator.cuda.PropCUDA` still exists, but for
-most user-facing workflows the recommended entry point is:
+`c` memory modes are equation-specific. Full-wavefield and
+boundary-saving modes are available across the `c`-backed solvers;
+checkpoint modes are available where the equation exposes the corresponding
+backward implementation. The user-facing entry point is:
 
 ```python
-PropTorch(..., backend="cuda")
+PropTorch(..., backend="torch", impl="c")
 ```

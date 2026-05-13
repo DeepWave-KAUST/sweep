@@ -20,8 +20,8 @@ First-order 3D elastic velocity-stress equation.
   even number.
 - `device` (device or `str`, optional): Target device used to place derivative
   operators and backend-specific tensors.
-- `backend` (`str`, optional): Numerical backend, typically `"torch"`. If you
-  plan to run with `PropCUDA`, this should still normally be `"torch"` rather
+- `backend` (`str`, optional): Numerical backend, typically `"torch"`. For the
+  compiled `c` implementation, this should still normally be `"torch"` rather
   than `"cuda"`.
 
 ## Models
@@ -44,7 +44,7 @@ memory variables.
 ## Backend Behavior
 
 - implemented as a first-order 3D equation using `PartialDerivative`
-- supports compiled CUDA binding through `_C()`
+- supports compiled extension binding through `_C()`
 
 ## Torch Binding
 

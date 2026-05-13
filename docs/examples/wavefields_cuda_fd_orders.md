@@ -1,11 +1,11 @@
-# CUDA FD Orders
+# C/CUDA FD Orders
 
 Source directory:
 
 - `examples/wavefields/cuda_fd_orders/`
 
-These scripts compare PropCUDA wavefields under different spatial orders on a
-uniform 2D model.
+These scripts compare compiled `c` CUDA wavefields under different spatial
+orders on a uniform 2D model.
 
 ## Scripts
 
@@ -34,10 +34,10 @@ python elastic_fd_orders.py
 `acoustic_fd_orders.png`: the acoustic wavefield snapshot comparison across
 different finite-difference spatial orders on the same uniform model.
 
-![CUDA FD orders acoustic comparison](../figures/examples/wavefields_cuda_fd_orders_acoustic.png)
+![C/CUDA FD orders acoustic comparison](../figures/examples/wavefields_cuda_fd_orders_acoustic.png)
 
 `elastic_fd_orders_vz.png`: the elastic `vz` wavefield snapshot comparison
 across the same set of spatial orders, useful for checking how elastic
 propagation changes as stencil order increases.
 
-![CUDA FD orders elastic vz comparison](../figures/examples/wavefields_cuda_fd_orders_elastic_vz.png)
+![C/CUDA FD orders elastic vz comparison](../figures/examples/wavefields_cuda_fd_orders_elastic_vz.png)

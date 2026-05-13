@@ -16,13 +16,6 @@ else:
     __all__.append("PropTorch")
 
 try:
-    from .cuda import PropCUDA
-except ModuleNotFoundError:
-    PropCUDA = None
-else:
-    __all__.append("PropCUDA")
-
-try:
     from .jax import PropJax
 except ModuleNotFoundError:
     PropJax = None

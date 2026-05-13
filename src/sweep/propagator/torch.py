@@ -15,7 +15,44 @@ from sweep.propagator.options import (
 )
 
 
-SUPPORTED_BACKENDS = {"eager", "cuda"}
+SUPPORTED_BACKENDS = {"torch"}
+SUPPORTED_IMPLS = {"eager", "c"}
+LEGACY_BACKEND_IMPLS = {
+    "eager": "eager",
+    "cuda": "c",
+    "c": "c",
+}
+IMPL_ALIASES = {}
+
+
+def _normalize_impl(value):
+    value = str(value).lower()
+    value = IMPL_ALIASES.get(value, value)
+    if value not in SUPPORTED_IMPLS:
+        raise ValueError(f"Unsupported PropTorch impl '{value}'. Expected 'eager' or 'c'.")
+    return value
+
+
+def _normalize_backend_impl(backend, impl):
+    backend = str(backend).lower()
+    if backend == "pytorch":
+        backend = "torch"
+
+    if backend in LEGACY_BACKEND_IMPLS:
+        legacy_impl = LEGACY_BACKEND_IMPLS[backend]
+        if impl is not None and _normalize_impl(impl) != legacy_impl:
+            raise ValueError(
+                f"Legacy PropTorch backend='{backend}' implies impl='{legacy_impl}', got impl='{impl}'."
+            )
+        return "torch", legacy_impl
+
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            "Unsupported PropTorch backend "
+            f"'{backend}'. Expected backend='torch'. Use PropJax for backend='jax'."
+        )
+
+    return backend, _normalize_impl("eager" if impl is None else impl)
 
 
 def _merge_option_dict(base, extra, *, label):
@@ -36,7 +73,7 @@ def _normalize_cuda_memory_kwargs(merged):
     memory = options_to_dict(memory)
     strategy = memory.get("strategy")
     if strategy is None:
-        raise ValueError("CUDA memory options must set strategy to 'boundary' or 'ckpt'.")
+        raise ValueError("c memory options must set strategy to 'boundary' or 'ckpt'.")
 
     if strategy == "boundary":
         boundary = memory.get("boundary") or {}
@@ -77,33 +114,33 @@ def _normalize_cuda_memory_kwargs(merged):
             raise ValueError(f"Unsupported ckpt mode '{mode}'. Expected 'chunk' or 'recursive'.")
         return merged
 
-    raise ValueError(f"Unsupported CUDA memory strategy '{strategy}'. Expected 'boundary' or 'ckpt'.")
+    raise ValueError(f"Unsupported c memory strategy '{strategy}'. Expected 'boundary' or 'ckpt'.")
 
 
-def _resolve_backend_init_kwargs(*, backend, kwargs, backend_options, eager_options, cuda_options):
-    if eager_options is not None and backend != "eager":
-        raise ValueError("eager_options can only be used with backend='eager'.")
-    if cuda_options is not None and backend != "cuda":
-        raise ValueError("cuda_options can only be used with backend='cuda'.")
+def _resolve_backend_init_kwargs(*, impl, kwargs, backend_options, eager_options, cuda_options):
+    if eager_options is not None and impl != "eager":
+        raise ValueError("eager_options can only be used with impl='eager'.")
+    if cuda_options is not None and impl != "c":
+        raise ValueError("cuda_options can only be used with impl='c'.")
 
-    wrong_top_level = (CUDA_OPTION_KEYS if backend == "eager" else EAGER_OPTION_KEYS) & set(kwargs)
+    wrong_top_level = (CUDA_OPTION_KEYS if impl == "eager" else EAGER_OPTION_KEYS) & set(kwargs)
     if wrong_top_level:
-        target = "cuda_options" if backend == "cuda" else "eager_options"
+        target = "cuda_options" if impl == "c" else "eager_options"
         raise ValueError(
-            f"Top-level kwargs {sorted(wrong_top_level)} do not belong to backend='{backend}'. "
-            f"Pass backend-specific options through {target} or switch backend."
+            f"Top-level kwargs {sorted(wrong_top_level)} do not belong to impl='{impl}'. "
+            f"Pass implementation-specific options through {target} or switch impl."
         )
 
     merged = _merge_option_dict(dict(kwargs), backend_options, label="backend_options")
-    selected_options = eager_options if backend == "eager" else cuda_options
-    option_label = "eager_options" if backend == "eager" else "cuda_options"
+    selected_options = eager_options if impl == "eager" else cuda_options
+    option_label = "eager_options" if impl == "eager" else "cuda_options"
     merged = _merge_option_dict(merged, selected_options, label=option_label)
 
-    wrong_merged = (CUDA_OPTION_KEYS if backend == "eager" else EAGER_OPTION_KEYS) & set(merged)
+    wrong_merged = (CUDA_OPTION_KEYS if impl == "eager" else EAGER_OPTION_KEYS) & set(merged)
     if wrong_merged:
-        raise ValueError(f"Invalid {option_label} for backend='{backend}': {sorted(wrong_merged)}")
+        raise ValueError(f"Invalid {option_label} for impl='{impl}': {sorted(wrong_merged)}")
 
-    if backend == "cuda":
+    if impl == "c":
         merged = _normalize_cuda_memory_kwargs(merged)
     return merged
 
@@ -120,32 +157,33 @@ class PropTorch(torch.nn.Module):
     def __init__(
         self,
         *args,
-        backend="eager",
+        backend="torch",
+        impl=None,
         backend_options=None,
         eager_options=None,
         cuda_options=None,
         **kwargs,
     ):
         torch.nn.Module.__init__(self)
-        backend = str(backend).lower()
-        if backend not in SUPPORTED_BACKENDS:
-            raise ValueError(f"Unsupported PropTorch backend '{backend}'. Expected 'eager' or 'cuda'.")
+        backend, impl = _normalize_backend_impl(backend, impl)
 
         self.backend = backend
+        self.impl = impl
+        self.legacy_backend = "eager" if impl == "eager" else "c"
         init_kwargs = _resolve_backend_init_kwargs(
-            backend=backend,
+            impl=impl,
             kwargs=kwargs,
             backend_options=backend_options,
             eager_options=eager_options,
             cuda_options=cuda_options,
         )
-        if backend == "eager":
-            impl = _PropTorchEager(*args, **init_kwargs)
+        if impl == "eager":
+            backend_impl = _PropTorchEager(*args, **init_kwargs)
         else:
-            from sweep.propagator.cuda import PropCUDA
+            from sweep.propagator._c import _CompiledPropagator
 
-            impl = PropCUDA(*args, **init_kwargs)
-        self._backend_impl = impl
+            backend_impl = _CompiledPropagator(*args, **init_kwargs)
+        self._backend_impl = backend_impl
         self.__signature__ = _public_forward_signature(type(self).forward)
 
     def __getattr__(self, name):

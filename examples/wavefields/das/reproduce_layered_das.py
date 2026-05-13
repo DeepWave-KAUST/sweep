@@ -63,6 +63,42 @@ FIGURE7_GAUGE_LENGTHS = [
 ]
 
 
+def torch_impl_for_mode(mode: str) -> str:
+    return "c" if mode == "cuda" else "eager"
+
+
+def resolve_backend_modes(backend: str, impl: Optional[str]) -> list[str]:
+    backend = str(backend).lower()
+    impl = None if impl is None else str(impl).lower()
+
+    if backend in {"eager", "pytorch"}:
+        if impl not in {None, "eager"}:
+            raise ValueError(f"--backend {backend} implies --impl eager, got --impl {impl}.")
+        return ["eager"]
+    if backend in {"cuda", "c"}:
+        if impl not in {None, "c"}:
+            raise ValueError(f"--backend {backend} implies --impl c, got --impl {impl}.")
+        return ["cuda"]
+    if backend == "cpu":
+        raise ValueError("The DAS reproduction script does not currently expose the C++ CPU extension path.")
+    if backend == "both":
+        if impl not in {None, "both"}:
+            raise ValueError(f"--backend both implies --impl both, got --impl {impl}.")
+        return ["eager", "cuda"]
+    if backend == "jax":
+        raise ValueError("This DAS reproduction script is Torch-based. Use a JAX example for --backend jax.")
+    if backend != "torch":
+        raise ValueError("Unsupported backend. Use --backend torch with --impl eager, c, or both.")
+
+    if impl in {None, "eager"}:
+        return ["eager"]
+    if impl == "c":
+        return ["cuda"]
+    if impl == "both":
+        return ["eager", "cuda"]
+    raise ValueError("Unsupported --impl. Expected eager, c, or both.")
+
+
 def ricker(nt: int, dt: float, fm: float, delay: float) -> np.ndarray:
     t = np.arange(nt, dtype=np.float32) * np.float32(dt) - np.float32(delay)
     arg = np.pi * np.float32(fm) * t
@@ -235,7 +271,7 @@ def run_solver(
     args,
 ) -> tuple[np.ndarray, Dict[str, int], float]:
     if args.device == "auto":
-        chosen_device = "cuda:0"# if backend == "cuda" else "cpu"
+        chosen_device = "cuda:0" if backend == "cuda" or torch.cuda.is_available() else "cpu"
     else:
         chosen_device = args.device
 
@@ -260,7 +296,8 @@ def run_solver(
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
-        backend=backend,
+        backend="torch",
+        impl=torch_impl_for_mode(backend),
     )
 
     wavelet_t = torch.as_tensor(wavelet, dtype=torch.float32, device=device)
@@ -327,7 +364,8 @@ def run_elastic_derived_das_solver(
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
-        backend=backend,
+        backend="torch",
+        impl=torch_impl_for_mode(backend),
     )
 
     wavelet_t = torch.as_tensor(wavelet, dtype=torch.float32, device=device)
@@ -1147,10 +1185,8 @@ def resolve_records_path(explicit: Optional[Path]) -> Optional[Path]:
     return None
 
 
-def resolve_backends(choice: str) -> Iterable[str]:
-    if choice in {"eager", "cuda"}:
-        return [choice]
-    return ["eager", "cuda"]
+def resolve_backends(args: argparse.Namespace) -> Iterable[str]:
+    return resolve_backend_modes(args.backend, args.impl)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1159,10 +1195,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend cuda\n"
-            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 7 --backend cuda "
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend torch --impl c --device cuda\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 7 --backend torch --impl c --device cuda "
             "--figure7-edge-mode reflect --figure7-time-min 0.68 --figure7-time-max 2.15\n"
-            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend cuda\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend torch --impl c --device cuda\n"
         ),
     )
     parser.add_argument(
@@ -1171,7 +1207,21 @@ def parse_args() -> argparse.Namespace:
         default="both",
         help="Figure set to generate. 'both' runs Figure 4 and Figure 9.",
     )
-    parser.add_argument("--backend", choices=("eager", "cuda", "both"), default="both")
+    parser.add_argument(
+        "--backend",
+        metavar="{torch,jax}",
+        default="torch",
+        help="Array/programming backend. Legacy aliases eager, cuda, and both are still accepted.",
+    )
+    parser.add_argument(
+        "--impl",
+        metavar="{eager,c,both}",
+        default="both",
+        help=(
+            "Torch implementation to run. The default preserves the previous behavior and runs both "
+            "eager and c modes."
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -1240,7 +1290,7 @@ def main() -> None:
 
     if run_figure4:
         results = {}
-        for backend in resolve_backends(args.backend):
+        for backend in resolve_backends(args):
             records, channels, elapsed = run_figure4_data(
                 backend=backend,
                 geometry=geometry,
@@ -1290,7 +1340,7 @@ def main() -> None:
 
     if run_figure7:
         results = {}
-        for backend in resolve_backends(args.backend):
+        for backend in resolve_backends(args):
             records, channels, elapsed = run_figure7_data(
                 backend=backend,
                 geometry=figure7_geometry,
@@ -1413,7 +1463,7 @@ def main() -> None:
         return
 
     results = {}
-    for backend in resolve_backends(args.backend):
+    for backend in resolve_backends(args):
         records, channels, elapsed = run_elastic_derived_das_solver(
             backend=backend,
             geometry=geometry,

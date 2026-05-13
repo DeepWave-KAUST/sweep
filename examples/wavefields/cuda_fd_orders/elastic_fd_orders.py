@@ -7,7 +7,7 @@ from common import (
     ABCN,
     ORDERS,
     OUTPUT_DIR,
-    PropCUDA,
+    PropTorch,
     crop_panel,
     extract_saved_wavefield,
     make_geometry,
@@ -29,8 +29,10 @@ RHO = 2000.0
 
 
 def build_solver(order, dev):
-    return PropCUDA(
+    return PropTorch(
         Elastic(spatial_order=order, device=dev, backend="torch"),
+        backend="torch",
+        impl="c",
         shape=PHYS_SHAPE,
         dev=dev,
         dh=DH,
@@ -62,7 +64,7 @@ def run_order(order, dev):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare PropCUDA elastic wavefields across FD orders.")
+    parser = argparse.ArgumentParser(description="Compare compiled CUDA elastic wavefields across FD orders.")
     parser.add_argument(
         "--orders",
         type=int,

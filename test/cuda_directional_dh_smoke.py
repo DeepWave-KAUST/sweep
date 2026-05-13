@@ -7,7 +7,7 @@ import torch
 
 from sweep import is_torch_binding_available
 from sweep.equations import Acoustic, Elastic
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator._c import _CompiledPropagator
 from sweep.signal import ricker
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "test_outputs" / "cuda_directional_dh"
@@ -189,7 +189,7 @@ def run_acoustic(dev):
     sources, receivers = make_geometry_2d(shape[1], src_z=3, rec_z=4, nshots=2, nrec=10)
     true_vp, init_vp = make_acoustic_model(shape)
 
-    solver = PropCUDA(
+    solver = _CompiledPropagator(
         Acoustic(spatial_order=4, device=dev),
         shape=shape,
         dev=dev,
@@ -240,7 +240,7 @@ def run_elastic(dev):
     sources, receivers = make_geometry_2d(shape[1], src_z=3, rec_z=4, nshots=2, nrec=8)
     true_vp, true_vs, true_rho, init_vp, init_vs, init_rho = make_elastic_model(shape)
 
-    solver = PropCUDA(
+    solver = _CompiledPropagator(
         Elastic(spatial_order=4, device=dev),
         shape=shape,
         dev=dev,
@@ -333,7 +333,7 @@ def run_acoustic_physical_consistency(dev):
     coarse_model = make_acoustic_model_from_extent(coarse_shape, coarse_dh, physical_size)
     fine_model = make_acoustic_model_from_extent(fine_shape, fine_dh, physical_size)
 
-    coarse_solver = PropCUDA(
+    coarse_solver = _CompiledPropagator(
         Acoustic(spatial_order=4, device=dev),
         shape=coarse_shape,
         dev=dev,
@@ -348,7 +348,7 @@ def run_acoustic_physical_consistency(dev):
         use_ckpt=False,
         boundary_saving_config={"enabled": False},
     )
-    fine_solver = PropCUDA(
+    fine_solver = _CompiledPropagator(
         Acoustic(spatial_order=4, device=dev),
         shape=fine_shape,
         dev=dev,

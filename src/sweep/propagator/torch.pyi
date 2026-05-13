@@ -7,11 +7,13 @@ from .options import CUDAOptions, EagerOptions
 
 class PropTorch(torch.nn.Module):
     backend: str
+    impl: str
 
     def __init__(
         self,
         *args: Any,
         backend: str = ...,
+        impl: str | None = ...,
         backend_options: dict[str, Any] | None = ...,
         eager_options: dict[str, Any] | EagerOptions | None = ...,
         cuda_options: dict[str, Any] | CUDAOptions | None = ...,

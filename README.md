@@ -9,7 +9,7 @@ Documentation: https://deepwave-kaust.github.io/sweep/
 Recent interface updates:
 
 - lazy imports are supported, so you only need to install the backend you plan to use
-- `PropTorch` is now the main Torch-family entry point, with `backend="eager"` for PyTorch operators or `backend="cuda"` for the compiled C++/CUDA extension
+- `backend` now names the array/programming backend (`torch` or `jax`); Torch execution chooses `impl="eager"` for PyTorch operators or `impl="c"` for the compiled C++/CUDA extension
 - backend-specific options are grouped through `EagerOptions`, `CUDAOptions`, `MemoryOptions`, `BoundaryOptions`, and `CkptOptions`
 - examples are reorganized by task family under `examples/`, including new `wavefields/` and `reducingmemory/` groups
 
@@ -58,34 +58,42 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 
 `SWEEP_CUDA_ARCH_LIST` can be used as a package-specific alias for `TORCH_CUDA_ARCH_LIST`. If neither variable is set, the build defaults to V100-compatible `7.0` to avoid PyTorch's empty architecture auto-detection on CPU-only build nodes.
 
-## Backends and Devices
+## Backends, Implementations, and Devices
 
-For `PropTorch`, the public backends are:
+Use `backend` for the array/programming backend, `impl` for the implementation under that backend, and `device` for CPU/CUDA placement.
 
-| `PropTorch` backend | Tensor device | Implementation |
-| --- | --- | --- |
-| `backend="eager"` | CPU or CUDA | PyTorch eager operators and PyTorch autograd |
-| `backend="cuda"` | CPU | compiled C++ CPU kernels |
-| `backend="cuda"` | CUDA | compiled CUDA kernels |
+| Backend | Impl | Device | Implementation |
+| --- | --- | --- | --- |
+| `backend="torch"` | `impl="eager"` | CPU or CUDA | PyTorch eager operators and PyTorch autograd |
+| `backend="torch"` | `impl="c"` | CPU | Torch C++ extension with compiled CPU kernels |
+| `backend="torch"` | `impl="c"` | CUDA | Torch C++ extension with compiled CUDA kernels |
+| `backend="jax"` | equation-specific | CPU or CUDA | JAX implementation |
 
-In the FWI example scripts, the CLI separates implementation and device:
+In the FWI example scripts:
 
 ```bash
-# PyTorch eager on GPU when available
-python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend pytorch --device auto
+# PyTorch eager on GPU
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl eager
 
 # compiled CUDA kernels
-python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend c --device cuda
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl c
 
 # compiled C++ CPU kernels
-python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend c --device cpu
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py --impl c
+
+# PyTorch eager CPU kernels
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py --impl eager
 
 # compiled C++ CPU kernels with MPI shot parallelism
-mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi.py \
-    --backend c --device cpu --mpi --mpi-forward-batchsize 4
+mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+    --impl c --mpi --mpi-forward-batchsize 4
+
+# PyTorch eager CPU with MPI shot parallelism
+mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+    --impl eager --mpi --mpi-forward-batchsize 4
 ```
 
-`--device auto` uses CUDA when PyTorch reports that CUDA is available; otherwise it falls back to CPU.
+The acoustic Marmousi Torch example is split into a GPU entry point and a CPU/MPI entry point. Other updated examples still accept older backend aliases such as `--backend pytorch`, `--backend eager`, `--backend c`, `--backend cuda`, and `--backend cpu` for compatibility.
 
 ## Usage
 The following example shows how to compute the gradient of a toy model with respect to the velocity model.
@@ -124,7 +132,8 @@ model = PropTorch(Acoustic(spatial_order=spatial_order, device=dev, backend='tor
             receiver_type=['h1'],
             pml_type='cpmlr',
             free_surface=False,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=False))
             
 # Set the model parameters (Pytorch)

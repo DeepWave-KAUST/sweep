@@ -17,7 +17,7 @@ Checkpoint note:
 
 - eager checkpointing still uses the top-level `use_ckpt` and `ckpt_chunks`
   arguments on `PropTorch`
-- CUDA checkpointing should be configured through
+- c checkpointing should be configured through
   `CUDAOptions(memory=MemoryOptions(strategy="ckpt", ckpt=CkptOptions(...)))`
 
 ## EagerOptions
@@ -36,7 +36,7 @@ class EagerOptions:
 Use this block with:
 
 ```python
-PropTorch(..., backend="eager", eager_options=EagerOptions(...))
+PropTorch(..., backend="torch", impl="eager", eager_options=EagerOptions(...))
 ```
 
 This block controls eager compile/runtime behavior. It does not currently
@@ -44,7 +44,7 @@ replace the top-level eager checkpoint arguments `use_ckpt` and `ckpt_chunks`.
 
 Fields:
 
-- `use_compile`: enables `torch.compile` on the eager backend
+- `use_compile`: enables `torch.compile` on the eager implementation
 - `compile_mode`: compile mode passed into `torch.compile`
 - `compile_dynamic`: whether dynamic-shape behavior is allowed in the compiled graph
 - `compile_backend`: optional backend argument passed into `torch.compile`
@@ -62,12 +62,12 @@ class CUDAOptions:
 Use this block with:
 
 ```python
-PropTorch(..., backend="cuda", cuda_options=CUDAOptions(...))
+PropTorch(..., backend="torch", impl="c", cuda_options=CUDAOptions(...))
 ```
 
 Fields:
 
-- `memory`: CUDA memory-policy block, described in [MemoryOptions](#memoryoptions)
+- `memory`:  memory-policy block, described in [MemoryOptions](#memoryoptions)
 
 ## MemoryOptions
 
@@ -75,11 +75,11 @@ Fields:
 @dataclass
 class MemoryOptions:
     strategy: Literal["boundary", "ckpt"] | None = None
-    boundary: BoundaryOptions | None = None
+  boundary: BoundaryOptions | None = None
     ckpt: CkptOptions | None = None
 ```
 
-This block chooses one CUDA memory-saving strategy.
+This block chooses one  memory-saving strategy.
 
 Rules:
 
@@ -120,7 +120,7 @@ class BoundaryOptions:
     pinned_memory: bool = False
 ```
 
-This block controls CUDA boundary saving.
+This block controls c boundary saving.
 
 Fields:
 
@@ -143,7 +143,7 @@ class CkptOptions:
     count: int = 0
 ```
 
-This block controls CUDA checkpointing.
+This block controls c checkpointing.
 
 Fields:
 
@@ -168,7 +168,8 @@ Example:
 ```python
 PropTorch(
     ...,
-    backend="eager",
+    backend="torch",
+    impl="eager",
     backend_options=EagerOptions(use_compile=True),
 )
 ```
@@ -178,7 +179,8 @@ or:
 ```python
 PropTorch(
     ...,
-    backend="cuda",
+    backend="torch",
+    impl="c",
     backend_options=CUDAOptions(
         memory=MemoryOptions(
             strategy="boundary",
@@ -189,4 +191,4 @@ PropTorch(
 ```
 
 In most user-facing code, `eager_options` and `cuda_options` are clearer than
-`backend_options`, because they make the backend split explicit.
+`backend_options`, because they make the implementation split explicit.

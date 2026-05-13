@@ -7,10 +7,10 @@ Source file:
 ## What This Example Does
 
 This example runs 2D elastic full-waveform inversion on the Marmousi model with
-one script that supports two propagator backends:
+one script that supports two Torch implementations:
 
-- `eager`: pure PyTorch propagation through `PropTorch(..., backend="eager")`
-- `cuda`: compiled CUDA propagation through `PropTorch(..., backend="cuda")`
+- `eager`: pure PyTorch propagation through `PropTorch(..., backend="torch", impl="eager")`
+- `c`: compiled C++/CUDA propagation through `PropTorch(..., backend="torch", impl="c")`
 
 The script:
 
@@ -52,20 +52,20 @@ python3 examples/models/marmousi/prepare_fwi_models.py \
   --passes 3
 ```
 
-## Backend Selection
+## Backend / Implementation Selection
 
 Run the example with:
 
 === "PyTorch"
 
     ```bash
-    python3 examples/FWI/2d/elastic/torch/fwi_marmousi.py --backend eager
+    python3 examples/FWI/2d/elastic/torch/fwi_marmousi.py --backend torch --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/FWI/2d/elastic/torch/fwi_marmousi.py --backend cuda
+    python3 examples/FWI/2d/elastic/torch/fwi_marmousi.py --backend torch --impl c --device cuda
     ```
 
 ## Key Configuration
@@ -102,7 +102,7 @@ The script saves:
 - `loss.png`
 - `epoch_XXXX.png`
 
-Each backend writes into its own output directory:
+Each implementation/device combination writes into its own output directory:
 
 === "PyTorch"
 
@@ -134,4 +134,4 @@ the true models, current inverted models, and current gradients.
 ## Notes
 
 - the Marmousi elastic example defaults to source encoding
-- `cuda` mode requires a CUDA-capable PyTorch environment and compiled bindings
+- `--impl c --device cuda` requires a CUDA-capable PyTorch environment and compiled bindings

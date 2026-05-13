@@ -7,10 +7,10 @@ Source file:
 This example demonstrates how to run acoustic full-waveform inversion (FWI)
 with source encoding.
 
-The example supports two propagation backends:
+The example supports two Torch propagation implementations:
 
-- `torch`: PyTorch-based wave propagation
-- `cuda`: CUDA-accelerated wave propagation with boundary saving
+- `eager`: PyTorch-operator wave propagation
+- `c`: CUDA-accelerated wave propagation with boundary saving
 
 Source encoding is used to reduce the cost of FWI. Instead of modeling all
 shots independently at every iteration, the script randomly selects several
@@ -42,7 +42,7 @@ The output includes:
 Use this example if you want to:
 
 - test acoustic FWI with source encoding
-- run the same workflow on either eager or CUDA backends
+- run the same workflow on either eager or c CUDA mode
 - reduce memory usage during FWI
 - run a simple Marmousi-style inversion example
 - understand how encoded shots are used in inversion
@@ -82,12 +82,12 @@ python3 examples/models/marmousi/prepare_fwi_models.py \
 Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
 exist.
 
-Step 2. Choose the backend you want to use.
+Step 2. Choose the implementation you want to use.
 
 === "PyTorch"
 
     ```bash
-    python source_encoding_fwi.py --backend eager
+    python source_encoding_fwi.py --backend torch --impl eager
     ```
 
     This mode uses the PyTorch propagator.
@@ -95,19 +95,19 @@ Step 2. Choose the backend you want to use.
 === "CUDA"
 
     ```bash
-    python source_encoding_fwi.py --backend cuda
+    python source_encoding_fwi.py --backend torch --impl c --device cuda
     ```
 
-    This mode uses the CUDA propagator.
+    This mode uses the compiled c propagator on CUDA.
 
-    The CUDA backend requires a CUDA-capable PyTorch environment and the CUDA propagation module to be available.
+    The c CUDA mode requires a CUDA-capable PyTorch environment and the compiled propagation module to be available.
 
-Step 3. Check the backend-specific output folder for figures and inversion
+Step 3. Check the implementation-specific output folder for figures and inversion
 progress.
 
 ## Output Folders
 
-Each backend writes results to a separate folder.
+Each implementation writes results to a separate folder.
 
 === "PyTorch"
 
@@ -146,7 +146,7 @@ epoch_XXXX.png
 
 The following figures show one completed CUDA run from
 `examples/reducingmemory/source_encoding/torch/acoustic_fwi_encoding_cuda/`.
-The eager backend produces the same file set with the same naming pattern.
+The eager implementation produces the same file set with the same naming pattern.
 
 `observed_data.png`: one observed shot gather generated from the true Marmousi
 model.
@@ -227,17 +227,17 @@ Backend-specific settings are defined in
     }
     ```
 
-    The CUDA backend is intended for faster propagation.
+    The c CUDA mode is intended for faster propagation.
 
     Boundary saving is enabled to reduce memory usage during backpropagation.
 
 ## Source Encoding Call Shapes
 
-The eager and CUDA paths both support source encoding, but they expect
+The eager and `c` paths both support source encoding, but they expect
 different input layouts when `source_encoding=True`.
 
-For the broader runtime shape conventions used by `PropTorch`, `PropJax`, and
-`PropCUDA`, see [API Reference > Propagators](../api/propagators/index.md).
+For the broader runtime shape conventions used by `PropTorch` and `PropJax`,
+see [API Reference > Propagators](../api/propagators/index.md).
 
 === "Eager"
 
@@ -255,7 +255,7 @@ For the broader runtime shape conventions used by `PropTorch`, `PropJax`, and
 
 === "CUDA"
 
-    The CUDA path expects a single batch that already contains multiple encoded
+    The `c` path expects a single batch that already contains multiple encoded
     sources inside that batch.
 
     Use:
@@ -268,4 +268,5 @@ For the broader runtime shape conventions used by `PropTorch`, `PropJax`, and
     super-shot.
 
 In practice, the main difference is that eager passes selected sources as a
-plain shot list, while CUDA passes them as one batched encoded-source block.
+plain shot list, while the `c` path passes them as one batched
+encoded-source block.

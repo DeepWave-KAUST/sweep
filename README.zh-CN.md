@@ -9,7 +9,7 @@ Seismic Wave Equation Exploration Platform (SWEEP) 是一个用于地震波方�
 近期接口更新：
 
 - 支持惰性导入，因此只需要安装计划使用的后端
-- `PropTorch` 是 Torch 系列接口的主要入口，`backend="eager"` 使用 PyTorch 算子，`backend="cuda"` 使用编译后的 C++/CUDA 扩展
+- `backend` 现在表示数组/编程后端（`torch` 或 `jax`）；Torch 后端下用 `impl="eager"` 表示 PyTorch 算子实现，用 `impl="c"` 表示编译后的 C++/CUDA 扩展实现
 - 后端相关选项通过 `EagerOptions`、`CUDAOptions`、`MemoryOptions`、`BoundaryOptions` 和 `CkptOptions` 组织
 - 示例按任务类型整理在 `examples/` 下，包括新的 `wavefields/` 和 `reducingmemory/` 示例组
 
@@ -61,34 +61,42 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 
 `SWEEP_CUDA_ARCH_LIST` 可以作为 `TORCH_CUDA_ARCH_LIST` 的包内别名使用。如果两个变量都没有设置，构建会默认使用兼容 V100 的 `7.0`，避免 PyTorch 在无法自动检测架构时出现空架构列表错误。
 
-## 后端和设备
+## 后端、实现和设备
 
-对 `PropTorch` 来说，公开后端如下：
+`backend` 表示数组/编程后端，`impl` 表示这个后端下面的具体实现，`device` 表示实际运行在 CPU 还是 CUDA 上。
 
-| `PropTorch` 后端 | Tensor 设备 | 实现 |
-| --- | --- | --- |
-| `backend="eager"` | CPU 或 CUDA | PyTorch eager 算子和 PyTorch autograd |
-| `backend="cuda"` | CPU | 编译后的 C++ CPU kernel |
-| `backend="cuda"` | CUDA | 编译后的 CUDA kernel |
+| Backend | Impl | Device | 实现 |
+| --- | --- | --- | --- |
+| `backend="torch"` | `impl="eager"` | CPU 或 CUDA | PyTorch eager 算子和 PyTorch autograd |
+| `backend="torch"` | `impl="c"` | CPU | Torch C++ extension 中的 C++ CPU kernel |
+| `backend="torch"` | `impl="c"` | CUDA | Torch C++ extension 中的 CUDA kernel |
+| `backend="jax"` | 方程相关 | CPU 或 CUDA | JAX 实现 |
 
-在 FWI 示例脚本中，CLI 会分开指定实现和设备：
+在 FWI 示例脚本中：
 
 ```bash
-# PyTorch eager，默认有 GPU 时使用 GPU
-python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend pytorch --device auto
+# PyTorch eager GPU
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl eager
 
 # 编译后的 CUDA kernel
-python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend c --device cuda
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl c
 
 # 编译后的 C++ CPU kernel
-python examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend c --device cpu
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py --impl c
+
+# PyTorch eager CPU
+python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py --impl eager
 
 # 使用 MPI 做炮并行的 C++ CPU kernel
-mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi.py \
-    --backend c --device cpu --mpi --mpi-forward-batchsize 4
+mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+    --impl c --mpi --mpi-forward-batchsize 4
+
+# 使用 MPI 做炮并行的 PyTorch eager CPU
+mpirun -np 4 python examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+    --impl eager --mpi --mpi-forward-batchsize 4
 ```
 
-`--device auto` 会在 PyTorch 报告 CUDA 可用时使用 CUDA，否则回退到 CPU。
+Acoustic Marmousi Torch 示例拆成了 GPU 入口和 CPU/MPI 入口。其他已更新示例仍兼容旧写法，例如 `--backend pytorch`、`--backend eager`、`--backend c`、`--backend cuda` 和 `--backend cpu`。
 
 ## 使用示例
 
@@ -129,7 +137,8 @@ model = PropTorch(Acoustic(spatial_order=spatial_order, device=dev, backend='tor
             receiver_type=['h1'],
             pml_type='cpmlr',
             free_surface=False,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=False))
 
 # Set the model parameters (PyTorch)

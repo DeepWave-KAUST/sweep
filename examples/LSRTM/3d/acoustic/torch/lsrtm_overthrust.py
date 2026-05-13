@@ -16,6 +16,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from backend_cli import add_backend_impl_device_args, resolve_backend_impl_device
 from plotting import gather_extent, plot_loss_curve
 
 import matplotlib.pyplot as plt
@@ -34,13 +35,24 @@ from sweep.signal import ricker
 torch.backends.cudnn.benchmark = True
 
 
-def build_config(backend):
-    backend_key = f"lsrtm_3d_acoustic_torch_{backend}"
+def build_config(backend="torch", impl=None, device="auto"):
+    backend, impl, device = resolve_backend_impl_device(backend, impl, device)
+    if impl == "c" and device != "cuda":
+        raise ValueError("The 3D acoustic LSRTM example currently supports the c implementation only on CUDA.")
+    mode = "eager" if impl == "eager" else "cuda"
+    backend_key = f"lsrtm_3d_acoustic_torch_{mode}"
     cfg = shared_config.get_config("lsrtm_3d_acoustic_torch_common")
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
-    cfg.setdefault("cuda_memory", "bs" if backend == "cuda" else "ckpt")
+    cfg["impl"] = impl
+    cfg["device"] = device
+    cfg["mode"] = mode
+    cfg.setdefault("cuda_memory", "bs" if impl == "c" else "ckpt")
     return cfg
+
+
+def select_device(cfg):
+    return torch.device(cfg["device"])
 
 
 def build_cuda_options(cfg):
@@ -74,16 +86,17 @@ def build_acoustic_solver(shape, dev, cfg):
         free_surface=cfg["free_surface"],
         pml_type="cpmlr",
     )
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=cfg.get("use_compile", True)),
             use_ckpt=cfg.get("use_ckpt", False),
             ckpt_chunks=cfg.get("ckpt_chunks", 16),
             **common,
         )
-    return PropTorch(equation, backend="cuda", cuda_options=build_cuda_options(cfg), **common)
+    return PropTorch(equation, backend="torch", impl="c", cuda_options=build_cuda_options(cfg), **common)
 
 
 def build_lsrtm_solver(shape, dev, cfg):
@@ -99,16 +112,17 @@ def build_lsrtm_solver(shape, dev, cfg):
         free_surface=cfg["free_surface"],
         pml_type="cpmlr",
     )
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=cfg.get("use_compile", True)),
             use_ckpt=cfg.get("use_ckpt", False),
             ckpt_chunks=cfg.get("ckpt_chunks", 16),
             **common,
         )
-    return PropTorch(equation, backend="cuda", cuda_options=build_cuda_options(cfg), **common)
+    return PropTorch(equation, backend="torch", impl="c", cuda_options=build_cuda_options(cfg), **common)
 
 
 def save_observed_figure(obs, receivers, cfg, output_dir):
@@ -196,7 +210,7 @@ def save_progress_figure(ref, grad, losses, epoch, cfg, output_dir):
 def generate_observed_data(acoustic_solver, wave, sources, receivers, true_model, smooth_model, dev):
     true_vp = torch.from_numpy(true_model).to(dev)
     background_vp = torch.from_numpy(smooth_model).to(dev)
-    kwargs = {"use_boundary_saving": False} if getattr(acoustic_solver, "backend", "eager") == "cuda" else {}
+    kwargs = {"use_boundary_saving": False} if getattr(acoustic_solver, "impl", "eager") == "c" else {}
     scattered_shots = []
     with torch.no_grad():
         for shot_id in tqdm.trange(sources.shape[0], desc="Forward shots", unit="shot"):
@@ -215,8 +229,8 @@ def generate_observed_data(acoustic_solver, wave, sources, receivers, true_model
     return torch.cat(scattered_shots, dim=0)
 
 
-def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
-    cfg = build_config(backend)
+def run_lsrtm(backend="torch", impl=None, device="auto", cuda_memory=None, epochs=None):
+    cfg = build_config(backend, impl, device)
     if cuda_memory is None:
         cuda_memory = cfg["cuda_memory"]
     cfg["cuda_memory"] = cuda_memory
@@ -225,7 +239,7 @@ def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
     cfg.setdefault("ckpt_num", 6)
 
     script_dir = Path(__file__).resolve().parent
-    output_dir = script_dir / f"{cfg['output_dir']}_{backend}_{cuda_memory}"
+    output_dir = script_dir / f"{cfg['output_dir']}_{cfg['mode']}_{cuda_memory}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(0)
@@ -234,12 +248,8 @@ def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
     true_model, smooth_model = load_models(EXAMPLES_DIR, cfg)
     shape = true_model.shape
 
-    if backend == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("The CUDA 3D LSRTM example requires a CUDA-capable PyTorch environment.")
-        dev = torch.device("cuda")
-    else:
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = select_device(cfg)
+    run_label = f"{cfg['backend']}/{cfg['impl']}/{cfg['device']}"
 
     acoustic_solver = build_acoustic_solver(shape, dev, cfg)
     lsrtm_solver = build_lsrtm_solver(shape, dev, cfg)
@@ -250,7 +260,7 @@ def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
     sources, receivers = build_geometry(shape, cfg)
     print("(nshots, ndim):", sources.shape)
     print("(nshots, nreceivers, ndim):", receivers.shape)
-    print(f"Running backend={backend}, cuda_memory={cuda_memory} on {dev} ...")
+    print(f"Running backend={cfg['backend']}, impl={cfg['impl']}, device={cfg['device']}, cuda_memory={cuda_memory} on {dev} ...")
 
     obs = generate_observed_data(acoustic_solver, wave, sources, receivers, true_model, smooth_model, dev)
     save_observed_figure(obs.numpy(), receivers, cfg, output_dir)
@@ -269,7 +279,7 @@ def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
         epoch_loss = 0.0
         for shot_id in shot_idx:
             solver_kwargs = {}
-            if getattr(lsrtm_solver, "backend", "eager") == "cuda" and cuda_memory == "bs":
+            if getattr(lsrtm_solver, "impl", "eager") == "c" and cuda_memory == "bs":
                 solver_kwargs["use_boundary_saving"] = True
             syn = lsrtm_solver(
                 wave,
@@ -287,7 +297,7 @@ def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
 
         epoch_loss /= batchsize
         losses.append(epoch_loss)
-        print(f"[{backend}/{cuda_memory}] Epoch {epoch:04d} | Loss: {epoch_loss:.6e}")
+        print(f"[{run_label}/{cuda_memory}] Epoch {epoch:04d} | Loss: {epoch_loss:.6e}")
 
         if epoch % cfg["show_every"] == 0:
             ref_np = ref.detach().cpu().numpy()
@@ -296,22 +306,27 @@ def run_lsrtm(backend="eager", cuda_memory=None, epochs=None):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="3D acoustic LSRTM on the Overthrust model for PyTorch eager and CUDA backends.")
+    parser = argparse.ArgumentParser(description="3D acoustic LSRTM on the Overthrust model for Torch eager and c propagators.")
     parser.add_argument(
         "--import-mode",
         choices=("env", "source"),
         default=IMPORT_MODE,
         help="Load sweep from the current environment or from the repository source tree.",
     )
-    parser.add_argument("--backend", choices=("eager", "cuda"), default="eager")
-    parser.add_argument("--cuda-memory", choices=("full", "bs", "ckpt", "recursive"), default=None)
+    add_backend_impl_device_args(parser)
+    parser.add_argument(
+        "--cuda-memory",
+        choices=("full", "bs", "ckpt", "recursive"),
+        default=None,
+        help="C CUDA memory strategy. Defaults to bs for --impl c and ckpt for --impl eager.",
+    )
     parser.add_argument("--epochs", type=int, default=None)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    run_lsrtm(backend=args.backend, cuda_memory=args.cuda_memory, epochs=args.epochs)
+    run_lsrtm(backend=args.backend, impl=args.impl, device=args.device, cuda_memory=args.cuda_memory, epochs=args.epochs)
 
 
 if __name__ == "__main__":

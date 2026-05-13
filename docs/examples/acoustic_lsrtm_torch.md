@@ -13,7 +13,7 @@ The script:
 
 1. loads the true and smooth Marmousi velocity models
 2. generates observed scattered data with `Acoustic`
-3. builds an `AcousticLSRTM` solver on either the eager or CUDA backend
+3. builds an `AcousticLSRTM` solver with either the eager or  implementation
 4. updates the reflectivity model `mp` by matching predicted and observed scattered gathers
 
 ## Main Components
@@ -49,23 +49,23 @@ python3 examples/models/marmousi/prepare_fwi_models.py \
   --passes 3
 ```
 
-## Backend Selection
+## Backend / Implementation Selection
 
 Run the example with:
 
 === "PyTorch"
 
     ```bash
-    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend eager
+    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend torch --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend cuda --cuda-memory full
+    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend torch --impl c --device cuda --cuda-memory full
     ```
 
-The CUDA version also supports:
+The c CUDA run also supports:
 
 - `--cuda-memory bs`
 - `--cuda-memory ckpt`
@@ -173,18 +173,18 @@ and the current reflectivity gradient.
 Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
 exist.
 
-Step 2. Choose the backend and memory mode you want to test.
+Step 2. Choose the implementation and memory mode you want to test.
 
 === "PyTorch"
 
     ```bash
-    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend eager
+    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend torch --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend cuda --cuda-memory full
+    python3 examples/LSRTM/2d/acoustic/torch/lsrtm.py --backend torch --impl c --device cuda --cuda-memory full
     ```
 
 Step 3. Check the output directory for the saved wavelet, observed data, loss,
@@ -192,6 +192,6 @@ and epoch figures.
 
 Notes:
 
-- the eager path runs through `PropTorch(..., backend="eager")`
-- the CUDA path requires a CUDA-capable PyTorch build and the compiled CUDA extension
-- different CUDA memory modes trade runtime for peak memory usage
+- the eager path runs through `PropTorch(..., backend="torch", impl="eager")`
+- the c CUDA path requires a CUDA-capable PyTorch build and the compiled extension
+- different c CUDA memory modes trade runtime for peak memory usage

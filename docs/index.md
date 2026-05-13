@@ -6,7 +6,7 @@ Seismic Wave Equation Exploration Platform (SWEEP) is a Python package for seism
 
 - Various wave equations (acoustic, elastic, visco-acoustic, etc.) in a unified framework
 - PyTorch and JAX backends
-- Optional PyTorch CUDA bindings for faster propagation (Boundary saving is supported)
+- Optional PyTorch C++/CUDA extension bindings for faster propagation and memory-saving modes
 - Tools for forward modeling, FWI, and research prototyping
 - A modular structure for extending equations and operators
 
@@ -14,7 +14,7 @@ Seismic Wave Equation Exploration Platform (SWEEP) is a Python package for seism
 
 - Start with [Installation](getting-started/installation.md) to set up the package
 - Continue with [Quick Start](getting-started/quickstart.md) for a minimal example
-- See [Backends](user-guide/backends.md) for JAX, PyTorch, and CUDA binding notes
+- See [Backends](user-guide/backends.md) for JAX, PyTorch, and extension binding notes
 - Use [CLI](user-guide/cli.md) to inspect supported equations from the terminal
 - Browse [Examples](examples/index.md) for runnable scripts in the repository
 

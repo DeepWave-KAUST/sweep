@@ -362,7 +362,7 @@ class Warpper(torch.autograd.Function):
             *model_grads # models
         )
 
-class PropCUDA(PropBase, torch.nn.Module):
+class _CompiledPropagator(PropBase, torch.nn.Module):
 
     def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
@@ -474,7 +474,7 @@ class PropCUDA(PropBase, torch.nn.Module):
             return layout
 
         raise AttributeError(
-            f"{type(self.equation).__name__} must define `cuda_layout` to run with the CUDA propagator."
+            f"{type(self.equation).__name__} must define `cuda_layout` to run with PropTorch impl='c'."
         )
 
     def _remove_boundary_disk_cache(self):
@@ -590,7 +590,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         if current_capacity is not None and batch_size > current_capacity and not self.allow_growth:
             raise ValueError(
                 f"Input batch size {batch_size} exceeds preallocated CUDA buffer capacity {current_capacity}. "
-                "Increase B when constructing PropCUDA or set allow_growth=True."
+                "Increase B when constructing PropTorch(..., impl='c') or set allow_growth=True."
             )
 
         target_capacity = batch_size
@@ -988,7 +988,7 @@ class PropCUDA(PropBase, torch.nn.Module):
 
         if self.ndim == 2 and (use_boundary_saving or self.use_ckpt):
             raise NotImplementedError(
-                "PropCUDA.rtm for 2D acoustic currently supports full-wavefield mode only; "
+                "PropTorch impl='c' RTM for 2D acoustic currently supports full-wavefield mode only; "
                 "disable boundary saving and checkpointing."
             )
 
@@ -1054,7 +1054,7 @@ class PropCUDA(PropBase, torch.nn.Module):
         if adjoint_source_t.ndim == 4:
             if adjoint_source_t.shape[-1] != 1:
                 raise ValueError(
-                    "PropCUDA.rtm currently expects a single receiver channel; "
+                    "PropTorch impl='c' RTM currently expects a single receiver channel; "
                     f"got adjoint_source shape {tuple(adjoint_source_t.shape)}"
                 )
             adjoint_source_t = adjoint_source_t[..., 0]
@@ -1064,7 +1064,7 @@ class PropCUDA(PropBase, torch.nn.Module):
                 adjoint_source_t = adjoint_source_t.transpose(1, 2)
         else:
             raise ValueError(
-                "PropCUDA.rtm expects adjoint_source with shape (B, nt, nrec[, 1]) "
+                "PropTorch impl='c' RTM expects adjoint_source with shape (B, nt, nrec[, 1]) "
                 f"or (B, nrec, nt), got {tuple(adjoint_source_t.shape)}"
             )
         adjoint_source_t = adjoint_source_t.contiguous()

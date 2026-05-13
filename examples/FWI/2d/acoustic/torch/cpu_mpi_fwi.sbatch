@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/examples/FWI/2d/acoustic/torch/fwi_marmousi.py" ]]; then
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py" ]]; then
     REPO_ROOT="${SLURM_SUBMIT_DIR}"
 else
     REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
@@ -77,9 +77,8 @@ exec srun \
     --cpu-bind=cores \
     -n "${SLURM_NTASKS:-4}" \
     -c "${SLURM_CPUS_PER_TASK:-14}" \
-    "${PYTHON_BIN}" -u "${REPO_ROOT}/examples/FWI/2d/acoustic/torch/fwi_marmousi.py" \
-    --backend c \
-    --device cpu \
+    "${PYTHON_BIN}" -u "${REPO_ROOT}/examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py" \
+    --impl c \
     --mpi \
     --mpi-forward-batchsize "${MPI_FORWARD_BATCHSIZE}" \
     "$@"

@@ -22,7 +22,7 @@ Implementation:
 - `device` (device or `str`, optional): Target device used to place operator
   kernels and backend-specific tensors.
 - `backend` (`str`, optional): Numerical backend, typically `"torch"` or
-  `"jax"`. If you plan to run with `PropCUDA`, this should still normally be
+  `"jax"`. For the compiled `c` implementation, this should still normally be
   `"torch"` rather than `"cuda"`.
 - `dim` (`int`, optional): Stored dimensionality. For this class the intended
   value is `2`.
@@ -44,7 +44,7 @@ Required models:
 
 - uses separable Laplace operators
 - uses gradient kernels in the torch implementation
-- supports compiled CUDA binding through `_C()`
+- supports compiled extension binding through `_C()`
 
 ## Torch Binding
 

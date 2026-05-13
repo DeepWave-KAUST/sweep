@@ -12,8 +12,8 @@ shot-based objective while changing how wavefields are stored or recomputed.
 - `PyTorch eager + compile`
 - `PyTorch eager + ckpt`
 - `PyTorch eager + compile + ckpt`
-- `CUDA boundary saving`
-- `CUDA ckpt`
+- ` CUDA boundary saving`
+- ` CUDA ckpt`
 
 ## Benchmark Scripts
 
@@ -27,20 +27,20 @@ shot-based objective while changing how wavefields are stored or recomputed.
 - eager compile full
 - eager checkpointing with different chunk sizes
 - eager compile plus checkpointing
-- cuda full
-- cuda boundary saving on GPU
-- cuda boundary saving on CPU with transfer tuning
-- cuda boundary saving on pinned CPU memory
-- cuda boundary saving on disk, including asynchronous disk readback
-- cuda chunk checkpointing
-- cuda recursive checkpointing
+- c CUDA full
+- c CUDA boundary saving on GPU
+- c CUDA boundary saving on CPU with transfer tuning
+- c CUDA boundary saving on pinned CPU memory
+- c CUDA boundary saving on disk, including asynchronous disk readback
+- c CUDA chunk checkpointing
+- c CUDA recursive checkpointing
 
 ## Practical Guidance
 
 - if you need the simplest eager-side memory reduction, start with PyTorch checkpointing
-- if you are already on the CUDA backend and want the best memory/runtime
-  tradeoff, test CUDA boundary saving first
-- if boundary saving is still too memory hungry, try CUDA checkpointing
+- if you are already using the c CUDA path and want the best memory/runtime
+  tradeoff, test c CUDA boundary saving first
+- if boundary saving is still too memory hungry, try c CUDA checkpointing
 - CPU boundary saving is useful when GPU memory is the bottleneck; pinned CPU
   storage can improve transfer behavior
 - Disk-backed boundary saving gives the lowest GPU memory footprint among the

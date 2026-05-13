@@ -10,18 +10,16 @@ and model tensors into a callable solver.
 
 ## Recommended Entry Points
 
-- For Torch-family workflows, prefer `PropTorch(...)`. `backend="eager"` uses the Python/Torch implementation, while `backend="cuda"` dispatches to the compiled CUDA backend.
-- `PropCUDA` remains available as the lower-level CUDA-specific class when you
-  need to work directly with CUDA-only runtime behavior.
+- For Torch-family workflows, prefer `PropTorch(...)`. `backend="torch", impl="eager"` uses the Python/Torch implementation, while `backend="torch", impl="c"` dispatches to compiled C++/CUDA extension kernels.
 - Use `PropJax` for JAX-based propagation.
 
-## Backend-Specific Options
+## Implementation-Specific Options
 
 - `EagerOptions`: groups compile-related Torch options such as `use_compile` and `compile_mode`
-- `CUDAOptions`: groups CUDA-only runtime options
-- `MemoryOptions`: selects one CUDA memory-saving strategy
-- `BoundaryOptions`: controls CUDA boundary saving
-- `CkptOptions`: controls CUDA checkpointing mode and tuning parameters
+- `CUDAOptions`: groups c runtime options. The class name is retained for compatibility.
+- `MemoryOptions`: selects one c memory-saving strategy
+- `BoundaryOptions`: controls c boundary saving
+- `CkptOptions`: controls c checkpointing mode and tuning parameters
 
 ## Geometry Conventions
 
@@ -33,12 +31,12 @@ and model tensors into a callable solver.
 ## Memory-Saving Features
 
 - PyTorch eager checkpointing
-- `torch.compile` on the eager backend
-- CUDA boundary saving with GPU, CPU, pinned CPU, and disk-backed storage
-- CUDA boundary saving disk prefetch/readback, including asynchronous disk reads
-- CUDA checkpointing in `chunk` and `recursive` modes where the equation supports it
+- `torch.compile` on the eager implementation
+- c boundary saving with GPU, CPU, pinned CPU, and disk-backed storage
+- c boundary saving disk prefetch/readback, including asynchronous disk reads
+- c checkpointing in `chunk` and `recursive` modes where the equation supports it
 
-CUDA boundary saving is configured with `CUDAOptions(memory=MemoryOptions(...))`.
+C boundary saving is configured with `CUDAOptions(memory=MemoryOptions(...))`.
 The most commonly tuned boundary options are:
 
 - `BoundaryOptions.storage`: `"gpu"`, `"cpu"`, or `"disk"`
@@ -52,8 +50,8 @@ See `examples/reducingmemory/` for runnable comparisons of these options.
 
 ## Consistency Testing
 
-The CUDA memory modes are covered by `test/solver_gradient_mode_suite.py`. The
-suite compares eager gradients against CUDA full-wavefield, boundary-saving,
-and checkpoint modes across interior, finite-difference-edge, and free-surface
-source placements. It also saves per-mode gradient figures under
+The c memory modes are covered by `test/solver_gradient_mode_suite.py`.
+The suite compares eager gradients against c full-wavefield,
+boundary-saving, and checkpoint modes across interior, finite-difference-edge,
+and free-surface source placements. It also saves per-mode gradient figures under
 `test/test_outputs/solver_gradient_mode_suite/`.

@@ -26,4 +26,4 @@ velocity model `vp` and a reflectivity model `mp`.
 ## Backends
 
 - eager PyTorch
-- CUDA propagator backend
+- c compiled propagator

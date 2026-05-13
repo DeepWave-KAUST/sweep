@@ -18,6 +18,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from backend_cli import add_backend_impl_device_args, resolve_backend_impl_device
 from plotting import gather_extent, plot_loss_curve
 
 import matplotlib
@@ -64,14 +65,19 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
-def build_config(backend):
-    backend_key = f"fwi_2d_acoustic_torch_{backend}"
-    if backend not in ("eager", "cuda"):
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'eager'].")
+def build_config(backend, impl=None, device="auto"):
+    backend, impl, device = resolve_backend_impl_device(backend, impl, device)
+    if device != "cuda":
+        raise ValueError("The distributed multi-GPU example requires --device cuda.")
+    mode = "eager" if impl == "eager" else "cuda"
+    backend_key = f"fwi_2d_acoustic_torch_{mode}"
     cfg = shared_config.get_config("fwi_2d_acoustic_torch_common")
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
-    cfg["output_dir"] = f"multi_gpu_acoustic_fwi_{backend}"
+    cfg["impl"] = impl
+    cfg["device"] = device
+    cfg["mode"] = mode
+    cfg["output_dir"] = f"multi_gpu_acoustic_fwi_{mode}"
     return cfg
 
 
@@ -102,11 +108,12 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=cfg["use_compile"]),
             use_ckpt=cfg["use_ckpt"],
         )
@@ -114,7 +121,8 @@ def build_solver(shape, dev, cfg):
     return PropTorch(
         equation,
         **prop_kwargs,
-        backend="cuda",
+        backend="torch",
+        impl="c",
         cuda_options=CUDAOptions(
             memory=MemoryOptions(
                 strategy="boundary",
@@ -263,7 +271,8 @@ def save_progress_figure(true_model, vp, grad, losses, epoch, cfg, output_dir, s
 def run_fwi(args):
     rank, world_size, device = setup_distributed()
     try:
-        cfg = build_config(args.backend)
+        cfg = build_config(args.backend, args.impl, args.device)
+        run_label = f"{cfg['backend']}/{cfg['impl']}/{cfg['device']}"
         cfg["epochs"] = args.epochs if args.epochs is not None else cfg["epochs"]
         cfg["batchsize"] = args.batchsize if args.batchsize is not None else cfg["batchsize"]
         cfg["show_every"] = args.show_every if args.show_every is not None else cfg["show_every"]
@@ -300,7 +309,7 @@ def run_fwi(args):
                 true_vp,
                 forward_batchsize=cfg["forward_batchsize"],
             )
-            print(f"[rank 0] Forward modeling time ({args.backend}): {elapsed_ms:.2f} ms")
+            print(f"[rank 0] Forward modeling time ({run_label}): {elapsed_ms:.2f} ms")
         else:
             obs = None
         obs_torch = broadcast_observed_data(rank, device, obs)
@@ -362,7 +371,7 @@ def run_fwi(args):
             if rank == 0:
                 losses.append(loss_value)
                 iterator.set_description(f"loss={loss_value:.6e}")
-                print(f"[dist {args.backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
+                print(f"[dist {run_label}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
                 if epoch % cfg["show_every"] == 0:
                     save_progress_figure(
                         true_model,
@@ -387,12 +396,7 @@ def parse_args():
         default=IMPORT_MODE,
         help="Load sweep from the current environment or from the repository source tree.",
     )
-    parser.add_argument(
-        "--backend",
-        choices=("cuda", "eager"),
-        default="cuda",
-        help="PropTorch backend used independently on each rank.",
-    )
+    add_backend_impl_device_args(parser, default_impl="c")
     parser.add_argument("--epochs", type=int, default=None, help="Override the shared Marmousi epoch count.")
     parser.add_argument("--batchsize", type=int, default=None, help="Override the global shot batch size.")
     parser.add_argument("--show-every", type=int, default=None, help="Override progress figure interval.")

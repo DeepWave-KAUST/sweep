@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from sweep.equations import Acoustic, Acoustic3D
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator._c import _CompiledPropagator
 from sweep.propagator.torch import PropTorch
 
 
@@ -244,7 +244,7 @@ def build_solver(strategy, args, device):
             **common_kwargs,
         )
 
-    return PropCUDA(
+    return _CompiledPropagator(
         equation,
         **common_kwargs,
         **solver_kwargs_for_strategy(strategy, args),

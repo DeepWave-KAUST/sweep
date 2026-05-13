@@ -7,7 +7,7 @@ from common import (
     ABCN,
     ORDERS,
     OUTPUT_DIR,
-    PropCUDA,
+    PropTorch,
     crop_panel,
     extract_saved_wavefield,
     make_geometry,
@@ -27,8 +27,10 @@ VP = 2000.0
 
 
 def build_solver(order, dev):
-    return PropCUDA(
+    return PropTorch(
         Acoustic(spatial_order=order, device=dev, backend="torch"),
+        backend="torch",
+        impl="c",
         shape=PHYS_SHAPE,
         dev=dev,
         dh=DH,
@@ -46,8 +48,8 @@ def run_order(order, dev):
     wavelet = make_wavelet(NT, DT, DOM_FREQ, delay=0.15)
     sources, receivers = make_geometry(PHYS_SHAPE)
 
-    # Requiring gradients forces the CUDA wrapper to retain the full time history,
-    # which lets this diagnostic script inspect the actual PropCUDA wavefield output.
+    # Requiring gradients forces the compiled CUDA autograd node to retain the
+    # full time history, which lets this diagnostic script inspect the wavefield.
     vp = torch.full(PHYS_SHAPE, VP, dtype=torch.float32, device=dev, requires_grad=True)
 
     record = solver(wavelet, sources, receivers, models=[vp])
@@ -57,7 +59,7 @@ def run_order(order, dev):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare PropCUDA acoustic wavefields across FD orders.")
+    parser = argparse.ArgumentParser(description="Compare compiled CUDA acoustic wavefields across FD orders.")
     parser.add_argument(
         "--orders",
         type=int,

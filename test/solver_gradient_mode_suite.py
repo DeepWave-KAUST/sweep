@@ -476,7 +476,8 @@ def build_solver(spec: SolverSpec, backend: str, mode: str, scenario: ScenarioSp
     if backend == "eager":
         return PropTorch(
             equation,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=False),
             use_ckpt=False,
             **common,
@@ -486,12 +487,13 @@ def build_solver(spec: SolverSpec, backend: str, mode: str, scenario: ScenarioSp
     if mode == "full":
         return PropTorch(
             equation,
-            backend="cuda",
+            backend="torch",
+            impl="c",
             use_ckpt=False,
             boundary_saving_config={"enabled": False},
             **common,
         )
-    return PropTorch(equation, backend="cuda", cuda_options=cuda_options, **common)
+    return PropTorch(equation, backend="torch", impl="c", cuda_options=cuda_options, **common)
 
 
 def normalize_record(record: torch.Tensor, nshots: int, nreceivers: int, nt: int) -> torch.Tensor:

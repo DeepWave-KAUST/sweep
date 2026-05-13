@@ -18,7 +18,7 @@ The default modeling setup uses the paper-style three-layer model, 4 s recording
 Run from the repository root:
 
 ```bash
-PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend cuda --output-dir examples/wavefields/das/outputs_elastic_derived
+PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend torch --impl c --device cuda --output-dir examples/wavefields/das/outputs_elastic_derived
 ```
 
 Figure choices:
@@ -27,9 +27,9 @@ Figure choices:
 - `--figure 7`: vertical-well `ezz` gathers with different gauge lengths.
 - `--figure 9`: helical-wound DAS gathers.
 - `--figure both`: Figures 4 and 9.
-- `--figure compare`: direct DAS CUDA, direct DAS eager, and Elastic-derived DAS comparison.
+- `--figure compare`: direct DAS c CUDA, direct DAS eager, and Elastic-derived DAS comparison.
 
-Use `--backend eager`, `--backend cuda`, or `--backend both` for solver selection.
+Use `--backend torch --impl eager`, `--backend torch --impl c --device cuda`, or `--backend torch --impl both` for solver selection.
 
 ## Figure 4
 
@@ -47,7 +47,7 @@ gauge lengths:
 ```bash
 PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py \
   --figure 7 \
-  --backend cuda \
+  --backend torch --impl c --device cuda \
   --figure7-edge-mode reflect \
   --figure7-time-min 0.68 \
   --figure7-time-max 2.15 \
@@ -87,7 +87,7 @@ horizontal well, and vertical well. The columns are pressure, axial strain-rate 
 degrees, and axial strain-rate at 54.7 degrees.
 
 ```bash
-PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 9 --backend cuda --output-dir examples/wavefields/das/outputs_elastic_derived
+PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 9 --backend torch --impl c --device cuda --output-dir examples/wavefields/das/outputs_elastic_derived
 ```
 
 ![DAS Figure 9 reproduction](../figures/examples/wavefields_das_figure9_cuda.png)
@@ -98,7 +98,7 @@ The comparison mode checks whether the direct DAS equation and the Elastic-deriv
 post-processing path produce consistent records:
 
 ```bash
-PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend cuda --output-dir examples/wavefields/das/outputs_das_method_compare
+PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend torch --impl c --device cuda --output-dir examples/wavefields/das/outputs_das_method_compare
 ```
 
 ![DAS method records](../figures/examples/wavefields_das_method_records.png)

@@ -4,9 +4,9 @@ Run from the repository root after installing the package, for example:
 
     PYTHONPATH=src python test/c_cpu_forward_gradient_smoke.py
 
-The script exercises the C backend on CPU tensors.  Records are compared
+The script exercises the `c` implementation on CPU tensors.  Records are compared
 against the PyTorch CPU backend.  Acoustic2D gradients use the compiled CUDA
-backend as the reference when CUDA is available, because the compiled acoustic
+path as the reference when CUDA is available, because the compiled acoustic
 adjoint is a handwritten GPU-style adjoint rather than PyTorch eager autograd.
 Gradient comparisons also check cosine similarity so tiny gradients are not
 accepted solely because their absolute errors are small.
@@ -169,11 +169,11 @@ def make_solver(case: Case, backend: str, mode: str, device: torch.device | None
     elif mode != "full":
         raise ValueError(f"Unknown c/cpu mode '{mode}'.")
 
-    # PropTorch uses backend="cuda" as the public entry point for the compiled
-    # extension. CPU tensors dispatch into the C CPU binding through sweep._C.
+    # CPU tensors dispatch into the C++ CPU binding through sweep._C.
     return PropTorch(
         equation,
-        backend="cuda",
+        backend="torch",
+        impl="c",
         use_ckpt=False,
         boundary_saving_config=boundary_saving_config,
         **common,

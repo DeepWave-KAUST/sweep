@@ -79,12 +79,12 @@ Use `torchrun` from the repository root. For two GPUs:
 
 ```bash
 torchrun --standalone --nproc_per_node=2 \
-  examples/multi-gpu/torch/fwi_marmousi_dist.py --backend cuda
+  examples/multi-gpu/torch/fwi_marmousi_dist.py --backend torch --impl c --device cuda
 ```
 
-The script also accepts `--backend eager`, which still uses one distributed
+The script also accepts `--backend torch --impl eager`, which still uses one distributed
 process per CUDA device but runs each local propagation through the eager
-`PropTorch` backend.
+`PropTorch` implementation.
 
 ## Outputs
 
@@ -107,7 +107,7 @@ inspection; it is not used by the optimizer.
 ## Notes
 
 - Launch with one process per GPU.
-- The default CUDA path uses boundary saving through `PropTorch(..., backend="cuda")`.
+- The default c CUDA path uses boundary saving through `PropTorch(..., backend="torch", impl="c")`.
 - Rank 0 generates observed data once, then broadcasts it to the other ranks.
 - The loss is normalized by the global selected-shot batch, so ranks with
   different local shot counts still contribute the correct gradient scale.

@@ -10,7 +10,7 @@ import torch
 
 from sweep import is_torch_binding_available
 from sweep.equations import Acoustic
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator._c import _CompiledPropagator
 from sweep.signal import ricker
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "test_outputs" / "acoustic2d_rtm_layered"
@@ -138,7 +138,7 @@ def plot_rtm_panels(true_vp, image, src_illum, rec_illum, normalized, out_path):
 
 
 def build_solver(args, shape, device):
-    return PropCUDA(
+    return _CompiledPropagator(
         Acoustic(spatial_order=args.spatial_order, device=device),
         shape=shape,
         dev=device,

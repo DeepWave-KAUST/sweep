@@ -17,8 +17,8 @@ wave propagation workloads.
 ## Example Layout
 
 - `source_encoding/`: source-encoding examples and tradeoffs
-- `method_compare/`: PyTorch checkpointing, Torch compile, CUDA boundary
-  saving, and CUDA checkpointing benchmarks
+- `method_compare/`: PyTorch checkpointing, Torch compile, c CUDA
+  boundary saving, and c CUDA checkpointing benchmarks
 - `acoustic/torch/vrz_forward_compare.py`: acoustic VRZ forward comparison
 
 ## Main Methods
@@ -53,7 +53,7 @@ Main tuning knob:
 
 ### PyTorch Compile
 
-Implemented through `EagerOptions(use_compile=True, ...)` on the eager backend.
+Implemented through `EagerOptions(use_compile=True, ...)` on the eager implementation.
 
 Use when:
 
@@ -94,9 +94,9 @@ Supported modes:
 - `CkptOptions(mode="chunk", chunks=...)`
 - `CkptOptions(mode="recursive", count=...)`
 
-Checkpoint support depends on the CUDA equation. If a solver does not expose a
-checkpoint backward path, use CUDA full-wavefield or boundary-saving mode for
-that equation.
+Checkpoint support depends on the c implementation for each equation. If a solver does not
+expose a checkpoint backward path, use c full-wavefield or
+boundary-saving mode for that equation.
 
 ## What to Compare
 

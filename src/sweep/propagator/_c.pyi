@@ -5,7 +5,7 @@ import torch
 from .base import PropBase
 
 
-class PropCUDA(PropBase, torch.nn.Module):
+class _CompiledPropagator(PropBase, torch.nn.Module):
     store_last_wavefield: bool
     source_illumination: Optional[torch.Tensor]
     receiver_illumination: Optional[torch.Tensor]

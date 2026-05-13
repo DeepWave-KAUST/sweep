@@ -1,16 +1,18 @@
 # 2D Acoustic FWI on Marmousi with Torch
 
-Source file:
+Source files:
 
-- `examples/FWI/2d/acoustic/torch/fwi_marmousi.py`
+- `examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py`
+- `examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py`
+- `examples/FWI/2d/acoustic/torch/marmousi_minimal_fwi.ipynb`
 
 ## What This Example Does
 
-This example runs acoustic full-waveform inversion with one script that supports
-two propagator backends:
+This example runs acoustic full-waveform inversion with separate Torch entry
+points for GPU and CPU/MPI runs. Both entry points support two implementations:
 
-- `eager`: pure PyTorch propagation through `PropTorch(..., backend="eager")`
-- `cuda`: compiled CUDA propagation through `PropTorch(..., backend="cuda")`
+- `eager`: pure PyTorch propagation through `PropTorch(..., backend="torch", impl="eager")`
+- `c`: compiled C++/CUDA propagation through `PropTorch(..., backend="torch", impl="c")`
 
 The script:
 
@@ -18,6 +20,10 @@ The script:
 2. builds an acoustic solver for the selected backend
 3. generates observed data from the true model
 4. inverts the initial model by matching synthetic and observed gathers
+
+For a shorter walkthrough, open `marmousi_minimal_fwi.ipynb`. It uses a small
+Marmousi crop and keeps the workflow to model loading, forward modeling, and a
+few inversion iterations.
 
 ## Main Components
 
@@ -61,31 +67,41 @@ python3 examples/models/marmousi/plot_models.py
 The generated model files under `examples/models/` are ignored by git. The
 helper scripts in that directory remain tracked.
 
-## Backend Selection
+## Backend / Implementation Selection
 
 Run the example with:
 
 === "PyTorch"
 
     ```bash
-    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend eager
+    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend cuda
+    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl c
     ```
 
-The script keeps:
+=== "CPU / MPI"
+
+    ```bash
+    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py --impl c
+    mpirun -np 4 python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+      --impl c --mpi --mpi-forward-batchsize 4
+    mpirun -np 4 python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+      --impl eager --mpi --mpi-forward-batchsize 4
+    ```
+
+The runner scripts share:
 
 - `COMMON_CONFIG`: shared acquisition and inversion settings
-- `BACKEND_CONFIG`: backend-specific options for the eager and CUDA paths
+- `BACKEND_CONFIG`: implementation-specific options for the eager and `c` paths
 
 For `BACKEND_CONFIG`, the script uses:
 
 - `EagerOptions(...)` for the eager path
-- `CUDAOptions(memory=...)` for the CUDA path
+- `CUDAOptions(memory=...)` for the `c` path
 
 ## Key Configuration
 
@@ -115,7 +131,7 @@ equation = Acoustic(
 )
 ```
 
-Even when the solver runs with `backend="cuda"`, the equation `backend`
+Even when the solver runs with `backend="torch", impl="c"`, the equation `backend`
 remains `"torch"`.
 
 Shared propagator arguments are collected first:
@@ -141,7 +157,7 @@ prop_kwargs = dict(
         equation,
         **prop_kwargs,
         use_ckpt=cfg["use_ckpt"],
-        backend="eager",
+        backend="torch", impl="eager",
         eager_options=EagerOptions(use_compile=cfg["use_compile"]),
     )
     ```
@@ -152,11 +168,11 @@ prop_kwargs = dict(
     solver = PropTorch(
         equation,
         **prop_kwargs,
-        backend="cuda",
+        backend="torch", impl="c",
         cuda_options=CUDAOptions(
             memory=MemoryOptions(
                 strategy="boundary",
-                boundary=BoundaryOptions(...),
+              boundary=BoundaryOptions(...),
             )
         ),
     )
@@ -198,7 +214,7 @@ The script creates an output directory under `examples/` and saves:
 - `loss.png`
 - `epoch_XXXX.png`: includes the true model, the current inverted model, and the current gradient
 
-Each backend writes into its own output directory:
+Each implementation/device combination writes into its own output directory:
 
 === "PyTorch"
 
@@ -226,23 +242,35 @@ the true model, the current inverted model, and the current gradient.
 Step 1. Prepare the Marmousi `.npy` files listed above if they do not already
 exist.
 
-Step 2. Choose the backend you want to use.
+Step 2. Choose the implementation you want to use.
 
 === "PyTorch"
 
     ```bash
-    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend eager
+    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl eager
     ```
 
 === "CUDA"
 
     ```bash
-    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi.py --backend cuda
+    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_gpu.py --impl c
+    ```
+
+=== "CPU / MPI"
+
+    ```bash
+    python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py --impl c
+    mpirun -np 4 python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+      --impl c --mpi --mpi-forward-batchsize 4
+    mpirun -np 4 python3 examples/FWI/2d/acoustic/torch/fwi_marmousi_cpu_mpi.py \
+      --impl eager --mpi --mpi-forward-batchsize 4
     ```
 
 Step 3. Check the output directory for the saved figures.
 
 Notes:
 
-- `eager` mode runs on GPU if available and otherwise falls back to CPU
-- `cuda` mode requires a CUDA-capable PyTorch environment and compiled binding
+- `fwi_marmousi_gpu.py --impl eager` uses PyTorch eager CUDA
+- `fwi_marmousi_gpu.py --impl c` requires a CUDA-capable PyTorch environment and compiled binding
+- `fwi_marmousi_cpu_mpi.py --impl eager` uses PyTorch eager CPU
+- `fwi_marmousi_cpu_mpi.py --impl c` uses the compiled C++ CPU binding

@@ -25,8 +25,8 @@ First-order 2D elastic velocity-stress equation.
   even number.
 - `device` (device or `str`, optional): Target device used to place derivative
   operators and backend-specific tensors.
-- `backend` (`str`, optional): Numerical backend, typically `"torch"`. If you
-  plan to run with `PropCUDA`, this should still normally be `"torch"` rather
+- `backend` (`str`, optional): Numerical backend, typically `"torch"`. For the
+  compiled `c` implementation, this should still normally be `"torch"` rather
   than `"cuda"`.
 
 ## Models
@@ -102,15 +102,15 @@ Defaults:
 ## Backend Behavior
 
 - implemented as a first-order equation using `PartialDerivative`
-- supports compiled CUDA binding through `_C()`
+- supports compiled extension binding through `_C()`
 
 ## CUDA Layout
 
-For the compiled CUDA propagator, this equation exposes:
+For the compiled C++/CUDA propagator, this equation exposes:
 
 - `cuda_layout`
 
-This groups the CUDA runtime buffer and workspace metadata used by `PropCUDA`.
+This groups the CUDA runtime buffer and workspace metadata used by the compiled `c` implementation.
 
 ## Torch Binding
 

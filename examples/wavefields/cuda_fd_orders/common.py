@@ -20,7 +20,7 @@ from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
 
-from sweep.propagator.cuda import PropCUDA
+from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
 
@@ -91,4 +91,3 @@ def plot_order_grid(panels, titles, out_path, figure_title, shape, dh):
     fig.tight_layout()
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
-

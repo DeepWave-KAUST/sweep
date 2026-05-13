@@ -37,14 +37,14 @@ def build_torch_solver():
 
 def maybe_build_cuda_solver():
     if not torch.cuda.is_available():
-        print("PropCUDA: skipped (CUDA not available)")
+        print("_CompiledPropagator: skipped (CUDA not available)")
         return None
 
-    from sweep.propagator.cuda import PropCUDA
+    from sweep.propagator._c import _CompiledPropagator
 
     device = torch.device("cuda")
     equation = Acoustic(spatial_order=4, device=device, backend="torch")
-    return PropCUDA(
+    return _CompiledPropagator(
         equation,
         shape=(32, 32),
         dt=0.001,
@@ -83,7 +83,7 @@ def maybe_build_jax_solver():
 def main():
     solvers = [
         ("PropTorch", build_torch_solver()),
-        ("PropCUDA", maybe_build_cuda_solver()),
+        ("_CompiledPropagator", maybe_build_cuda_solver()),
         ("PropJax", maybe_build_jax_solver()),
     ]
 

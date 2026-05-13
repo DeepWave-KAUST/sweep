@@ -10,7 +10,7 @@ An equation defines:
 - the wavefields carried during propagation
 - the user-facing source and receiver field choices
 - the numerical update rule used by the propagator
-- whether a compiled PyTorch CUDA binding exists
+- whether a compiled PyTorch extension binding exists
 
 ## Shared Equation Interface
 
@@ -65,20 +65,20 @@ Field and model metadata are not just documentation.
   If an equation lists `["vp", "vs", "rho"]`, then the runtime model list must
   follow the same order.
 
-For equations that support the compiled CUDA backend, runtime buffer metadata is
+For equations that support the compiled extension backend, runtime buffer metadata is
 now grouped under:
 
 - `cuda_layout`
 
-This replaces the older pattern of scattering CUDA-specific scalar properties
+This replaces the older pattern of scattering extension-specific scalar properties
 through the equation class.
 
 !!! note
 
     In equation constructors, the `backend` argument refers to the tensor and
-    operator backend, not the propagator class. If you plan to run with
-    `PropCUDA`, the equation `backend` should still normally be `"torch"`, not
-    `"cuda"`.
+    operator backend, not the propagator implementation. For the compiled `c`
+    implementation, the equation `backend` should still normally be `"torch"`,
+    not `"cuda"`.
 
 ## API Tabs
 

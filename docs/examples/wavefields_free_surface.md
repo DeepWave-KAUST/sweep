@@ -20,8 +20,8 @@ boundary rule.
 - `elastic_free_surface.py`: compares elastic `vz` snapshots and seismograms
 
 The elastic free-surface implementation is available for both 2D `Elastic` and
-3D `Elastic3D` in eager and CUDA modes. CUDA full-wavefield, boundary-saving,
-and checkpoint modes are covered by the gradient consistency suite.
+3D `Elastic3D` in eager and c CUDA modes. c full-wavefield,
+boundary-saving, and checkpoint modes are covered by the gradient consistency suite.
 
 ## How to Run
 

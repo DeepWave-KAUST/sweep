@@ -22,7 +22,7 @@ Second-order 3D acoustic wave equation.
 - `device` (device or `str`, optional): Target device used to place operator
   kernels and backend-specific tensors.
 - `backend` (`str`, optional): Numerical backend, typically `"torch"` or
-  `"jax"`. If you plan to run with `PropCUDA`, this should still normally be
+  `"jax"`. For the compiled `c` implementation, this should still normally be
   `"torch"` rather than `"cuda"`.
 - `dim` (`int`, optional): Stored dimensionality. For this class the intended
   value is `3`.
@@ -44,7 +44,7 @@ This extends the 2D acoustic state with `y`-direction CPML components.
 ## Backend Behavior
 
 - uses separable 3D Laplace operators
-- supports compiled CUDA binding through `_C()`
+- supports compiled extension binding through `_C()`
 - supports RTM binding through `_C_rtm()`
 
 ## Torch Binding

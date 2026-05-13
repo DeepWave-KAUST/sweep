@@ -11,7 +11,8 @@ class PropTorch(
     dh=10.0,
     dt=0.002,
     dev=None,
-    backend="eager",
+    backend="torch",
+    impl="eager",
     backend_options=None,
     eager_options=None,
     cuda_options=None,
@@ -27,19 +28,20 @@ Implementation:
 
 Torch-family propagator facade.
 
-- `backend="eager"` uses the Python/Torch implementation
-- `backend="cuda"` dispatches to the compiled CUDA implementation
+- `backend="torch", impl="eager"` uses the Python/Torch implementation
+- `backend="torch", impl="c"` dispatches to compiled C++/CUDA extension kernels
 
-In other words, the CUDA path is part of the `PropTorch` API surface now. The
-lower-level CUDA implementation details sit underneath
-`PropTorch(..., backend="cuda")`.
+In other words, the `c` path is part of the `PropTorch` API surface now.
+The lower-level compiled C++/CUDA implementation details sit underneath
+`PropTorch(..., backend="torch", impl="c")`.
 
 !!! note
 
     `PropTorch` is the main Torch-facing solver entry point. If you choose
-    `backend="eager"`, the time loop and source/receiver logic live directly in
-    Python. If you choose `backend="cuda"`, `PropTorch` forwards to the
-    compiled CUDA backend while keeping the same top-level constructor style.
+    `backend="torch", impl="eager"`, the time loop and source/receiver logic
+    live directly in Python. If you choose `backend="torch", impl="c"`,
+    `PropTorch` forwards to compiled CPU or CUDA kernels while keeping the same
+    top-level constructor style.
 
 ## Parameters
 
@@ -63,22 +65,26 @@ lower-level CUDA implementation details sit underneath
   `(dz, dx)` in 2D and `(dz, dy, dx)` in 3D.
 - `dt` (`float`, optional): Time step in seconds.
 - `dev` (device, optional): Execution device, typically a `torch.device`.
-- `backend` (`"eager"` or `"cuda"`, optional): Selects which Torch-family
-  implementation is used.
+- `backend` (`"torch"`, optional): Selects the Torch backend family. Legacy
+  values such as `"eager"` and `"cuda"` are still accepted and normalized.
+- `impl` (`"eager"` or `"c"`, optional): Selects the Torch-family
+  implementation. `"eager"` uses PyTorch operators; `"c"` uses compiled
+  C++/CUDA kernels from the Torch extension and dispatches by tensor device.
 - `backend_options` (dict or dataclass, optional): Backend-specific options
   block merged after top-level kwargs. See [backend_options](options.md#backend_options).
 - `eager_options` ([`EagerOptions`](options.md#eageroptions) or dict, optional):
   eager-only options such as `use_compile`, `compile_mode`, and
   `store_last_wavefield`.
 - `cuda_options` ([`CUDAOptions`](options.md#cudaoptions) or dict, optional):
-  CUDA-only options. The main CUDA-specific block is
+  `c`-implementation options. The name is retained for compatibility; the main
+  memory block is
   [`CUDAOptions(memory=...)`](options.md#cudaoptions).
 - `use_ckpt` (`bool`, optional): Enables chunk checkpointing on the eager
-  backend. For CUDA usage, prefer
+  implementation. For `c` usage, prefer
   [`CUDAOptions(memory=MemoryOptions(strategy="ckpt", ...))`](options.md#memoryoptions)
   instead of relying on this top-level flag.
 - `ckpt_chunks` (`int`, optional): Number of time steps per checkpoint chunk
-  when `use_ckpt=True` on the eager backend. For CUDA usage, prefer
+  when `use_ckpt=True` on the eager implementation. For `c` usage, prefer
   [`CkptOptions(chunks=...)`](options.md#ckptoptions).
 - `pml_type` (`str`, optional): Absorbing boundary implementation passed into
   the equation setup.
@@ -127,7 +133,7 @@ forward(
 - `models` (`list[torch.Tensor]`, optional): List of model tensors, provided in
   the exact order required by `equation.models`.
 - `source_encoding` (`bool`, optional): If `True`, collapses shots into a
-  single encoded batch during propagation. The eager and CUDA-backed Torch
+  single encoded batch during propagation. The eager and `c` implementation Torch
   paths also auto-detect source encoding when the runtime inputs use
   `(1, nsrc, nt)`, `(1, nsrc, dim)`, and `(1, nreceivers, dim)`.
 - `adj` (`bool`, optional): Switches source time indexing for adjoint-style

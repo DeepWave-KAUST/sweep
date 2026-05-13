@@ -17,6 +17,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from backend_cli import add_backend_impl_device_args, resolve_backend_impl_device
 
 import numpy as np
 import torch
@@ -40,14 +41,23 @@ from sweep.signal import ricker
 torch.backends.cudnn.benchmark = True
 
 
-def build_config(backend):
-    backend_key = f"fwi_3d_acoustic_torch_{backend}"
-    if backend not in ("eager", "cuda"):
-        raise ValueError(f"Unsupported backend '{backend}'. Expected one of ['cuda', 'eager'].")
+def build_config(backend, impl=None, device="auto"):
+    backend, impl, device = resolve_backend_impl_device(backend, impl, device)
+    if impl == "c" and device != "cuda":
+        raise ValueError("The 3D acoustic FWI example currently supports the c implementation only on CUDA.")
+    mode = "eager" if impl == "eager" else "cuda"
+    backend_key = f"fwi_3d_acoustic_torch_{mode}"
     cfg = shared_config.get_config("fwi_3d_acoustic_torch_common")
     cfg.update(shared_config.get_config(backend_key))
     cfg["backend"] = backend
+    cfg["impl"] = impl
+    cfg["device"] = device
+    cfg["mode"] = mode
     return cfg
+
+
+def select_device(cfg):
+    return torch.device(cfg["device"])
 
 
 def build_solver(shape, dev, cfg):
@@ -69,11 +79,12 @@ def build_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(
                 use_compile=cfg["use_compile"],
             ),
@@ -81,11 +92,12 @@ def build_solver(shape, dev, cfg):
             ckpt_chunks=cfg["ckpt_chunks"],
         )
 
-    if cfg["backend"] == "cuda":
+    if cfg["impl"] == "c":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="cuda",
+            backend="torch",
+            impl="c",
             cuda_options=CUDAOptions(
                 memory=MemoryOptions(
                     strategy="boundary",
@@ -94,7 +106,7 @@ def build_solver(shape, dev, cfg):
             ),
         )
 
-    raise ValueError(f"Unsupported backend '{cfg['backend']}'.")
+    raise ValueError(f"Unsupported backend/impl '{cfg['backend']}/{cfg['impl']}'.")
 
 
 def build_boundary_options(boundary_cfg):
@@ -107,7 +119,7 @@ def build_boundary_options(boundary_cfg):
 
 def timed_forward(solver, wave, sources, receivers, models):
     kwargs = {}
-    if getattr(solver, "backend", "eager") == "cuda":
+    if getattr(solver, "impl", "eager") == "c":
         kwargs["use_boundary_saving"] = False
 
     if solver.dev.type == "cuda":
@@ -143,7 +155,7 @@ def timed_forward_batched(solver, wave, sources, receivers, models, shot_batchsi
             for start in progress:
                 stop = min(start + shot_batchsize, nshots)
                 solver_kwargs = {}
-                if getattr(solver, "backend", "eager") == "cuda":
+                if getattr(solver, "impl", "eager") == "c":
                     solver_kwargs["use_boundary_saving"] = False
                 batch_obs = solver(
                     wave,
@@ -193,7 +205,7 @@ def inversion_step_batched(
         stop = min(start + train_shot_batchsize, shot_idx.shape[0])
         batch_idx = shot_idx[start:stop]
         solver_kwargs = {}
-        if getattr(solver, "backend", "eager") == "cuda":
+        if getattr(solver, "impl", "eager") == "c":
             solver_kwargs["use_boundary_saving"] = True
 
         syn = solver(wave, sources[batch_idx], receivers[batch_idx], models=[inv_vp], **solver_kwargs)
@@ -205,8 +217,8 @@ def inversion_step_batched(
     return total_loss
 
 
-def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_override=None):
-    cfg = build_config(backend)
+def run_fwi(backend="torch", impl=None, device="auto", batchsize_override=None, train_shot_batchsize_override=None):
+    cfg = build_config(backend, impl, device)
     if batchsize_override is not None:
         cfg["batchsize"] = int(batchsize_override)
     if train_shot_batchsize_override is not None:
@@ -228,11 +240,9 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
     true_model, init_model = load_models(EXAMPLES_DIR, cfg)
     shape = true_model.shape
     
-    if backend == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("The CUDA acoustic 3D FWI example requires a CUDA-capable PyTorch environment.")
-
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = select_device(cfg)
     solver = build_solver(shape, dev, cfg)
+    run_label = f"{cfg['backend']}/{cfg['impl']}/{cfg['device']}"
 
     _, wave = build_wavelet(cfg, ricker)
     save_wavelet_figure(wave, output_dir)
@@ -246,7 +256,7 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
     forward_batchsize = min(cfg["forward_batchsize"], sources.shape[0])
     if forward_batchsize >= sources.shape[0]:
         obs, elapsed_ms = timed_forward(solver, wave, sources, receivers, models=[true_vp])
-        print(f"Forward modeling time ({backend}): {elapsed_ms:.2f} ms")
+        print(f"Forward modeling time ({run_label}): {elapsed_ms:.2f} ms")
     else:
         obs, elapsed_ms = timed_forward_batched(
             solver,
@@ -257,7 +267,7 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
             shot_batchsize=forward_batchsize,
         )
         print(
-            f"Forward modeling time ({backend}, batched {forward_batchsize} shots/step): "
+            f"Forward modeling time ({run_label}, batched {forward_batchsize} shots/step): "
             f"{elapsed_ms:.2f} ms"
         )
     save_observed_figure(obs, receivers, cfg, output_dir)
@@ -294,7 +304,7 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
         optimizer.step()
 
         losses.append(loss_value)
-        print(f"[{backend}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
+        print(f"[{run_label}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
 
         if epoch % cfg["show_every"] == 0:
             vp_np = inv_vp.detach().cpu().numpy()
@@ -312,19 +322,14 @@ def run_fwi(backend="eager", batchsize_override=None, train_shot_batchsize_overr
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="3D acoustic FWI on the Overthrust model for PyTorch and CUDA propagators.")
+    parser = argparse.ArgumentParser(description="3D acoustic FWI on the Overthrust model for Torch eager and c propagators.")
     parser.add_argument(
         "--import-mode",
         choices=("env", "source"),
         default=IMPORT_MODE,
         help="Load sweep from the current environment or from the repository source tree.",
     )
-    parser.add_argument(
-        "--backend",
-        choices=("eager", "cuda"),
-        default="eager",
-        help="Select which PropTorch backend to use.",
-    )
+    add_backend_impl_device_args(parser)
     parser.add_argument(
         "--batchsize",
         type=int,
@@ -344,6 +349,8 @@ def main():
     args = parse_args()
     run_fwi(
         backend=args.backend,
+        impl=args.impl,
+        device=args.device,
         batchsize_override=args.batchsize,
         train_shot_batchsize_override=args.train_shot_batchsize,
     )

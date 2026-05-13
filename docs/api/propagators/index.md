@@ -19,15 +19,12 @@ The main user-facing solver classes are:
 For most Torch-based workflows, `PropTorch` is now the main user-facing entry
 point. Use:
 
-- `PropTorch(..., backend="eager")` for the pure PyTorch implementation
-- `PropTorch(..., backend="cuda")` for the compiled CUDA implementation
-
-`PropCUDA` remains available as the lower-level CUDA-specific implementation,
-but the Torch-side API is centered on `PropTorch(..., backend="cuda")`.
+- `PropTorch(..., backend="torch", impl="eager")` for the pure PyTorch implementation
+- `PropTorch(..., backend="torch", impl="c")` for compiled C++/CUDA extension kernels
 
 ## Runtime Shape Conventions
 
-Across `PropTorch`, `PropJax`, and `PropCUDA`, runtime inputs usually follow
+Across `PropTorch` and `PropJax`, runtime inputs usually follow
 one of these patterns:
 
 - Single-source batched shots:
@@ -51,7 +48,7 @@ Here:
 - `dim` is `2` in 2D and `3` in 3D
 
 When the inputs use the super-shot layout
-`(1, nsrc, nt) / (1, nsrc, dim) / (1, nrec, dim)`, all three propagators now
+`(1, nsrc, nt) / (1, nsrc, dim) / (1, nrec, dim)`, supported implementations
 auto-detect this pattern and treat it as `source_encoding=True`.
 
 ## API Tabs
@@ -69,7 +66,8 @@ auto-detect this pattern and treat it as `source_encoding=True`.
         dh=10.0,
         dt=0.002,
         dev=None,
-        backend="eager",
+        backend="torch",
+        impl="eager",
         backend_options=None,
         eager_options=None,
         cuda_options=None,
@@ -79,9 +77,9 @@ auto-detect this pattern and treat it as `source_encoding=True`.
     )
     ```
 
-    Torch-family propagator facade. `backend="eager"` uses the Python/Torch
-    implementation, while `backend="cuda"` dispatches to the compiled CUDA
-    backend.
+    Torch-family propagator facade. `backend="torch", impl="eager"` uses the
+    Python/Torch implementation, while `backend="torch", impl="c"`
+    dispatches to compiled C++/CUDA extension kernels.
 
     See [PropTorch](prop_torch.md) for parameter meanings.
 
@@ -115,5 +113,3 @@ The following pages use a class-reference style layout:
 - [Propagator Options](options.md)
 - [PropTorch](prop_torch.md)
 - [PropJax](prop_jax.md)
-
-For lower-level CUDA-specific runtime details, see [PropCUDA](prop_cuda.md).

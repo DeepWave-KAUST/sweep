@@ -27,7 +27,7 @@ Second-order 2D acoustic wave equation with CPML auxiliary fields.
 - `device` (device or `str`, optional): Target device used to place operator
   kernels and backend-specific tensors.
 - `backend` (`str`, optional): Numerical backend, typically `"torch"` or
-  `"jax"`. If you plan to run with `PropCUDA`, this should still normally be
+  `"jax"`. For the compiled `c` implementation, this should still normally be
   `"torch"` rather than `"cuda"`.
 - `dim` (`int`, optional): Stored dimensionality. For this class the intended
   value is `2`.
@@ -86,16 +86,16 @@ Defaults:
 ## Backend Behavior
 
 - PyTorch path uses separable Laplace operators
-- CUDA-backed PyTorch binding is available through `_C()`
+- compiled PyTorch extension binding is available through `_C()`
 - JAX path is also supported
 
 ## CUDA Layout
 
-For the compiled CUDA propagator, this equation exposes:
+For the compiled C++/CUDA propagator, this equation exposes:
 
 - `cuda_layout`
 
-This groups the CUDA runtime buffer metadata needed by `PropCUDA` instead of
+This groups the CUDA runtime buffer metadata needed by the compiled `c` implementation instead of
 storing separate `base_nvar`, `pml_nvar`, and checkpoint-count properties on
 the equation class.
 
@@ -103,4 +103,4 @@ the equation class.
 
 - `supports_torch_binding()` : `True`
 
-Compiled entry points exposed by this class are used by `PropCUDA`.
+Compiled entry points exposed by this class are used by `PropTorch(..., impl="c")`.

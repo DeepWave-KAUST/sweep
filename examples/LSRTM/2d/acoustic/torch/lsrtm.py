@@ -16,6 +16,7 @@ sys.path.insert(0, str(EXAMPLES_DIR / "_shared"))
 from bootstrap import configure_example_imports
 
 IMPORT_MODE = configure_example_imports(EXAMPLES_DIR)
+from backend_cli import add_backend_impl_device_args, resolve_backend_impl_device
 from plotting import gather_extent, plot_loss_curve
 
 import matplotlib.pyplot as plt
@@ -33,13 +34,20 @@ from sweep.signal import ricker
 torch.backends.cudnn.benchmark = True
 
 
-def build_config():
+def build_config(backend="torch", impl=None, device="auto"):
+    backend, impl, device = resolve_backend_impl_device(backend, impl, device)
+    if impl == "c" and device != "cuda":
+        raise ValueError("The 2D acoustic LSRTM example currently supports the c implementation only on CUDA.")
+    mode = "eager" if impl == "eager" else "cuda"
     cfg = shared_config.get_config("fwi_2d_acoustic_torch_common")
     cfg.update(
         {
             "output_dir": "acoustic_lsrtm_torch",
             "fm": 10.0,
-            "backend": "eager",
+            "backend": backend,
+            "impl": impl,
+            "device": device,
+            "mode": mode,
             "cuda_memory": "full",
             "use_compile": False,
             "use_ckpt": False,
@@ -55,6 +63,10 @@ def build_config():
         }
     )
     return cfg
+
+
+def select_device(cfg):
+    return torch.device(cfg["device"])
 
 
 def build_geometry(shape, cfg):
@@ -96,18 +108,20 @@ def build_acoustic_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=cfg["use_compile"]),
         )
 
     return PropTorch(
         equation,
         **prop_kwargs,
-        backend="cuda",
+        backend="torch",
+        impl="c",
         cuda_options=build_cuda_options(cfg),
     )
 
@@ -131,18 +145,20 @@ def build_lsrtm_solver(shape, dev, cfg):
         pml_type="cpmlr",
     )
 
-    if cfg["backend"] == "eager":
+    if cfg["impl"] == "eager":
         return PropTorch(
             equation,
             **prop_kwargs,
-            backend="eager",
+            backend="torch",
+            impl="eager",
             eager_options=EagerOptions(use_compile=cfg["use_compile"]),
         )
 
     return PropTorch(
         equation,
         **prop_kwargs,
-        backend="cuda",
+        backend="torch",
+        impl="c",
         cuda_options=build_cuda_options(cfg),
     )
 
@@ -246,15 +262,14 @@ def generate_observed_data(acoustic_solver, wave, sources, receivers, true_model
     return (obs - background).detach()
 
 
-def run_lsrtm(backend="eager", cuda_memory="full", epochs=None):
-    cfg = build_config()
-    cfg["backend"] = backend
+def run_lsrtm(backend="torch", impl=None, device="auto", cuda_memory="full", epochs=None):
+    cfg = build_config(backend, impl, device)
     cfg["cuda_memory"] = cuda_memory
     if epochs is not None:
         cfg["epochs"] = int(epochs)
 
     script_dir = Path(__file__).resolve().parent
-    output_dir = script_dir / f"{cfg['output_dir']}_{backend}_{cuda_memory}"
+    output_dir = script_dir / f"{cfg['output_dir']}_{cfg['mode']}_{cuda_memory}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(0)
@@ -264,12 +279,8 @@ def run_lsrtm(backend="eager", cuda_memory="full", epochs=None):
     smooth_model = np.load(EXAMPLES_DIR / cfg["init_model"]).astype(np.float32)
     shape = true_model.shape
 
-    if backend == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("The CUDA LSRTM example requires a CUDA-capable PyTorch environment.")
-        dev = torch.device("cuda")
-    else:
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = select_device(cfg)
+    run_label = f"{cfg['backend']}/{cfg['impl']}/{cfg['device']}"
 
     acoustic_solver = build_acoustic_solver(shape, dev, cfg)
     lsrtm_solver = build_lsrtm_solver(shape, dev, cfg)
@@ -280,7 +291,7 @@ def run_lsrtm(backend="eager", cuda_memory="full", epochs=None):
     sources, receivers = build_geometry(shape, cfg)
     print("(nshots, ndim):", sources.shape)
     print("(nshots, nreceivers, ndim):", receivers.shape)
-    print(f"Running backend={backend}, cuda_memory={cuda_memory} on {dev} ...")
+    print(f"Running backend={cfg['backend']}, impl={cfg['impl']}, device={cfg['device']}, cuda_memory={cuda_memory} on {dev} ...")
 
     obs = generate_observed_data(acoustic_solver, wave, sources, receivers, true_model, smooth_model, dev)
     obs_np = obs.detach().cpu().numpy()
@@ -304,7 +315,7 @@ def run_lsrtm(backend="eager", cuda_memory="full", epochs=None):
         optimizer.step()
 
         losses.append(loss.item())
-        print(f"[{backend}/{cuda_memory}] Epoch {epoch:04d} | Loss: {loss.item():.6e}")
+        print(f"[{run_label}/{cuda_memory}] Epoch {epoch:04d} | Loss: {loss.item():.6e}")
 
         if epoch % cfg["show_every"] == 0:
             ref_np = ref.detach().cpu().numpy()
@@ -313,24 +324,19 @@ def run_lsrtm(backend="eager", cuda_memory="full", epochs=None):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Acoustic LSRTM example for PyTorch eager and CUDA backends.")
+    parser = argparse.ArgumentParser(description="Acoustic LSRTM example for Torch eager and c propagators.")
     parser.add_argument(
         "--import-mode",
         choices=("env", "source"),
         default=IMPORT_MODE,
         help="Load sweep from the current environment or from the repository source tree.",
     )
-    parser.add_argument(
-        "--backend",
-        choices=("eager", "cuda"),
-        default="eager",
-        help="Select which PropTorch backend to use.",
-    )
+    add_backend_impl_device_args(parser)
     parser.add_argument(
         "--cuda-memory",
         choices=("full", "bs", "ckpt", "recursive"),
         default="full",
-        help="CUDA memory strategy. Ignored when --backend eager.",
+        help=" CUDA memory strategy. Ignored when --impl eager.",
     )
     parser.add_argument(
         "--epochs",
@@ -343,7 +349,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    run_lsrtm(backend=args.backend, cuda_memory=args.cuda_memory, epochs=args.epochs)
+    run_lsrtm(backend=args.backend, impl=args.impl, device=args.device, cuda_memory=args.cuda_memory, epochs=args.epochs)
 
 
 if __name__ == "__main__":

@@ -42,11 +42,13 @@ def _configure_torch_cpu_threads(local_size=1):
     torch.set_num_interop_threads(1)
 
 
-def init_mpi(enabled, backend, device=None):
+def init_mpi(enabled, backend, device=None, impl=None):
     if not enabled:
         return MPIContext(enabled=False)
-    if backend != "c" or device != "cpu":
-        raise ValueError("--mpi is currently supported only with --backend c --device cpu.")
+    legacy_cpu_binding = backend == "c" and device == "cpu"
+    torch_cpu = backend == "torch" and impl in {"eager", "c"} and device == "cpu"
+    if not (legacy_cpu_binding or torch_cpu):
+        raise ValueError("--mpi is currently supported only for CPU Torch runs: impl='eager' or impl='c'.")
     try:
         from mpi4py import MPI
     except ImportError as exc:
