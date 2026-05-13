@@ -58,6 +58,19 @@ def top_free_surface_derivative(u, deriv, halo, odd, axis):
     return deriv(extend_top_free_surface(u, halo, odd, axis))
 
 
+def extend_top_free_surface_cell_centered(u, halo, odd, axis):
+    if halo <= 0:
+        return u
+    ghost = _flip(_slice_axis(u, axis, halo, 2 * halo), axis=axis)
+    if odd:
+        ghost = -ghost
+    return _concat([ghost, _slice_axis(u, axis, halo, None)], axis=axis)
+
+
+def top_free_surface_cell_derivative(u, deriv, halo, odd, axis):
+    return deriv(extend_top_free_surface_cell_centered(u, halo, odd, axis))
+
+
 def zero_top_row(u, halo, axis):
     row = 0 if halo <= 0 else halo
     out = _zero_axis_index(u, axis, row)

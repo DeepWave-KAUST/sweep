@@ -68,6 +68,7 @@ nav:
           - CUDA FD Orders: examples/wavefields_cuda_fd_orders.md
           - Free Surface Forward: examples/wavefields_free_surface.md
           - Anisotropic Wavefields: examples/wavefields_anisotropic.md
+          - Elastic TTI Wavefields: examples/elastic_tti_wavefields.md
           - DAS Figure 4: examples/wavefields_das.md
       - Multi-GPU: examples/multi_gpu.md
       - Joint Migration Inversion: examples/joint_migration_inversion.md

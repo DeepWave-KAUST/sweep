@@ -11,6 +11,8 @@ from .acoustic_vrz import AcousticVRZ, AcousticVRZ3D
 # from .aec_lsrtm import AECLSRTM
 # from .elastic_lsrtm import ElasticLSRTM
 from .elastic import Elastic
+from .elastic_tti import ElasticTTI
+from .elastic_tti_sg import ElasticTTISG
 from .elastic3d import Elastic as Elastic3D
 from .das import (
     DAS,
