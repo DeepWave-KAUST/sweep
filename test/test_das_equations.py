@@ -2,7 +2,19 @@ import numpy as np
 import pytest
 import torch
 
-from sweep.equations import DAS, DAS3D, DASElastic, DASElastic3D, gauge_average, helical_das_response
+from sweep.equations import (
+    DAS,
+    DAS3D,
+    DASElastic,
+    DASElastic3D,
+    DASModeler,
+    DASMu,
+    DASMu3D,
+    DASZhao,
+    DASZhao3D,
+    gauge_average,
+    helical_das_response,
+)
 from sweep.propagator.torch import PropTorch
 
 
@@ -32,10 +44,244 @@ def test_das_equations_are_exported_with_cuda_binding():
     classes = eq._equation_classes()
     assert classes["DASElastic"] is DASElastic
     assert classes["DASElastic3D"] is DASElastic3D
+    assert classes["DASMu"] is DASMu
+    assert classes["DASMu3D"] is DASMu3D
+    assert classes["DASZhao"] is DASZhao
+    assert classes["DASZhao3D"] is DASZhao3D
     assert DAS is DASElastic
     assert DAS3D is DASElastic3D
     assert DASElastic.supports_torch_binding()
     assert DASElastic3D.supports_torch_binding()
+    assert not DASMu.supports_torch_binding()
+    assert not DASMu3D.supports_torch_binding()
+
+
+def test_das_modeler_zhao_uses_standard_record_layout():
+    device = torch.device("cpu")
+    nt = 18
+    dt = 0.001
+    shape = (22, 24)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    sources = np.array([[[shape[1] // 2, 5]]], dtype=np.int32)
+    receivers = np.array([[[8, 6], [14, 7], [18, 8]]], dtype=np.int32)
+
+    vp = torch.full(shape, 2200.0, dtype=torch.float32)
+    vs = torch.full(shape, 1200.0, dtype=torch.float32)
+    rho = torch.full(shape, 2100.0, dtype=torch.float32)
+
+    modeler = DASModeler(
+        method="zhao",
+        ndim=2,
+        spatial_order=2,
+        shape=shape,
+        receiver_type=["exx_t", "ezz_t", "das35_t"],
+        abcn=4,
+        dh=10.0,
+        dt=dt,
+        dev=device,
+        pml_type="cpmls",
+        use_ckpt=False,
+    )
+
+    out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
+    assert out.shape == (1, nt, receivers.shape[1], 3)
+    assert modeler.channels == {"exx_t": 0, "ezz_t": 1, "das35_t": 2}
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 0
+
+
+def test_das_modeler_mu_outputs_physical_strain_rate_and_das_fields():
+    device = torch.device("cpu")
+    nt = 18
+    dt = 0.001
+    shape = (24, 28)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    sources = np.array([[[shape[1] // 2, 6]]], dtype=np.int32)
+    receivers = np.array([[[8, 7], [14, 8], [20, 9]]], dtype=np.int32)
+
+    vp = torch.full(shape, 2200.0, dtype=torch.float32, requires_grad=True)
+    vs = torch.full(shape, 1200.0, dtype=torch.float32, requires_grad=True)
+    rho = torch.full(shape, 2100.0, dtype=torch.float32, requires_grad=True)
+
+    modeler = DASModeler(
+        method="mu",
+        ndim=2,
+        spatial_order=2,
+        shape=shape,
+        receiver_type=["vx", "vz", "exx_t", "ezz_t", "das35_t"],
+        abcn=4,
+        dh=10.0,
+        dt=dt,
+        dev=device,
+        pml_type="cpmls",
+        use_ckpt=False,
+    )
+
+    out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
+    assert out.shape == (1, nt, receivers.shape[1], 5)
+    assert modeler.channels == {"vx": 0, "vz": 1, "exx_t": 2, "ezz_t": 3, "das35_t": 4}
+    assert modeler.solver_receiver_type == ("vx", "vz", "exx", "ezz")
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 0
+
+    out[..., [modeler.channels["exx_t"], modeler.channels["ezz_t"], modeler.channels["das35_t"]]].pow(2).mean().backward()
+    _assert_nonzero_finite_gradient(vp, vs, rho)
+
+
+def test_das_mu_supports_all_physical_fields_as_source_receiver_with_free_surface():
+    device = torch.device("cpu")
+    nt = 18
+    dt = 0.001
+    shape = (24, 28)
+    fields = ["vx", "vz", "sxx", "szz", "sxz", "exx", "ezz", "exz"]
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    sources = np.array([[[shape[1] // 2, 6]]], dtype=np.int32)
+    receivers = np.array([[[8, 7], [14, 8], [20, 9]]], dtype=np.int32)
+
+    vp = torch.full(shape, 2200.0, dtype=torch.float32, requires_grad=True)
+    vs = torch.full(shape, 1200.0, dtype=torch.float32, requires_grad=True)
+    rho = torch.full(shape, 2100.0, dtype=torch.float32, requires_grad=True)
+
+    solver = PropTorch(
+        DASMu(spatial_order=2, device=device, backend="torch"),
+        shape=shape,
+        source_type=fields,
+        receiver_type=fields,
+        abcn=4,
+        dh=10.0,
+        dt=dt,
+        dev=device,
+        pml_type="cpmls",
+        free_surface=True,
+        use_ckpt=False,
+    )
+
+    out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
+    assert out.shape == (1, nt, receivers.shape[1], len(fields))
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 0
+
+    out[..., fields.index("exz")].pow(2).mean().backward()
+    _assert_nonzero_finite_gradient(vp, vs, rho)
+
+
+def test_das_modeler_mu_3d_outputs_physical_strain_rate_and_das_fields():
+    device = torch.device("cpu")
+    nt = 10
+    dt = 0.001
+    shape = (8, 8, 8)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.004).reshape(1, 1, nt)
+    sources = np.array([[[4, 4, 3]]], dtype=np.int32)
+    receivers = np.array([[[3, 3, 3], [5, 5, 4]]], dtype=np.int32)
+
+    vp = torch.full(shape, 2200.0, dtype=torch.float32, requires_grad=True)
+    vs = torch.full(shape, 1200.0, dtype=torch.float32, requires_grad=True)
+    rho = torch.full(shape, 2100.0, dtype=torch.float32, requires_grad=True)
+
+    modeler = DASModeler(
+        method="mu",
+        ndim=3,
+        spatial_order=2,
+        shape=shape,
+        receiver_type=["vx", "vy", "vz", "exx_t", "eyy_t", "ezz_t", "das35_t", "das54y_t"],
+        abcn=2,
+        dh=10.0,
+        dt=dt,
+        dev=device,
+        pml_type="cpmls",
+        use_ckpt=False,
+    )
+
+    out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
+    assert out.shape == (1, nt, receivers.shape[1], 8)
+    assert modeler.channels == {
+        "vx": 0,
+        "vy": 1,
+        "vz": 2,
+        "exx_t": 3,
+        "eyy_t": 4,
+        "ezz_t": 5,
+        "das35_t": 6,
+        "das54y_t": 7,
+    }
+    assert modeler.solver_receiver_type == ("vx", "vy", "vz", "exx", "eyy", "ezz")
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 0
+
+    out[..., [modeler.channels["exx_t"], modeler.channels["eyy_t"], modeler.channels["ezz_t"]]].pow(2).mean().backward()
+    _assert_nonzero_finite_gradient(vp, vs, rho)
+
+
+def test_das_mu3d_supports_all_physical_fields_as_source_receiver_with_free_surface():
+    device = torch.device("cpu")
+    nt = 8
+    dt = 0.001
+    shape = (8, 8, 8)
+    fields = ["vx", "vy", "vz", "sxx", "syy", "szz", "sxy", "sxz", "syz", "exx", "eyy", "ezz", "exy", "exz", "eyz"]
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.004).reshape(1, 1, nt)
+    sources = np.array([[[4, 4, 3]]], dtype=np.int32)
+    receivers = np.array([[[3, 3, 3], [5, 5, 4]]], dtype=np.int32)
+
+    vp = torch.full(shape, 2200.0, dtype=torch.float32, requires_grad=True)
+    vs = torch.full(shape, 1200.0, dtype=torch.float32, requires_grad=True)
+    rho = torch.full(shape, 2100.0, dtype=torch.float32, requires_grad=True)
+
+    solver = PropTorch(
+        DASMu3D(spatial_order=2, device=device, backend="torch"),
+        shape=shape,
+        source_type=fields,
+        receiver_type=fields,
+        abcn=2,
+        dh=10.0,
+        dt=dt,
+        dev=device,
+        pml_type="cpmls",
+        free_surface=True,
+        use_ckpt=False,
+    )
+
+    out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
+    assert out.shape == (1, nt, receivers.shape[1], len(fields))
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 0
+
+    out[..., fields.index("exz")].pow(2).mean().backward()
+    _assert_nonzero_finite_gradient(vp, vs, rho)
+
+
+def test_das_modeler_mu_variant():
+    device = torch.device("cpu")
+    nt = 16
+    dt = 0.001
+    shape = (22, 26)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    sources = np.array([[[shape[1] // 2, 5]]], dtype=np.int32)
+    receivers = np.array([[[8, 6], [14, 7]]], dtype=np.int32)
+
+    vp = torch.full(shape, 2200.0, dtype=torch.float32)
+    vs = torch.full(shape, 1200.0, dtype=torch.float32)
+    rho = torch.full(shape, 2100.0, dtype=torch.float32)
+
+    modeler = DASModeler(
+        method="mu",
+        ndim=2,
+        spatial_order=2,
+        shape=shape,
+        source_type=["sxx", "szz"],
+        receiver_type=["vx", "vz", "exx", "ezz", "exz"],
+        abcn=4,
+        dh=10.0,
+        dt=dt,
+        dev=device,
+        pml_type="cpmls",
+        use_ckpt=False,
+    )
+
+    out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
+    assert out.shape == (1, nt, receivers.shape[1], 5)
+    assert modeler.channels == {"vx": 0, "vz": 1, "exx": 2, "ezz": 3, "exz": 4}
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 0
 
 
 def test_das_elastic_2d_eager_forward_and_gradient():
@@ -61,7 +307,7 @@ def test_das_elastic_2d_eager_forward_and_gradient():
         DASElastic(spatial_order=2, device=device, backend="torch"),
         shape=shape,
         source_type=["sxx", "szz"],
-        receiver_type=["exx", "ezz", "das35", "das54x"],
+        receiver_type=["exx_t", "ezz_t", "das35_t", "das54x_t"],
         abcn=4,
         dh=10.0,
         dt=dt,
@@ -85,8 +331,8 @@ def test_das_elastic_3d_field_metadata():
     equation = DASElastic3D(spatial_order=2, backend="torch")
     assert equation.models == ["vp", "vs", "rho"]
     assert equation.default_source_fields == ["sxx", "syy", "szz"]
-    assert equation.default_receiver_fields == ["exx", "eyy", "ezz"]
-    assert "das54z" in equation.wavefields
+    assert equation.default_receiver_fields == ["exx_t", "eyy_t", "ezz_t"]
+    assert "das54z_t" in equation.wavefields
     assert "m_sxx_xf" in equation.wavefields
     assert "m_tzz_yb" in equation.wavefields
 
@@ -108,7 +354,7 @@ def test_das_elastic_3d_eager_forward_smoke():
         DASElastic3D(spatial_order=2, device=device, backend="torch"),
         shape=shape,
         source_type=["sxx", "syy", "szz"],
-        receiver_type=["exx", "eyy", "ezz", "das35", "das54x"],
+        receiver_type=["exx_t", "eyy_t", "ezz_t", "das35_t", "das54x_t"],
         abcn=2,
         dh=10.0,
         dt=dt,
@@ -147,7 +393,7 @@ def test_das_final_channels_backward_2d():
         DASElastic(spatial_order=2, device=device, backend="torch"),
         shape=shape,
         source_type=["sxx", "szz"],
-        receiver_type=["das35", "das54x", "das54z"],
+        receiver_type=["das35_t", "das54x_t", "das54z_t"],
         abcn=4,
         dh=10.0,
         dt=dt,
@@ -181,7 +427,7 @@ def test_das_elastic_2d_cuda_backward_matches_eager_with_random_adjoint(name, bo
     wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt), device=device)
     sources = np.array([[[shape[1] // 2, 7]]], dtype=np.int32)
     receivers = np.array([[[9, 8], [15, 9], [21, 10]]], dtype=np.int32)
-    receiver_type = ["exx", "ezz", "das35", "das54x", "das54z"]
+    receiver_type = ["exx_t", "ezz_t", "das35_t", "das54x_t", "das54z_t"]
 
     def run(backend, adjoint_weight=None):
         vp = torch.full(shape, 2200.0, dtype=torch.float32, device=device, requires_grad=True)
@@ -242,7 +488,15 @@ def test_das_elastic_3d_cuda_backward_matches_eager_with_encoded_wavelet(name, b
     wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt), device=device)
     sources = np.array([[[shape[2] // 2, shape[1] // 2, 5]]], dtype=np.int32)
     receivers = np.array([[[5, 5, 5], [7, 6, 5], [9, 7, 6], [7, 5, 7]]], dtype=np.int32)
-    receiver_type = ["exx", "eyy", "ezz", "das35", "das54x", "das54y", "das54z"]
+    receiver_type = [
+        "exx_t",
+        "eyy_t",
+        "ezz_t",
+        "das35_t",
+        "das54x_t",
+        "das54y_t",
+        "das54z_t",
+    ]
 
     def run(backend, adjoint_weight=None):
         vp = torch.full(shape, 2200.0, dtype=torch.float32, device=device, requires_grad=True)
@@ -304,7 +558,7 @@ def test_das_final_channels_backward_3d():
         DASElastic3D(spatial_order=2, device=device, backend="torch"),
         shape=shape,
         source_type=["sxx", "syy", "szz"],
-        receiver_type=["das35", "das54x", "das54y", "das54z"],
+        receiver_type=["das35_t", "das54x_t", "das54y_t", "das54z_t"],
         abcn=2,
         dh=10.0,
         dt=dt,

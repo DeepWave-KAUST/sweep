@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sweep.equations import DASElastic, DASElastic3D
+from sweep.equations import DASZhao, DASZhao3D
 from sweep.propagator.torch import PropTorch
 
 
@@ -191,10 +191,10 @@ def run_2d(args, output_dir, device):
     nt = int(round(args.duration2d / args.dt2d))
     wavelet = ricker(nt, args.dt2d, args.freq2d, args.delay2d).reshape(1, 1, nt)
     solver = PropTorch(
-        DASElastic(spatial_order=args.spatial_order2d, device=device, backend="torch"),
+        DASZhao(spatial_order=args.spatial_order2d, device=device, backend="torch"),
         shape=(nz, nx),
         source_type=["sxx", "szz"],
-        receiver_type=["exx", "ezz", "das35", "das54x", "das54z"],
+        receiver_type=["exx_t", "ezz_t", "das35_t", "das54x_t", "das54z_t"],
         abcn=args.abcn2d,
         dh=args.dh,
         dt=args.dt2d,
@@ -217,7 +217,7 @@ def run_2d(args, output_dir, device):
         slices,
         channels,
         [("surface", "surface"), ("horizontal", "horizontal well"), ("vertical", "vertical well")],
-        [("exx", "exx"), ("ezz", "ezz"), ("das35", "das35"), ("das54z", "das54z")],
+        [("exx_t", "exx_t"), ("ezz_t", "ezz_t"), ("das35_t", "das35_t"), ("das54z_t", "das54z_t")],
         args.duration2d,
         output_dir / "das_2d_shot_records.png",
     )
@@ -232,10 +232,10 @@ def run_3d(args, output_dir, device):
     nt = int(round(args.duration3d / args.dt3d))
     wavelet = ricker(nt, args.dt3d, args.freq3d, args.delay3d).reshape(1, 1, nt)
     solver = PropTorch(
-        DASElastic3D(spatial_order=args.spatial_order3d, device=device, backend="torch"),
+        DASZhao3D(spatial_order=args.spatial_order3d, device=device, backend="torch"),
         shape=(nz, ny, nx),
         source_type=["sxx", "syy", "szz"],
-        receiver_type=["exx", "eyy", "ezz", "das35", "das54x", "das54y", "das54z"],
+        receiver_type=["exx_t", "eyy_t", "ezz_t", "das35_t", "das54x_t", "das54y_t", "das54z_t"],
         abcn=args.abcn3d,
         dh=args.dh,
         dt=args.dt3d,
@@ -258,7 +258,7 @@ def run_3d(args, output_dir, device):
         slices,
         channels,
         [("inline", "inline x"), ("crossline", "crossline y"), ("vertical", "vertical z")],
-        [("exx", "exx"), ("eyy", "eyy"), ("ezz", "ezz"), ("das35", "das35")],
+        [("exx_t", "exx_t"), ("eyy_t", "eyy_t"), ("ezz_t", "ezz_t"), ("das35_t", "das35_t")],
         args.duration3d,
         output_dir / "das_3d_shot_records.png",
     )
@@ -267,7 +267,7 @@ def run_3d(args, output_dir, device):
         slices,
         channels,
         [("inline", "inline x"), ("crossline", "crossline y"), ("vertical", "vertical z")],
-        [("das54x", "das54x"), ("das54y", "das54y"), ("das54z", "das54z")],
+        [("das54x_t", "das54x_t"), ("das54y_t", "das54y_t"), ("das54z_t", "das54z_t")],
         args.duration3d,
         output_dir / "das_3d_helical54_shot_records.png",
     )

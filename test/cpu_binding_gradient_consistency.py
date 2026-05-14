@@ -37,8 +37,8 @@ from sweep.equations import (  # noqa: E402
     AcousticLSRTM3D,
     AcousticVRZ,
     AcousticVRZ3D,
-    DASElastic,
-    DASElastic3D,
+    DASZhao,
+    DASZhao3D,
     Elastic,
 )
 from sweep.equations.elastic3d import Elastic as Elastic3D  # noqa: E402
@@ -108,8 +108,8 @@ CASES = (
     Case("acoustic_vrz3d", AcousticVRZ3D, (8, 8, 8), "cpmlr"),
     Case("elastic2d", Elastic, (14, 16), "cpmls"),
     Case("elastic3d", Elastic3D, (8, 8, 8), "cpmls"),
-    Case("das2d", DASElastic, (14, 16), "cpmls", ["exx", "ezz", "das35"]),
-    Case("das3d", DASElastic3D, (8, 8, 8), "cpmls", ["exx", "eyy", "ezz", "das35"]),
+    Case("das2d", DASZhao, (14, 16), "cpmls", ["exx_t", "ezz_t", "das35_t"]),
+    Case("das3d", DASZhao3D, (8, 8, 8), "cpmls", ["exx_t", "eyy_t", "ezz_t", "das35_t"]),
 )
 
 MODES = ("full", "bs", "ckpt_chunk", "ckpt_recursive")

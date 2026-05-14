@@ -47,8 +47,8 @@ from sweep.equations import (  # noqa: E402
     AcousticLSRTM3D,
     AcousticVRZ,
     AcousticVRZ3D,
-    DASElastic,
-    DASElastic3D,
+    DASZhao,
+    DASZhao3D,
     Elastic,
     Elastic3D,
 )
@@ -93,11 +93,11 @@ SOLVERS = {
     "lsrtm3d": SolverSpec("lsrtm3d", AcousticLSRTM3D, 3, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
     "das2d": SolverSpec(
         "das2d",
-        DASElastic,
+        DASZhao,
         2,
         ("vp", "vs", "rho"),
         ("sxx", "szz"),
-        ("exx", "ezz", "das35", "das54x", "das54z"),
+        ("exx_t", "ezz_t", "das35_t", "das54x_t", "das54z_t"),
         "cpmls",
         elastic=True,
         supported_modes=(
@@ -116,11 +116,11 @@ SOLVERS = {
     ),
     "das3d": SolverSpec(
         "das3d",
-        DASElastic3D,
+        DASZhao3D,
         3,
         ("vp", "vs", "rho"),
         ("sxx", "syy", "szz"),
-        ("exx", "eyy", "ezz", "das35", "das54x", "das54y", "das54z"),
+        ("exx_t", "eyy_t", "ezz_t", "das35_t", "das54x_t", "das54y_t", "das54z_t"),
         "cpmls",
         elastic=True,
         supported_modes=(

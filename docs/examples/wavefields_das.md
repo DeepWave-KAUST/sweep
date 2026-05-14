@@ -18,24 +18,24 @@ The default modeling setup uses the paper-style three-layer model, 4 s recording
 Run from the repository root:
 
 ```bash
-PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend torch --impl c --device cuda --output-dir examples/wavefields/das/outputs_elastic_derived
+PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend torch --impl eager --device cuda --output-dir examples/wavefields/das/outputs_mu
 ```
 
 Figure choices:
 
-- `--figure 4`: Figure-4-style `vx`, `vz`, `exx`, and `ezz` common-shot gathers.
-- `--figure 7`: vertical-well `ezz` gathers with different gauge lengths.
+- `--figure 4`: Figure-4-style `vx`, `vz`, `exx_t`, and `ezz_t` common-shot gathers.
+- `--figure 7`: vertical-well `ezz_t` gathers with different gauge lengths.
 - `--figure 9`: helical-wound DAS gathers.
 - `--figure both`: Figures 4 and 9.
-- `--figure compare`: direct DAS c CUDA, direct DAS eager, and Elastic-derived DAS comparison.
+- `--figure compare`: Zhao DAS c CUDA/eager and Mu DAS eager-GPU comparison.
 
-Use `--backend torch --impl eager`, `--backend torch --impl c --device cuda`, or `--backend torch --impl both` for solver selection.
+Use `--backend torch --impl eager --device cuda` for Mu-based figure generation. The comparison mode also runs the Zhao c CUDA path as a reference.
 
 ## Figure 4
 
 Figure 4 shows surface, horizontal-well, and vertical-well common-shot gathers. The left
 two columns are particle velocities (`vx`, `vz`), and the right two columns are strain-rate
-components (`exx`, `ezz`).
+components (`exx_t`, `ezz_t`).
 
 ![DAS Figure 4 reproduction](../figures/examples/wavefields_das_figure4_cuda.png)
 
@@ -47,7 +47,7 @@ gauge lengths:
 ```bash
 PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py \
   --figure 7 \
-  --backend torch --impl c --device cuda \
+  --backend torch --impl eager --device cuda \
   --figure7-edge-mode reflect \
   --figure7-time-min 0.68 \
   --figure7-time-max 2.15 \
@@ -87,18 +87,18 @@ horizontal well, and vertical well. The columns are pressure, axial strain-rate 
 degrees, and axial strain-rate at 54.7 degrees.
 
 ```bash
-PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 9 --backend torch --impl c --device cuda --output-dir examples/wavefields/das/outputs_elastic_derived
+PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 9 --backend torch --impl eager --device cuda --output-dir examples/wavefields/das/outputs_mu
 ```
 
 ![DAS Figure 9 reproduction](../figures/examples/wavefields_das_figure9_cuda.png)
 
 ## DAS Method Comparison
 
-The comparison mode checks whether the direct DAS equation and the Elastic-derived DAS
-post-processing path produce consistent records:
+The comparison mode checks whether Zhao DAS and Mu velocity-stress-strain DAS
+produce consistent strain-rate records:
 
 ```bash
-PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend torch --impl c --device cuda --output-dir examples/wavefields/das/outputs_das_method_compare
+PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend torch --impl eager --device cuda --output-dir examples/wavefields/das/outputs_das_method_compare
 ```
 
 ![DAS method records](../figures/examples/wavefields_das_method_records.png)

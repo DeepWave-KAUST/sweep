@@ -2,17 +2,16 @@
 """Reproduce layered-model DAS figures and DAS method-comparison panels.
 
 Available figure modes:
-- 4: Figure-4-style vx/vz and exx/ezz common-shot gathers.
-- 7: Figure-7-style vertical-well ezz gathers with different gauge lengths.
+- 4: Figure-4-style vx/vz and exx_t/ezz_t common-shot gathers.
+- 7: Figure-7-style vertical-well ezz_t gathers with different gauge lengths.
 - 9: Figure-9-style helical-wound DAS pressure and strain-rate gathers.
 - both: Figures 4 and 9.
-- compare: direct DAS CUDA/eager records versus Elastic-derived DAS records.
+- compare: Zhao DAS records versus Mu velocity-stress-strain DAS records.
 """
 
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import json
 import time
 from pathlib import Path
@@ -25,14 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sweep.equations import (
-    DASElastic,
-    Elastic,
-    build_elastic_das_receivers,
-    elastic_velocity_record_to_das,
-    original_elastic_das_record,
-)
-from sweep.propagator.torch import PropTorch
+from sweep.equations import DASModeler
 
 
 PAPER_CITATION = "Zhao et al., Petroleum Science, 23 (2026), 626-642 (https://doi.org/10.1016/j.petsci.2025.09.015)"
@@ -216,43 +208,6 @@ def clip_limits(record: np.ndarray, percentile: tuple[float, float] = (2.0, 98.0
     return float(vmin), float(vmax)
 
 
-def normalize_record(record: torch.Tensor, nreceiver: int, nt: int) -> np.ndarray:
-    arr = record.detach().cpu().numpy()
-
-    if arr.ndim == 4:
-        for axis in range(arr.ndim - 1, -1, -1):
-            if arr.ndim <= 3:
-                break
-            if arr.shape[axis] == 1:
-                arr = np.squeeze(arr, axis=axis)
-
-    if arr.ndim != 3:
-        raise ValueError(f"Unexpected record tensor layout {arr.shape}")
-
-    candidates = [
-        (0, 1, 2),
-        (1, 0, 2),
-        (0, 2, 1),
-        (2, 0, 1),
-        (2, 1, 0),
-        (1, 2, 0),
-    ]
-    for perm in candidates:
-        if arr.shape[perm[0]] == nreceiver and arr.shape[perm[1]] == nt:
-            return arr.transpose(perm)
-
-    raise ValueError(f"Could not map record shape {arr.shape} to (nreceiver, nt, nfield)")
-
-
-def unique_fields(*groups: Iterable[str]) -> list[str]:
-    fields = []
-    for group in groups:
-        for field in group:
-            if field not in fields:
-                fields.append(field)
-    return fields
-
-
 def _tensor_record_to_numpy(record: torch.Tensor) -> np.ndarray:
     if record.ndim != 4 or record.shape[0] != 1:
         raise ValueError(f"Expected record layout (1, nt, nrec, nfield), got {tuple(record.shape)}")
@@ -262,7 +217,7 @@ def _tensor_record_to_numpy(record: torch.Tensor) -> np.ndarray:
 def run_solver(
     *,
     backend: str,
-    equation_cls,
+    method: str = "zhao",
     geometry: Dict[str, np.ndarray],
     models: tuple[np.ndarray, np.ndarray, np.ndarray],
     wavelet: np.ndarray,
@@ -284,9 +239,9 @@ def run_solver(
     vp_np, vs_np, rho_np = models
     models_t = tuple(torch.as_tensor(model, dtype=torch.float32, device=device) for model in (vp_np, vs_np, rho_np))
 
-    equation = equation_cls(spatial_order=args.spatial_order, device=device, backend="torch")
-    solver = PropTorch(
-        equation,
+    solver = DASModeler(
+        method=method,
+        ndim=2,
         shape=(args.nz, args.nx),
         source_type=["sxx", "szz"],
         receiver_type=receiver_type,
@@ -297,7 +252,7 @@ def run_solver(
         pml_type="cpmls",
         use_ckpt=False,
         backend="torch",
-        impl=torch_impl_for_mode(backend),
+        impl="eager" if method == "mu" else torch_impl_for_mode(backend),
     )
 
     wavelet_t = torch.as_tensor(wavelet, dtype=torch.float32, device=device)
@@ -313,116 +268,8 @@ def run_solver(
         torch.cuda.synchronize(device)
     elapsed_s = time.perf_counter() - start
 
-    records = normalize_record(records_t, nreceiver=receivers.shape[0], nt=nt)
-    channels = {name: i for i, name in enumerate(solver.receiver_type)}
-    return records, channels, elapsed_s
-
-
-def run_elastic_derived_das_solver(
-    *,
-    backend: str,
-    geometry: Dict[str, np.ndarray],
-    models: tuple[np.ndarray, np.ndarray, np.ndarray],
-    wavelet: np.ndarray,
-    elastic_receiver_fields: list[str],
-    das_receiver_fields: list[str],
-    args,
-) -> tuple[np.ndarray, Dict[str, int], float]:
-    if args.device == "auto":
-        chosen_device = "cuda:0" if backend == "cuda" else "cpu"
-    else:
-        chosen_device = args.device
-
-    device = torch.device(chosen_device)
-    if backend == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA backend requested but CUDA is not available on this system.")
-    if backend == "cuda" and device.type != "cuda":
-        raise RuntimeError("CUDA backend requires a cuda device, e.g. --device cuda:0")
-
-    receivers = np.asarray(geometry["receivers"], dtype=np.int32)
-    receiver_map = build_elastic_das_receivers(
-        receivers[None, ...],
-        spatial_order=args.spatial_order,
-        include_original=True,
-    )
-    receiver_type = unique_fields(receiver_map.elastic_receiver_type, elastic_receiver_fields)
-
-    requires_backward = bool(getattr(args, "check_backward", False))
-    models_t = tuple(
-        torch.as_tensor(model, dtype=torch.float32, device=device).clone().requires_grad_(requires_backward)
-        for model in models
-    )
-
-    solver = PropTorch(
-        Elastic(spatial_order=args.spatial_order, device=device, backend="torch"),
-        shape=(args.nz, args.nx),
-        source_type=["sxx", "szz"],
-        receiver_type=receiver_type,
-        abcn=args.abcn,
-        dh=args.dh,
-        dt=args.dt,
-        dev=device,
-        pml_type="cpmls",
-        use_ckpt=False,
-        backend="torch",
-        impl=torch_impl_for_mode(backend),
-    )
-
-    wavelet_t = torch.as_tensor(wavelet, dtype=torch.float32, device=device)
-    source = np.asarray(geometry["source"], dtype=np.int32)
-    if source.ndim == 2:
-        source = source[None, ...]
-
-    start = time.perf_counter()
-    grad_context = nullcontext() if requires_backward else torch.no_grad()
-    with grad_context:
-        elastic_record_t = solver(
-            wavelet_t,
-            sources=source,
-            receivers=receiver_map.augmented_receivers,
-            models=list(models_t),
-        )
-        original_t = original_elastic_das_record(
-            elastic_record_t,
-            receiver_map,
-            elastic_receiver_type=receiver_type,
-        )
-        das_t, das_fields = elastic_velocity_record_to_das(
-            elastic_record_t,
-            receiver_map,
-            dh=args.dh,
-            elastic_receiver_type=receiver_type,
-            receiver_type=das_receiver_fields,
-        )
-        if requires_backward:
-            das_t.pow(2).mean().backward()
-
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    elapsed_s = time.perf_counter() - start
-
-    if requires_backward:
-        for name, model in zip(("vp", "vs", "rho"), models_t):
-            if (
-                model.grad is None
-                or not torch.isfinite(model.grad).all().item()
-                or model.grad.abs().max().item() == 0
-            ):
-                raise RuntimeError(f"DAS backward check did not produce a finite nonzero gradient for {name}.")
-
-    original_index = {name: index for index, name in enumerate(receiver_type)}
-    parts = []
-    if elastic_receiver_fields:
-        parts.append(
-            torch.stack(
-                [original_t[..., original_index[field]] for field in elastic_receiver_fields],
-                dim=-1,
-            )
-        )
-    parts.append(das_t)
-    records_t = torch.cat(parts, dim=-1)
     records = _tensor_record_to_numpy(records_t)
-    channels = {name: i for i, name in enumerate(elastic_receiver_fields + list(das_fields))}
+    channels = dict(solver.channels)
     return records, channels, elapsed_s
 
 
@@ -434,13 +281,14 @@ def run_figure4_data(
     wavelet: np.ndarray,
     args,
 ) -> tuple[np.ndarray, Dict[str, int], float]:
-    return run_elastic_derived_das_solver(
+    return run_solver(
         backend=backend,
+        method="mu",
         geometry=geometry,
         models=models,
         wavelet=wavelet,
-        elastic_receiver_fields=["vx", "vz"],
-        das_receiver_fields=["exx", "ezz"],
+        receiver_type=["vx", "vz", "exx_t", "ezz_t"],
+        nt=wavelet.shape[-1],
         args=args,
     )
 
@@ -463,7 +311,7 @@ def parse_figure9_records(npz_path: Path) -> tuple[np.ndarray, np.ndarray, Dict[
 
     receiver_type = np.asarray(data["receiver_type"], dtype=str).tolist()
     channels = {name: i for i, name in enumerate(receiver_type)}
-    for required_field in ["sxx", "szz", "das35", "das54z"]:
+    for required_field in ["sxx", "szz", "das35_t", "das54z_t"]:
         if required_field not in channels:
             raise RuntimeError(
                 f"Required field '{required_field}' not found in {npz_path}: {receiver_type}"
@@ -548,8 +396,8 @@ def plot_figure4(
     cols = [
         ("vx", "Particle velocity vx"),
         ("vz", "Particle velocity vz"),
-        ("exx", "Strain-rate exx"),
-        ("ezz", "Strain-rate ezz"),
+        ("exx_t", "Strain-rate exx_t"),
+        ("ezz_t", "Strain-rate ezz_t"),
     ]
 
     fig, axes = plt.subplots(len(rows), len(cols), figsize=(16.0, 12.6), constrained_layout=True)
@@ -586,7 +434,7 @@ def plot_figure4(
                     bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.7, "pad": 1.5},
                 )
 
-    fig.suptitle("Figure 4-style common-shot gathers (vx/vz, exx/ezz)", fontsize=15)
+    fig.suptitle("Figure 4-style common-shot gathers (vx/vz, exx_t/ezz_t)", fontsize=15)
     fig.savefig(out_path, dpi=260)
     plt.close(fig)
 
@@ -862,11 +710,11 @@ def run_figure7_data(
 ) -> tuple[np.ndarray, Dict[str, int], float]:
     records, channels, elapsed = run_solver(
         backend=backend,
-        equation_cls=DASElastic,
+        method="mu",
         geometry=geometry,
         models=models,
         wavelet=wavelet,
-        receiver_type=["ezz"],
+        receiver_type=["ezz_t"],
         nt=wavelet.shape[-1],
         args=args,
     )
@@ -888,8 +736,8 @@ def plot_figure9(
     ]
     panels = [
         ("pressure", "Pressure seismogram"),
-        ("das35", "Axial strain-rate at 35.3°"),
-        ("das54z", "Axial strain-rate at 54.7°"),
+        ("das35_t", "Axial strain-rate at 35.3°"),
+        ("das54z_t", "Axial strain-rate at 54.7°"),
     ]
 
     fig, axes = plt.subplots(len(rows), len(panels), figsize=(14.4, 12.6), constrained_layout=True)
@@ -1027,7 +875,7 @@ def plot_method_records(
                     bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8, "pad": 1.5},
                 )
 
-    fig.suptitle("DAS records from direct DAS equation and Elastic-derived observation", fontsize=14)
+    fig.suptitle("DAS records from Zhao and Mu velocity-stress-strain equations", fontsize=14)
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
 
@@ -1092,38 +940,27 @@ def run_das_method_comparison(
     args,
     output_dir: Path,
 ) -> Dict[str, object]:
-    fields = ["exx", "ezz", "das35", "das54x", "das54z"]
+    fields = ["exx_t", "ezz_t", "das35_t", "das54x_t", "das54z_t"]
     method_specs = [
-        ("das_equation_cuda", "direct", "cuda"),
-        ("das_equation_eager", "direct", "eager"),
-        ("elastic_derived_cuda", "derived", "cuda"),
+        ("zhao_cuda", "zhao", "cuda"),
+        ("zhao_eager", "zhao", "eager"),
+        ("mu_eager_gpu", "mu", "eager"),
     ]
 
     records_by_method: Dict[str, np.ndarray] = {}
     results: Dict[str, object] = {}
-    for method_name, kind, backend in method_specs:
-        if kind == "direct":
-            records, channels, elapsed = run_solver(
-                backend=backend,
-                equation_cls=DASElastic,
-                geometry=geometry,
-                models=models,
-                wavelet=wavelet,
-                receiver_type=fields,
-                nt=wavelet.shape[-1],
-                args=args,
-            )
-            records = _slice_fields(records, channels, fields)
-        else:
-            records, channels, elapsed = run_elastic_derived_das_solver(
-                backend=backend,
-                geometry=geometry,
-                models=models,
-                wavelet=wavelet,
-                elastic_receiver_fields=[],
-                das_receiver_fields=fields,
-                args=args,
-            )
+    for method_name, method, backend in method_specs:
+        records, channels, elapsed = run_solver(
+            backend=backend,
+            method=method,
+            geometry=geometry,
+            models=models,
+            wavelet=wavelet,
+            receiver_type=fields,
+            nt=wavelet.shape[-1],
+            args=args,
+        )
+        records = _slice_fields(records, channels, fields)
 
         records_by_method[method_name] = records
         out_npz = output_dir / f"{method_name}_records.npz"
@@ -1139,7 +976,7 @@ def run_das_method_comparison(
         )
         results[method_name] = {
             "backend": backend,
-            "kind": kind,
+            "method": method,
             "elapsed_s": elapsed,
             "record_shape": list(records.shape),
             "receiver_fields": fields,
@@ -1148,13 +985,21 @@ def run_das_method_comparison(
 
     records_png = output_dir / "das_method_records.png"
     diff_png = output_dir / "das_method_differences.png"
-    reference = "das_equation_cuda"
-    plot_method_records(records_by_method, fields, args.duration, records_png)
+    reference = "zhao_cuda"
+    plot_method_records(
+        {
+            "Zhao": records_by_method[reference],
+            "Mu": records_by_method["mu_eager_gpu"],
+        },
+        fields,
+        args.duration,
+        records_png,
+    )
     plot_method_differences(records_by_method, fields, reference, args.duration, diff_png)
     summary = summarize_method_comparison(records_by_method, fields, reference)
     metadata = {
         "paper": PAPER_CITATION,
-        "purpose": "Compare direct DAS equation CUDA, direct DAS equation eager, and Elastic-derived DAS records.",
+        "purpose": "Compare Zhao DAS CUDA/eager records and Mu velocity-stress-strain DAS records.",
         "geometry": {
             "nz": args.nz,
             "nx": args.nx,
@@ -1195,10 +1040,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend torch --impl c --device cuda\n"
-            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 7 --backend torch --impl c --device cuda "
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure both --backend torch --impl eager --device cuda\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure 7 --backend torch --impl eager --device cuda "
             "--figure7-edge-mode reflect --figure7-time-min 0.68 --figure7-time-max 2.15\n"
-            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend torch --impl c --device cuda\n"
+            "  PYTHONPATH=src python examples/wavefields/das/reproduce_layered_das.py --figure compare --backend torch --impl eager --device cuda\n"
         ),
     )
     parser.add_argument(
@@ -1348,12 +1193,12 @@ def main() -> None:
                 wavelet=wavelet,
                 args=args,
             )
-            if "ezz" not in channels:
-                raise RuntimeError(f"Figure 7 requires ezz records, got {list(channels)}")
-            ezz = records[:, :, channels["ezz"]]
+            if "ezz_t" not in channels:
+                raise RuntimeError(f"Figure 7 requires ezz_t records, got {list(channels)}")
+            ezz_t = records[:, :, channels["ezz_t"]]
             out_png = output_dir / f"figure7_{backend}.png"
             gauge_cells, figure7_records, display_indices, display_positions_m = plot_figure7(
-                ezz,
+                ezz_t,
                 args.duration,
                 args.dh,
                 out_png,
@@ -1380,11 +1225,11 @@ def main() -> None:
                 out_npz,
                 origin=figure7_records["origin"],
                 **{key: value for key, value in figure7_records.items() if key != "origin"},
-                receiver_type=np.array(["ezz"], dtype="U"),
+                receiver_type=np.array(["ezz_t"], dtype="U"),
                 source=figure7_geometry["source"][None, ...],
                 receivers=displayed_receivers[None, ...],
                 receiver_positions_m=display_positions_m,
-                dense_receiver_count=ezz.shape[0],
+                dense_receiver_count=ezz_t.shape[0],
                 display_indices=display_indices,
                 duration=args.duration,
                 dt=args.dt,
@@ -1397,9 +1242,9 @@ def main() -> None:
             results[backend] = {
                 "backend": backend,
                 "elapsed_s": elapsed,
-                "dense_record_shape": list(ezz.shape),
+                "dense_record_shape": list(ezz_t.shape),
                 "display_record_shape": list(figure7_records["origin"].shape),
-                "receiver_field": "ezz",
+                "receiver_field": "ezz_t",
                 "gauge_cells": gauge_cells,
                 "gauge_mode": args.figure7_gauge_mode,
                 "gauge_grid_spacing": effective_gauge_grid_spacing,
@@ -1464,13 +1309,14 @@ def main() -> None:
 
     results = {}
     for backend in resolve_backends(args):
-        records, channels, elapsed = run_elastic_derived_das_solver(
+        records, channels, elapsed = run_solver(
             backend=backend,
+            method="mu",
             geometry=geometry,
             models=models,
             wavelet=wavelet,
-            elastic_receiver_fields=["sxx", "szz"],
-            das_receiver_fields=["das35", "das54x", "das54z"],
+            receiver_type=["sxx", "szz", "das35_t", "das54x_t", "das54z_t"],
+            nt=wavelet.shape[-1],
             args=args,
         )
         slices = infer_figure9_slices(geometry["receivers"], records)
