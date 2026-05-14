@@ -842,6 +842,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         lap_coes, grad_coes = self._build_fd_coefficients(M)
 
         models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
+        if getattr(self.equation, "prepare_models_for_c", False):
+            prepare = getattr(self.equation, "prepare_models", None)
+            if not callable(prepare):
+                raise AttributeError(
+                    f"{type(self.equation).__name__} sets prepare_models_for_c=True "
+                    "but does not define prepare_models()."
+                )
+            models = list(prepare(models))
         requires_model_grad = any(m.requires_grad for m in models)
         requires_wavelet_grad = wavelet.requires_grad
         requires_backward = bool(requires_model_grad or requires_wavelet_grad)

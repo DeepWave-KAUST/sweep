@@ -10,6 +10,7 @@
 #include "equations/das3d/das3d_cpu.h"
 #include "equations/elastic2d/elastic2d_cpu.h"
 #include "equations/elastic3d/elastic3d_cpu.h"
+#include "equations/elastic_tti_sg2d/elastic_tti_sg2d_cpu.h"
 
 #include <torch/extension.h>
 
@@ -44,6 +45,8 @@ ForwardOutput forward(const ForwardInput& in, EquationKind kind)
             return elastic2d::forward(in);
         case EquationKind::Elastic3D:
             return elastic3d::forward(in);
+        case EquationKind::ElasticTTISG2D:
+            return elastic_tti_sg2d::forward(in);
         case EquationKind::DAS2D:
             return das2d::forward(in);
         case EquationKind::DAS3D:
@@ -95,6 +98,11 @@ BackwardOutput backward(const BackwardInput& in, EquationKind kind, BackwardMode
             if (mode == BackwardMode::Checkpoint) return elastic3d::backward_ckpt(in);
             if (mode == BackwardMode::RecursiveCheckpoint) return elastic3d::backward_recursive_ckpt(in);
             return elastic3d::backward(in);
+        case EquationKind::ElasticTTISG2D:
+            if (mode == BackwardMode::BoundarySaving) return elastic_tti_sg2d::backward_bs(in);
+            if (mode == BackwardMode::Checkpoint) return elastic_tti_sg2d::backward_ckpt(in);
+            if (mode == BackwardMode::RecursiveCheckpoint) return elastic_tti_sg2d::backward_recursive_ckpt(in);
+            return elastic_tti_sg2d::backward(in);
         case EquationKind::DAS2D:
             if (mode == BackwardMode::BoundarySaving) return das2d::backward_bs(in);
             if (mode == BackwardMode::Checkpoint) return das2d::backward_ckpt(in);

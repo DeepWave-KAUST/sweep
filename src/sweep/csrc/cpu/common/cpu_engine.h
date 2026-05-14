@@ -13,6 +13,7 @@ enum class EquationKind {
     AcousticVRZ3D,
     Elastic2D,
     Elastic3D,
+    ElasticTTISG2D,
     DAS2D,
     DAS3D,
 };
