@@ -52,8 +52,8 @@ def test_das_equations_are_exported_with_cuda_binding():
     assert DAS3D is DASElastic3D
     assert DASElastic.supports_torch_binding()
     assert DASElastic3D.supports_torch_binding()
-    assert not DASMu.supports_torch_binding()
-    assert not DASMu3D.supports_torch_binding()
+    assert DASMu.supports_torch_binding()
+    assert DASMu3D.supports_torch_binding()
 
 
 def test_das_modeler_zhao_uses_standard_record_layout():

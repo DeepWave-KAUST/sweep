@@ -267,8 +267,6 @@ class DASModeler(torch.nn.Module):
 
         equation_device = propagator_kwargs.get("dev") or "cpu"
         if self.method == "mu":
-            if str(backend).lower() in {"cuda", "c"} or (impl is not None and str(impl).lower() == "c"):
-                raise NotImplementedError("The Mu DAS formulation currently supports eager Torch only.")
             equation_cls = DASMu if self.ndim == 2 else DASMu3D
         else:
             equation_cls = DASZhao if self.ndim == 2 else DASZhao3D
@@ -1196,6 +1194,27 @@ class DASMu(FirstOrderEquation):
             **kwargs,
         )
 
+    def _C(self):
+        import sweep._C as _C
+
+        return (
+            _C.das_mu2d_forward,
+            _C.das_mu2d_backward,
+            _C.das_mu2d_backward_bs,
+            _C.das_mu2d_backward_ckpt,
+            _C.das_mu2d_backward_recursive_ckpt,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=8,
+            pml_nvar=10,
+            last_two_nvar=1,
+            last_two_storage_nvar=8,
+            backward_workspace_nvar=8,
+        )
+
 
 class DASMu3D(FirstOrderEquation):
     """3D Mu velocity-stress-strain DAS equation.
@@ -1294,6 +1313,27 @@ class DASMu3D(FirstOrderEquation):
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
             **kwargs,
+        )
+
+    def _C(self):
+        import sweep._C as _C
+
+        return (
+            _C.das_mu3d_forward,
+            _C.das_mu3d_backward,
+            _C.das_mu3d_backward_bs,
+            _C.das_mu3d_backward_ckpt,
+            _C.das_mu3d_backward_recursive_ckpt,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=15,
+            pml_nvar=18,
+            last_two_nvar=1,
+            last_two_storage_nvar=15,
+            backward_workspace_nvar=18,
         )
 
 

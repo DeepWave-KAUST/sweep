@@ -7,6 +7,8 @@
 #include "cuda/equations/acoustic3d/acoustic3d.h"
 #include "cuda/equations/das2d/das2d.h"
 #include "cuda/equations/das3d/das3d.h"
+#include "cuda/equations/das_mu2d/das_mu2d.h"
+#include "cuda/equations/das_mu3d/das_mu3d.h"
 #include "cuda/equations/elastic2d/elastic2d.h"
 #include "cuda/equations/elastic3d/elastic3d.h"
 #include "cuda/equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
@@ -101,6 +103,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("das3d_backward_bs", wrap_backward(dispatch_backward(das3d::backward_bs, EK::DAS3D, BM::BoundarySaving)), "DAS backward with boundary saving 3D (CUDA/CPU)");
     m.def("das3d_backward_ckpt", wrap_backward(dispatch_backward(das3d::backward_ckpt, EK::DAS3D, BM::Checkpoint)), "DAS backward with checkpointing 3D (CUDA/CPU)");
     m.def("das3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(das3d::backward_recursive_ckpt, EK::DAS3D, BM::RecursiveCheckpoint)), "DAS backward with recursive checkpointing 3D (CUDA/CPU)");
+    m.def("das_mu2d_forward", wrap_forward(dispatch_forward(das_mu2d::forward, EK::DASMu2D)), "DAS Mu forward 2D (CUDA/CPU)");
+    m.def("das_mu2d_backward", wrap_backward(dispatch_backward(das_mu2d::backward, EK::DASMu2D, BM::Full)), "DAS Mu backward 2D (CUDA/CPU)");
+    m.def("das_mu2d_backward_bs", wrap_backward(dispatch_backward(das_mu2d::backward_bs, EK::DASMu2D, BM::BoundarySaving)), "DAS Mu backward with boundary saving 2D (CUDA/CPU)");
+    m.def("das_mu2d_backward_ckpt", wrap_backward(dispatch_backward(das_mu2d::backward_ckpt, EK::DASMu2D, BM::Checkpoint)), "DAS Mu backward with checkpointing 2D (CUDA/CPU)");
+    m.def("das_mu2d_backward_recursive_ckpt", wrap_backward(dispatch_backward(das_mu2d::backward_recursive_ckpt, EK::DASMu2D, BM::RecursiveCheckpoint)), "DAS Mu backward with recursive checkpointing 2D (CUDA/CPU)");
+    m.def("das_mu3d_forward", wrap_forward(dispatch_forward(das_mu3d::forward, EK::DASMu3D)), "DAS Mu forward 3D (CUDA/CPU)");
+    m.def("das_mu3d_backward", wrap_backward(dispatch_backward(das_mu3d::backward, EK::DASMu3D, BM::Full)), "DAS Mu backward 3D (CUDA/CPU)");
+    m.def("das_mu3d_backward_bs", wrap_backward(dispatch_backward(das_mu3d::backward_bs, EK::DASMu3D, BM::BoundarySaving)), "DAS Mu backward with boundary saving 3D (CUDA/CPU)");
+    m.def("das_mu3d_backward_ckpt", wrap_backward(dispatch_backward(das_mu3d::backward_ckpt, EK::DASMu3D, BM::Checkpoint)), "DAS Mu backward with checkpointing 3D (CUDA/CPU)");
+    m.def("das_mu3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(das_mu3d::backward_recursive_ckpt, EK::DASMu3D, BM::RecursiveCheckpoint)), "DAS Mu backward with recursive checkpointing 3D (CUDA/CPU)");
 
     py::class_<ForwardInput>(m, "ForwardInput")
         .def(py::init<>())

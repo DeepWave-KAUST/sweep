@@ -16,6 +16,8 @@ enum class EquationKind {
     ElasticTTISG2D,
     DAS2D,
     DAS3D,
+    DASMu2D,
+    DASMu3D,
 };
 
 namespace engine {

@@ -8,6 +8,8 @@
 #include "equations/acoustic_vrz3d/acoustic_vrz3d_cpu.h"
 #include "equations/das2d/das2d_cpu.h"
 #include "equations/das3d/das3d_cpu.h"
+#include "equations/das_mu2d/das_mu2d_cpu.h"
+#include "equations/das_mu3d/das_mu3d_cpu.h"
 #include "equations/elastic2d/elastic2d_cpu.h"
 #include "equations/elastic3d/elastic3d_cpu.h"
 #include "equations/elastic_tti_sg2d/elastic_tti_sg2d_cpu.h"
@@ -51,6 +53,10 @@ ForwardOutput forward(const ForwardInput& in, EquationKind kind)
             return das2d::forward(in);
         case EquationKind::DAS3D:
             return das3d::forward(in);
+        case EquationKind::DASMu2D:
+            return das_mu2d::forward(in);
+        case EquationKind::DASMu3D:
+            return das_mu3d::forward(in);
     }
     TORCH_CHECK(false, "Unsupported CPU equation kind");
 }
@@ -113,6 +119,16 @@ BackwardOutput backward(const BackwardInput& in, EquationKind kind, BackwardMode
             if (mode == BackwardMode::Checkpoint) return das3d::backward_ckpt(in);
             if (mode == BackwardMode::RecursiveCheckpoint) return das3d::backward_recursive_ckpt(in);
             return das3d::backward(in);
+        case EquationKind::DASMu2D:
+            if (mode == BackwardMode::BoundarySaving) return das_mu2d::backward_bs(in);
+            if (mode == BackwardMode::Checkpoint) return das_mu2d::backward_ckpt(in);
+            if (mode == BackwardMode::RecursiveCheckpoint) return das_mu2d::backward_recursive_ckpt(in);
+            return das_mu2d::backward(in);
+        case EquationKind::DASMu3D:
+            if (mode == BackwardMode::BoundarySaving) return das_mu3d::backward_bs(in);
+            if (mode == BackwardMode::Checkpoint) return das_mu3d::backward_ckpt(in);
+            if (mode == BackwardMode::RecursiveCheckpoint) return das_mu3d::backward_recursive_ckpt(in);
+            return das_mu3d::backward(in);
     }
     TORCH_CHECK(false, "Unsupported CPU equation kind");
 }
