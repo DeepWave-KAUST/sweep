@@ -80,7 +80,7 @@ def test_elastic_tti_exports_and_binding_flag():
     assert equation_sg.default_source_fields == ["sxx", "szz"]
     assert equation_sg.default_receiver_fields == ["vx", "vz"]
     assert supports_torch_binding("ElasticTTI") is False
-    assert supports_torch_binding("ElasticTTISG") is False
+    assert supports_torch_binding("ElasticTTISG") is True
 
 
 def test_elastic_tti_bond_rotation_preserves_vti_at_zero_tilt():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ._free_surface import top_free_surface_derivative, zero_top_row
 from .base import FirstOrderEquation
+from .cuda_layout import CUDALayoutSpec
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
 
 
@@ -278,6 +279,8 @@ def step(
 class ElasticTTISG(ElasticTTI):
     """2D-3C elastic TTI equation with axis-aligned SG derivatives and CPML."""
 
+    prepare_models_for_c = True
+
     def __init__(self, spatial_order=8, device="cpu", backend="torch"):
         FirstOrderEquation.__init__(self, spatial_order, device, backend, ndim=2)
 
@@ -299,4 +302,24 @@ class ElasticTTISG(ElasticTTI):
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
             **kwargs,
+        )
+
+    def _C(self):
+        import sweep._C as _C
+
+        return (
+            _C.elastic_tti_sg2d_forward,
+            _C.elastic_tti_sg2d_backward,
+            _C.elastic_tti_sg2d_backward_bs,
+            _C.elastic_tti_sg2d_backward_ckpt,
+            None,
+        )
+
+    @property
+    def cuda_layout(self):
+        return CUDALayoutSpec(
+            base_nvar=8,
+            pml_nvar=12,
+            last_two_nvar=1,
+            last_two_storage_nvar=8,
         )

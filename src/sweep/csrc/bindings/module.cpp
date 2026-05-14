@@ -9,6 +9,7 @@
 #include "cuda/equations/das3d/das3d.h"
 #include "cuda/equations/elastic2d/elastic2d.h"
 #include "cuda/equations/elastic3d/elastic3d.h"
+#include "cuda/equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
 #include "cpu/cpu_binding.h"
 #include "bindings_utils.h"
 
@@ -86,6 +87,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic3d_backward_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_ckpt, EK::Elastic3D, BM::Checkpoint)), "Elastic backward with checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_recursive_ckpt, EK::Elastic3D, BM::RecursiveCheckpoint)), "Elastic backward with recursive checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward", wrap_backward(dispatch_backward(elastic3d::backward, EK::Elastic3D, BM::Full)), "Elastic backward 3D (CUDA/CPU)");
+    m.def("elastic_tti_sg2d_forward", wrap_forward(dispatch_forward(elastic_tti_sg2d::forward, EK::ElasticTTISG2D)), "Elastic TTI staggered-grid forward 2D (CUDA/CPU)");
+    m.def("elastic_tti_sg2d_backward", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward, EK::ElasticTTISG2D, BM::Full)), "Elastic TTI staggered-grid backward 2D full mode (CUDA/CPU)");
+    m.def("elastic_tti_sg2d_backward_bs", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward_bs, EK::ElasticTTISG2D, BM::BoundarySaving)), "Elastic TTI staggered-grid backward 2D boundary-saving mode (CUDA/CPU)");
+    m.def("elastic_tti_sg2d_backward_ckpt", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward_ckpt, EK::ElasticTTISG2D, BM::Checkpoint)), "Elastic TTI staggered-grid backward 2D checkpoint mode (CUDA/CPU)");
     m.def("das2d_forward", wrap_forward(dispatch_forward(das2d::forward, EK::DAS2D)), "DAS forward 2D (CUDA/CPU)");
     m.def("das2d_backward", wrap_backward(dispatch_backward(das2d::backward, EK::DAS2D, BM::Full)), "DAS backward 2D (CUDA/CPU)");
     m.def("das2d_backward_bs", wrap_backward(dispatch_backward(das2d::backward_bs, EK::DAS2D, BM::BoundarySaving)), "DAS backward with boundary saving 2D (CUDA/CPU)");
