@@ -103,26 +103,25 @@ def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
 
     return lapz, lapy, lapx
 
-@torch.jit.script
+# Plain Python — no @torch.jit.script. TorchScript and Dynamo are separate
+# JITs and a @torch.jit.script function is opaque to Dynamo: every PD call
+# inside the equation step becomes a graph break, which neutralises
+# torch.compile on Elastic / DAS (their step calls these kernels 8+ times).
+# Measured on RTX 6000 Ada, removing the decorator also makes eager Elastic
+# ~6% faster, so the decorator was net cost even without torch.compile.
 def apply_kernels_torch(u, kernels):
-    # u: (B, 1, H, W), torch.Tensor
-    # kernels: (1, 1, kh, kw) or (K, 1, kh, kw), torch.Tensor
+    # u: (B, 1, H, W). kernels: (1, 1, kh, kw) or (K, 1, kh, kw).
     _, _, KH, KW = kernels.shape
-
-    padding = (KH // 2, KW // 2) 
-
-    conv_out = F.conv2d(u, kernels, padding=padding)  # (B, K, H, W)
+    padding = (KH // 2, KW // 2)
+    conv_out = F.conv2d(u, kernels, padding=padding)
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
-@torch.jit.script
+
 def apply_kernels_torch3d(u, kernels):
-    # u: (B, 1, D, H, W), torch.Tensor
-    # kernels: (1, 1, kD, kH, kW) or (K, 1, kD, kH, kW), torch.Tensor
+    # u: (B, 1, D, H, W). kernels: (1, 1, kD, kH, kW) or (K, 1, kD, kH, kW).
     _, _, KD, KH, KW = kernels.shape
-
-    padding = (KD // 2, KH // 2, KW // 2) 
-
-    conv_out = F.conv3d(u, kernels, padding=padding)  # (B, K, D, H, W)
+    padding = (KD // 2, KH // 2, KW // 2)
+    conv_out = F.conv3d(u, kernels, padding=padding)
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
 def laplace2d(u: torch.Tensor, 

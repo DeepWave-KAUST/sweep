@@ -55,6 +55,20 @@ class _PropTorchEager(PropBase, torch.nn.Module):
 
         if not self.use_compile or not hasattr(torch, "compile"):
             return step_func
+        # Dynamo specializes step_func on per-tensor metadata; each wavefield
+        # tensor's requires_grad flips from False to True the first time it
+        # absorbs a contribution from the (requires_grad=True) models, which
+        # forces a recompile. Elastic/DAS have many wavefields, so the
+        # default limit of 8 is exhausted before Dynamo settles, and it
+        # falls back to eager — the symptom that hid the @torch.jit.script
+        # graph break analysis in TODO.md [TASK 001]. Bump the cap so the
+        # specialization can finish; Acoustic's tighter step is unaffected.
+        dynamo_config = getattr(torch, "_dynamo", None)
+        if dynamo_config is not None:
+            cfg = getattr(dynamo_config, "config", None)
+            if cfg is not None and hasattr(cfg, "recompile_limit"):
+                if cfg.recompile_limit < 32:
+                    cfg.recompile_limit = 32
         compile_kwargs = {
             "mode": self.compile_mode,
             "dynamic": self.compile_dynamic,
