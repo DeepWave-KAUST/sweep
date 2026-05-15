@@ -45,17 +45,26 @@ __device__ inline float acoustic_cpml_update_2d(
     const LaplaceParam& lap_ctx,
     const GradParam& grad_ctx,
     const GradParam& grad_ctx_x,
-    const GradParam& grad_ctx_z
+    const GradParam& grad_ctx_z,
+    const SolverContext& solver,
+    int halo
 ) {
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+
+    // Interior fast-path: ax/bx/dbxdx vanish, so w_sum reduces to lap_x+lap_z
+    // and the aux fields psix/psiz/zetax/zetaz stay zero. Skip the loads/stores.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) return lap_x + lap_z;
+
     float ax_ = cpml.ax[ix];
     float az_ = cpml.az[iz];
     float bx_ = cpml.bx[ix];
     float bz_ = cpml.bz[iz];
     float dbxdx_ = cpml.dbxdx[ix];
     float dbzdz_ = cpml.dbzdz[iz];
-
-    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
-    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
 
     float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
     float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
@@ -114,7 +123,7 @@ __global__ void acoustic2nd(
     float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
     const float* vp_b = vp + b * spatial_size;
 
-    float w_sum = acoustic_cpml_update_2d<Order>(f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z);
+    float w_sum = acoustic_cpml_update_2d<Order>(f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
     float v = vp_b[idx];
     float utt = (v * v) * w_sum;
 
@@ -191,8 +200,8 @@ __global__ void acoustic_lsrtm2nd(
     const float* vp_b = vp + b * spatial_size;
     const float* mp_b = mp + b * spatial_size;
 
-    float bg_w_sum = acoustic_cpml_update_2d<Order>(bg_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z);
-    float sc_w_sum = acoustic_cpml_update_2d<Order>(sc_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z);
+    float bg_w_sum = acoustic_cpml_update_2d<Order>(bg_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
+    float sc_w_sum = acoustic_cpml_update_2d<Order>(sc_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
 
     float v = vp_b[idx];
     float bg_utt_val = (v * v) * bg_w_sum;

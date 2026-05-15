@@ -59,6 +59,35 @@ __global__ void das_mu2d_stress_strain_kernel(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b = mu + b * spatial_size;
 
+    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
+
+    float lam = lam_b[idx];
+    float mu_ = mu_b[idx];
+
+    // Interior fast-path. Conservative for free_surface: keep iz==halo on the
+    // full PML path so the szz/sxz=0 BC still fires.
+    int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        f.sxx[idx] += solver.dt * ((lam + 2.f * mu_) * dvx_dx + lam * dvz_dz);
+        f.szz[idx] += solver.dt * ((lam + 2.f * mu_) * dvz_dz + lam * dvx_dx);
+        f.sxz[idx] += solver.dt * mu_ * (dvx_dz + dvz_dx);
+        f.exx[idx] += solver.dt * dvx_dx;
+        f.ezz[idx] += solver.dt * dvz_dz;
+        f.exz[idx] += 0.5f * solver.dt * (dvx_dz + dvz_dx);
+        if (u_this_b) {
+            int comp_stride = solver.B * spatial_size;
+            u_this_b[0 * comp_stride + idx] = f.vx[idx];
+            u_this_b[1 * comp_stride + idx] = f.vz[idx];
+        }
+        return;
+    }
+
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
@@ -67,14 +96,6 @@ __global__ void das_mu2d_stress_strain_kernel(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
-    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
-
-    float lam = lam_b[idx];
-    float mu_ = mu_b[idx];
 
     f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
     dvz_dz += f.m_vzz[idx];

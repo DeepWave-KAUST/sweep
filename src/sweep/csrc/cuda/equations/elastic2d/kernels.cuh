@@ -130,6 +130,26 @@ __global__ void elastic_velocity_kernel(
 
     const float* rho_b = rho + b * spatial_size;
 
+    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD> (f.sxx, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
+
+    float inv_rho = 1.f / rho_b[idx];
+
+    // Position-based PML / interior split. All ax/bx CPML coefficients vanish
+    // outside the PML band, so the auxiliary fields m_szzz/m_sxzx/m_sxzz/m_sxxx
+    // become 0 → 0 in the interior. Skip the four reads + four writes.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        f.vx[idx] += solver.dt * inv_rho * (dsxx_dx + dsxz_dz);
+        f.vz[idx] += solver.dt * inv_rho * (dsxz_dx + dszz_dz);
+        return;
+    }
+
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
@@ -139,13 +159,6 @@ __global__ void elastic_velocity_kernel(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD> (f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
-    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
-
-    float inv_rho = 1.f / rho_b[idx];
 
     f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
     dszz_dz += f.m_szzz[idx];
@@ -199,6 +212,33 @@ __global__ void elastic_stress_kernel(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
+    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD> (f.vx, ix, 0, iz, grad_ctx);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
+    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>  (f.vz, ix, 0, iz, grad_ctx);
+
+    float lam = lam_b[idx];
+    float mu_ = mu_b[idx];
+
+    // PML / interior split. Conservative for free_surface: keep the iz == halo
+    // row (the free-surface row, where szz/sxz must be reset to 0) on the full
+    // PML path so the BC fires.
+    int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
+        f.szz[idx] += solver.dt * ((lam + 2.f*mu_) * dvz_dz + lam * dvx_dx);
+        f.sxz[idx] += solver.dt * mu_ * (dvx_dz + dvz_dx);
+        if (u_this_b) {
+            int comp_stride  = solver.B * spatial_size;
+            u_this_b[0 * comp_stride + idx] = f.vx[idx];
+            u_this_b[1 * comp_stride + idx] = f.vz[idx];
+        }
+        return;
+    }
+
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
@@ -208,14 +248,6 @@ __global__ void elastic_stress_kernel(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD> (f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
-    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>  (f.vz, ix, 0, iz, grad_ctx);
-
-    float lam = lam_b[idx];
-    float mu_ = mu_b[idx];
 
     f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
     dvz_dz += f.m_vzz[idx];

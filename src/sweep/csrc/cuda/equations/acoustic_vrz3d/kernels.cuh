@@ -265,6 +265,10 @@ __global__ void acoustic_vrz3nd(
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * stride_z + iy * stride_y + ix;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+
     auto f = wf.offset(b, spatial_size);
     const float* vp_b = vp + b * spatial_size;
     const float* z_b = z + b * spatial_size;
@@ -278,6 +282,36 @@ __global__ void acoustic_vrz3nd(
     float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
     float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
 
+    float dvpdx = gradient<3, Order, X>(vp_b, ix, iy, iz, grad_ctx);
+    float dvpdy = gradient<3, Order, Y>(vp_b, ix, iy, iz, grad_ctx);
+    float dvpdz = gradient<3, Order, Z>(vp_b, ix, iy, iz, grad_ctx);
+    float z1x = gradient<3, Order, X>(inv_z_b, ix, iy, iz, grad_ctx);
+    float z1y = gradient<3, Order, Y>(inv_z_b, ix, iy, iz, grad_ctx);
+    float z1z = gradient<3, Order, Z>(inv_z_b, ix, iy, iz, grad_ctx);
+
+    float v = vp_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float beta = v * inv_z0;
+    float kappa = v * z_b[idx];
+    float dbdx = dvpdx * inv_z0 + v * z1x;
+    float dbdy = dvpdy * inv_z0 + v * z1y;
+    float dbdz = dvpdz * inv_z0 + v * z1z;
+
+    // Interior fast-path: ax/bx/dbxdx all vanish so psixn/psiyn/psizn and
+    // zetaxn/zetayn/zetazn collapse to 0; rhs reduces to kappa*(beta*(sum_lap)
+    // + dbdx*dudx + dbdy*dudy + dbdz*dudz). Skip the 6 aux-field writes and
+    // the dpsix/dpsiy/dpsiz/daxdx/daydy/dazdz gradient loads.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        float rhs = kappa * (beta * (lap_x + lap_y + lap_z) + dbdx * dudx + dbdy * dudy + dbdz * dudz);
+        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
+        return;
+    }
+
     float dpsixdx = gradient<3, Order, X>(f.psix, ix, iy, iz, grad_ctx);
     float dpsiydy = gradient<3, Order, Y>(f.psiy, ix, iy, iz, grad_ctx);
     float dpsizdz = gradient<3, Order, Z>(f.psiz, ix, iy, iz, grad_ctx);
@@ -285,13 +319,6 @@ __global__ void acoustic_vrz3nd(
     float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
     float daydy = gradient<2, Order, X>(cpml.ay, iy, 0, 0, grad_ctx_y);
     float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
-
-    float dvpdx = gradient<3, Order, X>(vp_b, ix, iy, iz, grad_ctx);
-    float dvpdy = gradient<3, Order, Y>(vp_b, ix, iy, iz, grad_ctx);
-    float dvpdz = gradient<3, Order, Z>(vp_b, ix, iy, iz, grad_ctx);
-    float z1x = gradient<3, Order, X>(inv_z_b, ix, iy, iz, grad_ctx);
-    float z1y = gradient<3, Order, Y>(inv_z_b, ix, iy, iz, grad_ctx);
-    float z1z = gradient<3, Order, Z>(inv_z_b, ix, iy, iz, grad_ctx);
 
     float ax_ = cpml.ax[ix];
     float ay_ = cpml.ay[iy];
@@ -321,13 +348,6 @@ __global__ void acoustic_vrz3nd(
                 + (1.0f + by_) * tmpy + ay_ * f.zetay[idx]
                 + (1.0f + bz_) * tmpz + az_ * f.zetaz[idx];
 
-    float v = vp_b[idx];
-    float inv_z0 = inv_z_b[idx];
-    float beta = v * inv_z0;
-    float kappa = v * z_b[idx];
-    float dbdx = dvpdx * inv_z0 + v * z1x;
-    float dbdy = dvpdy * inv_z0 + v * z1y;
-    float dbdz = dvpdz * inv_z0 + v * z1z;
     float rhs = kappa * (beta * w_sum + dbdx * px + dbdy * py + dbdz * pz);
 
     f.psix[idx] = psixn;

@@ -48,12 +48,24 @@ __device__ inline float acoustic_cpml_update_3d(
     const GradParam& grad_ctx_x,
     const GradParam& grad_ctx_y,
     const GradParam& grad_ctx_z,
-    bool use_pml
+    bool use_pml,
+    const SolverContext& solver,
+    int halo
 ) {
     float lap_x = laplace<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
     float lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
     float lap_z = laplace<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
     if (!use_pml) {
+        return lap_x + lap_y + lap_z;
+    }
+
+    // Interior fast-path: ax/bx/dbxdx vanish, so w_sum reduces to the sum of
+    // laplacians and the aux fields stay zero. Skip the 14+ extra loads/stores.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
         return lap_x + lap_y + lap_z;
     }
 
@@ -140,7 +152,7 @@ __global__ void acoustic3d_single(
     const float* vp_b = vp + b * spatial_size;
 
     float utt = (vp_b[idx] * vp_b[idx]) * acoustic_cpml_update_3d<Order>(
-        f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true
+        f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo
     );
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
     if (save_all_wavefields && u_this_b != nullptr) {
@@ -183,7 +195,7 @@ __global__ void acoustic3d_single_nopml(
     const float* vp_b = vp + b * spatial_size;
 
     float utt = (vp_b[idx] * vp_b[idx]) * acoustic_cpml_update_3d<Order>(
-        f, ix, iy, iz, idx, AcousticCPMLPointer{}, lap_ctx, GradParam{}, GradParam{}, GradParam{}, GradParam{}, false
+        f, ix, iy, iz, idx, AcousticCPMLPointer{}, lap_ctx, GradParam{}, GradParam{}, GradParam{}, GradParam{}, false, solver, halo
     );
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
     if (u_this_b != nullptr) {
@@ -237,10 +249,10 @@ __global__ void acoustic_lsrtm3d_coupled(
 
     float v2 = vp_b[idx] * vp_b[idx];
     float bg_utt_val = v2 * acoustic_cpml_update_3d<Order>(
-        bg_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true
+        bg_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo
     );
     float sc_utt_val = v2 * acoustic_cpml_update_3d<Order>(
-        sc_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true
+        sc_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo
     );
 
     bg_f.u_next[idx] = 2.0f * bg_f.u_now[idx] - bg_f.u_prev[idx] + solver.dt * solver.dt * bg_utt_val;

@@ -268,6 +268,27 @@ __global__ void elastic_tti_sg_velocity_kernel(
     auto f = wf.offset(b, spatial_size);
     auto m = model.offset(b, spatial_size);
 
+    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxy_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxy, ix, 0, iz, grad_ctx);
+    float dsyz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.syz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
+
+    const float scale = solver.dt / m.rho[idx];
+
+    // Interior fast-path: ax/bx vanish, so the six aux fields stay zero and the
+    // gradients just feed through to the velocity update.
+    const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                        (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                        (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
+        f.vx[idx] += scale * (dsxx_dx + dsxz_dz);
+        f.vy[idx] += scale * (dsxy_dx + dsyz_dz);
+        f.vz[idx] += scale * (dsxz_dx + dszz_dz);
+        return;
+    }
+
     const float az = cpml.az[iz];
     const float bz = cpml.bz[iz];
     const float azh = cpml.azh[iz];
@@ -276,13 +297,6 @@ __global__ void elastic_tti_sg_velocity_kernel(
     const float bx = cpml.bx[ix];
     const float axh = cpml.axh[ix];
     const float bxh = cpml.bxh[ix];
-
-    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
-    float dsxy_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxy, ix, 0, iz, grad_ctx);
-    float dsyz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.syz, ix, iz, grad_ctx, solver, true);
-    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
 
     f.m_txxx[idx] = axh * f.m_txxx[idx] + bxh * dsxx_dx;
     f.m_txzz[idx] = az * f.m_txzz[idx] + bz * dsxz_dz;
@@ -298,7 +312,6 @@ __global__ void elastic_tti_sg_velocity_kernel(
     dsxz_dx += f.m_txzx[idx];
     dszz_dz += f.m_tzzz[idx];
 
-    const float scale = solver.dt / m.rho[idx];
     f.vx[idx] += scale * (dsxx_dx + dsxz_dz);
     f.vy[idx] += scale * (dsxy_dx + dsyz_dz);
     f.vz[idx] += scale * (dsxz_dx + dszz_dz);
@@ -334,6 +347,55 @@ __global__ void elastic_tti_sg_stress_kernel(
     auto m = model.offset(b, spatial_size);
     float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
 
+    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dvy_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vy, ix, 0, iz, grad_ctx);
+    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vy, ix, iz, grad_ctx, solver, false);
+
+    // Interior fast-path. Conservative for free_surface: keep iz==halo on the
+    // full PML path because both (a) the anisotropic FS gradient adjustment
+    // and (b) szz/sxz/syz=0 BC fire only there.
+    const int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
+    const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                        (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        const float shear_xz = dvz_dx + dvx_dz;
+        f.sxx[idx] += solver.dt * (
+            m.C11[idx] * dvx_dx + m.C16[idx] * dvy_dx + m.C15[idx] * shear_xz +
+            m.C14[idx] * dvy_dz + m.C13[idx] * dvz_dz
+        );
+        f.szz[idx] += solver.dt * (
+            m.C13[idx] * dvx_dx + m.C36[idx] * dvy_dx + m.C35[idx] * shear_xz +
+            m.C34[idx] * dvy_dz + m.C33[idx] * dvz_dz
+        );
+        f.syz[idx] += solver.dt * (
+            m.C14[idx] * dvx_dx + m.C46[idx] * dvy_dx + m.C45[idx] * shear_xz +
+            m.C44[idx] * dvy_dz + m.C34[idx] * dvz_dz
+        );
+        f.sxz[idx] += solver.dt * (
+            m.C15[idx] * dvx_dx + m.C56[idx] * dvy_dx + m.C55[idx] * shear_xz +
+            m.C45[idx] * dvy_dz + m.C35[idx] * dvz_dz
+        );
+        f.sxy[idx] += solver.dt * (
+            m.C16[idx] * dvx_dx + m.C66[idx] * dvy_dx + m.C56[idx] * shear_xz +
+            m.C46[idx] * dvy_dz + m.C36[idx] * dvz_dz
+        );
+        if (u_this_b) {
+            u_this_b[0 * comp_stride + idx] = f.vx[idx];
+            u_this_b[1 * comp_stride + idx] = f.vy[idx];
+            u_this_b[2 * comp_stride + idx] = f.vz[idx];
+            u_this_b[3 * comp_stride + idx] = f.sxx[idx];
+            u_this_b[4 * comp_stride + idx] = f.szz[idx];
+            u_this_b[5 * comp_stride + idx] = f.syz[idx];
+            u_this_b[6 * comp_stride + idx] = f.sxz[idx];
+            u_this_b[7 * comp_stride + idx] = f.sxy[idx];
+        }
+        return;
+    }
+
     const float az = cpml.az[iz];
     const float bz = cpml.bz[iz];
     const float azh = cpml.azh[iz];
@@ -342,13 +404,6 @@ __global__ void elastic_tti_sg_stress_kernel(
     const float bx = cpml.bx[ix];
     const float axh = cpml.axh[ix];
     const float bxh = cpml.bxh[ix];
-
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dvy_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vy, ix, 0, iz, grad_ctx);
-    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
-    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vy, ix, iz, grad_ctx, solver, false);
 
     f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
     f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
@@ -588,39 +643,82 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
         m.C15[idx] * bar_sxx + m.C35[idx] * bar_szz + m.C45[idx] * bar_syz +
         m.C55[idx] * bar_sxz + m.C56[idx] * bar_sxy
     );
-    const float bar_dvx_dx = solver.dt * (
+    float bar_dvx_dx = solver.dt * (
         m.C11[idx] * bar_sxx + m.C13[idx] * bar_szz + m.C14[idx] * bar_syz +
         m.C15[idx] * bar_sxz + m.C16[idx] * bar_sxy
     );
-    const float bar_dvy_dx = solver.dt * (
+    float bar_dvy_dx = solver.dt * (
         m.C16[idx] * bar_sxx + m.C36[idx] * bar_szz + m.C46[idx] * bar_syz +
         m.C56[idx] * bar_sxz + m.C66[idx] * bar_sxy
     );
-    const float bar_dvz_dx = bar_shear;
-    const float bar_dvx_dz = bar_shear;
-    const float bar_dvy_dz = solver.dt * (
+    float bar_dvz_dx = bar_shear;
+    // Stress uses (modified) dv*_dz at the free-surface row, so bar of the
+    // *stress-side* dvx_dz/dvy_dz/dvz_dz is bar of the MODIFIED values:
+    const float bar_dvx_dz_mod = bar_shear;
+    const float bar_dvy_dz_mod = solver.dt * (
         m.C14[idx] * bar_sxx + m.C34[idx] * bar_szz + m.C44[idx] * bar_syz +
         m.C45[idx] * bar_sxz + m.C46[idx] * bar_sxy
     );
-    const float bar_dvz_dz = solver.dt * (
+    const float bar_dvz_dz_mod = solver.dt * (
         m.C13[idx] * bar_sxx + m.C33[idx] * bar_szz + m.C34[idx] * bar_syz +
         m.C35[idx] * bar_sxz + m.C36[idx] * bar_sxy
     );
 
+    // Outside the FS row, modified == full, so the pre-CPML bars are equal to
+    // the stress-side bars. On the FS row the forward overwrites the full
+    // values via the 3x3 traction-free system, so:
+    //   (1) propagate bar(modified) back through the 3x3 system to bar(dv*_dx),
+    //   (2) bar(dv*_dz_full) is zero because the full value never reaches the
+    //       stress update (the 3x3 mod replaces it).
+    float bar_dvx_dz_full = bar_dvx_dz_mod;
+    float bar_dvy_dz_full = bar_dvy_dz_mod;
+    float bar_dvz_dz_full = bar_dvz_dz_mod;
+    if (elastic_is_top_free_surface_row(solver, iz)) {
+        const float C13 = m.C13[idx], C14 = m.C14[idx], C15 = m.C15[idx];
+        const float C33 = m.C33[idx], C34 = m.C34[idx], C35 = m.C35[idx], C36 = m.C36[idx];
+        const float C44 = m.C44[idx], C45 = m.C45[idx], C46 = m.C46[idx];
+        const float C55 = m.C55[idx], C56 = m.C56[idx];
+        const float a = C35, bb = C34, c = C33;
+        const float d = C45, e = C44, fcoef = C34;
+        const float g = C55, h = C45, icoef = C35;
+        const float det = a * (e * icoef - fcoef * h) - bb * (d * icoef - fcoef * g) + c * (d * h - e * g);
+        if (fabsf(det) > 1.0e-20f) {
+            const float inv = 1.f / det;
+            const float br1 = ((e * icoef - fcoef * h) * bar_dvx_dz_mod +
+                                (fcoef * g - d * icoef) * bar_dvy_dz_mod +
+                                (d * h - e * g) * bar_dvz_dz_mod) * inv;
+            const float br2 = ((c * h - bb * icoef) * bar_dvx_dz_mod +
+                                (a * icoef - c * g) * bar_dvy_dz_mod +
+                                (bb * g - a * h) * bar_dvz_dz_mod) * inv;
+            const float br3 = ((bb * fcoef - c * e) * bar_dvx_dz_mod +
+                                (c * d - a * fcoef) * bar_dvy_dz_mod +
+                                (a * e - bb * d) * bar_dvz_dz_mod) * inv;
+            // r1 = -rhs_zz = -(C13*dvx_dx + C36*dvy_dx + C35*dvz_dx) and similarly
+            // for r2 (using C14, C46, C45) and r3 (using C15, C56, C55).
+            // ∂L/∂dvx_dx via the 3x3 path is -C13*br1 - C14*br2 - C15*br3, etc.
+            bar_dvx_dx -= C13 * br1 + C14 * br2 + C15 * br3;
+            bar_dvy_dx -= C36 * br1 + C46 * br2 + C56 * br3;
+            bar_dvz_dx -= C35 * br1 + C45 * br2 + C55 * br3;
+        }
+        bar_dvx_dz_full = 0.f;
+        bar_dvy_dz_full = 0.f;
+        bar_dvz_dz_full = 0.f;
+    }
+
     float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
-    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz;
+    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz_full;
     float tmp_vyx = f.m_vyx[idx] + bar_dvy_dx;
-    float tmp_vyz = f.m_vyz[idx] + bar_dvy_dz;
+    float tmp_vyz = f.m_vyz[idx] + bar_dvy_dz_full;
     float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
-    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
+    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz_full;
 
     const int shift = b * spatial_size + idx;
     q_vxx[shift] = bar_dvx_dx + bx * tmp_vxx;
-    q_vxz[shift] = bar_dvx_dz + bzh * tmp_vxz;
+    q_vxz[shift] = bar_dvx_dz_full + bzh * tmp_vxz;
     q_vyx[shift] = bar_dvy_dx + bxh * tmp_vyx;
-    q_vyz[shift] = bar_dvy_dz + bzh * tmp_vyz;
+    q_vyz[shift] = bar_dvy_dz_full + bzh * tmp_vyz;
     q_vzx[shift] = bar_dvz_dx + bxh * tmp_vzx;
-    q_vzz[shift] = bar_dvz_dz + bz * tmp_vzz;
+    q_vzz[shift] = bar_dvz_dz_full + bz * tmp_vzz;
 
     f.m_vxx[idx] = ax * tmp_vxx;
     f.m_vxz[idx] = azh * tmp_vxz;
@@ -834,6 +932,29 @@ __global__ void calculate_grad_elastic_tti_sg_nobs(
     float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(vz, ix, iz, grad_ctx, solver, true);
     float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(vx, ix, iz, grad_ctx, solver, false);
     float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(vy, ix, iz, grad_ctx, solver, false);
+
+    // At the FS row the forward replaces dv*_dz with the 3x3 traction-free
+    // solution before the stress update, so ∂σ_**/∂C** must be evaluated
+    // against those modified gradients.
+    if (elastic_is_top_free_surface_row(solver, iz)) {
+        const float C13 = m.C13[idx], C14 = m.C14[idx], C15 = m.C15[idx];
+        const float C33 = m.C33[idx], C34 = m.C34[idx], C35 = m.C35[idx], C36 = m.C36[idx];
+        const float C44 = m.C44[idx], C45 = m.C45[idx], C46 = m.C46[idx];
+        const float C55 = m.C55[idx], C56 = m.C56[idx];
+        const float aa = C35, bb = C34, cc = C33;
+        const float d = C45, e = C44, fcoef = C34;
+        const float g = C55, h = C45, icoef = C35;
+        const float det = aa * (e * icoef - fcoef * h) - bb * (d * icoef - fcoef * g) + cc * (d * h - e * g);
+        if (fabsf(det) > 1.0e-20f) {
+            const float rhs_zz = C13 * dvx_dx + C36 * dvy_dx + C35 * dvz_dx;
+            const float rhs_yz = C14 * dvx_dx + C46 * dvy_dx + C45 * dvz_dx;
+            const float rhs_xz = C15 * dvx_dx + C56 * dvy_dx + C55 * dvz_dx;
+            const float r1 = -rhs_zz, r2 = -rhs_yz, r3 = -rhs_xz;
+            dvx_dz = ((e * icoef - fcoef * h) * r1 + (cc * h - bb * icoef) * r2 + (bb * fcoef - cc * e) * r3) / det;
+            dvy_dz = ((fcoef * g - d * icoef) * r1 + (aa * icoef - cc * g) * r2 + (cc * d - aa * fcoef) * r3) / det;
+            dvz_dz = ((d * h - e * g) * r1 + (bb * g - aa * h) * r2 + (aa * e - bb * d) * r3) / det;
+        }
+    }
     float shear_xz = dvz_dx + dvx_dz;
 
     float bar_sxx = a.sxx[idx];
