@@ -217,7 +217,44 @@ def inversion_step_batched(
     return total_loss
 
 
-def run_fwi(backend="torch", impl=None, device="auto", batchsize_override=None, train_shot_batchsize_override=None):
+def build_encoded_batch_3d(wave, obs, shot_idx, cfg, dev):
+    nsel = len(shot_idx)
+    nt = cfg["nt"]
+    max_shift = max(1, int(cfg["max_time_shift_ratio"] * nt))
+
+    encoded_wave = np.zeros((nsel, nt), dtype=np.float32)
+    encoded_obs = np.zeros_like(obs[shot_idx[0]], dtype=np.float32)
+    # obs[shot] has shape (nrec, nt) for c path or (nrec, nt) post-squeeze — time is the last axis.
+    time_axis = obs[shot_idx[0]].ndim - 1
+    head_zero = (slice(None),) * time_axis + (slice(0, None),)  # filled below per tau
+    for i, shot in enumerate(shot_idx):
+        polarity = -1.0 if np.random.randint(0, 2) else 1.0
+        tau = int(np.random.randint(0, max_shift))
+        shot_wave = polarity * np.roll(wave, shift=tau, axis=0)
+        shot_wave[:tau] = 0.0
+        shot_obs = polarity * np.roll(obs[shot], shift=tau, axis=time_axis)
+        zero_idx = (slice(None),) * time_axis + (slice(0, tau),)
+        shot_obs[zero_idx] = 0.0
+        encoded_wave[i] = shot_wave
+        encoded_obs += shot_obs
+
+    # Source-encoding requires 3D (1, nsel, ...) shapes for both eager and c paths
+    # so that _auto_detect_source_encoding agrees with the explicit flag.
+    encoded_wave = encoded_wave[None, ...]
+    if cfg["impl"] == "c":
+        encoded_obs = torch.as_tensor(encoded_obs[None, ...], dtype=torch.float32, device=dev)
+    else:
+        encoded_obs = torch.as_tensor(encoded_obs, dtype=torch.float32, device=dev)
+    return encoded_wave, encoded_obs
+
+
+def prepare_encoded_inputs_3d(wave, obs, sources, receivers_shared, shot_idx, cfg, dev):
+    encoded_wave, encoded_obs = build_encoded_batch_3d(wave, obs, shot_idx, cfg, dev)
+    sources_sel = sources[shot_idx][None, ...]                              # (1, nsel, 3)
+    return encoded_wave, sources_sel, receivers_shared, encoded_obs
+
+
+def run_fwi(backend="torch", impl=None, device="auto", batchsize_override=None, train_shot_batchsize_override=None, use_source_encoding=False):
     cfg = build_config(backend, impl, device)
     if batchsize_override is not None:
         cfg["batchsize"] = int(batchsize_override)
@@ -273,12 +310,66 @@ def run_fwi(backend="torch", impl=None, device="auto", batchsize_override=None, 
     save_observed_figure(obs, receivers, cfg, output_dir)
 
     inv_vp = torch.from_numpy(init_model).to(dev).requires_grad_(True)
+    nshots = sources.shape[0]
+    batchsize = min(cfg["batchsize"], nshots)
+
+    if use_source_encoding:
+        lr = float(cfg.get("lr_encoding", cfg["lr"]))
+        optimizer = torch.optim.Adam([inv_vp], lr=lr, eps=1e-22)
+        receivers_shared = receivers[:1]
+        print(
+            f"[{run_label}] source encoding ON,",
+            f"lr={lr}, batchsize={batchsize}, nshots={nshots}",
+        )
+        losses = []
+        for epoch in tqdm.trange(cfg["epochs"]):
+            optimizer.zero_grad()
+            shot_idx = np.random.choice(nshots, size=batchsize, replace=False)
+            encoded_wave, encoded_sources, encoded_receivers, encoded_obs = prepare_encoded_inputs_3d(
+                wave,
+                obs,
+                sources,
+                receivers_shared,
+                shot_idx,
+                cfg,
+                dev,
+            )
+            encoded_syn = solver(
+                encoded_wave,
+                encoded_sources,
+                encoded_receivers,
+                models=[inv_vp],
+                source_encoding=True,
+            )
+            loss = (encoded_syn - encoded_obs).pow(2).sum()
+            loss.backward()
+            optimizer.step()
+
+            loss_value = float(loss.item())
+            losses.append(loss_value)
+            print(f"[{run_label}] Epoch {epoch:04d} | Loss: {loss_value:.6e}")
+
+            if epoch % cfg["show_every"] == 0:
+                vp_np = inv_vp.detach().cpu().numpy()
+                grad_np = inv_vp.grad.detach().cpu().numpy()
+                save_progress_figure(
+                    true_model,
+                    vp_np,
+                    grad_np,
+                    losses,
+                    epoch,
+                    cfg,
+                    output_dir,
+                    loss_ylabel="Sum of Squared Error",
+                )
+        np.save(output_dir / "vp_inverted.npy", inv_vp.detach().cpu().numpy())
+        np.save(output_dir / "losses.npy", np.asarray(losses, dtype=np.float32))
+        return
+
     optimizer = torch.optim.Adam([inv_vp], lr=cfg["lr"], eps=1e-22)
 
     obs_torch = torch.from_numpy(obs)
     losses = []
-    nshots = sources.shape[0]
-    batchsize = min(cfg["batchsize"], nshots)
     train_shot_batchsize = min(int(cfg.get("train_shot_batchsize", batchsize)), batchsize)
     print(
         "Training shot selection:",
@@ -319,6 +410,8 @@ def run_fwi(backend="torch", impl=None, device="auto", batchsize_override=None, 
                 output_dir,
                 loss_ylabel="Sum of Squared Error",
             )
+    np.save(output_dir / "vp_inverted.npy", inv_vp.detach().cpu().numpy())
+    np.save(output_dir / "losses.npy", np.asarray(losses, dtype=np.float32))
 
 
 def parse_args():
@@ -342,7 +435,15 @@ def parse_args():
         default=None,
         help="Process the selected training shots in smaller chunks during each optimizer step. Use 1 to run one shot at a time while accumulating gradients.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--use-source-encoding",
+        action="store_true",
+        help="Use source encoding (combine selected shots into a super-shot per iteration) instead of mini-batch stochastic FWI.",
+    )
+    args = parser.parse_args()
+    if args.use_source_encoding and args.train_shot_batchsize is not None:
+        parser.error("--use-source-encoding ignores --train-shot-batchsize; do not pass both.")
+    return args
 
 
 def main():
@@ -353,6 +454,7 @@ def main():
         device=args.device,
         batchsize_override=args.batchsize,
         train_shot_batchsize_override=args.train_shot_batchsize,
+        use_source_encoding=args.use_source_encoding,
     )
 
 

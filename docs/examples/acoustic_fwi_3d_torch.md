@@ -12,6 +12,15 @@ with one script that supports two Torch implementations:
 - `eager`: pure PyTorch propagation through `PropTorch(..., backend="torch", impl="eager")`
 - `c`: compiled CUDA propagation through `PropTorch(..., backend="torch", impl="c")`
 
+and two training modes:
+
+- **mini-batch stochastic FWI** (default): each iteration randomly selects
+  `batchsize` shots and propagates them shot-by-shot (or in chunks of
+  `train_shot_batchsize`)
+- **source-encoding FWI** (`--use-source-encoding`): each iteration randomly
+  selects `batchsize` shots, applies random ±1 polarity and random time shifts,
+  and combines them into one super-shot — one solver call per epoch
+
 The script:
 
 1. loads the 3D true and smooth Overthrust velocity models
@@ -87,13 +96,23 @@ Shared configuration includes:
 - `src_margin=8`, `rec_margin=4`
 - `batchsize=4`
 - `forward_batchsize=1`
+- `lr=20.0` (mini-batch path)
+- `lr_encoding=20.0` (source-encoding path)
+- `max_time_shift_ratio=0.2` (source-encoding path)
 - `model_stride_z=1`, `model_stride_y=4`, `model_stride_x=4`
 
 The script uses:
 
-- `batchsize`: the number of shots randomly selected for one optimizer step
+- `batchsize`: the number of shots randomly selected for one optimizer step (or
+  combined into one super-shot when source encoding is on)
 - `forward_batchsize`: the number of shots used at once when generating observed data
-- `train_shot_batchsize`: an optional runtime override that splits the selected training shots into smaller chunks during one optimizer step
+- `train_shot_batchsize`: an optional runtime override that splits the selected
+  training shots into smaller chunks during one optimizer step (mini-batch path
+  only; mutually exclusive with `--use-source-encoding`)
+- `lr_encoding`: learning rate used when source encoding is enabled (falls back
+  to `lr` if not set)
+- `max_time_shift_ratio`: maximum random time shift per encoded shot, expressed
+  as a fraction of `nt` (only used when source encoding is on)
 
 ## Memory Notes
 
@@ -149,12 +168,45 @@ The final array shapes are:
 Observed data is generated first from the true model, then the inversion updates
 the smooth model with `torch.optim.Adam`.
 
+### Mini-Batch Path (default)
+
 At each iteration, the script:
 
 1. selects a random subset of `batchsize` shots
 2. optionally splits that subset into chunks of `train_shot_batchsize`
 3. computes synthetic data and accumulates gradients chunk by chunk
 4. updates the model once after the full selected batch has contributed
+
+### Source-Encoding Path (`--use-source-encoding`)
+
+At each iteration, the script:
+
+1. selects a random subset of `batchsize` shots
+2. assigns each selected shot a random ±1 polarity and a random time shift
+   `tau ∈ [0, max_time_shift_ratio · nt)`
+3. builds an encoded super-shot by summing the polarity- and time-shifted
+   observed traces, with a matching encoded wavelet stack
+4. runs **one** solver call with `source_encoding=True` and updates the model
+   once per epoch
+
+This makes each epoch ~3× faster than the mini-batch path on the default
+configuration, at the cost of higher per-epoch loss noise (each super-shot is a
+different encoded target).
+
+## Source Encoding: Call Shapes
+
+When `--use-source-encoding` is on, both the eager and `c` paths use the same
+3D batched layout (so `_auto_detect_source_encoding` in `PropTorch` agrees with
+the explicit `source_encoding=True` flag):
+
+- `wavelet`: `(1, nsel, nt)`
+- `sources`: `(1, nsel, 3)`
+- `receivers`: `(1, nreceivers, 3)`
+
+Here `nsel = batchsize` is the number of shots combined into the current
+super-shot. The 3D Overthrust geometry replicates the same receiver grid for
+every shot, so `receivers[:1]` is used as the shared receiver tensor for the
+super-shot.
 
 ## Outputs
 
@@ -181,11 +233,32 @@ Each implementation/device combination writes into its own output directory:
 The following figures come from a completed CUDA run of the 3D Overthrust
 example.
 
+The smoothed initial model used as the inversion starting point (three
+orthogonal mid-slices, same colour range as the true model):
+
+![3D Overthrust initial model](../figures/examples/acoustic_fwi_3d_torch_init_model.png)
+
 `epoch_0100.png`: the saved progress panel at a later epoch, showing three
 orthogonal slices of the true model, the current inverted model, and the
 current gradient.
 
 ![3D acoustic FWI epoch panel](../figures/examples/acoustic_fwi_3d_torch_epoch_0100.png)
+
+### Source-Encoding Run
+
+The same panel from a completed CUDA run with `--use-source-encoding` and
+identical default configuration (`batchsize=4`, `lr_encoding=20`, 101 epochs):
+
+![3D acoustic FWI source-encoding epoch panel](../figures/examples/acoustic_fwi_3d_torch_se_epoch_0100.png)
+
+The encoding path achieves comparable inversion quality to the mini-batch
+path. On one reference run with `batchsize=4` and 101 epochs:
+
+| Path | RMSE → true (m/s) | Wallclock |
+|---|---|---|
+| init (smooth) | 306.5 | — |
+| mini-batch | 250.8 | 1022 s |
+| source encoding | 253.0 | 340 s (≈3× faster) |
 
 ## Running the Example
 
@@ -212,5 +285,17 @@ Step 3. If memory is tight, retry with one-shot accumulation.
 python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda --train-shot-batchsize 1
 ```
 
-Step 4. Check the backend output directory for `loss.png`,
-`observed_data.png`, and `epoch_XXXX.png`.
+Step 4. Optionally try source-encoding FWI for ~3× faster epochs.
+
+```bash
+python3 examples/FWI/3d/acoustic/torch/fwi_overthrust.py --backend torch --impl c --device cuda --use-source-encoding
+```
+
+`--use-source-encoding` is mutually exclusive with `--train-shot-batchsize`
+(an encoded super-shot is one solver call by construction). The encoding path
+writes `vp_inverted.npy` and `losses.npy` alongside the figures so the
+inverted model can be loaded back with `np.load(...)`.
+
+Step 5. Check the backend output directory for `loss.png`,
+`observed_data.png`, `epoch_XXXX.png`, and (after the run finishes)
+`vp_inverted.npy` / `losses.npy`.
