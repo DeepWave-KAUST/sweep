@@ -138,6 +138,27 @@ def build_setup_kwargs(distribution_name="sweep", build_cuda=None):
             "torch": ["torch"],
             "jax": ["jax", "jaxlib"],
             "all": ["torch", "jax", "jaxlib"],
+            # Companion packages — each lives in its own repo and is
+            # installable on its own. `sweep[full]` pulls the whole
+            # ecosystem in one shot. Names match the `[project] name`
+            # field in each companion repo's pyproject.toml.
+            #
+            # NOTE: until every companion is on PyPI, `pip install sweep[full]`
+            # will fail to resolve. For local development, use
+            # `scripts/install_ecosystem.sh` (editable installs in dep order)
+            # instead.
+            "full": [
+                "torch",
+                "sweep-loss",
+                "sweep-opt",
+                "sweep-io",
+                "sweep-preproc",
+                "sweep-runner",
+                "sweep-tasks",
+                "sweep-zoo",
+                "sweep-viz",
+                "sweep-nn",
+            ],
         },
         "ext_modules": [],
         "cmdclass": {},

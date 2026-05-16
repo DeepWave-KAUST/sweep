@@ -1,3 +1,9 @@
+"""sweep CLI — engine introspection only (`list equations`, `show <Eq>`).
+
+Task-running / FWI / LSRTM YAML driver lives in the `sweep-tasks` companion
+package: `pip install sweep-tasks` and use `sweep-tasks run task.yaml`.
+"""
+
 import argparse
 import inspect
 
@@ -78,6 +84,7 @@ def list_equations():
             + "  ".join(row[key].ljust(widths[key]) for _, key in headers)
         )
 
+
 def list_wavefields(class_name):
     import sweep
     import sweep.equations as eq
@@ -113,11 +120,15 @@ def list_wavefields(class_name):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='sweep', description='SWEEP (Seismic Wave Equation Exploration Platform)')
+    parser = argparse.ArgumentParser(
+        prog='sweep',
+        description='SWEEP (Seismic Wave Equation Exploration Platform) — engine introspection. '
+                    'For YAML-driven FWI / LSRTM runs, install `sweep-tasks` and use `sweep-tasks run`.',
+    )
     subparsers = parser.add_subparsers(dest='command')
 
     list_parser = subparsers.add_parser('list', help='List components')
-    show_parser = subparsers.add_parser('show', help='List components')
+    show_parser = subparsers.add_parser('show', help='Show details for a wave equation class')
 
     list_parser.add_argument('component', choices=['equations'], help='Component type to list')
     show_parser.add_argument('component', help='Wave equation class name to show wavefields for')
@@ -126,7 +137,14 @@ def main():
 
     if args.command == 'list' and args.component == 'equations':
         list_equations()
-    elif args.command == 'show':
+        return 0
+    if args.command == 'show':
         list_wavefields(args.component)
-    else:
-        parser.print_help()
+        return 0
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main() or 0)
