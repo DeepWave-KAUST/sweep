@@ -147,6 +147,10 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
     auto f = wf.offset(b, spatial_size);
@@ -157,15 +161,6 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float* qzz_b = qzz + b * spatial_size;
     float* qxz_b = qxz + b * spatial_size;
     float* qzx_b = qzx + b * spatial_size;
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -188,6 +183,30 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float bar_dvz_dz = solver.dt * (((lam + 2.f * mu_) * bar_szz + lam * bar_sxx) + bar_ezz);
     float bar_dvx_dz = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
     float bar_dvz_dx = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
+
+    // Position-based PML / interior split — same logic as elastic2d's
+    // adjoint prepare: ax/az/bx/bz vanish outside the PML band, m_v* aux
+    // fields stay 0, so the four q* outputs collapse to bar_dv*_d* and
+    // the four m_v* writes become 0 -> 0.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
+        qxx_b[idx] = bar_dvx_dx;
+        qzz_b[idx] = bar_dvz_dz;
+        qxz_b[idx] = bar_dvx_dz;
+        qzx_b[idx] = bar_dvz_dx;
+        return;
+    }
+
+    float az = cpml.az[iz];
+    float bz = cpml.bz[iz];
+    float azh = cpml.azh[iz];
+    float bzh = cpml.bzh[iz];
+    float ax = cpml.ax[ix];
+    float bx = cpml.bx[ix];
+    float axh = cpml.axh[ix];
+    float bxh = cpml.bxh[ix];
 
     float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;

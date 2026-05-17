@@ -610,20 +610,15 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     const int spatial_size = solver.nx * solver.nz;
     const int idx = iz * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
     auto m = model.offset(b, spatial_size);
-
-    const float az = cpml.az[iz];
-    const float bz = cpml.bz[iz];
-    const float azh = cpml.azh[iz];
-    const float bzh = cpml.bzh[iz];
-    const float ax = cpml.ax[ix];
-    const float bx = cpml.bx[ix];
-    const float axh = cpml.axh[ix];
-    const float bxh = cpml.bxh[ix];
 
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
@@ -705,6 +700,33 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
         bar_dvz_dz_full = 0.f;
     }
 
+    // Position-based PML / interior split. Same logic as elastic2d's
+    // adjoint prepare: ax/az/bx/bz vanish outside the PML band, m_v* aux
+    // fields stay 0, so the six q_v* outputs collapse to bar_dv*_d* and
+    // the six m_v* writes become 0 -> 0. Skip them.
+    const int shift = b * spatial_size + idx;
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
+        q_vxx[shift] = bar_dvx_dx;
+        q_vxz[shift] = bar_dvx_dz_full;
+        q_vyx[shift] = bar_dvy_dx;
+        q_vyz[shift] = bar_dvy_dz_full;
+        q_vzx[shift] = bar_dvz_dx;
+        q_vzz[shift] = bar_dvz_dz_full;
+        return;
+    }
+
+    const float az = cpml.az[iz];
+    const float bz = cpml.bz[iz];
+    const float azh = cpml.azh[iz];
+    const float bzh = cpml.bzh[iz];
+    const float ax = cpml.ax[ix];
+    const float bx = cpml.bx[ix];
+    const float axh = cpml.axh[ix];
+    const float bxh = cpml.bxh[ix];
+
     float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
     float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz_full;
     float tmp_vyx = f.m_vyx[idx] + bar_dvy_dx;
@@ -712,7 +734,6 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz_full;
 
-    const int shift = b * spatial_size + idx;
     q_vxx[shift] = bar_dvx_dx + bx * tmp_vxx;
     q_vxz[shift] = bar_dvx_dz_full + bzh * tmp_vxz;
     q_vyx[shift] = bar_dvy_dx + bxh * tmp_vyx;
@@ -793,12 +814,41 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     const int spatial_size = solver.nx * solver.nz;
     const int idx = iz * solver.nx + ix;
     const int shift = b * spatial_size + idx;
 
     auto f = wf.offset(b, spatial_size);
     auto m = model.offset(b, spatial_size);
+
+    const float scale = solver.dt / m.rho[idx];
+    const float bar_dsxx_dx = scale * f.vx[idx];
+    const float bar_dsxz_dz = scale * f.vx[idx];
+    const float bar_dsxy_dx = scale * f.vy[idx];
+    const float bar_dsyz_dz = scale * f.vy[idx];
+    const float bar_dsxz_dx = scale * f.vz[idx];
+    const float bar_dszz_dz = scale * f.vz[idx];
+
+    // Position-based PML / interior split. Outside the PML band the
+    // ax/az/bx/bz coefficients vanish, m_t* aux fields stay 0, so the six
+    // q_t* outputs collapse to bar_ds*_d* and the six m_t* writes become
+    // 0 -> 0. Skip them.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
+        q_txxx[shift] = bar_dsxx_dx;
+        q_txzz[shift] = bar_dsxz_dz;
+        q_txyx[shift] = bar_dsxy_dx;
+        q_tyzz[shift] = bar_dsyz_dz;
+        q_txzx[shift] = bar_dsxz_dx;
+        q_tzzz[shift] = bar_dszz_dz;
+        return;
+    }
 
     const float az = cpml.az[iz];
     const float bz = cpml.bz[iz];
@@ -808,14 +858,6 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
     const float bx = cpml.bx[ix];
     const float axh = cpml.axh[ix];
     const float bxh = cpml.bxh[ix];
-
-    const float scale = solver.dt / m.rho[idx];
-    const float bar_dsxx_dx = scale * f.vx[idx];
-    const float bar_dsxz_dz = scale * f.vx[idx];
-    const float bar_dsxy_dx = scale * f.vy[idx];
-    const float bar_dsyz_dz = scale * f.vy[idx];
-    const float bar_dsxz_dx = scale * f.vz[idx];
-    const float bar_dszz_dz = scale * f.vz[idx];
 
     float tmp_txxx = f.m_txxx[idx] + bar_dsxx_dx;
     float tmp_txzz = f.m_txzz[idx] + bar_dsxz_dz;

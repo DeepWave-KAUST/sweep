@@ -409,6 +409,10 @@ __global__ void elastic_stress_adjoint_prepare(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -420,15 +424,6 @@ __global__ void elastic_stress_adjoint_prepare(
     float* qzz_b = qzz + b * spatial_size;
     float* qxz_b = qxz + b * spatial_size;
     float* qzx_b = qzx + b * spatial_size;
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -447,6 +442,31 @@ __global__ void elastic_stress_adjoint_prepare(
     float bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * bar_szz + lam * bar_sxx);
     float bar_dvx_dz = solver.dt * mu_ * bar_sxz;
     float bar_dvz_dx = solver.dt * mu_ * bar_sxz;
+
+    // Position-based PML / interior split. Outside the PML band all
+    // ax/az/bx/bz coefficients vanish, m_v* aux fields stay 0, so the four
+    // q* outputs collapse to bar_dv*_d* and the four m_v* writes become
+    // 0 -> 0. Skip them — saves 4 reads + 4 writes per interior cell.
+    // Matches the forward elastic_stress_kernel fast-path (line 230).
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
+        qxx_b[idx] = bar_dvx_dx;
+        qzz_b[idx] = bar_dvz_dz;
+        qxz_b[idx] = bar_dvx_dz;
+        qzx_b[idx] = bar_dvz_dx;
+        return;
+    }
+
+    float az = cpml.az[iz];
+    float bz = cpml.bz[iz];
+    float azh = cpml.azh[iz];
+    float bzh = cpml.bzh[iz];
+    float ax = cpml.ax[ix];
+    float bx = cpml.bx[ix];
+    float axh = cpml.axh[ix];
+    float bxh = cpml.bxh[ix];
 
     float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
@@ -525,6 +545,10 @@ __global__ void elastic_velocity_adjoint_prepare(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -536,6 +560,27 @@ __global__ void elastic_velocity_adjoint_prepare(
     float* pxz_b = pxz + b * spatial_size;
     float* pzx_b = pzx + b * spatial_size;
 
+    float inv_rho = 1.f / rho_b[idx];
+    float bar_dsxx_dx = solver.dt * inv_rho * f.vx[idx];
+    float bar_dsxz_dz = solver.dt * inv_rho * f.vx[idx];
+    float bar_dsxz_dx = solver.dt * inv_rho * f.vz[idx];
+    float bar_dszz_dz = solver.dt * inv_rho * f.vz[idx];
+
+    // Position-based PML / interior split — same logic as
+    // elastic_stress_adjoint_prepare above: ax/az/bx/bz vanish outside the
+    // PML band, m_s* aux fields stay 0, so the four p* outputs collapse to
+    // the bar_ds*_d* values and the four m_s* writes become 0 -> 0.
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+    if (!in_pml) {
+        pxx_b[idx] = bar_dsxx_dx;
+        pxz_b[idx] = bar_dsxz_dz;
+        pzx_b[idx] = bar_dsxz_dx;
+        pzz_b[idx] = bar_dszz_dz;
+        return;
+    }
+
     float az = cpml.az[iz];
     float bz = cpml.bz[iz];
     float azh = cpml.azh[iz];
@@ -544,12 +589,6 @@ __global__ void elastic_velocity_adjoint_prepare(
     float bx = cpml.bx[ix];
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
-
-    float inv_rho = 1.f / rho_b[idx];
-    float bar_dsxx_dx = solver.dt * inv_rho * f.vx[idx];
-    float bar_dsxz_dz = solver.dt * inv_rho * f.vx[idx];
-    float bar_dsxz_dx = solver.dt * inv_rho * f.vz[idx];
-    float bar_dszz_dz = solver.dt * inv_rho * f.vz[idx];
 
     float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
     float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;

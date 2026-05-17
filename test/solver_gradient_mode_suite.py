@@ -47,10 +47,13 @@ from sweep.equations import (  # noqa: E402
     AcousticLSRTM3D,
     AcousticVRZ,
     AcousticVRZ3D,
+    DASMu,
+    DASMu3D,
     DASZhao,
     DASZhao3D,
     Elastic,
     Elastic3D,
+    ElasticTTISG,
 )
 from sweep.propagator.options import (  # noqa: E402
     BoundaryOptions,
@@ -139,6 +142,49 @@ SOLVERS = {
     ),
     "elastic2d": SolverSpec("elastic2d", Elastic, 2, ("vp", "vs", "rho"), ("sxx", "szz"), ("vx", "vz"), "cpmls", False, True),
     "elastic3d": SolverSpec("elastic3d", Elastic3D, 3, ("vp", "vs", "rho"), ("sxx", "syy", "szz"), ("vx", "vy", "vz"), "cpmls", False, True),
+    # DAS-Mu (velocity-stress-strain DAS, isotropic vp/vs/rho)
+    "das_mu2d": SolverSpec(
+        "das_mu2d",
+        DASMu, 2,
+        ("vp", "vs", "rho"),
+        ("sxx", "szz"),
+        ("vx", "vz"),
+        "cpmls",
+        elastic=True,
+    ),
+    "das_mu3d": SolverSpec(
+        "das_mu3d",
+        DASMu3D, 3,
+        ("vp", "vs", "rho"),
+        ("sxx", "syy", "szz"),
+        ("vx", "vy", "vz"),
+        "cpmls",
+        elastic=True,
+    ),
+    # Elastic TTI (tilted transverse isotropy) — staggered-grid 2-D.
+    # 8 model parameters: ``vp0, vs0, rho, epsilon, delta, gamma, theta, phi``.
+    # ``make_models`` below recognises this tuple shape.
+    "elastic_tti_sg2d": SolverSpec(
+        "elastic_tti_sg2d",
+        ElasticTTISG, 2,
+        ("vp0", "vs0", "rho", "epsilon", "delta", "gamma", "theta", "phi"),
+        ("sxx", "szz"),
+        ("vx", "vz"),
+        "cpmls",
+        elastic=True,
+        # No ``ckpt_recursive`` binding for TTISG — drop the recursive
+        # checkpointing modes from the test matrix.
+        supported_modes=(
+            "full",
+            "bs_gpu",
+            "bs_cpu",
+            "bs_cpu_pinned",
+            "bs_disk",
+            "bs_disk_async",
+            "ckpt_chunk",
+            "ckpt_chunk_cpu",
+        ),
+    ),
 }
 
 SCENARIOS = {
@@ -227,20 +273,33 @@ def require_cuda_bindings(solver_keys: list[str]):
         "lsrtm3d": "acoustic_lsrtm3d",
         "das2d": "das2d",
         "das3d": "das3d",
+        "das_mu2d": "das_mu2d",
+        "das_mu3d": "das_mu3d",
         "elastic2d": "elastic2d",
         "elastic3d": "elastic3d",
+        "elastic_tti_sg2d": "elastic_tti_sg2d",
     }
     for key in solver_keys:
         prefix = prefixes[key]
-        required.extend(
-            [
-                f"{prefix}_forward",
-                f"{prefix}_backward",
-                f"{prefix}_backward_bs",
-                f"{prefix}_backward_ckpt",
-                f"{prefix}_backward_recursive_ckpt",
-            ]
+        spec = SOLVERS[key]
+        # Always need the basic forward + backward + ckpt set; the
+        # ``recursive_ckpt`` binding is optional and skipped for solvers
+        # whose ``supported_modes`` doesn't include it (currently
+        # elastic_tti_sg2d).
+        names = [
+            f"{prefix}_forward",
+            f"{prefix}_backward",
+            f"{prefix}_backward_bs",
+            f"{prefix}_backward_ckpt",
+        ]
+        modes_set = set(spec.supported_modes) if spec.supported_modes else None
+        wants_recursive = (
+            modes_set is None
+            or any(m in modes_set for m in ("ckpt_recursive", "ckpt_recursive_cpu"))
         )
+        if wants_recursive:
+            names.append(f"{prefix}_backward_recursive_ckpt")
+        required.extend(names)
     missing = sorted({name for name in required if not hasattr(sweep_c, name)})
     if missing:
         raise RuntimeError(f"The loaded sweep._C is missing CUDA bindings: {missing}")
@@ -296,6 +355,28 @@ def make_models(spec: SolverSpec, shape: tuple[int, ...]):
         mp_init = np.zeros(shape, dtype=np.float32)
         mp_true = add_box(mp_init, 0.08)
         return [vp_init, mp_true], [vp_init, mp_init], [False, True]
+
+    # ElasticTTISG: 8 anisotropic parameters. We perturb only vp0 to keep the
+    # adjoint gradient comparison focused on a single elastic-like contrast;
+    # epsilon/delta/gamma stay small (~0.05) and theta/phi stay 0 so the medium
+    # is close to isotropic. requires_grad mirrors that — only vp0/vs0/rho are
+    # toggled on in the inversion-side branch.
+    if spec.model_names == ("vp0", "vs0", "rho", "epsilon", "delta", "gamma", "theta", "phi"):
+        vs_init = (vp_init / 1.73).astype(np.float32)
+        vs_true = (vp_true / 1.73).astype(np.float32)
+        rho_init = depth_ramp(shape, 1000.0, 1200.0)
+        rho_true = add_box(rho_init, 60.0)
+        eps_init = np.full(shape, 0.05, dtype=np.float32)
+        del_init = np.full(shape, 0.03, dtype=np.float32)
+        gam_init = np.full(shape, 0.02, dtype=np.float32)
+        the_init = np.zeros(shape, dtype=np.float32)
+        phi_init = np.zeros(shape, dtype=np.float32)
+        true_list = [vp_true, vs_true, rho_true, eps_init, del_init, gam_init, the_init, phi_init]
+        init_list = [vp_init, vs_init, rho_init, eps_init, del_init, gam_init, the_init, phi_init]
+        # Compare gradients only on the three iso-like parameters (vp0, vs0,
+        # rho); anisotropic ones stay constant.
+        grad_flags = [True, True, True, False, False, False, False, False]
+        return true_list, init_list, grad_flags
 
     if spec.elastic:
         vs_init = (vp_init / 1.73).astype(np.float32)
