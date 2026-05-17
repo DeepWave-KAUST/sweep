@@ -1,10 +1,19 @@
 # SWEEP
 
+[![Docs](https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white)](https://deepwave-kaust.github.io/sweep/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
+[![JAX](https://img.shields.io/badge/JAX-supported-9cf)](https://github.com/google/jax)
+[![GitHub stars](https://img.shields.io/github/stars/DeepWave-KAUST/sweep?style=social)](https://github.com/DeepWave-KAUST/sweep/stargazers)
+
 English | [中文](README.zh-CN.md)
 
-Seismic Wave Equation Exploration Platform (SWEEP) is a Python package for seismic wave-equation modeling, migration, and inversion.
+**Seismic Wave Equation Exploration Platform (SWEEP)** is a Python framework for differentiable seismic wave-equation modeling, migration, and full-waveform inversion.
 
-Documentation: https://deepwave-kaust.github.io/sweep/
+> One API, many physics: switch between PyTorch / JAX backends, eager / compiled CUDA implementations, and 20+ wave equations including acoustic, elastic, anisotropic (TTI / VTI), and DAS.
+
+Documentation: <https://deepwave-kaust.github.io/sweep/>
 
 Recent interface updates:
 

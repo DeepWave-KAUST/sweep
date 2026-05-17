@@ -12,8 +12,9 @@ theme:
   name: material
   features:
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
-    - navigation.expand
+    - navigation.indexes
     - content.code.copy
   palette:
     - media: "(prefers-color-scheme: light)"
@@ -33,6 +34,11 @@ theme:
 
 markdown_extensions:
   - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
@@ -51,42 +57,49 @@ nav:
       - Propagators: user-guide/propagators.md
       - CLI: user-guide/cli.md
   - Examples:
-      - Overview: examples/index.md
-      - 2D Acoustic FWI on Marmousi with Torch: examples/acoustic_fwi_torch.md
-      - 2D Elastic FWI on Marmousi with Torch: examples/elastic_fwi_torch_marmousi.md
-      - 2D Elastic FWI on Overthrust with Torch: examples/elastic_fwi_torch_overthrust.md
-      - 2D Acoustic LSRTM on Marmousi with Torch: examples/acoustic_lsrtm_torch.md
-      - 2D Acoustic FWI on Marmousi with JAX: examples/acoustic_fwi_jax.md
-      - 3D Acoustic FWI on Overthrust with Torch: examples/acoustic_fwi_3d_torch.md
-      - 3D Acoustic LSRTM on Overthrust with Torch: examples/acoustic_lsrtm_3d_torch.md
+      - examples/index.md
+      - 2D Acoustic FWI · Torch: examples/acoustic_fwi_torch.md
+      - 2D Acoustic FWI · JAX: examples/acoustic_fwi_jax.md
+      - 2D Elastic FWI · Marmousi: examples/elastic_fwi_torch_marmousi.md
+      - 2D Elastic FWI · Overthrust: examples/elastic_fwi_torch_overthrust.md
+      - 2D Acoustic LSRTM: examples/acoustic_lsrtm_torch.md
+      - 3D Acoustic FWI · Torch: examples/acoustic_fwi_3d_torch.md
+      - 3D Acoustic FWI · JAX: examples/acoustic_fwi_3d_jax.md
+      - 3D Acoustic LSRTM: examples/acoustic_lsrtm_3d_torch.md
       - Reducing Memory:
-          - Overview: examples/reducing_memory.md
-          - 2D Acoustic FWI with Source Encoding on Marmousi with Torch: examples/acoustic_fwi_encoding_torch.md
-          - Memory Method Compare: examples/memory_method_compare.md
-      - Wavefield Examples:
-          - Overview: examples/wavefields.md
+          - examples/reducing_memory.md
+          - Source-encoded FWI: examples/acoustic_fwi_encoding_torch.md
+          - Source Encoding Overview: examples/source_encoding_overview.md
+          - Method Compare: examples/memory_method_compare.md
+      - Modeling:
+          - examples/wavefields.md
           - CUDA FD Orders: examples/wavefields_cuda_fd_orders.md
-          - Free Surface Forward: examples/wavefields_free_surface.md
-          - Anisotropic Wavefields: examples/wavefields_anisotropic.md
-          - Elastic TTI Wavefields: examples/elastic_tti_wavefields.md
-          - DAS Figure 4: examples/wavefields_das.md
-      - Multi-GPU: examples/multi_gpu.md
-      - Joint Migration Inversion: examples/joint_migration_inversion.md
+          - Free Surface: examples/wavefields_free_surface.md
+          - qP: examples/wavefields_anisotropic.md
+          - Elastic TTI: examples/elastic_tti_wavefields.md
+          - DAS: examples/wavefields_das.md
+      - Multi-GPU:
+          - examples/multi_gpu.md
+          - Torch Distributed: examples/multi_gpu_torch.md
+          - JAX pmap: examples/multi_gpu_jax.md
       - Model Assets: examples/model_assets.md
   - API Reference:
-      - Overview: api/index.md
+      - api/index.md
       - Equations:
-          - Overview: api/equations/index.md
+          - api/equations/index.md
           - Acoustic: api/equations/acoustic.md
           - Acoustic3D: api/equations/acoustic3d.md
+          - Acoustic1st: api/equations/acoustic1st.md
           - AcousticVRZ: api/equations/acoustic_vrz.md
           - AcousticLSRTM: api/equations/acoustic_lsrtm.md
           - AcousticLSRTM3D: api/equations/acoustic_lsrtm3d.md
-          - Acoustic1st: api/equations/acoustic1st.md
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md
+          - ElasticTTI: api/equations/elastic_tti.md
+          - ElasticTTISG: api/equations/elastic_tti_sg.md
+          - DAS family: api/equations/das.md
       - Propagators:
-          - Overview: api/propagators/index.md
+          - api/propagators/index.md
           - Propagator Options: api/propagators/options.md
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md

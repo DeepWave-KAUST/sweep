@@ -83,7 +83,7 @@ cd sweep
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - A working [PyTorch](https://pytorch.org/get-started/locally/) or
   [JAX](https://docs.jax.dev/en/latest/installation.html) environment depending
   on your backend
@@ -95,25 +95,28 @@ From the shell:
 
 ```bash
 sweep list equations
+sweep show Acoustic
 ```
 
-From Python:
+From Python, the simplest one-liner is:
 
 ```python
 import sweep
 
-print(sweep.backend.torch.is_available())
-print(sweep.backend.jax.is_available())
-print(sweep.backend.torch.cuda.is_available())
+# True when PyTorch + CUDA + the compiled sweep._C binding are all importable.
+print(sweep.is_torch_binding_available())
 ```
 
-If you built the extension binding, you can also verify that the extension is
-importable:
+For finer-grained diagnostics:
 
 ```python
-import importlib.util
+import sweep
 
-print(importlib.util.find_spec("sweep._C") is not None)
+print(sweep.backend.torch.is_available())          # PyTorch importable
+print(sweep.backend.torch.cuda.is_available())     # PyTorch sees a CUDA device
+print(sweep.backend.torch.binding.is_available())  # sweep._C extension importable
+print(sweep.backend.torch.binding.diagnostics())   # dict with the same details
+print(sweep.backend.jax.is_available())            # JAX importable
 ```
 
 ## Notes

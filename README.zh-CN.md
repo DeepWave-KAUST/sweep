@@ -1,10 +1,19 @@
 # SWEEP
 
+[![Docs](https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white)](https://deepwave-kaust.github.io/sweep/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
+[![JAX](https://img.shields.io/badge/JAX-supported-9cf)](https://github.com/google/jax)
+[![GitHub stars](https://img.shields.io/github/stars/DeepWave-KAUST/sweep?style=social)](https://github.com/DeepWave-KAUST/sweep/stargazers)
+
 [English](README.md) | 中文
 
-Seismic Wave Equation Exploration Platform (SWEEP) 是一个用于地震波方程正演、偏移和反演的 Python 软件包。
+**Seismic Wave Equation Exploration Platform (SWEEP)** 是一个可微分地震波方程正演、偏移与反演的 Python 框架。
 
-文档：https://deepwave-kaust.github.io/sweep/
+> 一套 API 覆盖多种物理：在 PyTorch / JAX 后端之间切换、在 eager / 编译 CUDA 实现之间切换，支持 20+ 种波动方程，包括声波、弹性、各向异性（TTI / VTI）和 DAS。
+
+文档：<https://deepwave-kaust.github.io/sweep/>
 
 近期接口更新：
 

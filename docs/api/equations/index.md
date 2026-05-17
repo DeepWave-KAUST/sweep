@@ -140,16 +140,80 @@ through the equation class.
 
     See [Elastic3D](elastic3d.md) for parameter meanings.
 
+=== "ElasticTTI"
+
+    ```python
+    class ElasticTTI(
+        spatial_order=4,
+        device="cpu",
+        backend="torch",
+    )
+    ```
+
+    First-order TTI elastic equation (non-staggered grid, eager-only).
+
+    See [ElasticTTI](elastic_tti.md) for parameter meanings.
+
+=== "ElasticTTISG"
+
+    ```python
+    class ElasticTTISG(
+        spatial_order=4,
+        device="cpu",
+        backend="torch",
+    )
+    ```
+
+    First-order TTI elastic equation on a rotated staggered grid; supports the
+    compiled C++ / CUDA binding.
+
+    See [ElasticTTISG](elastic_tti_sg.md) for parameter meanings.
+
+=== "DAS family"
+
+    ```python
+    from sweep.equations import (
+        DAS, DAS3D,
+        DASElastic, DASElastic3D,
+        DASMu, DASMu3D,
+        DASZhao, DASZhao3D,
+    )
+    ```
+
+    Strain-rate / helical-fiber receiver equations for DAS modelling. All eight
+    variants share `['vp', 'vs', 'rho']` and ship the compiled binding.
+
+    See [DAS family](das.md) for the comparison table.
+
 ## Equation Pages
 
-The following pages focus on constructor parameters, required models,
-wavefields, and backend or binding behavior for each equation:
+The following pages document constructor parameters, required models,
+wavefields, and backend / binding behavior:
+
+**Acoustic family**
 
 - [Acoustic](acoustic.md)
 - [Acoustic3D](acoustic3d.md)
+- [Acoustic1st](acoustic1st.md)
 - [AcousticVRZ](acoustic_vrz.md)
 - [AcousticLSRTM](acoustic_lsrtm.md)
 - [AcousticLSRTM3D](acoustic_lsrtm3d.md)
-- [Acoustic1st](acoustic1st.md)
+
+**Elastic family**
+
 - [Elastic](elastic.md)
 - [Elastic3D](elastic3d.md)
+- [ElasticTTI](elastic_tti.md)
+- [ElasticTTISG](elastic_tti_sg.md)
+
+**DAS family**
+
+- [DAS family overview](das.md) — covers `DAS`, `DAS3D`, `DASElastic`,
+  `DASElastic3D`, `DASMu`, `DASMu3D`, `DASZhao`, `DASZhao3D`.
+
+**Other anisotropic acoustic variants**
+
+`AcousticTTI`, `AcousticVTI`, and `AcousticTariq` are exported from
+`sweep.equations` but ship without the compiled binding. Use
+`sweep show <ClassName>` from the CLI to inspect their wavefields and required
+models; the [CLI page](../../user-guide/cli.md) has a full output example.

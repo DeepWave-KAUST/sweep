@@ -1,26 +1,49 @@
 # Propagator Options
 
-This page documents the dataclass-based options used by the Torch-family
-propagator interface.
+This page documents the dataclass-based option blocks that configure
+`PropTorch`. They live under `sweep.propagator.options` and are passed through
+the propagator constructor:
 
-Implementation:
+```python
+from sweep.propagator.torch import PropTorch
+from sweep.propagator.options import (
+    EagerOptions,
+    CUDAOptions,
+    MemoryOptions,
+    BoundaryOptions,
+    CkptOptions,
+)
+```
 
-- `src/sweep/propagator/options.py`
+Implementation: `src/sweep/propagator/options.py`.
 
-These option blocks are primarily used through:
+## Quick map
 
-- `PropTorch(..., eager_options=...)`
-- `PropTorch(..., cuda_options=...)`
-- `PropTorch(..., backend_options=...)`
+| Block | Used with | Configures |
+| --- | --- | --- |
+| `EagerOptions` | `impl="eager"` | `torch.compile` flags, debug knobs |
+| `CUDAOptions` | `impl="c"` | Compiled C++ / CUDA runtime configuration |
+| `MemoryOptions` | inside `CUDAOptions.memory` | Chooses one C-memory-saving strategy |
+| `BoundaryOptions` | inside `MemoryOptions.boundary` | Boundary-saving GPU / CPU / disk storage |
+| `CkptOptions` | inside `MemoryOptions.ckpt` | Chunk / recursive checkpointing in the C path |
 
-Checkpoint note:
+Pass an option block via the matching named kwarg:
 
-- eager checkpointing still uses the top-level `use_ckpt` and `ckpt_chunks`
-  arguments on `PropTorch`
-- c checkpointing should be configured through
-  `CUDAOptions(memory=MemoryOptions(strategy="ckpt", ckpt=CkptOptions(...)))`
+```python
+PropTorch(..., eager_options=EagerOptions(...))   # impl="eager"
+PropTorch(..., cuda_options=CUDAOptions(...))     # impl="c"
+```
 
-## EagerOptions
+A generic `backend_options=` slot is also accepted; see the
+[backend_options](#backend_options) section at the bottom.
+
+### Eager checkpointing today
+
+Eager-side activation checkpointing is still controlled by the top-level
+`use_ckpt` / `ckpt_chunks` arguments on `PropTorch` — *not* by
+`MemoryOptions`. Only the C path (`impl="c"`) reads `MemoryOptions`.
+
+## `EagerOptions`
 
 ```python
 @dataclass
@@ -33,25 +56,25 @@ class EagerOptions:
     store_last_wavefield: bool = False
 ```
 
-Use this block with:
+Use with `impl="eager"`:
 
 ```python
-PropTorch(..., backend="torch", impl="eager", eager_options=EagerOptions(...))
+PropTorch(..., backend="torch", impl="eager",
+          eager_options=EagerOptions(use_compile=True))
 ```
-
-This block controls eager compile/runtime behavior. It does not currently
-replace the top-level eager checkpoint arguments `use_ckpt` and `ckpt_chunks`.
 
 Fields:
 
-- `use_compile`: enables `torch.compile` on the eager implementation
-- `compile_mode`: compile mode passed into `torch.compile`
-- `compile_dynamic`: whether dynamic-shape behavior is allowed in the compiled graph
-- `compile_backend`: optional backend argument passed into `torch.compile`
-- `compile_fullgraph`: whether to request full-graph compilation
-- `store_last_wavefield`: whether to keep the last wavefield state for inspection/debugging
+| Field | Meaning |
+| --- | --- |
+| `use_compile` | Enables `torch.compile` on the eager step function. See the [`torch.compile` notes on operators](../../user-guide/backends.md) for caveats. |
+| `compile_mode` | `mode` argument passed to `torch.compile`. Common values: `"default"`, `"reduce-overhead"`, `"max-autotune"`. |
+| `compile_dynamic` | Allow dynamic shapes in the compiled graph. |
+| `compile_backend` | Optional `backend` argument forwarded to `torch.compile`. |
+| `compile_fullgraph` | Request full-graph compilation (errors on fallbacks instead of silently re-compiling). |
+| `store_last_wavefield` | Keep the final wavefield tensors on the solver for inspection / debugging. |
 
-## CUDAOptions
+## `CUDAOptions`
 
 ```python
 @dataclass
@@ -59,81 +82,111 @@ class CUDAOptions:
     memory: MemoryOptions | None = None
 ```
 
-Use this block with:
+Use with `impl="c"`:
 
 ```python
-PropTorch(..., backend="torch", impl="c", cuda_options=CUDAOptions(...))
+PropTorch(..., backend="torch", impl="c",
+          cuda_options=CUDAOptions(memory=MemoryOptions(...)))
 ```
 
 Fields:
 
-- `memory`:  memory-policy block, described in [MemoryOptions](#memoryoptions)
+- `memory`: a `MemoryOptions` block, described below.
 
-## MemoryOptions
+## `MemoryOptions`
 
 ```python
 @dataclass
 class MemoryOptions:
     strategy: Literal["boundary", "ckpt"] | None = None
-  boundary: BoundaryOptions | None = None
+    boundary: BoundaryOptions | None = None
     ckpt: CkptOptions | None = None
 ```
 
-This block chooses one  memory-saving strategy.
+Pick at most one C-side memory-saving strategy.
 
-Rules:
+Validation rules (enforced in `__post_init__`):
 
-- if `strategy="boundary"`, you must provide `boundary=BoundaryOptions(...)`
-- if `strategy="ckpt"`, you must provide `ckpt=CkptOptions(...)`
-- `boundary` and `ckpt` cannot be used at the same time
-- if `strategy=None`, neither `boundary` nor `ckpt` may be provided
+- `strategy="boundary"` ⇒ `boundary=BoundaryOptions(...)` must be provided;
+  `ckpt` must stay `None`.
+- `strategy="ckpt"` ⇒ `ckpt=CkptOptions(...)` must be provided;
+  `boundary` must stay `None`.
+- `strategy=None` ⇒ both `boundary` and `ckpt` must stay `None`.
 
-Typical usage:
-
-```python
-CUDAOptions(
-    memory=MemoryOptions(
-        strategy="boundary",
-        boundary=BoundaryOptions(storage="gpu"),
-    )
-)
-```
-
-or:
+Common patterns:
 
 ```python
-CUDAOptions(
-    memory=MemoryOptions(
-        strategy="ckpt",
-        ckpt=CkptOptions(mode="chunk", chunks=100),
-    )
-)
+# Boundary saving on GPU (no host transfer)
+CUDAOptions(memory=MemoryOptions(
+    strategy="boundary",
+    boundary=BoundaryOptions(storage="gpu"),
+))
+
+# Boundary saving staged on pinned host memory
+CUDAOptions(memory=MemoryOptions(
+    strategy="boundary",
+    boundary=BoundaryOptions(storage="cpu", pinned_memory=True),
+))
+
+# Boundary saving backed by disk, with asynchronous prefetch
+CUDAOptions(memory=MemoryOptions(
+    strategy="boundary",
+    boundary=BoundaryOptions(
+        storage="disk",
+        disk_dir="/scratch/sweep-boundary",
+        disk_async_read=True,
+    ),
+))
+
+# Chunk-mode checkpointing
+CUDAOptions(memory=MemoryOptions(
+    strategy="ckpt",
+    ckpt=CkptOptions(mode="chunk", chunks=100),
+))
+
+# Recursive-mode checkpointing with CPU offload
+CUDAOptions(memory=MemoryOptions(
+    strategy="ckpt",
+    ckpt=CkptOptions(mode="recursive", count=8, storage="cpu"),
+))
 ```
 
-## BoundaryOptions
+## `BoundaryOptions`
 
 ```python
 @dataclass
 class BoundaryOptions:
-    storage: Literal["gpu", "cpu"] = "gpu"
-    transfer_interval: int = 1
-    pinned_memory: bool = False
+    storage: Literal["gpu", "cpu", "disk"] = "gpu"
+    transfer_interval: int | None = None
+    pinned_memory: bool | None = None
+    disk_dir: str | None = None
+    ring_buffers: int | None = None
+    disk_async_read: bool = False
 ```
 
-This block controls c boundary saving.
+Controls boundary saving in the C path. Fields:
 
-Fields:
+| Field | Applies when | Meaning |
+| --- | --- | --- |
+| `storage` | always | `"gpu"` keeps boundary buffers on device; `"cpu"` stages them in host memory; `"disk"` writes them to local storage. |
+| `transfer_interval` | `cpu` / `disk` | How many time steps between host (or disk) transfers. `None` falls back to the default per storage tier. |
+| `pinned_memory` | `cpu` | Use pinned host pages for faster H2D / D2H. |
+| `disk_dir` | `disk` | Directory used as a staging area. `None` uses the runtime default. |
+| `ring_buffers` | `cpu` / `disk` | Number of staging buffers in the boundary ring. |
+| `disk_async_read` | `disk` | Enable asynchronous disk readback during backward. |
 
-- `storage`: `"gpu"` keeps saved boundaries on device, and `"cpu"` stages saved boundaries on host memory
-- `transfer_interval`: only meaningful when `storage="cpu"`; controls how often boundary values are transferred or staged
-- `pinned_memory`: only meaningful when `storage="cpu"`; enables pinned host memory for transfers
+Validation rules (enforced in `__post_init__`):
 
-Validation rules:
+- `storage` must be `"gpu"`, `"cpu"`, or `"disk"`.
+- `transfer_interval ≥ 1` when set.
+- `ring_buffers ≥ 1` when set.
+- When `storage="gpu"`: `transfer_interval` must stay `None`/`1`,
+  `ring_buffers` must stay `None`/`1`, `pinned_memory` must be falsy, and
+  `disk_async_read` must be `False`.
+- `pinned_memory` is only valid with `storage="cpu"`.
+- `disk_async_read` is only valid with `storage="disk"`.
 
-- `transfer_interval >= 1`
-- if `storage="gpu"`, then `transfer_interval` must stay at `1` and `pinned_memory` must stay `False`
-
-## CkptOptions
+## `CkptOptions`
 
 ```python
 @dataclass
@@ -141,29 +194,32 @@ class CkptOptions:
     mode: Literal["chunk", "recursive"] = "chunk"
     chunks: int = 100
     count: int = 0
+    storage: Literal["gpu", "cpu"] = "gpu"
+    pinned_memory: bool | None = None
 ```
 
-This block controls c checkpointing.
+Controls activation checkpointing in the C path. Fields:
 
-Fields:
-
-- `mode`: `"chunk"` means periodic chunk-based replay, and `"recursive"` means fixed checkpoint-budget replay
-- `chunks`: used only when `mode="chunk"`
-- `count`: used only when `mode="recursive"`
+| Field | Applies when | Meaning |
+| --- | --- | --- |
+| `mode` | always | `"chunk"` runs a periodic chunked replay; `"recursive"` runs a fixed-budget recursive replay. |
+| `chunks` | `mode="chunk"` | Number of chunks per replay. Must be `≥ 1`. |
+| `count` | `mode="recursive"` | Checkpoint budget. Must be `≥ 1`. |
+| `storage` | always | Where saved checkpoints live: `"gpu"` keeps them on device; `"cpu"` offloads to host memory. |
+| `pinned_memory` | `storage="cpu"` | Use pinned host pages for the checkpoint pool. |
 
 Validation rules:
 
-- for `mode="chunk"`, `chunks >= 1` and `count` must remain `0`
-- for `mode="recursive"`, `count >= 1` and `chunks` must remain at its default chunk-mode value
+- `storage` must be `"gpu"` or `"cpu"`.
+- `pinned_memory` is only valid with `storage="cpu"`.
+- `mode="chunk"` ⇒ `chunks ≥ 1` and `count` must remain `0`.
+- `mode="recursive"` ⇒ `count ≥ 1` and `chunks` must stay at its default.
 
-## backend_options
+## `backend_options`
 
-`backend_options` is the generic merged options block accepted by `PropTorch`.
-
-It can be used when you want to pass backend-specific fields without choosing
-between `eager_options` and `cuda_options` in the call site.
-
-Example:
+`backend_options` is a generic catch-all slot. Either `EagerOptions` or
+`CUDAOptions` can be passed through it instead of through `eager_options` /
+`cuda_options`:
 
 ```python
 PropTorch(
@@ -172,11 +228,7 @@ PropTorch(
     impl="eager",
     backend_options=EagerOptions(use_compile=True),
 )
-```
 
-or:
-
-```python
 PropTorch(
     ...,
     backend="torch",
@@ -184,11 +236,11 @@ PropTorch(
     backend_options=CUDAOptions(
         memory=MemoryOptions(
             strategy="boundary",
-            boundary=BoundaryOptions(storage="gpu"),
+            boundary=BoundaryOptions(storage="cpu", pinned_memory=True),
         )
     ),
 )
 ```
 
-In most user-facing code, `eager_options` and `cuda_options` are clearer than
-`backend_options`, because they make the implementation split explicit.
+In application code, the explicit `eager_options=` / `cuda_options=` kwargs are
+usually clearer because they make the `impl` choice obvious at the call site.
