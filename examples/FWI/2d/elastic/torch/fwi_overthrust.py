@@ -140,14 +140,16 @@ def build_wavelet(cfg):
 
 
 def to_standard_layout(record, cfg):
-    if cfg["record_layout"] == "cuda":
-        return np.transpose(record, (1, 3, 2, 0))
+    # All sweep backends (eager + CUDA) now return records in the canonical
+    # (nshots, nt, nrec, nfield) layout, so no per-backend permutation is
+    # needed. Kept as a thin wrapper for symmetry with older config files
+    # that still set ``record_layout``.
     return np.asarray(record)
 
 
 def to_backend_layout(record, cfg):
-    if cfg["record_layout"] == "cuda":
-        return np.transpose(record, (3, 0, 2, 1))
+    # Inverse of :func:`to_standard_layout`. After backend alignment this is
+    # also a no-op — solvers consume the canonical layout directly.
     return np.asarray(record)
 
 
@@ -175,7 +177,9 @@ def timed_forward(solver, wave, sources, receivers, models, cfg):
 
 
 def observed_shot_axis(cfg):
-    return 1 if cfg["record_layout"] == "cuda" else 0
+    # All backends produce records in canonical (nshots, nt, nrec, nfield)
+    # layout with the shot index at axis 0.
+    return 0
 
 
 def mpi_forward_batchsize(cfg, local_count):
@@ -322,8 +326,7 @@ def build_encoded_batch(wave, obs, shot_idx, cfg):
 
 
 def select_observed_batch(obs_torch, shot_idx, cfg):
-    if cfg["record_layout"] == "cuda":
-        return obs_torch[:, shot_idx]
+    # Canonical layout puts shot index at axis 0 for every backend.
     return obs_torch[shot_idx]
 
 

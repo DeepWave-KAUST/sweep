@@ -51,6 +51,25 @@ When the inputs use the super-shot layout
 `(1, nsrc, nt) / (1, nsrc, dim) / (1, nrec, dim)`, supported implementations
 auto-detect this pattern and treat it as `source_encoding=True`.
 
+### Record output layout
+
+Every backend (`impl="eager"` and `impl="c"`) returns the receiver record in
+the **canonical** shape
+
+```
+(B, nt, nrec, nfield)
+```
+
+where `nfield` is the number of recorded components for the equation
+(e.g. `1` for acoustic pressure, `2` for elastic vx/vz, `5` for the Zhao
+DAS receivers). This matches the layout expected by `sweep_loss` so the
+output of a solver can be fed straight into a misfit:
+
+```python
+syn = solver(wavelet, sources, receivers, models=models)
+loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
+```
+
 ## API Tabs
 
 === "PropTorch"

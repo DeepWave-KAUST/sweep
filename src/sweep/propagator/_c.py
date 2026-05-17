@@ -20,6 +20,73 @@ def _get_C():
 
     return _C
 
+
+# ---------------------------------------------------------------------------
+# Record layout helpers
+# ---------------------------------------------------------------------------
+# The CUDA kernels write the receiver record with time innermost so each
+# timestep writes contiguous receiver values. This gives two raw layouts:
+#
+#   * single-channel solvers : ``syn.shape == (B, nrec, nt)``
+#   * multi-channel solvers  : ``syn.shape == (nfield, B, nrec, nt)``
+#
+# Both differ from the canonical layout shared with the eager backend and
+# with ``sweep_loss``:
+#
+#   * canonical             : ``(B, nt, nrec, nfield)``
+#
+# To keep the user-facing API consistent across backends we permute the
+# CUDA output to canonical inside the Warpper / RTM wrappers, and permute
+# the canonical-shaped autograd / RTM gradient back to the raw CUDA layout
+# before handing it to the C++ adjoint-source kernels.
+
+def _cuda_record_to_canonical(syn: torch.Tensor) -> torch.Tensor:
+    """Permute a CUDA record tensor to ``(B, nt, nrec, nfield)``.
+
+    Accepts ``(B, nrec, nt)`` (single-channel) or
+    ``(nfield, B, nrec, nt)`` (multi-channel).
+    """
+    if syn.ndim == 3:
+        return syn.permute(0, 2, 1).unsqueeze(-1).contiguous()
+    if syn.ndim == 4:
+        return syn.permute(1, 3, 2, 0).contiguous()
+    raise ValueError(
+        f"Unexpected CUDA record ndim={syn.ndim}, shape={tuple(syn.shape)}; "
+        "expected (B, nrec, nt) or (nfield, B, nrec, nt)."
+    )
+
+
+def _canonical_to_cuda_record(grad: torch.Tensor, cuda_ndim: int) -> torch.Tensor:
+    """Inverse of :func:`_cuda_record_to_canonical`.
+
+    Given canonical ``(B, nt, nrec, nfield)`` (or a 3-D fallback variant),
+    return the raw CUDA layout. ``cuda_ndim`` is the ndim of the original
+    CUDA output (3 = single-channel, 4 = multi-channel).
+    """
+    if cuda_ndim == 3:
+        if grad.ndim == 4:
+            if grad.shape[-1] != 1:
+                raise ValueError(
+                    "Single-channel CUDA backward expects canonical "
+                    f"grad with last dim = 1, got shape {tuple(grad.shape)}."
+                )
+            grad = grad.squeeze(-1)
+        if grad.ndim != 3:
+            raise ValueError(
+                f"Single-channel CUDA backward needs 3-D grad, got {tuple(grad.shape)}."
+            )
+        # (B, nt, nrec) -> (B, nrec, nt)
+        return grad.permute(0, 2, 1).contiguous()
+    if cuda_ndim == 4:
+        if grad.ndim != 4:
+            raise ValueError(
+                f"Multi-channel CUDA backward needs 4-D grad, got {tuple(grad.shape)}."
+            )
+        # (B, nt, nrec, nfield) -> (nfield, B, nrec, nt)
+        return grad.permute(3, 0, 2, 1).contiguous()
+    raise ValueError(f"Unexpected cuda_ndim={cuda_ndim}; expected 3 or 4.")
+
+
 class Warpper(torch.autograd.Function):
 
     @staticmethod
@@ -139,6 +206,11 @@ class Warpper(torch.autograd.Function):
 
         # -------- CUDA forward --------
         (u_allt, last, syn) = forward_func(params)
+        # Permute to canonical (B, nt, nrec, nfield) for the user-facing
+        # output; remember the raw CUDA ndim so backward can invert it.
+        cuda_record_ndim = int(syn.ndim)
+        ctx.cuda_record_ndim = cuda_record_ndim
+        syn = _cuda_record_to_canonical(syn)
         if any([save_all_wavefields, use_boundary_saving, use_checkpoint]):
             
             ctx.save_for_backward(
@@ -220,7 +292,16 @@ class Warpper(torch.autograd.Function):
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.adjoint_workspace = list(ctx.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
-        params.adjoint_source = adjoint_source.contiguous()
+        # ``adjoint_source`` arrives in the canonical (B, nt, nrec, nfield)
+        # layout that ``forward`` returned; permute it back to the raw CUDA
+        # layout the C++ adjoint-source kernels expect.
+        cuda_record_ndim = getattr(ctx, "cuda_record_ndim", None)
+        if cuda_record_ndim is None:
+            params.adjoint_source = adjoint_source.contiguous()
+        else:
+            params.adjoint_source = _canonical_to_cuda_record(
+                adjoint_source, cuda_record_ndim
+            )
         params.lap_coes = lap_coes.contiguous()
         params.grad_coes = grad_coes.contiguous()
         params.M = M
@@ -1170,6 +1251,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.checkpoint_count = int(checkpoint_steps.numel()) if use_recursive_checkpoint else self.ckpt_num
 
         u_forward, u_last_two, syn = self.forward_func(fwd)
+        # Permute to canonical (B, nt, nrec, nfield) for the user-facing
+        # output; RTM is currently single-channel acoustic-only so this
+        # always lands as (B, nt, nrec, 1).
+        syn = _cuda_record_to_canonical(syn)
 
         _C = _get_C()
         bwd = _C.BackwardInput()

@@ -150,5 +150,9 @@ In the shape descriptions above:
 
 ## Return Value
 
-- default: `record`
+- default: `record` — shape `(B, nt, nrec, nfield)` for every backend
+  (`impl="eager"` and `impl="c"`). `nfield` is the number of recorded
+  components of the equation (e.g. `1` for acoustic pressure, `2` for
+  elastic `vx/vz`, `5` for Zhao DAS). This matches the canonical layout
+  expected by `sweep_loss`.
 - if `return_wavefield=True`: `(record, snapshots)`

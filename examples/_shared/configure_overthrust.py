@@ -113,7 +113,7 @@ _CONFIGS = {
     },
     "fwi_2d_elastic_torch_cuda": {
         "output_dir": "elastic_fwi_overthrust_cuda",
-        "record_layout": "cuda",
+        "record_layout": "standard",
         "boundary_saving_config": {
             "enabled": True,
             "storage": "gpu",
@@ -123,7 +123,7 @@ _CONFIGS = {
     },
     "fwi_2d_elastic_torch_cpu": {
         "output_dir": "elastic_fwi_overthrust_cpu",
-        "record_layout": "cuda",
+        "record_layout": "standard",
         "boundary_saving_config": {
             "enabled": True,
             "storage": "cpu",

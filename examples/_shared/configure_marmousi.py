@@ -91,7 +91,7 @@ _CONFIGS = {
     },
     "fwi_2d_acoustic_torch_cuda": {
         "output_dir": "acoustic_fwi_cuda",
-        "transpose_shot": True,
+        "transpose_shot": False,
         "boundary_saving_config": {
             "enabled": True,
             "storage": "gpu",
@@ -101,7 +101,7 @@ _CONFIGS = {
     },
     "fwi_2d_acoustic_torch_cpu": {
         "output_dir": "acoustic_fwi_cpu",
-        "transpose_shot": True,
+        "transpose_shot": False,
         "boundary_saving_config": {
             "enabled": True,
             "storage": "cpu",
@@ -129,7 +129,7 @@ _CONFIGS = {
     "fwi_2d_acoustic_encoding_torch_cuda": {
         **_FWI_2D_ACOUSTIC_COMMON,
         "output_dir": "acoustic_fwi_encoding_cuda",
-        "transpose_shot": True,
+        "transpose_shot": False,
         "max_time_shift_ratio": 0.2,
         "boundary_saving_config": {
             "enabled": True,
@@ -157,7 +157,7 @@ _CONFIGS = {
     },
     "fwi_2d_elastic_torch_cuda": {
         "output_dir": "elastic_fwi_marmousi_cuda",
-        "record_layout": "cuda",
+        "record_layout": "standard",
         "boundary_saving_config": {
             "enabled": True,
             "storage": "gpu",
@@ -167,7 +167,7 @@ _CONFIGS = {
     },
     "fwi_2d_elastic_torch_cpu": {
         "output_dir": "elastic_fwi_marmousi_cpu",
-        "record_layout": "cuda",
+        "record_layout": "standard",
         "boundary_saving_config": {
             "enabled": True,
             "storage": "cpu",

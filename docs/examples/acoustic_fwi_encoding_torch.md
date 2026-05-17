@@ -217,7 +217,7 @@ Backend-specific settings are defined in
     ```python
     {
         "output_dir": "acoustic_fwi_encoding_cuda",
-        "transpose_shot": True,
+        "transpose_shot": False,
         "boundary_saving_config": {
             "enabled": True,
             "storage": "gpu",
