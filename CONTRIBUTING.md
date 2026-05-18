@@ -9,7 +9,9 @@ Clone the repository and install in editable mode. The compiled CUDA
 extension is optional for most documentation and Python-level changes:
 
 ```bash
-git clone git@github.com:DeepWave-KAUST/sweep.git
+git clone https://github.com/DeepWave-KAUST/sweep.git
+# or, if you have an SSH key registered with GitHub:
+# git clone git@github.com:DeepWave-KAUST/sweep.git
 cd sweep
 pip install -e .
 ```

@@ -27,8 +27,14 @@
 请在 SWEEP 仓库根目录安装。如果还没有下载源码，先克隆仓库并进入项目目录：
 
 ```bash
-git clone git@github.com:DeepWave-KAUST/sweep.git
+git clone https://github.com/DeepWave-KAUST/sweep.git
 cd sweep
+```
+
+如果你的 GitHub 账号已经配好 SSH key，也可以用 SSH：
+
+```bash
+git clone git@github.com:DeepWave-KAUST/sweep.git
 ```
 
 ### 仅使用 PyTorch/JAX
