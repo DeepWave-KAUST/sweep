@@ -25,3 +25,4 @@ test/test_outputs/
 test/outputs/
 slurm_logs/
 dcgm/
+scripts/
