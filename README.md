@@ -27,8 +27,14 @@ Recent interface updates:
 Install SWEEP from the repository root. If you have not downloaded the source code yet, clone the repository first and change into the project directory:
 
 ```bash
-git clone git@github.com:DeepWave-KAUST/sweep.git
+git clone https://github.com/DeepWave-KAUST/sweep.git
 cd sweep
+```
+
+If you have an SSH key registered with GitHub you can use SSH instead:
+
+```bash
+git clone git@github.com:DeepWave-KAUST/sweep.git
 ```
 
 ### PyTorch/JAX only
