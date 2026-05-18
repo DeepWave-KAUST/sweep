@@ -3,4 +3,4 @@ class ReceiverBase:
         pass
 
     def forward(self, wavefield):
-        return wavefield[self.bidx, :, *self.coords_r]
+        return wavefield[(self.bidx, slice(None), *self.coords_r)]

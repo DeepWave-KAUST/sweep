@@ -23,7 +23,7 @@ class SourceJax(SourceBase):
         #     self.mask = self.mask.at[index, 0,  *jax.numpy.flip(coords, [-1])[i]].set(1.)
     
     def forward_source_encoding(self, wavefield, wavelet):
-        wavefield = wavefield.at[..., *self.coords_r].add(wavelet)
+        wavefield = wavefield.at[(..., *self.coords_r)].add(wavelet)
         return wavefield
     
     def forward_adjoint_modeling(self, wavefield, wavelet):
@@ -39,7 +39,7 @@ class SourceJax(SourceBase):
         if self.adj:
             shots = jnp.repeat(shots, self.coords.shape[1])
             wavelet = wavelet.reshape(-1)
-        wavefield = wavefield.at[shots, 0, *self.coords_r].add(wavelet)
+        wavefield = wavefield.at[(shots, 0, *self.coords_r)].add(wavelet)
         return wavefield
 
     def __call__(self, *args):
