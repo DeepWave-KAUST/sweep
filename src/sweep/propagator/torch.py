@@ -157,7 +157,7 @@ class PropTorch(torch.nn.Module):
     def __init__(
         self,
         *args,
-        backend="torch",
+        backend=None,
         impl=None,
         backend_options=None,
         eager_options=None,
@@ -165,6 +165,11 @@ class PropTorch(torch.nn.Module):
         **kwargs,
     ):
         torch.nn.Module.__init__(self)
+        if backend is None:
+            # Inherit from the equation (positional arg 0); equation owns backend
+            # because its operators were already built against it.
+            equation = args[0] if args else kwargs.get('equation')
+            backend = getattr(equation, 'backend', 'torch')
         backend, impl = _normalize_backend_impl(backend, impl)
 
         self.backend = backend

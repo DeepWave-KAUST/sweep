@@ -17,13 +17,14 @@ class PropBase:
                  dh=PROP_DEFAULTS.dh,
                  dt=PROP_DEFAULTS.dt,
                  dev=PROP_DEFAULTS.dev,
+                 device=None,
                  use_ckpt=PROP_DEFAULTS.use_ckpt,
                  ckpt_chunks=CKPT_DEFAULTS.chunks,
                  ckpt_mode=CKPT_DEFAULTS.mode,
                  ckpt_num=CKPT_DEFAULTS.count,
                  ckpt_storage=CKPT_DEFAULTS.storage,
                  ckpt_pinned_memory=CKPT_DEFAULTS.pinned_memory,
-                 pml_type=PROP_DEFAULTS.pml_type,
+                 pml_type=None,
                  nt=PROP_DEFAULTS.nt,
                  B=PROP_DEFAULTS.batch_size,
                  allow_growth=PROP_DEFAULTS.allow_growth,
@@ -43,7 +44,9 @@ class PropBase:
                 For 2D use ``(dz, dx)`` and for 3D use ``(dz, dy, dx)``.
                 Defaults to 10..
             dt (float, optional): Time step (seconds). Defaults to 0.002.
-            dev (str, optional): The device to run the simulation on. Defaults to None.
+            dev (str, optional): Deprecated alias for ``device``. Defaults to None.
+            device (str | torch.device, optional): The device to run the simulation on.
+                When None, the equation's device is used. Preferred over ``dev``.
             use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 100.
             ckpt_mode (str, optional): Checkpointing mode. "chunk" stores periodic checkpoints and
@@ -55,7 +58,9 @@ class PropBase:
                 CPU storage uses host memory to reduce device-memory pressure.
             ckpt_pinned_memory (bool, optional): Use pinned host memory when
                 ckpt_storage="cpu". Defaults to True for CPU checkpoint storage.
-            pml_type (str, optional): The type of PML to use. Defaults to 'spml'. Options include 'spml', 'cpml', 'cpmlr', etc.
+            pml_type (str, optional): The type of PML to use. When None (default), falls back to
+                ``equation.default_pml_type`` (most equations: 'cpmlr'; some stricter ones like
+                ElasticTTISG and Acoustic1st use 'cpmls'). Options include 'spml', 'cpmls', 'cpmlr'.
             nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
             B (int, optional): The batch size for the simulation. Defaults to 1.
             allow_growth (bool, optional): Whether to allow GPU memory growth. Defaults to True.
@@ -68,6 +73,10 @@ class PropBase:
         """
         
         self.equation = equation
+        if pml_type is None:
+            # Each WaveEquation subclass declares its own default_pml_type;
+            # see e.g. ElasticTTISG → 'cpmls', most acoustics → 'cpmlr'.
+            pml_type = equation.default_pml_type
         if getattr(self.equation, 'setup_pml', None):
             self.equation.setup_pml(pml_type)
         self.wavefield_names = equation.wavefields
@@ -76,7 +85,19 @@ class PropBase:
         self._wavefield_spec_index = build_field_index(self.wavefield_specs)
         self.shape = shape
         self.ndim = len(shape)
-        self.dev = dev
+        if device is not None and dev is not None and device != dev:
+            import warnings
+            warnings.warn(
+                "Both 'device' and 'dev' were passed to the propagator; using 'device'. "
+                "'dev' is deprecated and will be removed in a future release.",
+                DeprecationWarning, stacklevel=2,
+            )
+        resolved_device = device if device is not None else dev
+        if resolved_device is None:
+            # Inherit from the equation, which is the source of truth: its
+            # operators (laplace kernels etc.) were already built on this device.
+            resolved_device = getattr(equation, 'device', None)
+        self.dev = resolved_device
         self.abcn = abcn
         self.free_surface = free_surface
         if np.isscalar(dh):

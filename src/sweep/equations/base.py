@@ -37,11 +37,66 @@ def init_wavenumbers(shape, h):
 
 class WaveEquation:
 
+    # Default PML formulation when the propagator is not given one explicitly.
+    # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.
+    default_pml_type = "cpmlr"
+
     @classmethod
     def supports_torch_binding(cls):
         """Return True when the equation class exposes a compiled ``_C`` binding hook."""
         binding = getattr(cls, "_C", None)
         return callable(binding)
+
+    @hybridmethod
+    def defaults(target):
+        """Resolved defaults this equation will use with no overrides.
+
+        Useful for discovering — without reading source — what ``pml_type``,
+        source/receiver fields, ``spatial_order``, etc. you get from
+        ``EquationCls()``. Works as a classmethod or on an instance::
+
+            >>> from sweep.equations import Acoustic
+            >>> Acoustic.defaults()
+            {'class_name': 'Acoustic',
+             'spatial_order': 4,
+             'backend': 'torch',
+             'device': 'cpu',
+             'default_pml_type': 'cpmlr',
+             'default_source_fields': ['h1'],
+             'default_receiver_fields': ['h1'],
+             'wavefields': ['h1', 'h2', 'psix', 'psiz', 'zetax', 'zetaz'],
+             'models': ['vp']}
+
+        Class-level introspection instantiates with default args; if that fails
+        (e.g. equation requires an optional backend), only class-level
+        attributes are returned along with a ``note`` explaining why.
+        """
+        if isinstance(target, type):
+            try:
+                instance = target()
+            except (ImportError, TypeError):
+                try:
+                    instance = target(backend='torch')
+                except Exception as exc:
+                    return {
+                        "class_name": target.__name__,
+                        "default_pml_type": getattr(target, "default_pml_type", None),
+                        "note": f"cannot instantiate without arguments: {exc}",
+                    }
+        else:
+            instance = target
+
+        return {
+            "class_name": type(instance).__name__,
+            "spatial_order": instance.so,
+            "backend": instance.backend,
+            "device": instance.device,
+            "default_pml_type": instance.default_pml_type,
+            "default_source_fields": list(instance.default_source_fields),
+            "default_receiver_fields": list(instance.default_receiver_fields),
+            "wavefields": list(instance.wavefields),
+            "models": list(instance.models),
+        }
 
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
         """

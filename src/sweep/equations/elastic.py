@@ -124,6 +124,8 @@ class Elastic(FirstOrderEquation):
         FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
     )
 
+    default_pml_type = "cpmlr"
+
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
 

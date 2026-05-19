@@ -280,6 +280,7 @@ class ElasticTTISG(ElasticTTI):
     """2D-3C elastic TTI equation with axis-aligned SG derivatives and CPML."""
 
     prepare_models_for_c = True
+    default_pml_type = "cpmls"  # SG variant uses 8 staggered CPML profiles, not 6.
 
     def __init__(self, spatial_order=8, device="cpu", backend="torch"):
         FirstOrderEquation.__init__(self, spatial_order, device, backend, ndim=2)

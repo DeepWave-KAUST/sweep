@@ -1,5 +1,5 @@
 from .base import SecondOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 
 
 def step_cpml(
@@ -65,6 +65,18 @@ class AcousticTariq(SecondOrderEquation):
         ModelSpec("v", aliases=("velocity",), description="Velocity-like parameter for the Tariq qP formulation.", unit="m/s"),
         ModelSpec("eta", description="Anellipticity parameter for the Tariq qP formulation."),
     )
+    FIELD_SPECS = (
+        FieldSpec("h1", aliases=("pressure", "p"), description="Primary acoustic-Tariq qP pressure-like wavefield.", supports_source=True, supports_receiver=True),
+        FieldSpec("h2", aliases=("pressure_prev",), description="Previous-step pressure-like wavefield.", internal=True),
+        FieldSpec("f1", description="Auxiliary wavefield integrating the primary pressure (Tariq qP).", internal=True),
+        FieldSpec("f2", description="Previous-step auxiliary wavefield (Tariq qP).", internal=True),
+        FieldSpec("psix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("zetax", description="CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetaz", description="CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+    )
+
+    default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         super().__init__(spatial_order, device, backend, other_kernels=True)
@@ -77,7 +89,19 @@ class AcousticTariq(SecondOrderEquation):
 
     @property
     def wavefields(self):
-        return ["h1", "h2", "f1", "f2", "psix", "psiz", "zetax", "zetaz"]
+        return [spec.name for spec in self.FIELD_SPECS]
+
+    @property
+    def field_specs(self):
+        return list(self.FIELD_SPECS)
+
+    @property
+    def default_source_fields(self):
+        return ["h1"]
+
+    @property
+    def default_receiver_fields(self):
+        return ["h1"]
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)

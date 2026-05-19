@@ -67,8 +67,13 @@ class Acoustic1st(FirstOrderEquation):
         ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
     )
 
+    default_pml_type = "cpmls"  # acoustic1st does not support 'cpmlr'; supported: ['cpmls', 'spml'].
+
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
         super().__init__(spatial_order, device, backend)
+        # Pre-set the cpmls wavefield list so introspection (default_source_fields,
+        # field_specs, etc.) works before the propagator calls setup_pml.
+        self.wavefields = self.wavefields_cpml()
 
     def setup_pml(self, pml_type):
         self.wavefields = {
@@ -108,7 +113,17 @@ class Acoustic1st(FirstOrderEquation):
             FieldSpec("psiz", description="CPML auxiliary field in the z direction.", internal=True, boundary_related=True),
         ])
         return ensure_field_specs(self.wavefields, specs)
-    
+
+    @property
+    def default_source_fields(self):
+        # 'p' exists only in cpmls mode; in spml mode the pressure is split into px/pz.
+        return ["p"] if "p" in self.wavefields else ["px"]
+
+    @property
+    def default_receiver_fields(self):
+        # Pressure if available; otherwise particle velocity in x (spml mode).
+        return ["p"] if "p" in self.wavefields else ["vx"]
+
     @property
     def supported_pml(self):
         return ['cpmls', 'spml']
