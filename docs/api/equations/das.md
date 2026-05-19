@@ -5,30 +5,36 @@ measurement along an optical fiber. SWEEP provides several closely related
 equation classes for forward modeling DAS gathers, differing in the underlying
 physics (acoustic vs elastic) and in how the strain-rate output is constructed.
 
+**Unified facade**: `DAS` (formerly named `DASModeler`) selects the right
+raw class via the keyword arguments `method=` and `ndim=`, builds a
+`PropTorch` internally, and exposes a `forward(...)` that returns the
+receiver record.  The raw classes below remain usable directly when you
+need finer control:
+
 | Class | Dim | Underlying physics | Models | Compiled binding |
 | --- | --- | --- | --- | --- |
-| `DAS` | 2D | Stress-strain-rate-velocity formulation | `['vp', 'vs', 'rho']` | ✓ |
-| `DAS3D` | 3D | Same as `DAS` | `['vp', 'vs', 'rho']` | ✓ |
-| `DASElastic` | 2D | Strain-rate computed from elastic stresses | `['vp', 'vs', 'rho']` | ✓ |
-| `DASElastic3D` | 3D | Same as `DASElastic` | `['vp', 'vs', 'rho']` | ✓ |
+| `DASElastic` | 2D | Strain-rate computed from elastic stresses (alias of `DASZhao`) | `['vp', 'vs', 'rho']` | ✓ |
+| `DASElastic3D` | 3D | Same as `DASElastic` (alias of `DASZhao3D`) | `['vp', 'vs', 'rho']` | ✓ |
 | `DASMu` | 2D | μ least-squares strain-rate formulation | `['vp', 'vs', 'rho']` | ✓ |
 | `DASMu3D` | 3D | Same as `DASMu` | `['vp', 'vs', 'rho']` | ✓ |
 | `DASZhao` | 2D | Zhao-style two-stage (stress + auxiliary tau) | `['vp', 'vs', 'rho']` | ✓ |
 | `DASZhao3D` | 3D | Same as `DASZhao` | `['vp', 'vs', 'rho']` | ✓ |
 
-All eight classes live under `sweep.equations`:
+All live under `sweep.equations`:
 
 ```python
 from sweep.equations import (
-    DAS, DAS3D,
+    DAS,                       # unified facade (was DASModeler)
+    DASModeler,                # back-compat alias of DAS
     DASElastic, DASElastic3D,
     DASMu, DASMu3D,
     DASZhao, DASZhao3D,
 )
 ```
 
-Implementation: `src/sweep/equations/das.py` (`DASZhao` / `DASZhao3D`, `DAS` /
-`DAS3D`, `DASElastic` / `DASElastic3D`, `DASMu` / `DASMu3D`).
+Implementation: `src/sweep/equations/das.py` (`DASZhao` / `DASZhao3D`,
+`DASMu` / `DASMu3D`, plus the `DAS` facade and the back-compat
+`DASElastic` / `DASElastic3D` / `DASModeler` aliases).
 
 ## Shared model parameters
 
@@ -60,11 +66,13 @@ Use the introspection helpers to discover the exact field set on the class
 you're using:
 
 ```python
-from sweep.equations import DAS, DASMu3D
+from sweep.equations import DASZhao, DASMu3D
 
-print([f.name for f in DAS.available_fields(role="receiver")])
+# Note: introspection helpers live on the raw equation classes, not on the
+# `DAS` facade (which dispatches by method= and is not a WaveEquation).
+print([f.name for f in DASZhao.available_fields(role="receiver")])
 print([f.name for f in DASMu3D.available_fields(role="source")])
-print(DAS.describe_field("das35_t"))
+print(DASZhao.describe_field("das35_t"))
 ```
 
 ## Signal helpers

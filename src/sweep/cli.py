@@ -98,6 +98,14 @@ def list_wavefields(class_name):
         print(f"{class_name} is not a valid wave equation")
         return
 
+    # The `DAS` and `AcousticAniso` facades live in `sweep.equations` but are
+    # not `WaveEquation` subclasses — they dispatch to raw equation classes.
+    if not issubclass(cls, eq.WaveEquation):
+        print(f"\n=== {class_name} ===")
+        print(f"  {class_name} is a facade/dispatcher, not a raw wave equation.")
+        print(f"  Use `sweep show <RawClass>` to inspect the underlying equation.")
+        return
+
     wavefields = _read_class_metadata(cls, "wavefields")
     models = _read_class_metadata(cls, "models")
 

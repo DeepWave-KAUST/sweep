@@ -16,10 +16,9 @@ from .elastic_tti_sg import ElasticTTISG
 from .elastic3d import Elastic as Elastic3D
 from .das import (
     DAS,
-    DAS3D,
     DASElastic,
     DASElastic3D,
-    DASModeler,
+    DASModeler,    # back-compat alias of `DAS`
     DASMu,
     DASMu3D,
     DASZhao,
@@ -42,12 +41,40 @@ from .qP_tariq import AcousticTariq
 from .acoustic3d import Acoustic3D
 # TODO: re-run any codegen script if one exists for this module.
 from .acoustic_vti_1st import AcousticVTI1st, AcousticVTI1st3D
+from .acoustic_aniso import AcousticAniso
 
+
+# ---------------------------------------------------------------------------
+# Anisotropic entry points — author-named aliases (mirror the DAS pattern
+# in `das.py`, where the canonical user-facing name aliases to the author's
+# class: `DAS = DASZhao`, `DASElastic = DASZhao`, etc.).
+#
+# Originals stay exported above for back-compat.  Prefer the author-named
+# alias in new code; it makes the citation-to-class mapping obvious.
+# ---------------------------------------------------------------------------
+
+#   Liang K. et al. (2022) — 2nd-order pseudo-acoustic, 10.1190/geo2022-0292.1
+AcousticVTILiang        = AcousticVTI
+AcousticTTILiang        = AcousticTTI
+
+#   Tariq Alkhalifah (2000) — qP η-formulation, 10.1190/1.1444815
+AcousticVTIAlkhalifah   = AcousticTariq
+AcousticTTIAlkhalifah   = AcousticTariq   # same class; eta-acoustic covers VTI & TTI
 
 #   Duveneck et al. (2008) — 1st-order velocity-stress acoustic VTI,
 #                            10.1190/1.3059320
 AcousticVTIDuveneck     = AcousticVTI1st
 AcousticVTIDuveneck3D   = AcousticVTI1st3D
+
+
+# Per-symmetry default entry: when the user just wants "the standard" VTI
+# acoustic propagator without thinking about authors.  Matches the DAS
+# convention `DAS = DASZhao` (sensible default points at the most-used
+# class).  Today we route 2-D VTI to Liang's 2nd-order scalar (memory-
+# light, the original SWEEP entry); 3-D VTI routes to Duveneck's
+# first-order because that's the only one with a 3-D class.
+AcousticVTIDefault     = AcousticVTI            # 2-D, 2nd-order
+AcousticVTIDefault3D   = AcousticVTI1st3D       # 3-D, 1st-order
 
 
 def _equation_classes():

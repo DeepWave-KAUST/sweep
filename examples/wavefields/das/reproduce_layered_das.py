@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sweep.equations import DASModeler
+from sweep.equations import DAS
 
 
 PAPER_CITATION = "Zhao et al., Petroleum Science, 23 (2026), 626-642 (https://doi.org/10.1016/j.petsci.2025.09.015)"
@@ -239,7 +239,7 @@ def run_solver(
     vp_np, vs_np, rho_np = models
     models_t = tuple(torch.as_tensor(model, dtype=torch.float32, device=device) for model in (vp_np, vs_np, rho_np))
 
-    solver = DASModeler(
+    solver = DAS(
         method=method,
         ndim=2,
         shape=(args.nz, args.nx),

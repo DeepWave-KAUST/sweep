@@ -29,9 +29,11 @@ is supported for every class.
 
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
-| `AcousticTTI` | TTI parameters | 2D | qP acoustic TTI (optional dependency) | varies |
-| `AcousticVTI` | VTI parameters | 2D | qP acoustic VTI | varies |
-| `AcousticTariq` | TTI parameters | 2D | TTI variant from Alkhalifah-style formulation | varies |
+| `AcousticAniso` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks duveneck / liang / alkhalifah; mirrors the `DAS` facade | varies |
+| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | qP acoustic VTI, Liang K. et al. 2022 — alias `AcousticVTILiang` | varies |
+| `AcousticTTI` | TTI parameters | 2D | qP acoustic TTI, Liang K. et al. 2022 (optional dependency) — alias `AcousticTTILiang` | varies |
+| `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | varies |
+| `AcousticVTI1st` / `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 2D / 3D | 1st-order velocity-stress, Duveneck et al. 2008 — aliases `AcousticVTIDuveneck` / `AcousticVTIDuveneck3D` | ✅ (2D) |
 
 ### Elastic family
 
@@ -46,8 +48,8 @@ is supported for every class.
 
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
-| `DAS` / `DAS3D` | acoustic + strain parameters | 2D / 3D | DAS forward modeling | varies |
-| `DASElastic` / `DASElastic3D` | elastic + strain parameters | 2D / 3D | Elastic DAS variant | varies |
+| `DAS` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks zhao / mu (formerly `DASModeler`) | varies |
+| `DASElastic` / `DASElastic3D` | elastic + strain parameters | 2D / 3D | Elastic DAS variant (alias of `DASZhao` / `DASZhao3D`) | varies |
 | `DASMu` / `DASMu3D` | acoustic + strain parameters | 2D / 3D | μ-formulation DAS | ✅ (2D) |
 | `DASZhao` / `DASZhao3D` | acoustic + strain parameters | 2D / 3D | Zhao-style DAS formulation | varies |
 
