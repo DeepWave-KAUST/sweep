@@ -72,12 +72,87 @@ def patch_packaging_compat():
 
 
 def get_sources():
-    return (
-        glob.glob("src/sweep/csrc/cpu/**/*.cpp", recursive=True)
-        + glob.glob("src/sweep/csrc/cuda/common/**/*.cu", recursive=True)
+    """Collect C++/CUDA sources for the ``sweep._C`` extension.
+
+    Honours the ``SWEEP_SKIP_CPU`` environment variable: when set to a
+    truthy value (1, true, yes, on), the heavy ``cpu/equations/*`` tree
+    (~19k lines, often the build-time bottleneck) is *excluded* and a tiny
+    stub is linked in its place.  The stub keeps `bindings/module.cpp`
+    linking and routes every call to the CUDA path; attempting to use a
+    CPU tensor raises a clear TORCH_CHECK message.
+
+    This is intended for users who only ever run on CUDA — typically HPC
+    deployments where the CPU C++ path would be dead weight.
+    """
+    cuda_sources = (
+        glob.glob("src/sweep/csrc/cuda/common/**/*.cu", recursive=True)
         + glob.glob("src/sweep/csrc/cuda/equations/**/*.cu", recursive=True)
-        + ["src/sweep/csrc/bindings/module.cpp"]
     )
+    binding_sources = ["src/sweep/csrc/bindings/module.cpp"]
+
+    if env_flag_enabled("SWEEP_SKIP_CPU"):
+        log.warn(
+            "SWEEP_SKIP_CPU=1: skipping cpu/equations/* (~19k LoC); linking "
+            "cpu_binding_stub.cpp instead. CPU tensors will raise a clear "
+            "error at call time."
+        )
+        cpu_sources = ["src/sweep/csrc/cpu/cpu_binding_stub.cpp"]
+    else:
+        cpu_sources = glob.glob("src/sweep/csrc/cpu/**/*.cpp", recursive=True)
+        # Defensive: don't accidentally include the stub if it's globbed
+        cpu_sources = [
+            s for s in cpu_sources
+            if not s.endswith("cpu_binding_stub.cpp")
+        ]
+
+    return cpu_sources + cuda_sources + binding_sources
+
+
+def _check_ninja_on_path():
+    """Print an actionable note if torch's ninja-binary probe will fail.
+
+    Torch's ``is_ninja_available()`` shells out to ``ninja --version`` on
+    PATH, NOT to the bundled Python ``ninja`` package.  If the conda env is
+    not activated (e.g. invoking ``/path/to/envs/X/bin/python setup.py``
+    directly), the ninja binary at ``<env>/bin/ninja`` is invisible and
+    torch silently falls back to the *slow* distutils sequential build —
+    ~6× slower in practice.  Loud-warn now, instead of having the user
+    discover it 20 minutes into a serial compile.
+    """
+    import shutil
+
+    if shutil.which("ninja") is not None:
+        return  # binary on PATH — torch will use ninja, all good
+
+    # Bundled ninja package?  Tell the user how to expose it.
+    bundled = None
+    try:
+        import ninja as _ninja_pkg
+        bundled = os.path.join(os.path.dirname(_ninja_pkg.__file__), "..", "..", "..", "..", "bin", "ninja")
+        bundled = os.path.normpath(bundled)
+        if not os.path.exists(bundled):
+            # Try the conda env layout
+            python_exec = sys.executable
+            env_bin = os.path.dirname(python_exec)
+            candidate = os.path.join(env_bin, "ninja")
+            bundled = candidate if os.path.exists(candidate) else None
+    except ImportError:
+        pass
+
+    msg = (
+        "ninja binary not found on PATH.  Torch will fall back to the slow "
+        "distutils sequential build (~6× slower).  "
+    )
+    if bundled and os.path.exists(bundled):
+        msg += (
+            f"A ninja binary is bundled at {bundled}; either activate your "
+            "conda env (`conda activate <env>`) so PATH includes it, or run "
+            f"PATH='{os.path.dirname(bundled)}:$PATH' python setup.py ..."
+        )
+    else:
+        msg += "Install ninja-build (`apt install ninja-build` or `pip install ninja`)."
+    log.warn(msg)
+    print(f"WARNING: {msg}", file=sys.stderr, flush=True)
 
 
 def make_build_extension(BuildExtension):
@@ -88,6 +163,7 @@ def make_build_extension(BuildExtension):
     class SweepBuildExtension(BuildExtension):
         def run(self):
             self.verbose = max(getattr(self, "verbose", 1), 2)
+            _check_ninja_on_path()
             for ext in self.extensions:
                 sources = list(getattr(ext, "sources", []))
                 emit(f"Building CUDA extension '{ext.name}' with {len(sources)} source files")
