@@ -12,6 +12,7 @@
 #include "cuda/equations/elastic2d/elastic2d.h"
 #include "cuda/equations/elastic3d/elastic3d.h"
 #include "cuda/equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
+#include "cuda/equations/acoustic_vti_1st_2d/acoustic_vti_1st_2d.h"
 #include "cpu/cpu_binding.h"
 #include "bindings_utils.h"
 
@@ -113,6 +114,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("das_mu3d_backward_bs", wrap_backward(dispatch_backward(das_mu3d::backward_bs, EK::DASMu3D, BM::BoundarySaving)), "DAS Mu backward with boundary saving 3D (CUDA/CPU)");
     m.def("das_mu3d_backward_ckpt", wrap_backward(dispatch_backward(das_mu3d::backward_ckpt, EK::DASMu3D, BM::Checkpoint)), "DAS Mu backward with checkpointing 3D (CUDA/CPU)");
     m.def("das_mu3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(das_mu3d::backward_recursive_ckpt, EK::DASMu3D, BM::RecursiveCheckpoint)), "DAS Mu backward with recursive checkpointing 3D (CUDA/CPU)");
+
+    // Acoustic VTI 1st-order (Duveneck 2008) — CUDA-only slim path; no CPU
+    // fallback, no checkpointing/boundary-saving, no backward yet.  When the
+    // adjoint pass lands we will switch to the dispatch_forward/EK pattern.
+    m.def("acoustic_vti_1st_2d_forward", wrap_forward(acoustic_vti_1st_2d::forward),
+          "AcousticVTI1st (Duveneck 2008) forward 2D (CUDA only, slim)");
+    m.def("acoustic_vti_1st_2d_backward", wrap_backward(acoustic_vti_1st_2d::backward),
+          "AcousticVTI1st backward 2D (NotImplemented stub — raises TORCH_CHECK)");
+    m.def("acoustic_vti_1st_2d_backward_bs", wrap_backward(acoustic_vti_1st_2d::backward_bs),
+          "AcousticVTI1st backward 2D boundary-saving (NotImplemented stub)");
+    m.def("acoustic_vti_1st_2d_backward_ckpt", wrap_backward(acoustic_vti_1st_2d::backward_ckpt),
+          "AcousticVTI1st backward 2D checkpoint (NotImplemented stub)");
+    m.def("acoustic_vti_1st_2d_backward_recursive_ckpt", wrap_backward(acoustic_vti_1st_2d::backward_recursive_ckpt),
+          "AcousticVTI1st backward 2D recursive ckpt (NotImplemented stub)");
 
     py::class_<ForwardInput>(m, "ForwardInput")
         .def(py::init<>())

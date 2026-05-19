@@ -40,6 +40,14 @@ from .qP_vti import AcousticVTI
 from .acoustic import Acoustic
 from .qP_tariq import AcousticTariq
 from .acoustic3d import Acoustic3D
+# TODO: re-run any codegen script if one exists for this module.
+from .acoustic_vti_1st import AcousticVTI1st, AcousticVTI1st3D
+
+
+#   Duveneck et al. (2008) — 1st-order velocity-stress acoustic VTI,
+#                            10.1190/1.3059320
+AcousticVTIDuveneck     = AcousticVTI1st
+AcousticVTIDuveneck3D   = AcousticVTI1st3D
 
 
 def _equation_classes():
