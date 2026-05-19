@@ -173,15 +173,17 @@ through the equation class.
 
     ```python
     from sweep.equations import (
-        DAS, DAS3D,
+        DAS,                            # unified facade (was DASModeler)
         DASElastic, DASElastic3D,
         DASMu, DASMu3D,
         DASZhao, DASZhao3D,
     )
     ```
 
-    Strain-rate / helical-fiber receiver equations for DAS modelling. All eight
-    variants share `['vp', 'vs', 'rho']` and ship the compiled binding.
+    Strain-rate / helical-fiber receiver equations for DAS modelling. The
+    six raw equation variants share `['vp', 'vs', 'rho']` and ship the
+    compiled binding. `DAS` is the unified facade — pass `method="zhao"`
+    or `method="mu"` to pick a variant.
 
     See [DAS family](das.md) for the comparison table.
 
@@ -208,12 +210,37 @@ wavefields, and backend / binding behavior:
 
 **DAS family**
 
-- [DAS family overview](das.md) — covers `DAS`, `DAS3D`, `DASElastic`,
-  `DASElastic3D`, `DASMu`, `DASMu3D`, `DASZhao`, `DASZhao3D`.
+- [DAS family overview](das.md) — covers `DAS` (the unified facade, formerly
+  named `DASModeler`), plus the raw equation classes `DASElastic` /
+  `DASElastic3D`, `DASMu` / `DASMu3D`, `DASZhao` / `DASZhao3D`.
 
-**Other anisotropic acoustic variants**
+**Anisotropic acoustic family**
 
-`AcousticTTI`, `AcousticVTI`, and `AcousticTariq` are exported from
-`sweep.equations` but ship without the compiled binding. Use
-`sweep show <ClassName>` from the CLI to inspect their wavefields and required
-models; the [CLI page](../../user-guide/cli.md) has a full output example.
+The raw equation classes are:
+
+| Class | Symmetry | Dim | Reference |
+| --- | --- | --- | --- |
+| `AcousticVTI` | VTI | 2D | Liang K. et al. 2022 (2nd-order pseudo-acoustic) |
+| `AcousticTTI` | TTI | 2D | Liang K. et al. 2022 (TTI extension) |
+| `AcousticTariq` | VTI / TTI | 2D | Alkhalifah 2000 (qP η-formulation) |
+| `AcousticVTI1st` / `AcousticVTI1st3D` | VTI | 2D / 3D | Duveneck et al. 2008 (1st-order velocity-stress) |
+
+`AcousticAniso` is a thin **factory** that dispatches by `(method, symmetry,
+ndim)` and returns one of the above instances; it does **not** wrap a solver.
+The user constructs `PropTorch` separately:
+
+```python
+from sweep.equations import AcousticAniso
+from sweep.propagator.torch import PropTorch
+
+eq = AcousticAniso(method="duveneck", symmetry="vti", ndim=2)
+prop = PropTorch(eq, shape=(nz, nx), source_type=["sH", "sV"],
+                 receiver_type=["vz"], dh=10.0, dt=1e-3, abcn=30)
+record = prop(wavelet, sources, receivers, models=[vp, eps, delta, rho])
+```
+
+Author-named aliases also exist for the raw classes: `AcousticVTILiang`,
+`AcousticTTILiang`, `AcousticVTIAlkhalifah`, `AcousticTTIAlkhalifah`,
+`AcousticVTIDuveneck`, `AcousticVTIDuveneck3D`.  Use `sweep show <ClassName>`
+from the CLI to inspect any of them; the [CLI page](../../user-guide/cli.md)
+has a full output example.

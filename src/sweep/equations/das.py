@@ -224,12 +224,17 @@ def _standardize_das_record_layout(record: torch.Tensor, *, nreceivers: int, rec
     )
 
 
-class DASModeler(torch.nn.Module):
+class DAS(torch.nn.Module):
     """Unified Torch DAS modeling interface.
 
     ``method="zhao"`` runs the Zhao DAS equation.
     ``method="mu"`` runs the Mu velocity-stress-strain equation. Records are
     returned in ``(batch, nt, nrec, nfield)`` layout.
+
+    Note: this class used to be called ``DASModeler``; the shorter name
+    mirrors the DAS field convention and matches the new ``AcousticAniso``
+    facade for anisotropic acoustic equations.  ``DASModeler`` is kept as
+    a back-compat alias at the bottom of this module.
     """
 
     def __init__(
@@ -255,7 +260,7 @@ class DASModeler(torch.nn.Module):
         self.shape = tuple(shape)
         self.ndim = int(len(self.shape) if ndim is None else ndim)
         if self.ndim not in (2, 3):
-            raise ValueError("DASModeler only supports ndim=2 or ndim=3.")
+            raise ValueError("DAS only supports ndim=2 or ndim=3.")
 
         self.method = _normalize_das_method(method)
         self.spatial_order = int(spatial_order)
@@ -314,7 +319,7 @@ class DASModeler(torch.nn.Module):
         **kwargs,
     ):
         if return_wavefield:
-            raise NotImplementedError("DASModeler returns records only. Use PropTorch directly for wavefields.")
+            raise NotImplementedError("DAS facade returns records only. Use PropTorch directly for wavefields.")
 
         record = self.solver(
             wavelet,
@@ -1227,7 +1232,7 @@ class DASMu3D(FirstOrderEquation):
 
     All velocity, stress, and integrated strain components can be used as
     sources and receivers. Strain-rate and helical DAS-rate receivers are
-    derived by ``DASModeler`` from the integrated strain records.
+    derived by ``DAS`` (the facade) from the integrated strain records.
     """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
@@ -1345,7 +1350,8 @@ class DASMu3D(FirstOrderEquation):
         )
 
 
-DASElastic = DASZhao
+DASElastic   = DASZhao
 DASElastic3D = DASZhao3D
-DAS = DASZhao
-DAS3D = DASZhao3D
+
+# Back-compat: the unified facade used to be named ``DASModeler``.
+DASModeler = DAS

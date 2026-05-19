@@ -22,31 +22,44 @@ Example output on a machine with the compiled `sweep._C` extension installed:
 ```text
 Available equations:
 
-  Equation         Models                                                              Torch Binding  Binding Ready
-  ---------------  ------------------------------------------------------------------  -------------  -------------
-  Acoustic         ['vp']                                                              yes            yes
-  Acoustic1st      ['vp', 'rho']                                                       no             no
-  Acoustic3D       ['vp']                                                              yes            yes
-  AcousticLSRTM    ['vp', 'mp']                                                        yes            yes
-  AcousticLSRTM3D  ['vp', 'mp']                                                        yes            yes
-  AcousticTTI      ['vp', 'epsilon', 'delta', 'theta']                                 no             no
-  AcousticTariq    ['vv', 'v', 'eta']                                                  no             no
-  AcousticVRZ      ['vp', 'z']                                                         yes            yes
-  AcousticVRZ3D    ['vp', 'z']                                                         yes            yes
-  AcousticVTI      ['vp', 'epsilon', 'delta']                                          no             no
-  DAS              ['vp', 'vs', 'rho']                                                 yes            yes
-  DAS3D            ['vp', 'vs', 'rho']                                                 yes            yes
-  DASElastic       ['vp', 'vs', 'rho']                                                 yes            yes
-  DASElastic3D     ['vp', 'vs', 'rho']                                                 yes            yes
-  DASMu            ['vp', 'vs', 'rho']                                                 yes            yes
-  DASMu3D          ['vp', 'vs', 'rho']                                                 yes            yes
-  DASZhao          ['vp', 'vs', 'rho']                                                 yes            yes
-  DASZhao3D        ['vp', 'vs', 'rho']                                                 yes            yes
-  Elastic          ['vp', 'vs', 'rho']                                                 yes            yes
-  Elastic3D        ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticTTI       ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  no             no
-  ElasticTTISG     ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  yes            yes
+  Equation               Models                                                              Torch Binding  Binding Ready
+  ---------------------  ------------------------------------------------------------------  -------------  -------------
+  Acoustic               ['vp']                                                              yes            yes
+  Acoustic1st            ['vp', 'rho']                                                       no             no
+  Acoustic3D             ['vp']                                                              yes            yes
+  AcousticLSRTM          ['vp', 'mp']                                                        yes            yes
+  AcousticLSRTM3D        ['vp', 'mp']                                                        yes            yes
+  AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 no             no
+  AcousticTTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
+  AcousticTTILiang       ['vp', 'epsilon', 'delta', 'theta']                                 no             no
+  AcousticTariq          ['vv', 'v', 'eta']                                                  no             no
+  AcousticVRZ            ['vp', 'z']                                                         yes            yes
+  AcousticVRZ3D          ['vp', 'z']                                                         yes            yes
+  AcousticVTI            ['vp', 'epsilon', 'delta']                                          no             no
+  AcousticVTI1st         ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
+  AcousticVTI1st3D       ['vp', 'epsilon', 'delta', 'rho']                                   no             no
+  AcousticVTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
+  AcousticVTIDefault     ['vp', 'epsilon', 'delta']                                          no             no
+  AcousticVTIDefault3D   ['vp', 'epsilon', 'delta', 'rho']                                   no             no
+  AcousticVTIDuveneck    ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
+  AcousticVTIDuveneck3D  ['vp', 'epsilon', 'delta', 'rho']                                   no             no
+  AcousticVTILiang       ['vp', 'epsilon', 'delta']                                          no             no
+  DASElastic             ['vp', 'vs', 'rho']                                                 yes            yes
+  DASElastic3D           ['vp', 'vs', 'rho']                                                 yes            yes
+  DASMu                  ['vp', 'vs', 'rho']                                                 yes            yes
+  DASMu3D                ['vp', 'vs', 'rho']                                                 yes            yes
+  DASZhao                ['vp', 'vs', 'rho']                                                 yes            yes
+  DASZhao3D              ['vp', 'vs', 'rho']                                                 yes            yes
+  Elastic                ['vp', 'vs', 'rho']                                                 yes            yes
+  Elastic3D              ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticTTI             ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  no             no
+  ElasticTTISG           ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  yes            yes
 ```
+
+The unified facades `DAS` (formerly `DASModeler`) and `AcousticAniso` are
+also exported from `sweep.equations` but do not appear in this listing —
+they wrap / dispatch to the raw equation classes above and are not
+`WaveEquation` subclasses themselves.
 
 The two right-most columns distinguish:
 

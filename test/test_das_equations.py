@@ -3,11 +3,10 @@ import pytest
 import torch
 
 from sweep.equations import (
-    DAS,
-    DAS3D,
+    DAS,               # unified DAS facade (was DASModeler)
     DASElastic,
     DASElastic3D,
-    DASModeler,
+    DASModeler,        # back-compat alias of DAS (kept for the rename test below)
     DASMu,
     DASMu3D,
     DASZhao,
@@ -48,8 +47,9 @@ def test_das_equations_are_exported_with_cuda_binding():
     assert classes["DASMu3D"] is DASMu3D
     assert classes["DASZhao"] is DASZhao
     assert classes["DASZhao3D"] is DASZhao3D
-    assert DAS is DASElastic
-    assert DAS3D is DASElastic3D
+    # DAS is now the unified facade (formerly DASModeler), not an equation
+    # class.  DASElastic / DASElastic3D remain as raw equation-class aliases.
+    assert DASModeler is DAS
     assert DASElastic.supports_torch_binding()
     assert DASElastic3D.supports_torch_binding()
     assert DASMu.supports_torch_binding()
@@ -69,7 +69,7 @@ def test_das_modeler_zhao_uses_standard_record_layout():
     vs = torch.full(shape, 1200.0, dtype=torch.float32)
     rho = torch.full(shape, 2100.0, dtype=torch.float32)
 
-    modeler = DASModeler(
+    modeler = DAS(
         method="zhao",
         ndim=2,
         spatial_order=2,
@@ -103,7 +103,7 @@ def test_das_modeler_mu_outputs_physical_strain_rate_and_das_fields():
     vs = torch.full(shape, 1200.0, dtype=torch.float32, requires_grad=True)
     rho = torch.full(shape, 2100.0, dtype=torch.float32, requires_grad=True)
 
-    modeler = DASModeler(
+    modeler = DAS(
         method="mu",
         ndim=2,
         spatial_order=2,
@@ -178,7 +178,7 @@ def test_das_modeler_mu_3d_outputs_physical_strain_rate_and_das_fields():
     vs = torch.full(shape, 1200.0, dtype=torch.float32, requires_grad=True)
     rho = torch.full(shape, 2100.0, dtype=torch.float32, requires_grad=True)
 
-    modeler = DASModeler(
+    modeler = DAS(
         method="mu",
         ndim=3,
         spatial_order=2,
@@ -262,7 +262,7 @@ def test_das_modeler_mu_variant():
     vs = torch.full(shape, 1200.0, dtype=torch.float32)
     rho = torch.full(shape, 2100.0, dtype=torch.float32)
 
-    modeler = DASModeler(
+    modeler = DAS(
         method="mu",
         ndim=2,
         spatial_order=2,

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sweep.equations import DASModeler, DASZhao, gauge_average
+from sweep.equations import DAS, DASZhao, gauge_average
 from sweep.propagator.torch import PropTorch
 
 
@@ -330,7 +330,7 @@ def mu_reference_records(vp_np, vs_np, rho_np, geometry, args):
         device = torch.device("cpu")
 
     receiver_type = ["vx", "vz", "sxx", "szz", "exx_t", "ezz_t", "das35_t", "das54x_t", "das54z_t"]
-    solver = DASModeler(
+    solver = DAS(
         method="mu",
         ndim=2,
         shape=(nz, nx),
@@ -842,7 +842,7 @@ def run_layered(args):
             "mu_reference_elapsed_s": reference_elapsed,
         },
         "mu_reference_info": {
-            "description": "Mu records integrated exx/ezz internally and the DASModeler wrapper differentiates them in time to expose exx_t/ezz_t/das*_t.",
+            "description": "Mu records integrated exx/ezz internally and the DAS wrapper differentiates them in time to expose exx_t/ezz_t/das*_t.",
             **reference_info,
         },
         "zhao_vs_mu_reference": metrics,

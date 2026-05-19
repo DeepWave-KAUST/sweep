@@ -73,6 +73,28 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 
 `SWEEP_CUDA_ARCH_LIST` can be used as a package-specific alias for `TORCH_CUDA_ARCH_LIST`. If neither variable is set, the build defaults to V100-compatible `7.0` to avoid PyTorch's empty architecture auto-detection on CPU-only build nodes.
 
+#### GPU-only build (skip the CPU C++ path)
+
+If you only ever run sweep on CUDA tensors, you can skip compilation of the
+`cpu/equations/*` tree (~19k lines of C++, often the build-time bottleneck)
+by setting `SWEEP_SKIP_CPU=1`:
+
+```bash
+SWEEP_SKIP_CPU=1 SWEEP_BUILD_CUDA=1 \
+TORCH_CUDA_ARCH_LIST="8.9" MAX_JOBS=8 \
+  pip install -v .[cuda] --no-build-isolation
+```
+
+A tiny stub is linked in place of the full CPU equations so the extension
+still loads. Passing CPU tensors at runtime raises a clear `TORCH_CHECK`
+error telling the user to either rebuild without the flag, `.cuda()` their
+tensors, or use the Python backend (`backend='torch', impl='eager'`) which
+does not need this binding.
+
+Typical savings on a serial build: 5–10 minutes (CPU sources removed from
+the 50+ file compile queue).  On parallel builds (`MAX_JOBS=8` + ninja):
+roughly 10–15% of total build time.
+
 ## Backends, Implementations, and Devices
 
 Use `backend` for the array/programming backend, `impl` for the implementation under that backend, and `device` for CPU/CUDA placement.
