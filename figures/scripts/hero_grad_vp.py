@@ -83,9 +83,11 @@ def main() -> None:
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 3.6), constrained_layout=True)
 
     im0 = axes[0].imshow(vp_np, extent=extent_km, cmap="viridis", aspect="auto")
+    # SWEEP convention: sources/receivers store [ix, iz] in their last axis.
+    # matplotlib plot(x, y) → x = ix*dh (distance), y = iz*dh (depth).
     axes[0].plot(
-        sources[0, 1] * dh / 1000.0,
         sources[0, 0] * dh / 1000.0,
+        sources[0, 1] * dh / 1000.0,
         marker="*",
         color="white",
         markersize=14,
@@ -94,8 +96,8 @@ def main() -> None:
         label="source",
     )
     axes[0].plot(
-        receivers[0, :, 1] * dh / 1000.0,
         receivers[0, :, 0] * dh / 1000.0,
+        receivers[0, :, 1] * dh / 1000.0,
         marker="v",
         color="white",
         markersize=9,
