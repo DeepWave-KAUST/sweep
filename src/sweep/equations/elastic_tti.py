@@ -223,6 +223,8 @@ class ElasticTTI(FirstOrderEquation):
         FieldSpec("m_tzzz", description="CPML memory for dszz/dz.", internal=True, boundary_related=True),
     )
 
+    default_pml_type = "cpmlr"
+
     def __init__(self, spatial_order=8, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, ndim=2)
         self.rsg = RSGDerivative(spatial_order, device, backend, ndim=2)

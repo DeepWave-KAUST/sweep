@@ -126,6 +126,8 @@ class AcousticLSRTM3D(SecondOrderEquation):
         FieldSpec("szetaz", description="Scattered-wave CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
     )
 
+    default_pml_type = "cpmlr"
+
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, dim=3)
         super().init_laplace(ltype="3dsep")
@@ -141,6 +143,14 @@ class AcousticLSRTM3D(SecondOrderEquation):
     @property
     def field_specs(self):
         return list(self.FIELD_SPECS)
+
+    @property
+    def default_source_fields(self):
+        return ["h1"]
+
+    @property
+    def default_receiver_fields(self):
+        return ["sh1"]
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hy, hx = self._spacings_3d(h)

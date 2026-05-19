@@ -54,7 +54,6 @@ class PropagatorDefaults:
     dt: float = 0.002
     dev: str | None = None
     use_ckpt: bool = True
-    pml_type: str = "spml"
     nt: int = -1
     batch_size: int = 1
     allow_growth: bool = True

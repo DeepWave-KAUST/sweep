@@ -51,6 +51,8 @@ class Acoustic(SecondOrderEquation):
         FieldSpec("zetaz", description="CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
     )
 
+    default_pml_type = "cpmlr"
+
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.
 
@@ -75,6 +77,14 @@ class Acoustic(SecondOrderEquation):
     @property
     def field_specs(self):
         return list(self.FIELD_SPECS)
+
+    @property
+    def default_source_fields(self):
+        return ["h1"]
+
+    @property
+    def default_receiver_fields(self):
+        return ["h1"]
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]

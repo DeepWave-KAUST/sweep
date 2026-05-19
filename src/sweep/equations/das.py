@@ -944,6 +944,8 @@ class DASZhao(FirstOrderEquation):
         FieldSpec("das54z_t", description="54.7 degree helical-fiber axial strain-rate for z-oriented core.", supports_receiver=True),
     )
 
+    default_pml_type = "cpmlr"
+
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, ndim=2)
 
@@ -1044,6 +1046,8 @@ class DASZhao3D(FirstOrderEquation):
         FieldSpec("das54z_t", description="54.7 degree helical-fiber axial strain-rate for z-oriented core.", supports_receiver=True),
     )
 
+    default_pml_type = "cpmlr"
+
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, ndim=3)
 
@@ -1137,6 +1141,8 @@ class DASMu(FirstOrderEquation):
         FieldSpec("m_txzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
         FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
     )
+
+    default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, ndim=2)
@@ -1260,6 +1266,8 @@ class DASMu3D(FirstOrderEquation):
         FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True),
         FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
     )
+
+    default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, ndim=3)

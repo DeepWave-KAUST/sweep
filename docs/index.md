@@ -91,7 +91,17 @@ swap equations, switch backends, and inspect every gradient.
 
 ## A 30-line example
 
-Compute a velocity-model gradient from one shot of synthetic data:
+Compute a velocity-model gradient from one shot of synthetic data.
+
+!!! info "Coordinate convention (read this first)"
+
+    `sources` and `receivers` use **`(x, z)`** in grid indices for 2D, and
+    **`(x, y, z)`** for 3D — that is, horizontal axes first, depth last. In
+    the example below, `[50, 2]` means *column 50, depth 2*, and the receiver
+    line `[[ix, 2] for ix in range(10, 90)]` is a horizontal cable at depth
+    `z = 2` spanning `x ∈ [10, 90)`. Model arrays themselves are stored as
+    `(nz, nx)` / `(nz, ny, nx)` — depth first — matching how
+    `matplotlib.imshow` displays them with depth growing downwards.
 
 ```python
 import numpy as np
@@ -124,16 +134,6 @@ obs = solver(wave, sources, receivers, models=[vp])
 obs.pow(2).sum().backward()
 print("gradient shape:", tuple(vp.grad.shape))
 ```
-
-!!! info "Coordinate convention"
-
-    `sources` and `receivers` use **`(x, z)`** in grid indices for 2D, and
-    **`(x, y, z)`** for 3D — that is, horizontal axes first, depth last. In
-    the example above, `[50, 2]` means *column 50, depth 2*, and the receiver
-    line `[[ix, 2] for ix in range(10, 90)]` is a horizontal cable at depth
-    `z = 2` spanning `x ∈ [10, 90)`. Model arrays themselves are stored as
-    `(nz, nx)` / `(nz, ny, nx)` — depth first — matching how
-    `matplotlib.imshow` displays them with depth growing downwards.
 
 The [Quick Start](getting-started/quickstart.md) walks through every line above
 in detail.
