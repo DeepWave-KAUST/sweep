@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include "kernels.cuh"
 #include "das_mu2d.h"
@@ -366,6 +367,7 @@ void backward_segment_2d(
 
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -485,6 +487,7 @@ BackwardOutput backward(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
 
     TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
@@ -598,6 +601,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
 
     TORCH_CHECK(p.checkpoints.size() == 18, "DAS Mu 2D recursive checkpointing expects 18 checkpoint tensors");
@@ -765,6 +769,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
 
     const auto& p = in;
     BackwardOutput out;

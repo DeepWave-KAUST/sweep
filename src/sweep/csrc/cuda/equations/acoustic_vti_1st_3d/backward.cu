@@ -21,6 +21,8 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
+
+#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vti_1st_3d.h"
 #include "kernels.cuh"
 
@@ -121,6 +123,7 @@ struct AdjWavefieldTensor3D {
 // ===========================================================================
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -290,6 +293,7 @@ BackwardOutput backward(const BackwardInput& in)
 // alongside the adjoint pass.
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -527,6 +531,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 // ===========================================================================
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
