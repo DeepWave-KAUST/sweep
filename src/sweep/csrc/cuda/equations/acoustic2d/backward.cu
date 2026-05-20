@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "kernels.cuh"
@@ -191,6 +192,7 @@ void run_full_imaging(
 
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     BackwardOutput out;
     auto grad = torch::zeros_like(in.models[0]);
     auto grad_wavelet = torch::zeros_like(in.forward_source);
@@ -226,6 +228,7 @@ RTMOutput rtm(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
 
     const auto& p = in;
     BackwardOutput out;
@@ -753,6 +756,7 @@ void process_recursive_interval_2d(
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
 
     const auto& p = in;
     BackwardOutput out;
@@ -925,6 +929,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 

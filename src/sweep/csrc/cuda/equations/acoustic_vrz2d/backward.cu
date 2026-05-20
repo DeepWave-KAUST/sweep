@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "acoustic_vrz2d.h"
@@ -33,6 +34,7 @@ void zero_wavefield_state_vrz(AcousticWavefieldTensor& wf)
 
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     TORCH_CHECK(
         in.u_forward.defined() && in.u_forward.numel() > 0,
         "AcousticVRZ backward expects saved full forward wavefields."
@@ -151,6 +153,7 @@ BackwardOutput backward(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -343,6 +346,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -564,6 +568,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     return backward_ckpt(in);
 }
 

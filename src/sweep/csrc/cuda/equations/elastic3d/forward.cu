@@ -23,6 +23,7 @@ namespace elastic3d {
 
 ForwardOutput forward(const ForwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     ForwardOutput out;
 

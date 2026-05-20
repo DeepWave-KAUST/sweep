@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "kernels.cuh"
@@ -29,11 +30,13 @@ RTMOutput rtm_recursive_ckpt_impl(const BackwardInput& p);
 
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     return backward_full_imaging_impl(in);
 }
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     return backward_bs_imaging_impl(in);
 }
 
@@ -559,6 +562,7 @@ void run_full_imaging(
 
 BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
 {
+    c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
@@ -812,6 +816,7 @@ void run_bs_imaging(
 
 BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
 {
+    c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
@@ -1001,6 +1006,7 @@ void run_ckpt_imaging(
 
 BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
 {
+    c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
@@ -1159,6 +1165,7 @@ void run_recursive_imaging(
 
 BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
 {
+    c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
@@ -1183,11 +1190,13 @@ RTMOutput rtm_recursive_ckpt_impl(const BackwardInput& p)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     return backward_ckpt_imaging_impl(in);
 }
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     return backward_recursive_imaging_impl(in);
 }
 
