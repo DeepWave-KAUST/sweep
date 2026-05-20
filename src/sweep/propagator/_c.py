@@ -595,7 +595,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         cuda_layout = self._cuda_layout()
         layout = Layout(
             self.shape_cuda,
-            cuda_layout.base_nvar,
+            cuda_layout.resolved_boundary_save_nvar(),
             self.nt,
             self.abcn,
             self.equation.so // 2,
