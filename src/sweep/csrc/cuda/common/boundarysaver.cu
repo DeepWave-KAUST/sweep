@@ -1,5 +1,6 @@
 #include "context.h"
 #include "boundary/kernels.cuh"
+#include <cstdint>
 #include <cuda_runtime.h>
 
 __global__ void boundary_kernel2d(
@@ -84,8 +85,8 @@ __global__ void boundary_kernel2d(
         int zloc = iz - top_start;
         int xloc = ix - x_t0;
 
-        int idx =
-            ((it * ctx.B + b) * width + zloc) * nx_boundary + xloc;
+        int64_t idx =
+            ((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * nx_boundary + xloc;
 
         if (mode == BOUNDARY_SAVE) top[idx] = val;
         else u_b[iz * ctx.nx + ix] = top[idx];
@@ -97,8 +98,8 @@ __global__ void boundary_kernel2d(
         int zloc = iz - bot_start;
         int xloc = ix - x_t0;
 
-        int idx =
-            ((it * ctx.B + b) * width + zloc) * nx_boundary + xloc;
+        int64_t idx =
+            ((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * nx_boundary + xloc;
 
         if (mode == BOUNDARY_SAVE) bottom[idx] = val;
         else u_b[iz * ctx.nx + ix] = bottom[idx];
@@ -110,8 +111,8 @@ __global__ void boundary_kernel2d(
         int xloc = ix - left_start;
         int zloc = iz - z_t0;
 
-        int idx =
-            ((it * ctx.B + b) * nz_boundary + zloc) * width + xloc;
+        int64_t idx =
+            ((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + xloc;
 
         if (mode == BOUNDARY_SAVE) left[idx] = val;
         else u_b[iz * ctx.nx + ix] = left[idx];
@@ -123,8 +124,8 @@ __global__ void boundary_kernel2d(
         int xloc = ix - right_start;
         int zloc = iz - z_t0;
 
-        int idx =
-            ((it * ctx.B + b) * nz_boundary + zloc) * width + xloc;
+        int64_t idx =
+            ((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + xloc;
 
         if (mode == BOUNDARY_SAVE) right[idx] = val;
         else u_b[iz * ctx.nx + ix] = right[idx];
@@ -262,8 +263,8 @@ __global__ void boundary_kernel3d(
         int yloc = iy - y_t0;
         int xloc = ix - x_t0;
 
-        int idx =
-            ((((it * ctx.B + b) * width + zloc)
+        int64_t idx =
+            ((((static_cast<int64_t>(it) * ctx.B + b) * width + zloc)
               * ny_boundary + yloc)
               * nx_boundary + xloc);
 
@@ -283,8 +284,8 @@ __global__ void boundary_kernel3d(
         int yloc = iy - y_t0;
         int xloc = ix - x_t0;
 
-        int idx =
-            ((((it * ctx.B + b) * width + zloc)
+        int64_t idx =
+            ((((static_cast<int64_t>(it) * ctx.B + b) * width + zloc)
               * ny_boundary + yloc)
               * nx_boundary + xloc);
 
@@ -304,8 +305,8 @@ __global__ void boundary_kernel3d(
         int zloc = iz - z_t0;
         int xloc = ix - x_t0;
 
-        int idx =
-            ((((it * ctx.B + b) * nz_boundary + zloc)
+        int64_t idx =
+            ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc)
               * width + yloc)
               * nx_boundary + xloc);
 
@@ -325,8 +326,8 @@ __global__ void boundary_kernel3d(
         int zloc = iz - z_t0;
         int xloc = ix - x_t0;
 
-        int idx =
-            ((((it * ctx.B + b) * nz_boundary + zloc)
+        int64_t idx =
+            ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc)
               * width + yloc)
               * nx_boundary + xloc);
 
@@ -346,8 +347,8 @@ __global__ void boundary_kernel3d(
         int zloc = iz - z_t0;
         int yloc = iy - y_t0;
 
-        int idx =
-            ((((it * ctx.B + b) * nz_boundary + zloc)
+        int64_t idx =
+            ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc)
               * ny_boundary + yloc)
               * width + xloc);
 
@@ -367,8 +368,8 @@ __global__ void boundary_kernel3d(
         int zloc = iz - z_t0;
         int yloc = iy - y_t0;
 
-        int idx =
-            ((((it * ctx.B + b) * nz_boundary + zloc)
+        int64_t idx =
+            ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc)
               * ny_boundary + yloc)
               * width + xloc);
 
@@ -442,7 +443,7 @@ __global__ void boundary_kernel3d_compact(
     int ix = 0;
     int iy = 0;
     int iz = 0;
-    int idx = 0;
+    int64_t idx = 0;
     float* boundary = nullptr;
 
     if (local < top_count) {
@@ -454,7 +455,7 @@ __global__ void boundary_kernel3d_compact(
         iz = top_start + zloc;
         iy = y_t0 + yloc;
         ix = x_t0 + xloc;
-        idx = ((((it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
+        idx = ((((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
         boundary = top;
     } else if (local < 2 * top_count) {
         local -= top_count;
@@ -466,7 +467,7 @@ __global__ void boundary_kernel3d_compact(
         iz = bot_start + zloc;
         iy = y_t0 + yloc;
         ix = x_t0 + xloc;
-        idx = ((((it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
+        idx = ((((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
         boundary = bottom;
     } else if (local < 2 * top_count + front_count) {
         local -= 2 * top_count;
@@ -478,7 +479,7 @@ __global__ void boundary_kernel3d_compact(
         iz = z_t0 + zloc;
         iy = front_start + yloc;
         ix = x_t0 + xloc;
-        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
+        idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
         boundary = front;
     } else if (local < 2 * top_count + 2 * front_count) {
         local -= 2 * top_count + front_count;
@@ -490,7 +491,7 @@ __global__ void boundary_kernel3d_compact(
         iz = z_t0 + zloc;
         iy = back_start + yloc;
         ix = x_t0 + xloc;
-        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
+        idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
         boundary = back;
     } else if (local < 2 * top_count + 2 * front_count + left_count) {
         local -= 2 * top_count + 2 * front_count;
@@ -502,7 +503,7 @@ __global__ void boundary_kernel3d_compact(
         iz = z_t0 + zloc;
         iy = y_t0 + yloc;
         ix = left_start + xloc;
-        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
+        idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
         boundary = left;
     } else {
         local -= 2 * top_count + 2 * front_count + left_count;
@@ -514,7 +515,7 @@ __global__ void boundary_kernel3d_compact(
         iz = z_t0 + zloc;
         iy = y_t0 + yloc;
         ix = right_start + xloc;
-        idx = ((((it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
+        idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
         boundary = right;
     }
 
