@@ -13,6 +13,7 @@
 #include "cuda/equations/elastic3d/elastic3d.h"
 #include "cuda/equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
 #include "cuda/equations/acoustic_vti_1st_2d/acoustic_vti_1st_2d.h"
+#include "cuda/equations/acoustic_vti_1st_3d/acoustic_vti_1st_3d.h"
 #include "cpu/cpu_binding.h"
 #include "bindings_utils.h"
 
@@ -128,6 +129,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "AcousticVTI1st backward 2D checkpoint (NotImplemented stub)");
     m.def("acoustic_vti_1st_2d_backward_recursive_ckpt", wrap_backward(acoustic_vti_1st_2d::backward_recursive_ckpt),
           "AcousticVTI1st backward 2D recursive ckpt (NotImplemented stub)");
+
+    // Acoustic VTI 1st-order 3D — full forward + full/bs/ckpt backward;
+    // recursive_ckpt remains a TORCH_CHECK stub.
+    m.def("acoustic_vti_1st_3d_forward", wrap_forward(acoustic_vti_1st_3d::forward),
+          "AcousticVTI1st (Duveneck 2008) forward 3D (CUDA only)");
+    m.def("acoustic_vti_1st_3d_backward", wrap_backward(acoustic_vti_1st_3d::backward),
+          "AcousticVTI1st backward 3D (full mode, CUDA only)");
+    m.def("acoustic_vti_1st_3d_backward_bs", wrap_backward(acoustic_vti_1st_3d::backward_bs),
+          "AcousticVTI1st backward 3D boundary-saving (CUDA only)");
+    m.def("acoustic_vti_1st_3d_backward_ckpt", wrap_backward(acoustic_vti_1st_3d::backward_ckpt),
+          "AcousticVTI1st backward 3D chunk-checkpoint (CUDA only)");
+    m.def("acoustic_vti_1st_3d_backward_recursive_ckpt", wrap_backward(acoustic_vti_1st_3d::backward_recursive_ckpt),
+          "AcousticVTI1st backward 3D recursive ckpt (NotImplemented stub)");
 
     py::class_<ForwardInput>(m, "ForwardInput")
         .def(py::init<>())

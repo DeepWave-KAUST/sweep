@@ -561,6 +561,42 @@ class AcousticVTI1st3D(FirstOrderEquation):
         """
         return cfl * h / (vp_max * (1.0 + 2.0 * epsilon_max) ** 0.5)
 
+    def _C(self):
+        """Expose the compiled CUDA 3-D bindings.
+
+        Same memory-mode coverage as the 2-D entry point:
+
+        * forward          — CUDA forward with optional save_all_wavefields /
+                             boundary saving / chunk checkpointing.
+        * backward         — full mode (consumes ``u_forward`` from the
+                             ``save_all_wavefields=True`` forward).
+        * backward_bs      — boundary-saving + last_two reconstruction.
+        * backward_ckpt    — chunk replay from saved checkpoints.
+        * backward_recursive_ckpt — TORCH_CHECK stub (not implemented).
+        """
+        import sweep._C as _C
+        return (
+            _C.acoustic_vti_1st_3d_forward,
+            _C.acoustic_vti_1st_3d_backward,
+            _C.acoustic_vti_1st_3d_backward_bs,
+            _C.acoustic_vti_1st_3d_backward_ckpt,
+            _C.acoustic_vti_1st_3d_backward_recursive_ckpt,
+        )
+
     @property
     def cuda_layout(self):
-        return None
+        """CUDA buffer layout.
+
+        base_nvar = 5   (vx, vy, vz, sH, sV)
+        pml_nvar  = 6   (m_sHx, m_sHy, m_sVz, m_vxx, m_vyy, m_vzz)
+        last_two_storage_nvar = 5  (snapshot of vx, vy, vz, sH, sV)
+        backward_workspace_nvar = 0 (the 11 standard adjoint-wavefield tensors
+                                     are passed via ``adjoint_wavefields``).
+        """
+        return CUDALayoutSpec(
+            base_nvar=5,
+            pml_nvar=6,
+            last_two_nvar=1,
+            last_two_storage_nvar=5,
+            backward_workspace_nvar=0,
+        )
