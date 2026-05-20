@@ -61,10 +61,17 @@ def _run_2d(models, source_type=("sH", "sV"), receiver_type=("vz",),
     shape = tuple(models[0].shape)
     eq = AcousticVTI1st(spatial_order=4, device="cpu", backend="torch")
     src = _src(*shape)
+    # impl='eager' explicitly: these CPU smoke tests target the pure-PyTorch
+    # path.  Once sweep._C is built, PropTorch's impl='auto' resolves to 'c',
+    # whose entry expects numpy-array sources; here we pass torch.Tensor src
+    # so we have to stay on the eager path.  The dedicated CUDA tests
+    # (``test_cuda_*``) exercise the compiled path separately with numpy
+    # arrays.
     prop = PropTorch(
         eq, shape,
         source_type=list(source_type), receiver_type=list(receiver_type),
         abcn=abcn, dh=DH, dt=DT, nt=nt, device="cpu",
+        impl="eager",
         use_ckpt=not return_wavefield,
     )
     kwargs = {}
@@ -103,7 +110,7 @@ def test_isotropic_fallback():
     prop1 = PropTorch(
         eq1, shape,
         source_type=["p"], receiver_type=["vz"],
-        abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu",
+        abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
     )
     models_ac = [torch.full(shape, VP_BG, dtype=torch.float32),
                  torch.full(shape, RHO_BG, dtype=torch.float32)]
@@ -145,7 +152,7 @@ def test_variable_density():
     prop = PropTorch(
         eq, shape,
         source_type=["sH", "sV"], receiver_type=["vz"],
-        abcn=ABCN, dh=DH, dt=DT, nt=NT * 2, device="cpu",
+        abcn=ABCN, dh=DH, dt=DT, nt=NT * 2, device="cpu", impl="eager",
         use_ckpt=False,
     )
     t = np.arange(NT * 2, dtype=np.float32) * DT - 0.05
@@ -210,7 +217,7 @@ def test_3d_vs_2d_parity():
     src2 = _src(nz, nx)
     prop2 = PropTorch(eq2, shape2d,
                       source_type=["sH", "sV"], receiver_type=["vz"],
-                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu",
+                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
                       use_ckpt=False)
     models2 = _models_2d(shape2d, eps=0.15, delta=0.05)
     with torch.no_grad():
@@ -222,7 +229,7 @@ def test_3d_vs_2d_parity():
     src3 = torch.tensor(np.array([[nx // 2, ny // 2, nz // 2]], dtype=np.int64)[None])
     prop3 = PropTorch(eq3, shape3d,
                       source_type=["sH", "sV"], receiver_type=["vz"],
-                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu",
+                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
                       use_ckpt=False)
     models3 = [torch.full(shape3d, 1500.0, dtype=torch.float32),
                torch.full(shape3d, 0.15, dtype=torch.float32),
@@ -270,7 +277,7 @@ def _run_snapshot(delta_field, nz, nx):
     src = _src(nz, nx)
     prop = PropTorch(eq, shape,
                      source_type=["sH", "sV"], receiver_type=["vz"],
-                     abcn=ABCN, dh=DH, dt=DT, nt=nt_snap, device="cpu",
+                     abcn=ABCN, dh=DH, dt=DT, nt=nt_snap, device="cpu", impl="eager",
                      use_ckpt=False)
     t = np.arange(nt_snap, dtype=np.float32) * DT - 0.05
     wav = torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, None, :]
@@ -756,3 +763,333 @@ def test_jax_backend_parity():
     assert torch.allclose(rec_torch, rec_jax, atol=1e-5, rtol=1e-4), (
         f"JAX/torch parity failed: max diff={float((rec_torch - rec_jax).abs().max()):.3e}"
     )
+
+
+# ===========================================================================
+#                        3-D CUDA consistency tests
+# ===========================================================================
+# Mirror the 2-D CUDA tests but on the canonical 3-D suite grid documented in
+# MEMORY.md (nz=24, ny=20, nx=24, dh=10 m, dt=1.5 ms, nt=120, abcn=30).  The
+# 3-D grid is intentionally small so the eager-autograd reference (which has
+# to keep every intermediate wavefield around for autograd) fits in memory
+# comfortably; the CUDA path can scale much larger but that's not what these
+# tests are about.
+
+def _canonical_3d_setup():
+    """Return the canonical 3-D grid + wavelet + source/receiver geometry."""
+    nz, ny, nx = 24, 20, 24
+    dh, dt, nt = 10.0, 1.5e-3, 120
+    abcn = 30
+    freq, delay = 10.0, 0.06
+    spatial_order = 4
+    radius = spatial_order // 2
+
+    shape = (nz, ny, nx)
+    src_x = nx // 2
+    src_y = ny // 2
+    src_z = max(1, min(nz - 1, nz // 4))
+    rec_z = max(1, radius)
+    # One receiver per y-row at z = radius; sparse in y.
+    rec_x = np.arange(max(2, radius),
+                      max(max(2, radius) + 1, nx - max(2, radius)),
+                      6, dtype=np.int64)
+    rec_y = np.arange(max(2, radius),
+                      max(max(2, radius) + 1, ny - max(2, radius)),
+                      4, dtype=np.int64)
+    rx, ry = np.meshgrid(rec_x, rec_y, indexing="xy")
+    rec_xyz = np.stack([rx.ravel(), ry.ravel(),
+                        np.full(rx.size, rec_z, dtype=np.int64)], axis=-1)
+    src_xyz = np.array([[src_x, src_y, src_z]], dtype=np.int64)[None]
+    rec = rec_xyz[None]
+
+    t = np.arange(nt, dtype=np.float32) * dt - delay
+    wavelet = torch.tensor(
+        (1e6 * ricker(t, f=freq)).astype(np.float32)
+    )[None, None, :].cuda()
+
+    return {
+        "shape": shape, "nz": nz, "ny": ny, "nx": nx,
+        "dh": dh, "dt": dt, "nt": nt, "abcn": abcn,
+        "spatial_order": spatial_order,
+        "src": src_xyz, "rec": rec, "wavelet": wavelet,
+    }
+
+
+def _make_3d_models(shape, vp_val=2000.0, eps_val=0.05, delta_val=0.03,
+                    rho_val=1000.0, req_grad=False, device="cuda"):
+    return [
+        torch.full(shape, vp_val,    dtype=torch.float32, device=device, requires_grad=req_grad),
+        torch.full(shape, eps_val,   dtype=torch.float32, device=device, requires_grad=req_grad),
+        torch.full(shape, delta_val, dtype=torch.float32, device=device, requires_grad=req_grad),
+        torch.full(shape, rho_val,   dtype=torch.float32, device=device, requires_grad=req_grad),
+    ]
+
+
+def test_cuda_forward_3d_matches_eager():
+    """impl='c' (compiled CUDA kernel) must match impl='eager' for 3-D.
+
+    Verifies the 3-D Duveneck VTI CUDA forward kernel produces bit-equivalent
+    receiver records to the eager Python reference within float32 round-off.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available.")
+    try:
+        import sweep._C as _C  # noqa: F401
+        if not hasattr(_C, "acoustic_vti_1st_3d_forward"):
+            pytest.skip("sweep._C lacks acoustic_vti_1st_3d_forward — rebuild needed.")
+    except ImportError:
+        pytest.skip("sweep._C extension not built.")
+
+    cfg = _canonical_3d_setup()
+
+    def _run(impl):
+        eq = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                              device="cuda", backend="torch")
+        prop = PropTorch(
+            eq, cfg["shape"],
+            source_type=["sH", "sV"], receiver_type=["vz"],
+            abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+            device="cuda", impl=impl, use_ckpt=False,
+        )
+        with torch.no_grad():
+            return prop(cfg["wavelet"], cfg["src"], cfg["rec"],
+                        models=_make_3d_models(cfg["shape"])).detach().cpu()
+
+    rec_eager = _run("eager")
+    rec_cuda  = _run("c")
+
+    assert rec_eager.shape == rec_cuda.shape
+    max_diff = float((rec_eager - rec_cuda).abs().max())
+    ref = float(rec_eager.abs().max())
+    rel = max_diff / max(ref, 1e-30)
+    assert rel < 1e-4, (
+        f"3-D CUDA vs eager forward divergence: rel={rel:.3e} "
+        f"(max diff {max_diff:.3e}, ref {ref:.3e})"
+    )
+
+
+def _canonical_3d_models_with_anomaly(cfg, req_grad=False):
+    """Depth-ramp vp / rho with a box anomaly; constant eps / delta.
+
+    Returns (true_models, init_models).  Same construction as the 2-D test
+    but with the box extended through y.
+    """
+    nz, ny, nx = cfg["nz"], cfg["ny"], cfg["nx"]
+    shape = cfg["shape"]
+
+    def _ramp(top, bottom):
+        depth = np.linspace(0.0, 1.0, nz, dtype=np.float32)
+        col = (top + (bottom - top) * depth).astype(np.float32)
+        return np.broadcast_to(col[:, None, None], shape).copy()
+
+    def _box(arr, val):
+        out = arr.copy()
+        out[nz // 3: max(nz // 3 + 2, (2 * nz) // 3),
+            ny // 4: max(ny // 4 + 2, (3 * ny) // 4),
+            nx // 4: max(nx // 4 + 2, (3 * nx) // 4)] += val
+        return out
+
+    vp_init  = _ramp(1800.0, 2400.0)
+    vp_true  = _box(vp_init, 180.0)
+    rho_init = _ramp(1000.0, 1200.0)
+    rho_true = _box(rho_init, 60.0)
+    eps      = np.full(shape, 0.05, dtype=np.float32)
+    delta    = np.full(shape, 0.03, dtype=np.float32)
+
+    def _to(*arrs):
+        return [
+            torch.tensor(a, dtype=torch.float32, device="cuda",
+                         requires_grad=req_grad)
+            for a in arrs
+        ]
+
+    return _to(vp_true, eps, delta, rho_true), _to(vp_init, eps, delta, rho_init)
+
+
+def test_cuda_backward_3d_matches_eager():
+    """3-D CUDA backward (full mode) vs eager autograd, canonical 3-D suite.
+
+    Per-model expectations (same Phase-1 caveats as 2-D):
+        grad_vp, grad_epsilon, grad_delta  : rel L2 < 1.5, cos sim > 0.8
+        grad_rho                          : rel L2 < 1.5, cos sim > 0.8
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available.")
+    try:
+        import sweep._C as _C
+        if not hasattr(_C, "acoustic_vti_1st_3d_backward"):
+            pytest.skip("sweep._C lacks acoustic_vti_1st_3d_backward — rebuild needed.")
+    except ImportError:
+        pytest.skip("sweep._C extension not built.")
+
+    cfg = _canonical_3d_setup()
+    true_models, _ = _canonical_3d_models_with_anomaly(cfg, req_grad=False)
+
+    # Synthetic target via eager (3-D autograd is the reference).
+    eq_t = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                            device="cuda", backend="torch")
+    prop_t = PropTorch(
+        eq_t, cfg["shape"],
+        source_type=["sH", "sV"], receiver_type=["vz"],
+        abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+        device="cuda", impl="eager", use_ckpt=False,
+    )
+    with torch.no_grad():
+        target = prop_t(cfg["wavelet"], cfg["src"], cfg["rec"],
+                        models=true_models).detach()
+
+    def _grads(impl):
+        eq = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                              device="cuda", backend="torch")
+        prop = PropTorch(
+            eq, cfg["shape"],
+            source_type=["sH", "sV"], receiver_type=["vz"],
+            abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+            device="cuda", impl=impl, use_ckpt=False,
+        )
+        _, init_models = _canonical_3d_models_with_anomaly(cfg, req_grad=True)
+        rec_syn = prop(cfg["wavelet"], cfg["src"], cfg["rec"], models=init_models)
+        loss = ((rec_syn - target) ** 2).mean()
+        gs = torch.autograd.grad(loss, init_models)
+        return [g.detach() for g in gs]
+
+    g_eager = _grads("eager")
+    g_cuda  = _grads("c")
+
+    names = ["grad_vp", "grad_eps", "grad_delta", "grad_rho"]
+    for name, ge, gc in zip(names, g_eager, g_cuda):
+        ref = ge.cpu().to(torch.float64).reshape(-1)
+        cand = gc.cpu().to(torch.float64).reshape(-1)
+        ref_l2 = float(torch.linalg.vector_norm(ref))
+        cand_l2 = float(torch.linalg.vector_norm(cand))
+        diff_l2 = float(torch.linalg.vector_norm(ref - cand))
+        rel_l2 = diff_l2 / max(ref_l2, 1e-30)
+        cos_sim = float(torch.dot(ref, cand) / (max(ref_l2 * cand_l2, 1e-30)))
+        assert rel_l2 < 1.5, f"{name}: rel L2 {rel_l2:.3e} >= 1.5"
+        assert cos_sim > 0.8, f"{name}: cosine similarity {cos_sim:.4f} <= 0.8"
+
+
+def test_cuda_backward_3d_bs_matches_full():
+    """3-D CUDA backward_bs vs full mode — should match to float32 precision."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available.")
+    try:
+        import sweep._C as _C
+        if not hasattr(_C, "acoustic_vti_1st_3d_backward_bs"):
+            pytest.skip("sweep._C lacks acoustic_vti_1st_3d_backward_bs — rebuild needed.")
+    except ImportError:
+        pytest.skip("sweep._C extension not built.")
+
+    from sweep.propagator.options import BoundaryOptions, MemoryOptions
+
+    cfg = _canonical_3d_setup()
+    true_models, _ = _canonical_3d_models_with_anomaly(cfg, req_grad=False)
+
+    eq_t = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                            device="cuda", backend="torch")
+    prop_t = PropTorch(
+        eq_t, cfg["shape"],
+        source_type=["sH", "sV"], receiver_type=["vz"],
+        abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+        device="cuda", impl="eager", use_ckpt=False,
+    )
+    with torch.no_grad():
+        target = prop_t(cfg["wavelet"], cfg["src"], cfg["rec"],
+                        models=true_models).detach()
+
+    def _grads(memory_options):
+        eq = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                              device="cuda", backend="torch")
+        kwargs = dict(
+            source_type=["sH", "sV"], receiver_type=["vz"],
+            abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+            device="cuda", impl="c", use_ckpt=False,
+        )
+        if memory_options is not None:
+            kwargs["memory_options"] = memory_options
+        prop = PropTorch(eq, cfg["shape"], **kwargs)
+        _, init_models = _canonical_3d_models_with_anomaly(cfg, req_grad=True)
+        rec_syn = prop(cfg["wavelet"], cfg["src"], cfg["rec"], models=init_models)
+        loss = ((rec_syn - target) ** 2).mean()
+        return [g.detach() for g in torch.autograd.grad(loss, init_models)]
+
+    g_full = _grads(None)
+    g_bs   = _grads(MemoryOptions(strategy="boundary",
+                                  boundary=BoundaryOptions(storage="gpu")))
+
+    names = ["grad_vp", "grad_eps", "grad_delta", "grad_rho"]
+    for name, gf, gb in zip(names, g_full, g_bs):
+        diff = float((gf - gb).abs().max())
+        ref = float(gf.abs().max())
+        rel = diff / max(ref, 1e-30)
+        # bs and full share the same adjoint kernel + gradient kernel; only the
+        # forward-state source differs (saved full vs reconstructed) so the
+        # difference is at float32 round-off.
+        assert rel < 1e-4, (
+            f"{name}: backward_bs vs full diff {rel:.3e} > 1e-4 "
+            f"(diff max {diff:.3e}, full max {ref:.3e})"
+        )
+
+
+def test_cuda_backward_3d_ckpt_matches_full():
+    """3-D CUDA backward_ckpt vs full mode, loose ``solver_gradient_mode_suite``
+    thresholds (rel_l2 < 1.5, cos sim > 0.8) because chunk boundaries introduce
+    a small inv_rho bias.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available.")
+    try:
+        import sweep._C as _C
+        if not hasattr(_C, "acoustic_vti_1st_3d_backward_ckpt"):
+            pytest.skip("sweep._C lacks acoustic_vti_1st_3d_backward_ckpt — rebuild needed.")
+    except ImportError:
+        pytest.skip("sweep._C extension not built.")
+
+    from sweep.propagator.options import CkptOptions, MemoryOptions
+
+    cfg = _canonical_3d_setup()
+    true_models, _ = _canonical_3d_models_with_anomaly(cfg, req_grad=False)
+
+    eq_t = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                            device="cuda", backend="torch")
+    prop_t = PropTorch(
+        eq_t, cfg["shape"],
+        source_type=["sH", "sV"], receiver_type=["vz"],
+        abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+        device="cuda", impl="eager", use_ckpt=False,
+    )
+    with torch.no_grad():
+        target = prop_t(cfg["wavelet"], cfg["src"], cfg["rec"],
+                        models=true_models).detach()
+
+    def _grads(memory_options):
+        eq = AcousticVTI1st3D(spatial_order=cfg["spatial_order"],
+                              device="cuda", backend="torch")
+        kwargs = dict(
+            source_type=["sH", "sV"], receiver_type=["vz"],
+            abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
+            device="cuda", impl="c", use_ckpt=False,
+        )
+        if memory_options is not None:
+            kwargs["memory_options"] = memory_options
+        prop = PropTorch(eq, cfg["shape"], **kwargs)
+        _, init_models = _canonical_3d_models_with_anomaly(cfg, req_grad=True)
+        rec_syn = prop(cfg["wavelet"], cfg["src"], cfg["rec"], models=init_models)
+        loss = ((rec_syn - target) ** 2).mean()
+        return [g.detach() for g in torch.autograd.grad(loss, init_models)]
+
+    g_full = _grads(None)
+    g_ckpt = _grads(MemoryOptions(strategy="ckpt",
+                                  ckpt=CkptOptions(mode="chunk", chunks=8)))
+
+    names = ["grad_vp", "grad_eps", "grad_delta", "grad_rho"]
+    for name, gf, gc in zip(names, g_full, g_ckpt):
+        ref = gf.cpu().to(torch.float64).reshape(-1)
+        cand = gc.cpu().to(torch.float64).reshape(-1)
+        ref_l2 = float(torch.linalg.vector_norm(ref))
+        cand_l2 = float(torch.linalg.vector_norm(cand))
+        diff_l2 = float(torch.linalg.vector_norm(ref - cand))
+        rel_l2 = diff_l2 / max(ref_l2, 1e-30)
+        cos_sim = float(torch.dot(ref, cand) / (max(ref_l2 * cand_l2, 1e-30)))
+        assert rel_l2 < 1.5, f"{name}: rel L2 {rel_l2:.3e} >= 1.5"
+        assert cos_sim > 0.8, f"{name}: cos sim {cos_sim:.4f} <= 0.8"
