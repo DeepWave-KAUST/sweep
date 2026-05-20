@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
+
+#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vrz2d.h"
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
@@ -18,6 +20,7 @@
 namespace acoustic_vrz2d {
 
 ForwardOutput forward(const ForwardInput& in) {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
 
     const auto& p = in;
     ForwardOutput out;

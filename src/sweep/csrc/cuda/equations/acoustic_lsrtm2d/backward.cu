@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <torch/extension.h>
 
@@ -342,6 +343,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
 
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     BackwardOutput out;
     TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
 
@@ -357,6 +359,7 @@ BackwardOutput backward(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -557,6 +560,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -715,6 +719,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 

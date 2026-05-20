@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 #include <array>
 
@@ -262,6 +263,7 @@ void backward_segment_ckpt(
 
 BackwardOutput backward(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -386,6 +388,7 @@ BackwardOutput backward(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
@@ -652,6 +655,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
+    c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
 
