@@ -148,5 +148,6 @@ class AcousticLSRTM(SecondOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
+            boundary_save_nvar=1,
         )
     

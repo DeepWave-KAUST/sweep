@@ -16,6 +16,7 @@ class CUDALayoutSpec:
     backward_workspace_nvar: int = 0
     backward_workspace_shapes: Callable | None = None
     boundary_tangent_pad: int = 0
+    boundary_save_nvar: int | None = None
 
     def resolved_last_two_storage_nvar(self) -> int:
         return self.base_nvar if self.last_two_storage_nvar is None else self.last_two_storage_nvar
@@ -23,3 +24,14 @@ class CUDALayoutSpec:
     def resolved_checkpoint_nvar(self) -> int:
         default = self.base_nvar + self.pml_nvar
         return default if self.checkpoint_nvar is None else self.checkpoint_nvar
+
+    def resolved_boundary_save_nvar(self) -> int:
+        """Number of distinct fields the boundary saver writes per timestep.
+
+        Defaults to ``base_nvar`` for backward compatibility, but second-order
+        time-stepping schemes (acoustic, acoustic_vrz, acoustic_lsrtm) only
+        write the primary pressure field to the boundary buffer — they should
+        set ``boundary_save_nvar=1`` to avoid over-allocating the GPU-side
+        boundary tensors by a factor of ``base_nvar``.
+        """
+        return self.base_nvar if self.boundary_save_nvar is None else self.boundary_save_nvar
