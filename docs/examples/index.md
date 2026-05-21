@@ -12,14 +12,15 @@ versions designed to be the easiest entry point.
 
 <div class="grid cards" markdown>
 
--   **Hello · forward**
+-   **Hello · SWEEP**
 
     ---
 
-    Smallest end-to-end SWEEP workflow: parameters → model → `Acoustic()` +
-    `PropTorch()` → one forward + shot gather. No external data.
+    Smallest end-to-end SWEEP story in one notebook: parameters → model →
+    `Acoustic()` + `PropTorch()` → one shot gather → one `.backward()` for a
+    vp gradient → 5-line Adam loop. No external data.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/00_hello_forward.ipynb)
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/00_hello_fwi.ipynb)
 
 -   **FWI · Acoustic · Marmousi**
 

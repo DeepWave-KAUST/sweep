@@ -18,8 +18,8 @@ two-layer model, then points to the runnable example that does the same thing in
 a notebook.
 
 > Prefer to skim a notebook?
-> [`examples/notebooks/00_hello_forward.ipynb`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/00_hello_forward.ipynb)
-> is the executable version of this quick start.
+> [`examples/notebooks/00_hello_fwi.ipynb`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/00_hello_fwi.ipynb)
+> is the executable version of this quick start (plus the backward + Adam-loop continuation).
 
 ## 1. Imports and a velocity model
 
