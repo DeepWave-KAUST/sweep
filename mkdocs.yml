@@ -13,8 +13,9 @@ theme:
   features:
     - navigation.tabs
     - navigation.tabs.sticky
-    - navigation.sections
     - navigation.indexes
+    - navigation.top
+    - toc.follow
     - content.code.copy
   palette:
     - media: "(prefers-color-scheme: light)"
@@ -46,6 +47,28 @@ markdown_extensions:
   - toc:
       permalink: true
 
+plugins:
+  - search
+  - mkdocs-jupyter:
+      include_source: true
+      execute: false
+      ignore_h1_titles: true
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            docstring_style: google
+            docstring_section_style: table
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            merge_init_into_class: true
+            line_length: 88
+
 nav:
   - Home: index.md
   - Getting Started:
@@ -57,32 +80,27 @@ nav:
       - Propagators: user-guide/propagators.md
       - CLI: user-guide/cli.md
   - Examples:
-      - examples/index.md
-      - 2D Acoustic FWI · Torch: examples/acoustic_fwi_torch.md
-      - 2D Acoustic FWI · JAX: examples/acoustic_fwi_jax.md
-      - 2D Elastic FWI · Marmousi: examples/elastic_fwi_torch_marmousi.md
-      - 2D Elastic FWI · Overthrust: examples/elastic_fwi_torch_overthrust.md
-      - 2D Acoustic LSRTM: examples/acoustic_lsrtm_torch.md
-      - 3D Acoustic FWI · Torch: examples/acoustic_fwi_3d_torch.md
-      - 3D Acoustic FWI · JAX: examples/acoustic_fwi_3d_jax.md
-      - 3D Acoustic LSRTM: examples/acoustic_lsrtm_3d_torch.md
-      - Reducing Memory:
-          - examples/reducing_memory.md
-          - Source-encoded FWI: examples/acoustic_fwi_encoding_torch.md
-          - Source Encoding Overview: examples/source_encoding_overview.md
-          - Method Compare: examples/memory_method_compare.md
-      - Modeling:
-          - examples/wavefields.md
-          - CUDA FD Orders: examples/wavefields_cuda_fd_orders.md
-          - Free Surface: examples/wavefields_free_surface.md
-          - qP: examples/wavefields_anisotropic.md
-          - Elastic TTI: examples/elastic_tti_wavefields.md
-          - DAS: examples/wavefields_das.md
-      - Multi-GPU:
-          - examples/multi_gpu.md
-          - Torch Distributed: examples/multi_gpu_torch.md
-          - JAX pmap: examples/multi_gpu_jax.md
-      - Model Assets: examples/model_assets.md
+      - Overview: examples/index.md
+      - Notebooks:
+          - Hello · SWEEP: notebooks/00_hello_fwi.ipynb
+          - FWI:
+              - Acoustic · Marmousi: notebooks/01_fwi_acoustic_marmousi.ipynb
+              - Elastic · Marmousi: notebooks/02_fwi_elastic_marmousi.ipynb
+              - Multiscale: notebooks/03_fwi_multiscale.ipynb
+              - Memory strategies: notebooks/07_memory_strategies.ipynb
+              - 3D Overthrust: notebooks/11_fwi_acoustic_overthrust_3d.ipynb
+              - Multi-GPU · single process: notebooks/12_multi_gpu_single_process.ipynb
+          - Wavefields:
+              - DAS: notebooks/04_das_zhao_vs_mu.ipynb
+              - Elastic: notebooks/06_wavefield_elastic.ipynb
+              - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
+          - Anisotropic:
+              - AcousticVTI: notebooks/05_wavefield_vti.ipynb
+              - ElasticTTI: notebooks/10_wavefield_elastic_tti.ipynb
+          - Imaging:
+              - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
+      - Scripts:
+          - Multi-GPU DDP: examples/multi_gpu_dist.md
   - API Reference:
       - api/index.md
       - Equations:

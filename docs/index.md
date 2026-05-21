@@ -4,88 +4,131 @@ A PyTorch + JAX framework for **differentiable** seismic wave-equation modeling,
 migration, and full-waveform inversion. Built for research where you want to
 swap equations, switch backends, and inspect every gradient.
 
-<div class="grid cards" markdown>
+## Try the notebooks
 
--   ![Multi-backend speedups](assets/cards/backends.png){ loading=lazy }
+Browser-rendered Jupyter notebooks — every cell already executed, figures
+inline. Click a thumbnail to read it online, or download the `.ipynb` to run
+it locally.
 
-    **Multi-backend by design**
+### Start here
 
-    ---
+<div class="grid cards" markdown style="max-width: 18rem;">
 
-    PyTorch eager, compiled CUDA / C++ extension, and JAX behind one API.
-    Switch with one flag — autograd everywhere.
+-   [![Hello SWEEP — single-trace vp gradient](figures/gallery/00_hello_fwi.png){ loading=lazy }](notebooks/00_hello_fwi.ipynb)
 
-    [:octicons-arrow-right-24: Backends](user-guide/backends.md)
-
--   ![Wavefield ripple](assets/cards/equations.png){ loading=lazy }
-
-    **Twenty-plus equations**
+    **Hello · SWEEP**
 
     ---
 
-    Acoustic, elastic, TTI / VTI anisotropic, DAS, visco-acoustic — both 2D
-    and 3D variants, ready for forward modeling and adjoint-based inversion.
+    One shot, one receiver, one `.backward()` — read off the Fresnel-zone
+    sensitivity kernel for a single trace, then stack shots into a 5-line
+    Adam loop. The 30-second tour of SWEEP.
 
-    [:octicons-arrow-right-24: Equations](user-guide/equations.md)
-
--   ![Memory tactics for large-model FWI](assets/cards/gpu.png){ loading=lazy }
-
-    **GPU-accelerated, memory-friendly**
-
-    ---
-
-    Hand-tuned CUDA kernels with boundary-saving, source encoding, and
-    activation checkpointing for memory-bound large-model FWI.
-
-    [:octicons-arrow-right-24: Reducing memory](examples/reducing_memory.md)
-
--   ![Velocity model and FWI gradient](assets/cards/research.png){ loading=lazy }
-
-    **Research-ready**
-
-    ---
-
-    Multi-GPU, MPI shot parallelism, joint migration inversion, DAS-specific
-    physics — all exercised on Marmousi, Overthrust, and SEAM benchmarks.
-
-    [:octicons-arrow-right-24: Examples](examples/index.md)
+    [:octicons-arrow-right-24: Open](notebooks/00_hello_fwi.ipynb)
 
 </div>
 
-## Pick your path
+### FWI
 
 <div class="grid cards" markdown>
 
--   :material-rocket-launch-outline:{ .lg .middle } &nbsp; **New to FWI?**
+-   [![Marmousi vp model](figures/gallery/01_fwi_acoustic_marmousi.png){ loading=lazy }](notebooks/01_fwi_acoustic_marmousi.ipynb)
+
+    **Acoustic · Marmousi**
 
     ---
 
-    Start with the [Quick Start](getting-started/quickstart.md) — a 12-step
-    PyTorch walkthrough that builds one acoustic solver and computes a
-    velocity gradient.
+    Velocity inversion on Marmousi with the PyTorch backend, single-GPU.
 
--   :material-swap-horizontal:{ .lg .middle } &nbsp; **Migrating from another solver?**
+    [:octicons-arrow-right-24: Open](notebooks/01_fwi_acoustic_marmousi.ipynb)
 
-    ---
+-   [![Marmousi Poisson ratio](figures/gallery/02_fwi_elastic_marmousi.png){ loading=lazy }](notebooks/02_fwi_elastic_marmousi.ipynb)
 
-    Jump straight to [Examples](examples/index.md) — runnable FWI / LSRTM
-    scripts on Marmousi and Overthrust models, in both PyTorch and JAX.
-
--   :material-api:{ .lg .middle } &nbsp; **Need the API?**
+    **Elastic · Marmousi**
 
     ---
 
-    [API Reference](api/index.md) documents every equation class and
-    propagator option, including model parameter order and supported
-    backends.
+    Joint Vp / Vs inversion with the 2D elastic equation, autograd end-to-end.
 
--   :material-speedometer:{ .lg .middle } &nbsp; **Optimizing for large models?**
+    [:octicons-arrow-right-24: Open](notebooks/02_fwi_elastic_marmousi.ipynb)
+
+-   [![Multiscale inversion target](figures/gallery/03_fwi_multiscale.png){ loading=lazy }](notebooks/03_fwi_multiscale.ipynb)
+
+    **Multiscale**
 
     ---
 
-    [Multi-GPU](examples/multi_gpu.md) and
-    [Reducing memory](examples/reducing_memory.md) cover Torch Distributed,
-    JAX pmap, source encoding, and checkpointing.
+    Frequency-sweep strategy to climb out of cycle-skipping on Marmousi.
+
+    [:octicons-arrow-right-24: Open](notebooks/03_fwi_multiscale.ipynb)
+
+-   [![Memory strategies comparison](figures/gallery/07_memory_strategies.png){ loading=lazy }](notebooks/07_memory_strategies.ipynb)
+
+    **Memory strategies**
+
+    ---
+
+    Boundary saving, checkpointing, disk offload — how to fit large-model FWI.
+
+    [:octicons-arrow-right-24: Open](notebooks/07_memory_strategies.ipynb)
+
+</div>
+
+### Wavefields
+
+<div class="grid cards" markdown>
+
+-   [![DAS shot gather](figures/gallery/04_das_zhao_vs_mu.png){ loading=lazy }](notebooks/04_das_zhao_vs_mu.ipynb)
+
+    **DAS**
+
+    ---
+
+    Compare two distributed-acoustic-sensing forward operators on a layered model.
+
+    [:octicons-arrow-right-24: Open](notebooks/04_das_zhao_vs_mu.ipynb)
+
+-   [![Elastic Vz wavefield snapshot](figures/gallery/06_wavefield_elastic.png){ loading=lazy }](notebooks/06_wavefield_elastic.ipynb)
+
+    **Elastic**
+
+    ---
+
+    P/S separation snapshots from the 2D elastic staggered-grid solver.
+
+    [:octicons-arrow-right-24: Open](notebooks/06_wavefield_elastic.ipynb)
+
+</div>
+
+### Anisotropic
+
+<div class="grid cards" markdown style="max-width: 18rem;">
+
+-   [![VTI pseudo-acoustic wavefield](figures/gallery/05_wavefield_vti.png){ loading=lazy }](notebooks/05_wavefield_vti.ipynb)
+
+    **AcousticVTI**
+
+    ---
+
+    Pseudo-acoustic VTI propagation with shear-leakage suppression.
+
+    [:octicons-arrow-right-24: Open](notebooks/05_wavefield_vti.ipynb)
+
+</div>
+
+### Imaging
+
+<div class="grid cards" markdown style="max-width: 18rem;">
+
+-   [![Vp gradient / RTM image](figures/gallery/08_rtm_acoustic_marmousi.png){ loading=lazy }](notebooks/08_rtm_acoustic_marmousi.ipynb)
+
+    **RTM · Marmousi**
+
+    ---
+
+    Reverse-time migration with the acoustic solver — image from one gradient.
+
+    [:octicons-arrow-right-24: Open](notebooks/08_rtm_acoustic_marmousi.ipynb)
 
 </div>
 

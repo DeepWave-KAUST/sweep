@@ -77,11 +77,39 @@ def step_cpml(
 
 
 class AcousticTTI(SecondOrderEquation):
-    """Parameter order: vp, epsilon, delta, theta.
+    """Second-order 2-D pseudo-acoustic TTI wave equation (Liang 2022).
 
-       Wavefields: (h1, h2, psix, psiz, zetax, zetaz)
+    Tilted-symmetry-axis extension of :class:`AcousticVTI`. The
+    pressure-like field ``h1`` is updated with anisotropy weights that
+    are computed in a tilted frame defined by ``theta``; the Laplacian
+    along the symmetry axis is rotated accordingly, and an extra
+    ``∂²p/∂x∂z`` mixed-term carries the off-diagonal anisotropy.
+    Single-field pseudo-acoustic — no auxiliary ``f`` field. Also
+    exposed as :class:`AcousticAniso(method='liang', symmetry='tti')`.
 
-       Reference: Liang K., et.al, 10.1190/geo2022-0292.1
+    Reference: Liang K. et al. 2022, 10.1190/geo2022-0292.1.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): TTI acoustic reference velocity.
+        - ``epsilon``: Thomsen epsilon parameter.
+        - ``delta``: Thomsen delta parameter.
+        - ``theta`` (rad): Tilt angle parameter.
+
+    !!! info "Wavefields"
+
+        - ``h1`` (aliases: ``pressure``, ``p``): Primary acoustic-TTI pressure-like wavefield; default source and receiver.
+        - ``h2`` (aliases: ``pressure_prev``): Previous-step pressure-like wavefield (internal).
+        - ``psix``: CPML memory variable for the x-derivative term (internal).
+        - ``psiz``: CPML memory variable for the z-derivative term (internal).
+        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
+        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['h1']``
+        - ``receiver_type``: ``['h1']``
+        - ``pml_type``: ``'cpmlr'``
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="TTI acoustic reference velocity.", unit="m/s"),
@@ -101,6 +129,24 @@ class AcousticTTI(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
+        """Build the 2-D pseudo-acoustic TTI equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the spatial Laplacian and the auxiliary first-derivative kernels used by the rotated-anisotropy term — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must be an even integer (``2, 4, 6, 8, 10, …``).
+                This equation has **no compiled `impl='c'` path; use
+                `impl='eager'`** (the default). Defaults to 4.
+            device: Device for the operator's static kernels. Use
+                ``'cuda'`` / a ``torch.device`` for GPU eager runs.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. Defaults to ``'torch'``. Requires the
+                matching array library to be importable.
+            dim: Stored dimensionality. Always ``2`` for this class.
+                Defaults to 2.
+        """
         super().__init__(spatial_order, device, backend, other_kernels=True)
         super().init_laplace(ltype="1dsep", backend=backend)
         self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}

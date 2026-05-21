@@ -136,11 +136,65 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
            m_syzy, m_syzz
 
 class Elastic(FirstOrderEquation):
-    """Parameter order: vp, vs, rho.
-    
-       Wavefields: (vx, vz, txx, tzz, txz)
+    """First-order 3-D elastic wave equation on a staggered grid (Virieux 1986).
 
-       Reference: Jean Virieux, 10.1190/1.1442147
+    Three-dimensional velocity-stress formulation. The nine physical fields
+    ``(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz)`` are evolved together
+    with eighteen CPML memory variables (one per first-derivative
+    direction). Sources are typically an explosion (``['sxx', 'syy',
+    'szz']`` — the default) or a directional body force; receivers
+    usually read particle velocities or stresses.
+
+    Reference: J. Virieux, 1986, *P-SV wave propagation in heterogeneous
+    media: velocity-stress finite-difference method*, Geophysics 51(4),
+    [10.1190/1.1442147](https://doi.org/10.1190/1.1442147).
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): 3D elastic P-wave velocity model.
+        - ``vs`` (m/s): 3D elastic S-wave velocity model.
+        - ``rho`` (kg/m^3): 3D density model.
+
+    !!! info "Wavefields"
+
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction; default receiver.
+        - ``vy`` (aliases: ``velocity_y``): Particle velocity in the y direction; default receiver.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction; default receiver.
+        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
+        - ``syy`` (aliases: ``stress_yy``): Normal stress in the y direction; default source.
+        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
+        - ``sxy`` (aliases: ``stress_xy``, ``shear_xy``): Shear stress component.
+        - ``sxz`` (aliases: ``stress_xz``, ``shear_xz``): Shear stress component.
+        - ``syz`` (aliases: ``stress_yz``, ``shear_yz``): Shear stress component.
+        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
+        - ``m_vxy``: CPML memory variable for dvx/dy (internal).
+        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
+        - ``m_vyx``: CPML memory variable for dvy/dx (internal).
+        - ``m_vyy``: CPML memory variable for dvy/dy (internal).
+        - ``m_vyz``: CPML memory variable for dvy/dz (internal).
+        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
+        - ``m_vzy``: CPML memory variable for dvz/dy (internal).
+        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
+        - ``m_sxxx``: CPML memory variable for dsxx/dx (internal).
+        - ``m_szzz``: CPML memory variable for dszz/dz (internal).
+        - ``m_sxyx``: CPML memory variable for dsxy/dx (internal).
+        - ``m_sxyy``: CPML memory variable for dsxy/dy (internal).
+        - ``m_sxzx``: CPML memory variable for dsxz/dx (internal).
+        - ``m_sxzz``: CPML memory variable for dsxz/dz (internal).
+        - ``m_syyy``: CPML memory variable for dsyy/dy (internal).
+        - ``m_syzy``: CPML memory variable for dsyz/dy (internal).
+        - ``m_syzz``: CPML memory variable for dsyz/dz (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sxx', 'syy', 'szz']``
+        - ``receiver_type``: ``['vx', 'vy', 'vz']``
+        - ``pml_type``: ``'cpmls'``
+
+    Note:
+        The class is named ``Elastic`` in this module but is exposed as
+        :class:`Elastic3D` from :mod:`sweep.equations`; use the 3-D name
+        in user code.
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="3D elastic P-wave velocity model.", unit="m/s"),
@@ -177,9 +231,35 @@ class Elastic(FirstOrderEquation):
         FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
     )
 
-    default_pml_type = "cpmlr"
+    default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
+        """Build the 3-D elastic equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must
+                be an even integer (``2, 4, 6, 8, 10, …``). Higher orders
+                reduce grid dispersion — most visibly on the slower
+                S-wave — at the cost of more compute per step and a
+                wider PML halo.
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels are template-specialised only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                falls through to the generic ``order = -1`` runtime path
+                (see ``src/sweep/csrc/cuda/equations/elastic3d/forward.cu``)
+                which is noticeably slower; the PyTorch eager path is
+                unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, ndim=3)
     
     @property

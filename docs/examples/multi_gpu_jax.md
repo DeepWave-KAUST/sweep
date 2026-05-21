@@ -1,8 +1,10 @@
 # JAX pmap Multi-GPU FWI
 
+> :material-github: **Source on GitHub** &mdash; [`examples/multi-gpu/jax/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/multi-gpu/jax) (clone, run, modify)
+
 Source file:
 
-- `examples/multi-gpu/jax/fwi_marmousi_pmap.py`
+- [`examples/multi-gpu/jax/fwi_marmousi_pmap.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/multi-gpu/jax/fwi_marmousi_pmap.py)
 
 This script is a data-parallel version of the 2D acoustic Marmousi JAX FWI
 example. It uses one host process and `jax.pmap` over all local JAX devices.
@@ -85,7 +87,7 @@ python3 examples/multi-gpu/jax/fwi_marmousi_pmap.py
 
 Outputs are saved under:
 
-- `examples/multi-gpu/jax/multi_gpu_acoustic_fwi_jax/`
+- [`examples/multi-gpu/jax/multi_gpu_acoustic_fwi_jax/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/multi-gpu/jax/multi_gpu_acoustic_fwi_jax)
 
 Saved files include:
 

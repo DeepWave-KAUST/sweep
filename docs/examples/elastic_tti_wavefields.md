@@ -1,8 +1,10 @@
 # Elastic TTI Wavefield Experiments
 
+> :material-github: **Source on GitHub** &mdash; [`examples/wavefields/anisotropic/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/wavefields/anisotropic) (clone, run, modify)
+
 Source directory:
 
-- `examples/wavefields/anisotropic/`
+- [`examples/wavefields/anisotropic/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/wavefields/anisotropic)
 
 This example keeps the elastic TTI visualization set intentionally small. It
 uses a homogeneous 2D three-component TTI medium and focuses on two diagnostics:

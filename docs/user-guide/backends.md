@@ -7,8 +7,13 @@ SWEEP supports two main user-facing backend families:
 
 Within the Torch family, `PropTorch` now selects the actual implementation:
 
-- `backend="torch", impl="eager"`: Python/Torch implementation
-- `backend="torch", impl="c"`: compiled C++/CUDA implementation through the Torch extension
+- `impl=None` *(default — equivalent to `impl="auto"`)*: probe `sweep._C`;
+  pick `"c"` when the compiled binding is importable, otherwise transparently
+  fall back to `"eager"`.
+- `impl="eager"`: pure-PyTorch implementation (no build step required).
+- `impl="c"`: compiled C++/CUDA implementation through the Torch extension.
+  If the binding is missing, `PropTorch` falls back to `"eager"` with a
+  `UserWarning` so the slowdown is visible.
 
 ## User-Facing Backend Families
 
@@ -64,34 +69,18 @@ Example diagnostics output:
 
 Not every equation exposes the compiled binding path.
 
-Use the CLI to inspect support:
+Use the CLI to inspect support — the listing is generated live from the
+installed package, so it always reflects the current environment:
 
 ```bash
 sweep list equations
 ```
 
-Example output:
+See [CLI · `sweep list equations`](cli.md#sweep-list-equations) for the full
+table. Each row tells you:
 
-```text
-Available equations:
-
-  Equation       Models               Torch Binding  Binding Ready
-  -------------  -------------------  -------------  -------------
-  Acoustic       ['vp']               yes            yes
-  Acoustic1st    ['vp', 'rho']        no             no
-  Acoustic3D     ['vp']               yes            yes
-  AcousticLSRTM  ['vp', 'mp']         yes            yes
-  AcousticLSRTM3D ['vp', 'mp']        yes            yes
-  AcousticVRZ    ['vp', 'z']          yes            yes
-  AcousticVRZ3D  ['vp', 'z']          yes            yes
-  Elastic        ['vp', 'vs', 'rho']  yes            yes
-  Elastic3D      ['vp', 'vs', 'rho']  yes            yes
-```
-
-The table distinguishes:
-
-- Whether an equation supports torch binding
-- Whether the current environment can actually use it
+- **Torch Binding** — whether the equation's source declares compiled-extension support.
+- **Binding Ready** — whether that binding is loadable *right now* (i.e. `sweep._C` imports cleanly).
 
 ## Choosing Between Torch and JAX
 

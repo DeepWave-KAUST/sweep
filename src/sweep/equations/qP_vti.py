@@ -54,11 +54,47 @@ def step_cpml(
 
 
 class AcousticVTI(SecondOrderEquation):
-    """Parameter order: vp, epsilon, delta.
+    """Second-order 2-D pseudo-acoustic VTI wave equation (Liang 2022).
 
-       Wavefields: (h1, h2, psix, psiz, zetax, zetaz)
+    Single-field pseudo-acoustic VTI formulation derived from the
+    dispersion relation. The pressure-like field ``h1`` is driven by
+    PML-corrected Laplacian terms with anisotropy-dependent weights
+    that depend on the local propagation direction of the wavefront
+    (computed from the spatial gradients of ``h1`` itself). This
+    avoids the auxiliary ``f`` field needed by the Alkhalifah / eta
+    family while still suppressing the shear-mode artifact that
+    plagues the original Alkhalifah pseudo-acoustic.
 
-       Reference: Liang K., et.al, 10.1190/geo2022-0292.1
+    Source / receiver caveat: ``source_type=['h1']`` is the default;
+    typical Ricker injection on ``h1`` works well at modest grid
+    spacings. With strongly anisotropic media (large ``epsilon``) at
+    ``dh=(5, 5)`` and ``dt=1 ms``, the scheme can go unstable — use
+    coarser z spacing or smaller ``dt``. Also exposed as
+    :class:`AcousticAniso(method='liang', symmetry='vti')`.
+
+    Reference: Liang K. et al. 2022, 10.1190/geo2022-0292.1; underlying
+    pseudo-acoustic derivation: 10.1190/geo2014-0242.1.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): VTI acoustic reference velocity.
+        - ``epsilon``: Thomsen epsilon parameter.
+        - ``delta``: Thomsen delta parameter.
+
+    !!! info "Wavefields"
+
+        - ``h1`` (aliases: ``pressure``, ``p``): Primary acoustic-VTI pressure-like wavefield; default source and receiver.
+        - ``h2`` (aliases: ``pressure_prev``): Previous-step pressure-like wavefield (internal).
+        - ``psix``: CPML memory variable for the x-derivative term (internal).
+        - ``psiz``: CPML memory variable for the z-derivative term (internal).
+        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
+        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['h1']``
+        - ``receiver_type``: ``['h1']``
+        - ``pml_type``: ``'cpmlr'``
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="VTI acoustic reference velocity.", unit="m/s"),
@@ -77,6 +113,23 @@ class AcousticVTI(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
+        """Build the 2-D pseudo-acoustic VTI equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the spatial Laplacian and the auxiliary first-derivative kernels used by the anisotropy direction term — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must be an even integer (``2, 4, 6, 8,
+                10, …``). This equation has **no compiled `impl='c'`
+                path; use `impl='eager'`** (the default). Defaults to 4.
+            device: Device for the operator's static kernels. Use
+                ``'cuda'`` / a ``torch.device`` for GPU eager runs.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. Defaults to ``'torch'``.
+            dim: Stored dimensionality. Always ``2`` for this class.
+                Defaults to 2.
+        """
         super().__init__(spatial_order, device, backend, other_kernels=True)
         super().init_laplace(ltype="1dsep", backend=backend)
         self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}

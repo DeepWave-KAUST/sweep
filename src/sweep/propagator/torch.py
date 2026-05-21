@@ -1,4 +1,5 @@
 import inspect
+import warnings
 
 import torch
 
@@ -16,7 +17,7 @@ from sweep.propagator.options import (
 
 
 SUPPORTED_BACKENDS = {"torch"}
-SUPPORTED_IMPLS = {"eager", "c"}
+SUPPORTED_IMPLS = {"eager", "c", "auto"}
 LEGACY_BACKEND_IMPLS = {
     "eager": "eager",
     "cuda": "c",
@@ -29,22 +30,73 @@ def _normalize_impl(value):
     value = str(value).lower()
     value = IMPL_ALIASES.get(value, value)
     if value not in SUPPORTED_IMPLS:
-        raise ValueError(f"Unsupported PropTorch impl '{value}'. Expected 'eager' or 'c'.")
+        raise ValueError(
+            f"Unsupported PropTorch impl '{value}'. Expected 'eager', 'c', or 'auto'."
+        )
     return value
 
 
-def _normalize_backend_impl(backend, impl):
+def _compiled_binding_available():
+    from sweep import is_torch_binding_available
+    return is_torch_binding_available()
+
+
+def _equation_supports_c(equation):
+    """True when the equation exposes the compiled-kernel hook ``_C()``."""
+    if equation is None:
+        return True
+    return callable(getattr(equation, "_C", None))
+
+
+def _resolve_impl_with_fallback(impl, *, explicit, equation=None):
+    """Resolve 'auto' / 'c' to a concrete impl, falling back to 'eager' when
+    the compiled binding is unavailable or the equation has no ``_C`` hook.
+
+    When the user explicitly asked for 'c' but the path isn't available, emit
+    a UserWarning so the slowdown is visible.
+    """
+    binding_ok = _compiled_binding_available()
+    equation_ok = _equation_supports_c(equation)
+
+    if impl == "auto":
+        return "c" if (binding_ok and equation_ok) else "eager"
+
+    if impl == "c" and not (binding_ok and equation_ok):
+        if explicit:
+            if not binding_ok:
+                reason = "the compiled binding (sweep._C) is unavailable"
+                remedy = (
+                    "Rebuild with `pip install -e .` in a CUDA-enabled env "
+                    "to use the compiled path."
+                )
+            else:
+                eq_name = type(equation).__name__ if equation is not None else "<unknown>"
+                reason = f"equation '{eq_name}' does not expose a compiled CUDA kernel"
+                remedy = "Use impl='eager' (or omit impl) for this equation."
+            warnings.warn(
+                f"PropTorch(impl='c') requested but {reason}; falling back to "
+                f"impl='eager' (pure-PyTorch, ~10-30x slower). {remedy}",
+                UserWarning,
+                stacklevel=3,
+            )
+        return "eager"
+    return impl
+
+
+def _normalize_backend_impl(backend, impl, *, equation=None):
     backend = str(backend).lower()
     if backend == "pytorch":
         backend = "torch"
 
+    explicit_impl = impl is not None
+
     if backend in LEGACY_BACKEND_IMPLS:
         legacy_impl = LEGACY_BACKEND_IMPLS[backend]
-        if impl is not None and _normalize_impl(impl) != legacy_impl:
+        if impl is not None and _normalize_impl(impl) not in (legacy_impl, "auto"):
             raise ValueError(
                 f"Legacy PropTorch backend='{backend}' implies impl='{legacy_impl}', got impl='{impl}'."
             )
-        return "torch", legacy_impl
+        return "torch", _resolve_impl_with_fallback(legacy_impl, explicit=explicit_impl, equation=equation)
 
     if backend not in SUPPORTED_BACKENDS:
         raise ValueError(
@@ -52,7 +104,8 @@ def _normalize_backend_impl(backend, impl):
             f"'{backend}'. Expected backend='torch'. Use PropJax for backend='jax'."
         )
 
-    return backend, _normalize_impl("eager" if impl is None else impl)
+    normalized = _normalize_impl("auto" if impl is None else impl)
+    return backend, _resolve_impl_with_fallback(normalized, explicit=explicit_impl, equation=equation)
 
 
 def _merge_option_dict(base, extra, *, label):
@@ -165,12 +218,21 @@ class PropTorch(torch.nn.Module):
         **kwargs,
     ):
         torch.nn.Module.__init__(self)
+        equation = args[0] if args else kwargs.get('equation')
         if backend is None:
             # Inherit from the equation (positional arg 0); equation owns backend
             # because its operators were already built against it.
-            equation = args[0] if args else kwargs.get('equation')
             backend = getattr(equation, 'backend', 'torch')
-        backend, impl = _normalize_backend_impl(backend, impl)
+        requested_impl = impl
+        backend, impl = _normalize_backend_impl(backend, impl, equation=equation)
+
+        if impl == "eager" and (cuda_options is not None or CUDA_OPTION_KEYS & set(kwargs)):
+            requested_norm = (
+                _normalize_impl(requested_impl) if requested_impl is not None else "auto"
+            )
+            if requested_norm in ("c", "auto"):
+                cuda_options = None
+                kwargs = {k: v for k, v in kwargs.items() if k not in CUDA_OPTION_KEYS}
 
         self.backend = backend
         self.impl = impl

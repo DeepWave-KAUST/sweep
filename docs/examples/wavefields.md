@@ -1,8 +1,10 @@
 # Wavefield Examples
 
+> :material-github: **Source on GitHub** &mdash; [`examples/wavefields/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/wavefields) (clone, run, modify)
+
 Source directory:
 
-- `examples/wavefields/`
+- [`examples/wavefields/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/wavefields)
 
 Wavefield visualization and inspection examples live here.
 
@@ -16,7 +18,4 @@ Wavefield visualization and inspection examples live here.
 ## Related Pages
 
 - [C/CUDA FD Orders](wavefields_cuda_fd_orders.md)
-- [Free Surface Forward](wavefields_free_surface.md)
-- [Anisotropic Wavefields](wavefields_anisotropic.md)
 - [Elastic TTI Wavefields](elastic_tti_wavefields.md)
-- [DAS Layered-Model Reproductions](wavefields_das.md)

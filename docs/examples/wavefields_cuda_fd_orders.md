@@ -1,8 +1,10 @@
 # C/CUDA FD Orders
 
+> :material-github: **Source on GitHub** &mdash; [`examples/wavefields/cuda_fd_orders/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/wavefields/cuda_fd_orders) (clone, run, modify)
+
 Source directory:
 
-- `examples/wavefields/cuda_fd_orders/`
+- [`examples/wavefields/cuda_fd_orders/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/wavefields/cuda_fd_orders)
 
 These scripts compare compiled `c` CUDA wavefields under different spatial
 orders on a uniform 2D model.

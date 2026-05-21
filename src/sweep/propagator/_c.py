@@ -447,7 +447,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
     def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
-        kwargs.setdefault("use_ckpt", False)
         super().__init__(*args, **kwargs)
         
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))

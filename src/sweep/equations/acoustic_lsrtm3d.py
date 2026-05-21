@@ -103,6 +103,47 @@ def step_cpml(
 
 
 class AcousticLSRTM3D(SecondOrderEquation):
+    """Second-order 3-D acoustic Born / LSRTM wave equation.
+
+    Three-dimensional generalisation of :class:`AcousticLSRTM`: a
+    *background* pressure-like field ``h1`` propagating through the
+    smooth velocity ``vp``, and a *scattered* pressure-like field
+    ``sh1`` driven by the reflectivity perturbation ``mp`` acting on
+    the background Laplacian (linearised Born scattering). Both fields
+    carry their own CPML memory variables on every face. Defaults:
+    source on ``h1``, receivers on ``sh1``.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): Background 3D acoustic velocity model.
+        - ``mp`` (aliases: ``reflectivity``, ``ref``): 3D acoustic reflectivity perturbation used for LSRTM.
+
+    !!! info "Wavefields"
+
+        - ``h1`` (aliases: ``pressure``, ``p``, ``background``): Background 3D acoustic pressure-like wavefield; default source.
+        - ``h2`` (aliases: ``pressure_prev``, ``background_prev``): Previous-step background wavefield (internal).
+        - ``psix``: Background CPML memory variable for the x-derivative term (internal).
+        - ``psiy``: Background CPML memory variable for the y-derivative term (internal).
+        - ``psiz``: Background CPML memory variable for the z-derivative term (internal).
+        - ``zetax``: Background CPML auxiliary wavefield for the x-direction update (internal).
+        - ``zetay``: Background CPML auxiliary wavefield for the y-direction update (internal).
+        - ``zetaz``: Background CPML auxiliary wavefield for the z-direction update (internal).
+        - ``sh1`` (aliases: ``scattered``, ``scattered_pressure``, ``data``): Scattered 3D acoustic wavefield used for LSRTM data prediction; default receiver.
+        - ``sh2`` (aliases: ``scattered_prev``): Previous-step scattered wavefield (internal).
+        - ``spsix``: Scattered-wave CPML memory variable for the x-derivative term (internal).
+        - ``spsiy``: Scattered-wave CPML memory variable for the y-derivative term (internal).
+        - ``spsiz``: Scattered-wave CPML memory variable for the z-derivative term (internal).
+        - ``szetax``: Scattered-wave CPML auxiliary wavefield for the x-direction update (internal).
+        - ``szetay``: Scattered-wave CPML auxiliary wavefield for the y-direction update (internal).
+        - ``szetaz``: Scattered-wave CPML auxiliary wavefield for the z-direction update (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['h1']``
+        - ``receiver_type``: ``['sh1']``
+        - ``pml_type``: ``'cpmlr'``
+    """
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Background 3D acoustic velocity model.", unit="m/s"),
         ModelSpec("mp", aliases=("reflectivity", "ref"), description="3D acoustic reflectivity perturbation used for LSRTM."),
@@ -129,6 +170,29 @@ class AcousticLSRTM3D(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        """Build the 3-D acoustic LSRTM equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the spatial Laplacians applied to both the background and scattered fields — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must be an even integer
+                (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/acoustic_lsrtm3d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static kernels. Use
+                ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, dim=3)
         super().init_laplace(ltype="3dsep")
 

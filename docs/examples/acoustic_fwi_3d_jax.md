@@ -1,8 +1,10 @@
 # 3D Acoustic FWI on Overthrust with JAX
 
+> :material-github: **Source on GitHub** &mdash; [`examples/FWI/3d/acoustic/jax/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/FWI/3d/acoustic/jax) (clone, run, modify)
+
 Source file:
 
-- `examples/FWI/3d/acoustic/jax/fwi_overthrust.py`
+- [`examples/FWI/3d/acoustic/jax/fwi_overthrust.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/FWI/3d/acoustic/jax/fwi_overthrust.py)
 
 ## What This Example Does
 
@@ -43,8 +45,8 @@ The solver is built from:
 
 The same Overthrust `.npy` files are used as in the Torch version:
 
-- `examples/models/overthrust/true_3d.npy`
-- `examples/models/overthrust/smooth_3d.npy`
+- [`examples/models/overthrust/true_3d.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/overthrust/true_3d.npy)
+- [`examples/models/overthrust/smooth_3d.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/overthrust/smooth_3d.npy)
 
 If you have not generated them yet, follow the *Prepare the Overthrust Model
 Files* section of the [Torch page](acoustic_fwi_3d_torch.md) — both scripts

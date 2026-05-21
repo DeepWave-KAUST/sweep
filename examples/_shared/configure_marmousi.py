@@ -1,21 +1,24 @@
-nt = 2500
-dt = 0.002
+# Marmousi production config (matches sweep.datasets preset: 12.5 m grid,
+# 281 × 1361). Doubling spatial resolution requires halving dt for stability;
+# physical durations and depths are preserved by adjusting grid-index values.
+nt = 5000          # 5.0 s total at dt=0.001
+dt = 0.001         # halved for CFL at dh=12.5 (vmax≈4700 m/s → CFL≈0.38)
 delay = 0.256
 fm = 5
 true_path = "models/marmousi/true.npy"
 smooth_path = "models/marmousi/smooth.npy"
 # smooth_path = "models/marmousi/linear.npy"
-dh = 25.0
+dh = 12.5
 spatial_order = 8
 
-abcn = 20
+abcn = 40          # PML thickness = 500 m physical (same as old abcn=20 × 25 m)
 free_surface = False
 use_habc = False
 
-src_step = 2
-rec_step = 1
-srcz = 1
-recz = 18
+src_step = 4       # 50 m source spacing (was 2 × 25 m)
+rec_step = 2       # 25 m receiver spacing (was 1 × 25 m)
+srcz = 2           # 25 m source depth (was 1 × 25 m)
+recz = 36          # 450 m receiver depth (was 18 × 25 m)
 
 lr = 25
 epochs = 101

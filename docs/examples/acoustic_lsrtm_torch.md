@@ -1,8 +1,10 @@
 # 2D Acoustic LSRTM on Marmousi with Torch
 
+> :material-github: **Source on GitHub** &mdash; [`examples/LSRTM/2d/acoustic/torch/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/LSRTM/2d/acoustic/torch) (clone, run, modify)
+
 Source file:
 
-- `examples/LSRTM/2d/acoustic/torch/lsrtm.py`
+- [`examples/LSRTM/2d/acoustic/torch/lsrtm.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/LSRTM/2d/acoustic/torch/lsrtm.py)
 
 ## What This Example Does
 
@@ -32,8 +34,8 @@ The workflow is built from:
 
 This example reads:
 
-- `examples/models/marmousi/true.npy`
-- `examples/models/marmousi/smooth.npy`
+- [`examples/models/marmousi/true.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/marmousi/true.npy)
+- [`examples/models/marmousi/smooth.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/marmousi/smooth.npy)
 
 Generate them from the official Elastic Marmousi archive before running LSRTM:
 
@@ -44,8 +46,8 @@ python3 examples/models/marmousi/convert_segy_to_npy.py
 python3 examples/models/marmousi/prepare_fwi_models.py \
   --input examples/models/marmousi/npy/vp_1p25m.npy \
   --source-dh 1.25 \
-  --target-dh 25.0 \
-  --radii 8,8 \
+  --target-dh 12.5 \
+  --radii 16,16 \
   --passes 3
 ```
 
