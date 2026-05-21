@@ -187,7 +187,59 @@ def step(
 
 
 class ElasticTTI(FirstOrderEquation):
-    """2D-3C elastic TTI equation with RSG derivatives and recursive CPML."""
+    """First-order 2-D three-component elastic TTI wave equation (RSG).
+
+    Velocity-stress formulation for a fully anisotropic 2-D three-component
+    medium (8 stiffness parameters reduced to the 15 independent
+    components ``C11…C66`` via Bond rotation from the Thomsen-style
+    VTI parameters). Derivatives are taken on a rotated staggered grid
+    (RSG: cell-corner ↔ cell-centre with diagonal stencils) so no
+    interpolation is required between staggered locations; CPML is the
+    recursive variant ``cpmlr`` (six profiles).
+
+    Reference: Bond-rotated VTI stiffness with RSG operators (Saenger /
+    Bohlen rotated staggered grid).
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp0`` (m/s): VTI-frame vertical P velocity.
+        - ``vs0`` (m/s): VTI-frame vertical S velocity.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density.
+        - ``epsilon``: Thomsen epsilon.
+        - ``delta``: Thomsen delta.
+        - ``gamma``: Thomsen gamma.
+        - ``theta`` (rad): Tilt angle.
+        - ``phi`` (rad): Azimuth angle.
+
+    !!! info "Wavefields"
+
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in x; default receiver.
+        - ``vy`` (aliases: ``velocity_y``): Particle velocity in y.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in z; default receiver.
+        - ``sxx`` (aliases: ``stress_xx``): Normal stress xx; default source.
+        - ``szz`` (aliases: ``stress_zz``): Normal stress zz; default source.
+        - ``syz`` (aliases: ``stress_yz``): Shear stress yz.
+        - ``sxz`` (aliases: ``stress_xz``): Shear stress xz.
+        - ``sxy`` (aliases: ``stress_xy``): Shear stress xy.
+        - ``m_vxx``: CPML memory for dvx/dx (internal).
+        - ``m_vxz``: CPML memory for dvx/dz (internal).
+        - ``m_vyx``: CPML memory for dvy/dx (internal).
+        - ``m_vyz``: CPML memory for dvy/dz (internal).
+        - ``m_vzx``: CPML memory for dvz/dx (internal).
+        - ``m_vzz``: CPML memory for dvz/dz (internal).
+        - ``m_txxx``: CPML memory for dsxx/dx (internal).
+        - ``m_txzz``: CPML memory for dsxz/dz (internal).
+        - ``m_txyx``: CPML memory for dsxy/dx (internal).
+        - ``m_tyzz``: CPML memory for dsyz/dz (internal).
+        - ``m_txzx``: CPML memory for dsxz/dx (internal).
+        - ``m_tzzz``: CPML memory for dszz/dz (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sxx', 'szz']``
+        - ``receiver_type``: ``['vx', 'vz']``
+        - ``pml_type``: ``'cpmlr'``
+    """
 
     MODEL_SPECS = (
         ModelSpec("vp0", description="VTI-frame vertical P velocity.", unit="m/s"),
@@ -226,6 +278,24 @@ class ElasticTTI(FirstOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=8, device="cpu", backend="torch"):
+        """Build the 2-D-3C elastic TTI equation operator (RSG variant).
+
+        Args:
+            spatial_order: FD accuracy order of the rotated staggered-grid (RSG) first derivative — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must be an even integer (``2, 4, 6, 8, 10,
+                …``). Higher orders reduce grid dispersion at the cost
+                of more compute per step and a wider PML halo.
+                This equation has **no compiled `impl='c'` path; use
+                `impl='eager'`** (the SG variant :class:`ElasticTTISG`
+                does have a CUDA kernel). Defaults to 8.
+            device: Device for the operator's static RSG kernels. Use
+                ``'cuda'`` / a ``torch.device`` for GPU eager runs.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, ndim=2)
         self.rsg = RSGDerivative(spatial_order, device, backend, ndim=2)
         self.rsg.to_backend(to_backend)

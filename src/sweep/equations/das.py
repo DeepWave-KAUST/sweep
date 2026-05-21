@@ -225,16 +225,31 @@ def _standardize_das_record_layout(record: torch.Tensor, *, nreceivers: int, rec
 
 
 class DAS(torch.nn.Module):
-    """Unified Torch DAS modeling interface.
+    """Unified Torch DAS (distributed acoustic sensing) modeling interface.
 
-    ``method="zhao"`` runs the Zhao DAS equation.
-    ``method="mu"`` runs the Mu velocity-stress-strain equation. Records are
-    returned in ``(batch, nt, nrec, nfield)`` layout.
+    Facade ``nn.Module`` that wires one of the underlying DAS equations
+    to a :class:`PropTorch` propagator and post-processes records into
+    a uniform ``(batch, nt, nrec, nfield)`` layout. Two methods:
 
-    Note: this class used to be called ``DASModeler``; the shorter name
-    mirrors the DAS field convention and matches the new ``AcousticAniso``
-    facade for anisotropic acoustic equations.  ``DASModeler`` is kept as
-    a back-compat alias at the bottom of this module.
+    * ``method="zhao"`` — runs the Zhao (2022) stress / normal-strain-rate
+      equation (:class:`DASZhao` / :class:`DASZhao3D`); receivers are
+      strain-rates already, no time differentiation needed.
+    * ``method="mu"`` — runs the Mu (Mu & Hung 2022) velocity-stress
+      equation augmented with integrated strain (:class:`DASMu` /
+      :class:`DASMu3D`); strain-rate (``exx_t`` etc.) and helical DAS
+      receivers (``das35_t``, ``das54x_t``, …) are derived by numerical
+      time differentiation after the solve, which requires ``dt`` to
+      be passed through ``propagator_kwargs``.
+
+    Reference: Zhao Y. et al. 2022 (DAS strain-rate equation); Mu &
+    Hung 2022 (velocity-stress-strain coupling).
+
+    Note:
+        This class used to be called ``DASModeler``; the shorter name
+        mirrors the DAS field convention and matches the
+        :class:`AcousticAniso` facade for anisotropic acoustic
+        equations. ``DASModeler`` is kept as a back-compat alias at
+        the bottom of this module.
     """
 
     def __init__(
@@ -256,6 +271,53 @@ class DAS(torch.nn.Module):
         cuda_options=None,
         **propagator_kwargs,
     ):
+        """Build the DAS facade.
+
+        Args:
+            shape: Spatial model shape ``(nz, nx)`` for 2-D or
+                ``(nz, ny, nx)`` for 3-D.
+            method: DAS formulation. One of ``'zhao'`` (stress /
+                normal-strain-rate, :class:`DASZhao` / :class:`DASZhao3D`)
+                or ``'mu'`` (velocity-stress + integrated strain,
+                :class:`DASMu` / :class:`DASMu3D`). Defaults to
+                ``'zhao'``.
+            ndim: Spatial dimensionality (2 or 3). Inferred from
+                ``len(shape)`` when ``None``. Defaults to ``None``.
+            spatial_order: FD accuracy order — e.g. ``spatial_order=4`` is
+                fourth-order accurate. Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Even integer. Defaults to 4.
+            source_type: Names of fields injected by the source.
+                Defaults to the underlying equation's
+                ``default_source_fields``.
+            receiver_type: Names of receiver fields to extract. Mu can
+                emit strain-rate (``exx_t``, ``ezz_t``, …) and helical
+                DAS-rate channels (``das35_t``, ``das54x_t``,
+                ``das54y_t``, ``das54z_t``); these require ``dt``.
+                Defaults to the underlying equation's
+                ``default_receiver_fields``.
+            gauge_cells: Gauge length in number of cells along the
+                fibre axis for helical-fibre averaging. Mutually
+                exclusive with ``gauge_length``. Defaults to ``None``
+                (no averaging).
+            gauge_length: Gauge length in metres along the fibre axis;
+                converted to cells using the propagator's ``dh``.
+                Defaults to ``None``.
+            gauge_axis: Axis along which the gauge moving-average is
+                applied. Defaults to ``-1``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. Defaults to ``'torch'``.
+            impl: Propagator implementation. ``'eager'`` for the
+                PyTorch / JAX time loop, ``'c'`` for the compiled CUDA
+                kernel. Defaults to ``None`` (propagator decides).
+            backend_options: Forwarded to :class:`PropTorch` as
+                backend-level options.
+            eager_options: Forwarded to :class:`PropTorch` for the
+                eager path (e.g. checkpointing).
+            cuda_options: Forwarded to :class:`PropTorch` for the
+                compiled CUDA path.
+            **propagator_kwargs: Extra propagator kwargs (``dh``,
+                ``dt``, ``abcn``, ``dev``, …).
+        """
         super().__init__()
         self.shape = tuple(shape)
         self.ndim = int(len(self.shape) if ndim is None else ndim)
@@ -916,12 +978,50 @@ def step_das_zhao_3d(
 
 
 class DASZhao(FirstOrderEquation):
-    """2D Zhao stress and normal-strain-rate DAS equation.
+    """First-order 2-D stress / normal-strain-rate DAS equation (Zhao 2022).
 
-    Parameter order: ``vp, vs, rho``. Receiver fields ``exx_t`` and
-    ``ezz_t`` are the straight-fiber normal strain-rate components.
-    ``das35_t`` and ``das54x_t`` / ``das54z_t`` are regular
-    helical-fiber strain-rate projections from Eqs. (13)-(14).
+    The dynamic variables are normal strain-rates ``exx_t``, ``ezz_t``,
+    normal stresses ``sxx``, ``szz``, and auxiliary stress-like
+    components ``txx``, ``tzz``. The system is the 2-D, y-invariant
+    reduction of Eq. (9) of the Zhao et al. paper; helical-fibre
+    strain-rate projections (``das35_t``, ``das54x_t``, ``das54z_t``)
+    are computed inline from ``exx_t`` and ``ezz_t``. Staggered-grid
+    CPML (``cpmls``, 8 profiles).
+
+    Reference: Zhao Y. et al. 2022, *DAS modelling using a stress and
+    normal-strain-rate elastic formulation*.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
+        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
+
+    !!! info "Wavefields"
+
+        - ``exx_t``: Normal strain-rate in the x direction; default receiver.
+        - ``ezz_t``: Normal strain-rate in the z direction; default receiver.
+        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
+        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
+        - ``txx`` (aliases: ``tau_xx``): Auxiliary stress-like variable tau_xx (internal).
+        - ``tzz`` (aliases: ``tau_zz``): Auxiliary stress-like variable tau_zz (internal).
+        - ``m_sxx_xf``: CPML memory variable for forward d(sxx)/dx (internal).
+        - ``m_sxx_xb``: CPML memory variable for backward d2(sxx)/dx2 (internal).
+        - ``m_szz_zf``: CPML memory variable for forward d(szz)/dz (internal).
+        - ``m_szz_zb``: CPML memory variable for backward d2(szz)/dz2 (internal).
+        - ``m_txx_zf``: CPML memory variable for forward d(txx)/dz (internal).
+        - ``m_txx_zb``: CPML memory variable for backward d2(txx)/dz2 (internal).
+        - ``m_tzz_xf``: CPML memory variable for forward d(tzz)/dx (internal).
+        - ``m_tzz_xb``: CPML memory variable for backward d2(tzz)/dx2 (internal).
+        - ``das35_t``: 35.3 degree helical-fiber axial strain-rate.
+        - ``das54x_t``: 54.7 degree helical-fiber axial strain-rate for x-oriented core.
+        - ``das54z_t``: 54.7 degree helical-fiber axial strain-rate for z-oriented core.
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sxx', 'szz']``
+        - ``receiver_type``: ``['exx_t', 'ezz_t']``
+        - ``pml_type``: ``'cpmls'``
     """
 
     MODEL_SPECS = (
@@ -949,9 +1049,32 @@ class DASZhao(FirstOrderEquation):
         FieldSpec("das54z_t", description="54.7 degree helical-fiber axial strain-rate for z-oriented core.", supports_receiver=True),
     )
 
-    default_pml_type = "cpmlr"
+    default_pml_type = "cpmls"  # staggered-grid CPML: step_das_zhao_2d unpacks 8 profiles
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        """Build the 2-D Zhao DAS equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator (forward / backward FD pairs along x and z) — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must be
+                an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/das2d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, ndim=2)
 
     @property
@@ -1014,7 +1137,64 @@ class DASZhao(FirstOrderEquation):
 
 
 class DASZhao3D(FirstOrderEquation):
-    """3D Zhao stress and normal-strain-rate DAS equation from Eq. (9)."""
+    """First-order 3-D stress / normal-strain-rate DAS equation (Zhao 2022).
+
+    Three-dimensional generalisation of :class:`DASZhao` from Eq. (9)
+    of the Zhao et al. paper. The dynamic variables are normal
+    strain-rates ``exx_t``, ``eyy_t``, ``ezz_t``, normal stresses
+    ``sxx``, ``syy``, ``szz``, and auxiliary stress-like components
+    ``txx``, ``tyy``, ``tzz``. Helical-fibre strain-rate projections
+    are computed inline using all three normal strain-rates.
+    Staggered-grid CPML (``cpmls``, 12 profiles).
+
+    Reference: Zhao Y. et al. 2022.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
+        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
+
+    !!! info "Wavefields"
+
+        - ``exx_t``: Normal strain-rate in the x direction; default receiver.
+        - ``eyy_t``: Normal strain-rate in the y direction; default receiver.
+        - ``ezz_t``: Normal strain-rate in the z direction; default receiver.
+        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
+        - ``syy`` (aliases: ``stress_yy``): Normal stress in the y direction; default source.
+        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
+        - ``txx`` (aliases: ``tau_xx``): Auxiliary stress-like variable tau_xx (internal).
+        - ``tyy`` (aliases: ``tau_yy``): Auxiliary stress-like variable tau_yy (internal).
+        - ``tzz`` (aliases: ``tau_zz``): Auxiliary stress-like variable tau_zz (internal).
+        - ``m_sxx_xf``: CPML memory variable for forward d(sxx)/dx (internal).
+        - ``m_sxx_xb``: CPML memory variable for backward d2(sxx)/dx2 (internal).
+        - ``m_syy_yf``: CPML memory variable for forward d(syy)/dy (internal).
+        - ``m_syy_yb``: CPML memory variable for backward d2(syy)/dy2 (internal).
+        - ``m_szz_zf``: CPML memory variable for forward d(szz)/dz (internal).
+        - ``m_szz_zb``: CPML memory variable for backward d2(szz)/dz2 (internal).
+        - ``m_txx_yf``: CPML memory variable for forward d(txx)/dy (internal).
+        - ``m_txx_yb``: CPML memory variable for backward d2(txx)/dy2 (internal).
+        - ``m_txx_zf``: CPML memory variable for forward d(txx)/dz (internal).
+        - ``m_txx_zb``: CPML memory variable for backward d2(txx)/dz2 (internal).
+        - ``m_tyy_xf``: CPML memory variable for forward d(tyy)/dx (internal).
+        - ``m_tyy_xb``: CPML memory variable for backward d2(tyy)/dx2 (internal).
+        - ``m_tyy_zf``: CPML memory variable for forward d(tyy)/dz (internal).
+        - ``m_tyy_zb``: CPML memory variable for backward d2(tyy)/dz2 (internal).
+        - ``m_tzz_xf``: CPML memory variable for forward d(tzz)/dx (internal).
+        - ``m_tzz_xb``: CPML memory variable for backward d2(tzz)/dx2 (internal).
+        - ``m_tzz_yf``: CPML memory variable for forward d(tzz)/dy (internal).
+        - ``m_tzz_yb``: CPML memory variable for backward d2(tzz)/dy2 (internal).
+        - ``das35_t``: 35.3 degree helical-fiber axial strain-rate.
+        - ``das54x_t``: 54.7 degree helical-fiber axial strain-rate for x-oriented core.
+        - ``das54y_t``: 54.7 degree helical-fiber axial strain-rate for y-oriented core.
+        - ``das54z_t``: 54.7 degree helical-fiber axial strain-rate for z-oriented core.
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sxx', 'syy', 'szz']``
+        - ``receiver_type``: ``['exx_t', 'eyy_t', 'ezz_t']``
+        - ``pml_type``: ``'cpmls'``
+    """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1051,9 +1231,32 @@ class DASZhao3D(FirstOrderEquation):
         FieldSpec("das54z_t", description="54.7 degree helical-fiber axial strain-rate for z-oriented core.", supports_receiver=True),
     )
 
-    default_pml_type = "cpmlr"
+    default_pml_type = "cpmls"  # staggered-grid CPML: step_das_zhao_3d unpacks 12 profiles
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        """Build the 3-D Zhao DAS equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/das3d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, ndim=3)
 
     @property
@@ -1116,13 +1319,53 @@ class DASZhao3D(FirstOrderEquation):
 
 
 class DASMu(FirstOrderEquation):
-    """2D Mu velocity-stress-strain DAS equation.
+    """First-order 2-D velocity-stress-strain DAS equation (Mu).
 
-    Parameter order: ``vp, vs, rho``. Physical wavefields ``vx``, ``vz``,
-    ``sxx``, ``szz``, ``sxz``, ``exx``, ``ezz``, and
-    ``exz`` can all be used as sources and receivers. The stress fields
-    use the repository's elastic naming convention, while ``e**`` fields are
-    integrated strain components.
+    Standard 2-D elastic velocity-stress system augmented with three
+    integrated strain fields ``exx``, ``ezz``, ``exz`` that track the
+    velocity-gradient sources: ``exx_t = d(vx)/dx``,
+    ``ezz_t = d(vz)/dz``, ``exz_t = 0.5 · (d(vx)/dz + d(vz)/dx)``.
+    The :class:`DAS` facade differentiates the integrated strains in
+    time to produce strain-rate (``exx_t``, …) and helical DAS-rate
+    (``das35_t``, ``das54x_t``, ``das54z_t``) receivers — which
+    requires ``dt`` to be passed through the propagator. Staggered-grid
+    CPML (``cpmls``, 8 profiles).
+
+    Reference: Mu & Hung 2022, *Velocity-stress-strain coupling for DAS
+    forward modelling*.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
+        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
+
+    !!! info "Wavefields"
+
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction.
+        - ``sxx`` (aliases: ``stress_xx``, ``sigma_xx``): Normal stress in the x direction; default source.
+        - ``szz`` (aliases: ``stress_zz``, ``sigma_zz``): Normal stress in the z direction; default source.
+        - ``sxz`` (aliases: ``stress_xz``, ``sigma_xz``, ``sigma_zx``): Shear stress component.
+        - ``exx``: Integrated normal strain in the x direction; default receiver.
+        - ``ezz``: Integrated normal strain in the z direction; default receiver.
+        - ``exz``: Integrated shear strain component; default receiver.
+        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
+        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
+        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
+        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
+        - ``m_txxx``: CPML memory variable for dsxx/dx (internal).
+        - ``m_txxz``: Reserved elastic auxiliary field (internal).
+        - ``m_tzzx``: Reserved elastic auxiliary field (internal).
+        - ``m_tzzz``: CPML memory variable for dszz/dz (internal).
+        - ``m_txzx``: CPML memory variable for dsxz/dx (internal).
+        - ``m_txzz``: CPML memory variable for dsxz/dz (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sxx', 'szz']``
+        - ``receiver_type``: ``['exx', 'ezz', 'exz']``
+        - ``pml_type``: ``'cpmls'``
     """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
@@ -1147,9 +1390,32 @@ class DASMu(FirstOrderEquation):
         FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
     )
 
-    default_pml_type = "cpmlr"
+    default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_2d unpacks 8 profiles
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        """Build the 2-D Mu DAS equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/das_mu2d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, ndim=2)
 
     @property
@@ -1228,11 +1494,65 @@ class DASMu(FirstOrderEquation):
 
 
 class DASMu3D(FirstOrderEquation):
-    """3D Mu velocity-stress-strain DAS equation.
+    """First-order 3-D velocity-stress-strain DAS equation (Mu).
 
-    All velocity, stress, and integrated strain components can be used as
-    sources and receivers. Strain-rate and helical DAS-rate receivers are
-    derived by ``DAS`` (the facade) from the integrated strain records.
+    Three-dimensional generalisation of :class:`DASMu`. Standard 3-D
+    elastic velocity-stress system (nine physical fields) augmented
+    with six integrated strain fields tracking the velocity gradients.
+    The :class:`DAS` facade differentiates the integrated strains in
+    time to produce strain-rate and helical DAS-rate receivers — which
+    requires ``dt`` to be passed through the propagator. Staggered-grid
+    CPML (``cpmls``, 12 profiles).
+
+    Reference: Mu & Hung 2022.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
+        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
+
+    !!! info "Wavefields"
+
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction.
+        - ``vy`` (aliases: ``velocity_y``): Particle velocity in the y direction.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction.
+        - ``sxx`` (aliases: ``stress_xx``, ``sigma_xx``): Normal stress in the x direction; default source.
+        - ``syy`` (aliases: ``stress_yy``, ``sigma_yy``): Normal stress in the y direction; default source.
+        - ``szz`` (aliases: ``stress_zz``, ``sigma_zz``): Normal stress in the z direction; default source.
+        - ``sxy`` (aliases: ``stress_xy``, ``sigma_xy``, ``sigma_yx``): Shear stress xy component.
+        - ``sxz`` (aliases: ``stress_xz``, ``sigma_xz``, ``sigma_zx``): Shear stress xz component.
+        - ``syz`` (aliases: ``stress_yz``, ``sigma_yz``, ``sigma_zy``): Shear stress yz component.
+        - ``exx``: Integrated normal strain in the x direction; default receiver.
+        - ``eyy``: Integrated normal strain in the y direction; default receiver.
+        - ``ezz``: Integrated normal strain in the z direction; default receiver.
+        - ``exy``: Integrated shear strain xy component.
+        - ``exz``: Integrated shear strain xz component.
+        - ``eyz``: Integrated shear strain yz component.
+        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
+        - ``m_vxy``: CPML memory variable for dvx/dy (internal).
+        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
+        - ``m_vyx``: CPML memory variable for dvy/dx (internal).
+        - ``m_vyy``: CPML memory variable for dvy/dy (internal).
+        - ``m_vyz``: CPML memory variable for dvy/dz (internal).
+        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
+        - ``m_vzy``: CPML memory variable for dvz/dy (internal).
+        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
+        - ``m_sxxx``: CPML memory variable for dsxx/dx (internal).
+        - ``m_szzz``: CPML memory variable for dszz/dz (internal).
+        - ``m_sxyx``: CPML memory variable for dsxy/dx (internal).
+        - ``m_sxyy``: CPML memory variable for dsxy/dy (internal).
+        - ``m_sxzx``: CPML memory variable for dsxz/dx (internal).
+        - ``m_sxzz``: CPML memory variable for dsxz/dz (internal).
+        - ``m_syyy``: CPML memory variable for dsyy/dy (internal).
+        - ``m_syzy``: CPML memory variable for dsyz/dy (internal).
+        - ``m_syzz``: CPML memory variable for dsyz/dz (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sxx', 'syy', 'szz']``
+        - ``receiver_type``: ``['exx', 'eyy', 'ezz', 'exy', 'exz', 'eyz']``
+        - ``pml_type``: ``'cpmls'``
     """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
@@ -1272,9 +1592,32 @@ class DASMu3D(FirstOrderEquation):
         FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
     )
 
-    default_pml_type = "cpmlr"
+    default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_3d unpacks 12 profiles
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        """Build the 3-D Mu DAS equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/das_mu3d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+        """
         super().__init__(spatial_order, device, backend, ndim=3)
 
     @property

@@ -37,12 +37,12 @@ Available equations:
   AcousticVRZ3D          ['vp', 'z']                                                         yes            yes
   AcousticVTI            ['vp', 'epsilon', 'delta']                                          no             no
   AcousticVTI1st         ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
-  AcousticVTI1st3D       ['vp', 'epsilon', 'delta', 'rho']                                   no             no
+  AcousticVTI1st3D       ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
   AcousticVTIDefault     ['vp', 'epsilon', 'delta']                                          no             no
-  AcousticVTIDefault3D   ['vp', 'epsilon', 'delta', 'rho']                                   no             no
+  AcousticVTIDefault3D   ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIDuveneck    ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
-  AcousticVTIDuveneck3D  ['vp', 'epsilon', 'delta', 'rho']                                   no             no
+  AcousticVTIDuveneck3D  ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTILiang       ['vp', 'epsilon', 'delta']                                          no             no
   DASElastic             ['vp', 'vs', 'rho']                                                 yes            yes
   DASElastic3D           ['vp', 'vs', 'rho']                                                 yes            yes
@@ -80,7 +80,7 @@ sweep show Acoustic
 ```
 
 ```text
-Acoustic:
+=== Acoustic ===
   Wavefields: ['h1', 'h2', 'psix', 'psiz', 'zetax', 'zetaz']
   Needed models: ['vp']
   Torch binding support: yes
@@ -92,12 +92,9 @@ sweep show ElasticTTISG
 ```
 
 ```text
-ElasticTTISG:
-  Wavefields: ['vx', 'vy', 'vz', 'sxx', 'szz', 'syz', 'sxz', 'sxy',
-               'm_vxx', 'm_vxz', 'm_vyx', 'm_vyz', 'm_vzx', 'm_vzz',
-               'm_txxx', 'm_txzz', 'm_txyx', 'm_tyzz', 'm_txzx', 'm_tzzz']
-  Needed models: ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma',
-                  'theta', 'phi']
+=== ElasticTTISG ===
+  Wavefields: ['vx', 'vy', 'vz', 'sxx', 'szz', 'syz', 'sxz', 'sxy', 'm_vxx', 'm_vxz', 'm_vyx', 'm_vyz', 'm_vzx', 'm_vzz', 'm_txxx', 'm_txzz', 'm_txyx', 'm_tyzz', 'm_txzx', 'm_tzzz']
+  Needed models: ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']
   Torch binding support: yes
   Torch binding available: yes
 ```

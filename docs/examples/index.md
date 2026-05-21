@@ -1,34 +1,112 @@
 # Examples
 
-Runnable example scripts live in the `examples/` directory of the repository.
-Each card below points to a doc walk-through of the corresponding script.
+> :material-github: **All examples on GitHub** &mdash; [`examples/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples) (clone, run, modify)
+
+Runnable example scripts and notebooks live in the `examples/` directory of the
+repository. Each card below points to a doc walk-through; the walk-through page
+links straight to the matching source folder on GitHub. The
+**notebooks** folder under `examples/notebooks/` holds short, cell-by-cell
+versions designed to be the easiest entry point.
+
+## Notebooks (start here)
+
+<div class="grid cards" markdown>
+
+-   **Hello · forward**
+
+    ---
+
+    Smallest end-to-end SWEEP workflow: parameters → model → `Acoustic()` +
+    `PropTorch()` → one forward + shot gather. No external data.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/00_hello_forward.ipynb)
+
+-   **FWI · Acoustic · Marmousi**
+
+    ---
+
+    Load Marmousi from `sweep.datasets`, build a 192×320 window, forward-model
+    observed gathers, and invert the smooth start with Adam + MSE. Each phase
+    is one cell.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/01_fwi_acoustic_marmousi.ipynb)
+
+-   **FWI · Elastic · Marmousi**
+
+    ---
+
+    Same skeleton, but the equation is `Elastic` and the model is the
+    `(vp, vs, rho)` triplet. `vs` and `rho` are derived from `vp` with Poisson
+    + Gardner relations so the example still runs with zero downloads.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/02_fwi_elastic_marmousi.ipynb)
+
+-   **FWI · multiscale**
+
+    ---
+
+    Three-band frequency progression (3 → 6 → 12 Hz) of acoustic FWI on
+    Marmousi 25 m. Each band feeds its final model into the next; loss
+    drops monotonically across the chain and avoids cycle skipping.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/03_fwi_multiscale.ipynb)
+
+-   **DAS · Zhao vs Mu**
+
+    ---
+
+    Forward-model the same three-layer elastic medium with the two DAS
+    formulations and compare the resulting strain-rate gathers side by side.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/04_das_zhao_vs_mu.ipynb)
+
+-   **Wavefield · VTI + shear suppression**
+
+    ---
+
+    Run Duveneck (1st-order), Liang (2nd-order pseudo-acoustic), and
+    Alkhalifah (η-acoustic) through the unified `AcousticAniso` factory
+    on the canonical Duveneck Fig 2 setup; the trailing cell demonstrates
+    the δ→ε disk taper that kills the pseudo-acoustic shear artefact.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/05_wavefield_vti.ipynb)
+
+-   **Wavefield · Elastic**
+
+    ---
+
+    Wavefield snapshots from three different stress-source loadings on a
+    uniform elastic medium — explosion, vertical dipole, and pure shear —
+    to visualize P/S excitation and radiation patterns.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/06_wavefield_elastic.ipynb)
+
+-   **Memory · strategies**
+
+    ---
+
+    Same forward + backward step run under five memory strategies (eager
+    full vs. eager ckpt vs. c boundary-saving / chunk-ckpt / recursive-ckpt)
+    with side-by-side peak-memory and wallclock charts.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/07_memory_strategies.ipynb)
+
+-   **RTM · Acoustic · Marmousi**
+
+    ---
+
+    Reverse-time migration on full 12.5 m Marmousi with a 15 Hz Ricker —
+    background subtraction, near-offset mask, illumination compensation,
+    and `solver.rtm()`. Produces a clean reflectivity image in <3 s on
+    30 shots.
+
+    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/08_rtm_acoustic_marmousi.ipynb)
+
+</div>
 
 ## 2D Inversion
 
 <div class="grid cards" markdown>
-
--   ![Marmousi 2D Acoustic FWI](../figures/examples/acoustic_fwi_torch_epoch_0100.png){ loading=lazy }
-
-    **Acoustic FWI · Marmousi**
-
-    ---
-
-    Full-waveform inversion on the Marmousi 2D acoustic model. Torch path
-    has eager and compiled C++ / CUDA implementations plus optional MPI
-    shot parallelism; JAX path runs through `PropJax`.
-
-    [:octicons-arrow-right-24: Torch](acoustic_fwi_torch.md) ·
-    [:octicons-arrow-right-24: JAX](acoustic_fwi_jax.md)
-
--   ![Marmousi 2D Elastic FWI](../figures/examples/elastic_fwi_marmousi_torch_epoch_0100.png){ loading=lazy }
-
-    **Elastic FWI · Marmousi**
-
-    ---
-
-    PyTorch elastic FWI on Marmousi, inverting Vp and Vs simultaneously.
-
-    [:octicons-arrow-right-24: View details](elastic_fwi_torch_marmousi.md)
 
 -   ![Overthrust 2D Elastic observed data](../figures/examples/elastic_fwi_overthrust_torch_observed_data.png){ loading=lazy }
 
@@ -109,17 +187,6 @@ Each card below points to a doc walk-through of the corresponding script.
 
     [:octicons-arrow-right-24: View details](acoustic_fwi_encoding_torch.md)
 
--   ![Memory method comparison summary](../figures/examples/memory_method_compare_3d_summary.png){ loading=lazy }
-
-    **Method compare**
-
-    ---
-
-    Benchmark `full` / `boundary` / `disk` / `ckpt` memory modes across
-    2D and 3D cases.
-
-    [:octicons-arrow-right-24: View details](memory_method_compare.md)
-
 </div>
 
 ## Modeling
@@ -148,27 +215,6 @@ Each card below points to a doc walk-through of the corresponding script.
 
     [:octicons-arrow-right-24: View details](wavefields_cuda_fd_orders.md)
 
--   ![Elastic free-surface vz snapshots](../figures/examples/wavefields_free_surface_elastic_vz.png){ loading=lazy }
-
-    **Free surface**
-
-    ---
-
-    Elastic and acoustic free-surface boundary validation runs — Rayleigh
-    waves are clearly visible in the elastic vz comparison.
-
-    [:octicons-arrow-right-24: View details](wavefields_free_surface.md)
-
--   ![Acoustic TTI snapshots](../figures/examples/wavefields_anisotropic_tti.png){ loading=lazy }
-
-    **qP**
-
-    ---
-
-    Acoustic VTI / TTI quasi-P (qP) wavefield comparisons.
-
-    [:octicons-arrow-right-24: View details](wavefields_anisotropic.md)
-
 -   ![Elastic TTI rotation snapshots](../figures/examples/elastic_tti_rotation_vz_snapshots.png){ loading=lazy }
 
     **Elastic TTI**
@@ -179,17 +225,6 @@ Each card below points to a doc walk-through of the corresponding script.
     and free-surface modes.
 
     [:octicons-arrow-right-24: View details](elastic_tti_wavefields.md)
-
--   ![DAS strain-rate gathers](../figures/examples/wavefields_das_figure4_eager.png){ loading=lazy }
-
-    **DAS**
-
-    ---
-
-    Strain-rate gathers from the DAS modelling paper, reproduced with the
-    SWEEP DAS family.
-
-    [:octicons-arrow-right-24: View details](wavefields_das.md)
 
 </div>
 

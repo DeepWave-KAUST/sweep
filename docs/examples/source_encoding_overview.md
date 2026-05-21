@@ -1,8 +1,10 @@
 # Source Encoding Overview
 
+> :material-github: **Source on GitHub** &mdash; [`examples/reducingmemory/source_encoding/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/reducingmemory/source_encoding) (clone, run, modify)
+
 Source directory:
 
-- `examples/reducingmemory/source_encoding/`
+- [`examples/reducingmemory/source_encoding/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/reducingmemory/source_encoding)
 
 Source encoding reduces memory and runtime by mixing multiple shots into a
 single encoded super-shot during each optimization step.
@@ -32,8 +34,8 @@ Source encoding is most useful when:
 
 ## Example Scripts
 
-- `examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py`
-- `examples/reducingmemory/source_encoding/jax/source_encoding_fwi.py`
+- [`examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py)
+- [`examples/reducingmemory/source_encoding/jax/source_encoding_fwi.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/reducingmemory/source_encoding/jax/source_encoding_fwi.py)
 
 ## Related Example
 

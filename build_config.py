@@ -4,8 +4,6 @@ import os
 import sys
 from distutils import log
 
-from setuptools import find_packages
-
 try:
     import packaging.utils as packaging_utils
 except ImportError:
@@ -18,7 +16,7 @@ except ImportError:
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-PACKAGE_VERSION = "0.0.1"
+PACKAGE_VERSION = "0.1.0"
 
 
 def env_flag_enabled(name):
@@ -180,62 +178,18 @@ def make_build_extension(BuildExtension):
     return SweepBuildExtension
 
 
-def build_setup_kwargs(distribution_name="sweep", build_cuda=None):
+def build_ext_kwargs(build_cuda=None):
+    """Return setup() kwargs for the C++/CUDA extension module.
+
+    All package metadata (name, version, dependencies, entry-points, packages,
+    classifiers, …) lives in ``pyproject.toml`` under PEP 621. This function
+    returns only the bits that PEP 621 can't express: ``ext_modules`` and
+    ``cmdclass`` for the optional CUDA build.
+    """
     if build_cuda is None:
         build_cuda = env_flag_enabled("SWEEP_BUILD_CUDA")
 
     kwargs = {
-        "name": distribution_name,
-        "version": PACKAGE_VERSION,
-        "description": "Seismic Wave Equation Exploration Platform",
-        "long_description": open(os.path.join(ROOT_DIR, "README.md"), encoding="utf-8").read(),
-        "long_description_content_type": "text/markdown",
-        "author": "Shaowen Wang",
-        "author_email": "shaowen.wang@kaust.edu.sa",
-        "url": "https://github.com/DeepWave-KAUST/sweep",
-        "project_urls": {
-            "Homepage": "https://github.com/DeepWave-KAUST/sweep",
-            "Issues": "https://github.com/DeepWave-KAUST/sweep/issues",
-        },
-        "license": "MIT",
-        "python_requires": ">=3.8",
-        "package_dir": {"": "src"},
-        "packages": find_packages(
-            where="src",
-            include=["sweep", "sweep.*", "geophyai", "geophyai.*"],
-            exclude=["sweep.csrc", "sweep.csrc.*"],
-        ),
-        "include_package_data": False,
-        "entry_points": {
-            "console_scripts": ["sweep=sweep.cli:main"],
-        },
-        "extras_require": {
-            "cuda": ["torch"],
-            "torch": ["torch"],
-            "jax": ["jax", "jaxlib"],
-            "all": ["torch", "jax", "jaxlib"],
-            # Companion packages — each lives in its own repo and is
-            # installable on its own. `sweep[full]` pulls the whole
-            # ecosystem in one shot. Names match the `[project] name`
-            # field in each companion repo's pyproject.toml.
-            #
-            # NOTE: until every companion is on PyPI, `pip install sweep[full]`
-            # will fail to resolve. For local development, use
-            # `scripts/install_ecosystem.sh` (editable installs in dep order)
-            # instead.
-            "full": [
-                "torch",
-                "sweep-loss",
-                "sweep-opt",
-                "sweep-io",
-                "sweep-preproc",
-                "sweep-runner",
-                "sweep-tasks",
-                "sweep-zoo",
-                "sweep-viz",
-                "sweep-nn",
-            ],
-        },
         "ext_modules": [],
         "cmdclass": {},
     }

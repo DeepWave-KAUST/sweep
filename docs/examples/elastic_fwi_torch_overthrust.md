@@ -1,8 +1,10 @@
 # 2D Elastic FWI on Overthrust with Torch
 
+> :material-github: **Source on GitHub** &mdash; [`examples/FWI/2d/elastic/torch/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/FWI/2d/elastic/torch) (clone, run, modify)
+
 Source file:
 
-- `examples/FWI/2d/elastic/torch/fwi_overthrust.py`
+- [`examples/FWI/2d/elastic/torch/fwi_overthrust.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/FWI/2d/elastic/torch/fwi_overthrust.py)
 
 ## What This Example Does
 
@@ -34,8 +36,8 @@ The solver is built from:
 
 This 2D example reads an extracted Overthrust slice:
 
-- `examples/models/overthrust/true_2d.npy`
-- `examples/models/overthrust/smooth_2d.npy`
+- [`examples/models/overthrust/true_2d.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/overthrust/true_2d.npy)
+- [`examples/models/overthrust/smooth_2d.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/overthrust/smooth_2d.npy)
 
 Generate the 3D volume, smooth it, and extract the 2D slice before running the
 example:

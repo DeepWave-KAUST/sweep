@@ -1,10 +1,12 @@
 # 3D Acoustic LSRTM on Overthrust with Torch
 
+> :material-github: **Source on GitHub** &mdash; [`examples/LSRTM/3d/acoustic/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/LSRTM/3d/acoustic) (clone, run, modify)
+
 - Script:
-  - `examples/LSRTM/3d/acoustic/torch/lsrtm_overthrust.py`
+  - [`examples/LSRTM/3d/acoustic/torch/lsrtm_overthrust.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/LSRTM/3d/acoustic/torch/lsrtm_overthrust.py)
 - Shared utilities:
-  - `examples/_shared/configure_overthrust.py`
-  - `examples/_shared/fwi3d_overthrust.py`
+  - [`examples/_shared/configure_overthrust.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/_shared/configure_overthrust.py)
+  - [`examples/_shared/fwi3d_overthrust.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/_shared/fwi3d_overthrust.py)
 
 This example runs 3D acoustic least-squares reverse time migration (LSRTM) on
 the Overthrust model with one script that supports both the eager PyTorch
@@ -23,8 +25,8 @@ The workflow is:
 
 This example reads:
 
-- `examples/models/overthrust/true_3d.npy`
-- `examples/models/overthrust/smooth_3d.npy`
+- [`examples/models/overthrust/true_3d.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/overthrust/true_3d.npy)
+- [`examples/models/overthrust/smooth_3d.npy`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/models/overthrust/smooth_3d.npy)
 
 Generate them from the official SEG/EAGE Overthrust archive before running the
 example:

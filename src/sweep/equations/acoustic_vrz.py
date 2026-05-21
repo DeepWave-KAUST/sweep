@@ -118,12 +118,36 @@ def step_cpml_3d(
 
 
 class AcousticVRZ(SecondOrderEquation):
-    """
-    Parameter order: vp, rx, rz
+    """Second-order 2-D acoustic wave equation in variable-density VRZ form.
 
-    Wavefields: (h1, h2)
+    Pressure-only scalar acoustics with explicit density coupling through
+    an impedance-like auxiliary parameter ``z``. The Laplacian carries an
+    extra term ``∇b · ∇p`` (with ``b = vp / z``, ``κ = z · vp``), so the
+    propagator is a single second-order PDE in ``h1`` that correctly
+    refracts at sharp impedance contrasts without needing a staggered
+    velocity field. Absorbing boundaries via split-step CPML (``cpmlr``).
 
-    Reference: 10.3997/2214-4609.202010332
+    Reference: 10.3997/2214-4609.202010332.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): Acoustic velocity model.
+        - ``z``: Auxiliary parameter used by the VRZ formulation.
+
+    !!! info "Wavefields"
+
+        - ``h1`` (aliases: ``pressure``, ``p``): Primary VRZ acoustic pressure-like wavefield; default source and receiver.
+        - ``h2`` (aliases: ``pressure_prev``): Previous-step VRZ acoustic pressure-like wavefield (internal).
+        - ``psix``: CPML memory variable for the x-derivative term (internal).
+        - ``psiz``: CPML memory variable for the z-derivative term (internal).
+        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
+        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['h1']``
+        - ``receiver_type``: ``['h1']``
+        - ``pml_type``: ``'cpmlr'``
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic velocity model.", unit="m/s"),
@@ -141,10 +165,31 @@ class AcousticVRZ(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
-        """Acoustic wave equation solver.
+        """Build the 2-D VRZ acoustic equation operator.
 
         Args:
-            spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
+            spatial_order: FD accuracy order of the spatial Laplacian and the auxiliary first-derivative kernels used by the ``∇b · ∇p`` term — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/acoustic_vrz2d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or ``'jax'``.
+                When you later want ``impl='c'``, leave this on
+                ``'torch'`` — the compiled CUDA kernels go through the
+                Torch binding. Defaults to ``'torch'``.
+            dim: Stored dimensionality. Always ``2`` for this class; use
+                :class:`AcousticVRZ3D` for 3-D. Defaults to 2.
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
         super().init_laplace(ltype='1dsep', backend=backend)
@@ -211,14 +256,38 @@ class AcousticVRZ(SecondOrderEquation):
 
 
 class AcousticVRZ3D(SecondOrderEquation):
-    """
-    3D acoustic VRZ formulation.
+    """Second-order 3-D acoustic wave equation in variable-density VRZ form.
 
-    Parameter order: vp, z
+    Three-dimensional generalisation of :class:`AcousticVRZ`: a single
+    pressure-like field ``h1`` is propagated with an extra ``∇b · ∇p``
+    coupling term (with ``b = vp / z``, ``κ = z · vp``) so that
+    impedance contrasts refract correctly without needing a separate
+    velocity field. Absorbing boundaries on every face via split-step
+    CPML (``cpmlr``).
 
-    Wavefields: (h1, h2, psix, psiy, psiz, zetax, zetay, zetaz)
+    Reference: 10.3997/2214-4609.202010332.
 
-    Reference: 10.3997/2214-4609.202010332
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): 3D acoustic velocity model.
+        - ``z``: Auxiliary parameter used by the 3D VRZ formulation.
+
+    !!! info "Wavefields"
+
+        - ``h1`` (aliases: ``pressure``, ``p``): Primary 3D VRZ acoustic pressure-like wavefield; default source and receiver.
+        - ``h2`` (aliases: ``pressure_prev``): Previous-step 3D VRZ acoustic pressure-like wavefield (internal).
+        - ``psix``: CPML memory variable for the x-derivative term (internal).
+        - ``psiy``: CPML memory variable for the y-derivative term (internal).
+        - ``psiz``: CPML memory variable for the z-derivative term (internal).
+        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
+        - ``zetay``: CPML auxiliary wavefield for the y-direction update (internal).
+        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['h1']``
+        - ``receiver_type``: ``['h1']``
+        - ``pml_type``: ``'cpmlr'``
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic velocity model.", unit="m/s"),
@@ -238,6 +307,32 @@ class AcousticVRZ3D(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=3):
+        """Build the 3-D VRZ acoustic equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the spatial Laplacian and the auxiliary first-derivative kernels used by the ``∇b · ∇p`` term — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/acoustic_vrz3d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or ``'jax'``.
+                When you later want ``impl='c'``, leave this on
+                ``'torch'`` — the compiled CUDA kernels go through the
+                Torch binding. Defaults to ``'torch'``.
+            dim: Stored dimensionality. Always ``3`` for this class; use
+                :class:`AcousticVRZ` for 2-D. Defaults to 3.
+        """
         super().__init__(spatial_order, device, backend, dim=dim)
         super().init_laplace(ltype='3dsep', backend=backend)
         if backend == 'torch':

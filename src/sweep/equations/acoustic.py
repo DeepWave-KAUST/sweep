@@ -39,6 +39,33 @@ def step_cpml(
     return u_next, u_now, psixn, psiyn, zetax, zetaz
 
 class Acoustic(SecondOrderEquation):
+    """Second-order 2-D acoustic wave equation with CPML auxiliary fields.
+
+    The default scalar-wave solver: a pressure-like field ``h1`` is driven by
+    ``vp**2 · Laplace(u)`` and absorbed at every side by a split-step CPML
+    formulation (``cpmlr`` by default). This is the most common forward and
+    inversion equation in the codebase.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): Acoustic P-wave velocity model.
+
+    !!! info "Wavefields"
+
+        - ``h1`` (aliases: ``pressure``, ``p``): Primary acoustic pressure-like wavefield; default source and receiver.
+        - ``h2`` (aliases: ``pressure_prev``): Previous-step pressure-like wavefield (internal).
+        - ``psix``: CPML memory variable for the x-derivative term (internal).
+        - ``psiz``: CPML memory variable for the z-derivative term (internal).
+        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
+        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['h1']``
+        - ``receiver_type``: ``['h1']``
+        - ``pml_type``: ``'cpmlr'``
+    """
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic P-wave velocity model.", unit="m/s"),
     )
@@ -53,11 +80,34 @@ class Acoustic(SecondOrderEquation):
 
     default_pml_type = "cpmlr"
 
-    def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
-        """Acoustic wave equation solver.
+    def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2):
+        """Build the acoustic equation operator.
 
         Args:
-            spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
+            spatial_order: FD accuracy order of the spatial Laplacian — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must be an even integer
+                (typical values ``2, 4, 6, 8, 10, …``). Higher orders cut
+                grid dispersion at the cost of more compute per step and a
+                wider PML halo.
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/acoustic2d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static kernels (Laplace /
+                gradient coefficients). Use ``'cuda'`` / a ``torch.device``
+                when running on GPU so the propagator can follow without
+                a host↔device copy. Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or ``'jax'``.
+                When you later want ``impl='c'``, leave this on ``'torch'``
+                — the compiled CUDA kernels are dispatched through the
+                Torch binding. Defaults to ``'torch'``.
+            dim: Stored dimensionality. Always ``2`` for this class; use
+                :class:`Acoustic3D` for 3-D. Defaults to 2.
         """
         use_fast_grad_kernels = backend == 'torch' and 'cuda' in str(device)
         super().__init__(spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels)

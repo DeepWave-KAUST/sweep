@@ -58,9 +58,14 @@ class PropBase:
                 CPU storage uses host memory to reduce device-memory pressure.
             ckpt_pinned_memory (bool, optional): Use pinned host memory when
                 ckpt_storage="cpu". Defaults to True for CPU checkpoint storage.
-            pml_type (str, optional): The type of PML to use. When None (default), falls back to
-                ``equation.default_pml_type`` (most equations: 'cpmlr'; some stricter ones like
-                ElasticTTISG and Acoustic1st use 'cpmls'). Options include 'spml', 'cpmls', 'cpmlr'.
+            pml_type (str, optional): The type of PML to use. **You almost
+                never need to set this** — leave it ``None`` and the propagator
+                falls back to ``equation.default_pml_type``, which is the only
+                CPML formulation each equation ships. The kwarg exists for
+                advanced experiments (e.g. ``Acoustic1st`` accepts ``'spml'``
+                in addition to its default ``'cpmls'``). Possible string
+                values across the codebase: ``'cpmlr'``, ``'cpmls'``,
+                ``'spml'``. Defaults to None.
             nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
             B (int, optional): The batch size for the simulation. Defaults to 1.
             allow_growth (bool, optional): Whether to allow GPU memory growth. Defaults to True.

@@ -17,8 +17,8 @@ python3 examples/models/marmousi/convert_segy_to_npy.py
 python3 examples/models/marmousi/prepare_fwi_models.py \
   --input examples/models/marmousi/npy/vp_1p25m.npy \
   --source-dh 1.25 \
-  --target-dh 25.0 \
-  --radii 8,8 \
+  --target-dh 12.5 \
+  --radii 16,16 \
   --passes 3
 ```
 

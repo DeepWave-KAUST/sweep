@@ -20,38 +20,43 @@ is supported for every class.
 | `Acoustic` | `['vp']` | 2D | Second-order acoustic wave equation with CPML | ✅ |
 | `Acoustic3D` | `['vp']` | 3D | 3D counterpart of `Acoustic` | ✅ |
 | `Acoustic1st` | `['vp', 'rho']` | 2D | First-order velocity-pressure formulation | ❌ |
-| `AcousticVRZ` | `['vp', 'rho']` | 2D | Variable-density acoustic (impedance-style parameterization) | ✅ |
-| `AcousticVRZ3D` | `['vp', 'rho']` | 3D | 3D counterpart of `AcousticVRZ` | ✅ |
-| `AcousticLSRTM` | `['vp', 'm']` | 2D | LSRTM-oriented acoustic variant | ✅ |
-| `AcousticLSRTM3D` | `['vp', 'm']` | 3D | 3D counterpart of `AcousticLSRTM` | ✅ |
+| `AcousticVRZ` | `['vp', 'z']` | 2D | Variable-density acoustic, impedance-style parameterization (``z`` = impedance) | ✅ |
+| `AcousticVRZ3D` | `['vp', 'z']` | 3D | 3D counterpart of `AcousticVRZ` | ✅ |
+| `AcousticLSRTM` | `['vp', 'mp']` | 2D | LSRTM-oriented variant (``mp`` = reflectivity perturbation) | ✅ |
+| `AcousticLSRTM3D` | `['vp', 'mp']` | 3D | 3D counterpart of `AcousticLSRTM` | ✅ |
 
 ### Anisotropic acoustic family
 
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
 | `AcousticAniso` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks duveneck / liang / alkhalifah; mirrors the `DAS` facade | varies |
-| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | qP acoustic VTI, Liang K. et al. 2022 — alias `AcousticVTILiang` | varies |
-| `AcousticTTI` | TTI parameters | 2D | qP acoustic TTI, Liang K. et al. 2022 (optional dependency) — alias `AcousticTTILiang` | varies |
-| `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | varies |
-| `AcousticVTI1st` / `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 2D / 3D | 1st-order velocity-stress, Duveneck et al. 2008 — aliases `AcousticVTIDuveneck` / `AcousticVTIDuveneck3D` | ✅ (2D) |
+| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | qP acoustic VTI, Liang K. et al. 2022 — alias `AcousticVTILiang` | ❌ |
+| `AcousticTTI` | `['vp', 'epsilon', 'delta', 'theta']` | 2D | qP acoustic TTI, Liang K. et al. 2022 — alias `AcousticTTILiang` | ❌ |
+| `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | ❌ |
+| `AcousticVTI1st` | `['vp', 'epsilon', 'delta', 'rho']` | 2D | 1st-order velocity-stress, Duveneck et al. 2008 — alias `AcousticVTIDuveneck` | ✅ |
+| `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 3D | 3D counterpart of `AcousticVTI1st` — alias `AcousticVTIDuveneck3D` | ✅ |
 
 ### Elastic family
 
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
-| `Elastic` | `['vp', 'vs', 'rho']` | 2D | Velocity-stress elastic propagation | ✅ |
+| `Elastic` | `['vp', 'vs', 'rho']` | 2D | Velocity-stress elastic propagation (Virieux 1986) | ✅ |
 | `Elastic3D` | `['vp', 'vs', 'rho']` | 3D | 3D counterpart of `Elastic` | ✅ |
-| `ElasticTTI` | TTI elastic parameters | 2D | Elastic TTI propagation | varies |
-| `ElasticTTISG` | TTI elastic parameters | 2D | Elastic TTI on a staggered grid | ✅ |
+| `ElasticTTI` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Rotated-staggered-grid elastic TTI | ❌ |
+| `ElasticTTISG` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Standard-staggered-grid elastic TTI | ✅ |
 
 ### Distributed Acoustic Sensing (DAS) family
 
+All DAS classes take elastic models — `['vp', 'vs', 'rho']` — and read out
+strain or strain-rate at the receivers; the choice of formulation only changes
+the receiver-side discretisation.
+
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
-| `DAS` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks zhao / mu (formerly `DASModeler`) | varies |
-| `DASElastic` / `DASElastic3D` | elastic + strain parameters | 2D / 3D | Elastic DAS variant (alias of `DASZhao` / `DASZhao3D`) | varies |
-| `DASMu` / `DASMu3D` | acoustic + strain parameters | 2D / 3D | μ-formulation DAS | ✅ (2D) |
-| `DASZhao` / `DASZhao3D` | acoustic + strain parameters | 2D / 3D | Zhao-style DAS formulation | varies |
+| `DAS` | `['vp', 'vs', 'rho']` | 2D / 3D | **Unified facade** — `method=` picks zhao / mu (formerly `DASModeler`) | ✅ |
+| `DASZhao` / `DASZhao3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Zhao-style DAS formulation | ✅ |
+| `DASMu` / `DASMu3D` | `['vp', 'vs', 'rho']` | 2D / 3D | μ-formulation DAS | ✅ |
+| `DASElastic` / `DASElastic3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Elastic DAS variant (alias of `DASZhao` / `DASZhao3D`) | ✅ |
 
 For the authoritative list of equations exported by your installation,
 including constructor signatures and compiled-binding availability, use
@@ -168,6 +173,50 @@ print(sweep.backend.torch.binding.is_available())
 
 - In the current PyTorch implementation, the acoustic path uses separable Laplace operators and,
   on CUDA, fixed-stencil gradient kernels where available.
+
+## Inspecting available sources and receivers
+
+Every equation class carries a structured `FIELD_SPECS` table that lists, for
+each wavefield it tracks, whether the user is allowed to **inject a source**
+there or **place a receiver** there. The propagator reads this when you pass
+`source_type=` / `receiver_type=`; you can query it yourself the same way.
+
+```python
+from sweep.equations import Acoustic, Elastic, DASZhao
+
+eq = Acoustic(device="cuda")
+eq.default_source_fields            # ['h1']
+eq.default_receiver_fields          # ['h1']
+eq.available_source_fields()        # [FieldSpec(name='h1', aliases=('pressure','p'), ...)]
+eq.describe_field("pressure")       # 'h1: ... Aliases: pressure, p.'  (aliases are accepted too)
+
+Elastic(device="cuda").available_receiver_fields()
+# → [vx, vz, sxx, szz]    (FieldSpec list; supports_receiver=True on each)
+
+DASZhao(device="cuda").available_receiver_fields()
+# → [exx_t, ezz_t, sxx, szz, das35_t, das54x_t, das54z_t]
+#   — DAS exposes helical-fiber strain-rate readouts on top of the elastic basics
+```
+
+Each `FieldSpec` carries `name`, `aliases`, `description`, `supports_source`,
+`supports_receiver`, and `internal` flags — so an IDE / notebook can autocomplete
+through them without having to read the source. A handful of equations also have
+`default_source_fields` / `default_receiver_fields` populated, which is what
+`PropTorch` falls back to when `source_type=` / `receiver_type=` are omitted on
+the propagator.
+
+If the default for an equation doesn't suit your survey (e.g. you want to
+inject on `sxx + szz + sxz` in `Elastic` instead of just `sxx + szz`), pass an
+explicit list:
+
+```python
+solver = PropTorch(
+    Elastic(device=dev),
+    shape=shape, dh=dh, dt=dt, dev=dev,
+    source_type=["sxx", "szz", "sxz"],     # explicit override
+    receiver_type=["vz"],
+)
+```
 
 ## See Also
 

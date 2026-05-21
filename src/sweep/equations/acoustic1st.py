@@ -55,12 +55,45 @@ def step_spml(px, pz, vx, vz, vp, rho, dt, h, b, pd, pml=None):
 
 
 class Acoustic1st(FirstOrderEquation):
-    """
-    Parameter order: vp, rho
+    """First-order 2-D acoustic wave equation in pressure-velocity form.
 
-    Wavefields: (p, vx, vz).
+    Variable-density scalar acoustics on a staggered grid: a pressure field
+    ``p`` and particle velocities ``(vx, vz)`` evolve together. The default
+    boundary type is ``'cpmls'`` (staggered-grid recursive CPML), which
+    couples four memory variables (``phix``, ``phiz``, ``psix``, ``psiz``);
+    ``'spml'`` is also supported and switches to a split-pressure
+    formulation with two pressure components ``(px, pz)`` instead of
+    ``p``.
 
-    References: 10.1190/GEO2011-0345.1
+    Reference: 10.1190/GEO2011-0345.1.
+
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s): Acoustic P-wave velocity model.
+        - ``rho`` (kg/m^3): Density model.
+
+    !!! info "Wavefields (``cpmls`` mode — the default)"
+
+        - ``p`` (aliases: ``pressure``): Acoustic pressure field; default source and receiver.
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction.
+        - ``phix``: CPML memory variable for the x-derivative term (internal).
+        - ``phiz``: CPML memory variable for the z-derivative term (internal).
+        - ``psix``: CPML auxiliary field in the x direction (internal).
+        - ``psiz``: CPML auxiliary field in the z direction (internal).
+
+    !!! info "Wavefields (``spml`` mode)"
+
+        - ``px``: Split-field pressure component in the x direction (internal).
+        - ``pz``: Split-field pressure component in the z direction (internal).
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction.
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['p']``
+        - ``receiver_type``: ``['p']``
+        - ``pml_type``: ``'cpmls'``
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic P-wave velocity model.", unit="m/s"),
@@ -70,6 +103,29 @@ class Acoustic1st(FirstOrderEquation):
     default_pml_type = "cpmls"  # acoustic1st does not support 'cpmlr'; supported: ['cpmls', 'spml'].
 
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
+        """Build the first-order acoustic equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding). Must
+                be an even integer (``2, 4, 6, 8, 10, …``). Higher orders
+                reduce grid dispersion at the cost of more compute per
+                step and a wider PML halo. This equation has **no compiled
+                `impl='c'` path; use `impl='eager'`** (the default). The
+                PyTorch / JAX eager path accepts any even order. Defaults
+                to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or ``'jax'``.
+                Defaults to ``'jax'`` for this class (the original
+                research implementation); pass ``backend='torch'`` to
+                stay on PyTorch.
+            **kwargs: forwarded to :class:`FirstOrderEquation` for
+                forward-compatibility (currently unused).
+        """
         super().__init__(spatial_order, device, backend)
         # Pre-set the cpmls wavefield list so introspection (default_source_fields,
         # field_specs, etc.) works before the propagator calls setup_pml.

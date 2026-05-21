@@ -60,13 +60,14 @@ def main() -> None:
     parser.add_argument(
         "--target-dh",
         type=float,
-        default=25.0,
+        default=12.5,
         help="Target grid spacing for the FWI examples in meters.",
     )
     parser.add_argument(
         "--radii",
-        default="8,8",
-        help="Smoothing radii on the downsampled 2D model, formatted like z,x.",
+        default="16,16",
+        help="Smoothing radii on the downsampled 2D model, formatted like z,x. "
+             "Defaults to 16,16 which is ~200 m physical width at target-dh=12.5.",
     )
     parser.add_argument(
         "--passes",

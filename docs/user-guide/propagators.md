@@ -101,15 +101,8 @@ shape = (512, 2048)
 dh, dt = 10.0, 0.002
 
 solver = PropTorch(
-    Acoustic(spatial_order=8, device=dev, backend="torch"),
-    shape=shape,
-    dev=dev,
-    dh=dh,
-    dt=dt,
-    source_type=["h1"],
-    receiver_type=["h1"],
-    pml_type="cpmlr",
-    backend="torch",
+    Acoustic(spatial_order=8, device=dev),
+    shape=shape, dh=dh, dt=dt, dev=dev,
     impl="c",
     cuda_options=CUDAOptions(
         memory=MemoryOptions(
@@ -139,9 +132,10 @@ fail loudly at construction time rather than during a long FWI run.
 | Chunked checkpointing | `impl="c"` | `CkptOptions(mode="chunk", chunks=...)` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `CkptOptions(mode="recursive", count=...)` |
 
-Runnable comparisons of each option live under
-`examples/reducingmemory/`. See [Reducing memory](../examples/reducing_memory.md)
-for the doc walkthrough.
+A runnable comparison of these options lives in the
+[Memory · strategies notebook](../notebooks/07_memory_strategies.ipynb), which
+exercises full-wavefield, boundary saving, and checkpointing on the same
+Marmousi shot and prints the per-mode peak GPU / host memory.
 
 ## Consistency testing
 

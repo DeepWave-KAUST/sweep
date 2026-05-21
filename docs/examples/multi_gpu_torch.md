@@ -1,8 +1,10 @@
 # Torch Distributed Multi-GPU FWI
 
+> :material-github: **Source on GitHub** &mdash; [`examples/multi-gpu/torch/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/multi-gpu/torch) (clone, run, modify)
+
 Source file:
 
-- `examples/multi-gpu/torch/fwi_marmousi_dist.py`
+- [`examples/multi-gpu/torch/fwi_marmousi_dist.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/multi-gpu/torch/fwi_marmousi_dist.py)
 
 This script is a data-parallel version of the 2D acoustic Marmousi Torch FWI
 example. It uses `torch.distributed` with one process per GPU.
@@ -90,8 +92,8 @@ process per CUDA device but runs each local propagation through the eager
 
 Only rank 0 writes figures. Outputs are saved under:
 
-- `examples/multi-gpu/torch/multi_gpu_acoustic_fwi_cuda/`
-- `examples/multi-gpu/torch/multi_gpu_acoustic_fwi_eager/`
+- [`examples/multi-gpu/torch/multi_gpu_acoustic_fwi_cuda/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/multi-gpu/torch/multi_gpu_acoustic_fwi_cuda)
+- [`examples/multi-gpu/torch/multi_gpu_acoustic_fwi_eager/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/multi-gpu/torch/multi_gpu_acoustic_fwi_eager)
 
 Saved files include:
 

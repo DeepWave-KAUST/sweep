@@ -210,49 +210,57 @@ def _build_stiffness(vp, epsilon, delta, rho):
 # ---------------------------------------------------------------------------
 
 class AcousticVTI1st(FirstOrderEquation):
-    """First-order acoustic VTI wave equation on a standard staggered grid (2-D).
+    """First-order 2-D acoustic VTI wave equation on a standard staggered grid.
 
-    Implements the Duveneck et al. (2008) velocity-stress formulation with
-    4 wavefields (v_x, v_z, σ_H, σ_V) and 4 model parameters (V_P, ε, δ, ρ).
-    Variable density and CPML absorbing boundaries are supported natively.
+    Velocity-stress formulation (Duveneck et al. 2008): four wavefields
+    ``(vx, vz, sH, sV)`` evolve together with four CPML memory variables.
+    The system uses the Alkhalifah (1998) ``V_S = 0`` approximation, so
+    only two independent normal stresses exist: ``sH = sigma_11 =
+    sigma_22`` (horizontal) and ``sV = sigma_33`` (vertical). The four
+    cached stiffness coefficients are ``c11 = rho · vp² · (1 + 2·eps)``,
+    ``c33 = rho · vp²``, ``c13 = rho · vp² · sqrt(1 + 2·delta)``, and
+    ``inv_rho = 1 / rho``. Variable density is supported natively; CPML
+    is the staggered-grid ``cpmls`` variant (8 profiles).
 
-    The V_S = 0 approximation (Alkhalifah 1998) sets all shear stiffness
-    coefficients to zero, yielding c_12 = c_11 and σ_11 = σ_22 ≡ σ_H so
-    only two independent normal stresses exist.
+    Stability requires ``eps >= delta`` everywhere
+    (Grechka et al. 2004); ``prepare_models`` issues a runtime warning
+    when this is violated. Free-surface BC is not yet supported (the
+    constructor raises ``NotImplementedError`` for ``free_surface=True``)
+    — see the ``TODO_free_surface`` comment on the class. Also exposed
+    as :class:`AcousticAniso(method='duveneck', symmetry='vti')`.
 
-    Parameters
-    ----------
-    spatial_order : int, optional
-        Finite-difference spatial order.  Default 4.
-    device : str, optional
-        Torch/JAX device.  Default 'cpu'.
-    backend : str, optional
-        'torch' or 'jax'.  Default 'torch'.
-    free_surface : bool, optional
-        Enable a free-surface boundary at the top.  **Currently NOT
-        SUPPORTED for the VTI system.**  A naive isotropic-style image
-        method is *physically incorrect* for VTI because the surface
-        constraint σ_V = 0 couples ∂v_z/∂z to ∂v_x/∂x via the off-diagonal
-        stiffness c_13 (Robertsson 1996; Mittet 2002).  Passing
-        ``free_surface=True`` will raise ``NotImplementedError``.  Use
-        absorbing PML on all four sides for now.  See ``TODO_free_surface``
-        on this class.
+    References:
+        Duveneck E. et al. 2008, *Acoustic VTI wave equations and their
+            application for anisotropic reverse-time migration*, SEG Las
+            Vegas 2008, DOI: 10.1190/1.3059320.
+        Alkhalifah T. 1998, *Acoustic approximations for processing in
+            TI media*, Geophysics 63, 623–631.
+        Thomsen L. 1986, *Weak elastic anisotropy*, Geophysics 51,
+            1954–1966.
 
-    Notes
-    -----
-    Stability requires ε ≥ δ everywhere (Grechka, Zhang, Rector 2004,
-    Geophysics 69, 576).  ``prepare_models`` emits a warning when violated.
+    !!! info "Models (constructor input order)"
 
-    **This class does NOT have a CUDA binding.**  A pure-Python (PyTorch /
-    JAX) time loop is used.  CUDA support is a planned future extension.
+        - ``vp`` (m/s) (aliases: ``velocity``): Vertical P-wave velocity.
+        - ``epsilon``: Thomsen epsilon anisotropy parameter (ε ≥ δ required).
+        - ``delta``: Thomsen delta anisotropy parameter.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density.
 
-    References
-    ----------
-    Duveneck et al. (2008) DOI: 10.1190/1.3059320
-    Alkhalifah (1998) Geophysics 63, 623–631.
-    Thomsen (1986) Geophysics 51, 1954–1966.
-    Robertsson (1996) Geophysics 61, 1921–1934.  (Proper anisotropic FS.)
-    Mittet (2002) Geophysics 67, 1616–1623.  (Staggered-grid extension.)
+    !!! info "Wavefields"
+
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in x.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in z; default receiver.
+        - ``sH`` (aliases: ``stress_h``, ``sigma_H``): Horizontal normal stress σ_11 = σ_22; default source.
+        - ``sV`` (aliases: ``stress_v``, ``sigma_V``): Vertical normal stress σ_33; default source.
+        - ``m_sHx``: CPML memory variable for ∂σ_H/∂x (internal).
+        - ``m_sVz``: CPML memory variable for ∂σ_V/∂z (internal).
+        - ``m_vxx``: CPML memory variable for ∂v_x/∂x (internal).
+        - ``m_vzz``: CPML memory variable for ∂v_z/∂z (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sH', 'sV']``
+        - ``receiver_type``: ``['vz']``
+        - ``pml_type``: ``'cpmls'``
     """
 
     # TODO_free_surface: Implement a Mittet/Robertsson-style anisotropic
@@ -286,6 +294,38 @@ class AcousticVTI1st(FirstOrderEquation):
     default_pml_type = "cpmls"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", free_surface=False):
+        """Build the 2-D first-order acoustic VTI equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/acoustic_vti_1st_2d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+            free_surface: Enable a free-surface BC on the top face.
+                **Not currently supported for the VTI system** — the
+                naive isotropic image method is physically incorrect
+                because the ``sigma_V = 0`` constraint couples
+                ``d(vz)/dz`` to ``d(vx)/dx`` via the off-diagonal
+                stiffness ``c13`` (Robertsson 1996; Mittet 2002).
+                Passing ``True`` raises ``NotImplementedError``; use
+                absorbing PML on all four sides instead. Defaults to
+                ``False``.
+        """
         super().__init__(spatial_order, device, backend)
         if free_surface:
             raise NotImplementedError(
@@ -445,18 +485,45 @@ class AcousticVTI1st(FirstOrderEquation):
 # ---------------------------------------------------------------------------
 
 class AcousticVTI1st3D(FirstOrderEquation):
-    """First-order acoustic VTI wave equation on a standard staggered grid (3-D).
+    """First-order 3-D acoustic VTI wave equation on a standard staggered grid.
 
-    Extends ``AcousticVTI1st`` to 3-D with 5 wavefields (v_x, v_y, v_z,
-    σ_H, σ_V) and the same 4 model parameters.  The horizontal isotropy of
-    VTI media means σ_11 = σ_22 ≡ σ_H so only two distinct normal stresses
-    are tracked.
+    Three-dimensional generalisation of :class:`AcousticVTI1st`: five
+    wavefields ``(vx, vy, vz, sH, sV)`` evolve together with six CPML
+    memory variables. The horizontal isotropy of VTI media gives
+    ``sH = sigma_11 = sigma_22`` so only two distinct normal stresses
+    are tracked. Same Duveneck (2008) cached stiffness as the 2-D
+    variant. Variable density; CPML ``cpmls`` (12 profiles). Free
+    surface is not yet supported. Also exposed as
+    :class:`AcousticAniso(method='duveneck', symmetry='vti', ndim=3)`.
 
-    See ``AcousticVTI1st`` for full documentation.
+    Reference: Duveneck E. et al. 2008, 10.1190/1.3059320.
 
-    References
-    ----------
-    Duveneck et al. (2008) DOI: 10.1190/1.3059320
+    !!! info "Models (constructor input order)"
+
+        - ``vp`` (m/s) (aliases: ``velocity``): Vertical P-wave velocity.
+        - ``epsilon``: Thomsen epsilon anisotropy parameter (ε ≥ δ required).
+        - ``delta``: Thomsen delta anisotropy parameter.
+        - ``rho`` (kg/m^3) (aliases: ``density``): Density.
+
+    !!! info "Wavefields"
+
+        - ``vx`` (aliases: ``velocity_x``): Particle velocity in x.
+        - ``vy`` (aliases: ``velocity_y``): Particle velocity in y.
+        - ``vz`` (aliases: ``velocity_z``): Particle velocity in z; default receiver.
+        - ``sH`` (aliases: ``stress_h``, ``sigma_H``): Horizontal normal stress σ_11 = σ_22; default source.
+        - ``sV`` (aliases: ``stress_v``, ``sigma_V``): Vertical normal stress σ_33; default source.
+        - ``m_sHx``: CPML memory variable for ∂σ_H/∂x (internal).
+        - ``m_sHy``: CPML memory variable for ∂σ_H/∂y (internal).
+        - ``m_sVz``: CPML memory variable for ∂σ_V/∂z (internal).
+        - ``m_vxx``: CPML memory variable for ∂v_x/∂x (internal).
+        - ``m_vyy``: CPML memory variable for ∂v_y/∂y (internal).
+        - ``m_vzz``: CPML memory variable for ∂v_z/∂z (internal).
+
+    !!! info "Defaults"
+
+        - ``source_type``: ``['sH', 'sV']``
+        - ``receiver_type``: ``['vz']``
+        - ``pml_type``: ``'cpmls'``
     """
 
     MODEL_SPECS = AcousticVTI1st.MODEL_SPECS
@@ -478,6 +545,34 @@ class AcousticVTI1st3D(FirstOrderEquation):
     default_pml_type = "cpmls"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", free_surface=False):
+        """Build the 3-D first-order acoustic VTI equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first-derivative operator — e.g.
+                ``spatial_order=4`` is fourth-order accurate.
+                Internally the half-stencil width is
+                ``M = spatial_order // 2`` (used for loop bounds and PML padding).
+                Must be an even integer (``2, 4, 6, 8, 10, …``).
+                **Performance note (`impl='c'` on CUDA):** the compiled
+                kernels ship template specialisations only for
+                ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
+                drops to a generic runtime path (``order = -1`` in
+                ``src/sweep/csrc/cuda/equations/acoustic_vti_1st_3d/forward.cu``)
+                which uses more registers and runs noticeably slower.
+                The PyTorch eager path is unaffected. Defaults to 4.
+            device: Device for the operator's static gradient kernels.
+                Use ``'cuda'`` / a ``torch.device`` for GPU runs so the
+                propagator can follow without a host↔device copy.
+                Defaults to ``'cpu'``.
+            backend: Array / programming backend, ``'torch'`` or
+                ``'jax'``. When you later want ``impl='c'``, leave this
+                on ``'torch'``. Defaults to ``'torch'``.
+            free_surface: Enable a free-surface BC on the top face.
+                **Not currently supported for the VTI system** — same
+                reason as the 2-D case (see :class:`AcousticVTI1st`).
+                Passing ``True`` raises ``NotImplementedError``.
+                Defaults to ``False``.
+        """
         super().__init__(spatial_order, device, backend, ndim=3)
         if free_surface:
             raise NotImplementedError(

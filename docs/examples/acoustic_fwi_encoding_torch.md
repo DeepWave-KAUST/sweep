@@ -1,8 +1,10 @@
 # 2D Acoustic FWI with Source Encoding on Marmousi with Torch
 
+> :material-github: **Source on GitHub** &mdash; [`examples/reducingmemory/source_encoding/torch/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/reducingmemory/source_encoding/torch) (clone, run, modify)
+
 Source file:
 
-- `examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py`
+- [`examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/reducingmemory/source_encoding/torch/source_encoding_fwi.py)
 
 This example demonstrates how to run acoustic full-waveform inversion (FWI)
 with source encoding.
@@ -72,8 +74,8 @@ python3 examples/models/marmousi/convert_segy_to_npy.py
 python3 examples/models/marmousi/prepare_fwi_models.py \
   --input examples/models/marmousi/npy/vp_1p25m.npy \
   --source-dh 1.25 \
-  --target-dh 25.0 \
-  --radii 8,8 \
+  --target-dh 12.5 \
+  --radii 16,16 \
   --passes 3
 ```
 

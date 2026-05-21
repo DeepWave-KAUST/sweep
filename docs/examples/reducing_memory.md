@@ -1,8 +1,10 @@
 # Reducing Memory
 
+> :material-github: **Source on GitHub** &mdash; [`examples/reducingmemory/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/reducingmemory) (clone, run, modify)
+
 Source directory:
 
-- `examples/reducingmemory/`
+- [`examples/reducingmemory/`](https://github.com/DeepWave-KAUST/sweep/tree/main/examples/reducingmemory)
 
 This example family focuses on memory-reduction techniques for inversion and
 wave propagation workloads.
@@ -112,4 +114,4 @@ When comparing these methods, focus on:
 
 ## Related Pages
 
-- [Memory Method Compare](memory_method_compare.md)
+- Notebook walk-through: [`07_memory_strategies.ipynb`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/notebooks/07_memory_strategies.ipynb)

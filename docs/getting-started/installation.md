@@ -32,12 +32,14 @@ cd sweep
     Notes:
 
     - This build produces the compiled extension module `sweep._C`.
-    - After installation, you can use the compiled extension implementation through:
+    - After installation, `PropTorch` auto-detects the binding by default:
 
     ```python
     from sweep.propagator.torch import PropTorch
 
-    solver = PropTorch(..., backend="torch", impl="c")
+    solver = PropTorch(...)              # impl='auto' → 'c' when available
+    solver = PropTorch(..., impl="c")    # explicit; warns + falls back if missing
+    solver = PropTorch(..., impl="eager")  # force pure-PyTorch
     ```
 
     - The compiled binding currently supports:

@@ -5,7 +5,7 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class EagerDefaults:
-    use_compile: bool = False
+    use_compile: bool = True
     compile_mode: str = "default"
     compile_dynamic: bool = False
     compile_backend: str | None = None
