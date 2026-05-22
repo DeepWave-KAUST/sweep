@@ -1,13 +1,22 @@
-# SWEEP
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/sweep-icon-dark.svg">
+    <img src="docs/assets/logo/sweep-icon-light.svg" alt="SWEEP" width="180">
+  </picture>
+</p>
 
-[![Docs](https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white)](https://deepwave-kaust.github.io/sweep/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
-[![JAX](https://img.shields.io/badge/JAX-supported-9cf)](https://github.com/google/jax)
-[![GitHub stars](https://img.shields.io/github/stars/DeepWave-KAUST/sweep?style=social)](https://github.com/DeepWave-KAUST/sweep/stargazers)
+<h1 align="center">SWEEP</h1>
 
-[English](README.md) | 中文
+<p align="center">
+  <a href="https://deepwave-kaust.github.io/sweep/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white"></a>
+  <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
+  <a href="https://www.python.org"><img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white"></a>
+  <a href="https://pytorch.org"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white"></a>
+  <a href="https://github.com/google/jax"><img alt="JAX" src="https://img.shields.io/badge/JAX-supported-9cf"></a>
+  <a href="https://github.com/DeepWave-KAUST/sweep/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/DeepWave-KAUST/sweep?style=social"></a>
+</p>
+
+<p align="center"><a href="README.md">English</a> | 中文</p>
 
 **Seismic Wave Equation Exploration Platform (SWEEP)** 是一个可微分地震波方程正演、偏移与反演的 Python 框架。
 
