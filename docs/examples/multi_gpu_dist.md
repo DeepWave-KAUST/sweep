@@ -6,7 +6,7 @@ own `PropTorch`, owns a slice of the global shot list, and exchanges
 gradients through NCCL.
 
 This page documents the production script
-[`examples/multi-gpu/torch/fwi_marmousi_dist.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/multi-gpu/torch/fwi_marmousi_dist.py) — it is **not** a notebook because notebooks run inside one Python kernel, while DDP requires *N* independent interpreters. See the [single-process variant](../notebooks/12_multi_gpu_single_process.ipynb) for the in-kernel demo.
+[`examples/multi-gpu/torch/fwi_marmousi_dist.py`](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/multi-gpu/torch/fwi_marmousi_dist.py) — it is **not** a notebook because notebooks run inside one Python kernel, while DDP requires *N* independent interpreters. See the [single-process variant](../notebooks/12_multi_gpu.ipynb) for the in-kernel demo.
 
 ## Launch
 
@@ -141,9 +141,9 @@ optimizer iteration) and from the work that is *not* per-shot — observed
 data preparation, figure writing, optimizer step. For very small jobs
 (few shots, low spatial order) the per-step kernel time can become
 comparable to the NCCL handshake and you may want to stay on
-[single-process multi-GPU](../notebooks/12_multi_gpu_single_process.ipynb).
+[single-process multi-GPU](../notebooks/12_multi_gpu.ipynb).
 
 ## See also
 
-- [`examples/multi-gpu/jax/fwi_marmousi_pmap.py`](https://github.com/DeepWave-KAUST/sweep/blob/main/examples/multi-gpu/jax/fwi_marmousi_pmap.py) — the same idea with `jax.pmap` (single-process, but truly multi-device thanks to XLA SPMD).
-- [Single-process multi-GPU notebook](../notebooks/12_multi_gpu_single_process.ipynb) — when you don't want to deal with launchers.
+- [`examples/multi-gpu/jax/fwi_marmousi_pmap.py`](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/multi-gpu/jax/fwi_marmousi_pmap.py) — the same idea with `jax.pmap` (single-process, but truly multi-device thanks to XLA SPMD).
+- [Single-process multi-GPU notebook](../notebooks/12_multi_gpu.ipynb) — when you don't want to deal with launchers.

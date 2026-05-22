@@ -10,6 +10,8 @@ watch:
 
 theme:
   name: material
+  logo: assets/logo/sweep-icon-transparent.svg
+  favicon: assets/logo/sweep-icon-32.png
   features:
     - navigation.tabs
     - navigation.tabs.sticky
@@ -89,7 +91,6 @@ nav:
               - Multiscale: notebooks/03_fwi_multiscale.ipynb
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - 3D Overthrust: notebooks/11_fwi_acoustic_overthrust_3d.ipynb
-              - Multi-GPU · single process: notebooks/12_multi_gpu_single_process.ipynb
           - Wavefields:
               - DAS: notebooks/04_das_zhao_vs_mu.ipynb
               - Elastic: notebooks/06_wavefield_elastic.ipynb
@@ -99,6 +100,8 @@ nav:
               - ElasticTTI: notebooks/10_wavefield_elastic_tti.ipynb
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
+          - HPC:
+              - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
   - API Reference:
@@ -121,3 +124,6 @@ nav:
           - Propagator Options: api/propagators/options.md
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
+
+extra_css:
+  - stylesheets/extra.css

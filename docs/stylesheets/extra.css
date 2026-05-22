@@ -1,0 +1,22 @@
+/* Enlarge the SWEEP logo in the top-left header.
+   Default mkdocs-material logo is ~1.5rem (24 px) which feels lost next to the
+   site title. Bumping to 2.5rem (40 px) and trimming the surrounding padding
+   gives the icon room to breathe without pushing the title off the row. */
+
+.md-header__button.md-logo {
+  margin: 0.15rem 0.4rem 0.15rem 0;
+  padding: 0;
+}
+
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+/* Same treatment for the drawer (mobile / narrow-screen sidebar) logo. */
+.md-nav--primary .md-nav__title .md-logo img,
+.md-nav--primary .md-nav__title .md-logo svg {
+  width: 2.5rem;
+  height: 2.5rem;
+}
