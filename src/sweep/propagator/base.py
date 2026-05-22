@@ -8,12 +8,13 @@ from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFA
 class PropBase:
 
     def __init__(self,
-                 equation, 
-                 shape, 
+                 equation,
+                 shape,
                  source_type=None,
                  receiver_type=None,
                  abcn=PROP_DEFAULTS.abcn,
                  free_surface=PROP_DEFAULTS.free_surface,
+                 topography=None,
                  dh=PROP_DEFAULTS.dh,
                  dt=PROP_DEFAULTS.dt,
                  dev=PROP_DEFAULTS.dev,
@@ -40,6 +41,14 @@ class PropBase:
             receiver_type (list, optional): List of strings for the receiver type. Defaults to [].
             abcn (int, optional): The number of layers of absorbing boundary conditions. Defaults to 50.
             free_surface (bool, optional): If the model has a free surface. Defaults to False.
+            topography (array_like, optional): Irregular free-surface topography.
+                When ``None`` (default) the free surface is flat at the top of
+                the physical domain (existing behavior). When provided, must
+                be a 1-D integer array of length ``nx_phys`` giving the
+                surface row index per physical x-column (``0`` = top of
+                physical domain). Requires ``free_surface=True``.
+                Currently supported only on ``impl='python'`` (eager) for
+                2-D ``Acoustic``; CUDA / 3-D / elastic are Stage 2+.
             dh (float or sequence, optional): Grid spacing in model-axis order.
                 For 2D use ``(dz, dx)`` and for 3D use ``(dz, dy, dx)``.
                 Defaults to 10..
@@ -176,7 +185,97 @@ class PropBase:
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
+
+        # Topography is processed AFTER self.shape is PML-padded so the
+        # runtime-coord conversion can compute the final padded surface row.
+        self._process_topography(topography)
+
         self._set_call_signature()
+
+    def _process_topography(self, topography):
+        """Validate and store irregular free-surface topography.
+
+        Sets ``self.topography`` (the user input as a long tensor) and
+        ``self._topo_rows_runtime`` (the surface-row index per column in
+        the runtime padded-grid coordinates expected by the eager
+        wavefield tensors). Both are mirrored onto ``self.equation`` so
+        the equation's ``func`` can reach them without a back-pointer.
+        """
+        self.topography = None
+        self._topo_rows_runtime = None
+        # Always mirror so re-init doesn't leave a stale value.
+        self.equation.topography = None
+        self.equation._topo_rows_runtime = None
+
+        if topography is None:
+            return
+
+        if not self.free_surface:
+            raise ValueError(
+                "topography requires free_surface=True; got free_surface=False"
+            )
+        if self.ndim != 2:
+            raise NotImplementedError(
+                "topography support is currently limited to 2-D propagators "
+                f"(got ndim={self.ndim}). 3-D will be added in Stage 1b."
+            )
+
+        import torch
+        import torch.nn.functional as F
+
+        topo = torch.as_tensor(topography, dtype=torch.long)
+        if topo.ndim != 1:
+            raise ValueError(
+                f"topography must be a 1-D array indexed by physical x; "
+                f"got shape {tuple(topo.shape)}"
+            )
+
+        halo = self.equation.so // 2
+        # Recover physical (un-padded) z, x from the now PML-padded self.shape.
+        # With free_surface=True: padding_z=(0, abcn); else (abcn, abcn).
+        nz_phys = self.shape[0] - self.abcn  # free_surface guaranteed True above
+        nx_phys = self.shape[1] - 2 * self.abcn
+        if topo.shape[0] != nx_phys:
+            raise ValueError(
+                f"topography length {topo.shape[0]} != physical nx ({nx_phys})"
+            )
+        if (topo < 0).any() or (topo >= nz_phys).any():
+            raise ValueError(
+                f"topography values must satisfy 0 <= row < {nz_phys}; "
+                f"got range [{int(topo.min())}, {int(topo.max())}]"
+            )
+
+        # Translate to runtime-grid z coords. The runtime z-axis layout is
+        #   [0, halo)              top stencil halo (zero, "air" in flat case)
+        #   [halo, halo + nz_phys) physical interior
+        #   [halo + nz_phys, ...)  bottom PML + bottom halo
+        # So the surface row per column is ``halo + topo_phys``.
+        topo_z = topo + halo
+
+        # Pad the x-axis with edge replication so PML and runtime-halo
+        # columns inherit the nearest physical surface. This keeps the
+        # surface continuous through the absorbing zone instead of jumping
+        # at the model edge.
+        pad_each = self.abcn + halo
+        topo_runtime = F.pad(
+            topo_z.to(torch.float32).view(1, 1, -1),
+            (pad_each, pad_each),
+            mode="replicate",
+        ).view(-1).to(torch.long)
+
+        device = getattr(self.equation, "device", None) or self.dev
+        if device is not None:
+            try:
+                topo_runtime = topo_runtime.to(device=device)
+            except (RuntimeError, TypeError):
+                # Fall back to current device if equation.device isn't a
+                # valid torch device (e.g. plain string mismatch).
+                pass
+
+        self.topography = topo
+        self._topo_rows_runtime = topo_runtime
+        self.equation.topography = topo
+        self.equation._topo_rows_runtime = topo_runtime
 
     def _default_field_types(self, role):
         attr = "default_source_fields" if role == "source" else "default_receiver_fields"
