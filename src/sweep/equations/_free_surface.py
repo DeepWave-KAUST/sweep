@@ -12,11 +12,28 @@ def _flip(u, axis):
 
 
 def _concat(arrays, axis):
+    # Dispatch order matters under torch.compile + CUDA:
+    #   - ``np.ndarray`` first short-circuits the eager numpy path
+    #     before touching torch; numpy >= 1.25 exposes ``.device`` per
+    #     the Array API so a generic duck-type check on ``first`` would
+    #     mis-route plain ndarrays into ``torch.cat``.
+    #   - ``torch.cat`` is then attempted unconditionally rather than
+    #     gated by ``isinstance(first, torch.Tensor)``. Under
+    #     ``torch.compile`` Dynamo can specialise such an isinstance
+    #     guard into the numpy branch and bake "can't convert cuda
+    #     tensor to numpy" into the compiled graph; calling
+    #     ``torch.cat`` directly lets Dynamo recognise the tensor op
+    #     and emit ``aten.cat`` in the FX graph. For non-torch inputs
+    #     ``torch.cat`` raises ``TypeError`` and we fall through.
     first = arrays[0]
-    if hasattr(first, "device") and hasattr(first, "dtype"):
+    if isinstance(first, np.ndarray):
+        return np.concatenate(arrays, axis=axis)
+    try:
         import torch
 
         return torch.cat(arrays, dim=axis)
+    except (ImportError, TypeError):
+        pass
     try:
         import jax.numpy as jnp
 
@@ -193,4 +210,21 @@ def zero_above_topo(u, iz_surf, axis):
 
     z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
     mask = (z < surf).expand_as(u)
+    return u.masked_fill(mask, 0.0)
+
+
+def zero_at_topo(u, iz_surf, axis):
+    """Zero exactly the surface row per column (one cell per ``ix`` at
+    ``z == iz_surf[ix]``).
+
+    For staggered first-order elastic FS the image method enforces
+    ``σ_zz = σ_xz = 0`` at the surface row; this is the topo
+    generalisation of :func:`zero_top_row` (which zeros the constant row
+    ``halo``). Cells above and below the surface are untouched — the
+    mirror operation done one step earlier already replaces air cells
+    next time the derivative is taken."""
+    import torch
+
+    z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
+    mask = (z == surf).expand_as(u)
     return u.masked_fill(mask, 0.0)
