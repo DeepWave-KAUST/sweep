@@ -447,8 +447,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
     def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
+        # Pre-set the attributes ``__del__`` may touch so a raise-during-init
+        # (e.g. the topography guard below) doesn't trip a second exception.
+        self._boundary_disk_root = None
+        self._boundary_disk_files = ()
         super().__init__(*args, **kwargs)
-        
+
+        if getattr(self, "topography", None) is not None:
+            raise NotImplementedError(
+                "topography is currently supported only on impl='python' "
+                "(eager backend). CUDA / impl='c' support will be added in "
+                "Stage 2."
+            )
+
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer('dh', torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
 
