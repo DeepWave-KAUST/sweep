@@ -195,11 +195,21 @@ class PropBase:
     def _process_topography(self, topography):
         """Validate and store irregular free-surface topography.
 
-        Sets ``self.topography`` (the user input as a long tensor) and
-        ``self._topo_rows_runtime`` (the surface-row index per column in
-        the runtime padded-grid coordinates expected by the eager
-        wavefield tensors). Both are mirrored onto ``self.equation`` so
-        the equation's ``func`` can reach them without a back-pointer.
+        Two paths depending on the equation:
+
+        * **Curvilinear** equations (``equation.is_curvilinear == True``,
+          e.g. :class:`AcousticCurvilinear`): build a
+          :class:`CurvilinearGrid`, pad its metric tensors to runtime
+          shape, and attach them to the equation. The equation's
+          ``step`` runs on a flat computational η=0 surface; no
+          per-column staircase BC is used.
+
+        * **Staircase** equations (the default, Stage 1+2): set
+          ``self.topography`` (the user input as a long tensor) and
+          ``self._topo_rows_runtime`` (surface row per column in the
+          runtime padded-grid). Both are mirrored onto
+          ``self.equation`` so its ``func`` reaches them without a
+          back-pointer.
         """
         self.topography = None
         self._topo_rows_runtime = None
@@ -208,6 +218,13 @@ class PropBase:
         self.equation._topo_rows_runtime = None
 
         if topography is None:
+            # On curvilinear equations a flat topo still has to attach
+            # an identity-metric grid, otherwise ``step`` raises. Build
+            # one from a zero-elevation array.
+            if getattr(self.equation, "is_curvilinear", False):
+                self._attach_curvilinear_metrics(
+                    topography=None, halo=self.equation.so // 2
+                )
             return
 
         if not self.free_surface:
@@ -245,6 +262,16 @@ class PropBase:
                 f"got range [{int(topo.min())}, {int(topo.max())}]"
             )
 
+        # Curvilinear equations consume the metric tensors instead of
+        # the staircase ``_topo_rows_runtime``. Branch here and return.
+        if getattr(self.equation, "is_curvilinear", False):
+            self.topography = topo
+            self.equation.topography = topo
+            self._attach_curvilinear_metrics(
+                topography=topo.cpu().numpy(), halo=halo
+            )
+            return
+
         # Translate to runtime-grid z coords. The runtime z-axis layout is
         #   [0, halo)              top stencil halo (zero, "air" in flat case)
         #   [halo, halo + nz_phys) physical interior
@@ -276,6 +303,60 @@ class PropBase:
         self._topo_rows_runtime = topo_runtime
         self.equation.topography = topo
         self.equation._topo_rows_runtime = topo_runtime
+
+    def _attach_curvilinear_metrics(self, topography, halo):
+        """Build a :class:`CurvilinearGrid` from ``topography`` (physical
+        nx-long array, ``None`` for flat) and attach padded metric
+        tensors to ``self.equation``."""
+        from sweep.utils.curvilinear import CurvilinearGrid
+
+        if self.ndim != 2:
+            raise NotImplementedError(
+                "Curvilinear path only supports 2-D propagators (got "
+                f"ndim={self.ndim})."
+            )
+
+        nz_phys = self.shape[0] - (self.abcn if self.free_surface else 2 * self.abcn)
+        nx_phys = self.shape[1] - 2 * self.abcn
+        device = getattr(self.equation, "device", None) or self.dev
+
+        grid = CurvilinearGrid(
+            topography=topography,
+            nz_phys=nz_phys,
+            nx_phys=nx_phys,
+            dh=float(self._grid_spacing[-1]),
+            device="cpu",   # build on CPU; move to device after padding
+        )
+
+        # Pad metrics to runtime shape using edge replication. The
+        # runtime shape is ``self.shape + 2 * halo`` per axis, with
+        # padding pattern ``(pad_x_left, pad_x_right, pad_z_top, pad_z_bottom)``.
+        if self.free_surface:
+            pad_z_top, pad_z_bot = halo, self.abcn + halo
+        else:
+            pad_z_top = pad_z_bot = self.abcn + halo
+        pad_x_left = pad_x_right = self.abcn + halo
+        pad_runtime = (pad_x_left, pad_x_right, pad_z_top, pad_z_bot)
+        padded = grid.padded_metrics(pad_runtime)
+
+        if device is not None:
+            try:
+                padded = {k: v.to(device) for k, v in padded.items()}
+            except (RuntimeError, TypeError):
+                pass
+
+        self.equation.set_curvilinear_metrics(
+            alpha=padded["alpha"],
+            metric_pηη=padded["metric_pηη"],
+            metric_pη=padded["metric_pη"],
+            d_eta=grid.d_eta,
+        )
+        # Also expose α_xi, α_eta, β for elastic; safely ignored by
+        # acoustic which doesn't need them.
+        self.equation._curv_beta = padded["beta"]
+        self.equation._curv_alpha_xi = padded["alpha_xi"]
+        self.equation._curv_alpha_eta = padded["alpha_eta"]
+        self._curvilinear_grid = grid
 
     def _default_field_types(self, role):
         attr = "default_source_fields" if role == "source" else "default_receiver_fields"
