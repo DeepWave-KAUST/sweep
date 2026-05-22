@@ -41,6 +41,8 @@ from sweep.equations._free_surface import (
     extend_top_free_surface_topo,
     top_free_surface_derivative_topo,
     zero_above_topo,
+    zero_at_topo,
+    zero_top_row,
 )
 
 
@@ -218,3 +220,36 @@ def test_iz_surf_as_python_list():
         iz_surf=torch.tensor([2, 1, 2], dtype=torch.long),
     )
     assert torch.allclose(out_list, out_tensor)
+
+
+# ---------------------------------------------------------------------------
+# zero_at_topo (per-column surface-row zero, for elastic image-method FS)
+# ---------------------------------------------------------------------------
+
+
+def test_zero_at_topo_clears_exactly_surface_row():
+    u = torch.ones(4, 3)
+    iz_surf = torch.tensor([2, 1, 2], dtype=torch.long)
+    out = zero_at_topo(u, iz_surf, axis=-2)
+    expected = torch.tensor(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],  # col 1: surf=1 ⇒ row 1 zeroed
+            [0.0, 1.0, 0.0],  # col 0, 2: surf=2 ⇒ row 2 zeroed
+            [1.0, 1.0, 1.0],
+        ]
+    )
+    assert torch.allclose(out, expected)
+
+
+def test_zero_at_topo_constant_surf_matches_zero_top_row():
+    """When iz_surf = halo*ones (the flat-degenerate case) zero_at_topo
+    must match the existing zero_top_row used by the flat elastic path."""
+    torch.manual_seed(7)
+    nz, nx = 8, 5
+    halo = 2
+    u = torch.randn(nz, nx)
+    iz_surf = torch.full((nx,), halo, dtype=torch.long)
+    out_flat = zero_top_row(u, halo, axis=-2)
+    out_topo = zero_at_topo(u, iz_surf, axis=-2)
+    assert torch.allclose(out_flat, out_topo, atol=1e-7)

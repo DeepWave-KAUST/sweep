@@ -1,7 +1,12 @@
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from ._free_surface import top_free_surface_derivative, zero_top_row
+from ._free_surface import (
+    top_free_surface_derivative,
+    top_free_surface_derivative_topo,
+    zero_at_topo,
+    zero_top_row,
+)
 
 
 def _match_reference_shape(u, ref):
@@ -22,26 +27,37 @@ def _match_reference_shape(u, ref):
     return u[..., z0 : z0 + target_z, x0 : x0 + target_x]
 
 
-def step(vx, vz, sxx, szz, sxz, 
+def step(vx, vz, sxx, szz, sxz,
          m_vxx, m_vxz, m_vzx, m_vzz,
          m_txxx, m_txxz, m_tzzx, m_tzzz,
          m_txzx, m_txzz,
-         vp, vs, rho, 
+         vp, vs, rho,
          lame_lambda, lame_mu,
-         dt, h, b, pd, 
+         dt, h, b, pd,
          pml=None,
          free_surface=False,
          lame_lambda_2mu=None,
+         topo_rows=None,
          ):
 
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
     lame_lambda_2mu = lame_lambda + 2 * lame_mu if lame_lambda_2mu is None else lame_lambda_2mu
 
+    # Topo path picks per-column ``top_free_surface_derivative_topo`` (image
+    # method mirror with column-dependent surface row). When ``topo_rows`` is
+    # None the call sites collapse to the flat ``top_free_surface_derivative``
+    # used historically — guarded by the flat-zero degenerate test.
+    has_topo = free_surface and topo_rows is not None
+
     txx_x = pd.x_forward(sxx)
     if free_surface:
-        txz_z = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
-        tzz_z = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
+        if has_topo:
+            txz_z = top_free_surface_derivative_topo(sxz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows)
+            tzz_z = top_free_surface_derivative_topo(szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows)
+        else:
+            txz_z = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
+            tzz_z = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
     else:
         txz_z = pd.z_backward(sxz)
         tzz_z = pd.z_forward(szz)
@@ -63,8 +79,12 @@ def step(vx, vz, sxx, szz, sxz,
     # Update Stress fields
     vx_x = pd.x_backward(vx)
     if free_surface:
-        vz_z = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-2)
-        vx_z = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-2)
+        if has_topo:
+            vz_z = top_free_surface_derivative_topo(vz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows)
+            vx_z = top_free_surface_derivative_topo(vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows)
+        else:
+            vz_z = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-2)
+            vx_z = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-2)
     else:
         vz_z = pd.z_backward(vz)
         vx_z = pd.z_forward(vx)
@@ -85,8 +105,12 @@ def step(vx, vz, sxx, szz, sxz,
     sxz = sxz + dt * lame_mu * (vx_z + vz_x)
 
     if free_surface:
-        szz = zero_top_row(szz, top_halo, axis=-2)
-        sxz = zero_top_row(sxz, top_halo, axis=-2)
+        if has_topo:
+            szz = zero_at_topo(szz, topo_rows, axis=-2)
+            sxz = zero_at_topo(sxz, topo_rows, axis=-2)
+        else:
+            szz = zero_top_row(szz, top_halo, axis=-2)
+            sxz = zero_top_row(sxz, top_halo, axis=-2)
 
 
     return vx, vz, sxx, szz, sxz, \
@@ -246,6 +270,7 @@ class Elastic(FirstOrderEquation):
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
             lame_lambda_2mu=lame_lambda_2mu,
+            topo_rows=getattr(self, "_topo_rows_runtime", None),
             **kwargs,
         )
     
