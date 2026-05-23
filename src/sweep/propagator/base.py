@@ -356,6 +356,10 @@ class PropBase:
         self.equation._curv_beta = padded["beta"]
         self.equation._curv_alpha_xi = padded["alpha_xi"]
         self.equation._curv_alpha_eta = padded["alpha_eta"]
+        # ``h_prime`` is the 1-D surface slope along ξ, padded to the
+        # runtime x-extent. Elastic uses it for the rotated free-surface
+        # traction BC on a curved surface (acoustic ignores it).
+        self.equation._curv_h_prime = padded["h_prime"]
         self._curvilinear_grid = grid
 
     def _default_field_types(self, role):

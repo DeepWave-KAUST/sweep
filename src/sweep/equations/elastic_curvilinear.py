@@ -43,6 +43,7 @@ def step_curv(
     alpha=None,
     beta=None,
     d_eta=None,
+    h_prime=None,
 ):
     """Staggered-grid velocity-stress elastic step in the (ξ, η) grid.
 
@@ -151,6 +152,19 @@ def step_curv(
     sxz = sxz + dt * lame_mu * (vx_Z_pml + vz_X_pml)
 
     if free_surface:
+        # NOTE: Naively enforcing the rotated traction-free BC
+        #   σ_xz = h'·σ_xx, σ_zz = h'²·σ_xx
+        # at the surface row by overwriting σ_xz, σ_zz produces a
+        # systematic energy injection (the wave equation in physical
+        # components doesn't drive σ_xz toward h'·σ_xx by itself; the
+        # per-step Δ between the wave-eq value and the BC value is the
+        # injection). Result: faster blow-up, not slower. The proper
+        # fix is the Hestholm-Ruud (1998) reformulation in computational
+        # (ξ, η) stress tensor components where image-method mirror on
+        # the FLAT η=0 row naturally enforces σ_ηη = σ_ξη = 0. That's a
+        # Stage 4 rewrite (~500 LOC). For now keep the flat-equivalent
+        # ``zero_top_row``; the slow surface-mode instability is
+        # documented in CURVILINEAR_PLAN §7.
         szz = zero_top_row(szz, top_halo, axis=-2)
         sxz = zero_top_row(sxz, top_halo, axis=-2)
 
@@ -185,6 +199,23 @@ def _x_shift_right(t):
 
     pad = torch.cat([t[..., 1:], t[..., -1:]], dim=-1)
     return 0.5 * (t + pad)
+
+
+def _enforce_curved_surface(target, sxx, h_prime, surf_row, exponent):
+    """Set ``target[..., surf_row, :] = (h_prime ** exponent) * sxx[..., surf_row, :]``.
+
+    Implements the rotated traction-free BC for an irregular surface in
+    physical-component stresses. The image-method mirror in the next
+    step's z-derivative will then see the corrected surface value and
+    propagate the BC consistently.
+    """
+    import torch
+
+    out = target.clone()
+    coef = h_prime if exponent == 1 else h_prime ** exponent
+    # h_prime shape: (nx_runtime,). Broadcast to (..., nx_runtime).
+    out[..., surf_row, :] = coef * sxx[..., surf_row, :]
+    return out
 
 
 class ElasticCurvilinear(FirstOrderEquation):
@@ -227,6 +258,7 @@ class ElasticCurvilinear(FirstOrderEquation):
         self._curv_alpha = None
         self._curv_beta = None
         self._curv_d_eta = None
+        self._curv_h_prime = None
         self.is_curvilinear = True
 
     def set_curvilinear_metrics(self, alpha, metric_pηη, metric_pη, d_eta):
@@ -297,6 +329,7 @@ class ElasticCurvilinear(FirstOrderEquation):
             alpha=self._curv_alpha,
             beta=self._curv_beta,
             d_eta=self._curv_d_eta,
+            h_prime=getattr(self, "_curv_h_prime", None),
             **kwargs,
         )
 
