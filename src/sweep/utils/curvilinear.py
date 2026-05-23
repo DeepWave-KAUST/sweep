@@ -165,6 +165,9 @@ class CurvilinearGrid:
         self.alpha_eta = _t(alpha_eta)
         self.metric_pηη = _t(metric_pηη)
         self.metric_pη = _t(metric_pη)
+        # 1D surface-slope h'(ξ) for the elastic rotated free-surface BC
+        # ``σ_xz = h' σ_xx, σ_zz = h'² σ_xx`` on a curved surface.
+        self.h_prime = _t(h_prime)
         self.topo_rows = torch.from_numpy(topo).to(device).long()
         self.d_eta = float(d_eta)
         self.dh = float(dh)
@@ -192,6 +195,13 @@ class CurvilinearGrid:
             t4 = F.pad(t4, padding, mode="replicate")
             return t4.squeeze(0).squeeze(0)
 
+        # 1D ``h_prime`` padded along x only (matches the surface row's
+        # x-extent on the runtime grid). ``F.pad(..., mode='replicate')``
+        # with a 2-tuple expects ≤ 3D input.
+        h_prime_3d = self.h_prime[None, None, :]          # (1, 1, nx)
+        h_prime_padded = F.pad(h_prime_3d, (padding[0], padding[1]), mode="replicate")
+        h_prime_runtime = h_prime_padded.squeeze(0).squeeze(0)  # (nx_runtime,)
+
         return {
             "alpha": _pad(self.alpha),
             "beta": _pad(self.beta),
@@ -199,6 +209,7 @@ class CurvilinearGrid:
             "alpha_eta": _pad(self.alpha_eta),
             "metric_pηη": _pad(self.metric_pηη),
             "metric_pη": _pad(self.metric_pη),
+            "h_prime": h_prime_runtime,
         }
 
     def physical_to_computational(self, x_phys, z_phys):
