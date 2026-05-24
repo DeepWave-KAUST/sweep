@@ -256,17 +256,19 @@ def main():
     vp = torch.from_numpy(vp_np).to(device)
     vs = torch.from_numpy(vs_np).to(device)
     rho = torch.from_numpy(rho_np).to(device)
-    am = torch.from_numpy(air_mask).to(device)
     wavelet = build_wavelet().to(device)
     sources, receivers, src_x, src_z, rec_x = build_geometry(topo_row)
     sources = sources.to(device)
     receivers = receivers.to(device)
 
+    # Unified topography API: passing ``topography=topo_row`` activates
+    # APM (Cao & Chen 2018) for elastic equations — ``topo_method`` defaults
+    # to ``'apm'`` when the equation declares ``supports_apm=True``.
+    # ``ElasticAPM`` is an alias of :class:`Elastic` — either name works.
     equation = ElasticAPM(spatial_order=SO, device=device, backend="torch")
     prop = PropTorch(
         equation, shape=(NZ, NX),
-        free_surface=False,        # APM IS the FS — no propagator-side mirror
-        topography=None,           # not used by APM
+        topography=topo_row,        # auto → 'apm' for Elastic
         abcn=ABCN, dh=DH, dt=DT,
         use_ckpt=False, impl="eager",
         eager_options={"use_compile": False},
@@ -276,7 +278,7 @@ def main():
     with torch.no_grad():
         record, snaps = prop(
             wavelet, sources, receivers,
-            models=[vp, vs, rho, am],
+            models=[vp, vs, rho],
             return_wavefield=True, snapshot_times=snap_times,
         )
     print(f"[apm-gaussian] record {tuple(record.shape)}, snaps {tuple(snaps.shape)}")

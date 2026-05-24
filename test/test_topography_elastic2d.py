@@ -42,10 +42,13 @@ SO = 4
 DOM_FREQ = 10.0
 DELAY = 0.06
 
+# Auto-select CUDA when available (matches test_elastic_apm.py).
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def _wavelet():
     t = np.arange(NT, dtype=np.float32) * DT - DELAY
-    return torch.tensor((1.0e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))
+    return torch.tensor((1.0e3 * ricker(t, f=DOM_FREQ)).astype(np.float32)).to(DEVICE)
 
 
 def _models():
@@ -57,9 +60,9 @@ def _models():
         (1000.0 + 200.0 * depth)[:, None], (NZ, NX)
     ).astype(np.float32).copy()
     return (
-        torch.from_numpy(vp),
-        torch.from_numpy(vs),
-        torch.from_numpy(rho),
+        torch.from_numpy(vp).to(DEVICE),
+        torch.from_numpy(vs).to(DEVICE),
+        torch.from_numpy(rho).to(DEVICE),
     )
 
 
@@ -69,16 +72,20 @@ def _geometry(src_xz=None):
     rec_x = np.arange(2, NX - 2, 6, dtype=np.int64)
     rec_z = np.full_like(rec_x, 2)
     receivers = np.stack([rec_x, rec_z], axis=-1)[None, ...]
-    return torch.from_numpy(sources), torch.from_numpy(receivers)
+    return torch.from_numpy(sources).to(DEVICE), torch.from_numpy(receivers).to(DEVICE)
 
 
-def _make_prop(topography, *, free_surface=True, impl="eager"):
-    eq = Elastic(spatial_order=SO, device="cpu", backend="torch")
+def _make_prop(topography, *, impl="eager"):
+    """Image-method (Robertsson 1996) elastic propagator with optional
+    topography.  ``topo_method='image'`` pins the staircase mirror —
+    Elastic's auto default would otherwise be APM."""
+    eq = Elastic(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq,
         shape=(NZ, NX),
-        free_surface=free_surface,
         topography=topography,
+        topo_method='image' if topography is not None else 'auto',
+        free_surface=topography is None,   # flat FS only when no topography
         abcn=ABCN,
         dh=DH,
         dt=DT,
@@ -183,14 +190,14 @@ def test_constant_shift_topography_is_translation_invariant_elastic():
     rec_x = np.array([src_x], dtype=np.int64)
 
     def _run(topo, src_z, rec_z):
-        sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64))
+        sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64)).to(DEVICE)
         receivers = torch.from_numpy(
             np.stack([rec_x, np.full_like(rec_x, rec_z)], axis=-1)[None, ...]
-        )
+        ).to(DEVICE)
         # Constant vp/vs/rho so no depth contrasts contaminate the comparison.
-        vp = torch.full((NZ, NX), 1800.0)
-        vs = torch.full((NZ, NX), 1040.0)
-        rho = torch.full((NZ, NX), 1000.0)
+        vp = torch.full((NZ, NX), 1800.0).to(DEVICE)
+        vs = torch.full((NZ, NX), 1040.0).to(DEVICE)
+        rho = torch.full((NZ, NX), 1000.0).to(DEVICE)
         prop = _make_prop(topography=topo)
         return prop(_wavelet(), sources, receivers, models=[vp, vs, rho])
 
@@ -224,18 +231,18 @@ def test_vp_gradient_finite_under_topography_elastic():
     hill = (5.0 * np.exp(-((x - NX / 2) ** 2) / (2.0 * 10.0**2))).round().astype(np.int64)
     src_x = NX // 2
     src_z = int(hill[src_x]) + 2
-    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64))
+    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64)).to(DEVICE)
     rec_x = np.arange(2, NX - 2, 6, dtype=np.int64)
     rec_z = (hill[rec_x] + 1).astype(np.int64)
-    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
 
     # Constant background; a buried P-wave anomaly drives the residual.
     vp_bg, vs_bg, rho_bg = 1800.0, 1040.0, 1000.0
-    vp_true = torch.full((NZ, NX), vp_bg)
+    vp_true = torch.full((NZ, NX), vp_bg).to(DEVICE)
     vp_true[NZ // 2 : NZ // 2 + 5, NX // 3 : (2 * NX) // 3] += 180.0
-    vs_const = torch.full((NZ, NX), vs_bg)
-    rho_const = torch.full((NZ, NX), rho_bg)
-    vp_init = torch.full((NZ, NX), vp_bg)
+    vs_const = torch.full((NZ, NX), vs_bg).to(DEVICE)
+    rho_const = torch.full((NZ, NX), rho_bg).to(DEVICE)
+    vp_init = torch.full((NZ, NX), vp_bg).to(DEVICE)
 
     prop = _make_prop(topography=hill)
     with torch.no_grad():

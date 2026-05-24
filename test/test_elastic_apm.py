@@ -66,11 +66,15 @@ def _bulk_models():
     return vp, vs, rho
 
 
-def _make_apm_prop(air_mask, *, free_surface=False):
+def _make_apm_prop(topo_row):
+    """Build an APM propagator from the 1-D per-column surface row.
+    ``ElasticAPM`` is an alias of :class:`Elastic`; ``topo_method``
+    defaults to ``'apm'`` for equations with ``supports_apm=True``, so
+    no extra flag is needed."""
     eq = ElasticAPM(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq, shape=(NZ, NX),
-        free_surface=free_surface,
+        topography=topo_row,             # auto → 'apm' for Elastic
         abcn=ABCN, dh=DH, dt=DT,
         use_ckpt=False, impl="eager",
         eager_options={"use_compile": False},
@@ -94,18 +98,38 @@ def _make_elastic_prop():
 
 
 def test_construction_smoke():
+    """After the unified-topography refactor ``ElasticAPM`` is just an
+    alias of :class:`Elastic` — same fields, same models, same defaults.
+    APM kicks in only when the propagator is given a 2-D air_mask via
+    ``topography=``."""
+    assert ElasticAPM is Elastic, "ElasticAPM must be an alias of Elastic"
     eq = ElasticAPM(spatial_order=SO, device=DEVICE, backend="torch")
-    assert len(eq.field_specs) == 15, "ElasticAPM must mirror Elastic's 15 fields"
-    assert eq.models == ["vp", "vs", "rho", "air_mask"]
+    assert len(eq.field_specs) == 15
+    assert eq.models == ["vp", "vs", "rho"]
     assert eq.default_source_fields == ["sxx", "szz"]
     assert eq.default_receiver_fields == ["vx", "vz"]
-    assert eq.supports_torch_binding() is False
 
 
-def test_c_kernel_raises():
-    eq = ElasticAPM(spatial_order=SO, device=DEVICE, backend="torch")
-    with pytest.raises(NotImplementedError):
-        eq._C()
+def test_apm_path_activates_with_topography():
+    """Smoke: passing ``topography=`` flips the elastic equation into APM
+    mode at runtime (the default ``topo_method='auto'`` resolves to
+    ``'apm'`` for Elastic / ElasticAPM)."""
+    K = NZ // 4
+    topo_row = np.full(NX, K, dtype=np.int64)
+    prop = _make_apm_prop(topo_row)
+    assert prop._topo_method == 'apm', (
+        f"Expected topo_method=='apm' for Elastic + topography=, got "
+        f"{prop._topo_method!r}"
+    )
+    assert prop.equation._apm_air_mask_runtime is not None, (
+        "_process_topography did not derive the runtime air mask"
+    )
+    # Standard 3-model input.
+    vp, vs, rho = _bulk_models()
+    src_z = K + 2
+    sources, receivers = _geometry(src_z=src_z, rec_z=K + 1)
+    syn = prop(_wavelet(), sources, receivers, models=[vp, vs, rho])
+    assert torch.isfinite(syn).all() and syn.abs().max().item() > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +138,12 @@ def test_c_kernel_raises():
 
 
 def test_flat_topography_matches_elastic():
-    """With a flat air_mask, ElasticAPM's record should agree with
-    ``Elastic + free_surface=True`` to engineering tolerance (5% RMS)
-    on the standard Rayleigh-test config (PPW≈10, source above surface)."""
-    K = NZ // 4              # air rows 0..K-1, surface at row K
-    air_mask = np.zeros((NZ, NX), dtype=np.float32)
-    air_mask[:K, :] = 1.0
+    """With a flat topography at row K, ElasticAPM's record should agree
+    with ``Elastic + free_surface=True`` to engineering tolerance (5%
+    RMS) on the standard Rayleigh-test config (PPW≈10, source above
+    surface)."""
+    K = NZ // 4              # surface at row K, air rows 0..K-1
+    topo_row = np.full(NX, K, dtype=np.int64)
 
     src_z = K + 2            # 2 cells below the flat surface
     rec_z = K + 1
@@ -146,10 +170,10 @@ def test_flat_topography_matches_elastic():
     syn_ref = pref(wavelet, src_ref, rec_ref, models=[vp, vs, rho])
 
     # APM run: same physical depth below surface, surface at row K.
-    prop = _make_apm_prop(air_mask)
+    prop = _make_apm_prop(topo_row)
     syn_apm = prop(
         wavelet, sources, receivers,
-        models=[vp, vs, rho, torch.from_numpy(air_mask).to(DEVICE)],
+        models=[vp, vs, rho],
     )
 
     # Records should have the same shape and SIMILAR (not bit-exact)
@@ -192,9 +216,6 @@ def test_gaussian_hill_stable_long_time():
     hill_row = (
         16.0 - 6.0 * np.exp(-((x - NX / 2) ** 2) / (2.0 * 8.0 ** 2))
     ).round().astype(np.int64)
-    air_mask = np.zeros((NZ, NX), dtype=np.float32)
-    for ix in range(NX):
-        air_mask[: hill_row[ix], ix] = 1.0
 
     vp, vs, rho = _bulk_models()
     # Source 3 cells below the local surface at mid-x
@@ -205,11 +226,11 @@ def test_gaussian_hill_stable_long_time():
     rec_z = (hill_row[rec_x] + 1).astype(np.int64)
     receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
 
-    prop = _make_apm_prop(air_mask)
+    prop = _make_apm_prop(hill_row)
     snap_times = list(range(0, nt_long, max(1, nt_long // 12)))
     syn, snaps = prop(
         _wavelet(nt_long), sources, receivers,
-        models=[vp, vs, rho, torch.from_numpy(air_mask).to(DEVICE)],
+        models=[vp, vs, rho],
         return_wavefield=True, snapshot_times=snap_times,
     )
     assert torch.isfinite(syn).all(), "APM long-time run produced NaN/Inf"
@@ -238,18 +259,17 @@ def test_air_cells_stay_zero():
     """The vacuum approximation must keep all pure-AIR cells at
     exactly zero throughout the simulation."""
     K = NZ // 4
-    air_mask = np.zeros((NZ, NX), dtype=np.float32)
-    air_mask[:K, :] = 1.0
+    topo_row = np.full(NX, K, dtype=np.int64)   # flat surface at row K
     src_z = K + 3
     rec_z = K + 1
     sources, receivers = _geometry(src_z=src_z, rec_z=rec_z)
     vp, vs, rho = _bulk_models()
 
-    prop = _make_apm_prop(air_mask)
+    prop = _make_apm_prop(topo_row)
     snap_times = list(range(0, NT, NT // 5))
     syn, snaps = prop(
         _wavelet(), sources, receivers,
-        models=[vp, vs, rho, torch.from_numpy(air_mask).to(DEVICE)],
+        models=[vp, vs, rho],
         return_wavefield=True, snapshot_times=snap_times,
     )
     # snaps shape: (n_snap, n_field=15, B, C, nz_pad, nx_pad). Crop to
@@ -264,3 +284,78 @@ def test_air_cells_stay_zero():
     )
     # Sanity: solid receivers actually picked up signal.
     assert syn.abs().max().item() > 0.0, "record is identically zero"
+
+
+# ---------------------------------------------------------------------------
+# 5. Differentiability through the APM path
+# ---------------------------------------------------------------------------
+
+
+def test_vp_gradient_finite_under_topography_apm():
+    """FWI-style loss through the APM path is differentiable: autograd
+    must return a finite, non-trivial gradient w.r.t. vp.  Additional
+    sanity:
+
+    * the gradient at pure-AIR cells stays close to zero — the
+      ``zero_at_air`` mask is applied each forward step, and backward
+      carries that zero (one residual time-step coupling is tolerated).
+    * the gradient through the per-cell APM moduli (which are functions
+      of bulk λ, μ, ρ via ``precompute_apm_moduli``) doesn't break
+      autograd.  This implicitly checks that ``classify_topography`` /
+      ``precompute_apm_moduli`` work on autograd-tracked tensors.
+    """
+    # Gaussian hill, max height 5 rows centred at nx//2.
+    x = np.arange(NX, dtype=np.float32)
+    hill = (5.0 * np.exp(-((x - NX / 2) ** 2) / (2.0 * 12.0 ** 2))).round().astype(np.int64)
+
+    src_x = NX // 2
+    src_z = int(hill[src_x]) + 3
+    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64)).to(DEVICE)
+    rec_x = np.arange(8, NX - 8, 4, dtype=np.int64)
+    rec_z = (hill[rec_x] + 1).astype(np.int64)
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
+
+    # Constant background + buried anomaly drives the residual.
+    vp_bg, vs_bg, rho_bg = 3000.0, 1500.0, 2200.0
+    vp_true = torch.full((NZ, NX), vp_bg).to(DEVICE)
+    vp_true[NZ // 2 : NZ // 2 + 5, NX // 3 : (2 * NX) // 3] += 200.0
+    vs_const = torch.full((NZ, NX), vs_bg).to(DEVICE)
+    rho_const = torch.full((NZ, NX), rho_bg).to(DEVICE)
+    vp_init = torch.full((NZ, NX), vp_bg).to(DEVICE)
+
+    prop = _make_apm_prop(hill)
+    with torch.no_grad():
+        obs = prop(_wavelet(), sources, receivers, models=[vp_true, vs_const, rho_const])
+
+    vp_param = vp_init.clone().requires_grad_(True)
+    # Clear the APM modulus cache: prepare_models hasn't been re-run with
+    # the new tracked vp_param, so the cached (lam_eff, mu_eff, ...)
+    # tensors reference the previous (no_grad) bulk Lamé arrays.  The
+    # cache key in ``_func_apm`` is based on ``id()``, which would still
+    # hit on the same air_mask but would carry a stale, detached set of
+    # moduli.  Reset so the first step recomputes against vp_param.
+    prop.equation._apm_cache_key = None
+    prop.equation._apm_cache = None
+
+    syn = prop(_wavelet(), sources, receivers, models=[vp_param, vs_const, rho_const])
+    loss = 0.5 * (syn - obs).pow(2).sum()
+    loss.backward()
+
+    grad = vp_param.grad
+    assert grad is not None, "autograd produced no gradient through the APM path"
+    assert torch.isfinite(grad).all(), "gradient has NaN/Inf"
+    assert loss.detach().item() > 0, "loss is identically zero — observed == synthetic"
+    grad_peak = grad.abs().max().item()
+    assert grad_peak > 0, "gradient is identically zero"
+
+    # Air-region gradient leak check (same shape as the acoustic test):
+    # the forward zeros AIR-cell wavefields each step; backward should
+    # carry that zero through.  Some O(dt) coupling at the surface itself
+    # is tolerated.
+    z_idx = np.arange(NZ)[:, None]
+    air_bool = torch.from_numpy(z_idx < hill[None, :]).to(grad.device)
+    air_peak = grad[air_bool].abs().max().item() if air_bool.any() else 0.0
+    assert air_peak / max(grad_peak, 1e-30) < 5e-2, (
+        f"gradient leaks into AIR cells: air_peak/peak = "
+        f"{air_peak / grad_peak:.3e} (air_peak={air_peak:.3e}, peak={grad_peak:.3e})"
+    )
