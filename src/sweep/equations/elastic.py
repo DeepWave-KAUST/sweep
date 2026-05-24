@@ -1,122 +1,15 @@
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from ._free_surface import (
-    top_free_surface_derivative,
-    top_free_surface_derivative_topo,
-    zero_at_topo,
-    zero_top_row,
+from ._elastic_step_core import elastic_step_core
+from ._free_surface import zero_at_topo, zero_top_row
+from ._topography import (
+    classify_topography,
+    enforce_apm_traction_bc,
+    precompute_apm_moduli,
+    zero_at_air,
 )
 
-
-def _match_reference_shape(u, ref):
-    if u.shape[-2:] == ref.shape[-2:]:
-        return u
-
-    target_z, target_x = ref.shape[-2:]
-    size_z, size_x = u.shape[-2:]
-    if size_z < target_z or size_x < target_x:
-        raise ValueError(
-            f"Cannot match tensor shape {u.shape[-2:]} to larger reference {ref.shape[-2:]}."
-        )
-
-    crop_z = size_z - target_z
-    crop_x = size_x - target_x
-    z0 = crop_z // 2
-    x0 = crop_x // 2
-    return u[..., z0 : z0 + target_z, x0 : x0 + target_x]
-
-
-def step(vx, vz, sxx, szz, sxz,
-         m_vxx, m_vxz, m_vzx, m_vzz,
-         m_txxx, m_txxz, m_tzzx, m_tzzz,
-         m_txzx, m_txzz,
-         vp, vs, rho,
-         lame_lambda, lame_mu,
-         dt, h, b, pd,
-         pml=None,
-         free_surface=False,
-         lame_lambda_2mu=None,
-         topo_rows=None,
-         ):
-
-    az, bz, azh, bzh, ax, bx, axh, bxh = pml
-    top_halo = pd.coes.shape[0]
-    lame_lambda_2mu = lame_lambda + 2 * lame_mu if lame_lambda_2mu is None else lame_lambda_2mu
-
-    # Topo path picks per-column ``top_free_surface_derivative_topo`` (image
-    # method mirror with column-dependent surface row). When ``topo_rows`` is
-    # None the call sites collapse to the flat ``top_free_surface_derivative``
-    # used historically — guarded by the flat-zero degenerate test.
-    has_topo = free_surface and topo_rows is not None
-
-    txx_x = pd.x_forward(sxx)
-    if free_surface:
-        if has_topo:
-            txz_z = top_free_surface_derivative_topo(sxz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows)
-            tzz_z = top_free_surface_derivative_topo(szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows)
-        else:
-            txz_z = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
-            tzz_z = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
-    else:
-        txz_z = pd.z_backward(sxz)
-        tzz_z = pd.z_forward(szz)
-    txz_x = pd.x_backward(sxz)
-
-    # Update Veclocity fields
-    m_tzzz = azh * m_tzzz + bzh * tzz_z
-    tzz_z = tzz_z + m_tzzz
-    m_txzx = ax * m_txzx + bx * txz_x
-    txz_x = txz_x + m_txzx
-    vz = vz + dt / rho * (tzz_z + txz_x)
-
-    m_txzz = az * m_txzz + bz * txz_z
-    txz_z = txz_z + m_txzz
-    m_txxx = axh * m_txxx + bxh * txx_x
-    txx_x = txx_x + m_txxx
-    vx = vx + dt / rho * (txx_x + txz_z)
-
-    # Update Stress fields
-    vx_x = pd.x_backward(vx)
-    if free_surface:
-        if has_topo:
-            vz_z = top_free_surface_derivative_topo(vz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows)
-            vx_z = top_free_surface_derivative_topo(vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows)
-        else:
-            vz_z = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-2)
-            vx_z = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-2)
-    else:
-        vz_z = pd.z_backward(vz)
-        vx_z = pd.z_forward(vx)
-    vz_x = pd.x_forward(vz)
-
-    m_vzz = az * m_vzz + bz * vz_z
-    vz_z = vz_z + m_vzz
-    m_vxx = ax * m_vxx + bx * vx_x
-    vx_x = vx_x + m_vxx
-
-    szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
-    sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
-
-    m_vxz = azh * m_vxz + bzh * vx_z
-    vx_z = vx_z + m_vxz
-    m_vzx = axh * m_vzx + bxh * vz_x
-    vz_x = vz_x + m_vzx
-    sxz = sxz + dt * lame_mu * (vx_z + vz_x)
-
-    if free_surface:
-        if has_topo:
-            szz = zero_at_topo(szz, topo_rows, axis=-2)
-            sxz = zero_at_topo(sxz, topo_rows, axis=-2)
-        else:
-            szz = zero_top_row(szz, top_halo, axis=-2)
-            sxz = zero_top_row(sxz, top_halo, axis=-2)
-
-
-    return vx, vz, sxx, szz, sxz, \
-           m_vxx, m_vxz, m_vzx, m_vzz, \
-           m_txxx, m_txxz, m_tzzx, m_tzzz, \
-           m_txzx, m_txzz
 
 class Elastic(FirstOrderEquation):
     """First-order 2-D elastic wave equation on a staggered grid (Virieux 1986).
@@ -186,6 +79,7 @@ class Elastic(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 8 profiles
+    supports_apm = True          # APM (Cao & Chen 2018) dispatch in ``func``
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic equation operator.
@@ -216,6 +110,14 @@ class Elastic(FirstOrderEquation):
                 Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend)
+        # APM (Cao & Chen 2018) cache.  The propagator's ``_process_topography``
+        # attaches ``_apm_air_mask_runtime`` when the user passes a 2-D
+        # ``topography=`` array; ``func`` then computes the per-category
+        # effective moduli once per (air_mask, models) pair and reuses them
+        # across every time step.  ``cache_key`` keys on the tuple of
+        # ``id()`` of (air_mask, vp, vs, rho).
+        self._apm_cache_key = None
+        self._apm_cache = None
 
     @property
     def models(self):
@@ -244,6 +146,7 @@ class Elastic(FirstOrderEquation):
         return [vp, vs, rho, lame_lambda, lame_mu, lame_lambda + 2 * lame_mu]
     
     def func(self, wavefields, models, dt, h, b, **kwargs):
+        # Standard model unpacking (3 / 5 / 6).
         if len(models) == 6:
             vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = models
         elif len(models) == 5:
@@ -256,22 +159,108 @@ class Elastic(FirstOrderEquation):
             lame_lambda_2mu = lame_lambda + 2 * lame_mu
         else:
             raise ValueError(f"Elastic.func expected 3, 5, or 6 models, got {len(models)}")
-        return step(
+
+        # ---- APM dispatch ---------------------------------------------------
+        # If the propagator's ``topography=`` was a 2-D air_mask it stored a
+        # padded runtime version on the equation.  Re-route through the
+        # parameter-modified step (Cao & Chen 2018).
+        air_mask_rt = getattr(self, "_apm_air_mask_runtime", None)
+        if air_mask_rt is not None:
+            return self._func_apm(
+                wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
+                dt, h, b, **kwargs,
+            )
+
+        # ---- Standard (image-method / flat) dispatch -----------------------
+        # The wave equation (Virieux 1986 first-order velocity-stress) is
+        # solved by ``elastic_step_core`` — shared verbatim with the APM
+        # branch above.  For the bulk path we alias ρ_x = ρ_z = ρ and
+        # μ_xz = μ (no node-centred averaging, no per-cell modifications).
+        free_surface = getattr(self, "free_surface", False)
+        topo_rows = getattr(self, "_topo_rows_runtime", None)
+        out = elastic_step_core(
             *wavefields,
-            vp,
-            vs,
-            rho,
-            lame_lambda,
-            lame_mu,
-            dt,
-            h,
-            b,
-            pd=self.pd,
-            pml=self.b,
-            free_surface=getattr(self, "free_surface", False),
+            lame_lambda=lame_lambda,
+            lame_mu=lame_mu,
+            mu_xz=lame_mu,
+            rho_x=rho,
+            rho_z=rho,
+            dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
+            free_surface=free_surface,
+            topo_rows=topo_rows,
             lame_lambda_2mu=lame_lambda_2mu,
-            topo_rows=getattr(self, "_topo_rows_runtime", None),
-            **kwargs,
+        )
+        (vx, vz, sxx, szz, sxz,
+         m_vxx, m_vxz, m_vzx, m_vzz,
+         m_txxx, m_txxz, m_tzzx, m_tzzz,
+         m_txzx, m_txzz) = out
+
+        # Image-method post-step zeroing (top-row / staircase surface).
+        if free_surface:
+            top_halo = self.pd.coes.shape[0]
+            if topo_rows is not None:
+                szz = zero_at_topo(szz, topo_rows, axis=-2)
+                sxz = zero_at_topo(sxz, topo_rows, axis=-2)
+            else:
+                szz = zero_top_row(szz, top_halo, axis=-2)
+                sxz = zero_top_row(sxz, top_halo, axis=-2)
+
+        return (
+            vx, vz, sxx, szz, sxz,
+            m_vxx, m_vxz, m_vzx, m_vzz,
+            m_txxx, m_txxz, m_tzzx, m_tzzz,
+            m_txzx, m_txzz,
+        )
+
+    def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
+                  dt, h, b, **kwargs):
+        """One leapfrog step with APM-modified moduli (Cao & Chen 2018).
+
+        Caches the per-category effective moduli by the id() of the input
+        tensors — the same (air_mask, λ, μ, ρ) inputs hit the cache on
+        every subsequent time step within a propagator run.
+        """
+        cache_key = (id(air_mask_rt), id(lame_lambda), id(lame_mu), id(rho))
+        if cache_key == self._apm_cache_key and self._apm_cache is not None:
+            cat, lam_eff, mu_eff, mu_xz, rho_x, rho_z = self._apm_cache
+        else:
+            cat = classify_topography(air_mask_rt)
+            lam_eff, mu_eff, mu_xz, rho_x, rho_z = precompute_apm_moduli(
+                lame_lambda, lame_mu, rho, cat
+            )
+            self._apm_cache_key = cache_key
+            self._apm_cache = (cat, lam_eff, mu_eff, mu_xz, rho_x, rho_z)
+
+        out = elastic_step_core(
+            *wavefields,
+            lame_lambda=lam_eff,
+            lame_mu=mu_eff,
+            mu_xz=mu_xz,
+            rho_x=rho_x,
+            rho_z=rho_z,
+            dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
+            free_surface=False,    # APM IS the free surface
+            topo_rows=None,
+        )
+        (vx, vz, sxx, szz, sxz,
+         m_vxx, m_vxz, m_vzx, m_vzz,
+         m_txxx, m_txxz, m_tzzx, m_tzzz,
+         m_txzx, m_txzz) = out
+
+        # APM traction-free BC: pointwise stress zero per cell type.
+        sxx, szz, sxz = enforce_apm_traction_bc(sxx, szz, sxz, cat)
+        # Vacuum approximation: kill any wavefield in pure-air cells.
+        vx = zero_at_air(vx, air_mask_rt)
+        vz = zero_at_air(vz, air_mask_rt)
+        sxx = zero_at_air(sxx, air_mask_rt)
+        szz = zero_at_air(szz, air_mask_rt)
+        sxz = zero_at_air(sxz, air_mask_rt)
+
+        return (
+            vx, vz, sxx, szz, sxz,
+            m_vxx, m_vxz, m_vzx, m_vzz,
+            m_txxx, m_txxz, m_tzzx, m_tzzz,
+            m_txzx, m_txzz,
         )
     
     def _C(self, ):
