@@ -1,3 +1,53 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "sweep-solver"
+version = "0.0.0"
+description = "Seismic Wave Equation Exploration Platform — equations, propagators, operators."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Shaowen Wang", email = "shaowen.wang@kaust.edu.sa"},
+]
+keywords = ["fwi", "geophysics", "seismic", "wave-equation", "propagator", "cuda", "pytorch", "jax"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+cuda  = ["torch"]
+torch = ["torch"]
+jax   = ["jax", "jaxlib"]
+all   = ["torch", "jax", "jaxlib"]
+
+[project.urls]
+Homepage = "https://github.com/DeepWave-KAUST/sweep"
+Issues   = "https://github.com/DeepWave-KAUST/sweep/issues"
+
+[project.scripts]
+sweep = "sweep.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["sweep*", "geophyai*"]
+exclude = ["sweep.csrc*"]
