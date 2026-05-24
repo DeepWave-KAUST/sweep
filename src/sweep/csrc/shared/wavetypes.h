@@ -42,6 +42,14 @@ struct ForwardInput {
     bool use_pinned_memory = false;
     bool free_surface;
 
+    // Irregular free-surface topography (image method / vacuum staircase).
+    // ``topo_rows`` is a 1-D ``int32`` tensor of length nx_runtime giving
+    // the surface row index per column in runtime (PML-padded) coords; any
+    // cell with ``iz < topo_rows[ix]`` is air.  Empty + ``has_topo=false``
+    // for the flat / no-topo case.
+    torch::Tensor topo_rows;
+    bool has_topo = false;
+
     unsigned int nt;
     float dt;
 
@@ -135,6 +143,9 @@ struct BackwardInput {
 
     // options
     bool free_surface;
+    // See ForwardInput for semantics.  Mirrored by the propagator.
+    torch::Tensor topo_rows;
+    bool has_topo = false;
     bool checkpoint_on_cpu = false;
     bool boundary_on_cpu = false;
     bool boundary_on_disk = false;

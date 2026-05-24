@@ -43,6 +43,10 @@ ForwardOutput forward(const ForwardInput& in) {
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    if (p.has_topo) {
+        ctx.topo_rows = p.topo_rows.data_ptr<int>();
+        ctx.has_topo  = true;
+    }
 
     AcousticWavefieldTensor wavefield;
     if (!p.wavefields.empty())
