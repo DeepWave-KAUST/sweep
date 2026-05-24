@@ -133,6 +133,8 @@ class Warpper(torch.autograd.Function):
         source_illumination_buffer: torch.Tensor=None,
         receiver_illumination_buffer: torch.Tensor=None,
         illumination_padding: tuple=(),
+        topo_rows_param: torch.Tensor=None,   # runtime padded surface row per col
+        has_topo_param: bool=False,
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -197,6 +199,16 @@ class Warpper(torch.autograd.Function):
         params.boundary_disk_async_read = boundary_disk_async_read
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
+        # Topography plumbing (image method) — empty tensor + has_topo=False
+        # for flat. topo_rows_param is passed in via the autograd Function
+        # call site (see Warpper.apply below).
+        if has_topo_param:
+            params.topo_rows = topo_rows_param.to(torch.int32).contiguous()
+            params.has_topo = True
+        else:
+            params.topo_rows = torch.empty(0, dtype=torch.int32,
+                                            device=wavelet.device)
+            params.has_topo = False
         params.nt = nt
         params.dt = dt
         params.spacing = spacing
@@ -314,6 +326,14 @@ class Warpper(torch.autograd.Function):
         params.dt = dt
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
+        # Topography plumbing (image method) — mirrors forward path.
+        topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
+        if topo_rows_rt is not None:
+            params.topo_rows = topo_rows_rt.to(torch.int32).contiguous()
+            params.has_topo = True
+        else:
+            params.topo_rows = torch.empty(0, dtype=torch.int32, device=self.dev)
+            params.has_topo = False
         params.boundary_on_cpu = ctx.boundary_on_cpu
         params.boundary_on_disk = ctx.boundary_on_disk
         params.boundary_disk_async_read = ctx.boundary_disk_async_read
@@ -453,11 +473,18 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_files = ()
         super().__init__(*args, **kwargs)
 
-        if getattr(self, "topography", None) is not None:
+        # Topography is supported on CUDA via the per-column staircase
+        # path (`topo_method='image'` for both Acoustic and Elastic).  The
+        # APM path is eager-only because its per-cell modulus modification
+        # has no CUDA kernel.  Reject APM here with a clear message; the
+        # image-method path falls through and gets plumbed below.
+        if (getattr(self, "topography", None) is not None
+                and getattr(self, "_topo_method", None) == "apm"):
             raise NotImplementedError(
-                "topography is currently supported only on impl='python' "
-                "(eager backend). CUDA / impl='c' support will be added in "
-                "Stage 2."
+                "topo_method='apm' is currently supported only on "
+                "impl='python' (eager backend).  Pass topo_method='image' "
+                "(Robertsson) for the elastic CUDA path, or run with "
+                "impl='eager' to keep APM."
             )
 
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
@@ -1039,6 +1066,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
                 self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
                 tuple(padding),
+                # Topography (image method) — pass the runtime per-column
+                # surface row tensor through to the CUDA ForwardInput.
+                getattr(self.equation, "_topo_rows_runtime", None),
+                getattr(self.equation, "_topo_rows_runtime", None) is not None,
                 *models,
             )
         
@@ -1252,6 +1283,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.boundary_disk_async_read = boundary_disk_async_read
         fwd.use_pinned_memory = use_pinned_memory
         fwd.free_surface = self.free_surface
+        # Topography plumbing (image method).  Empty + has_topo=False for flat.
+        topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
+        if topo_rows_rt is not None:
+            fwd.topo_rows = topo_rows_rt.to(torch.int32).contiguous()
+            fwd.has_topo = True
+        else:
+            fwd.topo_rows = torch.empty(0, dtype=torch.int32, device=self.dev)
+            fwd.has_topo = False
         fwd.nt = self.nt
         fwd.dt = self._dt
         fwd.spacing = spacing
@@ -1295,6 +1334,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.dt = self._dt
         bwd.spacing = spacing
         bwd.free_surface = self.free_surface
+        topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
+        if topo_rows_rt is not None:
+            bwd.topo_rows = topo_rows_rt.to(torch.int32).contiguous()
+            bwd.has_topo = True
+        else:
+            bwd.topo_rows = torch.empty(0, dtype=torch.int32, device=self.dev)
+            bwd.has_topo = False
         bwd.boundary_on_cpu = boundary_on_cpu
         bwd.boundary_on_disk = boundary_on_disk
         bwd.boundary_disk_async_read = boundary_disk_async_read

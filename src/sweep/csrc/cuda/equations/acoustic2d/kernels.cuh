@@ -56,6 +56,20 @@ __global__ void acoustic2nd(
 
     auto f = wf.offset(b, spatial_size);
 
+    // Irregular free-surface topography (vacuum staircase / image method):
+    // any cell strictly above the per-column surface row is air.  Mirror
+    // Python's ``zero_above_topo`` — clear the wavefield and any CPML aux
+    // fields, then skip the FD update.  Solid cells just below the surface
+    // see these zeros through the stencil, which is what reproduces the
+    // ``p=0`` boundary condition.
+    if (solver.has_topo && iz < solver.topo_rows[ix]) {
+        f.u_next[idx] = 0.f;
+        f.psix[idx] = 0.f; f.psiz[idx] = 0.f;
+        f.zetax[idx] = 0.f; f.zetaz[idx] = 0.f;
+        if (u_this) u_this[b * spatial_size + idx] = 0.f;
+        return;
+    }
+
     float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
     const float* vp_b = vp + b * spatial_size;
 
