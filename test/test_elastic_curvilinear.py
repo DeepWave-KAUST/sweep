@@ -23,23 +23,26 @@ SO = 4
 FREQ = 8.0
 DELAY = 0.12
 
+# Auto-select CUDA when available.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def _wavelet(nt=NT):
     t = np.arange(nt, dtype=np.float32) * DT - DELAY
-    return torch.tensor((1.0e3 * ricker(t, f=FREQ)).astype(np.float32))
+    return torch.tensor((1.0e3 * ricker(t, f=FREQ)).astype(np.float32)).to(DEVICE)
 
 
 def _geometry(src_xz=None):
     sx, sz = (NX // 2, 3) if src_xz is None else src_xz
-    sources = torch.from_numpy(np.array([[sx, sz]], dtype=np.int64))
+    sources = torch.from_numpy(np.array([[sx, sz]], dtype=np.int64)).to(DEVICE)
     rec_x = np.arange(4, NX - 4, 6, dtype=np.int64)
     rec_z = np.full_like(rec_x, 1)
-    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
     return sources, receivers
 
 
 def _make_prop(topography, *, free_surface=True, equation_cls=ElasticCurvilinear):
-    eq = equation_cls(spatial_order=SO, device="cpu", backend="torch")
+    eq = equation_cls(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq, shape=(NZ, NX),
         free_surface=free_surface,
@@ -51,9 +54,9 @@ def _make_prop(topography, *, free_surface=True, equation_cls=ElasticCurvilinear
 
 
 def _models():
-    vp = torch.full((NZ, NX), 2000.0)
-    vs = torch.full((NZ, NX), 1200.0)
-    rho = torch.full((NZ, NX), 1800.0)
+    vp = torch.full((NZ, NX), 2000.0).to(DEVICE)
+    vs = torch.full((NZ, NX), 1200.0).to(DEVICE)
+    rho = torch.full((NZ, NX), 1800.0).to(DEVICE)
     return [vp, vs, rho]
 
 
@@ -81,11 +84,11 @@ def test_hill_long_time_stable_elastic():
     ).round().astype(np.int64)
 
     src_x = NX // 4
-    sources = torch.from_numpy(np.array([[src_x, 3]], dtype=np.int64))
+    sources = torch.from_numpy(np.array([[src_x, 3]], dtype=np.int64)).to(DEVICE)
     rec_x = np.arange(4, NX - 4, 6, dtype=np.int64)
     receivers = torch.from_numpy(
         np.stack([rec_x, np.full_like(rec_x, 1)], axis=-1)[None, ...]
-    )
+    ).to(DEVICE)
 
     prop = _make_prop(topography=hill)
     snap_times = list(range(0, nt_long, max(1, nt_long // 10)))
@@ -143,6 +146,6 @@ def test_surface_stresses_zero_under_hill_elastic():
 
 
 def test_impl_c_rejects_curvilinear_elastic():
-    eq = ElasticCurvilinear(spatial_order=SO, device="cpu", backend="torch")
+    eq = ElasticCurvilinear(spatial_order=SO, device=DEVICE, backend="torch")
     with pytest.raises(NotImplementedError):
         eq._C()

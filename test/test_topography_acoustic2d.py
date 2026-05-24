@@ -52,17 +52,20 @@ SO = 4
 DOM_FREQ = 10.0
 DELAY = 0.06
 
+# Auto-select CUDA when available.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def _wavelet():
     t = np.arange(NT, dtype=np.float32) * DT - DELAY
-    return torch.tensor((1.0e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))
+    return torch.tensor((1.0e3 * ricker(t, f=DOM_FREQ)).astype(np.float32)).to(DEVICE)
 
 
 def _vp_model():
     depth = np.linspace(0.0, 1.0, NZ, dtype=np.float32)
     ramp = 1800.0 + (2400.0 - 1800.0) * depth
     vp = np.broadcast_to(ramp[:, None], (NZ, NX)).astype(np.float32).copy()
-    return torch.from_numpy(vp)
+    return torch.from_numpy(vp).to(DEVICE)
 
 
 def _geometry(src_xz=None):
@@ -72,21 +75,33 @@ def _geometry(src_xz=None):
     rec_x = np.arange(2, NX - 2, 6, dtype=np.int64)
     rec_z = np.full_like(rec_x, 2)
     receivers = np.stack([rec_x, rec_z], axis=-1)[None, ...]  # (1, nrec, 2)
-    return torch.from_numpy(sources), torch.from_numpy(receivers)
+    return torch.from_numpy(sources).to(DEVICE), torch.from_numpy(receivers).to(DEVICE)
 
 
-def _make_prop(topography, *, free_surface=True, impl="eager"):
-    eq = Acoustic(spatial_order=SO, device="cpu", backend="torch")
+def _make_prop(topography, *, free_surface=True, topo_method='auto', impl="eager"):
+    """Acoustic propagator with optional topography.
+
+    When ``topography`` is given we use the new unified API: pass
+    ``topography=`` alone and let ``topo_method`` auto-resolve to
+    ``'image'`` (Mittet 2002 staircase + vacuum).  ``free_surface`` only
+    matters in the no-topo case (flat free surface vs no FS).
+    """
+    eq = Acoustic(spatial_order=SO, device=DEVICE, backend="torch")
+    if topography is None:
+        return PropTorch(
+            eq, shape=(NZ, NX),
+            free_surface=free_surface,
+            topography=None,
+            abcn=ABCN, dh=DH, dt=DT,
+            use_ckpt=False, impl=impl,
+        )
+    # Topography given — free_surface auto-set by topo_method.
     return PropTorch(
-        eq,
-        shape=(NZ, NX),
-        free_surface=free_surface,
+        eq, shape=(NZ, NX),
         topography=topography,
-        abcn=ABCN,
-        dh=DH,
-        dt=DT,
-        use_ckpt=False,
-        impl=impl,
+        topo_method=topo_method,
+        abcn=ABCN, dh=DH, dt=DT,
+        use_ckpt=False, impl=impl,
     )
 
 
@@ -96,7 +111,12 @@ def _make_prop(topography, *, free_surface=True, impl="eager"):
 
 
 def test_flat_zeros_matches_no_topography():
-    """topography=zeros(nx) must reproduce topography=None bit-for-bit."""
+    """topography=zeros(nx) must reproduce topography=None to float32
+    rounding tolerance.  Strict bit-equality holds on CPU; on CUDA the
+    two code paths may pick different reduction orders, so we require a
+    relative error below 1e-6 (well under float32 epsilon ≈ 1.2e-7 per
+    operation, but accumulated over NT steps and the receiver-line
+    aggregation)."""
     sources, receivers = _geometry()
     wavelet = _wavelet()
     vp = _vp_model()
@@ -111,9 +131,11 @@ def test_flat_zeros_matches_no_topography():
         f"shape mismatch: none={tuple(syn_none.shape)} zero={tuple(syn_zero.shape)}"
     )
     max_abs_err = (syn_none - syn_zero).abs().max().item()
-    assert max_abs_err < 1e-6, (
-        f"flat-degenerate diverges: max abs error {max_abs_err}; "
-        f"|none|max={syn_none.abs().max().item():.3e}"
+    peak = syn_none.abs().max().item()
+    rel_err = max_abs_err / max(peak, 1e-30)
+    assert rel_err < 1e-6, (
+        f"flat-degenerate diverges: rel error {rel_err:.3e} "
+        f"(max abs error {max_abs_err:.3e}; |none|max={peak:.3e})"
     )
 
 
@@ -177,9 +199,22 @@ def test_air_cells_stay_zero_under_hill():
 # ---------------------------------------------------------------------------
 
 
-def test_topography_without_free_surface_raises():
-    with pytest.raises(ValueError, match="free_surface=True"):
-        _make_prop(topography=np.zeros(NX, dtype=np.int64), free_surface=False)
+def test_topography_apm_on_acoustic_raises():
+    """With the unified ``topo_method=`` API, ``Acoustic`` cannot use APM
+    (Cao 2018 is elastic-only).  Asking for it must error cleanly."""
+    with pytest.raises(ValueError, match="topo_method='apm' requires"):
+        _make_prop(topography=np.zeros(NX, dtype=np.int64), topo_method='apm')
+
+
+def test_topography_implies_free_surface_acoustic():
+    """``topography=`` alone is sufficient for Acoustic — no need to set
+    ``free_surface=True`` (it's auto-set internally by the resolved
+    method).  This test pins the new ergonomic API."""
+    prop = _make_prop(topography=np.zeros(NX, dtype=np.int64), free_surface=False)
+    # Internally the propagator picked 'image' (Acoustic's only path) and
+    # auto-set free_surface=True for the layout.
+    assert prop._topo_method == 'image'
+    assert prop.free_surface is True
 
 
 def test_topography_wrong_length_raises():
@@ -236,12 +271,12 @@ def test_constant_shift_topography_is_translation_invariant():
     rec_x = np.array([src_x], dtype=np.int64)
 
     def _run(topo, src_z, rec_z):
-        sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64))
+        sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64)).to(DEVICE)
         receivers = torch.from_numpy(
             np.stack([rec_x, np.full_like(rec_x, rec_z)], axis=-1)[None, ...]
-        )
+        ).to(DEVICE)
         # Constant vp so no depth-dependent contrasts contaminate the test.
-        vp = torch.full((NZ, NX), 1800.0)
+        vp = torch.full((NZ, NX), 1800.0).to(DEVICE)
         prop = _make_prop(topography=topo)
         return prop(_wavelet(), sources, receivers, models=[vp])
 
@@ -280,21 +315,21 @@ def test_vp_gradient_finite_under_topography():
     hill = (5.0 * np.exp(-((x - NX / 2) ** 2) / (2.0 * 10.0**2))).round().astype(np.int64)
     src_x = NX // 2
     src_z = int(hill[src_x]) + 2  # just below the local surface
-    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64))
+    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64)).to(DEVICE)
     rec_x = np.arange(2, NX - 2, 6, dtype=np.int64)
     rec_z = (hill[rec_x] + 1).astype(np.int64)  # one row below local surface
-    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
 
     # Constant background + a buried box anomaly drives the residual.
     vp_bg = 1800.0
-    vp_true = torch.full((NZ, NX), vp_bg)
+    vp_true = torch.full((NZ, NX), vp_bg).to(DEVICE)
     vp_true[NZ // 2 : NZ // 2 + 5, NX // 3 : (2 * NX) // 3] += 180.0
     vp_init_np = np.full((NZ, NX), vp_bg, dtype=np.float32)
 
     prop = _make_prop(topography=hill)
     with torch.no_grad():
         obs = prop(_wavelet(), sources, receivers, models=[vp_true])
-    vp_param = torch.from_numpy(vp_init_np).clone().requires_grad_(True)
+    vp_param = torch.from_numpy(vp_init_np).to(DEVICE).clone().requires_grad_(True)
     syn = prop(_wavelet(), sources, receivers, models=[vp_param])
     loss = 0.5 * (syn - obs).pow(2).sum()
     loss.backward()
@@ -314,7 +349,7 @@ def test_vp_gradient_finite_under_topography():
     z_idx = np.arange(NZ)[:, None]
     air_mask = z_idx < hill[None, :]
     if air_mask.any():
-        air_peak = grad[torch.from_numpy(air_mask)].abs().max().item()
+        air_peak = grad[torch.from_numpy(air_mask).to(grad.device)].abs().max().item()
     else:
         air_peak = 0.0
     assert air_peak / max(grad_peak, 1e-30) < 5e-2, (

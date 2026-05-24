@@ -39,23 +39,26 @@ SO = 4
 FREQ = 8.0
 DELAY = 0.10
 
+# Auto-select CUDA when available.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def _wavelet():
     t = np.arange(NT, dtype=np.float32) * DT - DELAY
-    return torch.tensor((1.0e3 * ricker(t, f=FREQ)).astype(np.float32))
+    return torch.tensor((1.0e3 * ricker(t, f=FREQ)).astype(np.float32)).to(DEVICE)
 
 
 def _geometry(src_xz=None):
     sx, sz = (NX // 2, NZ // 3) if src_xz is None else src_xz
-    sources = torch.from_numpy(np.array([[sx, sz]], dtype=np.int64))
+    sources = torch.from_numpy(np.array([[sx, sz]], dtype=np.int64)).to(DEVICE)
     rec_x = np.arange(4, NX - 4, 6, dtype=np.int64)
     rec_z = np.full_like(rec_x, 4)
-    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
     return sources, receivers
 
 
 def _make_prop(topography, equation_cls=AcousticCurvilinear, *, free_surface=True):
-    eq = equation_cls(spatial_order=SO, device="cpu", backend="torch")
+    eq = equation_cls(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq, shape=(NZ, NX),
         free_surface=free_surface,
@@ -74,7 +77,7 @@ def _make_prop(topography, equation_cls=AcousticCurvilinear, *, free_surface=Tru
 def test_flat_topography_runs_and_is_stable():
     sources, receivers = _geometry()
     wavelet = _wavelet()
-    vp = torch.full((NZ, NX), 2000.0)
+    vp = torch.full((NZ, NX), 2000.0).to(DEVICE)
 
     prop = _make_prop(topography=None)
     syn = prop(wavelet, sources, receivers, models=[vp])
@@ -109,14 +112,14 @@ def test_hill_long_time_stable():
     ).round().astype(np.int64)
 
     t = np.arange(nt_long, dtype=np.float32) * DT - DELAY
-    wavelet = torch.tensor((1.0e3 * ricker(t, f=FREQ)).astype(np.float32))
+    wavelet = torch.tensor((1.0e3 * ricker(t, f=FREQ)).astype(np.float32)).to(DEVICE)
     src_x = NX // 4
     src_z = int(hill[src_x]) + 4
-    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64))
+    sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64)).to(DEVICE)
     rec_x = np.arange(4, NX - 4, 6, dtype=np.int64)
     rec_z = (hill[rec_x] + 2).astype(np.int64)
-    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
-    vp = torch.full((NZ, NX), 2000.0)
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
+    vp = torch.full((NZ, NX), 2000.0).to(DEVICE)
 
     prop = _make_prop(topography=hill)
     snap_times = list(range(0, nt_long, max(1, nt_long // 10)))
@@ -157,8 +160,8 @@ def test_surface_pressure_release_under_hill():
     sources, _ = _geometry(src_xz=(src_x, src_z))
     rec_x = np.arange(4, NX - 4, 6, dtype=np.int64)
     rec_z = (hill[rec_x] + 1).astype(np.int64)
-    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
-    vp = torch.full((NZ, NX), 2000.0)
+    receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...]).to(DEVICE)
+    vp = torch.full((NZ, NX), 2000.0).to(DEVICE)
 
     prop = _make_prop(topography=hill)
     snap_idx = list(range(0, NT, NT // 5))
@@ -188,6 +191,6 @@ def test_surface_pressure_release_under_hill():
 
 
 def test_impl_c_rejects_curvilinear():
-    eq = AcousticCurvilinear(spatial_order=SO, device="cpu", backend="torch")
+    eq = AcousticCurvilinear(spatial_order=SO, device=DEVICE, backend="torch")
     with pytest.raises(NotImplementedError):
         eq._C()
