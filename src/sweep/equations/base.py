@@ -41,6 +41,14 @@ class WaveEquation:
     # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.
     default_pml_type = "cpmlr"
 
+    # Whether this equation has a parameter-modified (APM, Cao & Chen 2018)
+    # path for irregular free-surface topography.  When True, the propagator's
+    # ``topography=`` accepts a 2-D air_mask + ``free_surface=False`` and
+    # routes through the equation's APM dispatch.  Defaults to False;
+    # subclasses with an APM implementation (currently :class:`Elastic`)
+    # override.
+    supports_apm = False
+
     @classmethod
     def supports_torch_binding(cls):
         """Return True when the equation class exposes a compiled ``_C`` binding hook."""
