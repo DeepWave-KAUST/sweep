@@ -432,11 +432,14 @@ class PropBase:
         topo_z = topo_row_phys + halo
 
         pad_each = self.abcn + halo
+        # int32, not int64: ``_c.py`` reads ``data_ptr<int>()`` and a dtype
+        # cast there would create a temporary whose GPU memory is reused
+        # before the async CUDA kernels finish reading it.
         topo_runtime = F.pad(
             topo_z.to(torch.float32).view(1, 1, -1),
             (pad_each, pad_each),
             mode="replicate",
-        ).view(-1).to(torch.long)
+        ).view(-1).to(torch.int32)
 
         device = getattr(self.equation, "device", None) or self.dev
         if device is not None:
@@ -444,6 +447,12 @@ class PropBase:
                 topo_runtime = topo_runtime.to(device=device)
             except (RuntimeError, TypeError):
                 pass
+
+        # Defensive: ensure CPU→GPU copy is complete before any forward
+        # kernel reads ``topo_rows[ix]``.  Without this we've seen ~30%
+        # non-determinism in CUDA forward results.
+        if topo_runtime.device.type == "cuda":
+            torch.cuda.synchronize(topo_runtime.device)
 
         self.topography = topo_row_phys
         self._topo_rows_runtime = topo_runtime

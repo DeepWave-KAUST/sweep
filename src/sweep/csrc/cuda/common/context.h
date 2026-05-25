@@ -35,6 +35,13 @@ struct SolverContext {
     const int* topo_rows = nullptr;
     bool has_topo = false;
 
+    // APM (Cao & Chen 2018) per-cell category, runtime-padded ``int*``
+    // of length ``nz * nx`` (row-major).  Codes:
+    //   INTERIOR=0, AIR=1, H=2, VL=3, VR=4, OC=5, IC=6
+    // ``nullptr`` + ``use_apm=false`` for non-APM runs.
+    const int* topo_category = nullptr;
+    bool use_apm = false;
+
 
     // ===============================
     // Physical domain (computed)
