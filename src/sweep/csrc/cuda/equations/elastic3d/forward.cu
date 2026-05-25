@@ -242,7 +242,7 @@ ForwardOutput forward(const ForwardInput& in)
 
 
 // ===========================================================================
-// APM 3-D forward — Dong 2023 elastic limit.
+// APM 3-D forward — Cao & Chen 2018 (3-D).
 // ===========================================================================
 // Expects the 21-tensor model layout assembled by _c.py's APM 3-D dispatch:
 //   models = [vp, vs, rho, lam, mu, lam_2mu,

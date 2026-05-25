@@ -14,7 +14,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
 
 BackwardOutput backward(const BackwardInput& in);
 
-// APM (Dong 2023, elastic limit) — irregular topography with
+// APM (Cao & Chen 2018, 3-D) — irregular topography with
 // parameter-modified moduli.  Forward only in this commit;
 // apm_backward / apm_backward_bs are stubs until Phase 3D.
 ForwardOutput  apm_forward(const ForwardInput& in);

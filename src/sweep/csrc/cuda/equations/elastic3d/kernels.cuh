@@ -1365,7 +1365,7 @@ __global__ void calculate_grad_elastic3d_bs(
 
 
 // ===========================================================================
-// APM (Dong 2023, elastic limit) 3-D kernels
+// APM (Cao & Chen 2018, 3-D) kernels
 // ===========================================================================
 // Category codes mirror sweep.equations._topography:
 //   INTERIOR=0, AIR=1, H=2, VL=3, VR=4, OC=5, IC=6, VF=7, VB=8
@@ -1698,7 +1698,7 @@ __global__ void elastic3d_stress_kernel_apm(
 
 
 // ===========================================================================
-// APM (Dong 2023, elastic limit) 3-D BACKWARD kernels
+// APM (Cao & Chen 2018, 3-D) BACKWARD kernels
 // ===========================================================================
 // Mirror the 2-D APM backward + image-method 3-D backward structures.
 //
@@ -1788,7 +1788,7 @@ __device__ __forceinline__ void apm3d_chain_lammu(
 
 __device__ __forceinline__ void apm3d_rho_jacobian(int cat, float* dx, float* dy, float* dz)
 {
-    // Per Dong 2023 Table 1 density rules transcribed in
+    // Per Cao & Chen 2018 (3-D) density rules transcribed in
     // _topography.precompute_apm_moduli_3d.
     switch (cat) {
         case APM3D_CATEGORY_INTERIOR:

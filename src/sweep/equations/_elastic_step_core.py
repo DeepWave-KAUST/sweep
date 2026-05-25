@@ -65,8 +65,8 @@ def elastic_step_core(
         for APM.
     rho_x, rho_z
         Effective densities at the v_x and v_z staggered nodes
-        respectively.  Equal in the bulk case, modified per Dong 2023
-        Table 1 in APM.
+        respectively.  Equal in the bulk case, modified per
+        Cao & Chen 2018 in APM.
     dt, h, b
         Time step, grid spacing, batch size (latter passed through for
         API parity with the rest of SWEEP).
