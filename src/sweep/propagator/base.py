@@ -361,29 +361,39 @@ class PropBase:
                 )
             return
 
-        if self.ndim != 2:
+        if self.ndim not in (2, 3):
             raise NotImplementedError(
-                "topography support is currently limited to 2-D propagators "
-                f"(got ndim={self.ndim}). 3-D will be added in Stage 1b."
+                "topography support is currently limited to 2-D and 3-D "
+                f"propagators (got ndim={self.ndim})."
             )
 
         import torch
 
         topo_input = torch.as_tensor(topography)
 
-        # Resolve physical (nz_phys, nx_phys) from the runtime shape +
-        # image-method-layout flag (image suppresses top PML; APM has PML
-        # on both top and bottom).
+        # Resolve physical extents from the runtime shape + image-method-
+        # layout flag (image suppresses top PML; APM has PML on both top
+        # and bottom).  ``self.shape`` is laid out as (nz, nx) for 2-D and
+        # (nz, ny, nx) for 3-D — z is always axis 0.
         if self._image_method_active:
             nz_phys = self.shape[0] - self.abcn
         else:
             nz_phys = self.shape[0] - 2 * self.abcn
-        nx_phys = self.shape[1] - 2 * self.abcn
+        if self.ndim == 2:
+            nx_phys = self.shape[1] - 2 * self.abcn
+            ny_phys = None
+            phys_extent = (nz_phys, nx_phys)
+        else:
+            ny_phys = self.shape[1] - 2 * self.abcn
+            nx_phys = self.shape[2] - 2 * self.abcn
+            phys_extent = (nz_phys, ny_phys, nx_phys)
 
         # Normalise input → (topo_row_phys, air_mask_phys) tuple.  Each
-        # method below picks the form it needs.
+        # method below picks the form it needs.  Shapes:
+        #   2-D : topo_row_phys (nx_phys,)              air_mask (nz, nx)
+        #   3-D : topo_row_phys (ny_phys, nx_phys)      air_mask (nz, ny, nx)
         topo_row_phys, air_mask_phys = self._canonicalise_topography(
-            topo_input, nz_phys, nx_phys
+            topo_input, *phys_extent
         )
 
         # Curvilinear path: always uses 1-D row.  Boundary-fitted grid
@@ -410,29 +420,66 @@ class PropBase:
                 f"{self._topo_method!r}"
             )
 
-    def _canonicalise_topography(self, topo_input, nz_phys, nx_phys):
-        """Validate a 1-D ``(nx_phys,)`` per-column surface row array and
-        derive the matching 2-D air mask.
+    def _canonicalise_topography(self, topo_input, *phys_extent):
+        """Validate the per-column surface row array and derive the matching
+        air mask.
 
-        Returns ``(topo_row_phys, air_mask_phys)`` where ``topo_row_phys``
-        is ``long`` shape ``(nx_phys,)`` and ``air_mask_phys`` is
-        ``float32`` shape ``(nz_phys, nx_phys)``, with rows strictly
-        above ``topo_row_phys[ix]`` marked air (=1.0).
+        Shapes (dispatched on ``len(phys_extent)``):
+
+        * 2-D propagator (``phys_extent = (nz_phys, nx_phys)``):
+          ``topo_input`` must be 1-D ``(nx_phys,)``.  Returns
+          ``(topo_row_phys, air_mask_phys)`` with shapes
+          ``(nx_phys,)`` and ``(nz_phys, nx_phys)``.
+
+        * 3-D propagator (``phys_extent = (nz_phys, ny_phys, nx_phys)``):
+          ``topo_input`` must be 2-D ``(ny_phys, nx_phys)``.  Returns
+          ``(topo_row_phys, air_mask_phys)`` with shapes
+          ``(ny_phys, nx_phys)`` and ``(nz_phys, ny_phys, nx_phys)``.
+
+        ``topo_row_phys`` is ``int64``; ``air_mask_phys`` is ``float32``
+        (1.0 above the surface, 0.0 at and below).
         """
         import torch
 
-        if topo_input.ndim != 1:
+        if len(phys_extent) == 2:
+            nz_phys, nx_phys = phys_extent
+            if topo_input.ndim != 1:
+                raise ValueError(
+                    f"2-D topography must be 1-D ``(nx_phys,)`` (surface row "
+                    f"index per physical column); got shape "
+                    f"{tuple(topo_input.shape)}.  Non-single-valued geometries "
+                    f"(overhangs, caves) are not supported by the standard "
+                    f"staircase path."
+                )
+            if topo_input.shape[0] != nx_phys:
+                raise ValueError(
+                    f"topography length {topo_input.shape[0]} != physical nx "
+                    f"({nx_phys})"
+                )
+            topo_row_phys = topo_input.to(torch.long)
+            if (topo_row_phys < 0).any() or (topo_row_phys >= nz_phys).any():
+                raise ValueError(
+                    f"topography values must satisfy 0 <= row < {nz_phys}; "
+                    f"got range [{int(topo_row_phys.min())}, "
+                    f"{int(topo_row_phys.max())}]"
+                )
+            iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1)
+            air_mask_phys = (iz < topo_row_phys.view(1, -1)).to(torch.float32)
+            return topo_row_phys, air_mask_phys
+
+        # 3-D branch.
+        nz_phys, ny_phys, nx_phys = phys_extent
+        if topo_input.ndim != 2:
             raise ValueError(
-                f"topography must be a 1-D array of length nx (surface row "
-                f"index per physical column); got shape "
-                f"{tuple(topo_input.shape)}.  Non-single-valued geometries "
-                f"(overhangs, caves) are not supported by the standard "
-                f"staircase path."
+                f"3-D topography must be 2-D ``(ny_phys, nx_phys)`` (surface "
+                f"row index per (iy, ix) physical column); got shape "
+                f"{tuple(topo_input.shape)}.  Overhangs / caves are not "
+                f"supported."
             )
-        if topo_input.shape[0] != nx_phys:
+        if tuple(topo_input.shape) != (ny_phys, nx_phys):
             raise ValueError(
-                f"topography length {topo_input.shape[0]} != physical nx "
-                f"({nx_phys})"
+                f"3-D topography shape {tuple(topo_input.shape)} != "
+                f"(ny_phys, nx_phys) = ({ny_phys}, {nx_phys})"
             )
         topo_row_phys = topo_input.to(torch.long)
         if (topo_row_phys < 0).any() or (topo_row_phys >= nz_phys).any():
@@ -441,17 +488,24 @@ class PropBase:
                 f"got range [{int(topo_row_phys.min())}, "
                 f"{int(topo_row_phys.max())}]"
             )
-        # Derive the 2-D air mask used by APM.  Image-method ignores it.
-        iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1)
-        air_mask_phys = (iz < topo_row_phys.view(1, -1)).to(torch.float32)
+        iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1, 1)
+        air_mask_phys = (iz < topo_row_phys.view(1, ny_phys, nx_phys)).to(
+            torch.float32
+        )
         return topo_row_phys, air_mask_phys
 
     def _populate_image_method_topography(self, topo_row_phys):
         """Set ``self._topo_rows_runtime`` for the image-method /
         vacuum-staircase path.  Translates physical row indices to
-        runtime-grid coordinates and pads the x-axis through PML +
-        stencil halo so the surface stays continuous through the
-        absorbing boundary."""
+        runtime-grid coordinates and replicate-pads the horizontal
+        axes (x for 2-D; y and x for 3-D) through PML + stencil halo so
+        the surface stays continuous through the absorbing boundary.
+
+        Result shapes:
+          2-D : 1-D ``(nx_phys + 2*(abcn+halo),)`` ``int32``.
+          3-D : 2-D ``(ny_phys + 2*(abcn+halo), nx_phys + 2*(abcn+halo))``
+                ``int32``.
+        """
         import torch
         import torch.nn.functional as F
 
@@ -461,16 +515,26 @@ class PropBase:
         #   [halo, halo + nz_phys) physical interior
         #   [halo + nz_phys, ...)  bottom PML + bottom halo
         topo_z = topo_row_phys + halo
-
         pad_each = self.abcn + halo
+
         # int32, not int64: ``_c.py`` reads ``data_ptr<int>()`` and a dtype
         # cast there would create a temporary whose GPU memory is reused
         # before the async CUDA kernels finish reading it.
-        topo_runtime = F.pad(
-            topo_z.to(torch.float32).view(1, 1, -1),
-            (pad_each, pad_each),
-            mode="replicate",
-        ).view(-1).to(torch.int32)
+        if topo_row_phys.ndim == 1:
+            # 2-D propagator: 1-D row per ix.
+            topo_runtime = F.pad(
+                topo_z.to(torch.float32).view(1, 1, -1),
+                (pad_each, pad_each),
+                mode="replicate",
+            ).view(-1).to(torch.int32)
+        else:
+            # 3-D propagator: 2-D row per (iy, ix).  Pad x and y via a
+            # single F.pad call (W_left, W_right, H_left, H_right).
+            topo_runtime = F.pad(
+                topo_z.to(torch.float32).view(1, 1, *topo_z.shape),
+                (pad_each, pad_each, pad_each, pad_each),
+                mode="replicate",
+            ).squeeze(0).squeeze(0).to(torch.int32)
 
         device = getattr(self.equation, "device", None) or self.dev
         if device is not None:

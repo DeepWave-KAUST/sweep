@@ -2,6 +2,7 @@ from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
+from ._free_surface import zero_above_topo
 
 
 def step_cpml(
@@ -149,7 +150,13 @@ class Acoustic3D(SecondOrderEquation):
         lap_z, lap_y, lap_x = self.laplace3d_sep(u_now, self.laplace_kernels, hz, hy, hx)
         out = step_cpml(*wavefields, vp, dt, h, b, lap_x, lap_y, lap_z, self.b, self.gradient)
         if getattr(self, "free_surface", False):
-            out = zero_top_halo_fields(out, self.so // 2, axis=-3)
+            topo_rows = getattr(self, "_topo_rows_runtime", None)
+            if topo_rows is not None:
+                # Irregular surface: zero ALL air cells per (iy, ix) column.
+                # ``topo_rows`` is 2-D shape (ny, nx) on the runtime grid.
+                out = tuple(zero_above_topo(field, topo_rows, axis=-3) for field in out)
+            else:
+                out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out
 
     def _C(self, ):
