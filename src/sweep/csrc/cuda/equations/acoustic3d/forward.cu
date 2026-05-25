@@ -51,6 +51,10 @@ ForwardOutput forward(const ForwardInput& in)
         (M <= 4) ? static_cast<int>(2 * M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, dt, nt, M, abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    if (p.has_topo) {
+        ctx.topo_rows = p.topo_rows.data_ptr<int>();
+        ctx.has_topo  = true;
+    }
 
     AcousticWavefieldTensor wavefield;
     if (!p.wavefields.empty())
@@ -151,6 +155,16 @@ ForwardOutput forward(const ForwardInput& in)
         u_thist = u_allt.defined()
             ? u_allt[it].data_ptr<float>()
             : nullptr;
+
+        // Pre-pass: clear air cells in a separate kernel launch so the
+        // main acoustic_forward_kernel_3d only reads (never writes) air
+        // cells in the same launch.  Mirrors the acoustic2d fix —
+        // eliminates intra-launch RAW races on PML aux fields.
+        if (p.has_topo) {
+            acoustic3d_air_clear_kernel<<<launch_config.grid, launch_config.block>>>(
+                view, p.save_all_wavefields, u_thist, ctx
+            );
+        }
 
         ACOUSTIC3D(
             order,
