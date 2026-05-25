@@ -581,6 +581,18 @@ class Elastic(FirstOrderEquation):
             _C.elastic3d_backward_ckpt,
             _C.elastic3d_backward_recursive_ckpt,
         )
+
+    def _C_apm(self):
+        """APM CUDA bindings (Dong 2023, elastic limit).
+        Forward is fully implemented; backward is a stub pending Phase 3D
+        — the _c.py dispatch handles the fallback to eager autograd for
+        gradient computation."""
+        import sweep._C as _C
+        return (
+            _C.elastic3d_apm_forward,
+            _C.elastic3d_apm_backward,
+            _C.elastic3d_apm_backward_bs,
+        )
     
     @property
     def cuda_layout(self):

@@ -1080,25 +1080,58 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         use_apm_arg = False
         models_arg = models
         if getattr(self, "_topo_method", None) == "apm":
-            from sweep.equations._topography import (
-                classify_topography, precompute_apm_moduli,
-            )
             # models[0..2] = vp, vs, rho already padded to runtime by EdgePadding.
             vp_r, vs_r, rho_r = models[0], models[1], models[2]
             lam_r = rho_r * (vp_r ** 2 - 2 * vs_r ** 2)
             mu_r  = rho_r * (vs_r ** 2)
             lam_2mu_r = lam_r + 2 * mu_r
             air_mask_rt = self.equation._apm_air_mask_runtime
-            # classify expects (nz, nx); air_mask_rt is already runtime-padded.
-            cat_np = classify_topography(air_mask_rt)
-            cat_t = torch.from_numpy(cat_np).to(device=vp_r.device, dtype=torch.int32)
-            lam_eff, mu_eff, mu_xz, rho_x, rho_z = precompute_apm_moduli(
-                lam_r, mu_r, rho_r, cat_np,
-            )
-            models_arg = (
-                vp_r, vs_r, rho_r, lam_r, mu_r, lam_2mu_r,
-                lam_eff, mu_eff, mu_xz, rho_x, rho_z,
-            )
+
+            if self.ndim == 2:
+                from sweep.equations._topography import (
+                    classify_topography, precompute_apm_moduli,
+                )
+                cat_np = classify_topography(air_mask_rt)
+                cat_t = torch.from_numpy(cat_np).to(device=vp_r.device, dtype=torch.int32)
+                lam_eff, mu_eff, mu_xz, rho_x, rho_z = precompute_apm_moduli(
+                    lam_r, mu_r, rho_r, cat_np,
+                )
+                # 2-D APM model layout (11 tensors):
+                #   vp, vs, rho, lam, mu, lam_2mu,
+                #   lam_eff, mu_eff, mu_xz, rho_x, rho_z
+                models_arg = (
+                    vp_r, vs_r, rho_r, lam_r, mu_r, lam_2mu_r,
+                    lam_eff, mu_eff, mu_xz, rho_x, rho_z,
+                )
+            else:  # 3-D
+                from sweep.equations._topography import (
+                    classify_topography_3d, precompute_apm_moduli_3d,
+                )
+                cat_np = classify_topography_3d(air_mask_rt)
+                cat_t = torch.from_numpy(cat_np).to(device=vp_r.device, dtype=torch.int32)
+                (alpha_xx, alpha_yy, alpha_zz,
+                 lam_xx_yy, lam_xx_zz,
+                 lam_yy_xx, lam_yy_zz,
+                 lam_zz_xx, lam_zz_yy,
+                 mu_xy, mu_xz, mu_yz,
+                 inv_rho_x, inv_rho_y, inv_rho_z) = precompute_apm_moduli_3d(
+                    lam_r, mu_r, rho_r, cat_np,
+                )
+                # 3-D APM model layout (21 tensors):
+                #   vp, vs, rho, lam, mu, lam_2mu,
+                #   alpha_xx, alpha_yy, alpha_zz,
+                #   lam_xx_yy, lam_xx_zz, lam_yy_xx, lam_yy_zz,
+                #   lam_zz_xx, lam_zz_yy,
+                #   mu_xy, mu_xz, mu_yz,
+                #   inv_rho_x, inv_rho_y, inv_rho_z
+                models_arg = (
+                    vp_r, vs_r, rho_r, lam_r, mu_r, lam_2mu_r,
+                    alpha_xx, alpha_yy, alpha_zz,
+                    lam_xx_yy, lam_xx_zz, lam_yy_xx, lam_yy_zz,
+                    lam_zz_xx, lam_zz_yy,
+                    mu_xy, mu_xz, mu_yz,
+                    inv_rho_x, inv_rho_y, inv_rho_z,
+                )
             topo_cat_arg = cat_t
             use_apm_arg = True
 

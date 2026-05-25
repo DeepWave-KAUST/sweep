@@ -1362,3 +1362,336 @@ __global__ void calculate_grad_elastic3d_bs(
     grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
                  grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
 }
+
+
+// ===========================================================================
+// APM (Dong 2023, elastic limit) 3-D kernels
+// ===========================================================================
+// Category codes mirror sweep.equations._topography:
+//   INTERIOR=0, AIR=1, H=2, VL=3, VR=4, OC=5, IC=6, VF=7, VB=8
+// The 3-D APM step uses the Virieux SSG stencil with parameter-modified
+// moduli (9 normal + 3 shear + 3 inverse densities, all pre-computed on
+// the Python side).  Image-method z-derivative substitutions are disabled
+// (``solver.free_surface=false`` in APM mode, so the existing
+// ``elastic3d_top_fs_sgradient_z`` helpers fall through to plain
+// ``sgradient``).
+
+#define APM3D_CATEGORY_INTERIOR 0
+#define APM3D_CATEGORY_AIR      1
+#define APM3D_CATEGORY_H        2
+#define APM3D_CATEGORY_VL       3
+#define APM3D_CATEGORY_VR       4
+#define APM3D_CATEGORY_OC       5
+#define APM3D_CATEGORY_IC       6
+#define APM3D_CATEGORY_VF       7
+#define APM3D_CATEGORY_VB       8
+
+
+template<int Order>
+__global__ void elastic3d_velocity_kernel_apm(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ inv_rho_x,
+    const float* __restrict__ inv_rho_y,
+    const float* __restrict__ inv_rho_z,
+    const int*   __restrict__ category,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo) return;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    // AIR cell: wipe velocity components, skip update.  ``inv_rho_*`` is
+    // already zero at air cells (masked on the Python side) but be
+    // explicit here too in case category > AIR was set for some reason.
+    if (category[idx] == APM3D_CATEGORY_AIR) {
+        f.vx[idx] = 0.f;
+        f.vy[idx] = 0.f;
+        f.vz[idx] = 0.f;
+        return;
+    }
+
+    const float* invrx_b = inv_rho_x + b * spatial_size;
+    const float* invry_b = inv_rho_y + b * spatial_size;
+    const float* invrz_b = inv_rho_z + b * spatial_size;
+
+    // No image-method z-derivative substitution: solver.free_surface=false
+    // in APM mode → helpers fall through to plain sgradient.
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true);
+
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true);
+
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dszz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx, solver, true);
+
+    float irx = invrx_b[idx];
+    float iry = invry_b[idx];
+    float irz = invrz_b[idx];
+
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
+                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        f.vx[idx] += solver.dt * irx * (dsxx_dx + dsxy_dy + dsxz_dz);
+        f.vy[idx] += solver.dt * iry * (dsxy_dx + dsyy_dy + dsyz_dz);
+        f.vz[idx] += solver.dt * irz * (dsxz_dx + dsyz_dy + dszz_dz);
+        return;
+    }
+
+    // PML CPML aux update (mirror elastic_velocity_kernel_3d).
+    float az = cpml.az[iz];
+    float bz = cpml.bz[iz];
+    float azh = cpml.azh[iz];
+    float bzh = cpml.bzh[iz];
+    float ay = cpml.ay[iy];
+    float by = cpml.by[iy];
+    float ayh = cpml.ayh[iy];
+    float byh = cpml.byh[iy];
+    float ax = cpml.ax[ix];
+    float bx = cpml.bx[ix];
+    float axh = cpml.axh[ix];
+    float bxh = cpml.bxh[ix];
+
+    f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
+    dszz_dz += f.m_szzz[idx];
+    f.m_sxzx[idx] = ax * f.m_sxzx[idx] + bx * dsxz_dx;
+    dsxz_dx += f.m_sxzx[idx];
+
+    f.m_sxzz[idx] = az * f.m_sxzz[idx] + bz * dsxz_dz;
+    dsxz_dz += f.m_sxzz[idx];
+    f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
+    dsxx_dx += f.m_sxxx[idx];
+
+    f.m_sxyy[idx] = ay * f.m_sxyy[idx] + by * dsxy_dy;
+    dsxy_dy += f.m_sxyy[idx];
+    f.m_sxyx[idx] = ax * f.m_sxyx[idx] + bx * dsxy_dx;
+    dsxy_dx += f.m_sxyx[idx];
+
+    f.m_syyy[idx] = ayh * f.m_syyy[idx] + byh * dsyy_dy;
+    dsyy_dy += f.m_syyy[idx];
+    f.m_syzz[idx] = az * f.m_syzz[idx] + bz * dsyz_dz;
+    dsyz_dz += f.m_syzz[idx];
+    f.m_syzy[idx] = ay * f.m_syzy[idx] + by * dsyz_dy;
+    dsyz_dy += f.m_syzy[idx];
+
+    f.vx[idx] += solver.dt * irx * (dsxx_dx + dsxy_dy + dsxz_dz);
+    f.vy[idx] += solver.dt * iry * (dsxy_dx + dsyy_dy + dsyz_dz);
+    f.vz[idx] += solver.dt * irz * (dsxz_dx + dsyz_dy + dszz_dz);
+}
+
+
+template<int Order>
+__global__ void elastic3d_stress_kernel_apm(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ alpha_xx,
+    const float* __restrict__ alpha_yy,
+    const float* __restrict__ alpha_zz,
+    const float* __restrict__ lam_xx_yy,
+    const float* __restrict__ lam_xx_zz,
+    const float* __restrict__ lam_yy_xx,
+    const float* __restrict__ lam_yy_zz,
+    const float* __restrict__ lam_zz_xx,
+    const float* __restrict__ lam_zz_yy,
+    const float* __restrict__ mu_xy_node,
+    const float* __restrict__ mu_xz_node,
+    const float* __restrict__ mu_yz_node,
+    const int*   __restrict__ category,
+    float* __restrict__ u_this,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo) return;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    int cat = category[idx];
+
+    // AIR cell: wipe stresses, save vx/vy/vz checkpoints (they were
+    // zeroed by the velocity kernel) and return.
+    if (cat == APM3D_CATEGORY_AIR) {
+        f.sxx[idx] = 0.f; f.syy[idx] = 0.f; f.szz[idx] = 0.f;
+        f.sxy[idx] = 0.f; f.sxz[idx] = 0.f; f.syz[idx] = 0.f;
+        if (u_this_b) {
+            int comp_stride = solver.B * spatial_size;
+            u_this_b[0 * comp_stride + idx] = 0.f;
+            u_this_b[1 * comp_stride + idx] = 0.f;
+            u_this_b[2 * comp_stride + idx] = 0.f;
+        }
+        return;
+    }
+
+    const float* axx_b   = alpha_xx   + b * spatial_size;
+    const float* ayy_b   = alpha_yy   + b * spatial_size;
+    const float* azz_b   = alpha_zz   + b * spatial_size;
+    const float* lxxyy_b = lam_xx_yy  + b * spatial_size;
+    const float* lxxzz_b = lam_xx_zz  + b * spatial_size;
+    const float* lyyxx_b = lam_yy_xx  + b * spatial_size;
+    const float* lyyzz_b = lam_yy_zz  + b * spatial_size;
+    const float* lzzxx_b = lam_zz_xx  + b * spatial_size;
+    const float* lzzyy_b = lam_zz_yy  + b * spatial_size;
+    const float* muxy_b  = mu_xy_node + b * spatial_size;
+    const float* muxz_b  = mu_xz_node + b * spatial_size;
+    const float* muyz_b  = mu_yz_node + b * spatial_size;
+
+    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx, solver, false);
+    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx, solver, false);
+    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+
+    float axx  = axx_b[idx],   ayy  = ayy_b[idx],   azz  = azz_b[idx];
+    float lxy  = lxxyy_b[idx], lxz  = lxxzz_b[idx];
+    float lyx  = lyyxx_b[idx], lyz  = lyyzz_b[idx];
+    float lzx  = lzzxx_b[idx], lzy  = lzzyy_b[idx];
+    float mxy  = muxy_b[idx],  mxz  = muxz_b[idx],  myz  = muyz_b[idx];
+
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
+                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        f.sxx[idx] += solver.dt * (axx * dvx_dx + lxy * dvy_dy + lxz * dvz_dz);
+        f.syy[idx] += solver.dt * (lyx * dvx_dx + ayy * dvy_dy + lyz * dvz_dz);
+        f.szz[idx] += solver.dt * (lzx * dvx_dx + lzy * dvy_dy + azz * dvz_dz);
+        f.sxy[idx] += solver.dt * mxy * (dvx_dy + dvy_dx);
+        f.sxz[idx] += solver.dt * mxz * (dvx_dz + dvz_dx);
+        f.syz[idx] += solver.dt * myz * (dvy_dz + dvz_dy);
+    } else {
+        float az = cpml.az[iz];
+        float bz = cpml.bz[iz];
+        float azh = cpml.azh[iz];
+        float bzh = cpml.bzh[iz];
+        float ay = cpml.ay[iy];
+        float by = cpml.by[iy];
+        float ayh = cpml.ayh[iy];
+        float byh = cpml.byh[iy];
+        float ax = cpml.ax[ix];
+        float bx = cpml.bx[ix];
+        float axh = cpml.axh[ix];
+        float bxh = cpml.bxh[ix];
+
+        f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
+        dvx_dx += f.m_vxx[idx];
+        f.m_vyy[idx] = ay * f.m_vyy[idx] + by * dvy_dy;
+        dvy_dy += f.m_vyy[idx];
+        f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
+        dvz_dz += f.m_vzz[idx];
+
+        f.sxx[idx] += solver.dt * (axx * dvx_dx + lxy * dvy_dy + lxz * dvz_dz);
+        f.syy[idx] += solver.dt * (lyx * dvx_dx + ayy * dvy_dy + lyz * dvz_dz);
+        f.szz[idx] += solver.dt * (lzx * dvx_dx + lzy * dvy_dy + azz * dvz_dz);
+
+        f.m_vxy[idx] = ayh * f.m_vxy[idx] + byh * dvx_dy;
+        dvx_dy += f.m_vxy[idx];
+        f.m_vyx[idx] = axh * f.m_vyx[idx] + bxh * dvy_dx;
+        dvy_dx += f.m_vyx[idx];
+        f.sxy[idx] += solver.dt * mxy * (dvx_dy + dvy_dx);
+
+        f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
+        dvx_dz += f.m_vxz[idx];
+        f.m_vzx[idx] = axh * f.m_vzx[idx] + bxh * dvz_dx;
+        dvz_dx += f.m_vzx[idx];
+        f.sxz[idx] += solver.dt * mxz * (dvx_dz + dvz_dx);
+
+        f.m_vyz[idx] = azh * f.m_vyz[idx] + bzh * dvy_dz;
+        dvy_dz += f.m_vyz[idx];
+        f.m_vzy[idx] = ayh * f.m_vzy[idx] + byh * dvz_dy;
+        dvz_dy += f.m_vzy[idx];
+        f.syz[idx] += solver.dt * myz * (dvy_dz + dvz_dy);
+    }
+
+    // APM traction-free BC: pointwise stress zero per surface category.
+    // Rules mirror enforce_apm_traction_bc_3d:
+    //   H        → σ_zz = σ_xz = σ_yz = 0  (free face ±z)
+    //   VL/VR    → σ_xx = σ_xy = σ_xz = 0  (free face ±x)
+    //   VF/VB    → σ_yy = σ_xy = σ_yz = 0  (free face ±y)
+    //   OC       → all 6 stresses zero
+    if (cat == APM3D_CATEGORY_H) {
+        f.szz[idx] = 0.f;
+        f.sxz[idx] = 0.f;
+        f.syz[idx] = 0.f;
+    } else if (cat == APM3D_CATEGORY_VL || cat == APM3D_CATEGORY_VR) {
+        f.sxx[idx] = 0.f;
+        f.sxy[idx] = 0.f;
+        f.sxz[idx] = 0.f;
+    } else if (cat == APM3D_CATEGORY_VF || cat == APM3D_CATEGORY_VB) {
+        f.syy[idx] = 0.f;
+        f.sxy[idx] = 0.f;
+        f.syz[idx] = 0.f;
+    } else if (cat == APM3D_CATEGORY_OC) {
+        f.sxx[idx] = 0.f; f.syy[idx] = 0.f; f.szz[idx] = 0.f;
+        f.sxy[idx] = 0.f; f.sxz[idx] = 0.f; f.syz[idx] = 0.f;
+    }
+
+    if (u_this_b) {
+        int comp_stride = solver.B * spatial_size;
+        u_this_b[0 * comp_stride + idx] = f.vx[idx];
+        u_this_b[1 * comp_stride + idx] = f.vy[idx];
+        u_this_b[2 * comp_stride + idx] = f.vz[idx];
+    }
+}
+
+
+#define LAUNCH_3DELASTIC_VELOCITY_APM(order, grid, block, ...)                 \
+    do {                                                                        \
+        if      ((order) == 2) elastic3d_velocity_kernel_apm<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) elastic3d_velocity_kernel_apm<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) elastic3d_velocity_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) elastic3d_velocity_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   elastic3d_velocity_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
+    } while (0)
+
+#define LAUNCH_3DELASTIC_STRESS_APM(order, grid, block, ...)                   \
+    do {                                                                        \
+        if      ((order) == 2) elastic3d_stress_kernel_apm<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) elastic3d_stress_kernel_apm<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) elastic3d_stress_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) elastic3d_stress_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   elastic3d_stress_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
+    } while (0)
