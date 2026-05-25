@@ -42,6 +42,9 @@ from .acoustic3d import Acoustic3D
 # TODO: re-run any codegen script if one exists for this module.
 from .acoustic_vti_1st import AcousticVTI1st, AcousticVTI1st3D
 from .acoustic_aniso import AcousticAniso
+from .acoustic_curvilinear import AcousticCurvilinear
+from .elastic_curvilinear import ElasticCurvilinear
+from .elastic_apm import ElasticAPM
 
 
 # ---------------------------------------------------------------------------
