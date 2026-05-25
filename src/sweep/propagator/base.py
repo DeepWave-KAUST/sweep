@@ -8,12 +8,14 @@ from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFA
 class PropBase:
 
     def __init__(self,
-                 equation, 
-                 shape, 
+                 equation,
+                 shape,
                  source_type=None,
                  receiver_type=None,
                  abcn=PROP_DEFAULTS.abcn,
                  free_surface=PROP_DEFAULTS.free_surface,
+                 topography=None,
+                 topo_method='auto',
                  dh=PROP_DEFAULTS.dh,
                  dt=PROP_DEFAULTS.dt,
                  dev=PROP_DEFAULTS.dev,
@@ -40,6 +42,34 @@ class PropBase:
             receiver_type (list, optional): List of strings for the receiver type. Defaults to [].
             abcn (int, optional): The number of layers of absorbing boundary conditions. Defaults to 50.
             free_surface (bool, optional): If the model has a free surface. Defaults to False.
+            topography (array_like, optional): Irregular free-surface
+                topography — a 1-D integer array of length ``nx_phys``
+                giving the per-column surface row index in the physical
+                grid (``0`` = top of physical domain).  When given, a
+                free surface is **implicit** — you do NOT need to set
+                ``free_surface=True``.  ``topo_method`` selects the
+                discretisation (image method vs APM); the propagator's
+                PML layout is auto-set to match.  Defaults to ``None``.
+            topo_method (str, optional): Which surface scheme to use
+                when ``topography`` is given.  One of:
+
+                * ``'auto'`` (default) — pick ``'apm'`` if the equation
+                  declares ``supports_apm=True`` (currently
+                  :class:`Elastic`/:class:`ElasticAPM`), else ``'image'``
+                  (vacuum / Robertsson staircase).
+                * ``'image'`` — staircase image method.  Acoustic uses
+                  Mittet 2002 vacuum cells; Elastic uses Robertsson 1996
+                  odd-parity stress mirror.  Sets ``free_surface=True``
+                  internally (top PML suppressed).
+                * ``'apm'`` — Cao & Chen 2018 parameter-modified method
+                  (elastic only).  Sets ``free_surface=False`` internally
+                  (full PML, including top).  Best long-time stability
+                  on rough staircase topography.
+
+                Ignored when ``topography is None``.  Legacy:
+                ``free_surface=True + topography`` (without
+                ``topo_method``) still selects image method, with a
+                ``DeprecationWarning``.
             dh (float or sequence, optional): Grid spacing in model-axis order.
                 For 2D use ``(dz, dx)`` and for 3D use ``(dz, dy, dx)``.
                 Defaults to 10..
@@ -104,7 +134,26 @@ class PropBase:
             resolved_device = getattr(equation, 'device', None)
         self.dev = resolved_device
         self.abcn = abcn
-        self.free_surface = free_surface
+        # Resolve topo_method + free_surface BEFORE PML padding is
+        # computed.  Two separate flags come out:
+        #   ``self.free_surface``           — physical: model has a free
+        #     surface (any topo + ``True`` flag).  This is the user-facing
+        #     attribute.
+        #   ``self._image_method_active``   — implementation: CUDA / Python
+        #     kernels should use the image-method PML layout (top PML
+        #     suppressed) AND the odd-parity z-derivative mirror at the
+        #     surface row.  ``True`` only when method == 'image'.
+        # APM implements the free surface via per-cell modulus
+        # modifications and keeps full PML on all four sides, so it has
+        # ``free_surface=True`` (physical) but ``_image_method_active=False``
+        # (no image-method mirror / no top-PML suppression).
+        self._topo_method, self.free_surface, self._image_method_active = (
+            self._resolve_topo_method(
+                topography=topography,
+                topo_method=topo_method,
+                free_surface=free_surface,
+            )
+        )
         if np.isscalar(dh):
             self._dh = float(dh)
             self._grid_spacing = tuple([self._dh] * self.ndim)
@@ -156,8 +205,13 @@ class PropBase:
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
         self._abc_cache_key = None
 
-        # Keep the equation object aware of geometry-dependent boundary behavior.
-        self.equation.free_surface = self.free_surface
+        # Keep the equation object aware of geometry-dependent boundary
+        # behavior.  ``equation.free_surface`` is the image-method-layout
+        # flag (used by the Python eager step to decide whether to apply
+        # the top-row image mirror).  APM equations set free_surface=False
+        # internally because their kernels don't engage the image mirror;
+        # the per-cell category handles the FS BC.
+        self.equation.free_surface = self._image_method_active
         self.equation.abcn = self.abcn
         if getattr(self.equation, "pd", None) is not None and hasattr(self.equation.pd, "set_spacing"):
             self.equation.pd.set_spacing(self._grid_spacing)
@@ -165,7 +219,9 @@ class PropBase:
         self.source_type = self._resolve_field_types(source_type, role="source")
         self.receiver_type = self._resolve_field_types(receiver_type, role="receiver")
 
-        if self.free_surface:
+        # PML layout: image method suppresses top PML (top halo holds the
+        # mirror); APM and no-FS use full PML on all sides.
+        if self._image_method_active:
             self.padding_z = (0, self.abcn)
             shape_z = self.shape[0] + self.abcn
         else:
@@ -176,7 +232,442 @@ class PropBase:
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
         self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
+
+        # Topography is processed AFTER self.shape is PML-padded so the
+        # runtime-coord conversion can compute the final padded surface row.
+        self._process_topography(topography)
+
         self._set_call_signature()
+
+    def _resolve_topo_method(self, *, topography, topo_method, free_surface):
+        """Resolve topo method, physical free-surface state, and image-method
+        layout flag.
+
+        New semantics (post-refactor):
+
+        * ``free_surface=True`` (no topo)  → flat free surface (image method).
+        * ``free_surface=False`` (no topo) → no free surface, full PML.
+        * ``topography=`` given             → free surface is ON regardless
+          of the ``free_surface`` flag; method auto-selects (APM if
+          supported, otherwise image) unless the user explicitly passes
+          ``topo_method='image'`` or ``'apm'``.
+        * ``topo_method='apm'`` without ``topography``                 → error.
+
+        Returns
+        -------
+        (method, free_surface_physical, image_method_active) :
+            (str | None, bool, bool)
+
+        ``method``                — ``'image'``, ``'apm'``, or ``None``.
+        ``free_surface_physical`` — user-facing flag: does the model have a
+                                    free surface at all?
+        ``image_method_active``   — implementation flag: should kernels use
+                                    image-method PML layout (top PML
+                                    suppressed) and the odd-parity
+                                    z-derivative mirror?  Only true when
+                                    ``method == 'image'``.
+        """
+        valid_methods = {'auto', 'image', 'apm'}
+        if topo_method not in valid_methods:
+            raise ValueError(
+                f"topo_method must be one of {sorted(valid_methods)}; "
+                f"got {topo_method!r}"
+            )
+
+        has_topo = topography is not None
+        supports_apm = bool(getattr(self.equation, 'supports_apm', False))
+
+        # Curvilinear equations have their own topo path (boundary-fitted
+        # grid via metric tensors); ``topo_method`` doesn't apply.  Honour
+        # the user's ``free_surface`` flag verbatim and skip method
+        # resolution.
+        is_curvilinear = bool(getattr(self.equation, 'is_curvilinear', False))
+        if is_curvilinear:
+            fs = bool(free_surface) or has_topo
+            return None, fs, fs
+
+        # ---- No topography ----
+        if not has_topo:
+            if free_surface:
+                # Flat free surface — only image method supports this
+                # configuration.  APM is meaningless without per-cell
+                # categories from a topo mask.
+                if topo_method == 'apm':
+                    raise ValueError(
+                        "topo_method='apm' requires a topography= mask; "
+                        "for a flat free surface use topo_method='image' "
+                        "(or omit it)."
+                    )
+                return 'image', True, True
+            # No free surface at all.
+            return None, False, False
+
+        # ---- Topography given: free surface is implicit ----
+        # If the user also passed free_surface=False, we still turn it on
+        # (topo implies FS); if they passed True, that matches.  No
+        # warning needed — the new semantics make the combination
+        # unambiguous.
+        if topo_method == 'auto':
+            method = 'apm' if supports_apm else 'image'
+        elif topo_method == 'apm':
+            if not supports_apm:
+                raise ValueError(
+                    f"topo_method='apm' requires equation.supports_apm=True; "
+                    f"{type(self.equation).__name__} only supports the image "
+                    f"method (use topo_method='image' or omit topo_method)."
+                )
+            method = 'apm'
+        else:  # 'image'
+            method = 'image'
+
+        image_method_active = (method == 'image')
+        return method, True, image_method_active
+
+    def _process_topography(self, topography):
+        """Validate and store irregular free-surface topography.
+
+        ``topography=`` takes a 1-D ``(nx_phys,)`` integer array of
+        per-column surface row indices.  The matching 2-D air mask is
+        derived internally for the APM path; the image-method path uses
+        only the 1-D form.  Method dispatch follows ``self._topo_method``
+        (set in :meth:`_resolve_topo_method`):
+
+        ============== =================================================
+        ``_topo_method``  Backend
+        ============== =================================================
+        ``'image'``      Image-method / vacuum staircase
+                         (Mittet 2002 / Robertsson 1996).
+                         Uses ``_topo_rows_runtime``.
+        ``'apm'``        APM (Cao & Chen 2018) — elastic only.
+                         Uses ``_apm_air_mask_runtime``.
+        ============== =================================================
+
+        Curvilinear equations (``equation.is_curvilinear``) consume the
+        per-column elevation independently of the dispatch above.
+        """
+        # Reset all topo-related attributes.
+        self.topography = None
+        self._topo_rows_runtime = None
+        self.equation.topography = None
+        self.equation._topo_rows_runtime = None
+        self.equation._apm_air_mask_runtime = None
+
+        if topography is None:
+            # Curvilinear equations need an identity-metric grid even
+            # for flat topo, otherwise ``step`` raises.
+            if getattr(self.equation, "is_curvilinear", False):
+                self._attach_curvilinear_metrics(
+                    topography=None, halo=self.equation.so // 2
+                )
+            return
+
+        if self.ndim not in (2, 3):
+            raise NotImplementedError(
+                "topography support is currently limited to 2-D and 3-D "
+                f"propagators (got ndim={self.ndim})."
+            )
+
+        import torch
+
+        topo_input = torch.as_tensor(topography)
+
+        # Resolve physical extents from the runtime shape + image-method-
+        # layout flag (image suppresses top PML; APM has PML on both top
+        # and bottom).  ``self.shape`` is laid out as (nz, nx) for 2-D and
+        # (nz, ny, nx) for 3-D — z is always axis 0.
+        if self._image_method_active:
+            nz_phys = self.shape[0] - self.abcn
+        else:
+            nz_phys = self.shape[0] - 2 * self.abcn
+        if self.ndim == 2:
+            nx_phys = self.shape[1] - 2 * self.abcn
+            ny_phys = None
+            phys_extent = (nz_phys, nx_phys)
+        else:
+            ny_phys = self.shape[1] - 2 * self.abcn
+            nx_phys = self.shape[2] - 2 * self.abcn
+            phys_extent = (nz_phys, ny_phys, nx_phys)
+
+        # Normalise input → (topo_row_phys, air_mask_phys) tuple.  Each
+        # method below picks the form it needs.  Shapes:
+        #   2-D : topo_row_phys (nx_phys,)              air_mask (nz, nx)
+        #   3-D : topo_row_phys (ny_phys, nx_phys)      air_mask (nz, ny, nx)
+        topo_row_phys, air_mask_phys = self._canonicalise_topography(
+            topo_input, *phys_extent
+        )
+
+        # Curvilinear path: always uses 1-D row.  Boundary-fitted grid
+        # ignores the air_mask form entirely.
+        if getattr(self.equation, "is_curvilinear", False):
+            self.topography = topo_row_phys
+            self.equation.topography = topo_row_phys
+            self._attach_curvilinear_metrics(
+                topography=topo_row_phys.cpu().numpy(),
+                halo=self.equation.so // 2,
+            )
+            return
+
+        # Dispatch on the topo method resolved at construction.
+        if self._topo_method == 'image':
+            self._populate_image_method_topography(topo_row_phys)
+        elif self._topo_method == 'apm':
+            self._populate_apm_topography(air_mask_phys)
+        else:
+            # _resolve_topo_method should never let us get here with
+            # topography != None and method == None, but guard anyway.
+            raise RuntimeError(
+                f"Internal error: topography given but _topo_method is "
+                f"{self._topo_method!r}"
+            )
+
+    def _canonicalise_topography(self, topo_input, *phys_extent):
+        """Validate the per-column surface row array and derive the matching
+        air mask.
+
+        Shapes (dispatched on ``len(phys_extent)``):
+
+        * 2-D propagator (``phys_extent = (nz_phys, nx_phys)``):
+          ``topo_input`` must be 1-D ``(nx_phys,)``.  Returns
+          ``(topo_row_phys, air_mask_phys)`` with shapes
+          ``(nx_phys,)`` and ``(nz_phys, nx_phys)``.
+
+        * 3-D propagator (``phys_extent = (nz_phys, ny_phys, nx_phys)``):
+          ``topo_input`` must be 2-D ``(ny_phys, nx_phys)``.  Returns
+          ``(topo_row_phys, air_mask_phys)`` with shapes
+          ``(ny_phys, nx_phys)`` and ``(nz_phys, ny_phys, nx_phys)``.
+
+        ``topo_row_phys`` is ``int64``; ``air_mask_phys`` is ``float32``
+        (1.0 above the surface, 0.0 at and below).
+        """
+        import torch
+
+        if len(phys_extent) == 2:
+            nz_phys, nx_phys = phys_extent
+            if topo_input.ndim != 1:
+                raise ValueError(
+                    f"2-D topography must be 1-D ``(nx_phys,)`` (surface row "
+                    f"index per physical column); got shape "
+                    f"{tuple(topo_input.shape)}.  Non-single-valued geometries "
+                    f"(overhangs, caves) are not supported by the standard "
+                    f"staircase path."
+                )
+            if topo_input.shape[0] != nx_phys:
+                raise ValueError(
+                    f"topography length {topo_input.shape[0]} != physical nx "
+                    f"({nx_phys})"
+                )
+            topo_row_phys = topo_input.to(torch.long)
+            if (topo_row_phys < 0).any() or (topo_row_phys >= nz_phys).any():
+                raise ValueError(
+                    f"topography values must satisfy 0 <= row < {nz_phys}; "
+                    f"got range [{int(topo_row_phys.min())}, "
+                    f"{int(topo_row_phys.max())}]"
+                )
+            iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1)
+            air_mask_phys = (iz < topo_row_phys.view(1, -1)).to(torch.float32)
+            return topo_row_phys, air_mask_phys
+
+        # 3-D branch.
+        nz_phys, ny_phys, nx_phys = phys_extent
+        if topo_input.ndim != 2:
+            raise ValueError(
+                f"3-D topography must be 2-D ``(ny_phys, nx_phys)`` (surface "
+                f"row index per (iy, ix) physical column); got shape "
+                f"{tuple(topo_input.shape)}.  Overhangs / caves are not "
+                f"supported."
+            )
+        if tuple(topo_input.shape) != (ny_phys, nx_phys):
+            raise ValueError(
+                f"3-D topography shape {tuple(topo_input.shape)} != "
+                f"(ny_phys, nx_phys) = ({ny_phys}, {nx_phys})"
+            )
+        topo_row_phys = topo_input.to(torch.long)
+        if (topo_row_phys < 0).any() or (topo_row_phys >= nz_phys).any():
+            raise ValueError(
+                f"topography values must satisfy 0 <= row < {nz_phys}; "
+                f"got range [{int(topo_row_phys.min())}, "
+                f"{int(topo_row_phys.max())}]"
+            )
+        iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1, 1)
+        air_mask_phys = (iz < topo_row_phys.view(1, ny_phys, nx_phys)).to(
+            torch.float32
+        )
+        return topo_row_phys, air_mask_phys
+
+    def _populate_image_method_topography(self, topo_row_phys):
+        """Set ``self._topo_rows_runtime`` for the image-method /
+        vacuum-staircase path.  Translates physical row indices to
+        runtime-grid coordinates and replicate-pads the horizontal
+        axes (x for 2-D; y and x for 3-D) through PML + stencil halo so
+        the surface stays continuous through the absorbing boundary.
+
+        Result shapes:
+          2-D : 1-D ``(nx_phys + 2*(abcn+halo),)`` ``int32``.
+          3-D : 2-D ``(ny_phys + 2*(abcn+halo), nx_phys + 2*(abcn+halo))``
+                ``int32``.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        halo = self.equation.so // 2
+        # Runtime z layout (free_surface=True):
+        #   [0, halo)              top stencil halo (image)
+        #   [halo, halo + nz_phys) physical interior
+        #   [halo + nz_phys, ...)  bottom PML + bottom halo
+        topo_z = topo_row_phys + halo
+        pad_each = self.abcn + halo
+
+        # int32, not int64: ``_c.py`` reads ``data_ptr<int>()`` and a dtype
+        # cast there would create a temporary whose GPU memory is reused
+        # before the async CUDA kernels finish reading it.
+        if topo_row_phys.ndim == 1:
+            # 2-D propagator: 1-D row per ix.
+            topo_runtime = F.pad(
+                topo_z.to(torch.float32).view(1, 1, -1),
+                (pad_each, pad_each),
+                mode="replicate",
+            ).view(-1).to(torch.int32)
+        else:
+            # 3-D propagator: 2-D row per (iy, ix).  Pad x then y via a
+            # single F.pad call (right, left, top, bottom).
+            topo_runtime = F.pad(
+                topo_z.to(torch.float32).view(1, 1, *topo_z.shape),
+                (pad_each, pad_each, pad_each, pad_each),
+                mode="replicate",
+            ).squeeze(0).squeeze(0).to(torch.int32)
+
+        device = getattr(self.equation, "device", None) or self.dev
+        if device is not None:
+            try:
+                topo_runtime = topo_runtime.to(device=device)
+            except (RuntimeError, TypeError):
+                pass
+
+        # Defensive: ensure CPU→GPU copy is complete before any forward
+        # kernel reads ``topo_rows[..., ix]``.  Without this we've seen ~30%
+        # non-determinism in CUDA forward results.
+        if topo_runtime.device.type == "cuda":
+            torch.cuda.synchronize(topo_runtime.device)
+
+        self.topography = topo_row_phys
+        self._topo_rows_runtime = topo_runtime
+        self.equation.topography = topo_row_phys
+        self.equation._topo_rows_runtime = topo_runtime
+
+    def _populate_apm_topography(self, air_mask_phys):
+        """Set ``self.equation._apm_air_mask_runtime`` for the APM path.
+
+        Replicate-pads the air mask through PML + stencil halo so the
+        surface stays continuous through the absorbing boundary.
+
+        Shapes:
+
+        * 2-D propagator: ``air_mask_phys`` is ``(nz_phys, nx_phys)``;
+          output is ``(nz_phys + 2*pad, nx_phys + 2*pad)``.
+        * 3-D propagator: ``air_mask_phys`` is
+          ``(nz_phys, ny_phys, nx_phys)``; output is
+          ``(nz_phys + 2*pad, ny_phys + 2*pad, nx_phys + 2*pad)``,
+          replicate-padded on all 6 sides.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        halo = self.equation.so // 2
+        pad_each = self.abcn + halo
+
+        if air_mask_phys.ndim == 2:
+            nz_phys, nx_phys = air_mask_phys.shape
+            air_mask_padded = F.pad(
+                air_mask_phys.view(1, 1, nz_phys, nx_phys),
+                (pad_each, pad_each, pad_each, pad_each),
+                mode="replicate",
+            ).view(nz_phys + 2 * pad_each, nx_phys + 2 * pad_each)
+        elif air_mask_phys.ndim == 3:
+            nz_phys, ny_phys, nx_phys = air_mask_phys.shape
+            # F.pad on (N=1, C=1, D, H, W) accepts a 6-tuple
+            # (W_left, W_right, H_left, H_right, D_left, D_right).
+            air_mask_padded = F.pad(
+                air_mask_phys.view(1, 1, nz_phys, ny_phys, nx_phys),
+                (pad_each, pad_each, pad_each, pad_each, pad_each, pad_each),
+                mode="replicate",
+            ).view(
+                nz_phys + 2 * pad_each,
+                ny_phys + 2 * pad_each,
+                nx_phys + 2 * pad_each,
+            )
+        else:
+            raise ValueError(
+                f"air_mask_phys must be 2-D or 3-D, got ndim={air_mask_phys.ndim}"
+            )
+
+        device = getattr(self.equation, "device", None) or self.dev
+        if device is not None:
+            try:
+                air_mask_padded = air_mask_padded.to(device=device)
+            except (RuntimeError, TypeError):
+                pass
+
+        self.topography = air_mask_phys
+        self.equation.topography = air_mask_phys
+        self.equation._apm_air_mask_runtime = air_mask_padded
+
+    def _attach_curvilinear_metrics(self, topography, halo):
+        """Build a :class:`CurvilinearGrid` from ``topography`` (physical
+        nx-long array, ``None`` for flat) and attach padded metric
+        tensors to ``self.equation``."""
+        from sweep.utils.curvilinear import CurvilinearGrid
+
+        if self.ndim != 2:
+            raise NotImplementedError(
+                "Curvilinear path only supports 2-D propagators (got "
+                f"ndim={self.ndim})."
+            )
+
+        nz_phys = self.shape[0] - (self.abcn if self._image_method_active else 2 * self.abcn)
+        nx_phys = self.shape[1] - 2 * self.abcn
+        device = getattr(self.equation, "device", None) or self.dev
+
+        grid = CurvilinearGrid(
+            topography=topography,
+            nz_phys=nz_phys,
+            nx_phys=nx_phys,
+            dh=float(self._grid_spacing[-1]),
+            device="cpu",   # build on CPU; move to device after padding
+        )
+
+        # Pad metrics to runtime shape using edge replication. The
+        # runtime shape is ``self.shape + 2 * halo`` per axis, with
+        # padding pattern ``(pad_x_left, pad_x_right, pad_z_top, pad_z_bottom)``.
+        if self._image_method_active:
+            pad_z_top, pad_z_bot = halo, self.abcn + halo
+        else:
+            pad_z_top = pad_z_bot = self.abcn + halo
+        pad_x_left = pad_x_right = self.abcn + halo
+        pad_runtime = (pad_x_left, pad_x_right, pad_z_top, pad_z_bot)
+        padded = grid.padded_metrics(pad_runtime)
+
+        if device is not None:
+            try:
+                padded = {k: v.to(device) for k, v in padded.items()}
+            except (RuntimeError, TypeError):
+                pass
+
+        self.equation.set_curvilinear_metrics(
+            alpha=padded["alpha"],
+            metric_pηη=padded["metric_pηη"],
+            metric_pη=padded["metric_pη"],
+            d_eta=grid.d_eta,
+        )
+        # Also expose α_xi, α_eta, β for elastic; safely ignored by
+        # acoustic which doesn't need them.
+        self.equation._curv_beta = padded["beta"]
+        self.equation._curv_alpha_xi = padded["alpha_xi"]
+        self.equation._curv_alpha_eta = padded["alpha_eta"]
+        # ``h_prime`` is the 1-D surface slope along ξ, padded to the
+        # runtime x-extent. Elastic uses it for the rotated free-surface
+        # traction BC on a curved surface (acoustic ignores it).
+        self.equation._curv_h_prime = padded["h_prime"]
+        self._curvilinear_grid = grid
 
     def _default_field_types(self, role):
         attr = "default_source_fields" if role == "source" else "default_receiver_fields"
@@ -342,7 +833,7 @@ class PropBase:
         shape = tuple(kwargs.get('shape', self.shape))
         abc_key = (
             self.pml_type,
-            tuple([self.abcn if not self.free_surface else 0] + (2**self.ndim-1) * [self.abcn]),
+            tuple([self.abcn if not self._image_method_active else 0] + (2**self.ndim-1) * [self.abcn]),
             self.equation.so,
             fd_pad,
             self._dt,
@@ -379,7 +870,7 @@ class PropBase:
         Returns:
             np.ndarray: The cropped data
         """
-        if self.free_surface:
+        if self._image_method_active:
             return data[..., 0:-self.abcn, self.abcn:-self.abcn]
         else:
             s = slice(self.abcn, -self.abcn)
@@ -415,12 +906,12 @@ class PropBase:
         halo = self._runtime_fd_halo()
         if halo <= 0:
             offset = [self.abcn] * self.ndim
-            if self.free_surface:
+            if self._image_method_active:
                 offset[-1] = 0
             return tuple(offset)
 
         offset = [self.abcn + halo] * self.ndim
-        if self.free_surface:
+        if self._image_method_active:
             offset[-1] = halo
         return tuple(offset)
 

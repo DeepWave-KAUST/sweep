@@ -495,6 +495,7 @@ void run_full_imaging(
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
 
     LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
     GradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
@@ -608,6 +609,7 @@ void run_bs_imaging(
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, nullptr, nullptr, dx, dy, dz};
+    if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -862,6 +864,7 @@ void run_ckpt_imaging(
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -1066,6 +1069,7 @@ void run_recursive_imaging(
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())

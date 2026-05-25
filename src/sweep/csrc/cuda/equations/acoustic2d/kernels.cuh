@@ -15,6 +15,31 @@
         else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
+// Pre-pass: clear air cells (above per-column topo surface).  Launched
+// BEFORE acoustic2nd so the main kernel can early-return on air cells
+// without writing any aux field — eliminating intra-launch RAW races
+// between air-zeroing and PML stencil reads.  See sweep VTI history.
+static __global__ void acoustic2d_air_clear_kernel(
+    AcousticWavefieldPointer wf,
+    bool save_all_wavefields,
+    float* __restrict__ u_this,
+    SolverContext solver
+){
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+    if (!solver.has_topo) return;
+    if (iz >= solver.topo_rows[ix]) return;
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+    f.u_next[idx] = 0.f;
+    f.psix[idx] = 0.f; f.psiz[idx] = 0.f;
+    f.zetax[idx] = 0.f; f.zetaz[idx] = 0.f;
+    if (u_this) u_this[b * spatial_size + idx] = 0.f;
+}
+
 #define ACOUSTIC2D_NOPML(order, grid, block, ...)                                  \
     do {                                                        \
         if      ((order) == 2) acoustic2nd_nopml<2><<<grid, block>>>(__VA_ARGS__); \
@@ -55,6 +80,20 @@ __global__ void acoustic2nd(
     int idx = iz * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
+
+    // Irregular free-surface topography (vacuum staircase / image method):
+    // any cell strictly above the per-column surface row is air.  Mirror
+    // Python's ``zero_above_topo`` — clear the wavefield and any CPML aux
+    // fields, then skip the FD update.  Solid cells just below the surface
+    // see these zeros through the stencil, which is what reproduces the
+    // ``p=0`` boundary condition.
+    // Air cells were already cleared by acoustic2d_air_clear_kernel (a
+    // separate pre-pass launch).  Just early-return here — no writes —
+    // so this kernel only stencil-reads psix/psiz that the prior launch
+    // finished writing.
+    if (solver.has_topo && iz < solver.topo_rows[ix]) {
+        return;
+    }
 
     float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
     const float* vp_b = vp + b * spatial_size;

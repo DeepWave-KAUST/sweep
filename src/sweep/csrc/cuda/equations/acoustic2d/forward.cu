@@ -42,7 +42,26 @@ ForwardOutput forward(const ForwardInput& in) {
     const int order =
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    SolverContext ctx;
+    ctx.ndim         = 2;
+    ctx.nx           = nx;
+    ctx.ny           = 0;
+    ctx.nz           = nz;
+    ctx.B            = B;
+    ctx.dt           = p.dt;
+    ctx.nt           = p.nt;
+    ctx.M            = p.M;
+    ctx.abcn         = p.abcn;
+    ctx.free_surface = p.free_surface;
+    ctx.lap_coeff    = p.lap_coes.data_ptr<float>();
+    ctx.grad_coeff   = p.grad_coes.data_ptr<float>();
+    ctx.dx           = dx;
+    ctx.dy           = 0.f;
+    ctx.dz           = dz;
+    ctx.topo_rows    = p.has_topo ? p.topo_rows.data_ptr<int>() : nullptr;
+    ctx.has_topo     = p.has_topo;
+    ctx.topo_category = nullptr;
+    ctx.use_apm      = false;
 
     AcousticWavefieldTensor wavefield;
     if (!p.wavefields.empty())
@@ -114,6 +133,17 @@ ForwardOutput forward(const ForwardInput& in) {
         auto view = wavefield.view();
 
         u_thist = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+
+        // Pre-pass: clear air cells in a separate kernel launch so the
+        // main acoustic2nd kernel only reads (never writes) air cells.
+        // Eliminates intra-launch RAW race on PML aux fields that was
+        // showing up as ~30% non-deterministic forward output across
+        // processes (sweep VTI history pattern).
+        if (p.has_topo) {
+            acoustic2d_air_clear_kernel<<<launch_config.grid, launch_config.block>>>(
+                view, p.save_all_wavefields, u_thist, ctx
+            );
+        }
 
         ACOUSTIC2D(
             order,

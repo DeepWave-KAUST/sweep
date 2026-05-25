@@ -86,11 +86,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic2d_backward_bs", wrap_backward(dispatch_backward(elastic2d::backward_bs, EK::Elastic2D, BM::BoundarySaving)), "Elastic backward with boundary saving 2D (CUDA/CPU)");
     m.def("elastic2d_backward_ckpt", wrap_backward(dispatch_backward(elastic2d::backward_ckpt, EK::Elastic2D, BM::Checkpoint)), "Elastic backward with checkpointing 2D (CUDA/CPU)");
     m.def("elastic2d_backward_recursive_ckpt", wrap_backward(dispatch_backward(elastic2d::backward_recursive_ckpt, EK::Elastic2D, BM::RecursiveCheckpoint)), "Elastic backward with recursive checkpointing 2D (CUDA/CPU)");
+    // APM (Cao & Chen 2018) parameter-modified path for irregular topography.
+    // CUDA-only; the dispatch wrapper falls back to image method on CPU.
+    m.def("elastic2d_apm_forward", wrap_forward(elastic2d::apm_forward), "Elastic APM forward 2D (CUDA only)");
+    m.def("elastic2d_apm_backward", wrap_backward(elastic2d::apm_backward), "Elastic APM backward 2D full mode (CUDA only)");
+    m.def("elastic2d_apm_backward_bs", wrap_backward(elastic2d::apm_backward_bs), "Elastic APM backward 2D boundary-saving (CUDA only)");
     m.def("elastic3d_forward", wrap_forward(dispatch_forward(elastic3d::forward, EK::Elastic3D)), "Elastic forward 3D (CUDA/CPU)");
     m.def("elastic3d_backward_bs", wrap_backward(dispatch_backward(elastic3d::backward_bs, EK::Elastic3D, BM::BoundarySaving)), "Elastic backward with boundary saving 3D (CUDA/CPU)");
     m.def("elastic3d_backward_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_ckpt, EK::Elastic3D, BM::Checkpoint)), "Elastic backward with checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_recursive_ckpt, EK::Elastic3D, BM::RecursiveCheckpoint)), "Elastic backward with recursive checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward", wrap_backward(dispatch_backward(elastic3d::backward, EK::Elastic3D, BM::Full)), "Elastic backward 3D (CUDA/CPU)");
+    // APM (Cao & Chen 2018, 3-D) — Phase 3C/3D.
+    // CUDA only; forward is full implementation, backward is stub
+    // until Phase 3D ships.
+    m.def("elastic3d_apm_forward", wrap_forward(elastic3d::apm_forward), "Elastic APM forward 3D (CUDA only)");
+    m.def("elastic3d_apm_backward", wrap_backward(elastic3d::apm_backward), "Elastic APM backward 3D full mode (CUDA only — stub pending Phase 3D)");
+    m.def("elastic3d_apm_backward_bs", wrap_backward(elastic3d::apm_backward_bs), "Elastic APM backward 3D boundary-saving (CUDA only — stub pending Phase 3D)");
     m.def("elastic_tti_sg2d_forward", wrap_forward(dispatch_forward(elastic_tti_sg2d::forward, EK::ElasticTTISG2D)), "Elastic TTI staggered-grid forward 2D (CUDA/CPU)");
     m.def("elastic_tti_sg2d_backward", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward, EK::ElasticTTISG2D, BM::Full)), "Elastic TTI staggered-grid backward 2D full mode (CUDA/CPU)");
     m.def("elastic_tti_sg2d_backward_bs", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward_bs, EK::ElasticTTISG2D, BM::BoundarySaving)), "Elastic TTI staggered-grid backward 2D boundary-saving mode (CUDA/CPU)");
@@ -167,6 +178,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_disk_async_read", &ForwardInput::boundary_disk_async_read)
         .def_readwrite("use_pinned_memory", &ForwardInput::use_pinned_memory)
         .def_readwrite("free_surface", &ForwardInput::free_surface)
+        .def_readwrite("topo_rows", &ForwardInput::topo_rows)
+        .def_readwrite("has_topo", &ForwardInput::has_topo)
+        .def_readwrite("topo_category", &ForwardInput::topo_category)
+        .def_readwrite("use_apm", &ForwardInput::use_apm)
         .def_readwrite("nt", &ForwardInput::nt)
         .def_readwrite("dt", &ForwardInput::dt)
         .def_readwrite("spacing", &ForwardInput::spacing)
@@ -203,6 +218,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("dt", &BackwardInput::dt)
         .def_readwrite("spacing", &BackwardInput::spacing)
         .def_readwrite("free_surface", &BackwardInput::free_surface)
+        .def_readwrite("topo_rows", &BackwardInput::topo_rows)
+        .def_readwrite("has_topo", &BackwardInput::has_topo)
+        .def_readwrite("topo_category", &BackwardInput::topo_category)
+        .def_readwrite("use_apm", &BackwardInput::use_apm)
         .def_readwrite("checkpoint_on_cpu", &BackwardInput::checkpoint_on_cpu)
         .def_readwrite("boundary_on_cpu", &BackwardInput::boundary_on_cpu)
         .def_readwrite("boundary_on_disk", &BackwardInput::boundary_on_disk)

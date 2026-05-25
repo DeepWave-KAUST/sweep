@@ -1,6 +1,7 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from ._free_surface import zero_above_topo
 from .utils import zero_top_halo_fields
 
 
@@ -143,7 +144,14 @@ class Acoustic(SecondOrderEquation):
         lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
         out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
-            out = zero_top_halo_fields(out, self.so // 2, axis=-2)
+            topo_rows = getattr(self, "_topo_rows_runtime", None)
+            if topo_rows is not None:
+                # Irregular surface: zero ALL air cells per column.
+                # In the flat-degenerate case (topo_rows == halo*ones) this
+                # matches ``zero_top_halo_fields`` bit-for-bit.
+                out = tuple(zero_above_topo(field, topo_rows, axis=-2) for field in out)
+            else:
+                out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
 
     def _C(self, ):
