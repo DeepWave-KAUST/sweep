@@ -1,0 +1,74 @@
+{# ─────────────────────────────────────────────────────────────────
+   overrides/home.html
+   Use ONLY when a page declares `template: home.html` in frontmatter.
+   Renders the SWEEP marketing hero above the page's normal markdown body.
+   ───────────────────────────────────────────────────────────────── #}
+{% extends "main.html" %}
+
+{% block tabs %}
+  {{ super() }}
+
+  <div class="sweep-hero md-typeset">
+
+    {# SWEEP acronym lockup — capitals colored by chirp gradient. #}
+    <div class="sweep-hero__eyebrow">
+      <span class="sweep-hero__cap" style="color:#BCC83C;">S</span>eismic
+      <span class="sweep-hero__cap" style="color:#1AA690;">W</span>ave
+      <span class="sweep-hero__cap" style="color:#22B889;">E</span>quation
+      <span class="sweep-hero__cap" style="color:#ED8B2E;">E</span>xploration
+      <span class="sweep-hero__cap" style="color:#F0A830;">P</span>latform
+    </div>
+
+    <h1 class="sweep-hero__title">
+      The earth,<br>
+      <span class="sweep-hero__gradient">differentiated.</span>
+    </h1>
+
+    <p class="sweep-hero__lede">
+      A PyTorch + JAX framework for differentiable seismic wave-equation
+      modeling, migration, and full-waveform inversion. Built so every
+      gradient is yours to read.
+    </p>
+
+    <div class="sweep-hero__ctas">
+      <a class="sweep-cta sweep-cta--fill" href="getting-started/quickstart/">
+        Get started
+      </a>
+      <span class="sweep-hero__install">
+        <code>$ pip install git+https://github.com/DeepWave-KAUST/sweep.git</code>
+        <button class="sweep-hero__copy" aria-label="Copy install command"
+                onclick="navigator.clipboard?.writeText('pip install git+https://github.com/DeepWave-KAUST/sweep.git');this.classList.add('is-copied');setTimeout(()=>this.classList.remove('is-copied'),1500);">
+          <span class="sweep-hero__copy-icon">⎘</span>
+          <span class="sweep-hero__copy-icon sweep-hero__copy-icon--done">✓</span>
+        </button>
+      </span>
+    </div>
+
+    <div class="sweep-hero__meta">
+      Python 3.10+ &nbsp;·&nbsp; PyTorch &nbsp;·&nbsp; JAX &nbsp;·&nbsp; CUDA 11/12
+    </div>
+  </div>
+
+  {# Wide animated wavefield panel below the hero CTAs (GIF — universal). #}
+  <div class="sweep-hero-panel">
+    <img src="{{ 'figures/landing/hero_anim.gif' | url }}?v=4"
+         alt="SWEEP — animated wavefield"
+         decoding="async">
+  </div>
+{% endblock %}
+
+{# Override `container` (not `content`) so we REPLACE Material's default
+   `<article class="md-content__inner md-typeset">` wrapper instead of
+   nesting our own article inside it. Nesting two `.md-content__inner`
+   articles was causing the inner one to inherit the outer's 820 px / 1.2 rem
+   margin constraints, breaking 1180 px centering. #}
+{% block container %}
+  <div class="md-content" data-md-component="content">
+    <article class="md-content__inner md-typeset sweep-home-body">
+      {{ page.content }}
+    </article>
+  </div>
+{% endblock %}
+
+{# Hide the page tabs sidebar/TOC on the homepage even when present. #}
+{% block site_nav %}{% endblock %}

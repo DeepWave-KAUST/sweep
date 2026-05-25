@@ -1,0 +1,79 @@
+{# ─────────────────────────────────────────────────────────────────
+   overrides/main.html
+   Extends Material's base template. Adds:
+   · Inter Tight font load (Material's font: block doesn't ship this one)
+   · A data-attribute on <html> so our CSS scopes cleanly
+   · The optional top announcement bar
+   ───────────────────────────────────────────────────────────────── #}
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {{ super() }}
+  {# — Inter Tight via Google Fonts, only weights we use — #}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <script>
+    document.documentElement.setAttribute('data-sweep-d', 'true');
+  </script>
+{% endblock %}
+
+{% block announce %}
+  {% include "partials/announce.html" ignore missing %}
+{% endblock %}
+
+{# Replace Material's default footer with the Direction D multi-column footer.
+   Each column lists only what currently exists in this repo / DeepWave site;
+   placeholder rows (Discord / Newsletter / etc.) from the mockup are dropped. #}
+{% block footer %}
+  <footer class="sweep-footer md-typeset">
+    <div class="sweep-footer__cols">
+      <div class="sweep-footer__brand">
+        <div class="sweep-footer__logo">
+          <img src="{{ 'assets/logo/sweep-icon-transparent.svg' | url }}" alt="">
+          <span>sweep</span>
+        </div>
+        <p class="sweep-footer__tagline">
+          A differentiable seismic platform from the DeepWave Research Group at
+          KAUST. Open source. MIT-licensed.
+        </p>
+      </div>
+      <div class="sweep-footer__col">
+        <h6>Documentation</h6>
+        <ul>
+          <li><a href="{{ 'getting-started/quickstart/' | url }}">Quickstart</a></li>
+          <li><a href="{{ 'api/' | url }}">API reference</a></li>
+          <li><a href="{{ 'user-guide/equations/' | url }}">Equations</a></li>
+          <li><a href="{{ 'user-guide/cli/' | url }}">CLI</a></li>
+          <li><a href="{{ 'examples/' | url }}">Examples</a></li>
+        </ul>
+      </div>
+      <div class="sweep-footer__col">
+        <h6>Project</h6>
+        <ul>
+          <li><a href="https://github.com/DeepWave-KAUST/sweep">GitHub</a></li>
+          <li><a href="https://github.com/DeepWave-KAUST/sweep/releases">Releases</a></li>
+          <li><a href="https://github.com/DeepWave-KAUST/sweep/blob/dev/LICENSE">License</a></li>
+          <li><a href="https://github.com/DeepWave-KAUST/sweep/blob/dev/CONTRIBUTING.md">Contributing</a></li>
+        </ul>
+      </div>
+      <div class="sweep-footer__col">
+        <h6>Research</h6>
+        <ul>
+          <li><a href="https://arxiv.org/abs/2604.14189">arXiv preprint</a></li>
+          <li><a href="{{ '#citing-sweep' | url }}">Cite SWEEP</a></li>
+          <li><a href="https://cemse.kaust.edu.sa/deepwave">DeepWave group</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="sweep-footer__bottom">
+      <span>© 2026 DeepWave · KAUST</span>
+      <span class="sweep-footer__dot">·</span>
+      <span>MIT licensed</span>
+      <span class="sweep-footer__dot">·</span>
+      <a href="https://github.com/DeepWave-KAUST/sweep">github.com/DeepWave-KAUST/sweep</a>
+    </div>
+  </footer>
+{% endblock %}

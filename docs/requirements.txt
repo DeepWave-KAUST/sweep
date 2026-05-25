@@ -2,5 +2,6 @@ mkdocs>=1.6
 mkdocs-material>=9.5
 mkdocs-jupyter>=0.24
 mkdocstrings[python]>=0.26  # API pages auto-generated from class docstrings
+mkdocs-git-revision-date-localized-plugin>=1.2  # "last updated" in page footer
 black>=24                    # mkdocstrings-python uses black to wrap signatures at line_length
 nbconvert>=7,<7.17  # >=7.17 removed nbconvert.filters.markdown_mistune which mkdocs-jupyter still imports

@@ -1,0 +1,76 @@
+{# Custom 404 page. Material picks this up automatically. #}
+{% extends "main.html" %}
+
+{% block content %}
+<div class="sweep-404">
+  <div class="sweep-404__wave">
+    <svg viewBox="0 0 800 200" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <defs>
+        <linearGradient id="d404Grad" x1="0" y1="0" x2="800" y2="0" gradientUnits="userSpaceOnUse">
+          <stop offset="0%"   stop-color="#BCC83C"/>
+          <stop offset="33%"  stop-color="#1AA690"/>
+          <stop offset="67%"  stop-color="#ED8B2E"/>
+          <stop offset="100%" stop-color="#F0A830" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      {# Chirp wave (precomputed path). #}
+      <path d="M 20 100 Q 50 60 80 100 T 140 100 T 200 90 T 260 110 T 320 80 T 380 120 T 440 70 T 500 130 T 560 60 T 620 140 T 680 100 T 740 100 T 780 100"
+            fill="none" stroke="url(#d404Grad)" stroke-width="14" stroke-linecap="round"/>
+      <text x="700" y="120" font-family="Inter Tight, sans-serif" font-weight="700"
+            font-size="76" fill="currentColor" text-anchor="middle" opacity="0.6">?</text>
+    </svg>
+  </div>
+
+  <div class="sweep-404__eyebrow">HTTP 404 · the wave reflected</div>
+
+  <h1 class="sweep-404__title">
+    You hit the<br>
+    <span class="sweep-hero__gradient">boundary.</span>
+  </h1>
+
+  <p class="sweep-404__lede">
+    This page isn't in the grid. Maybe a URL got rotated.
+    Maybe you followed an old link from a paper. Try one of these:
+  </p>
+
+  <div class="sweep-404__ctas">
+    <a class="sweep-cta sweep-cta--fill" href="{{ config.site_url or '/' }}">← Back to home</a>
+    <button class="sweep-cta sweep-cta--ghost"
+            onclick="document.querySelector('.md-search__input')?.focus()">
+      ⌘K to search the docs
+    </button>
+  </div>
+
+  <div class="sweep-404__grid">
+    <a class="sweep-404__card" href="{{ config.site_url or '/' }}getting-started/quickstart/">
+      <div class="sweep-404__card-kind">Start</div>
+      <div class="sweep-404__card-name">Quickstart</div>
+      <div class="sweep-404__card-sub">Your first FWI in 5 steps.</div>
+    </a>
+    <a class="sweep-404__card" href="{{ config.site_url or '/' }}api/">
+      <div class="sweep-404__card-kind">Refs</div>
+      <div class="sweep-404__card-name">API reference</div>
+      <div class="sweep-404__card-sub">17 equations · 2 propagators.</div>
+    </a>
+    <a class="sweep-404__card" href="{{ config.site_url or '/' }}examples/">
+      <div class="sweep-404__card-kind">Demo</div>
+      <div class="sweep-404__card-name">Examples</div>
+      <div class="sweep-404__card-sub">A worked notebook.</div>
+    </a>
+    <a class="sweep-404__card" href="{{ config.repo_url }}/issues/new">
+      <div class="sweep-404__card-kind">Help</div>
+      <div class="sweep-404__card-name">File an issue</div>
+      <div class="sweep-404__card-sub">Report this broken link ↗</div>
+    </a>
+  </div>
+</div>
+{% endblock %}
+
+{% block site_nav %}{% endblock %}
+{% block container %}
+  <main class="md-main">
+    <div class="md-main__inner md-grid">
+      {{ self.content() }}
+    </div>
+  </main>
+{% endblock %}
