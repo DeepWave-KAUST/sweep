@@ -135,6 +135,8 @@ class Warpper(torch.autograd.Function):
         illumination_padding: tuple=(),
         topo_rows_param: torch.Tensor=None,   # runtime padded surface row per col
         has_topo_param: bool=False,
+        topo_category_param: torch.Tensor=None,  # runtime padded APM category int32
+        use_apm_param: bool=False,
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -209,6 +211,16 @@ class Warpper(torch.autograd.Function):
             params.topo_rows = torch.empty(0, dtype=torch.int32,
                                             device=wavelet.device)
             params.has_topo = False
+        # APM (Cao & Chen 2018) plumbing.  ``params.models`` is already
+        # extended with the precomputed effective moduli by the caller
+        # (positions 6..10); we just attach the category and flag here.
+        if use_apm_param:
+            params.topo_category = topo_category_param.to(torch.int32).contiguous()
+            params.use_apm = True
+        else:
+            params.topo_category = torch.empty(0, dtype=torch.int32,
+                                                device=wavelet.device)
+            params.use_apm = False
         params.nt = nt
         params.dt = dt
         params.spacing = spacing
@@ -254,6 +266,12 @@ class Warpper(torch.autograd.Function):
             ctx.spacing = spacing
             ctx.dt = dt
             ctx.free_surface = free_surface
+            # Topography (image method): preserve runtime row-index tensor so
+            # the autograd backward can plumb it without referencing ``self``.
+            ctx.topo_rows_param = topo_rows_param
+            ctx.has_topo_param  = has_topo_param
+            ctx.topo_category_param = topo_category_param
+            ctx.use_apm_param   = use_apm_param
             ctx.use_boundary_saving = use_boundary_saving
             ctx.use_checkpoint = use_checkpoint
             ctx.use_recursive_checkpoint = use_recursive_checkpoint
@@ -327,13 +345,28 @@ class Warpper(torch.autograd.Function):
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
         # Topography plumbing (image method) — mirrors forward path.
-        topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
-        if topo_rows_rt is not None:
+        # ``ctx`` carries the runtime row tensor saved at forward time;
+        # ``self`` doesn't exist here (Warpper.backward is a staticmethod).
+        topo_rows_rt = getattr(ctx, "topo_rows_param", None)
+        has_topo     = bool(getattr(ctx, "has_topo_param", False))
+        if has_topo and topo_rows_rt is not None:
             params.topo_rows = topo_rows_rt.to(torch.int32).contiguous()
             params.has_topo = True
         else:
-            params.topo_rows = torch.empty(0, dtype=torch.int32, device=self.dev)
+            params.topo_rows = torch.empty(
+                0, dtype=torch.int32, device=adjoint_source.device,
+            )
             params.has_topo = False
+        # APM CUDA backward: forward saved the category + flag in ctx.
+        topo_cat_rt = getattr(ctx, "topo_category_param", None)
+        use_apm     = bool(getattr(ctx, "use_apm_param", False))
+        if use_apm and topo_cat_rt is not None:
+            params.topo_category = topo_cat_rt.to(torch.int32).contiguous()
+            params.use_apm = True
+        else:
+            params.topo_category = torch.empty(0, dtype=torch.int32,
+                                                device=adjoint_source.device)
+            params.use_apm = False
         params.boundary_on_cpu = ctx.boundary_on_cpu
         params.boundary_on_disk = ctx.boundary_on_disk
         params.boundary_disk_async_read = ctx.boundary_disk_async_read
@@ -460,6 +493,10 @@ class Warpper(torch.autograd.Function):
             None,      # source illumination buffer
             None,      # receiver illumination buffer
             None,      # illumination padding
+            None,      # topo_rows_param
+            None,      # has_topo_param
+            None,      # topo_category_param
+            None,      # use_apm_param
             *model_grads # models
         )
 
@@ -473,19 +510,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_files = ()
         super().__init__(*args, **kwargs)
 
-        # Topography is supported on CUDA via the per-column staircase
-        # path (`topo_method='image'` for both Acoustic and Elastic).  The
-        # APM path is eager-only because its per-cell modulus modification
-        # has no CUDA kernel.  Reject APM here with a clear message; the
-        # image-method path falls through and gets plumbed below.
-        if (getattr(self, "topography", None) is not None
-                and getattr(self, "_topo_method", None) == "apm"):
-            raise NotImplementedError(
-                "topo_method='apm' is currently supported only on "
-                "impl='python' (eager backend).  Pass topo_method='image' "
-                "(Robertsson) for the elastic CUDA path, or run with "
-                "impl='eager' to keep APM."
-            )
+        # Topography is supported on CUDA via two paths:
+        #   * topo_method='image' — per-column staircase (vacuum for Acoustic,
+        #     Robertsson 1996 image method for Elastic).  Always available.
+        #   * topo_method='apm'   — Cao & Chen 2018 parameter-modified path.
+        #     CUDA forward only; backward currently falls back to eager.
+        # Plumb the appropriate equation._C() function set below.
 
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer('dh', torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
@@ -497,6 +527,22 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.backward_ckpt_func = funcs[3] if len(funcs) > 3 else None
         self.backward_recursive_ckpt_func = funcs[4] if len(funcs) > 4 else None
         self.rtm_func = self.equation._C_rtm() if hasattr(self.equation, "_C_rtm") else None
+
+        # APM CUDA path — only attached when the equation supports it AND the
+        # user selected ``topo_method='apm'``.  Replaces forward_func only;
+        # backward stays on the standard path (CUDA APM backward is a stub —
+        # gradients should be computed via eager autograd).
+        if (getattr(self, "_topo_method", None) == "apm"
+                and hasattr(self.equation, "_C_apm")):
+            apm_funcs = self.equation._C_apm()
+            self.forward_func = apm_funcs[0]
+            self.backward_func = apm_funcs[1]
+            self.backward_bs_func = apm_funcs[2]
+            # APM has no checkpoint backward implementation; disable
+            # checkpoint dispatch so backward routes to full / bs only.
+            self.backward_ckpt_func = None
+            self.backward_recursive_ckpt_func = None
+            self.use_ckpt = False
 
         # Initialize reusable runtime buffers lazily so they always match the
         # current batch size used by the CUDA kernels.
@@ -1024,8 +1070,40 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         spacing = self._cuda_spacing()
 
+        # Topography / APM plumbing.  Image method uses _topo_rows_runtime
+        # only; APM additionally precomputes effective moduli + category
+        # from the runtime-padded air mask and prepends them to ``models``.
+        topo_rows_runtime = getattr(self.equation, "_topo_rows_runtime", None)
+        topo_rows_arg = topo_rows_runtime
+        has_topo_arg = topo_rows_runtime is not None
+        topo_cat_arg = None
+        use_apm_arg = False
+        models_arg = models
+        if getattr(self, "_topo_method", None) == "apm":
+            from sweep.equations._topography import (
+                classify_topography, precompute_apm_moduli,
+            )
+            # models[0..2] = vp, vs, rho already padded to runtime by EdgePadding.
+            vp_r, vs_r, rho_r = models[0], models[1], models[2]
+            lam_r = rho_r * (vp_r ** 2 - 2 * vs_r ** 2)
+            mu_r  = rho_r * (vs_r ** 2)
+            lam_2mu_r = lam_r + 2 * mu_r
+            air_mask_rt = self.equation._apm_air_mask_runtime
+            # classify expects (nz, nx); air_mask_rt is already runtime-padded.
+            cat_np = classify_topography(air_mask_rt)
+            cat_t = torch.from_numpy(cat_np).to(device=vp_r.device, dtype=torch.int32)
+            lam_eff, mu_eff, mu_xz, rho_x, rho_z = precompute_apm_moduli(
+                lam_r, mu_r, rho_r, cat_np,
+            )
+            models_arg = (
+                vp_r, vs_r, rho_r, lam_r, mu_r, lam_2mu_r,
+                lam_eff, mu_eff, mu_xz, rho_x, rho_z,
+            )
+            topo_cat_arg = cat_t
+            use_apm_arg = True
+
         syn = Warpper.apply(
-                self.forward_func, 
+                self.forward_func,
                 self.backward_func, 
                 self.backward_bs_func,
                 self.backward_ckpt_func,
@@ -1066,11 +1144,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
                 self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
                 tuple(padding),
-                # Topography (image method) — pass the runtime per-column
-                # surface row tensor through to the CUDA ForwardInput.
-                getattr(self.equation, "_topo_rows_runtime", None),
-                getattr(self.equation, "_topo_rows_runtime", None) is not None,
-                *models,
+                # Topography plumbing — both image-method (1-D row) and
+                # APM (per-cell category + extended models) are routed
+                # through ``Warpper.forward`` via these positional args.
+                topo_rows_arg,
+                has_topo_arg,
+                topo_cat_arg,
+                use_apm_arg,
+                *models_arg,
             )
         
         return syn
@@ -1291,6 +1372,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             fwd.topo_rows = torch.empty(0, dtype=torch.int32, device=self.dev)
             fwd.has_topo = False
+        # APM not supported on rtm path yet — empty stubs.
+        fwd.topo_category = torch.empty(0, dtype=torch.int32, device=self.dev)
+        fwd.use_apm = False
         fwd.nt = self.nt
         fwd.dt = self._dt
         fwd.spacing = spacing
@@ -1341,6 +1425,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             bwd.topo_rows = torch.empty(0, dtype=torch.int32, device=self.dev)
             bwd.has_topo = False
+        # APM not supported on rtm path yet — empty stubs.
+        bwd.topo_category = torch.empty(0, dtype=torch.int32, device=self.dev)
+        bwd.use_apm = False
         bwd.boundary_on_cpu = boundary_on_cpu
         bwd.boundary_on_disk = boundary_on_disk
         bwd.boundary_disk_async_read = boundary_disk_async_read
