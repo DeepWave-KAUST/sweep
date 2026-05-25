@@ -24,6 +24,36 @@
         else                   acoustic_nopml_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
+// Pre-pass: clear air cells (above per-(iy,ix) surface row).  Launched
+// BEFORE acoustic_forward_kernel_3d so the main kernel only reads (never
+// writes) air cells in the same launch — eliminates intra-launch RAW
+// races on PML aux fields (same fix as acoustic2d).  ``static`` so each
+// .cu including this header gets its own copy (avoids link conflicts).
+static __global__ void acoustic3d_air_clear_kernel(
+    AcousticWavefieldPointer wf,
+    bool save_all_wavefields,
+    float* __restrict__ u_this,
+    SolverContext solver
+){
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz) return;
+    if (!solver.has_topo) return;
+    if (iz >= solver.topo_rows[iy * solver.nx + ix]) return;
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int stride_y = solver.nx;
+    int stride_z = solver.nx * solver.ny;
+    int idx = iz * stride_z + iy * stride_y + ix;
+    auto f = wf.offset(b, spatial_size);
+    f.u_next[idx] = 0.f;
+    f.psix[idx] = 0.f; f.psiy[idx] = 0.f; f.psiz[idx] = 0.f;
+    f.zetax[idx] = 0.f; f.zetay[idx] = 0.f; f.zetaz[idx] = 0.f;
+    if (u_this) u_this[b * spatial_size + idx] = 0.f;
+}
+
 template<int Order>
 __global__ void acoustic_forward_kernel_3d(
     AcousticWavefieldPointer wf,
@@ -69,6 +99,14 @@ __global__ void acoustic_forward_kernel_3d(
     int idx = iz * stride_z + iy * stride_y + ix;
 
     auto f = wf.offset(b, spatial_size);
+
+    // Air cells were already cleared by acoustic3d_air_clear_kernel
+    // (separate pre-pass).  Early-return without writes so stencil reads
+    // of psix/psiy/psiz from neighbouring threads see the zeros that the
+    // prior launch finished writing — no intra-launch RAW race.
+    if (solver.has_topo && iz < solver.topo_rows[iy * solver.nx + ix]) {
+        return;
+    }
 
     float*       u_this_b = u_this ? u_this + spatial_size * b : nullptr;
     const float* vp_b     = vp     + spatial_size * b;
