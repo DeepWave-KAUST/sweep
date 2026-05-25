@@ -1,22 +1,2203 @@
-/* Enlarge the SWEEP logo in the top-left header.
-   Default mkdocs-material logo is ~1.5rem (24 px) which feels lost next to the
-   site title. Bumping to 2.5rem (40 px) and trimming the surrounding padding
-   gives the icon room to breathe without pushing the title off the row. */
+/* =====================================================================
+   SWEEP × Direction D · MkDocs override stylesheet
+   Drop into docs/stylesheets/extra.css, referenced from mkdocs.yml.
+   Scoped via [data-sweep-d] on <html> (set in overrides/main.html).
+   ===================================================================== */
 
-.md-header__button.md-logo {
-  margin: 0.15rem 0.4rem 0.15rem 0;
+/* ─── 1. PALETTE ─────────────────────────────────────────────────────── */
+:root,
+[data-md-color-scheme="default"] {
+  /* Material's primary tokens — keep these in sync */
+  --md-primary-fg-color:        #FBFBFD;
+  --md-primary-fg-color--light: #FBFBFD;
+  --md-primary-fg-color--dark:  #1D1D1F;
+  --md-primary-bg-color:        #1D1D1F;
+  --md-primary-bg-color--light: rgba(29,29,31,0.7);
+
+  --md-accent-fg-color:         #0066CC;
+  --md-accent-fg-color--transparent: rgba(0,102,204,0.10);
+
+  --md-default-bg-color:          #FBFBFD;
+  --md-default-fg-color:          #1D1D1F;
+  --md-default-fg-color--light:   #494949;
+  --md-default-fg-color--lighter: #86868B;
+  --md-default-fg-color--lightest: #D2D2D7;
+  --md-typeset-color:             #1D1D1F;
+  --md-typeset-a-color:           #0066CC;
+
+  /* SWEEP × Direction D · tokens */
+  --sw-lime:      #BCC83C;
+  --sw-teal:      #1AA690;
+  --sw-orange:    #ED8B2E;
+  --sw-amber:     #F0A830;
+  --sw-paper:     #FBFBFD;
+  --sw-ink:       #1D1D1F;
+  --sw-ink2:      #494949;
+  --sw-ink3:      #86868B;
+  --sw-rule:      #D2D2D7;
+  --sw-card:      #F5F5F7;
+  --sw-deep:      #000000;
+  --sw-deep-text: #F5F5F7;
+  --sw-deep-sub:  #A1A1A6;
+  --sw-accent:    #0066CC;
+
+  /* Apple/system gradient — the canonical chirp gradient. */
+  --sw-grad: linear-gradient(95deg, #BCC83C 0%, #1AA690 33%, #ED8B2E 67%, #F0A830 100%);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:           #000;
+  --md-default-bg-color:           #0A0A0A;
+  --md-default-fg-color:           #F5F5F7;
+  --md-default-fg-color--light:    #C7C7CB;
+  --md-default-fg-color--lighter:  #86868B;
+  --md-default-fg-color--lightest: #3A3A3D;
+  --md-typeset-color:              #F5F5F7;
+  --md-typeset-a-color:            #2997FF;
+  --md-accent-fg-color:            #2997FF;
+  --md-accent-fg-color--transparent: rgba(41,151,255,0.14);
+
+  --sw-paper:     #0A0A0A;
+  --sw-ink:       #F5F5F7;
+  --sw-ink2:      #C7C7CB;
+  --sw-ink3:      #86868B;
+  --sw-rule:      #2D2D2F;
+  --sw-card:      #1C1C1E;
+  --sw-deep:      #1C1C1E;
+  --sw-accent:    #2997FF;
+}
+
+/* ─── 2. GLOBAL TYPOGRAPHY ───────────────────────────────────────────── */
+[data-sweep-d] body,
+[data-sweep-d] .md-typeset {
+  font-family: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "kern", "liga", "calt", "ss01";
+}
+
+[data-sweep-d] .md-typeset h1 {
+  font-family: 'Inter Tight', 'Inter', system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  font-size: 2.1rem;
+  line-height: 1.1;
+  margin: 0.4rem 0 1rem;
+  color: var(--md-default-fg-color);
+}
+[data-sweep-d] .md-typeset h2 {
+  font-family: 'Inter Tight', system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  font-size: 1.45rem;
+  line-height: 1.15;
+  margin: 2rem 0 0.8rem;
+  border: none;
+  color: var(--md-default-fg-color);
+}
+[data-sweep-d] .md-typeset h3 {
+  font-family: 'Inter Tight', system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  font-size: 1.1rem;
+  margin: 1.6rem 0 0.6rem;
+}
+[data-sweep-d] .md-typeset h4,
+[data-sweep-d] .md-typeset h5 {
+  font-family: 'Inter Tight', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+[data-sweep-d] .md-typeset p,
+[data-sweep-d] .md-typeset li {
+  font-size: 0.85rem;
+  line-height: 1.65;
+  color: var(--md-default-fg-color--light);
+}
+
+[data-sweep-d] .md-typeset a {
+  color: var(--sw-accent);
+  text-decoration: none;
+  border-bottom: none;
+}
+[data-sweep-d] .md-typeset a:hover { text-decoration: underline; }
+
+[data-sweep-d] .md-typeset code,
+[data-sweep-d] code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  padding: 0.15em 0.45em;
+  background: rgba(127,127,127,0.10);
+  border-radius: 5px;
+  color: var(--md-default-fg-color);
+}
+
+/* ─── 3. HEADER ──────────────────────────────────────────────────────── */
+/* Solid (not translucent) so sidebar/page content under the sticky header
+   doesn't bleed through when the user scrolls. The earlier Direction-D
+   blur-glass look caused sidebar nav items to be visible through the bar. */
+[data-sweep-d] .md-header {
+  background: var(--sw-paper);
+  color: var(--md-default-fg-color);
+  box-shadow: 0 1px 0 var(--sw-rule);
+  height: 52px;
+}
+[data-sweep-d] .md-header__inner { padding: 0 1.4rem; height: 52px; }
+[data-sweep-d] .md-header__title { font-weight: 600; font-size: 0.85rem; }
+[data-sweep-d] .md-header__topic { padding: 0; }
+[data-sweep-d] .md-header__topic:first-child { font-weight: 600; opacity: 1; }
+/* Hide the page-title topic that Material stacks on top of the site name —
+   the active page is already shown in the tabs row + breadcrumbs below. */
+[data-sweep-d] .md-header__topic:not(:first-child) { display: none; }
+[data-sweep-d] .md-header__button.md-logo { padding: 0.2rem 0.3rem 0.2rem 0; }
+[data-sweep-d] .md-header__button.md-logo img,
+[data-sweep-d] .md-header__button.md-logo svg { width: 32px; height: 32px; }
+
+/* Tabs row — also solid (no transparency) so it doesn't reveal page
+   content underneath when the user scrolls. */
+[data-sweep-d] .md-tabs {
+  background: var(--sw-paper);
+  color: var(--md-default-fg-color--light);
+  box-shadow: 0 1px 0 var(--sw-rule);
+}
+[data-sweep-d] .md-tabs__link {
+  font-size: 0.78rem;
+  opacity: 1;
+  color: var(--md-default-fg-color--light);
+  letter-spacing: -0.005em;
+  margin-top: 0;
+  padding: 0.7rem 0;
+}
+[data-sweep-d] .md-tabs__link:hover { color: var(--md-default-fg-color); }
+[data-sweep-d] .md-tabs__link--active {
+  color: var(--md-default-fg-color);
+  font-weight: 500;
+}
+
+/* Search input */
+[data-sweep-d] .md-search__input {
+  background: rgba(127,127,127,0.10);
+  border-radius: 999px;
+  color: var(--md-default-fg-color);
+  height: 32px;
+  font-size: 13px;
+  padding-left: 36px;
+}
+[data-sweep-d] .md-search__icon { color: var(--sw-ink3); }
+
+/* ─── 4. ANNOUNCEMENT STRIP ──────────────────────────────────────────── */
+.sweep-announce {
+  background: var(--sw-ink);
+  color: var(--sw-paper);
+  height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px;
+  gap: 8px;
+  letter-spacing: 0.01em;
+}
+.sweep-announce__chip {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 1px 8px;
+  background: rgba(255,255,255,0.14);
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.sweep-announce__msg { opacity: 0.85; }
+.sweep-announce__cta { color: #2997FF !important; }
+.sweep-announce__cta:hover { text-decoration: underline; }
+
+/* ─── 5. HOMEPAGE HERO ───────────────────────────────────────────────── */
+.sweep-hero {
+  text-align: center;
+  padding: 5rem 2rem 1.4rem;
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.sweep-hero__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  color: var(--md-default-fg-color--lighter);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  margin-bottom: 1.4rem;
+}
+.sweep-hero__cap { font-weight: 700; }
+
+.sweep-hero__title {
+  font-family: 'Inter Tight', system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  font-size: clamp(3rem, 8vw, 6.5rem);
+  line-height: 0.98;
+  text-wrap: balance;
+  margin: 0 0 1.4rem;
+  color: var(--sw-ink);
+}
+.sweep-hero__gradient,
+.md-typeset .sweep-hero__gradient {
+  background: var(--sw-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-style: italic;
+  font-weight: 800;
+}
+
+.sweep-hero__lede {
+  font-size: 1.3rem;
+  line-height: 1.4;
+  color: var(--md-default-fg-color--light);
+  max-width: 720px;
+  margin: 0 auto 2rem;
+}
+
+.sweep-hero__ctas {
+  display: inline-flex;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.sweep-hero__install {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 6px 0 14px;
+  background: var(--sw-card);
+  border: 1px solid var(--sw-rule);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--sw-ink);
+  max-width: 100%;
+  overflow: hidden;
+}
+.sweep-hero__install code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sweep-hero__copy {
+  width: 30px; height: 30px;
+  border: none; background: transparent;
+  border-radius: 8px; cursor: pointer;
+  color: var(--sw-ink3);
+  display: grid; place-items: center;
+}
+.sweep-hero__copy:hover { background: rgba(127,127,127,0.10); color: var(--sw-ink); }
+.sweep-hero__copy-icon { display: inline; }
+.sweep-hero__copy-icon--done { display: none; color: var(--sw-teal); }
+.sweep-hero__copy.is-copied .sweep-hero__copy-icon { display: none; }
+.sweep-hero__copy.is-copied .sweep-hero__copy-icon--done { display: inline; }
+
+.sweep-hero__meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--md-default-fg-color--lighter);
+  letter-spacing: 0.04em;
+  margin-top: 0.5rem;
+}
+
+.sweep-home-body {
+  max-width: 980px;
+  margin: 3rem auto 6rem;
+  padding: 0 2rem;
+}
+
+/* ─── 6. CTA BUTTONS ─────────────────────────────────────────────────── */
+.sweep-cta {
+  display: inline-flex;
+  align-items: center;
+  height: 44px;
+  padding: 0 22px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  text-decoration: none !important;
+  gap: 6px;
+  transition: background 120ms ease, color 120ms ease;
+}
+.sweep-cta--fill { background: var(--sw-ink); color: var(--sw-paper) !important; }
+.sweep-cta--fill:hover { background: color-mix(in srgb, var(--sw-ink) 90%, black 10%); }
+.sweep-cta--ghost { background: transparent; color: var(--sw-accent) !important; }
+.sweep-cta--ghost:hover { text-decoration: underline !important; }
+
+/* ─── 7. SIDEBAR & TOC ───────────────────────────────────────────────── */
+[data-sweep-d] .md-main__inner { margin-top: 1.6rem; }
+[data-sweep-d] .md-content__inner:not(.sweep-home-body) {
+  padding-top: 1.6rem;
+  max-width: 820px;
+}
+[data-sweep-d] .md-content__inner > :first-child { margin-top: 0; }
+[data-sweep-d] .md-content__inner:before { display: none; }
+
+/* Notebook pages need more horizontal room — code cells + matplotlib figures
+   suffocate at 820 px. Widen specifically when the page is a Jupyter render
+   (mkdocs-jupyter wraps everything in .jupyter-wrapper / .jp-Notebook). */
+[data-sweep-d] .md-content__inner:has(.jupyter-wrapper),
+[data-sweep-d] .md-content__inner:has(.jp-Notebook) {
+  max-width: 1100px !important;
+}
+
+[data-sweep-d] .md-sidebar { padding-top: 1.6rem; }
+[data-sweep-d] .md-sidebar__inner { padding-right: 1rem; }
+
+[data-sweep-d] .md-nav__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--md-default-fg-color--lighter);
+  padding: 0.8rem 0 0.5rem;
+  background: transparent;
+}
+[data-sweep-d] .md-nav__link {
+  font-size: 13.5px;
+  margin: 0.15rem 0;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  color: var(--md-default-fg-color--light);
+}
+[data-sweep-d] .md-nav__item--active > .md-nav__link,
+[data-sweep-d] .md-nav__link--active {
+  color: var(--sw-accent) !important;
+  font-weight: 500;
+  background: var(--md-accent-fg-color--transparent);
+}
+[data-sweep-d] .md-nav__link:hover { color: var(--md-default-fg-color); }
+[data-sweep-d] .md-nav__link[for] { font-weight: 600; color: var(--md-default-fg-color); }
+
+/* Right-hand TOC */
+[data-sweep-d] .md-nav--secondary { border: none; }
+[data-sweep-d] .md-nav--secondary > .md-nav__title { border: none; }
+[data-sweep-d] .md-nav--secondary .md-nav__link { font-size: 12.5px; }
+
+/* ─── 8. CODE BLOCKS (mac-terminal) ──────────────────────────────────── */
+[data-sweep-d] .md-typeset .highlight {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #1D1D1F;
+  margin: 1.6rem 0;
+  box-shadow: 0 8px 24px -10px rgba(0,0,0,0.15);
+}
+[data-sweep-d] .md-typeset .highlight::before {
+  content: "";
+  display: block;
+  height: 36px;
+  background:
+    radial-gradient(circle 5.5px at 18px 18px, #FF5F57 99%, transparent 100%),
+    radial-gradient(circle 5.5px at 38px 18px, #FEBC2E 99%, transparent 100%),
+    radial-gradient(circle 5.5px at 58px 18px, #28C840 99%, transparent 100%),
+    #1D1D1F;
+  border-bottom: 1px solid #2D2D2F;
+}
+[data-sweep-d] .md-typeset .highlight pre {
+  background: #1D1D1F;
+  color: #F5F5F7;
+  padding: 1.2rem 1.4rem;
+  margin: 0;
+  border-radius: 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+[data-sweep-d] .md-typeset .highlight code { background: transparent; color: #F5F5F7; padding: 0; }
+
+/* Filename header from pymdownx code title */
+[data-sweep-d] .md-typeset .highlight .filename {
+  position: absolute;
+  top: 0; left: 80px;
+  height: 36px;
+  display: flex; align-items: center;
+  background: transparent;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #A1A1A6;
+  border: none;
   padding: 0;
 }
 
-.md-header__button.md-logo img,
-.md-header__button.md-logo svg {
-  width: 2.5rem;
-  height: 2.5rem;
+/* Copy-to-clipboard button */
+[data-sweep-d] .md-clipboard {
+  color: rgba(255,255,255,0.4);
+  top: 6px; right: 8px;
+}
+[data-sweep-d] .md-clipboard:hover { color: rgba(255,255,255,0.95); }
+
+/* Syntax highlight tokens (override pygments) — Apple-y palette on dark.
+   Force EVERY pygments span back to a bright fg first, then re-tint the
+   specific token categories. Material's light-mode default colors most
+   identifier tokens (.n, .nn, .na, .nx) dark — they become invisible on
+   our dark Apple chrome unless we override them here. */
+[data-sweep-d] .md-typeset .highlight code,
+[data-sweep-d] .md-typeset .highlight pre,
+[data-sweep-d] .md-typeset .highlight span,
+[data-sweep-d] .md-typeset .highlight .n,    /* generic name / identifier */
+[data-sweep-d] .md-typeset .highlight .nn,   /* namespace (module path)   */
+[data-sweep-d] .md-typeset .highlight .na,   /* keyword argument          */
+[data-sweep-d] .md-typeset .highlight .nv,   /* variable                  */
+[data-sweep-d] .md-typeset .highlight .nx,   /* other name                */
+[data-sweep-d] .md-typeset .highlight .nl,   /* label                     */
+[data-sweep-d] .md-typeset .highlight .ni,   /* entity                    */
+[data-sweep-d] .md-typeset .highlight .ne,   /* exception                 */
+[data-sweep-d] .md-typeset .highlight .nd,   /* decorator                 */
+[data-sweep-d] .md-typeset .highlight .nt,   /* tag                       */
+[data-sweep-d] .md-typeset .highlight .p,    /* punctuation               */
+[data-sweep-d] .md-typeset .highlight .w {   /* whitespace                */
+  color: #F5F5F7;
 }
 
-/* Same treatment for the drawer (mobile / narrow-screen sidebar) logo. */
-.md-nav--primary .md-nav__title .md-logo img,
-.md-nav--primary .md-nav__title .md-logo svg {
-  width: 2.5rem;
-  height: 2.5rem;
+[data-sweep-d] .md-typeset .highlight .c,    /* comment */
+[data-sweep-d] .md-typeset .highlight .ch,
+[data-sweep-d] .md-typeset .highlight .cm,
+[data-sweep-d] .md-typeset .highlight .cp,
+[data-sweep-d] .md-typeset .highlight .c1 { color: #7F7F87; font-style: italic; }
+[data-sweep-d] .md-typeset .highlight .k,    /* keyword */
+[data-sweep-d] .md-typeset .highlight .kn,
+[data-sweep-d] .md-typeset .highlight .kd,
+[data-sweep-d] .md-typeset .highlight .kr,
+[data-sweep-d] .md-typeset .highlight .kt,
+[data-sweep-d] .md-typeset .highlight .kc { color: #FF7AB6; } /* incl. True/False/None */
+[data-sweep-d] .md-typeset .highlight .s,    /* string */
+[data-sweep-d] .md-typeset .highlight .s1,
+[data-sweep-d] .md-typeset .highlight .s2,
+[data-sweep-d] .md-typeset .highlight .sb,
+[data-sweep-d] .md-typeset .highlight .sc,
+[data-sweep-d] .md-typeset .highlight .sd,
+[data-sweep-d] .md-typeset .highlight .se,
+[data-sweep-d] .md-typeset .highlight .sh,
+[data-sweep-d] .md-typeset .highlight .si,
+[data-sweep-d] .md-typeset .highlight .sx,
+[data-sweep-d] .md-typeset .highlight .sr,
+[data-sweep-d] .md-typeset .highlight .ss { color: #A8E0FF; }
+[data-sweep-d] .md-typeset .highlight .m,    /* number */
+[data-sweep-d] .md-typeset .highlight .mi,
+[data-sweep-d] .md-typeset .highlight .mf,
+[data-sweep-d] .md-typeset .highlight .mh,
+[data-sweep-d] .md-typeset .highlight .mo,
+[data-sweep-d] .md-typeset .highlight .il { color: #FFBF6E; }
+[data-sweep-d] .md-typeset .highlight .nf,   /* function name */
+[data-sweep-d] .md-typeset .highlight .nc { color: #67E8B6; } /* class name */
+[data-sweep-d] .md-typeset .highlight .nb,   /* builtin (len, print, range, ...) */
+[data-sweep-d] .md-typeset .highlight .bp { color: #FF7AB6; } /* self / cls */
+[data-sweep-d] .md-typeset .highlight .o,    /* operator */
+[data-sweep-d] .md-typeset .highlight .ow { color: #C896E6; }
+
+/* ─── 9. ADMONITIONS ─────────────────────────────────────────────────── */
+[data-sweep-d] .md-typeset .admonition,
+[data-sweep-d] .md-typeset details {
+  border: none;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--sw-accent) 6%, transparent);
+  box-shadow: none;
+  padding: 1.2rem 1.4rem;
+  font-size: 0.95rem;
+  margin: 1.6rem 0;
 }
+[data-sweep-d] .md-typeset .admonition > .admonition-title,
+[data-sweep-d] .md-typeset details > summary {
+  background: transparent !important;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sw-accent);
+  font-weight: 600;
+  padding: 0;
+  margin: 0 0 0.6rem;
+  border: none;
+}
+[data-sweep-d] .md-typeset .admonition > .admonition-title::before,
+[data-sweep-d] .md-typeset details > summary::before { display: none; }
+
+[data-sweep-d] .md-typeset .admonition.warning,
+[data-sweep-d] .md-typeset .admonition.attention,
+[data-sweep-d] .md-typeset .admonition.caution {
+  background: color-mix(in srgb, #F0A830 12%, transparent);
+}
+[data-sweep-d] .md-typeset .admonition.warning > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.attention > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.caution > .admonition-title { color: #B86A00; }
+
+[data-sweep-d] .md-typeset .admonition.danger,
+[data-sweep-d] .md-typeset .admonition.error,
+[data-sweep-d] .md-typeset .admonition.failure {
+  background: color-mix(in srgb, #D70015 10%, transparent);
+}
+[data-sweep-d] .md-typeset .admonition.danger > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.error > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.failure > .admonition-title { color: #D70015; }
+
+[data-sweep-d] .md-typeset .admonition.tip,
+[data-sweep-d] .md-typeset .admonition.hint,
+[data-sweep-d] .md-typeset .admonition.success,
+[data-sweep-d] .md-typeset .admonition.check {
+  background: color-mix(in srgb, var(--sw-teal) 10%, transparent);
+}
+[data-sweep-d] .md-typeset .admonition.tip > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.hint > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.success > .admonition-title,
+[data-sweep-d] .md-typeset .admonition.check > .admonition-title { color: var(--sw-teal); }
+
+[data-sweep-d] .md-typeset .admonition.note,
+[data-sweep-d] .md-typeset .admonition.abstract,
+[data-sweep-d] .md-typeset .admonition.summary {
+  background: color-mix(in srgb, var(--sw-accent) 6%, transparent);
+}
+
+/* ─── 9b. TABBED CODE BLOCKS (pymdownx.tabbed, alternate style) ─────────
+   Used for the homepage "Installing" toggle (Python only vs Python + CUDA).
+   Restyle the labels as Apple-y pill segmented control above the dark
+   code chrome so the two terminals share one visual frame. */
+[data-sweep-d] .md-typeset .tabbed-set {
+  margin: 1rem 0 1.4rem;
+  border-radius: 14px;
+  background: transparent;
+  box-shadow: none;
+}
+[data-sweep-d] .md-typeset .tabbed-labels {
+  display: inline-flex;
+  gap: 0.3rem;
+  padding: 0.25rem;
+  margin-bottom: 0.7rem;
+  background: rgba(127,127,127,0.10);
+  border-radius: 999px;
+  box-shadow: none;
+  border: none;
+  font-size: 12px;
+}
+[data-sweep-d] .md-typeset .tabbed-labels > label {
+  font-family: 'Inter Tight', sans-serif;
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: -0.005em;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  color: var(--md-default-fg-color--light);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+  border: none;
+  margin: 0;
+}
+[data-sweep-d] .md-typeset .tabbed-labels > label:hover {
+  color: var(--md-default-fg-color);
+}
+[data-sweep-d] .md-typeset .tabbed-set > input:checked + label,
+[data-sweep-d] .md-typeset .tabbed-labels > label.tabbed-label--active {
+  background: var(--sw-paper);
+  color: var(--md-default-fg-color);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 1px 0 var(--sw-rule);
+}
+/* pymdownx checked-input → label active styling (alternate_style: true) */
+[data-sweep-d] .md-typeset .tabbed-alternate > input:nth-child(1):checked ~ .tabbed-labels > label:nth-child(1),
+[data-sweep-d] .md-typeset .tabbed-alternate > input:nth-child(2):checked ~ .tabbed-labels > label:nth-child(2),
+[data-sweep-d] .md-typeset .tabbed-alternate > input:nth-child(3):checked ~ .tabbed-labels > label:nth-child(3),
+[data-sweep-d] .md-typeset .tabbed-alternate > input:nth-child(4):checked ~ .tabbed-labels > label:nth-child(4) {
+  background: var(--sw-paper);
+  color: var(--md-default-fg-color);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 1px 0 var(--sw-rule);
+}
+[data-sweep-d] .md-typeset .tabbed-content { padding: 0; }
+[data-sweep-d] .md-typeset .tabbed-block { padding: 0; }
+[data-sweep-d] .md-typeset .tabbed-block > p:first-child {
+  margin-top: 0;
+  font-size: 0.82rem;
+  color: var(--md-default-fg-color--light);
+  text-align: left;
+  max-width: none;
+}
+/* Match the dark code-chrome corner radius with the tabbed container.
+   Match no longer needs the underline strip pymdownx adds by default. */
+[data-sweep-d] .md-typeset .tabbed-labels::before { display: none !important; }
+
+/* ─── 10. TABLES ─────────────────────────────────────────────────────── */
+[data-sweep-d] .md-typeset table:not([class]) {
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  overflow: hidden;
+  font-size: 13.5px;
+  margin: 1.4rem 0;
+  box-shadow: none;
+}
+[data-sweep-d] .md-typeset table:not([class]) th {
+  background: var(--sw-card);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--sw-ink3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--sw-rule);
+  text-align: left;
+}
+[data-sweep-d] .md-typeset table:not([class]) td {
+  padding: 12px 16px;
+  border-top: 1px solid var(--sw-rule);
+  background: transparent;
+}
+
+/* ─── 11. MKDOCSTRINGS (auto-API) ─────────────────────────────────────── */
+
+/* Function / class heading block — explicit size so it doesn't inherit
+   the global .md-typeset h2 = 1.8rem and look oversized in mono. */
+[data-sweep-d] .md-typeset h2 .doc-object-name,
+[data-sweep-d] .md-typeset h3 .doc-object-name,
+[data-sweep-d] .md-typeset .doc-heading {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 500;
+  font-size: 1.4rem !important;
+  letter-spacing: -0.01em;
+  margin: 1.8rem 0 1rem;
+}
+
+/* The signature block: mkdocstrings adds BOTH `.doc-signature` and
+   `.highlight` classes. We previously overrode it with a light card bg
+   which conflicted with the `.highlight` Apple-dark-chrome rules and
+   produced an inverted "dark top bar over a light code area" look. Now we
+   just let `.highlight` style it (dark frame + mac dots + light text). */
+
+/* The Parameters / Returns / Raises sections */
+[data-sweep-d] .md-typeset .doc-section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 0.78rem !important;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin: 1.6rem 0 0.6rem;
+  display: block;
+}
+
+/* The "Description" column in the Parameters table — text inherits the
+   home/body 0.85 rem paragraph size which is too large inside a table cell.
+   Tighten it to 0.78 rem to match the surrounding `td` content. */
+[data-sweep-d] .md-typeset .doc-md-description,
+[data-sweep-d] .md-typeset .doc-md-description p,
+[data-sweep-d] .md-typeset .doc-md-description li {
+  font-size: 0.78rem !important;
+  line-height: 1.5 !important;
+  margin: 0 0 0.4rem !important;
+}
+[data-sweep-d] .md-typeset .doc-md-description p:last-child { margin-bottom: 0 !important; }
+[data-sweep-d] .md-typeset .doc-md-description code {
+  font-size: 0.86em;
+  padding: 0.08em 0.35em;
+}
+/* Also tighten the Parameter table cell defaults so the row height
+   matches the smaller description text. */
+[data-sweep-d] .md-typeset table:not([class]) td {
+  font-size: 0.82rem;
+}
+[data-sweep-d] .md-typeset table:not([class]) td > code {
+  font-size: 0.86em;
+}
+
+/* mkdocstrings renders param tables — clean them up */
+[data-sweep-d] .md-typeset .doc-md-description table,
+[data-sweep-d] .md-typeset .doc-class table,
+[data-sweep-d] .md-typeset .doc-function table {
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  overflow: hidden;
+}
+[data-sweep-d] .md-typeset .doc-md-description table th {
+  background: var(--sw-card);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Annotation labels (Parameter / Default / etc.) */
+[data-sweep-d] .md-typeset .doc-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: var(--md-accent-fg-color--transparent);
+  color: var(--sw-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+/* ─── 12. MKDOCS-JUPYTER ─────────────────────────────────────────────── */
+[data-sweep-d] .md-typeset .jupyter-wrapper { font-family: inherit; width: 100%; }
+
+[data-sweep-d] .md-typeset .jp-Notebook,
+[data-sweep-d] .md-typeset .jp-Cell {
+  width: 100%;
+  max-width: 100%;
+}
+
+[data-sweep-d] .md-typeset .jp-Cell {
+  margin: 1.4rem 0;
+}
+
+/* JupyterLab's bundled CSS sets `.jp-InputArea-editor { width: 1px }` which,
+   combined with the row-flex wrapper, collapses the code block to a tiny
+   strip on wide pages. Force the entire input/output wrapper chain to fill
+   100% of the content column so the dark Apple chrome spans the page. */
+[data-sweep-d] .md-typeset .jp-Cell-inputWrapper,
+[data-sweep-d] .md-typeset .jp-Cell-outputWrapper {
+  width: 100%;
+  min-width: 0;
+}
+[data-sweep-d] .md-typeset .jp-Cell-inputArea,
+[data-sweep-d] .md-typeset .jp-Cell-outputArea,
+[data-sweep-d] .md-typeset .jp-InputArea,
+[data-sweep-d] .md-typeset .jp-OutputArea,
+[data-sweep-d] .md-typeset .jp-InputArea-editor {
+  width: auto !important;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+[data-sweep-d] .md-typeset .jp-CodeMirrorEditor,
+[data-sweep-d] .md-typeset .jp-InputArea-editor {
+  background: #1D1D1F !important;
+  border-radius: 14px !important;
+  border: none !important;
+  overflow: hidden;
+  padding: 1.2rem 1.4rem;
+  color: #F5F5F7;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 13px;
+  line-height: 1.7;
+  box-shadow: 0 8px 24px -10px rgba(0,0,0,0.15);
+  position: relative;
+}
+[data-sweep-d] .md-typeset .jp-CodeMirrorEditor::before {
+  content: "";
+  display: block;
+  height: 36px;
+  margin: -1.2rem -1.4rem 0.6rem;
+  background:
+    radial-gradient(circle 5.5px at 18px 18px, #FF5F57 99%, transparent 100%),
+    radial-gradient(circle 5.5px at 38px 18px, #FEBC2E 99%, transparent 100%),
+    radial-gradient(circle 5.5px at 58px 18px, #28C840 99%, transparent 100%);
+  border-bottom: 1px solid #2D2D2F;
+}
+
+/* In[N] / Out[N] gutters — hide entirely so the dark code block left-aligns
+   with the surrounding text instead of being pushed in by a 110 px gutter.
+   Static notebook docs don't need execution counters. */
+[data-sweep-d] .md-typeset .jp-InputPrompt,
+[data-sweep-d] .md-typeset .jp-OutputPrompt {
+  display: none !important;
+}
+/* Collapse the prompt's reserved flex slot (JupyterLab sets flex:0 0 110px). */
+[data-sweep-d] .md-typeset .jp-Cell .jp-InputPrompt,
+[data-sweep-d] .md-typeset .jp-Cell .jp-OutputPrompt {
+  flex: 0 0 0 !important;
+}
+
+[data-sweep-d] .md-typeset .jp-OutputArea-output {
+  background: transparent !important;
+  padding: 0.4rem 0 0.4rem !important;
+  font-size: 12.5px;
+}
+
+[data-sweep-d] .md-typeset .jp-RenderedImage img,
+[data-sweep-d] .md-typeset .jp-OutputArea img {
+  border-radius: 10px;
+  background: var(--sw-card);
+  padding: 8px;
+  max-width: 100%;
+}
+
+/* Markdown cells — render as normal page content, lose the cell chrome */
+[data-sweep-d] .md-typeset .jp-MarkdownCell { padding: 0; }
+[data-sweep-d] .md-typeset .jp-Cell-inputWrapper:has(.jp-MarkdownCell) { background: transparent; }
+
+/* ─── 13. MATH (KaTeX) ───────────────────────────────────────────────── */
+[data-sweep-d] .md-typeset .arithmatex,
+[data-sweep-d] .md-typeset mjx-container {
+  font-size: 1.05em;
+}
+[data-sweep-d] .md-typeset div.arithmatex {
+  background: var(--sw-card);
+  border-radius: 14px;
+  padding: 1.6rem 1.4rem;
+  margin: 1.6rem 0;
+  text-align: center;
+  overflow-x: auto;
+}
+[data-sweep-d] .md-typeset .katex-display { margin: 0; }
+
+/* ─── 14. CONTENT ACTIONS (Edit / View source) ───────────────────────── */
+[data-sweep-d] .md-content__button {
+  margin: 0 0 0 0.5rem;
+  padding: 0.3rem 0.6rem;
+  color: var(--sw-accent);
+  font-size: 12.5px;
+}
+[data-sweep-d] .md-content__button:hover { color: var(--sw-accent); opacity: 0.8; }
+
+/* Last updated / source meta strip — Material renders this in .md-source-file */
+[data-sweep-d] .md-source-file {
+  margin-top: 2.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--sw-rule);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: var(--sw-ink3);
+  display: flex;
+  gap: 1.4rem;
+  flex-wrap: wrap;
+}
+[data-sweep-d] .md-source-file__fact { margin: 0; }
+
+/* ─── 15. PREV / NEXT PAGE NAV ───────────────────────────────────────── */
+[data-sweep-d] .md-footer__inner.md-grid {
+  background: transparent;
+  border-top: 1px solid var(--sw-rule);
+}
+[data-sweep-d] .md-footer__link {
+  background: transparent;
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+}
+[data-sweep-d] .md-footer__link:hover { background: var(--sw-card); }
+[data-sweep-d] .md-footer__direction { font-size: 11px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.08em; }
+[data-sweep-d] .md-footer__title { font-size: 15px; font-weight: 500; }
+
+/* Bottom (copyright) footer */
+[data-sweep-d] .md-footer-meta {
+  background: var(--sw-card);
+  color: var(--sw-ink2);
+}
+[data-sweep-d] .md-footer-meta.md-typeset a { color: var(--sw-accent); }
+[data-sweep-d] .md-copyright { color: var(--sw-ink3); font-size: 11.5px; }
+
+/* ─── 16. 404 PAGE ───────────────────────────────────────────────────── */
+.sweep-404 {
+  max-width: 900px;
+  margin: 0 auto;
+  text-align: center;
+  padding: 4rem 2rem;
+}
+.sweep-404__wave { width: 100%; max-width: 800px; margin: 0 auto 2rem; height: 200px; }
+.sweep-404__wave svg { width: 100%; height: 100%; }
+.sweep-404__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: #ED8B2E;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-bottom: 1rem;
+}
+.sweep-404__title {
+  font-family: 'Inter Tight', system-ui, sans-serif;
+  font-weight: 700;
+  font-size: clamp(3.5rem, 9vw, 6rem);
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+  margin: 0 0 1.2rem;
+  color: var(--sw-ink);
+}
+.sweep-404__lede {
+  font-size: 1.2rem;
+  line-height: 1.45;
+  color: var(--sw-ink2);
+  max-width: 600px;
+  margin: 0 auto 2rem;
+}
+.sweep-404__ctas { display: inline-flex; gap: 14px; margin-bottom: 2.5rem; }
+.sweep-404__grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  text-align: left;
+  margin: 0 auto;
+  max-width: 820px;
+}
+.sweep-404__card {
+  background: var(--sw-card);
+  border-radius: 14px;
+  padding: 16px 18px;
+  text-decoration: none !important;
+  display: block;
+  color: var(--sw-ink);
+}
+.sweep-404__card:hover { background: color-mix(in srgb, var(--sw-card) 90%, var(--sw-accent) 10%); }
+.sweep-404__card-kind {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--sw-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+.sweep-404__card-name { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.sweep-404__card-sub { font-size: 12px; color: var(--sw-ink2); }
+
+@media (max-width: 760px) {
+  .sweep-404__grid { grid-template-columns: 1fr 1fr; }
+  .sweep-404__ctas { flex-direction: column; align-items: center; }
+}
+
+/* ─── 17. MOBILE ─────────────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  .sweep-hero { padding: 3rem 1.2rem 2rem; }
+  .sweep-hero__title { font-size: clamp(2.4rem, 11vw, 3.5rem); }
+  .sweep-hero__lede { font-size: 1.05rem; }
+  .sweep-hero__ctas { flex-direction: column; width: 100%; }
+  .sweep-hero__install, .sweep-cta { width: 100%; justify-content: center; }
+  .sweep-home-body { padding: 0 1.2rem; }
+}
+
+/* ─── 18. PRINT ──────────────────────────────────────────────────────── */
+@media print {
+  .sweep-announce, .md-header, .md-tabs, .md-sidebar, .md-footer,
+  .md-clipboard, .md-content__button { display: none !important; }
+  [data-sweep-d] .md-typeset .highlight,
+  [data-sweep-d] .md-typeset .highlight pre {
+    background: #fafafa !important;
+    color: #1d1d1f !important;
+    border: 1px solid #d2d2d7 !important;
+  }
+  [data-sweep-d] .md-typeset .highlight::before { display: none !important; }
+  [data-sweep-d] .md-typeset .highlight code { color: #1d1d1f !important; }
+}
+
+/* ─── 19. UTILITIES ──────────────────────────────────────────────────── */
+.sweep-gradient-text {
+  background: var(--sw-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-style: italic;
+  font-weight: 800;
+}
+
+/* ─── 12. STACK SECTION (homepage, below the gallery) ────────────────── */
+[data-sweep-d] .sweep-stack {
+  max-width: 1180px;
+  margin: 3rem auto 2.4rem;
+  padding: 0 1.5rem;
+  text-align: center;
+}
+[data-sweep-d] .sweep-stack__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--md-default-fg-color--lighter);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  margin-bottom: 0.6rem;
+}
+[data-sweep-d] .md-typeset h2.sweep-stack__title {
+  font-size: clamp(1.4rem, 3vw, 2.1rem);
+  letter-spacing: -0.03em;
+  margin: 0 0 0.5rem;
+  text-align: center;
+  border: none;
+}
+[data-sweep-d] .md-typeset p.sweep-stack__lede {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.88rem;
+  max-width: 640px;
+  margin: 0 auto 1.6rem;
+  text-align: center;
+}
+[data-sweep-d] .sweep-stack__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+[data-sweep-d] .sweep-stack__card {
+  background: var(--sw-paper);
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  padding: 1rem 1.1rem 1.1rem;
+  text-align: left;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+[data-sweep-d] .sweep-stack__card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--md-default-fg-color) 18%, transparent);
+  box-shadow: 0 12px 32px -18px rgba(0,0,0,0.25);
+}
+[data-sweep-d] .sweep-stack__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.9rem;
+}
+[data-sweep-d] .sweep-stack__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+[data-sweep-d] .sweep-stack__dot--sq { border-radius: 2px; }
+[data-sweep-d] .sweep-stack__dot--tri {
+  width: 0;
+  height: 0;
+  background: transparent !important;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 12px solid var(--sw-lime);
+  border-radius: 0;
+}
+[data-sweep-d] .sweep-stack__role {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--md-default-fg-color--lighter);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+[data-sweep-d] .sweep-stack__name {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--md-default-fg-color);
+  margin-bottom: 0.15rem;
+}
+[data-sweep-d] .sweep-stack__version {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--sw-orange);
+  margin-bottom: 0.65rem;
+}
+[data-sweep-d] .sweep-stack__desc {
+  font-size: 0.78rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.5;
+}
+
+/* ─── 13. RICH FOOTER (overrides Material's default) ─────────────────── */
+[data-sweep-d] .sweep-footer {
+  background: var(--sw-card);
+  color: var(--md-default-fg-color--light);
+  padding: 4rem 2rem 1.6rem;
+  border-top: 1px solid var(--sw-rule);
+  margin-top: 4rem;
+}
+[data-sweep-d] .sweep-footer__cols {
+  max-width: 1180px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1fr 1fr;
+  gap: 3rem 2rem;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  [data-sweep-d] .sweep-footer__cols { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 540px) {
+  [data-sweep-d] .sweep-footer__cols { grid-template-columns: 1fr; }
+}
+[data-sweep-d] .sweep-footer__brand { padding-right: 1rem; }
+[data-sweep-d] .sweep-footer__logo {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: 'Inter Tight', sans-serif;
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+  color: var(--md-default-fg-color);
+  margin-bottom: 0.9rem;
+}
+[data-sweep-d] .sweep-footer__logo img { width: 24px; height: 24px; }
+[data-sweep-d] .sweep-footer__tagline {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--md-default-fg-color--light);
+  margin: 0;
+  max-width: 22rem;
+}
+[data-sweep-d] .sweep-footer__col h6 {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin: 0 0 1rem;
+}
+[data-sweep-d] .sweep-footer__col ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+[data-sweep-d] .sweep-footer__col li { margin: 0 0 0.55rem; }
+[data-sweep-d] .sweep-footer__col a {
+  color: var(--md-default-fg-color);
+  font-size: 0.9rem;
+  text-decoration: none;
+  border-bottom: none;
+}
+[data-sweep-d] .sweep-footer__col a:hover {
+  color: var(--sw-accent);
+}
+[data-sweep-d] .sweep-footer__bottom {
+  max-width: 1180px;
+  margin: 3rem auto 0;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--sw-rule);
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-size: 0.78rem;
+  color: var(--md-default-fg-color--lighter);
+  flex-wrap: wrap;
+}
+[data-sweep-d] .sweep-footer__bottom a {
+  color: var(--md-default-fg-color--light);
+  text-decoration: none;
+}
+[data-sweep-d] .sweep-footer__bottom a:hover {
+  text-decoration: underline;
+}
+[data-sweep-d] .sweep-footer__dot {
+  color: var(--sw-rule);
+}
+
+/* ─── 14. QUICKSTART · numbered-step layout ──────────────────────────── */
+[data-sweep-d] .sweep-qs {
+  max-width: 760px;
+  margin: 0 auto;
+  padding-top: 2rem;
+}
+
+/* Eyebrow */
+[data-sweep-d] .sweep-qs__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 1.2rem;
+}
+
+/* Title */
+[data-sweep-d] .md-typeset h1.sweep-qs__title {
+  font-size: clamp(2.4rem, 5vw, 3.6rem);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.04;
+  text-wrap: balance;
+  margin: 0 0 1.4rem;
+}
+
+/* Lede */
+[data-sweep-d] .md-typeset p.sweep-qs__lede {
+  font-size: 1.05rem;
+  line-height: 1.6;
+  color: var(--md-default-fg-color--light);
+  margin: 0 0 2.6rem;
+}
+
+/* Progress strip */
+[data-sweep-d] .sweep-qs__strip {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.4rem;
+  background: var(--sw-card);
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  margin: 0 0 3.4rem;
+  overflow-x: auto;
+}
+[data-sweep-d] .sweep-qs__strip a {
+  flex: 1 1 0;
+  min-width: 90px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0.65rem 0.55rem 0.6rem;
+  border-radius: 10px;
+  text-decoration: none !important;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.78rem;
+  line-height: 1.25;
+  text-align: center;
+  font-weight: 500;
+  transition: background 0.15s ease;
+}
+[data-sweep-d] .sweep-qs__strip a span {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 0.2rem;
+}
+[data-sweep-d] .sweep-qs__strip a:hover {
+  background: var(--sw-paper);
+  color: var(--md-default-fg-color);
+}
+
+/* Step header (big gray number + h2) */
+[data-sweep-d] .sweep-qs__step {
+  margin: 3.6rem 0 1.2rem;
+}
+[data-sweep-d] .sweep-qs__hd {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+[data-sweep-d] .sweep-qs__num {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 3.4rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 0.9;
+  color: var(--sw-rule);
+}
+[data-sweep-d] .md-typeset .sweep-qs__step h2 {
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+  border: none;
+}
+
+/* Step body paragraph */
+[data-sweep-d] .md-typeset .sweep-qs__step p {
+  margin: 0.4rem 0 0;
+  font-size: 0.95rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.55;
+}
+
+/* Install pair (step 01) */
+[data-sweep-d] .sweep-qs__pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin: 1.6rem 0 1rem;
+}
+@media (max-width: 640px) {
+  [data-sweep-d] .sweep-qs__pair { grid-template-columns: 1fr; }
+}
+[data-sweep-d] .sweep-qs__pill {
+  background: var(--sw-card);
+  border: 1px solid var(--sw-rule);
+  border-radius: 12px;
+  padding: 0.9rem 1.1rem;
+}
+[data-sweep-d] .sweep-qs__pill-hd {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+[data-sweep-d] .sweep-qs__pill-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color);
+}
+[data-sweep-d] .sweep-qs__pill-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 2px 6px;
+  background: rgba(0,102,204,0.12);
+  color: var(--sw-accent);
+  border-radius: 5px;
+}
+[data-sweep-d] .sweep-qs__pill code {
+  display: block;
+  background: transparent;
+  padding: 0;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color);
+}
+
+/* Tip strip */
+[data-sweep-d] .sweep-qs__hint {
+  margin: 1.1rem 0 0;
+  padding: 0.7rem 0.9rem;
+  background: rgba(0,102,204,0.07);
+  border-left: 3px solid var(--sw-accent);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color--light);
+}
+[data-sweep-d] .sweep-qs__hint strong {
+  color: var(--sw-accent);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  margin-right: 0.3rem;
+}
+
+/* Result figure */
+[data-sweep-d] .sweep-qs__figure {
+  margin: 1.4rem 0 0.6rem;
+  background: var(--sw-card);
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  padding: 0.9rem;
+  text-align: center;
+}
+[data-sweep-d] .sweep-qs__figure img {
+  max-width: 100%;
+  border-radius: 10px;
+  display: block;
+  margin: 0 auto;
+}
+[data-sweep-d] .sweep-qs__caption {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--md-default-fg-color--lighter);
+  margin-top: 0.7rem;
+}
+
+/* Step 05 — next-steps cards */
+[data-sweep-d] .sweep-qs__cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem;
+  margin: 1.6rem 0 0.6rem;
+}
+[data-sweep-d] .sweep-qs__card {
+  background: var(--sw-card);
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  overflow: hidden;
+  text-decoration: none !important;
+  color: inherit !important;
+  display: block;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+[data-sweep-d] .sweep-qs__card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px -18px rgba(0,0,0,0.25);
+}
+[data-sweep-d] .sweep-qs__card img {
+  width: 100%;
+  height: 130px;
+  object-fit: cover;
+  display: block;
+}
+[data-sweep-d] .sweep-qs__card-body { padding: 0.9rem 1rem 1rem; }
+[data-sweep-d] .sweep-qs__card-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 0.2rem;
+}
+[data-sweep-d] .sweep-qs__card-name {
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--md-default-fg-color);
+  margin-bottom: 0.2rem;
+}
+[data-sweep-d] .sweep-qs__card-desc {
+  font-size: 0.78rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.5;
+}
+
+/* ─── 15. HERO PANEL — wide wavefield image below the hero CTAs ─────── */
+[data-sweep-d] .sweep-hero-panel {
+  position: relative;
+  max-width: 920px;
+  margin: 0.4rem auto 1.6rem;
+  padding: 0 1.5rem;
+}
+[data-sweep-d] .sweep-hero-panel img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  box-shadow: 0 18px 48px -24px rgba(0,0,0,0.4),
+              0 1px 0 var(--sw-rule);
+}
+[data-sweep-d] .sweep-hero-panel__stats {
+  position: absolute;
+  left: 2.1rem;
+  bottom: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: rgba(255,255,255,0.85);
+  letter-spacing: 0.04em;
+}
+[data-sweep-d] .sweep-hero-panel__dot { color: rgba(255,255,255,0.4); }
+[data-sweep-d] .sweep-hero-panel__sig {
+  position: absolute;
+  right: 2.1rem;
+  bottom: 0.85rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.6);
+}
+
+/* ─── 15b. THREE-COL FEATURE CARDS (Differentiable / Backend / Inspectable) */
+[data-sweep-d] .sweep-features-3 {
+  max-width: 1180px;
+  margin: 1.8rem auto 2.4rem;
+  padding: 0 1.5rem;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.8rem;
+}
+@media (max-width: 820px) {
+  [data-sweep-d] .sweep-features-3 { grid-template-columns: 1fr; }
+}
+[data-sweep-d] .sweep-features-3__card {
+  background: var(--sw-paper);
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  padding: 1.2rem 1.2rem 1rem;
+  display: flex;
+  flex-direction: column;
+  text-decoration: none !important;
+  color: inherit;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+[data-sweep-d] .sweep-features-3__card:hover {
+  border-color: color-mix(in srgb, var(--md-default-fg-color) 18%, transparent);
+  box-shadow: 0 8px 24px -16px rgba(0,0,0,0.18);
+  transform: translateY(-1px);
+}
+[data-sweep-d] .sweep-features-3__tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 0.55rem;
+}
+[data-sweep-d] .md-typeset h3.sweep-features-3__title {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--md-default-fg-color);
+  margin: 0 0 0.55rem;
+}
+[data-sweep-d] .sweep-features-3__desc {
+  font-size: 0.78rem !important;
+  color: var(--md-default-fg-color--light) !important;
+  line-height: 1.5 !important;
+  margin: 0 0 0.9rem !important;
+  text-align: left !important;
+  max-width: none !important;
+}
+[data-sweep-d] .sweep-features-3__link {
+  margin-top: auto;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--sw-accent);
+}
+[data-sweep-d] .sweep-features-3__card:hover .sweep-features-3__link { text-decoration: underline; }
+
+/* ─── 15c. ONE-FILE DARK SECTION (full-bleed, with embedded code) ──────── */
+[data-sweep-d] .sweep-onefile {
+  /* Break out of the 1180 px centred wrapper to full viewport width. */
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  width: 100vw;
+  background: #0A0A0C;
+  color: #F5F5F7;
+  padding: 4rem 1.5rem 4.5rem;
+  margin-top: 2.8rem;
+  margin-bottom: 3rem;
+}
+[data-sweep-d] .sweep-onefile__inner {
+  max-width: 760px;
+  margin: 0 auto;
+  text-align: center;
+}
+[data-sweep-d] .sweep-onefile__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.5);
+  margin-bottom: 1rem;
+}
+[data-sweep-d] .md-typeset h2.sweep-onefile__title,
+[data-sweep-d] .sweep-onefile__title {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: clamp(1.7rem, 3.5vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: #FFFFFF !important;
+  margin: 0 0 0.85rem;
+  text-align: center !important;
+  border: none;
+}
+[data-sweep-d] .sweep-onefile__dim {
+  color: rgba(255,255,255,0.55);
+  font-weight: 600;
+}
+[data-sweep-d] .sweep-onefile__lede {
+  font-size: 0.92rem !important;
+  color: rgba(255,255,255,0.7) !important;
+  margin: 0 auto 1.6rem !important;
+  max-width: 540px !important;
+  line-height: 1.55 !important;
+  text-align: center !important;
+}
+/* The embedded fenced code block — keep our Apple dark chrome but slimmer
+   (already styled in §11). Just constrain its width inside the dark band. */
+[data-sweep-d] .sweep-onefile .highlight {
+  max-width: 680px;
+  margin: 0 auto 1.6rem !important;
+  text-align: left;
+}
+/* Ghost CTA on dark — outlined pill */
+[data-sweep-d] .sweep-cta--ghost-dark {
+  display: inline-flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid rgba(255,255,255,0.25);
+  color: rgba(255,255,255,0.92) !important;
+  text-decoration: none !important;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+[data-sweep-d] .sweep-cta--ghost-dark:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.5);
+}
+
+/* ─── 15d. NOTEBOOK SHOWCASE (Pre-baked notebooks) ──────────────────────── */
+[data-sweep-d] .sweep-nb {
+  max-width: 1180px;
+  margin: 2.4rem auto 2.8rem;
+  padding: 0 1.5rem;
+}
+[data-sweep-d] .sweep-nb__hd {
+  text-align: center;
+  margin-bottom: 1.6rem;
+}
+[data-sweep-d] .sweep-nb__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 0.55rem;
+}
+[data-sweep-d] .md-typeset h2.sweep-nb__title {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.45rem;
+  text-align: center;
+  border: none;
+}
+[data-sweep-d] .md-typeset p.sweep-nb__lede {
+  font-size: 0.85rem !important;
+  color: var(--md-default-fg-color--light) !important;
+  max-width: 540px;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+[data-sweep-d] .sweep-nb__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 0.85rem;
+}
+@media (max-width: 820px) {
+  [data-sweep-d] .sweep-nb__grid { grid-template-columns: 1fr; }
+}
+[data-sweep-d] .sweep-nb__featured {
+  display: flex;
+  flex-direction: column;
+  background: var(--sw-paper);
+  border: 1px solid var(--sw-rule);
+  border-radius: 16px;
+  overflow: hidden;
+  text-decoration: none !important;
+  color: inherit;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+[data-sweep-d] .sweep-nb__featured:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--md-default-fg-color) 18%, transparent);
+  box-shadow: 0 14px 36px -22px rgba(0,0,0,0.28);
+}
+[data-sweep-d] .sweep-nb__featured-media {
+  height: 14rem;
+  overflow: hidden;
+  background: #ECECEC;
+}
+[data-sweep-d] .sweep-nb__featured-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+[data-sweep-d] .sweep-nb__featured-body {
+  padding: 1rem 1.2rem 1.2rem;
+}
+[data-sweep-d] .sweep-nb__chip {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  margin-bottom: 0.6rem;
+}
+[data-sweep-d] .sweep-nb__chip.teal {
+  background: color-mix(in srgb, var(--sw-teal) 16%, transparent);
+  color: #0F7468;
+}
+[data-sweep-d] .sweep-nb__chip.amber {
+  background: color-mix(in srgb, var(--sw-orange) 16%, transparent);
+  color: #B86A00;
+}
+[data-sweep-d] .md-typeset .sweep-nb__featured-body h4,
+[data-sweep-d] .md-typeset .sweep-nb__small h4 {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0 0 0.4rem;
+  color: var(--md-default-fg-color);
+}
+[data-sweep-d] .md-typeset .sweep-nb__featured-body p,
+[data-sweep-d] .md-typeset .sweep-nb__small p {
+  font-size: 0.78rem !important;
+  color: var(--md-default-fg-color--light) !important;
+  line-height: 1.5 !important;
+  margin: 0 0 0.85rem !important;
+  text-align: left !important;
+  max-width: none !important;
+}
+[data-sweep-d] .sweep-nb__stats {
+  display: flex;
+  gap: 1.5rem;
+  border-top: 1px solid var(--sw-rule);
+  padding-top: 0.7rem;
+  margin-top: 0.7rem;
+}
+[data-sweep-d] .sweep-nb__stats > div { display: flex; flex-direction: column; gap: 0.15rem; }
+[data-sweep-d] .sweep-nb__stats span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+}
+[data-sweep-d] .sweep-nb__stats strong {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--md-default-fg-color);
+}
+
+[data-sweep-d] .sweep-nb__side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+[data-sweep-d] .sweep-nb__small {
+  background: var(--sw-paper);
+  border: 1px solid var(--sw-rule);
+  border-radius: 16px;
+  padding: 1rem 1.2rem;
+  text-decoration: none !important;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+[data-sweep-d] .sweep-nb__small:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--md-default-fg-color) 18%, transparent);
+  box-shadow: 0 12px 28px -18px rgba(0,0,0,0.25);
+}
+[data-sweep-d] .sweep-nb__small-media {
+  margin-top: 0.5rem;
+  height: 5.5rem;
+  overflow: hidden;
+  border-radius: 8px;
+}
+[data-sweep-d] .sweep-nb__small-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+[data-sweep-d] .sweep-nb__cta {
+  background: #0A0A0C;
+  color: #F5F5F7;
+  border-radius: 16px;
+  padding: 1.1rem 1.2rem 1.2rem;
+  text-decoration: none !important;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+[data-sweep-d] .sweep-nb__cta:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 32px -18px rgba(0,0,0,0.4);
+}
+[data-sweep-d] .sweep-nb__cta-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.5);
+}
+[data-sweep-d] .sweep-nb__cta-title {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: #FFFFFF;
+}
+[data-sweep-d] .sweep-nb__cta-italic {
+  font-style: italic;
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+}
+[data-sweep-d] .sweep-nb__cta-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+}
+[data-sweep-d] .sweep-nb__cta-tags span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.65);
+}
+[data-sweep-d] .sweep-nb__cta-arrow {
+  margin-top: 0.5rem;
+  font-size: 11px;
+  color: rgba(255,255,255,0.6);
+}
+[data-sweep-d] .sweep-nb__cta:hover .sweep-nb__cta-arrow { color: rgba(255,255,255,1); }
+
+/* ─── 16. TWO-COL FEATURE CARDS (Equations + Optimizer) ──────────────── */
+[data-sweep-d] .sweep-features-2 {
+  max-width: 1180px;
+  margin: 2.4rem auto 2.4rem;
+  padding: 0 1.5rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem;
+}
+@media (max-width: 820px) {
+  [data-sweep-d] .sweep-features-2 { grid-template-columns: 1fr; }
+}
+[data-sweep-d] .sweep-feature-card {
+  background: var(--sw-paper);
+  border: 1px solid var(--sw-rule);
+  border-radius: 14px;
+  padding: 1.2rem 1.3rem 1rem;
+  display: flex;
+  flex-direction: column;
+}
+[data-sweep-d] .sweep-feature-card__tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 0.55rem;
+}
+[data-sweep-d] .md-typeset h3.sweep-feature-card__title {
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  color: var(--md-default-fg-color);
+  margin: 0 0 0.55rem;
+  text-wrap: balance;
+}
+[data-sweep-d] .sweep-feature-card__desc {
+  font-size: 0.82rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.5;
+  margin: 0 0 0.9rem;
+}
+[data-sweep-d] .sweep-feature-card__desc code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  padding: 0.1em 0.4em;
+  background: rgba(127,127,127,0.10);
+  border-radius: 4px;
+}
+[data-sweep-d] code.sweep-feature-card__code {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  background: var(--sw-card);
+  color: var(--md-default-fg-color);
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  margin: 0 0 1.4rem;
+  border: 1px solid var(--sw-rule);
+  overflow-x: auto;
+}
+[data-sweep-d] .sweep-feature-card__fig {
+  margin-top: auto;
+}
+[data-sweep-d] .sweep-feature-card__fig img {
+  width: 100%;
+  border-radius: 10px;
+  display: block;
+}
+
+/* ─── 17. API INDEX — equation cards (Direction-D landing for API page) ─ */
+[data-sweep-d] .sweep-api {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 0 4rem;
+}
+[data-sweep-d] .sweep-api__eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 1.2rem;
+}
+[data-sweep-d] .md-typeset h1.sweep-api__title {
+  font-size: clamp(1.7rem, 3vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  margin: 0 0 0.9rem;
+}
+[data-sweep-d] .md-typeset p.sweep-api__lede {
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--md-default-fg-color--light);
+  max-width: 640px;
+  margin: 0 0 1.4rem;
+}
+[data-sweep-d] .sweep-api__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin: 0 0 3.6rem;
+}
+[data-sweep-d] .sweep-api__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.85rem;
+  background: var(--sw-card);
+  border-radius: 999px;
+  color: var(--md-default-fg-color--light);
+}
+[data-sweep-d] .sweep-api__pill-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--sw-teal);
+}
+[data-sweep-d] .sweep-api__pill-dot.teal   { background: var(--sw-teal); }
+[data-sweep-d] .sweep-api__pill-dot.orange { background: var(--sw-orange); }
+[data-sweep-d] .sweep-api__pill-dot.amber  { background: var(--sw-amber); }
+[data-sweep-d] .sweep-api__pill-dot.lime   { background: var(--sw-lime); }
+
+/* Section */
+[data-sweep-d] .sweep-api__sec { margin: 0 0 3.4rem; }
+[data-sweep-d] .sweep-api__sec-hd {
+  display: flex; align-items: center; gap: 0.7rem;
+  margin-bottom: 0.4rem;
+}
+[data-sweep-d] .sweep-api__sec-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--sw-teal); display: inline-block;
+}
+[data-sweep-d] .sweep-api__sec-dot.teal   { background: var(--sw-teal); }
+[data-sweep-d] .sweep-api__sec-dot.orange { background: var(--sw-orange); }
+[data-sweep-d] .sweep-api__sec-dot.amber  { background: var(--sw-amber); }
+[data-sweep-d] .sweep-api__sec-dot.lime   { background: var(--sw-lime); }
+[data-sweep-d] .sweep-api__sec-dot.accent { background: var(--sw-accent); }
+[data-sweep-d] .md-typeset .sweep-api__sec h2 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin: 0;
+  border: none;
+}
+[data-sweep-d] .sweep-api__count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--md-default-fg-color--lighter);
+  margin-left: 0.5rem;
+}
+[data-sweep-d] .md-typeset p.sweep-api__sec-lede {
+  font-size: 0.92rem;
+  color: var(--md-default-fg-color--light);
+  margin: 0 0 1.4rem;
+}
+
+/* Card grid */
+[data-sweep-d] .sweep-api__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem;
+}
+@media (max-width: 820px) {
+  [data-sweep-d] .sweep-api__grid { grid-template-columns: 1fr; }
+}
+[data-sweep-d] .sweep-api__card {
+  background: var(--sw-card);
+  border: 1px solid transparent;
+  border-radius: 14px;
+  padding: 1.1rem 1.2rem 1rem;
+  text-decoration: none !important;
+  color: inherit !important;
+  display: block;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+[data-sweep-d] .sweep-api__card:hover {
+  border-color: var(--sw-rule);
+  transform: translateY(-1px);
+}
+[data-sweep-d] .sweep-api__card-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+}
+[data-sweep-d] .sweep-api__card-hd code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--md-default-fg-color);
+  background: transparent;
+  padding: 0;
+}
+[data-sweep-d] .sweep-api__card-tags {
+  display: flex; gap: 0.4rem; flex-wrap: wrap;
+}
+[data-sweep-d] .sweep-api__card-tags span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--md-default-fg-color--lighter);
+  letter-spacing: 0.04em;
+}
+[data-sweep-d] .md-typeset .sweep-api__card p {
+  font-size: 0.82rem;
+  color: var(--md-default-fg-color--light);
+  margin: 0 0 0.7rem;
+  line-height: 1.5;
+}
+[data-sweep-d] .sweep-api__card-models {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--md-default-fg-color--lighter);
+  display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap;
+}
+[data-sweep-d] .sweep-api__chip {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid currentColor;
+  margin: 0 0.1rem;
+}
+[data-sweep-d] .sweep-api__chip.teal   { color: var(--sw-teal); }
+[data-sweep-d] .sweep-api__chip.orange { color: var(--sw-orange); }
+[data-sweep-d] .sweep-api__chip.amber  { color: var(--sw-amber); }
+[data-sweep-d] .sweep-api__chip.lime   { color: #6b7626; }
+[data-sweep-d] .sweep-api__chip.accent { color: var(--sw-accent); }
+
+/* ─── 18. NOTEBOOK CODE-BLOCK INNER FIX ─────────────────────────────────
+   `.jp-CodeMirrorEditor` already sets the dark Apple frame + mac dots
+   (lines 602–626). The inner pygments output (`.highlight-ipynb`) ships
+   with a white background that hid the dark frame, producing the
+   "dark frame around a white panel" look. Make the inner pygments
+   transparent so the dark frame shows through, and recolor the syntax
+   tokens for visibility on dark.
+   ─────────────────────────────────────────────────────────────────────── */
+[data-sweep-d] .jp-Cell .highlight-ipynb,
+[data-sweep-d] .jp-Cell .highlight-ipynb pre,
+[data-sweep-d] .jp-Cell .highlight-ipynb code {
+  background: transparent !important;
+  color: #F5F5F7 !important;
+}
+[data-sweep-d] .jp-Cell .highlight-ipynb pre {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+/* Apple-y syntax palette on dark for notebook code (mirrors §11 rules
+   that target standalone `.highlight` blocks). Force a bright base color
+   so identifier tokens (.n, .nn, .na, .nx) — which Material defaults to
+   dark in light mode — stay legible on the dark Apple chrome. */
+[data-sweep-d] .jp-Cell .highlight-ipynb span,
+[data-sweep-d] .jp-Cell .highlight-ipynb .n,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nn,
+[data-sweep-d] .jp-Cell .highlight-ipynb .na,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nv,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nx,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nl,
+[data-sweep-d] .jp-Cell .highlight-ipynb .ni,
+[data-sweep-d] .jp-Cell .highlight-ipynb .ne,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nd,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nt,
+[data-sweep-d] .jp-Cell .highlight-ipynb .p,
+[data-sweep-d] .jp-Cell .highlight-ipynb .w { color: #F5F5F7; }
+
+[data-sweep-d] .jp-Cell .highlight-ipynb .c,
+[data-sweep-d] .jp-Cell .highlight-ipynb .c1,
+[data-sweep-d] .jp-Cell .highlight-ipynb .cm,
+[data-sweep-d] .jp-Cell .highlight-ipynb .cp { color: #7F7F87; font-style: italic; }
+[data-sweep-d] .jp-Cell .highlight-ipynb .k,
+[data-sweep-d] .jp-Cell .highlight-ipynb .kn,
+[data-sweep-d] .jp-Cell .highlight-ipynb .kd,
+[data-sweep-d] .jp-Cell .highlight-ipynb .kr,
+[data-sweep-d] .jp-Cell .highlight-ipynb .kt,
+[data-sweep-d] .jp-Cell .highlight-ipynb .kc,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nb,
+[data-sweep-d] .jp-Cell .highlight-ipynb .bp { color: #FF7AB6; }
+[data-sweep-d] .jp-Cell .highlight-ipynb .s,
+[data-sweep-d] .jp-Cell .highlight-ipynb .s1,
+[data-sweep-d] .jp-Cell .highlight-ipynb .s2,
+[data-sweep-d] .jp-Cell .highlight-ipynb .sb,
+[data-sweep-d] .jp-Cell .highlight-ipynb .sd,
+[data-sweep-d] .jp-Cell .highlight-ipynb .se,
+[data-sweep-d] .jp-Cell .highlight-ipynb .si,
+[data-sweep-d] .jp-Cell .highlight-ipynb .sr,
+[data-sweep-d] .jp-Cell .highlight-ipynb .ss { color: #A8E0FF; }
+[data-sweep-d] .jp-Cell .highlight-ipynb .m,
+[data-sweep-d] .jp-Cell .highlight-ipynb .mi,
+[data-sweep-d] .jp-Cell .highlight-ipynb .mf,
+[data-sweep-d] .jp-Cell .highlight-ipynb .mh,
+[data-sweep-d] .jp-Cell .highlight-ipynb .mo,
+[data-sweep-d] .jp-Cell .highlight-ipynb .il { color: #FFBF6E; }
+[data-sweep-d] .jp-Cell .highlight-ipynb .nf,
+[data-sweep-d] .jp-Cell .highlight-ipynb .nc { color: #67E8B6; }
+[data-sweep-d] .jp-Cell .highlight-ipynb .o,
+[data-sweep-d] .jp-Cell .highlight-ipynb .ow { color: #C896E6; }
+
+/* ─── 19. HOMEPAGE BODY WRAPPER ─────────────────────────────────────────
+   `home.html` renders the markdown body inside <article.sweep-home-body>.
+   Without explicit centering, Material's `.md-content__inner` defaults
+   left-align the body to where the (hidden) sidebar would be. Force the
+   wrapper to a centered 1180px column and centre the top-level section
+   titles (h2/h3) so the gallery + "30-line example" + "Installing" rhythm
+   matches the centred features / stack / footer below.
+   ─────────────────────────────────────────────────────────────────────── */
+[data-sweep-d] .sweep-home-body,
+html[data-sweep-d] body article.md-content__inner.sweep-home-body,
+html[data-sweep-d] body .md-content > article.sweep-home-body {
+  max-width: 1180px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  margin-top: 0 !important;
+  width: auto !important;
+  padding-left: 1.5rem !important;
+  padding-right: 1.5rem !important;
+}
+/* NOTE: `<article class="md-typeset sweep-home-body">` puts both classes on
+   the SAME element — descendant selector "md-typeset sweep-home-body" misses
+   it. Use the compound `.md-typeset.sweep-home-body > X` (no space). */
+[data-sweep-d] .md-typeset.sweep-home-body > h2,
+[data-sweep-d] .md-typeset.sweep-home-body > h3 {
+  text-align: center;
+  margin-top: 2.4rem;
+  margin-bottom: 0.8rem;
+  letter-spacing: -0.025em;
+}
+[data-sweep-d] .md-typeset.sweep-home-body > h2:first-child,
+[data-sweep-d] .md-typeset.sweep-home-body > h3:first-child { margin-top: 0; }
+[data-sweep-d] .md-typeset.sweep-home-body > p {
+  max-width: 740px;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+/* Lists, code blocks, admonitions inside the body keep their natural width
+   but stay within the centred column. */
+
+/* Gallery card thumbnails: cap image height so each card stays compact —
+   notebook gallery cards with tall portrait figures (Marmousi etc.) were
+   making the rows oversized. Crop with object-fit: cover so the thumbnails
+   remain a consistent ~9rem strip. */
+[data-sweep-d] .md-typeset.sweep-home-body .grid.cards img {
+  width: 100%;
+  height: 9rem;
+  object-fit: cover;
+  border-radius: 8px;
+  display: block;
+}
+/* Force the home gallery to a fixed narrow-card layout. Material's default
+   `auto-fit + minmax(16rem, 1fr)` stretches 2-card sections (Imaging,
+   Wavefields, Anisotropic) to full row width, making them look much larger
+   than the 4-card FWI row. Cap each card at 15rem and centre the row so
+   every section has visually consistent card sizing. */
+[data-sweep-d] .md-typeset.sweep-home-body .grid.cards {
+  grid-template-columns: repeat(auto-fit, minmax(0, 15rem));
+  justify-content: center;
+  gap: 0.7rem;
+  margin: 0.6rem 0 1.4rem;
+}
+/* Tighter card padding + typography in the home gallery */
+[data-sweep-d] .md-typeset.sweep-home-body .grid.cards > ul > li,
+[data-sweep-d] .md-typeset.sweep-home-body .grid.cards > ol > li,
+[data-sweep-d] .md-typeset.sweep-home-body .grid > .card {
+  padding: 0.85rem !important;
+  border-radius: 14px !important;
+}
+[data-sweep-d] .md-typeset.sweep-home-body .grid.cards p {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin: 0.35rem 0;
+}
+[data-sweep-d] .md-typeset.sweep-home-body .grid.cards p strong {
+  font-size: 0.9rem;
+}
+
+/* ─── 20. WIDER PAGE GRID ───────────────────────────────────────────────
+   Material caps .md-grid at 61rem (~976 px) — far too narrow once both
+   sidebars (left nav + right TOC) are present on the notebook pages: the
+   content column ends up ~580 px. Widen the grid so notebook content has
+   ~1000 px to breathe, and so the centred 1180 px home sections actually
+   have visible left/right whitespace.
+   ─────────────────────────────────────────────────────────────────────── */
+[data-sweep-d] .md-grid { max-width: 1400px; }

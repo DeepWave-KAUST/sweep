@@ -72,9 +72,9 @@ Swap `Acoustic` for `Elastic`, `AcousticVTI`, `ElasticTTI`, ... — the surround
 
 ## Notebooks & examples
 
-- **Hello SWEEP** — forward / backward / 5-line FWI loop: [`docs/notebooks/00_hello_fwi.ipynb`](docs/notebooks/00_hello_fwi.ipynb)
-- **FWI on Marmousi** (acoustic / elastic / multiscale): see `docs/notebooks/01_*`–`03_*`
-- **Wavefields, DAS, anisotropic, RTM**: `docs/notebooks/04_*`–`08_*`
+- **Hello SWEEP** — forward / backward / 5-line FWI loop: [`examples/notebooks/00_hello_fwi.ipynb`](examples/notebooks/00_hello_fwi.ipynb)
+- **FWI on Marmousi** (acoustic / elastic / multiscale): see [`examples/notebooks/01_*`–`03_*`](examples/notebooks/)
+- **Wavefields, DAS, anisotropic, RTM**: [`examples/notebooks/04_*`–`08_*`](examples/notebooks/)
 - **Production scripts** (multi-GPU, MPI shot parallelism, multi-shot batching): under [`examples/`](examples/)
 
 ## Citing
