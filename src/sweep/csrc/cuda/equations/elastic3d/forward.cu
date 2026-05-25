@@ -461,18 +461,6 @@ ForwardOutput apm_forward(const ForwardInput& in)
     return out;
 }
 
-// Stubs — Phase 3D will replace these with the full APM 3-D backward.
-BackwardOutput apm_backward(const BackwardInput& /*in*/)
-{
-    TORCH_CHECK(false,
-        "elastic3d::apm_backward is not yet implemented on CUDA. "
-        "For APM 3-D forward modeling use impl='c'; for FWI / RTM use "
-        "impl='eager' (Python autograd).");
-}
-
-BackwardOutput apm_backward_bs(const BackwardInput& in)
-{
-    return apm_backward(in);
-}
+// apm_backward / apm_backward_bs are implemented in backward.cu.
 
 }
