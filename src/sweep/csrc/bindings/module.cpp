@@ -96,7 +96,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic3d_backward_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_ckpt, EK::Elastic3D, BM::Checkpoint)), "Elastic backward with checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_recursive_ckpt, EK::Elastic3D, BM::RecursiveCheckpoint)), "Elastic backward with recursive checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward", wrap_backward(dispatch_backward(elastic3d::backward, EK::Elastic3D, BM::Full)), "Elastic backward 3D (CUDA/CPU)");
-    // APM (Dong 2023, elastic limit) for 3-D — Phase 3C/3D.
+    // APM (Cao & Chen 2018, 3-D) — Phase 3C/3D.
     // CUDA only; forward is full implementation, backward is stub
     // until Phase 3D ships.
     m.def("elastic3d_apm_forward", wrap_forward(elastic3d::apm_forward), "Elastic APM forward 3D (CUDA only)");

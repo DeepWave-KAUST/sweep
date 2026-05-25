@@ -2,14 +2,17 @@
 modulus precomputation for elastic free-surface modelling with
 irregular topography on the standard staggered grid.
 
-Implements the 2-D elastic limit of the parameter-modified family:
+Implements the elastic parameter-modified free-surface method of:
 
   - Cao, J. & Chen, J.-B. (2018), "A parameter-modified method for
     implementing surface topography in elastic-wave finite-difference
-    modeling", Geophysics 83(6), T313–T322. **primary reference**
-  - Dong, S.-L. et al. (2023), "Finite-difference modeling with
-    topography using 3D viscoelastic parameter-modified free-surface
-    condition", Geophysics 88(4), T211–T226. **Table 1 cell taxonomy**
+    modeling", Geophysics 83(6), T313–T322. **primary reference (2D + 3D)**
+
+Cao & Chen 2018 already gives the full 2-D and 3-D parameter
+modifications and cell taxonomy used here. Dong et al. (2023) extends
+the same scheme to viscoelasticity (Q / memory variables); we do NOT
+implement the viscoelastic part — the kernels here are the pure
+elastic case, which is exactly Cao & Chen 2018.
 
 The free-surface effect is encoded entirely by modifying constitutive
 moduli and densities at cells that touch the air region, plus a
@@ -264,7 +267,7 @@ def precompute_apm_moduli(lame_lambda, lame_mu, rho, category):
 
     # IC: stiffness unchanged (still bulk), density at 0.75 ρ.
 
-    # Density modifications per Dong 2023 Table 1 (2D limit)
+    # Density modifications per Cao & Chen 2018 (2D)
     rho_x = where(is_H, 0.5 * rho, rho_x)
     rho_z = where(is_VL, 0.5 * rho, rho_z)
     rho_x = where(is_VR, 0.5 * rho, rho_x)
@@ -337,7 +340,7 @@ def enforce_apm_traction_bc(sxx, szz, sxz, category):
 
 
 # ===========================================================================
-# 3-D extension — Dong et al. 2023, elastic limit
+# 3-D extension — Cao & Chen 2018 (3-D parameter-modified scheme)
 # ===========================================================================
 #
 # In 3-D each cell can touch the free surface through any of FIVE of the
@@ -354,7 +357,7 @@ def enforce_apm_traction_bc(sxx, szz, sxz, category):
 # separately by the AIR-cell short-circuit.)
 #
 # Cells with two or more face-air neighbours are categorised as OC (outer
-# corner / edge), following Dong 2023 + Hayashi 2001: the simpler "ρ/4"
+# corner / edge), following Cao & Chen 2018 + Hayashi 2001: the simpler "ρ/4"
 # rule used for OC in 2-D is reused here for both edges and 3-face
 # corners.  IC (inner corner) is reserved for cells with zero face-air
 # neighbours but at least one of the 12 edge-diagonals or 8
@@ -362,7 +365,7 @@ def enforce_apm_traction_bc(sxx, szz, sxz, category):
 
 
 def classify_topography_3d(air_mask):
-    """3-D cell classifier — Dong 2023 §"Topographical free-surface".
+    """3-D cell classifier — Cao & Chen 2018 (3-D APM, topographical free surface).
 
     Parameters
     ----------
@@ -450,7 +453,7 @@ def classify_topography_3d(air_mask):
 
 def precompute_apm_moduli_3d(lame_lambda, lame_mu, rho, category):
     """Per-cell modified moduli and densities for 3-D elastic APM
-    (Dong 2023 Table 1, elastic limit).
+    (Cao & Chen 2018, 3-D parameter-modified moduli).
 
     Parameters
     ----------
@@ -582,7 +585,7 @@ def precompute_apm_moduli_3d(lame_lambda, lame_mu, rho, category):
         lam_zz_xx = where(surface, zeros_like(lame_lambda), lam_zz_xx)
         lam_zz_yy = where(surface, zeros_like(lame_lambda), lam_zz_yy)
 
-    # ---- Shear node moduli (Dong 2023 Table 1, with the 2ε→μ·(∂v+∂v) absorbed) ----
+    # ---- Shear node moduli (Cao & Chen 2018, with the 2ε→μ·(∂v+∂v) absorbed) ----
     # Bulk: μ everywhere.
     mu_xy = where(bulk_or_IC, lame_mu, zeros_like(lame_mu))
     mu_xz = where(bulk_or_IC, lame_mu, zeros_like(lame_mu))

@@ -396,7 +396,7 @@ class Elastic(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
-    supports_apm = True          # Dong 2023 elastic-limit APM is implemented
+    supports_apm = True          # Cao & Chen 2018 3-D APM is implemented
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         """Build the 3-D elastic equation operator.
@@ -426,7 +426,7 @@ class Elastic(FirstOrderEquation):
                 on ``'torch'``. Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend, ndim=3)
-        # APM (Dong 2023) cache: keyed by id() of the input tensors so it
+        # APM (Cao & Chen 2018) cache: keyed by id() of the input tensors so it
         # hits on every subsequent timestep within a propagator run.
         self._apm_cache_key = None
         self._apm_cache = None
@@ -469,7 +469,7 @@ class Elastic(FirstOrderEquation):
 
         # APM dispatch: if the propagator's ``topography=`` was a 3-D air
         # mask it stored a replicate-padded runtime version on the
-        # equation.  Route through the parameter-modified step (Dong 2023).
+        # equation.  Route through the parameter-modified step (Cao & Chen 2018).
         air_mask_rt = getattr(self, "_apm_air_mask_runtime", None)
         if air_mask_rt is not None:
             return self._func_apm(
@@ -500,7 +500,7 @@ class Elastic(FirstOrderEquation):
 
     def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
                   dt, h, b, **kwargs):
-        """One leapfrog step with APM-modified moduli (Dong 2023, elastic limit).
+        """One leapfrog step with APM-modified moduli (Cao & Chen 2018, 3-D).
 
         Caches the per-category effective moduli by the id() of the input
         tensors — the same (air_mask, λ, μ, ρ) hit the cache on every
@@ -583,7 +583,7 @@ class Elastic(FirstOrderEquation):
         )
 
     def _C_apm(self):
-        """APM CUDA bindings (Dong 2023, elastic limit).
+        """APM CUDA bindings (Cao & Chen 2018, 3-D).
         Forward is fully implemented; backward is a stub pending Phase 3D
         — the _c.py dispatch handles the fallback to eager autograd for
         gradient computation."""

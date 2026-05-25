@@ -1121,7 +1121,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
 
 // ===========================================================================
-// APM (Dong 2023, elastic limit) 3-D backward — full + boundary-saving.
+// APM (Cao & Chen 2018, 3-D) backward — full + boundary-saving.
 // ===========================================================================
 // Expects the 21-tensor APM 3-D model layout assembled by _c.py:
 //   models = [vp, vs, rho, lam, mu, lam_2mu,
