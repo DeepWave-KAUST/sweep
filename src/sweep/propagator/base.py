@@ -134,14 +134,25 @@ class PropBase:
             resolved_device = getattr(equation, 'device', None)
         self.dev = resolved_device
         self.abcn = abcn
-        # Resolve topo_method + effective free_surface layout BEFORE PML
-        # padding is computed — the method dictates the layout.  When
-        # ``topography is None`` the user's ``free_surface`` flag is
-        # honoured unchanged.
-        self._topo_method, self.free_surface = self._resolve_topo_method(
-            topography=topography,
-            topo_method=topo_method,
-            free_surface=free_surface,
+        # Resolve topo_method + free_surface BEFORE PML padding is
+        # computed.  Two separate flags come out:
+        #   ``self.free_surface``           — physical: model has a free
+        #     surface (any topo + ``True`` flag).  This is the user-facing
+        #     attribute.
+        #   ``self._image_method_active``   — implementation: CUDA / Python
+        #     kernels should use the image-method PML layout (top PML
+        #     suppressed) AND the odd-parity z-derivative mirror at the
+        #     surface row.  ``True`` only when method == 'image'.
+        # APM implements the free surface via per-cell modulus
+        # modifications and keeps full PML on all four sides, so it has
+        # ``free_surface=True`` (physical) but ``_image_method_active=False``
+        # (no image-method mirror / no top-PML suppression).
+        self._topo_method, self.free_surface, self._image_method_active = (
+            self._resolve_topo_method(
+                topography=topography,
+                topo_method=topo_method,
+                free_surface=free_surface,
+            )
         )
         if np.isscalar(dh):
             self._dh = float(dh)
@@ -194,8 +205,13 @@ class PropBase:
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
         self._abc_cache_key = None
 
-        # Keep the equation object aware of geometry-dependent boundary behavior.
-        self.equation.free_surface = self.free_surface
+        # Keep the equation object aware of geometry-dependent boundary
+        # behavior.  ``equation.free_surface`` is the image-method-layout
+        # flag (used by the Python eager step to decide whether to apply
+        # the top-row image mirror).  APM equations set free_surface=False
+        # internally because their kernels don't engage the image mirror;
+        # the per-cell category handles the FS BC.
+        self.equation.free_surface = self._image_method_active
         self.equation.abcn = self.abcn
         if getattr(self.equation, "pd", None) is not None and hasattr(self.equation.pd, "set_spacing"):
             self.equation.pd.set_spacing(self._grid_spacing)
@@ -203,7 +219,9 @@ class PropBase:
         self.source_type = self._resolve_field_types(source_type, role="source")
         self.receiver_type = self._resolve_field_types(receiver_type, role="receiver")
 
-        if self.free_surface:
+        # PML layout: image method suppresses top PML (top halo holds the
+        # mirror); APM and no-FS use full PML on all sides.
+        if self._image_method_active:
             self.padding_z = (0, self.abcn)
             shape_z = self.shape[0] + self.abcn
         else:
@@ -222,15 +240,32 @@ class PropBase:
         self._set_call_signature()
 
     def _resolve_topo_method(self, *, topography, topo_method, free_surface):
-        """Resolve the topographic discretisation method and the effective
-        ``free_surface`` layout flag.
+        """Resolve topo method, physical free-surface state, and image-method
+        layout flag.
+
+        New semantics (post-refactor):
+
+        * ``free_surface=True`` (no topo)  → flat free surface (image method).
+        * ``free_surface=False`` (no topo) → no free surface, full PML.
+        * ``topography=`` given             → free surface is ON regardless
+          of the ``free_surface`` flag; method auto-selects (APM if
+          supported, otherwise image) unless the user explicitly passes
+          ``topo_method='image'`` or ``'apm'``.
+        * ``topo_method='apm'`` without ``topography``                 → error.
 
         Returns
         -------
-        (method, free_surface_effective) : (str | None, bool)
-            ``method`` is one of ``'image'``, ``'apm'``, or ``None`` (no
-            topography).  ``free_surface_effective`` is the boolean used
-            to lay out PML padding.
+        (method, free_surface_physical, image_method_active) :
+            (str | None, bool, bool)
+
+        ``method``                — ``'image'``, ``'apm'``, or ``None``.
+        ``free_surface_physical`` — user-facing flag: does the model have a
+                                    free surface at all?
+        ``image_method_active``   — implementation flag: should kernels use
+                                    image-method PML layout (top PML
+                                    suppressed) and the odd-parity
+                                    z-derivative mirror?  Only true when
+                                    ``method == 'image'``.
         """
         valid_methods = {'auto', 'image', 'apm'}
         if topo_method not in valid_methods:
@@ -239,10 +274,7 @@ class PropBase:
                 f"got {topo_method!r}"
             )
 
-        # No topography — user's free_surface stays as-is, no method.
-        if topography is None:
-            return None, bool(free_surface)
-
+        has_topo = topography is not None
         supports_apm = bool(getattr(self.equation, 'supports_apm', False))
 
         # Curvilinear equations have their own topo path (boundary-fitted
@@ -251,42 +283,45 @@ class PropBase:
         # resolution.
         is_curvilinear = bool(getattr(self.equation, 'is_curvilinear', False))
         if is_curvilinear:
-            return None, bool(free_surface)
+            fs = bool(free_surface) or has_topo
+            return None, fs, fs
 
-        # Legacy back-compat path: ``topo_method='auto'`` + explicit
-        # ``free_surface=True`` used to mean "image method".  Honour it,
-        # but emit a DeprecationWarning steering users toward
-        # ``topo_method=`` for explicit selection.
-        if topo_method == 'auto' and free_surface is True:
-            import warnings
-            warnings.warn(
-                "Passing `free_surface=True` along with `topography=` is "
-                "deprecated.  When `topography` is given, a free surface "
-                "is implicit — use `topo_method='image'` (or omit it) to "
-                "select the image / vacuum staircase, or `topo_method="
-                "'apm'` for the Cao & Chen 2018 parameter-modified path.",
-                DeprecationWarning, stacklevel=4,
-            )
-            method = 'image'
-        elif topo_method == 'auto':
-            # Sensible default: APM for equations that support it, else image.
+        # ---- No topography ----
+        if not has_topo:
+            if free_surface:
+                # Flat free surface — only image method supports this
+                # configuration.  APM is meaningless without per-cell
+                # categories from a topo mask.
+                if topo_method == 'apm':
+                    raise ValueError(
+                        "topo_method='apm' requires a topography= mask; "
+                        "for a flat free surface use topo_method='image' "
+                        "(or omit it)."
+                    )
+                return 'image', True, True
+            # No free surface at all.
+            return None, False, False
+
+        # ---- Topography given: free surface is implicit ----
+        # If the user also passed free_surface=False, we still turn it on
+        # (topo implies FS); if they passed True, that matches.  No
+        # warning needed — the new semantics make the combination
+        # unambiguous.
+        if topo_method == 'auto':
             method = 'apm' if supports_apm else 'image'
-        else:
-            method = topo_method   # 'image' or 'apm'
+        elif topo_method == 'apm':
+            if not supports_apm:
+                raise ValueError(
+                    f"topo_method='apm' requires equation.supports_apm=True; "
+                    f"{type(self.equation).__name__} only supports the image "
+                    f"method (use topo_method='image' or omit topo_method)."
+                )
+            method = 'apm'
+        else:  # 'image'
+            method = 'image'
 
-        # Validate method against equation capability.
-        if method == 'apm' and not supports_apm:
-            raise ValueError(
-                f"topo_method='apm' requires equation.supports_apm=True; "
-                f"{type(self.equation).__name__} only supports the image "
-                f"method (use topo_method='image' or omit topo_method)."
-            )
-
-        # The method dictates the grid layout:
-        #   'image' → top PML suppressed (top halo holds image mirror)
-        #   'apm'   → full PML on every side (no special top treatment)
-        free_surface_effective = (method == 'image')
-        return method, free_surface_effective
+        image_method_active = (method == 'image')
+        return method, True, image_method_active
 
     def _process_topography(self, topography):
         """Validate and store irregular free-surface topography.
@@ -297,19 +332,15 @@ class PropBase:
         only the 1-D form.  Method dispatch follows ``self._topo_method``
         (set in :meth:`_resolve_topo_method`):
 
-        ============================ ===============================
-        ``free_surface`` (constructor)  Method
-        ============================ ===============================
-        ``True``                       Image-method / vacuum
-                                       staircase (Stage 1 for
-                                       :class:`Acoustic`, Stage 2
-                                       Robertsson 1996 for
-                                       :class:`Elastic`).  Uses
-                                       ``_topo_rows_runtime``.
-        ``False``                      APM (Cao & Chen 2018,
-                                       :class:`Elastic` only).
-                                       Uses ``_apm_air_mask_runtime``.
-        ============================ ===============================
+        ============== =================================================
+        ``_topo_method``  Backend
+        ============== =================================================
+        ``'image'``      Image-method / vacuum staircase
+                         (Mittet 2002 / Robertsson 1996).
+                         Uses ``_topo_rows_runtime``.
+        ``'apm'``        APM (Cao & Chen 2018) — elastic only.
+                         Uses ``_apm_air_mask_runtime``.
+        ============== =================================================
 
         Curvilinear equations (``equation.is_curvilinear``) consume the
         per-column elevation independently of the dispatch above.
@@ -341,9 +372,9 @@ class PropBase:
         topo_input = torch.as_tensor(topography)
 
         # Resolve physical (nz_phys, nx_phys) from the runtime shape +
-        # ``free_surface`` flag (image method skips top PML; APM has PML
+        # image-method-layout flag (image suppresses top PML; APM has PML
         # on both top and bottom).
-        if self.free_surface:
+        if self._image_method_active:
             nz_phys = self.shape[0] - self.abcn
         else:
             nz_phys = self.shape[0] - 2 * self.abcn
@@ -499,7 +530,7 @@ class PropBase:
                 f"ndim={self.ndim})."
             )
 
-        nz_phys = self.shape[0] - (self.abcn if self.free_surface else 2 * self.abcn)
+        nz_phys = self.shape[0] - (self.abcn if self._image_method_active else 2 * self.abcn)
         nx_phys = self.shape[1] - 2 * self.abcn
         device = getattr(self.equation, "device", None) or self.dev
 
@@ -514,7 +545,7 @@ class PropBase:
         # Pad metrics to runtime shape using edge replication. The
         # runtime shape is ``self.shape + 2 * halo`` per axis, with
         # padding pattern ``(pad_x_left, pad_x_right, pad_z_top, pad_z_bottom)``.
-        if self.free_surface:
+        if self._image_method_active:
             pad_z_top, pad_z_bot = halo, self.abcn + halo
         else:
             pad_z_top = pad_z_bot = self.abcn + halo
@@ -709,7 +740,7 @@ class PropBase:
         shape = tuple(kwargs.get('shape', self.shape))
         abc_key = (
             self.pml_type,
-            tuple([self.abcn if not self.free_surface else 0] + (2**self.ndim-1) * [self.abcn]),
+            tuple([self.abcn if not self._image_method_active else 0] + (2**self.ndim-1) * [self.abcn]),
             self.equation.so,
             fd_pad,
             self._dt,
@@ -746,7 +777,7 @@ class PropBase:
         Returns:
             np.ndarray: The cropped data
         """
-        if self.free_surface:
+        if self._image_method_active:
             return data[..., 0:-self.abcn, self.abcn:-self.abcn]
         else:
             s = slice(self.abcn, -self.abcn)
@@ -782,12 +813,12 @@ class PropBase:
         halo = self._runtime_fd_halo()
         if halo <= 0:
             offset = [self.abcn] * self.ndim
-            if self.free_surface:
+            if self._image_method_active:
                 offset[-1] = 0
             return tuple(offset)
 
         offset = [self.abcn + halo] * self.ndim
-        if self.free_surface:
+        if self._image_method_active:
             offset[-1] = halo
         return tuple(offset)
 

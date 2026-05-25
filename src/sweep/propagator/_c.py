@@ -684,7 +684,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.equation.so // 2,
             self.B,
             staging_interval if boundary_on_cpu else transfer_interval,
-            self.free_surface,
+            self._image_method_active,
             self.equation.so // 2 + 1,
             tangent_pad=cuda_layout.boundary_tangent_pad,
         )
@@ -938,7 +938,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         sources = sources.copy()
         receivers = receivers.copy()
 
-        if self.free_surface:
+        if self._image_method_active:
             sources[..., 0] += base_shift
             receivers[..., 0] += base_shift
 
@@ -1127,7 +1127,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 checkpoint_on_cpu,
                 use_boundary_saving,
                 use_pinned_memory,
-                self.free_surface,
+                self._image_method_active,
                 transfer_interval,
                 boundary_ring_buffers,
                 boundary_on_cpu,
@@ -1246,7 +1246,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         sources = sources.copy()
         receivers = receivers.copy()
-        if self.free_surface:
+        if self._image_method_active:
             sources[..., 0] += base_shift
             receivers[..., 0] += base_shift
             if self.ndim == 3:
@@ -1363,7 +1363,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.boundary_on_disk = boundary_on_disk
         fwd.boundary_disk_async_read = boundary_disk_async_read
         fwd.use_pinned_memory = use_pinned_memory
-        fwd.free_surface = self.free_surface
+        fwd.free_surface = self._image_method_active
         # Topography plumbing (image method).  Empty + has_topo=False for flat.
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
@@ -1417,7 +1417,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.nt = self.nt
         bwd.dt = self._dt
         bwd.spacing = spacing
-        bwd.free_surface = self.free_surface
+        bwd.free_surface = self._image_method_active
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
             bwd.topo_rows = topo_rows_rt.to(torch.int32).contiguous()
