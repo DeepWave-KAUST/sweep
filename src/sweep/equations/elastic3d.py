@@ -1,22 +1,39 @@
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from ._free_surface import top_free_surface_derivative, zero_top_row
+from ._free_surface import (
+    top_free_surface_derivative,
+    top_free_surface_derivative_topo,
+    zero_top_row,
+    zero_at_topo,
+)
+
+
+def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows):
+    """3-D free-surface z-derivative: flat ``top_halo`` row when
+    ``topo_rows`` is None, per-(iy,ix) ``topo_rows[iy, ix]`` row otherwise."""
+    if topo_rows is None:
+        return top_free_surface_derivative(field, deriv, top_halo, odd=odd, axis=-3)
+    return top_free_surface_derivative_topo(
+        field, deriv, top_halo, odd=odd, axis=-3, iz_surf=topo_rows
+    )
+
 
 def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          m_vxx, m_vxy, m_vxz,
          m_vyx, m_vyy, m_vyz,
-         m_vzx, m_vzy, m_vzz, 
+         m_vzx, m_vzy, m_vzz,
          m_sxxx, m_szzz,
          m_sxyx, m_sxyy,
-         m_sxzx, m_sxzz,
+            m_sxzx, m_sxzz,
             m_syyy,
          m_syzy, m_syzz,
-         vp, vs, rho, 
+         vp, vs, rho,
          lame_lambda, lame_mu,
-         dt, h, b, pd, 
+         dt, h, b, pd,
          pml=None,
          free_surface=False,
+         topo_rows=None,
          ):
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
@@ -24,21 +41,21 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dsxx_dx = pd.x_forward(sxx)
     dsxy_dy = pd.y_backward(sxy)
     if free_surface:
-        dsxz_dz = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-3)
+        dsxz_dz = _fs_z_deriv(sxz, pd.z_backward, top_halo, True, topo_rows)
     else:
         dsxz_dz = pd.z_backward(sxz)
 
     dsxy_dx = pd.x_backward(sxy)
     dsyy_dy = pd.y_forward(syy)
     if free_surface:
-        dsyz_dz = top_free_surface_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-3)
+        dsyz_dz = _fs_z_deriv(syz, pd.z_backward, top_halo, True, topo_rows)
     else:
         dsyz_dz = pd.z_backward(syz)
 
     dsxz_dx = pd.x_backward(sxz)
     dsyz_dy = pd.y_backward(syz)
     if free_surface:
-        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-3)
+        dszz_dz = _fs_z_deriv(szz, pd.z_forward, top_halo, True, topo_rows)
     else:
         dszz_dz = pd.z_forward(szz)
 
@@ -73,21 +90,21 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
     if free_surface:
-        dvx_dz = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-3)
+        dvx_dz = _fs_z_deriv(vx, pd.z_forward, top_halo, False, topo_rows)
     else:
         dvx_dz = pd.z_forward(vx)
 
     dvy_dx = pd.x_forward(vy)
     dvy_dy = pd.y_backward(vy)
     if free_surface:
-        dvy_dz = top_free_surface_derivative(vy, pd.z_forward, top_halo, odd=False, axis=-3)
+        dvy_dz = _fs_z_deriv(vy, pd.z_forward, top_halo, False, topo_rows)
     else:
         dvy_dz = pd.z_forward(vy)
 
     dvz_dx = pd.x_forward(vz)
     dvz_dy = pd.y_forward(vz)
     if free_surface:
-        dvz_dz = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-3)
+        dvz_dz = _fs_z_deriv(vz, pd.z_backward, top_halo, True, topo_rows)
     else:
         dvz_dz = pd.z_backward(vz)
 
@@ -121,9 +138,16 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
 
     if free_surface:
-        szz = zero_top_row(szz, top_halo, axis=-3)
-        sxz = zero_top_row(sxz, top_halo, axis=-3)
-        syz = zero_top_row(syz, top_halo, axis=-3)
+        if topo_rows is not None:
+            # Irregular surface: zero exactly the surface row per (iy, ix)
+            # column (σ_zz = σ_xz = σ_yz = 0).
+            szz = zero_at_topo(szz, topo_rows, axis=-3)
+            sxz = zero_at_topo(sxz, topo_rows, axis=-3)
+            syz = zero_at_topo(syz, topo_rows, axis=-3)
+        else:
+            szz = zero_top_row(szz, top_halo, axis=-3)
+            sxz = zero_top_row(sxz, top_halo, axis=-3)
+            syz = zero_top_row(syz, top_halo, axis=-3)
     
     return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
            m_vxx, m_vxy, m_vxz, \
@@ -297,6 +321,9 @@ class Elastic(FirstOrderEquation):
             lame_mu = rho * vs**2
         else:
             raise ValueError(f"Elastic3D.func expected 3 or 5 models, got {len(models)}")
+        # Irregular topography (image method): 2-D ``topo_rows`` shape
+        # ``(ny, nx)`` on the runtime grid; ``None`` for flat / no-FS.
+        topo_rows = getattr(self, "_topo_rows_runtime", None)
         return step(
             *wavefields,
             vp,
@@ -310,6 +337,7 @@ class Elastic(FirstOrderEquation):
             pd=self.pd,
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
+            topo_rows=topo_rows,
             **kwargs,
         )
     
