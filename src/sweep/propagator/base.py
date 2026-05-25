@@ -528,8 +528,8 @@ class PropBase:
                 mode="replicate",
             ).view(-1).to(torch.int32)
         else:
-            # 3-D propagator: 2-D row per (iy, ix).  Pad x and y via a
-            # single F.pad call (W_left, W_right, H_left, H_right).
+            # 3-D propagator: 2-D row per (iy, ix).  Pad x then y via a
+            # single F.pad call (right, left, top, bottom).
             topo_runtime = F.pad(
                 topo_z.to(torch.float32).view(1, 1, *topo_z.shape),
                 (pad_each, pad_each, pad_each, pad_each),
@@ -544,7 +544,7 @@ class PropBase:
                 pass
 
         # Defensive: ensure CPU→GPU copy is complete before any forward
-        # kernel reads ``topo_rows[ix]``.  Without this we've seen ~30%
+        # kernel reads ``topo_rows[..., ix]``.  Without this we've seen ~30%
         # non-determinism in CUDA forward results.
         if topo_runtime.device.type == "cuda":
             torch.cuda.synchronize(topo_runtime.device)
@@ -556,20 +556,49 @@ class PropBase:
 
     def _populate_apm_topography(self, air_mask_phys):
         """Set ``self.equation._apm_air_mask_runtime`` for the APM path.
-        Replicate-pads the 2-D air_mask through PML + stencil halo on
-        all four sides so the surface stays continuous through the
-        absorbing boundary."""
+
+        Replicate-pads the air mask through PML + stencil halo so the
+        surface stays continuous through the absorbing boundary.
+
+        Shapes:
+
+        * 2-D propagator: ``air_mask_phys`` is ``(nz_phys, nx_phys)``;
+          output is ``(nz_phys + 2*pad, nx_phys + 2*pad)``.
+        * 3-D propagator: ``air_mask_phys`` is
+          ``(nz_phys, ny_phys, nx_phys)``; output is
+          ``(nz_phys + 2*pad, ny_phys + 2*pad, nx_phys + 2*pad)``,
+          replicate-padded on all 6 sides.
+        """
         import torch
         import torch.nn.functional as F
 
-        nz_phys, nx_phys = air_mask_phys.shape
         halo = self.equation.so // 2
         pad_each = self.abcn + halo
-        air_mask_padded = F.pad(
-            air_mask_phys.view(1, 1, nz_phys, nx_phys),
-            (pad_each, pad_each, pad_each, pad_each),
-            mode="replicate",
-        ).view(nz_phys + 2 * pad_each, nx_phys + 2 * pad_each)
+
+        if air_mask_phys.ndim == 2:
+            nz_phys, nx_phys = air_mask_phys.shape
+            air_mask_padded = F.pad(
+                air_mask_phys.view(1, 1, nz_phys, nx_phys),
+                (pad_each, pad_each, pad_each, pad_each),
+                mode="replicate",
+            ).view(nz_phys + 2 * pad_each, nx_phys + 2 * pad_each)
+        elif air_mask_phys.ndim == 3:
+            nz_phys, ny_phys, nx_phys = air_mask_phys.shape
+            # F.pad on (N=1, C=1, D, H, W) accepts a 6-tuple
+            # (W_left, W_right, H_left, H_right, D_left, D_right).
+            air_mask_padded = F.pad(
+                air_mask_phys.view(1, 1, nz_phys, ny_phys, nx_phys),
+                (pad_each, pad_each, pad_each, pad_each, pad_each, pad_each),
+                mode="replicate",
+            ).view(
+                nz_phys + 2 * pad_each,
+                ny_phys + 2 * pad_each,
+                nx_phys + 2 * pad_each,
+            )
+        else:
+            raise ValueError(
+                f"air_mask_phys must be 2-D or 3-D, got ndim={air_mask_phys.ndim}"
+            )
 
         device = getattr(self.equation, "device", None) or self.dev
         if device is not None:
