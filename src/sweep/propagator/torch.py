@@ -121,6 +121,17 @@ def _merge_option_dict(base, extra, *, label):
 def _normalize_cuda_memory_kwargs(merged):
     memory = merged.pop("memory", None)
     if memory is None:
+        # impl='c' default: boundary saving with GPU storage.  Cheaper memory
+        # than full-wavefield mode and avoids the variable-batch
+        # non-contiguous slice that bites chunked checkpointing
+        # (cf. fix/ckpt-batch-shrink).  Only inject if the user hasn't
+        # already chosen a memory strategy at the top level.
+        if "use_ckpt" not in merged and "boundary_saving_config" not in merged:
+            merged["boundary_saving_config"] = {
+                "enabled": True,
+                "storage": "gpu",
+            }
+            merged["use_ckpt"] = False
         return merged
 
     memory = options_to_dict(memory)
