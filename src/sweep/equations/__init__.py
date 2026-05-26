@@ -14,18 +14,29 @@ from .elastic import Elastic
 from .elastic_tti import ElasticTTI
 from .elastic_tti_sg import ElasticTTISG
 from .elastic3d import Elastic as Elastic3D
-from .das import (
-    DAS,
-    DASElastic,
-    DASElastic3D,
-    DASModeler,    # back-compat alias of `DAS`
-    DASMu,
-    DASMu3D,
-    DASZhao,
-    DASZhao3D,
-    gauge_average,
-    helical_das_response,
-)
+# DAS family lives in `das.py` which imports torch at module top. Guard the
+# import so jax-only environments (no torch installed) can still
+# ``import sweep.equations`` and use jax-only equations / propagators.
+# Mirrors the ``qP_tti`` pattern below.
+try:
+    from .das import (
+        DAS,
+        DASElastic,
+        DASElastic3D,
+        DASModeler,    # back-compat alias of `DAS`
+        DASMu,
+        DASMu3D,
+        DASZhao,
+        DASZhao3D,
+        gauge_average,
+        helical_das_response,
+    )
+except ModuleNotFoundError as _das_import_err:
+    if _das_import_err.name != "torch":
+        raise
+    DAS = DASElastic = DASElastic3D = DASModeler = None
+    DASMu = DASMu3D = DASZhao = DASZhao3D = None
+    gauge_average = helical_das_response = None
 
 # from .acoustic_vrr import AcousticVRR
 try:
