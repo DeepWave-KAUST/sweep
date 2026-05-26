@@ -13,7 +13,9 @@ linked at the bottom of this page.
 
 <div class="grid cards" markdown>
 
--   **Hello · SWEEP**
+-   ![Hello SWEEP](../figures/gallery/00_hello_fwi.png){ loading=lazy }
+
+    **Hello · SWEEP**
 
     ---
 
@@ -21,9 +23,11 @@ linked at the bottom of this page.
     `Acoustic()` + `PropTorch()` → one shot gather → one `.backward()` for a
     vp gradient → 5-line Adam loop. No external data.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/00_hello_fwi.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/00_hello_fwi.ipynb)
 
--   **FWI · Acoustic · Marmousi**
+-   ![FWI Acoustic Marmousi](../figures/gallery/01_fwi_acoustic_marmousi.png){ loading=lazy }
+
+    **FWI · Acoustic · Marmousi**
 
     ---
 
@@ -31,9 +35,11 @@ linked at the bottom of this page.
     observed gathers, and invert the smooth start with Adam + MSE. Each phase
     is one cell.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/01_fwi_acoustic_marmousi.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/01_fwi_acoustic_marmousi.ipynb)
 
--   **FWI · Elastic · Marmousi**
+-   ![FWI Elastic Marmousi](../figures/gallery/02_fwi_elastic_marmousi.png){ loading=lazy }
+
+    **FWI · Elastic · Marmousi**
 
     ---
 
@@ -41,9 +47,11 @@ linked at the bottom of this page.
     `(vp, vs, rho)` triplet. `vs` and `rho` are derived from `vp` with Poisson
     + Gardner relations so the example still runs with zero downloads.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/02_fwi_elastic_marmousi.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/02_fwi_elastic_marmousi.ipynb)
 
--   **FWI · multiscale**
+-   ![FWI multiscale](../figures/gallery/03_fwi_multiscale.png){ loading=lazy }
+
+    **FWI · multiscale**
 
     ---
 
@@ -51,18 +59,22 @@ linked at the bottom of this page.
     Marmousi 25 m. Each band feeds its final model into the next; loss
     drops monotonically across the chain and avoids cycle skipping.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/03_fwi_multiscale.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/03_fwi_multiscale.ipynb)
 
--   **DAS · Zhao vs Mu**
+-   ![DAS Zhao vs Mu](../figures/gallery/04_das_zhao_vs_mu.png){ loading=lazy }
+
+    **DAS · Zhao vs Mu**
 
     ---
 
     Forward-model the same three-layer elastic medium with the two DAS
     formulations and compare the resulting strain-rate gathers side by side.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/04_das_zhao_vs_mu.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/04_das_zhao_vs_mu.ipynb)
 
--   **Wavefield · VTI + shear suppression**
+-   ![Wavefield VTI](../figures/gallery/05_wavefield_vti.png){ loading=lazy }
+
+    **Wavefield · VTI + shear suppression**
 
     ---
 
@@ -71,9 +83,11 @@ linked at the bottom of this page.
     on the canonical Duveneck Fig 2 setup; the trailing cell demonstrates
     the δ→ε disk taper that kills the pseudo-acoustic shear artefact.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/05_wavefield_vti.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/05_wavefield_vti.ipynb)
 
--   **Wavefield · Elastic**
+-   ![Wavefield Elastic](../figures/gallery/06_wavefield_elastic.png){ loading=lazy }
+
+    **Wavefield · Elastic**
 
     ---
 
@@ -81,9 +95,11 @@ linked at the bottom of this page.
     uniform elastic medium — explosion, vertical dipole, and pure shear —
     to visualize P/S excitation and radiation patterns.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/06_wavefield_elastic.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/06_wavefield_elastic.ipynb)
 
--   **Memory · strategies**
+-   ![Memory strategies](../figures/gallery/07_memory_strategies.png){ loading=lazy }
+
+    **Memory · strategies**
 
     ---
 
@@ -91,9 +107,11 @@ linked at the bottom of this page.
     full vs. eager ckpt vs. c boundary-saving / chunk-ckpt / recursive-ckpt)
     with side-by-side peak-memory and wallclock charts.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/07_memory_strategies.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/07_memory_strategies.ipynb)
 
--   **RTM · Acoustic · Marmousi**
+-   ![RTM Acoustic Marmousi](../figures/gallery/08_rtm_acoustic_marmousi.png){ loading=lazy }
+
+    **RTM · Acoustic · Marmousi**
 
     ---
 
@@ -102,7 +120,67 @@ linked at the bottom of this page.
     and `solver.rtm()`. Produces a clean reflectivity image in <3 s on
     30 shots.
 
-    [:material-notebook-outline: Open notebook](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/notebooks/08_rtm_acoustic_marmousi.ipynb)
+    [:material-notebook-outline: Open notebook](../notebooks/08_rtm_acoustic_marmousi.ipynb)
+
+-   ![Solver hyperparameters](../figures/gallery/09_solver_hyperparams.png){ loading=lazy }
+
+    **Solver · hyperparameters**
+
+    ---
+
+    Side-by-side wavefield snapshots showing how the propagator's
+    `spatial_order`, `abcn` (PML width) and `pml_type` choices visibly
+    change boundary reflections and grid dispersion on a single shot.
+
+    [:material-notebook-outline: Open notebook](../notebooks/09_solver_hyperparams.ipynb)
+
+-   ![Wavefield Elastic TTI](../figures/gallery/10_wavefield_elastic_tti.png){ loading=lazy }
+
+    **Wavefield · Elastic TTI**
+
+    ---
+
+    Rotated staggered-grid (`ElasticTTI`) `vz` snapshots across three
+    tilt / azimuth cases — the Duveneck Fig 2 setup at full resolution
+    with `(ε, δ, γ, θ, φ)` rotated symmetry axis.
+
+    [:material-notebook-outline: Open notebook](../notebooks/10_wavefield_elastic_tti.ipynb)
+
+-   ![3D Overthrust FWI](../figures/gallery/11_fwi_acoustic_overthrust_3d.png){ loading=lazy }
+
+    **FWI · 3-D · Overthrust**
+
+    ---
+
+    Acoustic FWI on a 3-D Overthrust volume — `Acoustic3D` solver,
+    boundary-saving for memory, depth/inline/crossline slices of the
+    recovered `vp` cube vs ground truth.
+
+    [:material-notebook-outline: Open notebook](../notebooks/11_fwi_acoustic_overthrust_3d.ipynb)
+
+-   ![Multi-GPU DDP](../figures/gallery/01_fwi_acoustic_marmousi.png){ loading=lazy }
+
+    **Multi-GPU · DDP vs 1 GPU**
+
+    ---
+
+    `torchrun --nproc_per_node=N` driver that shards shots across GPUs and
+    syncs gradients via `torch.distributed`. Hits 3.79× speedup on 4× V100
+    for Marmousi FWI compared to a single-GPU baseline.
+
+    [:material-notebook-outline: Open notebook](../notebooks/12_multi_gpu.ipynb)
+
+-   ![Wavefield Topography](../figures/gallery/15_wavefield_topography.png){ loading=lazy }
+
+    **Wavefield · irregular topography**
+
+    ---
+
+    Image-method irregular free-surface for acoustic & elastic 2-D — drape
+    a non-flat surface along the top of the model and see how the topography
+    reshapes the surface waves and primaries.
+
+    [:material-notebook-outline: Open notebook](../notebooks/15_wavefield_topography.ipynb)
 
 </div>
 
