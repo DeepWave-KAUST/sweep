@@ -1247,18 +1247,24 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         use_pinned_memory = boundary_cfg["pinned_memory"]
         boundary_disk_dir = boundary_cfg.get("disk_dir")
 
-        if self.ndim == 2 and (use_boundary_saving or self.use_ckpt):
-            raise NotImplementedError(
-                "PropTorch impl='c' RTM for 2D acoustic currently supports full-wavefield mode only; "
-                "disable boundary saving and checkpointing."
-            )
+        # 2-D RTM only supports the full-wavefield path today.  Silently
+        # force it on so the new impl='c' default (boundary saving / GPU,
+        # see _normalize_cuda_memory_kwargs in torch.py) doesn't trip up
+        # RTM users with a NotImplementedError.  Use a local ``use_ckpt``
+        # shadow rather than mutating ``self.use_ckpt`` so other
+        # forward()/rtm() calls on this solver keep their configured
+        # strategy.
+        use_ckpt = self.use_ckpt
+        if self.ndim == 2:
+            use_boundary_saving = False
+            use_ckpt = False
 
-        use_recursive_checkpoint = bool(self.use_ckpt and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None)
-        checkpoint_on_cpu = bool(self.use_ckpt and self.ckpt_storage == "cpu")
-        if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
+        use_recursive_checkpoint = bool(use_ckpt and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None)
+        checkpoint_on_cpu = bool(use_ckpt and self.ckpt_storage == "cpu")
+        if use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
         checkpoint_steps = torch.empty(0, dtype=torch.int32)
-        if self.use_ckpt:
+        if use_ckpt:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
                 self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size)
@@ -1266,8 +1272,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
 
         self.forward_allocator.zero_()
-        checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if self.use_ckpt else ()
-        if self.use_ckpt and checkpoint_buffers:
+        checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_ckpt else ()
+        if use_ckpt and checkpoint_buffers:
             self.checkpoint_allocator.zero_()
         if use_boundary_saving:
             self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
@@ -1285,7 +1291,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu_full, batch_size) if use_boundary_saving else ()
         last_two = self._slice_last_two(batch_size) if use_boundary_saving else self.last_two
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
-        save_all_wavefields = not use_boundary_saving and not self.use_ckpt
+        save_all_wavefields = not use_boundary_saving and not use_ckpt
 
         M = self.equation.so // 2
         padding = [p + M for p in self.padding]
@@ -1345,10 +1351,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         models = [m[None, None, ...].repeat(batch_size, *([1] * (m.ndim + 1))) for m in self.models_padded]
         requires_model_grad = any(m.requires_grad for m in models)
-        save_all_wavefields = bool(self.ndim == 2 or (requires_model_grad and not use_boundary_saving and not self.use_ckpt))
+        save_all_wavefields = bool(self.ndim == 2 or (requires_model_grad and not use_boundary_saving and not use_ckpt))
         self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_model_grad)
         self._ensure_adjoint_workspace_buffers(batch_size)
-        if self.use_ckpt:
+        if use_ckpt:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
                 self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size)
@@ -1356,7 +1362,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
-        checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if self.use_ckpt else ()
+        checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_ckpt else ()
 
         if self.forward_wavefields:
             self.forward_allocator.zero_()
@@ -1364,7 +1370,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.adjoint_allocator.zero_()
         if adjoint_workspace:
             self.workspace_allocator.zero_()
-        if self.use_ckpt and checkpoint_buffers:
+        if use_ckpt and checkpoint_buffers:
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
@@ -1398,8 +1404,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             fwd.boundary_cpu = []
             fwd.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
         fwd.boundary_disk_files = list(self._boundary_disk_files) if boundary_on_disk and use_boundary_saving else []
-        fwd.checkpoints = [c.zero_() for c in checkpoint_buffers] if self.use_ckpt else []
-        fwd.checkpoint_steps = checkpoint_steps if self.use_ckpt else torch.empty(0, dtype=torch.int32)
+        fwd.checkpoints = [c.zero_() for c in checkpoint_buffers] if use_ckpt else []
+        fwd.checkpoint_steps = checkpoint_steps if use_ckpt else torch.empty(0, dtype=torch.int32)
         fwd.models = [m.contiguous() for m in models]
         fwd.source = wavelet_t.contiguous()
         fwd.lap_coes = lap_coes.contiguous()
@@ -1413,7 +1419,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.pml_vals = [p.contiguous() for p in self.equation.b]
         fwd.save_all_wavefields = save_all_wavefields
         fwd.use_boundary_saving = use_boundary_saving
-        fwd.use_checkpoint = self.use_ckpt
+        fwd.use_checkpoint = use_ckpt
         fwd.use_recursive_checkpoint = use_recursive_checkpoint
         fwd.checkpoint_on_cpu = checkpoint_on_cpu
         fwd.boundary_on_cpu = boundary_on_cpu
@@ -1451,8 +1457,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.u_forward = u_forward.contiguous() if save_all_wavefields else torch.empty(0, device=self.dev)
         bwd.u_boundary = []
         bwd.u_last_two = u_last_two.contiguous() if use_boundary_saving else torch.empty(0, device=self.dev)
-        bwd.checkpoints = list(checkpoint_buffers) if self.use_ckpt else []
-        bwd.checkpoint_steps = checkpoint_steps.contiguous() if self.use_ckpt else torch.empty(0, dtype=torch.int32)
+        bwd.checkpoints = list(checkpoint_buffers) if use_ckpt else []
+        bwd.checkpoint_steps = checkpoint_steps.contiguous() if use_ckpt else torch.empty(0, dtype=torch.int32)
         bwd.adjoint_wavefields = [a.zero_() for a in adjoint_wavefields]
         bwd.forward_wavefields = []
         bwd.adjoint_workspace = []
