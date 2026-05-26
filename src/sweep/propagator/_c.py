@@ -825,7 +825,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         batch_dim = 1 if self.ndim == 3 else 2
         return tuple(t.narrow(batch_dim, 0, batch_size) for t in tensors)
 
-    def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None):
+    def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None, batch_size=None):
         if not self.use_ckpt or (self.backward_ckpt_func is None and self.backward_recursive_ckpt_func is None):
             return
 
@@ -834,11 +834,20 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             n_checkpoints = max(1, (self.nt + checkpoint_interval - 1) // checkpoint_interval)
 
+        # Allocate the checkpoint buffer at the *active* batch size for this
+        # call, not at the cached ``self.B`` capacity.  The batch dimension
+        # is dim 1 of the buffer, so ``t[:, :active]`` would be a
+        # non-contiguous view when ``active < B`` — and the CUDA checkpoint
+        # kernels require contiguous storage.  Allocating at the exact
+        # active size lets ``_slice_checkpoint_buffers`` return the tensor
+        # as-is (always contiguous).
+        active_batch = int(batch_size) if batch_size is not None else int(self.B)
+
         checkpoint_storage = self.ckpt_storage
         checkpoint_pinned = self.ckpt_pinned_memory if checkpoint_storage == "cpu" else False
 
         if (
-            self._checkpoint_cache_batch == self.B
+            self._checkpoint_cache_batch == active_batch
             and self._checkpoint_cache_interval == checkpoint_interval
             and self._checkpoint_cache_count == n_checkpoints
             and self._checkpoint_cache_nt == self.nt
@@ -847,7 +856,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         ):
             return
 
-        checkpoint_shape = [n_checkpoints, self.B, 1, *self.shape_cuda]
+        checkpoint_shape = [n_checkpoints, active_batch, 1, *self.shape_cuda]
         cuda_layout = self._cuda_layout()
         num_checkpoint_tensors = int(cuda_layout.resolved_checkpoint_nvar())
         checkpoint_device = "cpu" if checkpoint_storage == "cpu" else self.dev
@@ -860,7 +869,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 pin_memory=checkpoint_pinned,
             )
         )
-        self._checkpoint_cache_batch = self.B
+        self._checkpoint_cache_batch = active_batch
         self._checkpoint_cache_interval = checkpoint_interval
         self._checkpoint_cache_count = n_checkpoints
         self._checkpoint_cache_nt = self.nt
@@ -868,9 +877,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._checkpoint_cache_pinned = checkpoint_pinned
 
     def _slice_checkpoint_buffers(self, batch_size):
+        # Checkpoints are allocated at the active batch size in
+        # ``_ensure_checkpoint_buffers``, so no slicing is required.  Kept
+        # as a stable callsite so the existing forward()/rtm() flow doesn't
+        # need restructuring.
         if not self.checkpoints:
             return ()
-        return tuple(t[:, :batch_size] for t in self.checkpoints)
+        return tuple(self.checkpoints)
 
     @torch._dynamo.disable
     def forward(self, wavelet, sources, receivers, models=None, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
@@ -1034,9 +1047,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
-                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()))
+                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size)
             elif self.backward_ckpt_func is not None:
-                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks)
+                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
         checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_checkpoint else ()
@@ -1248,9 +1261,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if self.use_ckpt:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
-                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()))
+                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size)
             elif self.backward_ckpt_func is not None:
-                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks)
+                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
 
         self.forward_allocator.zero_()
         checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if self.use_ckpt else ()
@@ -1338,9 +1351,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if self.use_ckpt:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
-                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()))
+                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size)
             elif self.backward_ckpt_func is not None:
-                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks)
+                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
         checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if self.use_ckpt else ()
