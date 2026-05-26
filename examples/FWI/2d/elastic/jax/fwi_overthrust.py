@@ -224,13 +224,15 @@ def main():
     def fwi_step(current_vp, current_vs, current_rho, shot_idx, enc_signs, current_wave, all_sources, all_receivers, shared_receivers, all_obs):
         def loss_fn(vp_param, vs_param, rho_param, shots, signs, wavelet, sources_all, receivers_all, receivers_shared, obs_all):
             if cfg["source_encoding"]:
+                # Source-encoding mode: pack the per-shot wavelets and source
+                # positions into the canonical (1, nsrc, ...) layout; the
+                # propagator auto-detects encoding from these shapes.
                 encoded_wave = signs * jnp.broadcast_to(wavelet, (shots.shape[0], wavelet.shape[0]))
                 encoded_obs = jnp.sum(take_shots(obs_all, shots) * signs[:, None, None, None], axis=0, keepdims=True)
                 syn = solver(
                     encoded_wave,
-                    sources=take_shots(sources_all, shots),
+                    sources=take_shots(sources_all, shots)[None, ...],
                     receivers=receivers_shared,
-                    source_encoding=True,
                     models=[vp_param, vs_param, rho_param],
                 )
                 return jnp.mean((syn - encoded_obs) ** 2) * 1e10

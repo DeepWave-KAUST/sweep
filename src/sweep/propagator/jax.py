@@ -65,29 +65,20 @@ class PropJax(PropBase):
                 raise ValueError(f"Snapshot time {t} is outside valid range [0, {nt - 1}].")
         return times
     
-    def forward_base(self, 
-                     wavelet, 
-                     sources, 
-                     receivers, 
+    def forward_base(self,
+                     wavelet,
+                     sources,
+                     receivers,
                      models=None,
-                     source_encoding=False, 
-                     return_wavefield=False, 
-                     adj=False, 
-                     wave_equation=None, 
+                     return_wavefield=False,
+                     adj=False,
+                     wave_equation=None,
                      aux_args=tuple(),
                      **kwargs,):
-        """Forward pass of the wave equation
+        """Forward pass of the wave equation.
 
-        Args:
-            wavelet (jnp.array): Wavelet tensor (nt,)
-            sources (jnp.array): Source coordinates (nshots, 2)
-            receivers (jnp.array): Receiver coordinates (nshots, nreceivers, 2)
-            models (list): List of model parameters (Must be torch.Tensor)
-            source_encoding (bool, optional): If True, the sources are encoded in the wavefield. Defaults to False.
-            return_wavefield (bool, optional): If True, return the wavefields. Defaults to False.
-            adj (bool, optional): If True, run the adjoint forward modeling. Defaults to False.
-            wave_equation (callable, optional): The wave equation function to use. If None, use the equation defined in the class. Defaults to None.
-            aux_args (tuple(list), optional): Auxiliary arguments for the wave equation function. Defaults to ().
+        See :meth:`PropBase._normalize_io` for accepted ``wavelet`` /
+        ``sources`` / ``receivers`` shapes (modes A1, A2, B).
         """
         fd_pad = self._runtime_fd_pad()
         snapshot_times = kwargs.pop("snapshot_times", None)
@@ -97,7 +88,9 @@ class PropJax(PropBase):
         self.init_abc(**kwargs)
         if getattr(self.equation, 'setup_pml', None):
             self.equation.setup_pml(self.pml_type)
-        source_encoding = bool(source_encoding or self._auto_detect_source_encoding(wavelet, sources, receivers))
+        mode, batch_size, nsrc_per_shot, _, source_encoding = self._normalize_io(
+            wavelet, sources, receivers
+        )
 
         wavelet = jnp.array(wavelet, dtype=jnp.float32)
         wavelet = jnp.atleast_2d(wavelet)
@@ -110,9 +103,7 @@ class PropJax(PropBase):
             snapshot_interval,
         )
         self.snapshot_times_last = tuple(snapshot_indices)
-        nshots = sources.shape[0]
 
-        batch_size = 1 if source_encoding else nshots
         shape_wavefield = (batch_size, 1) + self._runtime_shape()
 
         sources = sources.copy()
@@ -274,7 +265,6 @@ class PropJax(PropBase):
         sources,
         receivers,
         models=None,
-        source_encoding=False,
         return_wavefield=False,
         adj=False,
         wave_equation=None,
@@ -286,7 +276,6 @@ class PropJax(PropBase):
             sources,
             receivers,
             models=models,
-            source_encoding=source_encoding,
             return_wavefield=return_wavefield,
             adj=adj,
             wave_equation=wave_equation,
@@ -300,7 +289,6 @@ class PropJax(PropBase):
         sources,
         receivers,
         models=None,
-        source_encoding=False,
         return_wavefield=False,
         adj=False,
         wave_equation=None,
@@ -314,7 +302,6 @@ class PropJax(PropBase):
             sources,
             receivers,
             models=models,
-            source_encoding=source_encoding,
             return_wavefield=return_wavefield,
             adj=adj,
             wave_equation=wave_equation,

@@ -163,12 +163,13 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         sources,
         receivers,
         models=None,
-        source_encoding=False,
         adj=False,
         return_wavefield=False,
         **kwargs,
     ):
-        source_encoding = bool(source_encoding or self._auto_detect_source_encoding(wavelet, sources, receivers))
+        mode, batch_size, nsrc_per_shot, _, source_encoding = self._normalize_io(
+            wavelet, sources, receivers
+        )
         if models is not None and not isinstance(models, (list, tuple)):
             models = list(models)
 
@@ -182,9 +183,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         snapshot_indices = self._resolve_snapshot_times(nt, return_wavefield, snapshot_times, snapshot_interval)
         snapshot_lookup = {t: i for i, t in enumerate(snapshot_indices)}
         self.snapshot_times_last = tuple(snapshot_indices)
-        nshots = sources.shape[0]
 
-        batch_size = 1 if source_encoding else nshots
         shape_wavefield = (batch_size, 1) + self._runtime_shape()
         wavelet = self._as_device_tensor(wavelet, dtype=torch.float32)
         sources = self._as_device_tensor(sources, dtype=torch.long) + self.coord_offset

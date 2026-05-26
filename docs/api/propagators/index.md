@@ -24,32 +24,43 @@ point. Use:
 
 ## Runtime Shape Conventions
 
-Across `PropTorch` and `PropJax`, runtime inputs usually follow
-one of these patterns:
+`PropTorch` and `PropJax` accept **three** input modes for
+`(wavelet, sources, receivers)`. The mode is **auto-detected from the array
+shapes** — there is no `source_encoding` keyword argument; pass the inputs in
+the shape that matches your acquisition geometry.
 
-- Single-source batched shots:
-  - `wavelet`: `(nt,)` or `(B, nt)`
-  - `sources`: `(B, dim)`
-  - `receivers`: `(B, nrec, dim)`
-- Multi-source batched shots or blended shots:
-  - `wavelet`: `(B, nsrc, nt)`
-  - `sources`: `(B, nsrc, dim)`
-  - `receivers`: `(B, nrec, dim)`
-- Source-encoding super-shot:
-  - `wavelet`: `(1, nsrc, nt)`
-  - `sources`: `(1, nsrc, dim)`
-  - `receivers`: `(1, nrec, dim)`
+| Mode | `wavelet` | `sources` | `receivers` | Meaning |
+|------|-----------|-----------|-------------|---------|
+| **A1** Shared wavelet | `(nt,)` | `(nshots, dim)` | `(nshots, nrec, dim)` | Naive multi-shot, all shots share one wavelet |
+| **A2** Per-shot wavelet | `(nshots, nt)` | `(nshots, dim)` | `(nshots, nrec, dim)` | Naive multi-shot, each shot has its own wavelet |
+| **B** Source encoding | `(nt,)` or `(nsrc, nt)` | `(1, nsrc, dim)` | `(1, nrec, dim)` | One super-shot with `nsrc` superposed point sources |
 
-Here:
+- `dim` is `2` in 2D and `3` in 3D.
+- **Receivers are always 3-D** `(B, nrec, dim)`. If you previously shared a
+  single receiver array across shots, pre-broadcast it:
+  `receivers = np.broadcast_to(rec, (nshots, *rec.shape)).copy()` (or
+  `[None, ...].repeat(nshots, axis=0)`).
+- In mode **B**, the leading dim of `sources`/`receivers` is the trigger
+  that distinguishes encoding from a naive multi-shot run.
 
-- `B` is the runtime batch size
-- `nsrc` is the number of sources inside one batch element
-- `nrec` is the number of receivers
-- `dim` is `2` in 2D and `3` in 3D
+### Dispatch rules (precise)
 
-When the inputs use the super-shot layout
-`(1, nsrc, nt) / (1, nsrc, dim) / (1, nrec, dim)`, supported implementations
-auto-detect this pattern and treat it as `source_encoding=True`.
+1. `sources.ndim == 2` → mode **A** (`nshots == sources.shape[0]`)
+   - `wavelet.ndim == 1` → **A1**
+   - `wavelet.shape == (nshots, nt)` → **A2**
+2. `sources.ndim == 3` and `sources.shape[0] == 1` → mode **B**
+   - `wavelet.shape == (nt,)` or `(nsrc, nt)` (with `nsrc == sources.shape[1]`)
+3. Anything else raises `ValueError` with a message describing the contract.
+
+### Migration from the old API
+
+The `source_encoding=` keyword argument has been **removed**. To migrate:
+
+- `solver(wavelet=(1, nsrc, nt), sources=(1, nsrc, dim), receivers=(1, nrec, dim), source_encoding=True)`
+  → drop the kwarg and pass `wavelet` as 2-D `(nsrc, nt)`; the encoding mode is
+  inferred from the leading-`1` sources/receivers.
+- `solver(wavelet=(nt,), sources=(nshots, dim), receivers=(nrec, dim))` →
+  pre-broadcast receivers to `(nshots, nrec, dim)`.
 
 ### Record output layout
 
