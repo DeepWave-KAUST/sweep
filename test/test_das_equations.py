@@ -453,8 +453,10 @@ def test_das_elastic_2d_cuda_backward_matches_eager_with_random_adjoint(name, bo
             models=[vp, vs, rho],
             boundary_saving_config={"enabled": False} if backend == "eager" else boundary_saving_config,
         )
-        if backend == "cuda":
-            out = out.permute(1, 3, 2, 0)
+        # Both backends return the canonical (B, nt, nrec, nfield) record;
+        # the legacy `permute(1, 3, 2, 0)` here was a remnant from when the
+        # CUDA wrapper still emitted raw (nfield, B, nrec, nt) and is no
+        # longer needed.
         if adjoint_weight is None:
             torch.manual_seed(2026)
             adjoint_weight = torch.randn_like(out)
@@ -522,8 +524,7 @@ def test_das_elastic_3d_cuda_backward_matches_eager_with_encoded_wavelet(name, b
             models=[vp, vs, rho],
             boundary_saving_config={"enabled": False} if backend == "eager" else boundary_saving_config,
         )
-        if backend == "cuda":
-            out = out.permute(1, 3, 2, 0)
+        # See note on the 2-D variant: CUDA record is already canonical.
         if adjoint_weight is None:
             torch.manual_seed(2027)
             adjoint_weight = torch.randn_like(out)
