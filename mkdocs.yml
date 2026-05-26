@@ -123,6 +123,8 @@ nav:
               - Multiscale: notebooks/03_fwi_multiscale.ipynb
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - 3D Overthrust: notebooks/11_fwi_acoustic_overthrust_3d.ipynb
+          - NN · FWI:
+              - IFWI · SIREN: notebooks/13_ifwi_siren.ipynb
           - Wavefields:
               - DAS: notebooks/04_das_zhao_vs_mu.ipynb
               - Elastic: notebooks/06_wavefield_elastic.ipynb
