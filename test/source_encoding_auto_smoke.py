@@ -38,7 +38,10 @@ def build_problem():
 
     base_wavelet = ricker(nt=nt, dt=dt, freq=10.0, delay=0.08)
     scales = np.array([1.0, -0.7, 0.45], dtype=np.float32)
-    encoded_wavelet = (scales[:, None] * base_wavelet[None, :])[None, ...]
+    # Canonical source-encoding wavelet shape under the unified IO contract:
+    # (nsrc, nt). The leading singleton from the old (1, nsrc, nt) layout is
+    # gone — encoding mode is auto-detected from sources/receivers shapes.
+    encoded_wavelet = (scales[:, None] * base_wavelet[None, :])
 
     src_x = np.array([nx // 4, nx // 2, (3 * nx) // 4], dtype=np.int32)
     src_z = np.full_like(src_x, 2)
@@ -129,7 +132,6 @@ def run_torch_case(backend, problem):
             sources=problem["sources"],
             receivers=problem["receivers"],
             models=[vp],
-            source_encoding=enable_source_encoding,
         )
         loss = record.square().mean()
         loss.backward()
@@ -198,8 +200,7 @@ def maybe_run_jax_case(problem):
                 sources=sources,
                 receivers=receivers,
                 models=[vp],
-                source_encoding=enable_source_encoding,
-            )
+                )
             return jnp.mean(record ** 2), record
 
         vp = jnp.asarray(problem["vp"], dtype=jnp.float32)

@@ -61,7 +61,7 @@ def test_das_modeler_zhao_uses_standard_record_layout():
     nt = 18
     dt = 0.001
     shape = (22, 24)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt)
     sources = np.array([[[shape[1] // 2, 5]]], dtype=np.int32)
     receivers = np.array([[[8, 6], [14, 7], [18, 8]]], dtype=np.int32)
 
@@ -95,7 +95,7 @@ def test_das_modeler_mu_outputs_physical_strain_rate_and_das_fields():
     nt = 18
     dt = 0.001
     shape = (24, 28)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt)
     sources = np.array([[[shape[1] // 2, 6]]], dtype=np.int32)
     receivers = np.array([[[8, 7], [14, 8], [20, 9]]], dtype=np.int32)
 
@@ -134,7 +134,7 @@ def test_das_mu_supports_all_physical_fields_as_source_receiver_with_free_surfac
     dt = 0.001
     shape = (24, 28)
     fields = ["vx", "vz", "sxx", "szz", "sxz", "exx", "ezz", "exz"]
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt)
     sources = np.array([[[shape[1] // 2, 6]]], dtype=np.int32)
     receivers = np.array([[[8, 7], [14, 8], [20, 9]]], dtype=np.int32)
 
@@ -170,7 +170,7 @@ def test_das_modeler_mu_3d_outputs_physical_strain_rate_and_das_fields():
     nt = 10
     dt = 0.001
     shape = (8, 8, 8)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.004).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.004).reshape(1, nt)
     sources = np.array([[[4, 4, 3]]], dtype=np.int32)
     receivers = np.array([[[3, 3, 3], [5, 5, 4]]], dtype=np.int32)
 
@@ -218,7 +218,7 @@ def test_das_mu3d_supports_all_physical_fields_as_source_receiver_with_free_surf
     dt = 0.001
     shape = (8, 8, 8)
     fields = ["vx", "vy", "vz", "sxx", "syy", "szz", "sxy", "sxz", "syz", "exx", "eyy", "ezz", "exy", "exz", "eyz"]
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.004).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.004).reshape(1, nt)
     sources = np.array([[[4, 4, 3]]], dtype=np.int32)
     receivers = np.array([[[3, 3, 3], [5, 5, 4]]], dtype=np.int32)
 
@@ -254,7 +254,7 @@ def test_das_modeler_mu_variant():
     nt = 16
     dt = 0.001
     shape = (22, 26)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt)
     sources = np.array([[[shape[1] // 2, 5]]], dtype=np.int32)
     receivers = np.array([[[8, 6], [14, 7]]], dtype=np.int32)
 
@@ -289,7 +289,7 @@ def test_das_elastic_2d_eager_forward_and_gradient():
     nt = 28
     dt = 0.001
     shape = (24, 28)
-    wavelet = _ricker(nt, dt).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt).reshape(1, nt)
     sources = np.array([[[shape[1] // 2, 3]]], dtype=np.int32)
     receivers = np.stack(
         [
@@ -342,7 +342,7 @@ def test_das_elastic_3d_eager_forward_smoke():
     nt = 8
     dt = 0.001
     shape = (8, 8, 8)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.003).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.003).reshape(1, nt)
     sources = np.array([[[4, 4, 3]]], dtype=np.int32)
     receivers = np.array([[[3, 3, 3], [5, 5, 3]]], dtype=np.int32)
 
@@ -381,7 +381,7 @@ def test_das_final_channels_backward_2d():
     nt = 20
     dt = 0.001
     shape = (24, 28)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt)
     sources = np.array([[[shape[1] // 2, 5]]], dtype=np.int32)
     receivers = np.array([[[8, 6], [14, 6], [20, 8], [14, 12]]], dtype=np.int32)
 
@@ -424,7 +424,7 @@ def test_das_elastic_2d_cuda_backward_matches_eager_with_random_adjoint(name, bo
     nt = 18
     dt = 0.001
     shape = (28, 32)
-    wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt), device=device)
+    wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt), device=device)
     sources = np.array([[[shape[1] // 2, 7]]], dtype=np.int32)
     receivers = np.array([[[9, 8], [15, 9], [21, 10]]], dtype=np.int32)
     receiver_type = ["exx_t", "ezz_t", "das35_t", "das54x_t", "das54z_t"]
@@ -485,7 +485,7 @@ def test_das_elastic_3d_cuda_backward_matches_eager_with_encoded_wavelet(name, b
     nt = 16
     dt = 0.001
     shape = (14, 12, 14)
-    wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt), device=device)
+    wavelet = torch.as_tensor(_ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt), device=device)
     sources = np.array([[[shape[2] // 2, shape[1] // 2, 5]]], dtype=np.int32)
     receivers = np.array([[[5, 5, 5], [7, 6, 5], [9, 7, 6], [7, 5, 7]]], dtype=np.int32)
     receiver_type = [
@@ -546,7 +546,7 @@ def test_das_final_channels_backward_3d():
     nt = 14
     dt = 0.001
     shape = (10, 10, 10)
-    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, 1, nt)
+    wavelet = _ricker(nt, dt, fm=15.0, delay=0.006).reshape(1, nt)
     sources = np.array([[[5, 5, 5]]], dtype=np.int32)
     receivers = np.array([[[4, 5, 5], [6, 5, 5], [5, 4, 5], [5, 5, 6]]], dtype=np.int32)
 

@@ -263,13 +263,12 @@ class PropTorch(torch.nn.Module):
     def parameters(self):
         return self._backend_impl.parameters()
 
-    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, **kwargs):
+    def forward(self, wavelet, sources, receivers, models=None, adj=False, return_wavefield=False, **kwargs):
         return self._backend_impl(
             wavelet,
             sources,
             receivers,
             models=models,
-            source_encoding=source_encoding,
             adj=adj,
             return_wavefield=return_wavefield,
             **kwargs,

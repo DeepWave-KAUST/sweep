@@ -435,16 +435,16 @@ def run_fwi(backend="torch", impl=None, device="auto", use_mpi=False, mpi_forwar
         local_elements = 0
         if shot_idx.size > 0 and cfg["source_encoding"]:
             encoded_wave, encoded_obs = build_encoded_batch(wave, obs, shot_idx, cfg)
-            encoded_sources = sources[shot_idx]
+            # Source-encoding mode: sources/receivers must be 3D with leading
+            # batch dim of 1 ((1, nsrc, ndim) / (1, nrec, ndim)). The mode is
+            # auto-detected from these shapes; no kwarg needed.
+            encoded_sources = sources[shot_idx][None, ...]
             encoded_receivers = receivers[:1]
-            if cfg["impl"] == "c":
-                encoded_sources = encoded_sources[None, ...]
             syn = solver(
                 encoded_wave,
                 encoded_sources,
                 encoded_receivers,
                 models=[vp, vs, rho],
-                source_encoding=True,
                 **forward_kwargs,
             )
             obs_batch = torch.from_numpy(encoded_obs).to(dev)

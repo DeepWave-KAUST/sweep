@@ -36,8 +36,10 @@ DOM_FREQ = 20.0
 
 
 def _wavelet(nt=NT):
+    # Source-encoding mode (sources/receivers have leading dim 1): wavelet
+    # canonical shape is (nsrc, nt). Here nsrc=1.
     t = np.arange(nt, dtype=np.float32) * DT - 0.05
-    return torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, None, :]
+    return torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, :]
 
 
 def _src(nz, nx, ndim=2):
@@ -156,7 +158,7 @@ def test_variable_density():
         use_ckpt=False,
     )
     t = np.arange(NT * 2, dtype=np.float32) * DT - 0.05
-    wavelet = torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, None, :]
+    wavelet = torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, :]
     with torch.no_grad():
         rec = prop(wavelet, src_pos, src_pos, models=models)
 
@@ -280,7 +282,7 @@ def _run_snapshot(delta_field, nz, nx):
                      abcn=ABCN, dh=DH, dt=DT, nt=nt_snap, device="cpu", impl="eager",
                      use_ckpt=False)
     t = np.arange(nt_snap, dtype=np.float32) * DT - 0.05
-    wav = torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, None, :]
+    wav = torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, :]
     with torch.no_grad():
         _, wf = prop(wav, src, src, models=models,
                      return_wavefield=True, snapshot_times=[nt_snap - 1])
@@ -362,7 +364,7 @@ def test_cuda_forward_matches_eager():
     t = np.arange(nt, dtype=np.float32) * dt - 0.04
     wavelet = torch.tensor(
         (1e3 * ricker(t, f=25.0)).astype(np.float32)
-    )[None, None, :].cuda()
+    )[None, :].cuda()
 
     def _models(device):
         return [
@@ -444,7 +446,7 @@ def test_cuda_backward_matches_eager():
     # round-off; the comparison metric runs in float64 anyway.
     wavelet = torch.tensor(
         (1e6 * ricker(t, f=freq)).astype(np.float32)
-    )[None, None, :].cuda()
+    )[None, :].cuda()
 
     # Models: vp depth-ramp + box anomaly (true vs init); ρ ramp + box;
     # eps/delta constant (keep ~isotropic, like ElasticTTISG branch).
@@ -557,7 +559,7 @@ def test_cuda_backward_bs_matches_full():
     t = np.arange(nt, dtype=np.float32) * dt - delay
     wavelet = torch.tensor(
         (1e6 * ricker(t, f=freq)).astype(np.float32)
-    )[None, None, :].cuda()
+    )[None, :].cuda()
 
     def _ramp(top, bottom):
         depth = np.linspace(0.0, 1.0, nz, dtype=np.float32)
@@ -669,7 +671,7 @@ def test_cuda_backward_ckpt_matches_full():
     t = np.arange(nt, dtype=np.float32) * dt - delay
     wavelet = torch.tensor(
         (1e6 * ricker(t, f=freq)).astype(np.float32)
-    )[None, None, :].cuda()
+    )[None, :].cuda()
 
     def _ramp(top, bottom):
         depth = np.linspace(0.0, 1.0, nz, dtype=np.float32)
@@ -805,7 +807,7 @@ def _canonical_3d_setup():
     t = np.arange(nt, dtype=np.float32) * dt - delay
     wavelet = torch.tensor(
         (1e6 * ricker(t, f=freq)).astype(np.float32)
-    )[None, None, :].cuda()
+    )[None, :].cuda()
 
     return {
         "shape": shape, "nz": nz, "ny": ny, "nx": nx,

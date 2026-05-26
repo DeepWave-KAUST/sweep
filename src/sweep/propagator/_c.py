@@ -873,14 +873,26 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         return tuple(t[:, :batch_size] for t in self.checkpoints)
 
     @torch._dynamo.disable
-    def forward(self, wavelet, sources, receivers, models=None, source_encoding=False, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
-        """Forward pass of the wave equation
+    def forward(self, wavelet, sources, receivers, models=None, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
+        """Forward pass of the wave equation.
+
+        Accepted input shapes (see :meth:`PropBase._normalize_io`):
+
+        - ``wavelet=(nt,)`` + ``sources=(nshots, ndim)`` — shared wavelet, one
+          point source per shot.
+        - ``wavelet=(nshots, nt)`` + ``sources=(nshots, ndim)`` — per-shot
+          wavelet, one point source per shot.
+        - ``wavelet=(nt,)`` or ``(nsrc, nt)`` + ``sources=(1, nsrc, ndim)`` —
+          source encoding (one super-shot, ``nsrc`` superposed point sources).
+
+        ``receivers`` must always be ``(B, nrec, ndim)``; pre-broadcast a
+        shared receiver array to per-shot form.
 
         Args:
-            wavelet (np.array): Wavelet tensor (nt,)
-            sources (np.array): Source coordinates (nshots, 2)
-            receivers (np.array): Receiver coordinates (nshots, nreceivers, 2)
-            models (list): List of model parameters (Must be torch.Tensor)
+            wavelet: Source wavelet (numpy or torch).
+            sources: Source coordinates.
+            receivers: Receiver coordinates.
+            models: List of model parameters (must be ``torch.Tensor``).
         """
 
         legacy_override = {}
@@ -899,7 +911,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         elif legacy_override:
             boundary_saving_config = {**legacy_override, **boundary_saving_config}
 
-        source_encoding = bool(source_encoding or self._auto_detect_source_encoding(wavelet, sources, receivers))
+        mode, batch_size, nsrc_per_shot, nrec, source_encoding = self._normalize_io(
+            wavelet, sources, receivers
+        )
 
         boundary_cfg = self.resolve_boundary_saving_config(
             override=boundary_saving_config,
@@ -916,8 +930,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         boundary_disk_dir = boundary_cfg.get("disk_dir")
 
         self.nt = wavelet.shape[-1]
-        nshots = sources.shape[0]
-        batch_size = 1 if source_encoding else nshots
         if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
         checkpoint_steps = torch.empty(0, dtype=torch.int32)
@@ -953,40 +965,26 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             sources += base_shift
             receivers += base_shift
 
-        # Batch the wavelet, sources and receivers
+        # Canonicalize wavelet/sources to (B, nsrc_per_shot, nt) / (B, nsrc_per_shot, ndim).
+        # `mode` was validated by _normalize_io above.
         if isinstance(wavelet, torch.Tensor):
             wavelet = wavelet.to(self.dev, dtype=torch.float32)
         else:
             wavelet = torch.from_numpy(wavelet).to(self.dev).float()
-        if wavelet.ndim == 1:
+        if mode == 'A1':
             wavelet = wavelet[None, None, :].repeat(batch_size, 1, 1)
-        elif wavelet.ndim == 2:
-            if wavelet.shape[0] != batch_size:
-                raise ValueError(
-                    f"Expected wavelet batch dimension {batch_size}, got {wavelet.shape[0]}"
-                )
+        elif mode == 'A2':
             wavelet = wavelet[:, None, :]
-        elif wavelet.ndim == 3:
-            if wavelet.shape[0] != batch_size:
-                raise ValueError(
-                    f"Expected wavelet batch dimension {batch_size}, got {wavelet.shape[0]}"
-                )
-        else:
-            raise ValueError(
-                f"wavelet must have shape (nt,), (B, nt), or (B, nsrc, nt), got {tuple(wavelet.shape)}"
-            )
+        else:  # mode == 'B'
+            if wavelet.ndim == 1:
+                wavelet = wavelet[None, None, :].repeat(1, nsrc_per_shot, 1)
+            else:  # (nsrc, nt)
+                wavelet = wavelet[None, :, :]
 
         sources = torch.from_numpy(sources).to(self.dev).int()
-        if sources.ndim == 2:
-            if sources.shape[0] != batch_size:
-                raise ValueError(
-                    f"Expected sources batch dimension {batch_size}, got {sources.shape[0]}"
-                )
+        if mode in ('A1', 'A2'):
             sources = sources[:, None, :]
-        elif sources.ndim != 3:
-            raise ValueError(
-                f"sources must have shape (B, dim) or (B, nsrc, dim), got {tuple(sources.shape)}"
-            )
+        # mode == 'B': already (1, nsrc, ndim)
         receivers = torch.from_numpy(receivers).to(self.dev).int()
         source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
@@ -1195,9 +1193,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         use_boundary_saving = kwargs.pop("use_boundary_saving", None)
         boundary_saving_config = kwargs.pop("boundary_saving_config", None)
+        mode, batch_size, nsrc_per_shot, nrec, _ = self._normalize_io(
+            wavelet, sources, receivers
+        )
+        if mode == 'B':
+            raise NotImplementedError(
+                "RTM does not support source encoding inputs "
+                "(sources with shape (1, nsrc, ndim)); use naive multi-shot."
+            )
         self.nt = wavelet.shape[-1]
-        nshots = sources.shape[0]
-        batch_size = nshots
         self._ensure_wavefield_buffers(batch_size)
         self._ensure_adjoint_workspace_buffers(batch_size)
 
@@ -1291,7 +1295,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             sources += base_shift
             receivers += base_shift
 
-        wavelet_t = torch.from_numpy(wavelet).to(self.dev).float()[None, None, :].repeat(batch_size, 1, 1)
+        if isinstance(wavelet, torch.Tensor):
+            wavelet_t = wavelet.to(self.dev, dtype=torch.float32)
+        else:
+            wavelet_t = torch.from_numpy(wavelet).to(self.dev).float()
+        if mode == 'A1':
+            wavelet_t = wavelet_t[None, None, :].repeat(batch_size, 1, 1)
+        else:  # mode == 'A2'
+            wavelet_t = wavelet_t[:, None, :]
         sources_t = torch.from_numpy(sources).to(self.dev).int()[:, None, :]
         receivers_t = torch.from_numpy(receivers).to(self.dev).int()
         adjoint_source_t = torch.as_tensor(adjoint_source, device=self.dev, dtype=torch.float32)
