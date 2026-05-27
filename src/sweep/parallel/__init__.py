@@ -28,12 +28,14 @@ Top-level objects:
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.halo import HaloExchange, exchange_halos
 from sweep.parallel.mesh import ModelParallelMesh
+from sweep.parallel.pml import build_rank_pml_widths
 from sweep.parallel.routing import partition_global_coords
 
 __all__ = [
     "HaloExchange",
     "MeshTopology",
     "ModelParallelMesh",
+    "build_rank_pml_widths",
     "exchange_halos",
     "partition_global_coords",
 ]
