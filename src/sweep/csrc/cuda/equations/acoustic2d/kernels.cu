@@ -1,11 +1,11 @@
 #include "kernels.cuh"
 
 __global__ void calculate_grad(
-    const float* __restrict__ u_forward,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward,  // (nt, B, nz, nx); stored as vp^2 * Lap(u)
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz
+    int nx, int nz, float dt
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -23,9 +23,10 @@ __global__ void calculate_grad(
     float*       grad_b       = grad       + b * spatial_size;
     const float* vp_b         = vp         + b * spatial_size;
 
-    float vp3 = vp_b[idx] * vp_b[idx] * vp_b[idx];
-
-    grad_b[idx] += 8*u_forward_b[idx] * u_backward_b[idx]/vp3;
+    // Discrete adjoint of u_next = 2 u_now - u_prev + dt^2 vp^2 Lap(u_now):
+    //   dL/dvp = 2 dt^2 vp * sum_t Lap(u) * u_adj
+    //          = (2 dt^2 / vp) * sum_t u_forward_saved * u_adj
+    grad_b[idx] += 2.f * dt * dt * u_forward_b[idx] * u_backward_b[idx] / vp_b[idx];
 
 }
 
@@ -56,11 +57,14 @@ __global__ void calculate_grad_utt(
     float*       grad_b       = grad       + b * spatial_size;
     const float* vp_b         = vp         + b * spatial_size;
 
+    // After the forward.swap() in backward_bs the buffer roles are rotated so
+    // that this expression evaluates to the centered second time derivative
+    // (u(t-1) - 2 u(t) + u(t+1)) / dt^2 at the physical middle time.
     float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
 
-    float vp3 = vp_b[idx] * vp_b[idx] * vp_b[idx];
-
-    grad_b[idx] += 8*u_tt * u_backward_b[idx]/vp3;
+    // u_tt = vp^2 * Lap(u) in the interior, same form as calculate_grad:
+    //   dL/dvp += (2 dt^2 / vp) * u_tt * u_adj
+    grad_b[idx] += 2.f * dt * dt * u_tt * u_backward_b[idx] / vp_b[idx];
 
 }
 
