@@ -1461,7 +1461,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.checkpoint_steps = checkpoint_steps.contiguous() if use_ckpt else torch.empty(0, dtype=torch.int32)
         bwd.adjoint_wavefields = [a.zero_() for a in adjoint_wavefields]
         bwd.forward_wavefields = []
-        bwd.adjoint_workspace = []
+        bwd.adjoint_workspace = list(adjoint_workspace)
         bwd.boundary_cpu = list(boundary_cpu) if boundary_on_cpu and use_boundary_saving else []
         bwd.boundary_gpu = list(boundary_gpu) if use_boundary_saving else []
         bwd.boundary_disk_files = list(self._boundary_disk_files) if boundary_on_disk and use_boundary_saving else []

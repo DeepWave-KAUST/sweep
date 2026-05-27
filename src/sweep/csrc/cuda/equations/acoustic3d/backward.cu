@@ -82,7 +82,8 @@ void accumulate_imaging_3d(
     int B,
     int nx,
     int ny,
-    int nz
+    int nz,
+    float dt
 )
 {
     if (grad != nullptr) {
@@ -91,7 +92,7 @@ void accumulate_imaging_3d(
             adjoint_ptr,
             vp.data_ptr<float>(),
             grad->data_ptr<float>(),
-            B, nx, ny, nz
+            B, nx, ny, nz, dt
         );
     }
 
@@ -253,6 +254,7 @@ void process_recursive_interval_3d(
     std::vector<AcousticWavefieldTensor>& scratch_states,
     int scratch_depth,
     torch::Tensor& u_this_scratch,
+    torch::Tensor& v2_lambda_scratch,
     int B,
     int nx,
     int ny,
@@ -297,13 +299,19 @@ void process_recursive_interval_3d(
 
         auto adj_view = adjoint.view();
 
-        ACOUSTIC3D(
+        compute_v2_lambda_3d<<<wave_grid, wave_block>>>(
+            vp.data_ptr<float>(),
+            adj_view.u_now,
+            v2_lambda_scratch.data_ptr<float>(),
+            nx, ny, nz, ctx.B
+        );
+
+        ACOUSTIC3D_ADJOINT(
             order,
             wave_grid,
             wave_block,
             adj_view,
-            false,
-            nullptr,
+            v2_lambda_scratch.data_ptr<float>(),
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -347,7 +355,8 @@ void process_recursive_interval_3d(
             B,
             nx,
             ny,
-            nz
+            nz,
+            ctx.dt
         );
         return;
     }
@@ -411,6 +420,7 @@ void process_recursive_interval_3d(
         scratch_states,
         scratch_depth + 1,
         u_this_scratch,
+        v2_lambda_scratch,
         B,
         nx,
         ny,
@@ -447,6 +457,7 @@ void process_recursive_interval_3d(
         scratch_states,
         scratch_depth + 1,
         u_this_scratch,
+        v2_lambda_scratch,
         B,
         nx,
         ny,
@@ -482,6 +493,13 @@ void run_full_imaging(
 
     float* u_thist = nullptr;
 
+    // Buffer for pre-computed v^2 * lambda_now (proper-adjoint kernel input).
+    // Python-side (PropTorch) manages the buffer via adjoint_workspace[0] so
+    // it can be reused across backward calls.
+    auto v2_lambda = !p.adjoint_workspace.empty()
+        ? p.adjoint_workspace[0]
+        : torch::empty_like(vp);
+
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -506,13 +524,19 @@ void run_full_imaging(
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
 
-        ACOUSTIC3D(
+        compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
+            vp.data_ptr<float>(),
+            adj_view.u_now,
+            v2_lambda.data_ptr<float>(),
+            nx, ny, nz, B
+        );
+
+        ACOUSTIC3D_ADJOINT(
             order,
             launch_config.grid,
             launch_config.block,
             adj_view,
-            false,
-            u_thist,
+            v2_lambda.data_ptr<float>(),
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -556,7 +580,8 @@ void run_full_imaging(
             B,
             nx,
             ny,
-            nz
+            nz,
+            ctx.dt
         );
     }
 }
@@ -627,6 +652,11 @@ void run_bs_imaging(
 
     auto f_this = torch::zeros_like(vp);
 
+    // Buffer for v^2 * lambda_now; Python-managed via adjoint_workspace[0].
+    auto v2_lambda = !p.adjoint_workspace.empty()
+        ? p.adjoint_workspace[0]
+        : torch::empty_like(vp);
+
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -680,13 +710,19 @@ void run_bs_imaging(
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
-        ACOUSTIC3D(
+        compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
+            vp.data_ptr<float>(),
+            adj_view.u_now,
+            v2_lambda.data_ptr<float>(),
+            nx, ny, nz, B
+        );
+
+        ACOUSTIC3D_ADJOINT(
             order,
             launch_config.grid,
             launch_config.block,
             adj_view,
-            false,
-            nullptr,
+            v2_lambda.data_ptr<float>(),
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -775,13 +811,19 @@ void run_bs_imaging(
     if (p.nt > 0) {
         auto adj_view = adjoint.view();
 
-        ACOUSTIC3D(
+        compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
+            vp.data_ptr<float>(),
+            adj_view.u_now,
+            v2_lambda.data_ptr<float>(),
+            nx, ny, nz, B
+        );
+
+        ACOUSTIC3D_ADJOINT(
             order,
             launch_config.grid,
             launch_config.block,
             adj_view,
-            false,
-            nullptr,
+            v2_lambda.data_ptr<float>(),
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -892,6 +934,11 @@ void run_ckpt_imaging(
 
     auto chunk_forward = torch::zeros({p.checkpoint_interval, B, nz, ny, nx}, vp.options());
 
+    // Buffer for v^2 * lambda_now; Python-managed via adjoint_workspace[0].
+    auto v2_lambda = !p.adjoint_workspace.empty()
+        ? p.adjoint_workspace[0]
+        : torch::empty_like(vp);
+
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -951,13 +998,19 @@ void run_ckpt_imaging(
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            ACOUSTIC3D(
+            compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
+                vp.data_ptr<float>(),
+                adj_view.u_now,
+                v2_lambda.data_ptr<float>(),
+                nx, ny, nz, B
+            );
+
+            ACOUSTIC3D_ADJOINT(
                 order,
                 launch_config.grid,
                 launch_config.block,
                 adj_view,
-                false,
-                nullptr,
+                v2_lambda.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 lap_ctx,
                 grad_ctx,
@@ -1001,7 +1054,8 @@ void run_ckpt_imaging(
                 B,
                 nx,
                 ny,
-                nz
+                nz,
+                ctx.dt
             );
         }
     }
@@ -1115,6 +1169,10 @@ void run_recursive_imaging(
     for (auto& scratch_state : scratch_states)
         scratch_state.allocate(vp, 3, true);
     auto u_this_scratch = torch::empty_like(vp);
+    // Scratch buffer for v^2 * lambda_now; Python-managed via adjoint_workspace[0].
+    auto v2_lambda_scratch = !p.adjoint_workspace.empty()
+        ? p.adjoint_workspace[0]
+        : torch::empty_like(vp);
 
     AcousticWavefieldTensor start_state;
     start_state.allocate(vp, 3, true);
@@ -1158,6 +1216,7 @@ void run_recursive_imaging(
             scratch_states,
             0,
             u_this_scratch,
+            v2_lambda_scratch,
             B,
             nx,
             ny,
