@@ -15,6 +15,21 @@
         else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
+// Proper adjoint of `L u = v^2 · ∇²u`:  L^* λ = ∇²(v^2 · λ)
+// Used in adjoint propagation. Differs from forward kernel only in the
+// non-PML branch (interior): computes ∇²(v²·λ) on a pre-computed `v2_lambda`
+// buffer instead of v²·∇²λ. PML branch left identical to forward (slight
+// residual error in PML zone; sufficient to clean up the interior box
+// anomaly).
+#define ACOUSTIC2D_ADJOINT(order, grid, block, ...)                                  \
+    do {                                                        \
+        if      ((order) == 2) acoustic2nd_adjoint<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) acoustic2nd_adjoint<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) acoustic2nd_adjoint<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) acoustic2nd_adjoint<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   acoustic2nd_adjoint<-1><<<grid, block>>>(__VA_ARGS__);\
+    } while (0)
+
 // Pre-pass: clear air cells (above per-column topo surface).  Launched
 // BEFORE acoustic2nd so the main kernel can early-return on air cells
 // without writing any aux field — eliminating intra-launch RAW races
@@ -162,6 +177,118 @@ __global__ void acoustic2nd(
         u_this_b[idx] = (v * v) * (lap_x + lap_z);
 }
 
+// Helper: pre-compute v2_lambda[idx] = vp[idx]^2 * lambda[idx]
+// Used by the adjoint kernel which then computes ∇²(v²·λ) on this buffer.
+// `static` so each translation unit has its own copy (header-defined).
+static __global__ void compute_v2_lambda_2d(
+    const float* __restrict__ vp,
+    const float* __restrict__ lambda,
+    float* __restrict__ v2_lambda,
+    int nx, int nz, int B
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= nx || iz >= nz || b >= B) return;
+    int spatial_size = nx * nz;
+    int idx = b * spatial_size + iz * nx + ix;
+    float v = vp[idx];
+    v2_lambda[idx] = v * v * lambda[idx];
+}
+
+// Proper-adjoint kernel for the acoustic wave equation.
+// Computes  λ_next = 2 λ_now - λ_pre + dt² · ∇²(v² · λ_now)
+// in the non-PML branch.  PML branch retains forward formulation for now.
+template<int Order>
+__global__ void acoustic2nd_adjoint(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ v2_lambda,  // pre-computed v^2 · λ_now
+    const float* __restrict__ vp,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml,
+    SolverContext solver
+){
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static  = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* vp_b = vp + b * spatial_size;
+    const float* v2l_b = v2_lambda + b * spatial_size;
+
+    if (solver.has_topo && iz < solver.topo_rows[ix]) {
+        return;
+    }
+
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        // Non-PML: proper adjoint. Compute ∇²(v² · λ_now) on the pre-computed
+        // v2_lambda buffer.  This is the transpose of `v² · ∇²λ` from the
+        // forward kernel.
+        float lap_x = laplace<2, Order, X>(v2l_b, ix, 0, iz, lap_ctx);
+        float lap_z = laplace<2, Order, Z>(v2l_b, ix, 0, iz, lap_ctx);
+        float dt2 = solver.dt * solver.dt;
+        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
+                        dt2 * (lap_x + lap_z);
+        return;
+    }
+
+    // PML branch: keep forward formulation for now (residual error in PML
+    // zone but main bug — box anomaly in non-PML interior — is addressed).
+    float v  = vp_b[idx];
+    float v2_dt2 = (v * v) * solver.dt * solver.dt;
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+
+    float ax_ = cpml.ax[ix];
+    float az_ = cpml.az[iz];
+    float bx_ = cpml.bx[ix];
+    float bz_ = cpml.bz[iz];
+    float dbxdx_ = cpml.dbxdx[ix];
+    float dbzdz_ = cpml.dbzdz[iz];
+
+    float w_sum = 0.0f;
+    float dudz     = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
+    float dudx     = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
+    float dpsizdz  = gradient<2, Order, Z>(f.psiz, ix, 0, iz, grad_ctx);
+    float dpsixdx  = gradient<2, Order, X>(f.psix, ix, 0, iz, grad_ctx);
+    float daxdx    = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
+    float dazdz    = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
+    float daipsiz_dz = az_ * dpsizdz + dazdz * f.psiz[idx];
+    float daipxix_dx = ax_ * dpsixdx + daxdx * f.psix[idx];
+
+    float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
+    w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[idx];
+    f.psix[idx]  = bx_ * dudx + ax_ * f.psix[idx];
+    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+
+    float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
+    w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[idx];
+    f.psiz[idx]  = bz_ * dudz + az_ * f.psiz[idx];
+    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + v2_dt2 * w_sum;
+}
+
 template<int Order>
 __global__ void acoustic2nd_nopml(
     AcousticWavefieldPointer wf,
@@ -218,7 +345,7 @@ __global__ void calculate_grad(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz
+    int nx, int nz, float dt
 );
 
 __global__ void calculate_grad_utt(
