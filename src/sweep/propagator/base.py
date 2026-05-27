@@ -205,6 +205,11 @@ class PropBase:
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
         self._abc_cache_key = None
 
+        # Optional sweep.parallel.ModelParallelMesh; when set, init_abc routes
+        # through rank-local PML widths and source/receiver / model tile work
+        # is performed in subclasses. None = single-rank behaviour (unchanged).
+        self.model_parallel = kwargs.pop('model_parallel', None)
+
         # Keep the equation object aware of geometry-dependent boundary
         # behavior.  ``equation.free_surface`` is the image-method-layout
         # flag (used by the Python eager step to decide whether to apply
@@ -906,9 +911,30 @@ class PropBase:
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim
         fd_pad = tuple(kwargs.get('fd_pad', _padding))
         shape = tuple(kwargs.get('shape', self.shape))
+
+        # PML widths layout: ``[z_low, z_high, (y_low, y_high,) x_low, x_high]``.
+        # With a model-parallel mesh, only the rank's mesh-edge sides get
+        # non-zero widths — interior-facing sides connect to neighbour tiles
+        # via HaloExchange and must NOT be absorbed.
+        if self.model_parallel is not None:
+            from sweep.parallel.pml import build_rank_pml_widths
+            pml_widths = tuple(build_rank_pml_widths(
+                self.model_parallel,
+                abcn=self.abcn,
+                ndim=self.ndim,
+                image_method_active=self._image_method_active,
+            ))
+            rank_coord = self.model_parallel.coord
+        else:
+            pml_widths = tuple(
+                [self.abcn if not self._image_method_active else 0]
+                + (2**self.ndim - 1) * [self.abcn]
+            )
+            rank_coord = None
+
         abc_key = (
             self.pml_type,
-            tuple([self.abcn if not self._image_method_active else 0] + (2**self.ndim-1) * [self.abcn]),
+            pml_widths,
             self.equation.so,
             fd_pad,
             self._dt,
@@ -916,12 +942,13 @@ class PropBase:
             kwargs.get('max_vel', 4500.0),
             kwargs.get('pml_freq', 25.0),
             shape,
+            rank_coord,
         )
 
         if abc_key != self._abc_cache_key:
             self.equation.init_abc(
                     type=self.pml_type,
-                    pml_width=list(abc_key[1]),
+                    pml_width=list(pml_widths),
                     accuracy=self.equation.so,
                     fd_pad=list(fd_pad),
                     dt=self._dt,
