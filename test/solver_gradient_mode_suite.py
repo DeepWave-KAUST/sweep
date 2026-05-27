@@ -47,6 +47,8 @@ from sweep.equations import (  # noqa: E402
     AcousticLSRTM3D,
     AcousticVRZ,
     AcousticVRZ3D,
+    AcousticVTI1st,
+    AcousticVTI1st3D,
     DASMu,
     DASMu3D,
     DASZhao,
@@ -105,7 +107,11 @@ SOLVERS = {
         elastic=True,
         supported_modes=(
             "full",
+            "full_fp16",
+            "full_bf16",
             "bs_gpu",
+            "bs_gpu_fp16",
+            "bs_gpu_bf16",
             "bs_cpu",
             "bs_cpu_pinned",
             "bs_disk",
@@ -128,7 +134,11 @@ SOLVERS = {
         elastic=True,
         supported_modes=(
             "full",
+            "full_fp16",
+            "full_bf16",
             "bs_gpu",
+            "bs_gpu_fp16",
+            "bs_gpu_bf16",
             "bs_cpu",
             "bs_cpu_pinned",
             "bs_disk",
@@ -164,6 +174,17 @@ SOLVERS = {
     # Elastic TTI (tilted transverse isotropy) — staggered-grid 2-D.
     # 8 model parameters: ``vp0, vs0, rho, epsilon, delta, gamma, theta, phi``.
     # ``make_models`` below recognises this tuple shape.
+    # AcousticVTI1st (1st-order VTI, sH/sV → vz)
+    "acoustic_vti_1st_2d": SolverSpec(
+        "acoustic_vti_1st_2d", AcousticVTI1st, 2,
+        ("vp", "epsilon", "delta", "rho"),
+        ("sH", "sV"), ("vz",), "cpmls",
+    ),
+    "acoustic_vti_1st_3d": SolverSpec(
+        "acoustic_vti_1st_3d", AcousticVTI1st3D, 3,
+        ("vp", "epsilon", "delta", "rho"),
+        ("sH", "sV"), ("vz",), "cpmls",
+    ),
     "elastic_tti_sg2d": SolverSpec(
         "elastic_tti_sg2d",
         ElasticTTISG, 2,
@@ -176,7 +197,11 @@ SOLVERS = {
         # checkpointing modes from the test matrix.
         supported_modes=(
             "full",
+            "full_fp16",
+            "full_bf16",
             "bs_gpu",
+            "bs_gpu_fp16",
+            "bs_gpu_bf16",
             "bs_cpu",
             "bs_cpu_pinned",
             "bs_disk",
@@ -278,6 +303,8 @@ def require_cuda_bindings(solver_keys: list[str]):
         "elastic2d": "elastic2d",
         "elastic3d": "elastic3d",
         "elastic_tti_sg2d": "elastic_tti_sg2d",
+        "acoustic_vti_1st_2d": "acoustic_vti_1st_2d",
+        "acoustic_vti_1st_3d": "acoustic_vti_1st_3d",
     }
     for key in solver_keys:
         prefix = prefixes[key]
@@ -378,6 +405,16 @@ def make_models(spec: SolverSpec, shape: tuple[int, ...]):
         grad_flags = [True, True, True, False, False, False, False, False]
         return true_list, init_list, grad_flags
 
+    # AcousticVTI1st (1st-order VTI): vp + epsilon + delta + rho
+    if spec.model_names == ("vp", "epsilon", "delta", "rho"):
+        eps_init = np.full(shape, 0.05, dtype=np.float32)
+        del_init = np.full(shape, 0.03, dtype=np.float32)
+        rho_init = depth_ramp(shape, 1000.0, 1200.0)
+        rho_true = add_box(rho_init, 60.0)
+        return ([vp_true, eps_init, del_init, rho_true],
+                [vp_init, eps_init, del_init, rho_init],
+                [True, False, False, True])
+
     if spec.elastic:
         vs_init = (vp_init / 1.73).astype(np.float32)
         vs_true = (vp_true / 1.73).astype(np.float32)
@@ -431,8 +468,12 @@ def make_geometry(spec: SolverSpec, shape: tuple[int, ...], scenario: ScenarioSp
 
 
 def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOptions | None:
-    if mode == "full":
+    # FP16/BF16 PoC modes: same CUDAOptions as the FP32 counterpart; the
+    # storage dtype is forced via env var by ``run_case``.
+    if mode in ("full", "full_fp16", "full_bf16"):
         return None
+    if mode in ("bs_gpu_fp16", "bs_gpu_bf16"):
+        mode = "bs_gpu"
 
     if mode.startswith("bs_"):
         storage = "gpu"
@@ -565,7 +606,7 @@ def build_solver(spec: SolverSpec, backend: str, mode: str, scenario: ScenarioSp
         )
 
     cuda_options = build_cuda_options(mode, args, run_dir, case_key)
-    if mode == "full":
+    if mode in ("full", "full_fp16", "full_bf16"):
         return PropTorch(
             equation,
             backend="torch",
@@ -899,6 +940,17 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
 
     rows = []
     for mode in modes:
+        # FP16/BF16 PoC: toggle env vars per mode so subsequent forward()
+        # picks up the right storage dtype.  Reset before each iter.
+        os.environ.pop("SWEEP_FP16_BOUNDARY", None)
+        os.environ.pop("SWEEP_BOUNDARY_DTYPE", None)
+        os.environ.pop("SWEEP_FP16_FULL", None)
+        if mode == "bs_gpu_fp16":
+            os.environ["SWEEP_BOUNDARY_DTYPE"] = "fp16"
+        elif mode == "bs_gpu_bf16":
+            os.environ["SWEEP_BOUNDARY_DTYPE"] = "bf16"
+        elif mode in ("full_fp16", "full_bf16"):
+            os.environ["SWEEP_FP16_FULL"] = "1"
         started = time.time()
         row = {
             "solver": spec.key,
@@ -1010,6 +1062,10 @@ def main():
         "ckpt_chunk_cpu",
         "ckpt_recursive",
         "ckpt_recursive_cpu",
+        "full_fp16",
+        "full_bf16",
+        "bs_gpu_fp16",
+        "bs_gpu_bf16",
     }
     solver_keys = parse_csv(args.solvers, SOLVERS, label="solver")
     scenario_keys = parse_csv(args.scenarios, SCENARIOS, label="scenario")

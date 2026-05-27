@@ -230,6 +230,21 @@ class Warpper(torch.autograd.Function):
 
         # -------- CUDA forward --------
         (u_allt, last, syn) = forward_func(params)
+
+        # FP16 / BF16 full-storage PoC: when SWEEP_FP16_FULL=1 downcast
+        # the per-step history to 16-bit before stashing in autograd ctx.
+        # u_allt stores ``v^2 * laplace(u)`` per step (NOT the raw
+        # wavefield), and ``v^2`` can be ~1e6 at FWI velocities, so
+        # IEEE-FP16's [6e-5, 6e4] dynamic range overflows near the source.
+        # BFloat16 (8-bit exponent, FP32-equivalent range, 7-bit mantissa)
+        # keeps the range and only sacrifices precision — same memory
+        # footprint, no overflow.
+        import os as _os_fp16
+        _ctx_u_allt_dtype = None
+        if (save_all_wavefields and u_allt is not None and u_allt.numel() > 0
+                and _os_fp16.environ.get('SWEEP_FP16_FULL', '') in ('1','true','yes','on')):
+            u_allt = u_allt.to(torch.bfloat16)
+            _ctx_u_allt_dtype = u_allt.dtype
         # Permute to canonical (B, nt, nrec, nfield) for the user-facing
         # output; remember the raw CUDA ndim so backward can invert it.
         cuda_record_ndim = int(syn.ndim)
@@ -288,6 +303,8 @@ class Warpper(torch.autograd.Function):
             ctx.source_illumination_buffer = source_illumination_buffer
             ctx.receiver_illumination_buffer = receiver_illumination_buffer
             ctx.illumination_padding = tuple(illumination_padding)
+            ctx.u_allt_was_fp16 = (_ctx_u_allt_dtype is not None)
+            ctx.u_allt_lowprec_dtype = _ctx_u_allt_dtype
 
         return syn
     
@@ -384,6 +401,9 @@ class Warpper(torch.autograd.Function):
             else:
                 gradients = ctx.backward_ckpt_func(params)
         elif not ctx.use_boundary_saving:
+            # FP16/BF16-full PoC: cast back to FP32 for the C++ kernel.
+            if getattr(ctx, 'u_allt_was_fp16', False) and u_allt.dtype in (torch.float16, torch.bfloat16):
+                u_allt = u_allt.to(torch.float32)
             params.u_forward = u_allt.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
@@ -659,10 +679,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = root
         self._boundary_disk_files = tuple(files)
 
-    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1):
+    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype='fp32'):
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
+        # Env override wins over kwarg for quick experimentation.
+        import os as _os_d
+        _env_dtype = _os_d.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
+        if _env_dtype in ('fp32', 'fp16', 'bf16'):
+            boundary_dtype = _env_dtype
+        elif _os_d.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
+            boundary_dtype = 'fp16'
+        if boundary_dtype not in ('fp32', 'fp16', 'bf16'):
+            raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16', got {boundary_dtype!r}")
         if (
             self._boundary_cache_batch == self.B
             and
@@ -672,6 +701,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_pinned == staging_pinned
             and self._boundary_cache_disk_dir == disk_dir
             and self._boundary_cache_nt == self.nt
+            and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
         ):
             return
 
@@ -727,9 +757,23 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.boundary_cpu = ()
             self.boundary_gpu = ()
-            self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(layout.gpu_full_shapes)
+            # FP16 boundary PoC: when SWEEP_FP16_BOUNDARY=1 allocate the GPU
+            # ring buffer as torch.float16 to halve its footprint.  Compute
+            # stays FP32 — the cast happens at the storage boundary inside
+            # boundary_kernel3d_fp16 (see kernels.cuh).  last_two stays FP32
+            # because it's a wavefield snapshot used to bootstrap backward.
+            # Both 2-D and 3-D FP16/BF16 boundary kernels are wired.
+            # Pick allocation dtype from the resolved boundary_dtype.
+            _bdry_dtype = {
+                'fp32': torch.float32,
+                'fp16': torch.float16,
+                'bf16': torch.bfloat16,
+            }[boundary_dtype]
+            self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
+                layout.gpu_full_shapes, dtype=_bdry_dtype)
             self.last_two = self.forward_allocator.zeros([last_two_shape])[0]
 
+        self._boundary_cache_dtype = boundary_dtype
         self._boundary_cache_mode = boundary_storage
         self._boundary_cache_interval = transfer_interval
         self._boundary_cache_ring_buffers = ring_buffers
@@ -1064,7 +1108,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype', 'fp32'))
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -1072,7 +1116,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype', 'fp32'))
                 for t in self.boundary_gpu_full:
                     t.zero_()
             boundary_cpu = ()
@@ -1276,7 +1320,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if use_ckpt and checkpoint_buffers:
             self.checkpoint_allocator.zero_()
         if use_boundary_saving:
-            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype', 'fp32'))
         if boundary_on_cpu:
             if boundary_on_disk and use_boundary_saving:
                 self.boundary_cpu_allocator.zero_()
@@ -1374,7 +1418,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype', 'fp32'))
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -1382,7 +1426,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype', 'fp32'))
                 for t in self.boundary_gpu_full:
                     t.zero_()
             boundary_cpu = ()

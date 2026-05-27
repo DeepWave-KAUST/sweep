@@ -226,10 +226,18 @@ struct EffectiveBoundarySaver {
         else
             store_on_gpu = (dim == 2);   // default
 
-        auto gpu_options = ref_tensor.options().dtype(torch::kFloat32);
+        // FP16 storage gate (PoC): when sweep_use_fp16_boundary() is on we
+        // allocate the persistent boundary buffers as kHalf to cut their
+        // footprint by 2×.  Staging (GPU staging buffer used by storage='cpu'
+        // / 'disk' modes) keeps FP32 to avoid breaking the existing CPU /
+        // disk paths.  last_two stays FP32 — it's a full-wavefield snapshot.
+        const bool fp16_storage = sweep_use_fp16_boundary();
+        auto dtype_storage = fp16_storage ? torch::kHalf : torch::kFloat32;
+
+        auto gpu_options = ref_tensor.options().dtype(dtype_storage);
 
         auto pinned_options = torch::TensorOptions()
-            .dtype(torch::kFloat32)
+            .dtype(dtype_storage)
             .device(torch::kCPU)
             .pinned_memory(use_pinned_memory_);
 
@@ -264,7 +272,10 @@ struct EffectiveBoundarySaver {
 
         compute_time_strides();
 
-        auto last_two_options = store_on_gpu ? gpu_options : pinned_options;
+        // last_two is the wavefield snapshot used to bootstrap the backward
+        // pass — full-precision matters here even when boundary buffers go
+        // FP16 (PoC choice; can be relaxed later).
+        auto last_two_options = (store_on_gpu ? gpu_options : pinned_options).dtype(torch::kFloat32);
         allocate_last_two(ctx, last_two_nvar, last_two, last_two_options);
     }
 
@@ -274,24 +285,48 @@ struct EffectiveBoundarySaver {
 
         if (!enabled) return v;
 
-        v.left  = left_t.data_ptr<float>();
-        v.right = right_t.data_ptr<float>();
-
-        if (dim == 3) {
-            v.front = front_t.data_ptr<float>();
-            v.back  = back_t.data_ptr<float>();
-        } else {
-            v.front = nullptr;
-            v.back  = nullptr;
-        }
-
-        v.bottom = bottom_t.data_ptr<float>();
-        v.top    = top_t.data_ptr<float>();
-
+        // last_two is always FP32 (we forced it in allocate above).
         v.last_two = last_two_t.data_ptr<float>();
 
-        return v;
+        // Detect storage dtype on the persistent face buffer (left_t) to
+        // decide which set of pointers to populate.
+        auto dt = left_t.dtype();
+        if (dt == torch::kHalf) {
+            v.dtype = BoundaryDtype::FP16;
+            v.use_fp16 = true;
+            v.left_h  = reinterpret_cast<__half*>(left_t.data_ptr());
+            v.right_h = reinterpret_cast<__half*>(right_t.data_ptr());
+            if (dim == 3) {
+                v.front_h = reinterpret_cast<__half*>(front_t.data_ptr());
+                v.back_h  = reinterpret_cast<__half*>(back_t.data_ptr());
+            }
+            v.bottom_h = reinterpret_cast<__half*>(bottom_t.data_ptr());
+            v.top_h    = reinterpret_cast<__half*>(top_t.data_ptr());
+        } else if (dt == torch::kBFloat16) {
+            v.dtype = BoundaryDtype::BF16;
+            v.use_fp16 = false;
+            v.left_bf  = reinterpret_cast<__nv_bfloat16*>(left_t.data_ptr());
+            v.right_bf = reinterpret_cast<__nv_bfloat16*>(right_t.data_ptr());
+            if (dim == 3) {
+                v.front_bf = reinterpret_cast<__nv_bfloat16*>(front_t.data_ptr());
+                v.back_bf  = reinterpret_cast<__nv_bfloat16*>(back_t.data_ptr());
+            }
+            v.bottom_bf = reinterpret_cast<__nv_bfloat16*>(bottom_t.data_ptr());
+            v.top_bf    = reinterpret_cast<__nv_bfloat16*>(top_t.data_ptr());
+        } else {
+            v.dtype = BoundaryDtype::FP32;
+            v.use_fp16 = false;
+            v.left  = left_t.data_ptr<float>();
+            v.right = right_t.data_ptr<float>();
+            if (dim == 3) {
+                v.front = front_t.data_ptr<float>();
+                v.back  = back_t.data_ptr<float>();
+            }
+            v.bottom = bottom_t.data_ptr<float>();
+            v.top    = top_t.data_ptr<float>();
+        }
 
+        return v;
     }
 
     void load_from_vector(
@@ -381,7 +416,7 @@ struct EffectiveBoundarySaver {
             size_t top_bytes = len * top_time_block * sizeof(float);
             size_t left_bytes = len * left_time_block * sizeof(float);
 
-            TORCH_CHECK(top_t.dtype() == torch::kFloat32, "Boundary storage must be float32.");
+            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
             copy_2d_chunk_async(
                 top_t.data_ptr<float>() + start * top_time_block,
                 top_var_block,
@@ -436,7 +471,7 @@ struct EffectiveBoundarySaver {
         size_t bottom_gpu_offset = static_cast<size_t>(gpu_start) * nvar * bottom_gpu_block;
 
 
-        TORCH_CHECK(left_t.dtype() == torch::kFloat32, "Boundary storage must be float32.");
+        TORCH_CHECK(left_t.dtype() == torch::kFloat32 || left_t.dtype() == torch::kHalf || left_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
         cudaMemcpyAsync(
             left_t.data_ptr<float>() + start * nvar * left_block,
             left_gpu.data_ptr<float>() + left_gpu_offset,
@@ -787,7 +822,7 @@ struct EffectiveBoundarySaver {
             size_t top_gpu_time_block = top_gpu.stride(1);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
-            TORCH_CHECK(top_t.dtype() == torch::kFloat32, "Boundary storage must be float32.");
+            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
             copy_2d_chunk_async(
                 top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
                 top_gpu_var_block,
@@ -841,7 +876,7 @@ struct EffectiveBoundarySaver {
         size_t front_gpu_offset = static_cast<size_t>(gpu_start) * nvar * front_gpu_block;
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
-        TORCH_CHECK(top_t.dtype() == torch::kFloat32, "Boundary storage must be float32.");
+        TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
         cudaMemcpyAsync(
             top_gpu.data_ptr<float>() + top_gpu_offset,
             top_t.data_ptr<float>() + start * nvar * top_block,
