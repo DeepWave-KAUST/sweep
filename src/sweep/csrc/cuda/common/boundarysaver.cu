@@ -871,3 +871,90 @@ __global__ void boundary_kernel3d_compact_bf16(
     boundary_kernel3d_compact_body<__nv_bfloat16>(u, top, bottom, front, back, left, right,
                                                   it, width, offset, ctx, mode, tangent_pad);
 }
+
+// ====================================================================
+// INT8 per-block symmetric quantization (DeepWave-style)
+//
+// Each thread block of BOUNDARY_INT8_BLOCK threads handles one quant
+// block: 256 contiguous cells on the flattened spatial axis of one
+// timestep slot of one face.  Block-local shared-memory reduction
+// finds max(|val|), then one FP32 scale is written per block and
+// every cell is quantized to uint8 with offset 128.
+//
+// scale layout: per face, scale buffer has shape (nt × nfields ×
+// n_blocks_per_step) — same outer "step" index as the main buffer so
+// the scale doesn't span timesteps (preserves dynamic range across
+// the wavefield's full evolution).
+//
+// Compression ratio = 4·B / (B + 4) where B = BOUNDARY_INT8_BLOCK.
+// B=256 → ratio = 1024/260 ≈ 3.94×.
+// ====================================================================
+
+__global__ __launch_bounds__(BOUNDARY_INT8_BLOCK) void
+quantize_int8_kernel(const float* __restrict__ src,
+                     uint8_t* __restrict__ dst,
+                     float* __restrict__ scale,
+                     int64_t total_cells)
+{
+    int tid = threadIdx.x;
+    int64_t block_idx = blockIdx.x;
+    int64_t cell_idx = block_idx * BOUNDARY_INT8_BLOCK + tid;
+
+    float val = (cell_idx < total_cells) ? src[cell_idx] : 0.0f;
+
+    __shared__ float s_max[BOUNDARY_INT8_BLOCK];
+    s_max[tid] = fabsf(val);
+    __syncthreads();
+
+    // Tree reduction.
+    for (int s = BOUNDARY_INT8_BLOCK / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            float other = s_max[tid + s];
+            if (other > s_max[tid]) s_max[tid] = other;
+        }
+        __syncthreads();
+    }
+    float max_abs = s_max[0];
+
+    if (tid == 0) scale[block_idx] = max_abs;
+
+    if (cell_idx < total_cells) {
+        float q_scale = (max_abs > 0.0f) ? (127.0f / max_abs) : 0.0f;
+        int q = __float2int_rn(val * q_scale) + 128;
+        if (q < 0) q = 0;
+        if (q > 255) q = 255;
+        dst[cell_idx] = (uint8_t)q;
+    }
+}
+
+__global__ __launch_bounds__(BOUNDARY_INT8_BLOCK) void
+dequantize_int8_kernel(const uint8_t* __restrict__ src,
+                       const float* __restrict__ scale,
+                       float* __restrict__ dst,
+                       int64_t total_cells)
+{
+    int64_t block_idx = blockIdx.x;
+    int64_t cell_idx = block_idx * BOUNDARY_INT8_BLOCK + threadIdx.x;
+    if (cell_idx >= total_cells) return;
+    float s = scale[block_idx] * (1.0f / 127.0f);
+    dst[cell_idx] = ((float)src[cell_idx] - 128.0f) * s;
+}
+
+// Host-side launchers — compute grid from total_cells.  Caller passes
+// the stream so the launch joins the propagator's existing schedule.
+void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
+                          int64_t total_cells, cudaStream_t stream)
+{
+    int64_t n_blocks = (total_cells + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
+    quantize_int8_kernel<<<n_blocks, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+        src, dst, scale, total_cells);
+}
+
+void launch_dequantize_int8(const uint8_t* src, const float* scale,
+                            float* dst, int64_t total_cells,
+                            cudaStream_t stream)
+{
+    int64_t n_blocks = (total_cells + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
+    dequantize_int8_kernel<<<n_blocks, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+        src, scale, dst, total_cells);
+}

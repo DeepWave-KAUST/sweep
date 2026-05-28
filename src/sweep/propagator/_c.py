@@ -686,12 +686,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # Env override wins over kwarg for quick experimentation.
         import os as _os_d
         _env_dtype = _os_d.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
-        if _env_dtype in ('fp32', 'fp16', 'bf16'):
+        if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
             boundary_dtype = _env_dtype
         elif _os_d.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
             boundary_dtype = 'fp16'
-        if boundary_dtype not in ('fp32', 'fp16', 'bf16'):
-            raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16', got {boundary_dtype!r}")
+        if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
+            raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
         if (
             self._boundary_cache_batch == self.B
             and
@@ -757,20 +757,55 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.boundary_cpu = ()
             self.boundary_gpu = ()
-            # FP16 boundary PoC: when SWEEP_FP16_BOUNDARY=1 allocate the GPU
-            # ring buffer as torch.float16 to halve its footprint.  Compute
-            # stays FP32 — the cast happens at the storage boundary inside
-            # boundary_kernel3d_fp16 (see kernels.cuh).  last_two stays FP32
-            # because it's a wavefield snapshot used to bootstrap backward.
-            # Both 2-D and 3-D FP16/BF16 boundary kernels are wired.
-            # Pick allocation dtype from the resolved boundary_dtype.
-            _bdry_dtype = {
-                'fp32': torch.float32,
-                'fp16': torch.float16,
-                'bf16': torch.bfloat16,
-            }[boundary_dtype]
-            self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
-                layout.gpu_full_shapes, dtype=_bdry_dtype)
+            # Boundary storage dtype: FP32 (default) / FP16 / BF16 cast at
+            # the storage boundary inside boundary_kernel*_{fp16,bf16}, or
+            # INT8 with per-block symmetric quantization (DeepWave-style,
+            # see boundarysaver.cu: quantize_int8_kernel).  last_two stays
+            # FP32 — it's a wavefield snapshot used to bootstrap backward.
+            if boundary_dtype == 'int8':
+                # INT8: Python owns persistent uint8 main + FP32 scale
+                # tensors so they survive across forward/backward calls
+                # (CUDA-side saver is recreated each call and would
+                # otherwise lose the data).  Layout: list of N main
+                # uint8 tensors followed by N scale FP32 tensors, where
+                # N = 4 (2D) or 6 (3D).  Saver detects this pattern via
+                # dtype and binds main + scale + allocates FP32 staging
+                # internally.  See saver.cuh allocate_int8_main_and_scale.
+                _BLOCK = 256
+                main_shapes = layout.gpu_full_shapes
+                main_tensors = self.boundary_gpu_allocator.zeros(
+                    main_shapes, dtype=torch.uint8)
+                # Scale shapes preserve the batch dimension so that
+                # ``_slice_boundary_buffers`` narrows the same axis as the
+                # main tensors.  Spatial dims collapse to n_blocks.
+                #   3D main  (nvar*nt, B, W, Ny_b, Nx_b)
+                #     scale  (nvar*nt, B, n_blocks_per_step)
+                #   2D main  (nvar, nt, B, W, Nx_b)
+                #     scale  (nvar, nt, B, n_blocks_per_step)
+                scale_shapes = []
+                for s in main_shapes:
+                    if self.ndim == 3:
+                        outer = (s[0], s[1])
+                        spatial = s[2:]
+                    else:
+                        outer = (s[0], s[1], s[2])
+                        spatial = s[3:]
+                    cells_per_step = 1
+                    for d in spatial:
+                        cells_per_step *= d
+                    n_blocks = (cells_per_step + _BLOCK - 1) // _BLOCK
+                    scale_shapes.append(outer + (n_blocks,))
+                scale_tensors = self.boundary_gpu_allocator.zeros(
+                    scale_shapes, dtype=torch.float32)
+                self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
+            else:
+                _bdry_dtype = {
+                    'fp32': torch.float32,
+                    'fp16': torch.float16,
+                    'bf16': torch.bfloat16,
+                }[boundary_dtype]
+                self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
+                    layout.gpu_full_shapes, dtype=_bdry_dtype)
             self.last_two = self.forward_allocator.zeros([last_two_shape])[0]
 
         self._boundary_cache_dtype = boundary_dtype
