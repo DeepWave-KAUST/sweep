@@ -151,6 +151,7 @@ def _normalize_cuda_memory_kwargs(merged):
             "disk_dir",
             "ring_buffers",
             "disk_async_read",
+            "storage_dtype",
         ):
             if key in boundary:
                 boundary_config[key] = boundary[key]
