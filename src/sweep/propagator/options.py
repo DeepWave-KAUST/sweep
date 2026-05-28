@@ -85,10 +85,28 @@ class BoundaryOptions:
     disk_dir: str | None = BOUNDARY_DEFAULTS.disk_dir
     ring_buffers: int | None = BOUNDARY_DEFAULTS.ring_buffers
     disk_async_read: bool = BOUNDARY_DEFAULTS.disk_async_read
+    # Low-precision storage for the boundary buffer.  Compute always
+    # stays FP32; this only changes how saved boundary values are
+    # represented in memory:
+    #   'fp32'  — 4 bytes/cell, baseline, no precision loss
+    #   'fp16'  — 2 bytes/cell, 10-bit mantissa (precision ~5e-4),
+    #             range [6e-5, 6.5e4] — best when wavefield amplitudes
+    #             are roughly O(1) and won't over- or under-flow
+    #   'bf16'  — 2 bytes/cell, 7-bit mantissa (precision ~8e-3),
+    #             same dynamic range as FP32 — safest under arbitrary
+    #             source amplitude scaling, slightly noisier reconstruction
+    #   'int8'  — ~1 byte/cell + ~0.4% FP32 scale metadata (≈4× compression),
+    #             per-256-cell symmetric quantization (DeepWave-style).
+    #             Lossier than BF16; intended for memory-bound runs where
+    #             3.94× compression beats BF16's 2× and the gradient drop
+    #             is acceptable for the equation in question.
+    storage_dtype: Literal["fp32", "fp16", "bf16", "int8"] = "fp32"
 
     def __post_init__(self):
         if self.storage not in {"gpu", "cpu", "disk"}:
             raise ValueError("BoundaryOptions.storage must be 'gpu', 'cpu', or 'disk'.")
+        if self.storage_dtype not in {"fp32", "fp16", "bf16", "int8"}:
+            raise ValueError("BoundaryOptions.storage_dtype must be 'fp32', 'fp16', 'bf16', or 'int8'.")
         if self.transfer_interval is not None and self.transfer_interval < 1:
             raise ValueError("BoundaryOptions.transfer_interval must be >= 1.")
         if self.ring_buffers is not None and self.ring_buffers < 1:

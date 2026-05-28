@@ -127,6 +127,85 @@ public:
         return chunk;
     }
 
+    // INT8 helpers: launch quantize / dequantize for one timestep's
+    // worth of data per face.  ``step_idx`` is the index along the
+    // outermost dimension of the persistent uint8 buffer (already
+    // includes any multi-field offset).  We look up the per-step cell
+    // count from the saver's tensor stride so this stays consistent
+    // with allocate_int8_main_and_scale.
+    inline void quantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
+    {
+        int64_t c_top = saver_.top_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t c_bot = saver_.bottom_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t c_lef = saver_.left_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t c_rig = saver_.right_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_top = saver_.top_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
+        launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
+        launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
+        launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
+    }
+    inline void dequantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
+    {
+        int64_t c_top = saver_.top_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t c_bot = saver_.bottom_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t c_lef = saver_.left_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t c_rig = saver_.right_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_top = saver_.top_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
+        launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
+        launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
+        launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
+        launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
+    }
+    inline void quantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
+    {
+        int64_t c_top = saver_.top_t.stride(0);
+        int64_t c_bot = saver_.bottom_t.stride(0);
+        int64_t c_fro = saver_.front_t.stride(0);
+        int64_t c_bac = saver_.back_t.stride(0);
+        int64_t c_lef = saver_.left_t.stride(0);
+        int64_t c_rig = saver_.right_t.stride(0);
+        int64_t s_top = saver_.top_scale_t.stride(0);
+        int64_t s_bot = saver_.bottom_scale_t.stride(0);
+        int64_t s_fro = saver_.front_scale_t.stride(0);
+        int64_t s_bac = saver_.back_scale_t.stride(0);
+        int64_t s_lef = saver_.left_scale_t.stride(0);
+        int64_t s_rig = saver_.right_scale_t.stride(0);
+        launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
+        launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
+        launch_quantize_int8(b.front, b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, c_fro, compute_stream_);
+        launch_quantize_int8(b.back,  b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, c_bac, compute_stream_);
+        launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
+        launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
+    }
+    inline void dequantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
+    {
+        int64_t c_top = saver_.top_t.stride(0);
+        int64_t c_bot = saver_.bottom_t.stride(0);
+        int64_t c_fro = saver_.front_t.stride(0);
+        int64_t c_bac = saver_.back_t.stride(0);
+        int64_t c_lef = saver_.left_t.stride(0);
+        int64_t c_rig = saver_.right_t.stride(0);
+        int64_t s_top = saver_.top_scale_t.stride(0);
+        int64_t s_bot = saver_.bottom_scale_t.stride(0);
+        int64_t s_fro = saver_.front_scale_t.stride(0);
+        int64_t s_bac = saver_.back_scale_t.stride(0);
+        int64_t s_lef = saver_.left_scale_t.stride(0);
+        int64_t s_rig = saver_.right_scale_t.stride(0);
+        launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
+        launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
+        launch_dequantize_int8(b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, b.front,  c_fro, compute_stream_);
+        launch_dequantize_int8(b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, b.back,   c_bac, compute_stream_);
+        launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
+        launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
+    }
+
     inline void wait_before_forward_save(const BoundaryChunk& chunk)
     {
         if (!enabled_ || !staged_ || chunk.buf_idx != 0)
@@ -178,6 +257,8 @@ public:
         if (dim_ == 2) {
             GeneralBoundaryPointer ptr{};
             ptr.last_two = direct.last_two;
+            ptr.use_fp16 = direct.use_fp16;
+            ptr.dtype = direct.dtype;
 
             if (staged_) {
                 int gpu_idx = chunk.ring_start + chunk.buf_idx;
@@ -193,6 +274,29 @@ public:
                 ptr.right = saver_.right_gpu.data_ptr<float>() +
                     field_idx * saver_.right_gpu.stride(0) +
                     gpu_idx * saver_.right_gpu.stride(1);
+            } else if (direct.dtype == BoundaryDtype::FP16) {
+                ptr.top_h    = direct.top_h    + field_idx * saver_.top_t.stride(0);
+                ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
+                ptr.left_h   = direct.left_h   + field_idx * saver_.left_t.stride(0);
+                ptr.right_h  = direct.right_h  + field_idx * saver_.right_t.stride(0);
+            } else if (direct.dtype == BoundaryDtype::BF16) {
+                ptr.top_bf    = direct.top_bf    + field_idx * saver_.top_t.stride(0);
+                ptr.bottom_bf = direct.bottom_bf + field_idx * saver_.bottom_t.stride(0);
+                ptr.left_bf   = direct.left_bf   + field_idx * saver_.left_t.stride(0);
+                ptr.right_bf  = direct.right_bf  + field_idx * saver_.right_t.stride(0);
+            } else if (direct.dtype == BoundaryDtype::INT8) {
+                ptr.top_q       = direct.top_q       + field_idx * saver_.top_t.stride(0);
+                ptr.bottom_q    = direct.bottom_q    + field_idx * saver_.bottom_t.stride(0);
+                ptr.left_q      = direct.left_q      + field_idx * saver_.left_t.stride(0);
+                ptr.right_q     = direct.right_q     + field_idx * saver_.right_t.stride(0);
+                ptr.top_scale    = direct.top_scale    + field_idx * saver_.top_scale_t.stride(0);
+                ptr.bottom_scale = direct.bottom_scale + field_idx * saver_.bottom_scale_t.stride(0);
+                ptr.left_scale   = direct.left_scale   + field_idx * saver_.left_scale_t.stride(0);
+                ptr.right_scale  = direct.right_scale  + field_idx * saver_.right_scale_t.stride(0);
+                ptr.top    = direct.top;
+                ptr.bottom = direct.bottom;
+                ptr.left   = direct.left;
+                ptr.right  = direct.right;
             } else {
                 ptr.top = direct.top + field_idx * saver_.top_t.stride(0);
                 ptr.bottom = direct.bottom + field_idx * saver_.bottom_t.stride(0);
@@ -206,18 +310,60 @@ public:
         int64_t flat_idx = static_cast<int64_t>(time_idx) * saver_.nvar + field_idx;
 
         GeneralBoundaryPointer ptr{};
-        ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
-            flat_idx * saver_.top_stride;
-        ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
-            flat_idx * saver_.bottom_stride;
-        ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
-            flat_idx * saver_.front_stride;
-        ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
-            flat_idx * saver_.back_stride;
-        ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
-            flat_idx * saver_.left_stride;
-        ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
-            flat_idx * saver_.right_stride;
+        ptr.use_fp16 = direct.use_fp16;
+            ptr.dtype = direct.dtype;
+        if (!staged_ && direct.dtype == BoundaryDtype::FP16) {
+            ptr.top_h    = direct.top_h    + flat_idx * saver_.top_stride;
+            ptr.bottom_h = direct.bottom_h + flat_idx * saver_.bottom_stride;
+            ptr.front_h  = direct.front_h  + flat_idx * saver_.front_stride;
+            ptr.back_h   = direct.back_h   + flat_idx * saver_.back_stride;
+            ptr.left_h   = direct.left_h   + flat_idx * saver_.left_stride;
+            ptr.right_h  = direct.right_h  + flat_idx * saver_.right_stride;
+        } else if (!staged_ && direct.dtype == BoundaryDtype::BF16) {
+            ptr.top_bf    = direct.top_bf    + flat_idx * saver_.top_stride;
+            ptr.bottom_bf = direct.bottom_bf + flat_idx * saver_.bottom_stride;
+            ptr.front_bf  = direct.front_bf  + flat_idx * saver_.front_stride;
+            ptr.back_bf   = direct.back_bf   + flat_idx * saver_.back_stride;
+            ptr.left_bf   = direct.left_bf   + flat_idx * saver_.left_stride;
+            ptr.right_bf  = direct.right_bf  + flat_idx * saver_.right_stride;
+        } else if (!staged_ && direct.dtype == BoundaryDtype::INT8) {
+            // 3D persistent uint8 buffer: outermost index = time*nvar + field.
+            // top_stride/bottom_stride/... already track per-(time×field)
+            // cell counts (compute_time_strides → tensor.stride(0)).
+            ptr.top_q    = direct.top_q    + flat_idx * saver_.top_stride;
+            ptr.bottom_q = direct.bottom_q + flat_idx * saver_.bottom_stride;
+            ptr.front_q  = direct.front_q  + flat_idx * saver_.front_stride;
+            ptr.back_q   = direct.back_q   + flat_idx * saver_.back_stride;
+            ptr.left_q   = direct.left_q   + flat_idx * saver_.left_stride;
+            ptr.right_q  = direct.right_q  + flat_idx * saver_.right_stride;
+            // Scale buffer outermost stride.
+            ptr.top_scale    = direct.top_scale    + flat_idx * saver_.top_scale_t.stride(0);
+            ptr.bottom_scale = direct.bottom_scale + flat_idx * saver_.bottom_scale_t.stride(0);
+            ptr.front_scale  = direct.front_scale  + flat_idx * saver_.front_scale_t.stride(0);
+            ptr.back_scale   = direct.back_scale   + flat_idx * saver_.back_scale_t.stride(0);
+            ptr.left_scale   = direct.left_scale   + flat_idx * saver_.left_scale_t.stride(0);
+            ptr.right_scale  = direct.right_scale  + flat_idx * saver_.right_scale_t.stride(0);
+            // Staging shared across (time, field) — no offset.
+            ptr.top    = direct.top;
+            ptr.bottom = direct.bottom;
+            ptr.front  = direct.front;
+            ptr.back   = direct.back;
+            ptr.left   = direct.left;
+            ptr.right  = direct.right;
+        } else {
+            ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
+                flat_idx * saver_.top_stride;
+            ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
+                flat_idx * saver_.bottom_stride;
+            ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
+                flat_idx * saver_.front_stride;
+            ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
+                flat_idx * saver_.back_stride;
+            ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
+                flat_idx * saver_.left_stride;
+            ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
+                flat_idx * saver_.right_stride;
+        }
         ptr.last_two = direct.last_two;
         return ptr;
     }
@@ -284,18 +430,27 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs(chunk, direct);
 
-        boundary_kernel2d<<<grid, block>>>(
-            u,
-            b.top,
-            b.bottom,
-            b.left,
-            b.right,
-            boundary_time_index(chunk),
-            width,
-            offset,
-            ctx,
-            BOUNDARY_SAVE
-        );
+        if (b.dtype == BoundaryDtype::FP16) {
+            boundary_kernel2d_fp16<<<grid, block>>>(
+                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
+                boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+        } else if (b.dtype == BoundaryDtype::BF16) {
+            boundary_kernel2d_bf16<<<grid, block>>>(
+                u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
+                boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+        } else if (b.dtype == BoundaryDtype::INT8) {
+            // INT8 2-pass save: FP32 kernel → staging (1-step), then
+            // quantize → persistent uint8 + per-block FP32 scale.
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+            int64_t bt = boundary_time_index(chunk);
+            quantize_step_2d(b, bt);
+        } else {
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+        }
 
         flush_forward_if_needed(chunk);
     }
@@ -320,35 +475,43 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                boundary_time_index(chunk),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_SAVE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+                quantize_step_3d(b, boundary_time_index(chunk));
+            } else {
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            }
         } else {
-            boundary_kernel3d<<<grid, block>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                boundary_time_index(chunk),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_SAVE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_fp16<<<grid, block>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_bf16<<<grid, block>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+                quantize_step_3d(b, boundary_time_index(chunk));
+            } else {
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            }
         }
 
         flush_forward_if_needed(chunk);
@@ -372,18 +535,24 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs_field(chunk, direct, field_idx);
 
-        boundary_kernel2d<<<grid, block>>>(
-            u,
-            b.top,
-            b.bottom,
-            b.left,
-            b.right,
-            boundary_time_index_field(chunk),
-            width,
-            offset,
-            ctx,
-            BOUNDARY_SAVE
-        );
+        if (b.dtype == BoundaryDtype::FP16) {
+            boundary_kernel2d_fp16<<<grid, block>>>(
+                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+        } else if (b.dtype == BoundaryDtype::BF16) {
+            boundary_kernel2d_bf16<<<grid, block>>>(
+                u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+        } else if (b.dtype == BoundaryDtype::INT8) {
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+            quantize_step_2d(b, boundary_time_index_field(chunk));
+        } else {
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+        }
 
         if (flush_chunk)
             flush_forward_if_needed(chunk);
@@ -411,35 +580,43 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                boundary_time_index_field(chunk),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_SAVE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+                quantize_step_3d(b, boundary_time_index_field(chunk));
+            } else {
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            }
         } else {
-            boundary_kernel3d<<<grid, block>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                boundary_time_index_field(chunk),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_SAVE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_fp16<<<grid, block>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_bf16<<<grid, block>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+                quantize_step_3d(b, boundary_time_index_field(chunk));
+            } else {
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+            }
         }
 
         if (flush_chunk)
@@ -539,6 +716,8 @@ public:
         if (dim_ == 2) {
             GeneralBoundaryPointer ptr{};
             ptr.last_two = direct.last_two;
+            ptr.use_fp16 = direct.use_fp16;
+            ptr.dtype = direct.dtype;
 
             if (staged_) {
                 int buf_idx = (it - 1) % transfer_interval_;
@@ -560,6 +739,29 @@ public:
                 ptr.right = saver_.right_gpu.data_ptr<float>() +
                     field_idx * saver_.right_gpu.stride(0) +
                     gpu_idx * saver_.right_gpu.stride(1);
+            } else if (direct.dtype == BoundaryDtype::FP16) {
+                ptr.top_h    = direct.top_h    + field_idx * saver_.top_t.stride(0);
+                ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
+                ptr.left_h   = direct.left_h   + field_idx * saver_.left_t.stride(0);
+                ptr.right_h  = direct.right_h  + field_idx * saver_.right_t.stride(0);
+            } else if (direct.dtype == BoundaryDtype::BF16) {
+                ptr.top_bf    = direct.top_bf    + field_idx * saver_.top_t.stride(0);
+                ptr.bottom_bf = direct.bottom_bf + field_idx * saver_.bottom_t.stride(0);
+                ptr.left_bf   = direct.left_bf   + field_idx * saver_.left_t.stride(0);
+                ptr.right_bf  = direct.right_bf  + field_idx * saver_.right_t.stride(0);
+            } else if (direct.dtype == BoundaryDtype::INT8) {
+                ptr.top_q       = direct.top_q       + field_idx * saver_.top_t.stride(0);
+                ptr.bottom_q    = direct.bottom_q    + field_idx * saver_.bottom_t.stride(0);
+                ptr.left_q      = direct.left_q      + field_idx * saver_.left_t.stride(0);
+                ptr.right_q     = direct.right_q     + field_idx * saver_.right_t.stride(0);
+                ptr.top_scale    = direct.top_scale    + field_idx * saver_.top_scale_t.stride(0);
+                ptr.bottom_scale = direct.bottom_scale + field_idx * saver_.bottom_scale_t.stride(0);
+                ptr.left_scale   = direct.left_scale   + field_idx * saver_.left_scale_t.stride(0);
+                ptr.right_scale  = direct.right_scale  + field_idx * saver_.right_scale_t.stride(0);
+                ptr.top    = direct.top;
+                ptr.bottom = direct.bottom;
+                ptr.left   = direct.left;
+                ptr.right  = direct.right;
             } else {
                 ptr.top = direct.top + field_idx * saver_.top_t.stride(0);
                 ptr.bottom = direct.bottom + field_idx * saver_.bottom_t.stride(0);
@@ -581,18 +783,60 @@ public:
         int64_t flat_idx = static_cast<int64_t>(time_idx) * saver_.nvar + field_idx;
 
         GeneralBoundaryPointer ptr{};
-        ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
-            flat_idx * saver_.top_stride;
-        ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
-            flat_idx * saver_.bottom_stride;
-        ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
-            flat_idx * saver_.front_stride;
-        ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
-            flat_idx * saver_.back_stride;
-        ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
-            flat_idx * saver_.left_stride;
-        ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
-            flat_idx * saver_.right_stride;
+        ptr.use_fp16 = direct.use_fp16;
+            ptr.dtype = direct.dtype;
+        if (!staged_ && direct.dtype == BoundaryDtype::FP16) {
+            ptr.top_h    = direct.top_h    + flat_idx * saver_.top_stride;
+            ptr.bottom_h = direct.bottom_h + flat_idx * saver_.bottom_stride;
+            ptr.front_h  = direct.front_h  + flat_idx * saver_.front_stride;
+            ptr.back_h   = direct.back_h   + flat_idx * saver_.back_stride;
+            ptr.left_h   = direct.left_h   + flat_idx * saver_.left_stride;
+            ptr.right_h  = direct.right_h  + flat_idx * saver_.right_stride;
+        } else if (!staged_ && direct.dtype == BoundaryDtype::BF16) {
+            ptr.top_bf    = direct.top_bf    + flat_idx * saver_.top_stride;
+            ptr.bottom_bf = direct.bottom_bf + flat_idx * saver_.bottom_stride;
+            ptr.front_bf  = direct.front_bf  + flat_idx * saver_.front_stride;
+            ptr.back_bf   = direct.back_bf   + flat_idx * saver_.back_stride;
+            ptr.left_bf   = direct.left_bf   + flat_idx * saver_.left_stride;
+            ptr.right_bf  = direct.right_bf  + flat_idx * saver_.right_stride;
+        } else if (!staged_ && direct.dtype == BoundaryDtype::INT8) {
+            // 3D persistent uint8 buffer: outermost index = time*nvar + field.
+            // top_stride/bottom_stride/... already track per-(time×field)
+            // cell counts (compute_time_strides → tensor.stride(0)).
+            ptr.top_q    = direct.top_q    + flat_idx * saver_.top_stride;
+            ptr.bottom_q = direct.bottom_q + flat_idx * saver_.bottom_stride;
+            ptr.front_q  = direct.front_q  + flat_idx * saver_.front_stride;
+            ptr.back_q   = direct.back_q   + flat_idx * saver_.back_stride;
+            ptr.left_q   = direct.left_q   + flat_idx * saver_.left_stride;
+            ptr.right_q  = direct.right_q  + flat_idx * saver_.right_stride;
+            // Scale buffer outermost stride.
+            ptr.top_scale    = direct.top_scale    + flat_idx * saver_.top_scale_t.stride(0);
+            ptr.bottom_scale = direct.bottom_scale + flat_idx * saver_.bottom_scale_t.stride(0);
+            ptr.front_scale  = direct.front_scale  + flat_idx * saver_.front_scale_t.stride(0);
+            ptr.back_scale   = direct.back_scale   + flat_idx * saver_.back_scale_t.stride(0);
+            ptr.left_scale   = direct.left_scale   + flat_idx * saver_.left_scale_t.stride(0);
+            ptr.right_scale  = direct.right_scale  + flat_idx * saver_.right_scale_t.stride(0);
+            // Staging shared across (time, field) — no offset.
+            ptr.top    = direct.top;
+            ptr.bottom = direct.bottom;
+            ptr.front  = direct.front;
+            ptr.back   = direct.back;
+            ptr.left   = direct.left;
+            ptr.right  = direct.right;
+        } else {
+            ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
+                flat_idx * saver_.top_stride;
+            ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
+                flat_idx * saver_.bottom_stride;
+            ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
+                flat_idx * saver_.front_stride;
+            ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
+                flat_idx * saver_.back_stride;
+            ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
+                flat_idx * saver_.left_stride;
+            ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
+                flat_idx * saver_.right_stride;
+        }
         ptr.last_two = direct.last_two;
         return ptr;
     }
@@ -620,18 +864,24 @@ public:
     {
         wait_before_backward_restore(it);
         auto b = backward_restore_ptrs(it, direct);
-        boundary_kernel2d<<<grid, block>>>(
-            u,
-            b.top,
-            b.bottom,
-            b.left,
-            b.right,
-            backward_time_index(it),
-            width,
-            offset,
-            ctx,
-            BOUNDARY_RESTORE
-        );
+        if (b.dtype == BoundaryDtype::FP16) {
+            boundary_kernel2d_fp16<<<grid, block>>>(
+                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
+                backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+        } else if (b.dtype == BoundaryDtype::BF16) {
+            boundary_kernel2d_bf16<<<grid, block>>>(
+                u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
+                backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+        } else if (b.dtype == BoundaryDtype::INT8) {
+            dequantize_step_2d(b, backward_time_index(it));
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+        } else {
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+        }
         record_backward_restore_done(it);
     }
 
@@ -652,35 +902,43 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                backward_time_index(it),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_RESTORE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                dequantize_step_3d(b, backward_time_index(it));
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+            } else {
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+            }
         } else {
-            boundary_kernel3d<<<grid, block>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                backward_time_index(it),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_RESTORE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_fp16<<<grid, block>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_bf16<<<grid, block>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                dequantize_step_3d(b, backward_time_index(it));
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+            } else {
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
+            }
         }
         record_backward_restore_done(it);
     }
@@ -702,18 +960,24 @@ public:
         if (wait_chunk)
             wait_before_backward_restore(it);
         auto b = backward_restore_ptrs_field(it, direct, field_idx);
-        boundary_kernel2d<<<grid, block>>>(
-            u,
-            b.top,
-            b.bottom,
-            b.left,
-            b.right,
-            backward_time_index_field(it),
-            width,
-            offset,
-            ctx,
-            BOUNDARY_RESTORE
-        );
+        if (b.dtype == BoundaryDtype::FP16) {
+            boundary_kernel2d_fp16<<<grid, block>>>(
+                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+        } else if (b.dtype == BoundaryDtype::BF16) {
+            boundary_kernel2d_bf16<<<grid, block>>>(
+                u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+        } else if (b.dtype == BoundaryDtype::INT8) {
+            dequantize_step_2d(b, backward_time_index_field(it));
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+        } else {
+            boundary_kernel2d<<<grid, block>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+        }
         if (record_done)
             record_backward_restore_done(it);
     }
@@ -739,35 +1003,43 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                backward_time_index_field(it),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_RESTORE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                dequantize_step_3d(b, backward_time_index_field(it));
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+            } else {
+                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+            }
         } else {
-            boundary_kernel3d<<<grid, block>>>(
-                u,
-                b.top,
-                b.bottom,
-                b.front,
-                b.back,
-                b.left,
-                b.right,
-                backward_time_index_field(it),
-                width,
-                offset,
-                ctx,
-                BOUNDARY_RESTORE
-            );
+            if (b.dtype == BoundaryDtype::FP16) {
+                boundary_kernel3d_fp16<<<grid, block>>>(
+                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
+                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::BF16) {
+                boundary_kernel3d_bf16<<<grid, block>>>(
+                    u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
+                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+            } else if (b.dtype == BoundaryDtype::INT8) {
+                dequantize_step_3d(b, backward_time_index_field(it));
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+            } else {
+                boundary_kernel3d<<<grid, block>>>(
+                    u, b.top, b.bottom, b.front, b.back, b.left, b.right,
+                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+            }
         }
         if (record_done)
             record_backward_restore_done(it);
