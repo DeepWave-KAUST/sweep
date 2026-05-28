@@ -8,6 +8,48 @@ from sweep.sources.torch import SourceTorch
 from sweep.utils.torch import EdgePadding
 
 
+class _CustomGradientFn(torch.autograd.Function):
+    """Routes the eager forward through an explicit adjoint-state backward
+    whose gradient is the user-registered imaging condition.
+
+    ``forward`` propagates and saves the per-step forward wavefield(s).
+    ``backward`` injects ``dL/d_record`` at the receivers, propagates the
+    adjoint field reverse-time, and accumulates the user's
+    ``imaging_fn(uf_t, ub_t, runtime_models, dt, dh)`` over time — replacing
+    PyTorch's autograd gradient for the registered model parameters.
+    """
+
+    @staticmethod
+    def forward(ctx, prop, wavelet, src_loc, rec_loc, source_encoding,
+                shape_wf, B, nrec, registered_idx, *models):
+        record, uf_series, runtime_models = prop._cg_forward_save(
+            wavelet, src_loc, rec_loc, source_encoding, shape_wf, B, nrec, models
+        )
+        ctx.prop = prop
+        ctx.registered_idx = registered_idx       # {model_index: (fn, mode)}
+        ctx.uf_series = uf_series
+        ctx.runtime_models = runtime_models
+        ctx.rec_loc = rec_loc
+        ctx.shape_wf = shape_wf
+        ctx.B = B
+        ctx.n_models = len(models)
+        ctx.model_shapes = [tuple(m.shape) for m in models]
+        return record
+
+    @staticmethod
+    def backward(ctx, grad_record):
+        grads = ctx.prop._cg_adjoint_imaging(
+            grad_record, ctx.uf_series, ctx.runtime_models,
+            ctx.rec_loc, ctx.shape_wf, ctx.B,
+            ctx.registered_idx, ctx.model_shapes,
+        )
+        # Map back to the (prop, wavelet, src_loc, rec_loc, source_encoding,
+        # shape_wf, B, nrec, registered_idx, *models) input signature — only
+        # the model leaves get gradients.
+        model_grads = [grads.get(i, None) for i in range(ctx.n_models)]
+        return (None, None, None, None, None, None, None, None, None, *model_grads)
+
+
 class _PropTorchEager(PropBase, torch.nn.Module):
     def __init__(self, *args, **kwargs):
         self.store_last_wavefield = kwargs.pop("store_last_wavefield", EAGER_DEFAULTS.store_last_wavefield)
@@ -27,6 +69,9 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
         self._equation_spacing = self._normalize_equation_spacing(self._grid_spacing)
         self._workspace_cache = {}
+        # User-registered custom gradient / imaging conditions.
+        #   {param_name: (imaging_fn, mode)}  with mode in {"gradient", "imaging"}
+        self._custom_gradients = {}
         self.step_func = self._build_step_func()
 
     def _as_device_tensor(self, value, *, dtype):
@@ -157,6 +202,215 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         for name, data in zip(self.model_names, model):
             setattr(self, name, torch.nn.Parameter(data))
 
+    # ------------------------------------------------------------------
+    # Custom gradient / imaging-condition registration
+    # ------------------------------------------------------------------
+    def register_gradient(self, param_name, imaging_fn, mode="gradient"):
+        """Register a user-defined imaging condition for a model parameter.
+
+        Args:
+            param_name: model name (e.g. ``"vp"``); must be in ``self.model_names``.
+            imaging_fn: callable ``(uf_t, ub_t, runtime_models, dt, dh) -> tensor``
+                returning the per-timestep contribution (runtime-padded grid).
+                The framework sums it over time and crops to the model shape.
+                ``uf_t`` is the forward wavefield (source/receiver field) at
+                physical time t; ``ub_t`` is the adjoint wavefield at the same t.
+                Example (zero-lag cross-correlation)::
+
+                    prop.register_gradient("vp", lambda uf, ub, m, dt, dh: uf * ub)
+
+            mode: ``"gradient"`` — the formula replaces the optimizer gradient
+                (``param.grad`` after ``loss.backward()``); ``"imaging"`` — the
+                formula is only produced by :meth:`imaging`, leaving autograd
+                gradients untouched.
+        """
+        if param_name not in self.model_names:
+            raise ValueError(
+                f"Unknown model '{param_name}'. Available: {list(self.model_names)}"
+            )
+        if mode not in ("gradient", "imaging"):
+            raise ValueError(f"mode must be 'gradient' or 'imaging', got '{mode}'.")
+        if not callable(imaging_fn):
+            raise TypeError("imaging_fn must be callable.")
+        self._custom_gradients[param_name] = (imaging_fn, mode)
+
+    def clear_gradients(self):
+        """Remove all registered custom gradient / imaging conditions."""
+        self._custom_gradients = {}
+
+    def _registered_indices(self, mode):
+        """Return {model_index: imaging_fn} for registrations of the given mode."""
+        out = {}
+        for name, (fn, m) in self._custom_gradients.items():
+            if m == mode:
+                out[self.model_names.index(name)] = fn
+        return out
+
+    def _pad_models(self, models):
+        """EdgePad physical models to runtime grid + apply equation prep."""
+        models_p = [
+            EdgePadding.apply(self._as_device_tensor(m, dtype=torch.float32),
+                              self._runtime_padding())
+            for m in models
+        ]
+        return models_p, self._prepare_runtime_models(models_p)
+
+    @staticmethod
+    def _crop_to_model(runtime_grid, model_shape):
+        """Center-crop a runtime-padded (…, nz_rt, nx_rt) tensor to the
+        physical model shape."""
+        rt_nz, rt_nx = runtime_grid.shape[-2], runtime_grid.shape[-1]
+        nz, nx = model_shape[-2], model_shape[-1]
+        pz = (rt_nz - nz) // 2
+        px = (rt_nx - nx) // 2
+        return runtime_grid[..., pz:pz + nz, px:px + nx]
+
+    def _cg_forward_save(self, wavelet, src_loc, rec_loc, source_encoding,
+                         shape_wf, B, nrec, models):
+        """Forward propagate, saving the source/receiver wavefield each step.
+
+        Returns (record, uf_series, runtime_models)."""
+        eq = self.equation
+        dt = self.dt
+        h = self._equation_spacing
+        h1 = self.source_indices[0]
+
+        src = SourceTorch(src_loc, shape_wf, self.dev, source_encoding, adj=False)
+        rec = ReceiverTorch(rec_loc)
+        _, runtime_models = self._pad_models(models)
+
+        nt = wavelet.shape[-1]
+        wf = [torch.zeros(shape_wf, dtype=torch.float32, device=self.dev)
+              for _ in self.wavefield_names]
+        uf_series = []
+        record = torch.zeros((B, nt, nrec, 1), dtype=torch.float32, device=self.dev)
+        with torch.no_grad():
+            for i in range(nt):
+                wf = list(eq.func(wf, runtime_models, dt, h, None))
+                wf[h1] = src(wf[h1], wavelet[..., i])
+                uf_series.append(wf[h1].clone())
+                record[:, i, :, 0] = rec(wf[h1]).view(B, nrec)
+        return record, uf_series, runtime_models
+
+    def _cg_adjoint_imaging(self, adjoint_source, uf_series, runtime_models,
+                            rec_loc, shape_wf, B, registered_idx, model_shapes):
+        """Adjoint propagate the residual (reverse time) and accumulate the
+        registered imaging condition(s).
+
+        Args:
+            adjoint_source: (B, nt, nrec[, 1]) — dL/d_record at receivers.
+            registered_idx: {model_index: imaging_fn}.
+        Returns {model_index: grad_tensor (cropped to model shape)}.
+        """
+        eq = self.equation
+        dt = self.dt
+        h = self._equation_spacing
+        h1 = self.source_indices[0]
+
+        if adjoint_source.dim() == 4:
+            adjoint_source = adjoint_source[..., 0]      # (B, nt, nrec)
+        nt = adjoint_source.shape[1]
+
+        inj = SourceTorch(rec_loc, shape_wf, self.dev,
+                          source_encoding=False, adj=True)
+
+        # accumulators per registered model
+        grads = {i: torch.zeros(shape_wf, dtype=torch.float32, device=self.dev)
+                 for i in registered_idx}
+
+        wfa = [torch.zeros(shape_wf, dtype=torch.float32, device=self.dev)
+               for _ in self.wavefield_names]
+        with torch.no_grad():
+            for k in range(nt):
+                t_phys = nt - 1 - k
+                wfa = list(eq.func(wfa, runtime_models, dt, h, None))
+                wfa[h1] = inj(wfa[h1], adjoint_source[:, t_phys, :])
+                ub_t = wfa[h1]
+                uf_t = uf_series[t_phys]
+                for i, fn in registered_idx.items():
+                    grads[i] = grads[i] + fn(uf_t, ub_t, runtime_models, dt, h)
+
+        return {i: self._crop_to_model(g, model_shapes[i]).reshape(model_shapes[i])
+                for i, g in grads.items()}
+
+    def _custom_gradient_setup(self, wavelet, sources, receivers, batch_size, **kwargs):
+        """Shared IO setup for the custom-gradient / imaging paths."""
+        kwargs.setdefault("fd_pad", self._runtime_fd_pad())
+        kwargs.setdefault("shape", self._runtime_shape())
+        self.init_abc(**kwargs)
+        shape_wf = (batch_size, 1) + self._runtime_shape()
+        wavelet_t = self._as_device_tensor(wavelet, dtype=torch.float32)
+        src_loc = self._as_device_tensor(sources, dtype=torch.long) + self.coord_offset
+        rec_loc = self._as_device_tensor(receivers, dtype=torch.long) + self.coord_offset
+        return wavelet_t, src_loc, rec_loc, shape_wf
+
+    def _custom_gradient_forward(self, wavelet, sources, receivers, models,
+                                 batch_size, source_encoding, **kwargs):
+        """Plain forward whose backward uses the registered gradient-mode
+        imaging condition(s) (via :class:`_CustomGradientFn`)."""
+        if models is None:
+            models = list(self.parameters())
+        wavelet_t, src_loc, rec_loc, shape_wf = self._custom_gradient_setup(
+            wavelet, sources, receivers, batch_size, **kwargs
+        )
+        nrec = rec_loc.shape[1]
+        registered_idx = self._registered_indices("gradient")
+        models_dev = [self._as_device_tensor(m, dtype=torch.float32) for m in models]
+        record = _CustomGradientFn.apply(
+            self, wavelet_t, src_loc, rec_loc, source_encoding,
+            shape_wf, batch_size, nrec, registered_idx, *models_dev,
+        )
+        return record
+
+    def imaging(self, wavelet, sources, receivers, models=None,
+                adjoint_source=None, observed=None):
+        """Explicit RTM/imaging using the registered ``mode='imaging'``
+        condition(s).  Does NOT touch any ``param.grad``.
+
+        The adjoint source is, in priority order: ``adjoint_source`` if given;
+        else ``record - observed`` (FWI residual) if ``observed`` is given;
+        else the forward ``record`` itself (zero-lag migration).
+
+        Returns ``{param_name: image_tensor}`` for every imaging-mode
+        registration.
+        """
+        registered = {self.model_names.index(n): fn
+                      for n, (fn, m) in self._custom_gradients.items()
+                      if m == "imaging"}
+        if not registered:
+            raise ValueError(
+                "imaging() called but no mode='imaging' gradient is registered."
+            )
+        mode, B, _, _, source_encoding = self._normalize_io(wavelet, sources, receivers)
+        if models is not None and not isinstance(models, (list, tuple)):
+            models = list(models)
+        if models is None:
+            models = list(self.parameters())
+
+        wavelet_t, src_loc, rec_loc, shape_wf = self._custom_gradient_setup(
+            wavelet, sources, receivers, B
+        )
+        nrec = rec_loc.shape[1]
+        record, uf_series, runtime_models = self._cg_forward_save(
+            wavelet_t, src_loc, rec_loc, source_encoding, shape_wf, B, nrec, models
+        )
+
+        if adjoint_source is not None:
+            adj_src = self._as_device_tensor(adjoint_source, dtype=torch.float32)
+        elif observed is not None:
+            obs = self._as_device_tensor(observed, dtype=torch.float32)
+            adj_src = record - obs.view_as(record)
+        else:
+            adj_src = record
+
+        model_shapes = [tuple(self._as_device_tensor(m, dtype=torch.float32).shape)
+                        for m in models]
+        images = self._cg_adjoint_imaging(
+            adj_src, uf_series, runtime_models, rec_loc, shape_wf, B,
+            registered, model_shapes,
+        )
+        return {self.model_names[i]: img for i, img in images.items()}
+
     def forward(
         self,
         wavelet,
@@ -172,6 +426,16 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         )
         if models is not None and not isinstance(models, (list, tuple)):
             models = list(models)
+
+        # Custom-gradient routing: when any model has a registered
+        # gradient-mode imaging condition, replace the autograd path with the
+        # explicit adjoint-state backward (only for plain forward modelling —
+        # adj / return_wavefield / ckpt keep the standard path).
+        if (self._registered_indices("gradient")
+                and not adj and not return_wavefield and not self.use_ckpt):
+            return self._custom_gradient_forward(
+                wavelet, sources, receivers, models, batch_size, source_encoding, **kwargs
+            )
 
         snapshot_times = kwargs.pop("snapshot_times", None)
         snapshot_interval = kwargs.pop("snapshot_interval", None)
