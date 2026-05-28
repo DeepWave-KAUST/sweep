@@ -112,6 +112,7 @@ SOLVERS = {
             "bs_gpu",
             "bs_gpu_fp16",
             "bs_gpu_bf16",
+            "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
             "bs_disk",
@@ -139,6 +140,7 @@ SOLVERS = {
             "bs_gpu",
             "bs_gpu_fp16",
             "bs_gpu_bf16",
+            "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
             "bs_disk",
@@ -202,6 +204,7 @@ SOLVERS = {
             "bs_gpu",
             "bs_gpu_fp16",
             "bs_gpu_bf16",
+            "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
             "bs_disk",
@@ -472,7 +475,7 @@ def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOpt
     # storage dtype is forced via env var by ``run_case``.
     if mode in ("full", "full_fp16", "full_bf16"):
         return None
-    if mode in ("bs_gpu_fp16", "bs_gpu_bf16"):
+    if mode in ("bs_gpu_fp16", "bs_gpu_bf16", "bs_gpu_int8"):
         mode = "bs_gpu"
 
     if mode.startswith("bs_"):
@@ -949,6 +952,8 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
             os.environ["SWEEP_BOUNDARY_DTYPE"] = "fp16"
         elif mode == "bs_gpu_bf16":
             os.environ["SWEEP_BOUNDARY_DTYPE"] = "bf16"
+        elif mode == "bs_gpu_int8":
+            os.environ["SWEEP_BOUNDARY_DTYPE"] = "int8"
         elif mode in ("full_fp16", "full_bf16"):
             os.environ["SWEEP_FP16_FULL"] = "1"
         started = time.time()
@@ -1066,6 +1071,7 @@ def main():
         "full_bf16",
         "bs_gpu_fp16",
         "bs_gpu_bf16",
+        "bs_gpu_int8",
     }
     solver_keys = parse_csv(args.solvers, SOLVERS, label="solver")
     scenario_keys = parse_csv(args.scenarios, SCENARIOS, label="scenario")

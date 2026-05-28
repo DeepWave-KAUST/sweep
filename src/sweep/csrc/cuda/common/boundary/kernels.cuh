@@ -179,3 +179,15 @@ __global__ void boundary_kernel3d_compact_bf16(
     int mode,
     int tangent_pad = 0
 );
+
+// INT8 path: two-pass design.  FP32 boundary kernel writes to an
+// FP32 staging buffer (one timestep's worth, shape == one face slice);
+// then ``launch_quantize_int8`` reduces and stores into the persistent
+// uint8 buffer plus a per-block FP32 scale.  Backward reverses the
+// order — dequantize first, then run the FP32 restore kernel.
+void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
+                          int64_t total_cells, cudaStream_t stream);
+
+void launch_dequantize_int8(const uint8_t* src, const float* scale,
+                            float* dst, int64_t total_cells,
+                            cudaStream_t stream);
