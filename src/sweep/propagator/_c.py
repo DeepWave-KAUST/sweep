@@ -230,6 +230,7 @@ class Warpper(torch.autograd.Function):
 
         # -------- CUDA forward --------
         (u_allt, last, syn) = forward_func(params)
+
         # Permute to canonical (B, nt, nrec, nfield) for the user-facing
         # output; remember the raw CUDA ndim so backward can invert it.
         cuda_record_ndim = int(syn.ndim)
@@ -659,10 +660,27 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = root
         self._boundary_disk_files = tuple(files)
 
-    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1):
+    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None):
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
+        # Precedence: explicit Python kwarg (from BoundaryOptions /
+        # boundary_saving_config dict) wins over env var, which wins over
+        # the legacy SWEEP_FP16_BOUNDARY=1 gate, which wins over the
+        # ``fp32`` default.  Once resolved, sync into the env so the C++
+        # saver's ``sweep_boundary_dtype_env()`` sees the same choice.
+        import os as _os_d
+        if boundary_dtype is None:
+            _env_dtype = _os_d.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
+            if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
+                boundary_dtype = _env_dtype
+            elif _os_d.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
+                boundary_dtype = 'fp16'
+            else:
+                boundary_dtype = 'fp32'
+        if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
+            raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
+        _os_d.environ['SWEEP_BOUNDARY_DTYPE'] = boundary_dtype
         if (
             self._boundary_cache_batch == self.B
             and
@@ -672,6 +690,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_pinned == staging_pinned
             and self._boundary_cache_disk_dir == disk_dir
             and self._boundary_cache_nt == self.nt
+            and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
         ):
             return
 
@@ -727,9 +746,58 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.boundary_cpu = ()
             self.boundary_gpu = ()
-            self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(layout.gpu_full_shapes)
+            # Boundary storage dtype: FP32 (default) / FP16 / BF16 cast at
+            # the storage boundary inside boundary_kernel*_{fp16,bf16}, or
+            # INT8 with per-block symmetric quantization (DeepWave-style,
+            # see boundarysaver.cu: quantize_int8_kernel).  last_two stays
+            # FP32 — it's a wavefield snapshot used to bootstrap backward.
+            if boundary_dtype == 'int8':
+                # INT8: Python owns persistent uint8 main + FP32 scale
+                # tensors so they survive across forward/backward calls
+                # (CUDA-side saver is recreated each call and would
+                # otherwise lose the data).  Layout: list of N main
+                # uint8 tensors followed by N scale FP32 tensors, where
+                # N = 4 (2D) or 6 (3D).  Saver detects this pattern via
+                # dtype and binds main + scale + allocates FP32 staging
+                # internally.  See saver.cuh allocate_int8_main_and_scale.
+                _BLOCK = 256
+                main_shapes = layout.gpu_full_shapes
+                main_tensors = self.boundary_gpu_allocator.zeros(
+                    main_shapes, dtype=torch.uint8)
+                # Scale shapes preserve the batch dimension so that
+                # ``_slice_boundary_buffers`` narrows the same axis as the
+                # main tensors.  Spatial dims collapse to n_blocks.
+                #   3D main  (nvar*nt, B, W, Ny_b, Nx_b)
+                #     scale  (nvar*nt, B, n_blocks_per_step)
+                #   2D main  (nvar, nt, B, W, Nx_b)
+                #     scale  (nvar, nt, B, n_blocks_per_step)
+                scale_shapes = []
+                for s in main_shapes:
+                    if self.ndim == 3:
+                        outer = (s[0], s[1])
+                        spatial = s[2:]
+                    else:
+                        outer = (s[0], s[1], s[2])
+                        spatial = s[3:]
+                    cells_per_step = 1
+                    for d in spatial:
+                        cells_per_step *= d
+                    n_blocks = (cells_per_step + _BLOCK - 1) // _BLOCK
+                    scale_shapes.append(outer + (n_blocks,))
+                scale_tensors = self.boundary_gpu_allocator.zeros(
+                    scale_shapes, dtype=torch.float32)
+                self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
+            else:
+                _bdry_dtype = {
+                    'fp32': torch.float32,
+                    'fp16': torch.float16,
+                    'bf16': torch.bfloat16,
+                }[boundary_dtype]
+                self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
+                    layout.gpu_full_shapes, dtype=_bdry_dtype)
             self.last_two = self.forward_allocator.zeros([last_two_shape])[0]
 
+        self._boundary_cache_dtype = boundary_dtype
         self._boundary_cache_mode = boundary_storage
         self._boundary_cache_interval = transfer_interval
         self._boundary_cache_ring_buffers = ring_buffers
@@ -1064,7 +1132,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -1072,7 +1140,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
                 for t in self.boundary_gpu_full:
                     t.zero_()
             boundary_cpu = ()
@@ -1276,7 +1344,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if use_ckpt and checkpoint_buffers:
             self.checkpoint_allocator.zero_()
         if use_boundary_saving:
-            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
         if boundary_on_cpu:
             if boundary_on_disk and use_boundary_saving:
                 self.boundary_cpu_allocator.zero_()
@@ -1374,7 +1442,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -1382,7 +1450,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers)
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
                 for t in self.boundary_gpu_full:
                     t.zero_()
             boundary_cpu = ()
