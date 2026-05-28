@@ -107,8 +107,6 @@ SOLVERS = {
         elastic=True,
         supported_modes=(
             "full",
-            "full_fp16",
-            "full_bf16",
             "bs_gpu",
             "bs_gpu_fp16",
             "bs_gpu_bf16",
@@ -135,8 +133,6 @@ SOLVERS = {
         elastic=True,
         supported_modes=(
             "full",
-            "full_fp16",
-            "full_bf16",
             "bs_gpu",
             "bs_gpu_fp16",
             "bs_gpu_bf16",
@@ -199,8 +195,6 @@ SOLVERS = {
         # checkpointing modes from the test matrix.
         supported_modes=(
             "full",
-            "full_fp16",
-            "full_bf16",
             "bs_gpu",
             "bs_gpu_fp16",
             "bs_gpu_bf16",
@@ -473,7 +467,7 @@ def make_geometry(spec: SolverSpec, shape: tuple[int, ...], scenario: ScenarioSp
 def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOptions | None:
     # FP16/BF16 PoC modes: same CUDAOptions as the FP32 counterpart; the
     # storage dtype is forced via env var by ``run_case``.
-    if mode in ("full", "full_fp16", "full_bf16"):
+    if mode == "full":
         return None
     if mode in ("bs_gpu_fp16", "bs_gpu_bf16", "bs_gpu_int8"):
         mode = "bs_gpu"
@@ -609,7 +603,7 @@ def build_solver(spec: SolverSpec, backend: str, mode: str, scenario: ScenarioSp
         )
 
     cuda_options = build_cuda_options(mode, args, run_dir, case_key)
-    if mode in ("full", "full_fp16", "full_bf16"):
+    if mode == "full":
         return PropTorch(
             equation,
             backend="torch",
@@ -947,15 +941,12 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
         # picks up the right storage dtype.  Reset before each iter.
         os.environ.pop("SWEEP_FP16_BOUNDARY", None)
         os.environ.pop("SWEEP_BOUNDARY_DTYPE", None)
-        os.environ.pop("SWEEP_FP16_FULL", None)
         if mode == "bs_gpu_fp16":
             os.environ["SWEEP_BOUNDARY_DTYPE"] = "fp16"
         elif mode == "bs_gpu_bf16":
             os.environ["SWEEP_BOUNDARY_DTYPE"] = "bf16"
         elif mode == "bs_gpu_int8":
             os.environ["SWEEP_BOUNDARY_DTYPE"] = "int8"
-        elif mode in ("full_fp16", "full_bf16"):
-            os.environ["SWEEP_FP16_FULL"] = "1"
         started = time.time()
         row = {
             "solver": spec.key,
@@ -1067,8 +1058,6 @@ def main():
         "ckpt_chunk_cpu",
         "ckpt_recursive",
         "ckpt_recursive_cpu",
-        "full_fp16",
-        "full_bf16",
         "bs_gpu_fp16",
         "bs_gpu_bf16",
         "bs_gpu_int8",
