@@ -48,7 +48,11 @@ def step_cpml(
     # anisotropic coupling follows the same boundary treatment as the Laplacian.
     dpdx_dz = grad_op(dpdx, h, -2, kernels=grad_kernels)
 
-    theta = op.deg2rad(theta)
+    # theta is the tilt angle in RADIANS — matching this equation's
+    # ModelSpec(unit="rad") and every other TTI equation (e.g. elastic_tti uses
+    # cos(theta) directly). Do not deg2rad it here: that double-converted a
+    # radian input (30° = 0.5236 rad → 0.0091 rad ≈ 0.5°), collapsing the tilt
+    # to almost nothing.
     sin0 = op.sin(theta)
     cos0 = op.cos(theta)
     sin20 = op.sin(2 * theta)
