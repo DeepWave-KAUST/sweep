@@ -78,7 +78,13 @@ BackwardOutput backward(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto kappa_lambda = torch::zeros_like(vp);
+    auto c_x = torch::zeros_like(vp);
+    auto c_z = torch::zeros_like(vp);
+    auto e_x = torch::zeros_like(vp);
+    auto e_z = torch::zeros_like(vp);
+    auto aq0 = torch::zeros_like(vp);   // b·κ·λ   (adjoint transpose buffer)
+    auto aqx = torch::zeros_like(vp);   // (∂ₓb·κ)·λ
+    auto aqz = torch::zeros_like(vp);   // (∂_z b·κ)·λ
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(in.pml_vals, 2);
@@ -94,6 +100,21 @@ BackwardOutput backward(const BackwardInput& in)
 
     for (int it = in.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
+        BUILD_VRZ_ADJOINT_FIELDS(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            adj_view.u_now,
+            vp.data_ptr<float>(),
+            z.data_ptr<float>(),
+            inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqz.data_ptr<float>(),
+            grad_ctx,
+            ctx
+        );
+
         ACOUSTIC_VRZ2D_ADJOINT(
             order,
             launch_config.grid,
@@ -102,6 +123,9 @@ BackwardOutput backward(const BackwardInput& in)
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqz.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -121,11 +145,19 @@ BackwardOutput backward(const BackwardInput& in)
 
         adjoint.swap();
 
-        build_kappa_lambda_vrz2d<<<launch_config.grid, launch_config.block>>>(
+        BUILD_VRZ_GRAD_FIELDS(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_z.data_ptr<float>(),
+            grad_ctx,
             ctx
         );
 
@@ -135,7 +167,10 @@ BackwardOutput backward(const BackwardInput& in)
             launch_config.block,
             in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_z.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
@@ -199,7 +234,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto kappa_lambda = torch::zeros_like(vp);
+    auto c_x = torch::zeros_like(vp);
+    auto c_z = torch::zeros_like(vp);
+    auto e_x = torch::zeros_like(vp);
+    auto e_z = torch::zeros_like(vp);
+    auto aq0 = torch::zeros_like(vp);   // b·κ·λ   (adjoint transpose buffer)
+    auto aqx = torch::zeros_like(vp);   // (∂ₓb·κ)·λ
+    auto aqz = torch::zeros_like(vp);   // (∂_z b·κ)·λ
     auto neg_adjoint_source = -p.adjoint_source;
 
     AcousticCPMLTensor cpml_tensor;
@@ -250,6 +291,21 @@ BackwardOutput backward_bs(const BackwardInput& in)
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
+        BUILD_VRZ_ADJOINT_FIELDS(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            adj_view.u_now,
+            vp.data_ptr<float>(),
+            z.data_ptr<float>(),
+            inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqz.data_ptr<float>(),
+            grad_ctx,
+            ctx
+        );
+
         ACOUSTIC_VRZ2D_ADJOINT(
             order,
             launch_config.grid,
@@ -258,6 +314,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqz.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -312,11 +371,19 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         forward.swap();
 
-        build_kappa_lambda_vrz2d<<<launch_config.grid, launch_config.block>>>(
+        BUILD_VRZ_GRAD_FIELDS(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_z.data_ptr<float>(),
+            grad_ctx,
             ctx
         );
 
@@ -326,7 +393,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
             launch_config.block,
             forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_z.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
@@ -392,7 +462,13 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto kappa_lambda = torch::zeros_like(vp);
+    auto c_x = torch::zeros_like(vp);
+    auto c_z = torch::zeros_like(vp);
+    auto e_x = torch::zeros_like(vp);
+    auto e_z = torch::zeros_like(vp);
+    auto aq0 = torch::zeros_like(vp);   // b·κ·λ   (adjoint transpose buffer)
+    auto aqx = torch::zeros_like(vp);   // (∂ₓb·κ)·λ
+    auto aqz = torch::zeros_like(vp);   // (∂_z b·κ)·λ
     auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
         ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
         : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
@@ -508,6 +584,21 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
+            BUILD_VRZ_ADJOINT_FIELDS(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                adj_view.u_now,
+                vp.data_ptr<float>(),
+                z.data_ptr<float>(),
+                inv_z.data_ptr<float>(),
+                aq0.data_ptr<float>(),
+                aqx.data_ptr<float>(),
+                aqz.data_ptr<float>(),
+                grad_ctx,
+                ctx
+            );
+
             ACOUSTIC_VRZ2D_ADJOINT(
                 order,
                 launch_config.grid,
@@ -516,6 +607,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
+                aq0.data_ptr<float>(),
+                aqx.data_ptr<float>(),
+                aqz.data_ptr<float>(),
                 lap_ctx,
                 grad_ctx,
                 grad_ctx_x,
@@ -535,11 +629,19 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
             adjoint.swap();
 
-            build_kappa_lambda_vrz2d<<<launch_config.grid, launch_config.block>>>(
+            BUILD_VRZ_GRAD_FIELDS(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
-                kappa_lambda.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_z.data_ptr<float>(),
+                grad_ctx,
                 ctx
             );
 
@@ -549,7 +651,10 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 launch_config.block,
                 chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                kappa_lambda.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_z.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
