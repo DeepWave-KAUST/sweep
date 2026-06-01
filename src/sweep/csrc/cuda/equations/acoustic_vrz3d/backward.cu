@@ -77,7 +77,16 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto kappa_lambda = torch::zeros_like(vp);
+    auto aq0 = torch::zeros_like(vp);   // adjoint transpose buffers (b·κ·λ, (∂b·κ)λ)
+    auto aqx = torch::zeros_like(vp);
+    auto aqy = torch::zeros_like(vp);
+    auto aqz = torch::zeros_like(vp);
+    auto c_x = torch::zeros_like(vp);   // gradient assembly buffers (λ·vp·∂p, λ·vp²z·∂p)
+    auto c_y = torch::zeros_like(vp);
+    auto c_z = torch::zeros_like(vp);
+    auto e_x = torch::zeros_like(vp);
+    auto e_y = torch::zeros_like(vp);
+    auto e_z = torch::zeros_like(vp);
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(in.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -93,6 +102,22 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
     for (int it = in.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
+        BUILD_VRZ_ADJOINT_FIELDS_3D(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            adj_view.u_now,
+            vp.data_ptr<float>(),
+            z.data_ptr<float>(),
+            inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqy.data_ptr<float>(),
+            aqz.data_ptr<float>(),
+            grad_ctx,
+            ctx
+        );
+
         ACOUSTIC_VRZ3D_ADJOINT(
             order,
             launch_config.grid,
@@ -101,6 +126,10 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqy.data_ptr<float>(),
+            aqz.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -121,11 +150,21 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
         adjoint.swap();
 
-        build_kappa_lambda_vrz3d<<<launch_config.grid, launch_config.block>>>(
+        BUILD_VRZ_GRAD_FIELDS_3D(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_y.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_y.data_ptr<float>(),
+            e_z.data_ptr<float>(),
+            grad_ctx,
             ctx
         );
 
@@ -135,7 +174,12 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
             launch_config.block,
             in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_y.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_y.data_ptr<float>(),
+            e_z.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
@@ -220,7 +264,16 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto kappa_lambda = torch::zeros_like(vp);
+    auto aq0 = torch::zeros_like(vp);   // adjoint transpose buffers (b·κ·λ, (∂b·κ)λ)
+    auto aqx = torch::zeros_like(vp);
+    auto aqy = torch::zeros_like(vp);
+    auto aqz = torch::zeros_like(vp);
+    auto c_x = torch::zeros_like(vp);   // gradient assembly buffers (λ·vp·∂p, λ·vp²z·∂p)
+    auto c_y = torch::zeros_like(vp);
+    auto c_z = torch::zeros_like(vp);
+    auto e_x = torch::zeros_like(vp);
+    auto e_y = torch::zeros_like(vp);
+    auto e_z = torch::zeros_like(vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -275,6 +328,22 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     for (int it = p.nt - 1; it >= 1; --it) {
         auto adj_view = adjoint.view();
 
+        BUILD_VRZ_ADJOINT_FIELDS_3D(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            adj_view.u_now,
+            vp.data_ptr<float>(),
+            z.data_ptr<float>(),
+            inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqy.data_ptr<float>(),
+            aqz.data_ptr<float>(),
+            grad_ctx,
+            ctx
+        );
+
         ACOUSTIC_VRZ3D_ADJOINT(
             order,
             launch_config.grid,
@@ -283,6 +352,10 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
+            aq0.data_ptr<float>(),
+            aqx.data_ptr<float>(),
+            aqy.data_ptr<float>(),
+            aqz.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -340,11 +413,21 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
         forward.swap();
 
-        build_kappa_lambda_vrz3d<<<launch_config.grid, launch_config.block>>>(
+        BUILD_VRZ_GRAD_FIELDS_3D(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_y.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_y.data_ptr<float>(),
+            e_z.data_ptr<float>(),
+            grad_ctx,
             ctx
         );
 
@@ -354,7 +437,12 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
             launch_config.block,
             forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            kappa_lambda.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_y.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_y.data_ptr<float>(),
+            e_z.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
@@ -436,7 +524,16 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto kappa_lambda = torch::zeros_like(vp);
+    auto aq0 = torch::zeros_like(vp);   // adjoint transpose buffers (b·κ·λ, (∂b·κ)λ)
+    auto aqx = torch::zeros_like(vp);
+    auto aqy = torch::zeros_like(vp);
+    auto aqz = torch::zeros_like(vp);
+    auto c_x = torch::zeros_like(vp);   // gradient assembly buffers (λ·vp·∂p, λ·vp²z·∂p)
+    auto c_y = torch::zeros_like(vp);
+    auto c_z = torch::zeros_like(vp);
+    auto e_x = torch::zeros_like(vp);
+    auto e_y = torch::zeros_like(vp);
+    auto e_z = torch::zeros_like(vp);
     auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
         ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
         : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
@@ -552,6 +649,22 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
+            BUILD_VRZ_ADJOINT_FIELDS_3D(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                adj_view.u_now,
+                vp.data_ptr<float>(),
+                z.data_ptr<float>(),
+                inv_z.data_ptr<float>(),
+                aq0.data_ptr<float>(),
+                aqx.data_ptr<float>(),
+                aqy.data_ptr<float>(),
+                aqz.data_ptr<float>(),
+                grad_ctx,
+                ctx
+            );
+
             ACOUSTIC_VRZ3D_ADJOINT(
                 order,
                 launch_config.grid,
@@ -560,6 +673,10 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
+                aq0.data_ptr<float>(),
+                aqx.data_ptr<float>(),
+                aqy.data_ptr<float>(),
+                aqz.data_ptr<float>(),
                 lap_ctx,
                 grad_ctx,
                 grad_ctx_x,
@@ -580,11 +697,21 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
             adjoint.swap();
 
-            build_kappa_lambda_vrz3d<<<launch_config.grid, launch_config.block>>>(
+            BUILD_VRZ_GRAD_FIELDS_3D(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
-                kappa_lambda.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_y.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_y.data_ptr<float>(),
+                e_z.data_ptr<float>(),
+                grad_ctx,
                 ctx
             );
 
@@ -594,7 +721,12 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
                 launch_config.block,
                 chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                kappa_lambda.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_y.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_y.data_ptr<float>(),
+                e_z.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
