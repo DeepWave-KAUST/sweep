@@ -56,6 +56,10 @@ from .acoustic_aniso import AcousticAniso
 from .acoustic_curvilinear import AcousticCurvilinear
 from .elastic_curvilinear import ElasticCurvilinear
 from .elastic_apm import ElasticAPM
+from .elastic_vector_reflectivity import (
+    ElasticVectorReflectivity,
+    compute_vector_reflectivity,
+)
 
 
 # ---------------------------------------------------------------------------
