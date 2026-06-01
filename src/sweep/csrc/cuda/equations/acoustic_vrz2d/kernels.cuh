@@ -35,11 +35,27 @@ __global__ void acoustic_vrz2nd_nopml(
 );
 
 template<int Order>
+__global__ void build_vrz_adjoint_fields(
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    float* __restrict__ aq0,
+    float* __restrict__ aqx,
+    float* __restrict__ aqz,
+    GradParam grad_ctx,
+    SolverContext solver
+);
+
+template<int Order>
 __global__ void acoustic_vrz2nd_adjoint(
     AcousticWavefieldPointer wf,
     const float* __restrict__ vp,
     const float* __restrict__ z,
     const float* __restrict__ inv_z,
+    const float* __restrict__ aq0,   // b·κ·λ      (= vp²·λ)
+    const float* __restrict__ aqx,   // (∂ₓb·κ)·λ
+    const float* __restrict__ aqz,   // (∂_z b·κ)·λ
     LaplaceParam lap_ctx,
     GradParam grad_ctx,
     GradParam grad_ctx_x,
@@ -56,11 +72,30 @@ static __global__ void build_kappa_lambda_vrz2d(
     SolverContext solver
 );
 
+// Pre-compute the reverse-mode buffers for the exact discrete-adjoint gradient:
+//   c_d = λ·vp·∂_d p ,   e_d = λ·vp²·z·∂_d p   (d = x, z)
+template<int Order>
+__global__ void build_vrz_grad_fields(
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    float* __restrict__ c_x,
+    float* __restrict__ c_z,
+    float* __restrict__ e_x,
+    float* __restrict__ e_z,
+    GradParam grad_ctx,
+    SolverContext solver
+);
+
 template<int Order>
 __global__ void calculate_grad_vrz2d(
     const float* __restrict__ f_u_now,
     const float* __restrict__ lambda_now,
-    const float* __restrict__ kappa_lambda_now,
+    const float* __restrict__ c_x,
+    const float* __restrict__ c_z,
+    const float* __restrict__ e_x,
+    const float* __restrict__ e_z,
     const float* __restrict__ vp,
     const float* __restrict__ z,
     const float* __restrict__ inv_z,
@@ -105,6 +140,24 @@ __global__ void calculate_grad_vrz2d(
         else if ((order) == 6) calculate_grad_vrz2d<6><<<grid, block>>>(__VA_ARGS__);        \
         else if ((order) == 8) calculate_grad_vrz2d<8><<<grid, block>>>(__VA_ARGS__);        \
         else                   calculate_grad_vrz2d<-1><<<grid, block>>>(__VA_ARGS__);       \
+    } while (0)
+
+#define BUILD_VRZ_GRAD_FIELDS(order, grid, block, ...)                                       \
+    do {                                                                                     \
+        if      ((order) == 2) build_vrz_grad_fields<2><<<grid, block>>>(__VA_ARGS__);       \
+        else if ((order) == 4) build_vrz_grad_fields<4><<<grid, block>>>(__VA_ARGS__);       \
+        else if ((order) == 6) build_vrz_grad_fields<6><<<grid, block>>>(__VA_ARGS__);       \
+        else if ((order) == 8) build_vrz_grad_fields<8><<<grid, block>>>(__VA_ARGS__);       \
+        else                   build_vrz_grad_fields<-1><<<grid, block>>>(__VA_ARGS__);      \
+    } while (0)
+
+#define BUILD_VRZ_ADJOINT_FIELDS(order, grid, block, ...)                                    \
+    do {                                                                                     \
+        if      ((order) == 2) build_vrz_adjoint_fields<2><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 4) build_vrz_adjoint_fields<4><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 6) build_vrz_adjoint_fields<6><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 8) build_vrz_adjoint_fields<8><<<grid, block>>>(__VA_ARGS__);    \
+        else                   build_vrz_adjoint_fields<-1><<<grid, block>>>(__VA_ARGS__);   \
     } while (0)
 
 template<int Order, int Direction>
@@ -377,12 +430,66 @@ __global__ void acoustic_vrz2nd_nopml(
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
 }
 
+// Pre-multiply λ by the model-only adjoint coefficients so the transpose
+// stencils in acoustic_vrz2nd_adjoint can be applied without a read-then-write
+// race:  aq0 = b·κ·λ = vp²·λ,  aqx = (∂ₓb·κ)·λ,  aqz = (∂_z b·κ)·λ.
+template<int Order>
+__global__ void build_vrz_adjoint_fields(
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    float* __restrict__ aq0,
+    float* __restrict__ aqx,
+    float* __restrict__ aqz,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int gidx = b * spatial_size + idx;
+
+    const float* vp_b = vp + b * spatial_size;
+    const float* z_b = z + b * spatial_size;
+    const float* inv_z_b = inv_z + b * spatial_size;
+    const float* lam_b = lambda_now + b * spatial_size;
+
+    float dvpdx = gradient<2, Order, X>(vp_b, ix, 0, iz, grad_ctx);
+    float dvpdz = gradient<2, Order, Z>(vp_b, ix, 0, iz, grad_ctx);
+    float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
+    float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
+    float v = vp_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float kappa = v * z_b[idx];
+    float dbdx = dvpdx * inv_z0 + v * z1x;
+    float dbdz = dvpdz * inv_z0 + v * z1z;
+    float lam = lam_b[idx];
+
+    aq0[gidx] = v * v * lam;            // b·κ·λ  (= vp²·λ)
+    aqx[gidx] = dbdx * kappa * lam;     // (∂ₓb·κ)·λ
+    aqz[gidx] = dbdz * kappa * lam;     // (∂_z b·κ)·λ
+}
+
 template<int Order>
 __global__ void acoustic_vrz2nd_adjoint(
     AcousticWavefieldPointer wf,
     const float* __restrict__ vp,
     const float* __restrict__ z,
     const float* __restrict__ inv_z,
+    const float* __restrict__ aq0,   // b·κ·λ      (= vp²·λ)
+    const float* __restrict__ aqx,   // (∂ₓb·κ)·λ
+    const float* __restrict__ aqz,   // (∂_z b·κ)·λ
     LaplaceParam lap_ctx,
     GradParam grad_ctx,
     GradParam grad_ctx_x,
@@ -407,6 +514,33 @@ __global__ void acoustic_vrz2nd_adjoint(
     int idx = iz * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
+
+    // Position-based PML / interior split (mirrors the forward fast-path).
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        // Exact transpose Aᵀλ of the forward interior operator
+        //   A u = κ·(b·∇²u + ∂ₓb·∂ₓu + ∂_z b·∂_z u).
+        // L is symmetric and the centred first-difference antisymmetric, so
+        //   Aᵀλ = ∇²(b·κ·λ) − ∂ₓ((∂ₓb·κ)·λ) − ∂_z((∂_z b·κ)·λ),
+        // computed on the pre-multiplied buffers from build_vrz_adjoint_fields
+        // (split into a separate launch to keep the neighbour reads race-free).
+        const float* aq0_b = aq0 + b * spatial_size;
+        const float* aqx_b = aqx + b * spatial_size;
+        const float* aqz_b = aqz + b * spatial_size;
+        float lap_x = laplace<2, Order, X>(aq0_b, ix, 0, iz, lap_ctx);
+        float lap_z = laplace<2, Order, Z>(aq0_b, ix, 0, iz, lap_ctx);
+        float gx = gradient<2, Order, X>(aqx_b, ix, 0, iz, grad_ctx);
+        float gz = gradient<2, Order, Z>(aqz_b, ix, 0, iz, grad_ctx);
+        float rhs = (lap_x + lap_z) - gx - gz;
+        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
+        return;
+    }
+
+    // PML branch: forward formulation retained (small residual error confined
+    // to the absorbing zone, mirroring the acoustic proper-adjoint kernel).
     const float* vp_b = vp + b * spatial_size;
     const float* z_b = z + b * spatial_size;
     const float* inv_z_b = inv_z + b * spatial_size;
@@ -428,20 +562,6 @@ __global__ void acoustic_vrz2nd_adjoint(
     float dbdx = dvpdx * inv_z0 + v * z1x;
     float dbdz = dvpdz * inv_z0 + v * z1z;
     float kappa = v * z_b[idx];
-
-    // Position-based PML / interior split. Mirrors the forward
-    // acoustic_vrz2nd fast-path: ax/az/bx/bz/dbxdx/dbzdz vanish in the
-    // interior, so psixn=psizn=zetaxn=zetazn=0, tmpx=lap_x, tmpz=lap_z,
-    // qx=dqdx, qz=dqdz, w_sum=lap_x+lap_z. Skip the dpsix/dpsiz/daxdx/
-    // dazdz gradient loads and the four aux-field writes.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
-    if (!in_pml) {
-        float rhs = kappa * (beta * (lap_x + lap_z) + dbdx * dqdx + dbdz * dqdz);
-        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
-        return;
-    }
 
     float ax_ = cpml.ax[ix];
     float az_ = cpml.az[iz];
@@ -498,10 +618,68 @@ static __global__ void build_kappa_lambda_vrz2d(
 }
 
 template<int Order>
+__global__ void build_vrz_grad_fields(
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    float* __restrict__ c_x,
+    float* __restrict__ c_z,
+    float* __restrict__ e_x,
+    float* __restrict__ e_z,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int gidx = b * spatial_size + idx;
+
+    const float* p_b = f_u_now + b * spatial_size;
+    const float* lam_b = lambda_now + b * spatial_size;
+    const float* vp_b = vp + b * spatial_size;
+    const float* z_b = z + b * spatial_size;
+
+    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
+    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
+    float v = vp_b[idx];
+    float lam = lam_b[idx];
+    float lam_v = lam * v;
+    float lam_v2z = lam * v * v * z_b[idx];
+
+    c_x[gidx] = lam_v * dpdx;          // λ·vp·∂ₓp
+    c_z[gidx] = lam_v * dpdz;          // λ·vp·∂_z p
+    e_x[gidx] = lam_v2z * dpdx;        // λ·vp²·z·∂ₓp
+    e_z[gidx] = lam_v2z * dpdz;        // λ·vp²·z·∂_z p
+}
+
+// Exact discrete-adjoint gradient (reverse-mode transpose of the forward rhs
+//   rhs = vp²·∇²p + vp·(∇vp·∇p) + vp²·z·(∇(1/z)·∇p) ).
+// SymPy-verified term-by-term against autograd (test/vrz_sympy_grad_audit.py):
+//   grad_vp = 2·vp·λ·∇²p + λ·(∇vp·∇p) - ∇·(λ·vp·∇p) + 2·vp·z·λ·(∇(1/z)·∇p)
+//   grad_z  = λ·vp²·(∇(1/z)·∇p) + ∇·(λ·vp²·z·∇p)/z²
+// The ∇·(...) divergences read the pre-computed c_d / e_d buffers (so the FD
+// gradient stencil — which is the transpose of the forward gradient — can read
+// neighbours).  The (-dt²) weight matches the forward u_next += dt²·rhs.
+template<int Order>
 __global__ void calculate_grad_vrz2d(
     const float* __restrict__ f_u_now,
     const float* __restrict__ lambda_now,
-    const float* __restrict__ kappa_lambda_now,
+    const float* __restrict__ c_x,
+    const float* __restrict__ c_z,
+    const float* __restrict__ e_x,
+    const float* __restrict__ e_z,
     const float* __restrict__ vp,
     const float* __restrict__ z,
     const float* __restrict__ inv_z,
@@ -530,7 +708,10 @@ __global__ void calculate_grad_vrz2d(
 
     const float* p_b = f_u_now + shift;
     const float* lambda_b = lambda_now + shift;
-    const float* q_b = kappa_lambda_now + shift;
+    const float* cx_b = c_x + shift;
+    const float* cz_b = c_z + shift;
+    const float* ex_b = e_x + shift;
+    const float* ez_b = e_z + shift;
     const float* vp_b = vp + shift;
     const float* z_b = z + shift;
     const float* inv_z_b = inv_z + shift;
@@ -548,20 +729,28 @@ __global__ void calculate_grad_vrz2d(
     float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
     float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
 
-    float v = vp_b[idx];
-    float inv_z0 = inv_z_b[idx];
-    float beta = v * inv_z0;
-    float dbdx = dvpdx * inv_z0 + v * z1x;
-    float dbdz = dvpdz * inv_z0 + v * z1z;
-    float div_b_grad_p = beta * (lap_x + lap_z) + dbdx * dpdx + dbdz * dpdz;
+    // ∇·(c)  and  ∇·(e)  via the FD gradient stencil (transpose of forward grad).
+    float div_c = gradient<2, Order, X>(cx_b, ix, 0, iz, grad_ctx)
+                + gradient<2, Order, Z>(cz_b, ix, 0, iz, grad_ctx);
+    float div_e = gradient<2, Order, X>(ex_b, ix, 0, iz, grad_ctx)
+                + gradient<2, Order, Z>(ez_b, ix, 0, iz, grad_ctx);
 
-    float d_q_dpdx = vrz2d_split_grad_q_gradp<Order, X>(q_b, p_b, ix, iz, grad_ctx, solver);
-    float d_q_dpdz = vrz2d_split_grad_q_gradp<Order, Z>(q_b, p_b, ix, iz, grad_ctx, solver);
+    float v = vp_b[idx];
+    float zz = z_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float lam = lambda_b[idx];
+
+    float dp_dvp   = dpdx * dvpdx + dpdz * dvpdz;   // ∇p·∇vp
+    float dp_dinvz = dpdx * z1x  + dpdz * z1z;      // ∇p·∇(1/z)
+
+    float g_vp = 2.0f * v * lam * (lap_x + lap_z)
+               + lam * dp_dvp
+               - div_c
+               + 2.0f * v * zz * lam * dp_dinvz;
+    float g_z  = lam * v * v * dp_dinvz
+               + div_e * inv_z0 * inv_z0;           // ∇·(e)/z²
 
     float dt2 = solver.dt * solver.dt;
-    float g_kappa = -dt2 * lambda_b[idx] * div_b_grad_p;
-    float g_beta = dt2 * (d_q_dpdx + d_q_dpdz);
-
-    grad_vp_b[idx] += z_b[idx] * g_kappa + inv_z0 * g_beta;
-    grad_z_b[idx] += v * g_kappa - beta * inv_z0 * g_beta;
+    grad_vp_b[idx] += -dt2 * g_vp;
+    grad_z_b[idx]  += -dt2 * g_z;
 }
