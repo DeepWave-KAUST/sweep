@@ -1,4 +1,4 @@
-"""Tests for :class:`sweep.equations.ElasticVectorReflectivity`.
+"""Tests for :class:`sweep.equations.ElasticVRR`.
 
 Soares & Sacchi 2025 momentum-stress first-order elastic equation. Six
 coverage tests:
@@ -27,7 +27,7 @@ import torch
 
 from sweep.equations import (
     Elastic,
-    ElasticVectorReflectivity,
+    ElasticVRR,
     compute_vector_reflectivity,
 )
 from sweep.propagator.torch import PropTorch
@@ -67,7 +67,7 @@ def _full(vp_val, vs_val):
 
 
 def _make_evr_prop(receiver_type=None):
-    eq = ElasticVectorReflectivity(spatial_order=SO, device=DEVICE, backend="torch")
+    eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq, shape=(NZ, NX),
         abcn=ABCN, dh=DH, dt=DT,
@@ -348,7 +348,7 @@ def test_sigma_xx_index_swap_uses_gamma_S_zz_not_xx():
     in sign. The post-step ``sigma_xx`` then has the sign of the
     S_zz-containing term, picking out the correct index.
     """
-    from sweep.equations.elastic_vector_reflectivity import elastic_vr_step_core
+    from sweep.equations.elastic_vrr import elastic_vr_step_core
 
     # Build a small (8, 12) grid where we control gamma analytically.
     # V_P = 0 -> gamma_P_xx = gamma_P_zz = 0 trivially.
@@ -380,12 +380,12 @@ def test_sigma_xx_index_swap_uses_gamma_S_zz_not_xx():
     sxz = zero4.clone()
 
     memvars = [zero4.clone() for _ in range(10)]
-    # Use ElasticVectorReflectivity's own pd. The pd was already
+    # Use ElasticVRR's own pd. The pd was already
     # prepared by FirstOrderEquation.__init__ (which calls
     # ``self.pd.to_backend(to_backend)``); do NOT call to_backend again
     # or the kernels acquire a phantom dim and the conv shape unpacks
     # to too many values.
-    eq = ElasticVectorReflectivity(spatial_order=SO, device=DEVICE, backend="torch")
+    eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     eq.pd.set_spacing(1.0)
     # Zero CPML (no absorbing zone in this unit test).
     pml = tuple(zero4.clone() for _ in range(8))
