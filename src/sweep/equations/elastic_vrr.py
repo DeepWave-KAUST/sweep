@@ -272,7 +272,7 @@ def elastic_vr_step_core(
     )
 
 
-class ElasticVectorReflectivity(FirstOrderEquation):
+class ElasticVRR(FirstOrderEquation):
     """First-order 2-D elastic vector-reflectivity wave equation.
 
     Soares & Sacchi 2025 momentum-stress formulation. State variables

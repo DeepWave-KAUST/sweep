@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from sweep.equations import ElasticVectorReflectivity
+from sweep.equations import ElasticVRR
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -37,7 +37,7 @@ def geo():
 
 
 def prop(impl):
-    eq = ElasticVectorReflectivity(spatial_order=SO, device=DEVICE, backend="torch")
+    eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(eq, shape=(NZ, NX), abcn=ABCN, dh=DH, dt=DT, use_ckpt=False,
                      impl=impl, eager_options={"use_compile": False} if impl == "eager" else None)
 

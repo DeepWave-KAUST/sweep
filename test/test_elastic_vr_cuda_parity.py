@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from sweep.equations import (
-    ElasticVectorReflectivity,
+    ElasticVRR,
     compute_vector_reflectivity,
 )
 from sweep.propagator.torch import PropTorch
@@ -45,7 +45,7 @@ def _geometry():
 
 
 def _make_prop(impl):
-    eq = ElasticVectorReflectivity(spatial_order=SO, device=DEVICE, backend="torch")
+    eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq, shape=(NZ, NX),
         abcn=ABCN, dh=DH, dt=DT,

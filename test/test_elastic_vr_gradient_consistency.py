@@ -1,6 +1,6 @@
 """Phase 3 gradient consistency test.
 
-Runs the forward + backward of ElasticVectorReflectivity twice:
+Runs the forward + backward of ElasticVRR twice:
 1. impl='eager' with PyTorch autograd (reference gradients)
 2. impl='c'     full-mode CUDA backward (candidate)
 
@@ -22,7 +22,7 @@ import pytest
 import torch
 
 from sweep.equations import (
-    ElasticVectorReflectivity,
+    ElasticVRR,
     compute_vector_reflectivity,
 )
 from sweep.propagator.torch import PropTorch
@@ -53,7 +53,7 @@ def _geometry():
 
 
 def _make_prop(impl, **ckpt_kwargs):
-    eq = ElasticVectorReflectivity(spatial_order=SO, device=DEVICE, backend="torch")
+    eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     kw = dict(use_ckpt=False)
     kw.update(ckpt_kwargs)
     return PropTorch(
