@@ -36,10 +36,20 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
 
     dpdx = grad_op(u_now, h, axis=-1, kernels=grad_kernels)
     dpdz = grad_op(u_now, h, axis=-2, kernels=grad_kernels)
-    model_b = vp / z
+    inv_z = 1.0 / z
+    model_b = vp * inv_z
     kappa = z * vp
-    dbdx = grad_op(model_b, h, axis=-1, kernels=grad_kernels)
-    dbdz = grad_op(model_b, h, axis=-2, kernels=grad_kernels)
+    # ∇b via the product rule on (vp, 1/z) — matches the C kernel exactly:
+    #   dbdx = (∂x vp)·(1/z) + vp·∂x(1/z)   [NOT ∂x(vp/z), the field-gradient form]
+    # The two discretisations differ at O(h²); using the product rule keeps the
+    # eager forward operator identical to the compiled CUDA kernel so impl='c'
+    # and impl='eager' produce the same wavefields and the same gradients.
+    dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
+    dvpdz = grad_op(vp, h, axis=-2, kernels=grad_kernels)
+    dinvzdx = grad_op(inv_z, h, axis=-1, kernels=grad_kernels)
+    dinvzdz = grad_op(inv_z, h, axis=-2, kernels=grad_kernels)
+    dbdx = dvpdx * inv_z + vp * dinvzdx
+    dbdz = dvpdz * inv_z + vp * dinvzdz
 
     # Z direction
     tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-2, kernels=grad_kernels)
@@ -79,11 +89,20 @@ def step_cpml_3d(
     dpdx = grad_op(u_now, h, axis=-1, kernels=grad_kernels)
     dpdy = grad_op(u_now, h, axis=-2, kernels=grad_kernels)
     dpdz = grad_op(u_now, h, axis=-3, kernels=grad_kernels)
-    model_b = vp / z
+    inv_z = 1.0 / z
+    model_b = vp * inv_z
     kappa = z * vp
-    dbdx = grad_op(model_b, h, axis=-1, kernels=grad_kernels)
-    dbdy = grad_op(model_b, h, axis=-2, kernels=grad_kernels)
-    dbdz = grad_op(model_b, h, axis=-3, kernels=grad_kernels)
+    # ∇b via the product rule on (vp, 1/z) — matches the C kernel exactly
+    # (see the 2-D step_cpml for why the field-gradient form is avoided).
+    dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
+    dvpdy = grad_op(vp, h, axis=-2, kernels=grad_kernels)
+    dvpdz = grad_op(vp, h, axis=-3, kernels=grad_kernels)
+    dinvzdx = grad_op(inv_z, h, axis=-1, kernels=grad_kernels)
+    dinvzdy = grad_op(inv_z, h, axis=-2, kernels=grad_kernels)
+    dinvzdz = grad_op(inv_z, h, axis=-3, kernels=grad_kernels)
+    dbdx = dvpdx * inv_z + vp * dinvzdx
+    dbdy = dvpdy * inv_z + vp * dinvzdy
+    dbdz = dvpdz * inv_z + vp * dinvzdz
 
     # Z direction
     tmpz = ((1 + bz) * lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-3, kernels=grad_kernels)
