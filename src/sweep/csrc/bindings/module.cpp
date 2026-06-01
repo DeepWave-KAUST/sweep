@@ -12,6 +12,7 @@
 #include "cuda/equations/elastic2d/elastic2d.h"
 #include "cuda/equations/elastic3d/elastic3d.h"
 #include "cuda/equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
+#include "cuda/equations/elastic_vr2d/elastic_vr2d.h"
 #include "cuda/equations/acoustic_vti_1st_2d/acoustic_vti_1st_2d.h"
 #include "cuda/equations/acoustic_vti_1st_3d/acoustic_vti_1st_3d.h"
 #include "cpu/cpu_binding.h"
@@ -91,6 +92,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic2d_apm_forward", wrap_forward(elastic2d::apm_forward), "Elastic APM forward 2D (CUDA only)");
     m.def("elastic2d_apm_backward", wrap_backward(elastic2d::apm_backward), "Elastic APM backward 2D full mode (CUDA only)");
     m.def("elastic2d_apm_backward_bs", wrap_backward(elastic2d::apm_backward_bs), "Elastic APM backward 2D boundary-saving (CUDA only)");
+    // Soares & Sacchi 2025 vector-reflectivity elastic (2D). CUDA only; no
+    // CPU fallback (the eager Python path covers CPU).
+    m.def("elastic_vr2d_forward", wrap_forward(elastic_vr2d::forward), "Elastic vector-reflectivity forward 2D (CUDA only)");
+    m.def("elastic_vr2d_backward", wrap_backward(elastic_vr2d::backward), "Elastic vector-reflectivity backward 2D full (CUDA only)");
+    m.def("elastic_vr2d_backward_bs", wrap_backward(elastic_vr2d::backward_bs), "Elastic vector-reflectivity backward 2D boundary-saving (CUDA only)");
+    m.def("elastic_vr2d_backward_ckpt", wrap_backward(elastic_vr2d::backward_ckpt), "Elastic vector-reflectivity backward 2D checkpoint (CUDA only)");
+    m.def("elastic_vr2d_backward_recursive_ckpt", wrap_backward(elastic_vr2d::backward_recursive_ckpt), "Elastic vector-reflectivity backward 2D recursive checkpoint (CUDA only)");
     m.def("elastic3d_forward", wrap_forward(dispatch_forward(elastic3d::forward, EK::Elastic3D)), "Elastic forward 3D (CUDA/CPU)");
     m.def("elastic3d_backward_bs", wrap_backward(dispatch_backward(elastic3d::backward_bs, EK::Elastic3D, BM::BoundarySaving)), "Elastic backward with boundary saving 3D (CUDA/CPU)");
     m.def("elastic3d_backward_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_ckpt, EK::Elastic3D, BM::Checkpoint)), "Elastic backward with checkpointing 3D (CUDA/CPU)");
