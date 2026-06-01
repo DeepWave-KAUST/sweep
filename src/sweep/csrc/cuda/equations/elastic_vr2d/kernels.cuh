@@ -219,18 +219,23 @@ __global__ void evr_momentum_kernel_nopml(
     SolverContext solver
 )
 {
+    // Boundary-saving REVERSE step: subtracts (-=) to undo the forward
+    // momentum update, operating strictly inside the absorbing band
+    // (halo = abcn + M + 1) where the medium is lossless and the leapfrog
+    // is time-reversible. The PML-zone values are restored from saved
+    // boundary strips by the driver.
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
+    int M;
+    if constexpr (Order == -1) M = solver.M; else M = Order / 2;
+    int halo = solver.abcn + M + 1;
+    int top_halo = solver.free_surface ? M : halo;
     if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
+        iz < top_halo || iz >= solver.nz - halo)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -242,8 +247,8 @@ __global__ void evr_momentum_kernel_nopml(
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
     float dszz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.szz, ix, 0, iz, grad_ctx);
 
-    f.vx[idx] += solver.dt * (dsxx_dx + dsxz_dz);
-    f.vz[idx] += solver.dt * (dsxz_dx + dszz_dz);
+    f.vx[idx] -= solver.dt * (dsxx_dx + dsxz_dz);
+    f.vz[idx] -= solver.dt * (dsxz_dx + dszz_dz);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,19 +398,21 @@ __global__ void evr_stress_kernel_nopml(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
+    // Boundary-saving REVERSE step: subtracts (-=) to undo the forward stress
+    // update, strictly inside the absorbing band (halo = abcn + M + 1).
+    int M;
+    if constexpr (Order == -1) M = solver.M; else M = Order / 2;
+    int halo = solver.abcn + M + 1;
+    int top_halo = solver.free_surface ? M : halo;
     if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
+        iz < top_halo || iz >= solver.nz - halo)
         return;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    (void) u_this;
 
     const float* vp_b   = vp   + b * spatial_size;
     const float* vs_b   = vs   + b * spatial_size;
@@ -439,15 +446,9 @@ __global__ void evr_stress_kernel_nopml(
 
     float gamma_P_kk = gamma_P_xx + gamma_P_zz;
 
-    f.sxx[idx] += solver.dt * (gamma_P_kk - 2.f * gamma_S_zz);
-    f.szz[idx] += solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
-    f.sxz[idx] += solver.dt * (gamma_S_xz + gamma_S_zx);
-
-    if (u_this_b) {
-        int comp_stride = solver.B * spatial_size;
-        u_this_b[0 * comp_stride + idx] = f.vx[idx];
-        u_this_b[1 * comp_stride + idx] = f.vz[idx];
-    }
+    f.sxx[idx] -= solver.dt * (gamma_P_kk - 2.f * gamma_S_zz);
+    f.szz[idx] -= solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
+    f.sxz[idx] -= solver.dt * (gamma_S_xz + gamma_S_zx);
 }
 
 // ---------------------------------------------------------------------------
