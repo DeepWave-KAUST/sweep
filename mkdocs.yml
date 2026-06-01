@@ -119,6 +119,7 @@ nav:
           - Hello · SWEEP: notebooks/00_hello_fwi.ipynb
           - FWI:
               - Acoustic · Marmousi: notebooks/01_fwi_acoustic_marmousi.ipynb
+              - Acoustic VRZ · FWI imaging: notebooks/17_fwi_vrz_marmousi.ipynb
               - Elastic · Marmousi: notebooks/02_fwi_elastic_marmousi.ipynb
               - Multiscale: notebooks/03_fwi_multiscale.ipynb
               - Memory strategies: notebooks/07_memory_strategies.ipynb
