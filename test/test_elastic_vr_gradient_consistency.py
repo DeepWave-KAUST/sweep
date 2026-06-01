@@ -52,13 +52,16 @@ def _geometry():
     return sources, receivers
 
 
-def _make_prop(impl):
+def _make_prop(impl, **ckpt_kwargs):
     eq = ElasticVectorReflectivity(spatial_order=SO, device=DEVICE, backend="torch")
+    kw = dict(use_ckpt=False)
+    kw.update(ckpt_kwargs)
     return PropTorch(
         eq, shape=(NZ, NX),
         abcn=ABCN, dh=DH, dt=DT,
-        use_ckpt=False, impl=impl,
+        impl=impl,
         eager_options={"use_compile": False} if impl == "eager" else None,
+        **kw,
     )
 
 
@@ -87,11 +90,11 @@ def _cosine(a, b):
     return (af @ bf / (af.norm() * bf.norm()).clamp_min(1e-30)).item()
 
 
-def _compute_grads(impl, wavelet, sources, receivers, target):
+def _compute_grads(impl, wavelet, sources, receivers, target, prop_ckpt=None, **prop_kwargs):
     """Build a fresh propagator + models, run forward+backward, return grads."""
     models = _layered_models_with_grad()
-    prop = _make_prop(impl)
-    syn = prop(wavelet, sources, receivers, models=models)
+    prop = _make_prop(impl, **(prop_ckpt or {}))
+    syn = prop(wavelet, sources, receivers, models=models, **prop_kwargs)
     loss = (syn - target).pow(2).sum()
     loss.backward()
     grads = {
@@ -153,6 +156,84 @@ def test_gradient_consistency_full_mode():
         if not (rel < 1.5 and cos > 0.8):
             failed.append(f"{name}: rel_l2={rel:.4e}, cos={cos:.4f}")
     assert not failed, "Gradient consistency failed on:\n  " + "\n  ".join(failed)
+
+
+def test_gradient_consistency_boundary_saving():
+    """impl='c' boundary-saving backward (the ckpt-style memory-light mode)
+    should match eager autograd on all 6 model parameters. The forward
+    wavefield is reconstructed in reverse time from saved boundary strips
+    rather than stored every step."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    wavelet = _wavelet()
+    sources, receivers = _geometry()
+
+    target_models = _layered_models_with_grad()
+    with torch.no_grad():
+        target_models[0] += 30.0
+    target_prop = _make_prop("eager")
+    with torch.no_grad():
+        target_syn = target_prop(wavelet, sources, receivers, models=target_models)
+
+    eager_grads, eager_syn = _compute_grads(
+        "eager", wavelet, sources, receivers, target_syn
+    )
+    # Candidate: impl='c' boundary-saving backward (GPU storage).
+    c_grads, c_syn = _compute_grads(
+        "c", wavelet, sources, receivers, target_syn, use_boundary_saving=True
+    )
+
+    syn_rel = _rel_l2(c_syn, eager_syn)
+    print(f"[bs] forward syn rel L2: {syn_rel:.4e}")
+    assert syn_rel < 1e-3
+
+    failed = []
+    for name in ("vp", "vs", "Rp_x", "Rp_z", "Rs_x", "Rs_z"):
+        rel = _rel_l2(c_grads[name], eager_grads[name])
+        cos = _cosine(c_grads[name], eager_grads[name])
+        print(f"  [bs] grad_{name:5s}: rel_l2 = {rel:.4e}  cos = {cos:.4f}")
+        if not (rel < 1.5 and cos > 0.8):
+            failed.append(f"{name}: rel_l2={rel:.4e}, cos={cos:.4f}")
+    assert not failed, "BS gradient consistency failed on:\n  " + "\n  ".join(failed)
+
+
+def _run_ckpt_case(tag, prop_ckpt):
+    wavelet = _wavelet()
+    sources, receivers = _geometry()
+    target_models = _layered_models_with_grad()
+    with torch.no_grad():
+        target_models[0] += 30.0
+    with torch.no_grad():
+        target_syn = _make_prop("eager")(wavelet, sources, receivers, models=target_models)
+
+    eager_grads, _ = _compute_grads("eager", wavelet, sources, receivers, target_syn)
+    c_grads, c_syn = _compute_grads(
+        "c", wavelet, sources, receivers, target_syn, prop_ckpt=prop_ckpt
+    )
+    failed = []
+    for name in ("vp", "vs", "Rp_x", "Rp_z", "Rs_x", "Rs_z"):
+        rel = _rel_l2(c_grads[name], eager_grads[name])
+        cos = _cosine(c_grads[name], eager_grads[name])
+        print(f"  [{tag}] grad_{name:5s}: rel_l2 = {rel:.4e}  cos = {cos:.4f}")
+        if not (rel < 1.5 and cos > 0.8):
+            failed.append(f"{name}: rel_l2={rel:.4e}, cos={cos:.4f}")
+    assert not failed, f"{tag} gradient consistency failed on:\n  " + "\n  ".join(failed)
+
+
+def test_gradient_consistency_ckpt_chunk():
+    """impl='c' chunked-checkpoint backward should match eager autograd."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    _run_ckpt_case("ckpt_chunk", {"use_ckpt": True, "ckpt_mode": "chunk", "ckpt_chunks": 16})
+
+
+def test_gradient_consistency_ckpt_recursive():
+    """impl='c' recursive-checkpoint backward should match eager autograd."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    _run_ckpt_case("ckpt_recursive",
+                   {"use_ckpt": True, "ckpt_mode": "recursive", "ckpt_num": 5})
 
 
 if __name__ == "__main__":
