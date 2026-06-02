@@ -13,6 +13,26 @@
 
 #include "saver.cuh"
 
+// Bind one staged boundary face to the typed pointer matching the staging
+// tensor's dtype (fp32/fp16/bf16) at element offset OFF.  Mirrors view()'s
+// GPU-direct binding so the existing dtype-dispatched save/restore kernels work
+// for the cpu/disk staging ring too.  OFF is an element offset (dtype-agnostic).
+// A macro (not a function) so it assigns directly to the __restrict__-qualified
+// pointer members of GeneralBoundaryPointer (a reference param would drop the
+// restrict qualifier).
+#define BIND_STAGED_FACE(STG, OFF, PF, PH, PBF)                                \
+    do {                                                                       \
+        const torch::Tensor& _stg = (STG);                                     \
+        const int64_t _off = (OFF);                                            \
+        const auto _st = _stg.scalar_type();                                   \
+        if (_st == torch::kHalf)                                               \
+            (PH) = reinterpret_cast<__half*>(_stg.data_ptr()) + _off;          \
+        else if (_st == torch::kBFloat16)                                      \
+            (PBF) = reinterpret_cast<__nv_bfloat16*>(_stg.data_ptr()) + _off;  \
+        else                                                                   \
+            (PF) = reinterpret_cast<float*>(_stg.data_ptr()) + _off;           \
+    } while (0)
+
 struct BoundaryChunk {
     int it = 0;
     int buf_idx = 0;
@@ -233,15 +253,16 @@ public:
 
         int gpu_idx = chunk.ring_start + chunk.buf_idx;
         GeneralBoundaryPointer ptr{};
-        ptr.top = saver_.top_gpu.data_ptr<float>() + gpu_idx * saver_.top_stride;
-        ptr.bottom = saver_.bottom_gpu.data_ptr<float>() + gpu_idx * saver_.bottom_stride;
-        ptr.left = saver_.left_gpu.data_ptr<float>() + gpu_idx * saver_.left_stride;
-        ptr.right = saver_.right_gpu.data_ptr<float>() + gpu_idx * saver_.right_stride;
+        ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
         ptr.last_two = direct.last_two;
+        BIND_STAGED_FACE(saver_.top_gpu,    gpu_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+        BIND_STAGED_FACE(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+        BIND_STAGED_FACE(saver_.left_gpu,   gpu_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+        BIND_STAGED_FACE(saver_.right_gpu,  gpu_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
 
         if (dim_ == 3) {
-            ptr.front = saver_.front_gpu.data_ptr<float>() + gpu_idx * saver_.front_stride;
-            ptr.back = saver_.back_gpu.data_ptr<float>() + gpu_idx * saver_.back_stride;
+            BIND_STAGED_FACE(saver_.front_gpu, gpu_idx * saver_.front_stride, ptr.front, ptr.front_h, ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,  gpu_idx * saver_.back_stride,  ptr.back,  ptr.back_h,  ptr.back_bf);
         }
         return ptr;
     }
@@ -262,18 +283,19 @@ public:
 
             if (staged_) {
                 int gpu_idx = chunk.ring_start + chunk.buf_idx;
-                ptr.top = saver_.top_gpu.data_ptr<float>() +
-                    field_idx * saver_.top_gpu.stride(0) +
-                    gpu_idx * saver_.top_gpu.stride(1);
-                ptr.bottom = saver_.bottom_gpu.data_ptr<float>() +
-                    field_idx * saver_.bottom_gpu.stride(0) +
-                    gpu_idx * saver_.bottom_gpu.stride(1);
-                ptr.left = saver_.left_gpu.data_ptr<float>() +
-                    field_idx * saver_.left_gpu.stride(0) +
-                    gpu_idx * saver_.left_gpu.stride(1);
-                ptr.right = saver_.right_gpu.data_ptr<float>() +
-                    field_idx * saver_.right_gpu.stride(0) +
-                    gpu_idx * saver_.right_gpu.stride(1);
+                ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+                BIND_STAGED_FACE(saver_.top_gpu,
+                    field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
+                    ptr.top, ptr.top_h, ptr.top_bf);
+                BIND_STAGED_FACE(saver_.bottom_gpu,
+                    field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
+                    ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+                BIND_STAGED_FACE(saver_.left_gpu,
+                    field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
+                    ptr.left, ptr.left_h, ptr.left_bf);
+                BIND_STAGED_FACE(saver_.right_gpu,
+                    field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
+                    ptr.right, ptr.right_h, ptr.right_bf);
             } else if (direct.dtype == BoundaryDtype::FP16) {
                 ptr.top_h    = direct.top_h    + field_idx * saver_.top_t.stride(0);
                 ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
@@ -350,19 +372,21 @@ public:
             ptr.back   = direct.back;
             ptr.left   = direct.left;
             ptr.right  = direct.right;
+        } else if (staged_) {
+            ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+            BIND_STAGED_FACE(saver_.top_gpu,    flat_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+            BIND_STAGED_FACE(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+            BIND_STAGED_FACE(saver_.front_gpu,  flat_idx * saver_.front_stride,  ptr.front,  ptr.front_h,  ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,   flat_idx * saver_.back_stride,   ptr.back,   ptr.back_h,   ptr.back_bf);
+            BIND_STAGED_FACE(saver_.left_gpu,   flat_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+            BIND_STAGED_FACE(saver_.right_gpu,  flat_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
         } else {
-            ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
-                flat_idx * saver_.top_stride;
-            ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
-                flat_idx * saver_.bottom_stride;
-            ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
-                flat_idx * saver_.front_stride;
-            ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
-                flat_idx * saver_.back_stride;
-            ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
-                flat_idx * saver_.left_stride;
-            ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
-                flat_idx * saver_.right_stride;
+            ptr.top = direct.top + flat_idx * saver_.top_stride;
+            ptr.bottom = direct.bottom + flat_idx * saver_.bottom_stride;
+            ptr.front = direct.front + flat_idx * saver_.front_stride;
+            ptr.back = direct.back + flat_idx * saver_.back_stride;
+            ptr.left = direct.left + flat_idx * saver_.left_stride;
+            ptr.right = direct.right + flat_idx * saver_.right_stride;
         }
         ptr.last_two = direct.last_two;
         return ptr;
@@ -692,15 +716,16 @@ public:
             gpu_idx = buf_idx;
 
         GeneralBoundaryPointer ptr{};
-        ptr.top = saver_.top_gpu.data_ptr<float>() + gpu_idx * saver_.top_stride;
-        ptr.bottom = saver_.bottom_gpu.data_ptr<float>() + gpu_idx * saver_.bottom_stride;
-        ptr.left = saver_.left_gpu.data_ptr<float>() + gpu_idx * saver_.left_stride;
-        ptr.right = saver_.right_gpu.data_ptr<float>() + gpu_idx * saver_.right_stride;
+        ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
         ptr.last_two = direct.last_two;
+        BIND_STAGED_FACE(saver_.top_gpu,    gpu_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+        BIND_STAGED_FACE(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+        BIND_STAGED_FACE(saver_.left_gpu,   gpu_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+        BIND_STAGED_FACE(saver_.right_gpu,  gpu_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
 
         if (dim_ == 3) {
-            ptr.front = saver_.front_gpu.data_ptr<float>() + gpu_idx * saver_.front_stride;
-            ptr.back = saver_.back_gpu.data_ptr<float>() + gpu_idx * saver_.back_stride;
+            BIND_STAGED_FACE(saver_.front_gpu, gpu_idx * saver_.front_stride, ptr.front, ptr.front_h, ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,  gpu_idx * saver_.back_stride,  ptr.back,  ptr.back_h,  ptr.back_bf);
         }
         return ptr;
     }
@@ -727,18 +752,19 @@ public:
                 if (!boundary_disk_async_read_)
                     gpu_idx = buf_idx;
 
-                ptr.top = saver_.top_gpu.data_ptr<float>() +
-                    field_idx * saver_.top_gpu.stride(0) +
-                    gpu_idx * saver_.top_gpu.stride(1);
-                ptr.bottom = saver_.bottom_gpu.data_ptr<float>() +
-                    field_idx * saver_.bottom_gpu.stride(0) +
-                    gpu_idx * saver_.bottom_gpu.stride(1);
-                ptr.left = saver_.left_gpu.data_ptr<float>() +
-                    field_idx * saver_.left_gpu.stride(0) +
-                    gpu_idx * saver_.left_gpu.stride(1);
-                ptr.right = saver_.right_gpu.data_ptr<float>() +
-                    field_idx * saver_.right_gpu.stride(0) +
-                    gpu_idx * saver_.right_gpu.stride(1);
+                ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+                BIND_STAGED_FACE(saver_.top_gpu,
+                    field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
+                    ptr.top, ptr.top_h, ptr.top_bf);
+                BIND_STAGED_FACE(saver_.bottom_gpu,
+                    field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
+                    ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+                BIND_STAGED_FACE(saver_.left_gpu,
+                    field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
+                    ptr.left, ptr.left_h, ptr.left_bf);
+                BIND_STAGED_FACE(saver_.right_gpu,
+                    field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
+                    ptr.right, ptr.right_h, ptr.right_bf);
             } else if (direct.dtype == BoundaryDtype::FP16) {
                 ptr.top_h    = direct.top_h    + field_idx * saver_.top_t.stride(0);
                 ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
@@ -823,19 +849,21 @@ public:
             ptr.back   = direct.back;
             ptr.left   = direct.left;
             ptr.right  = direct.right;
+        } else if (staged_) {
+            ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+            BIND_STAGED_FACE(saver_.top_gpu,    flat_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+            BIND_STAGED_FACE(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+            BIND_STAGED_FACE(saver_.front_gpu,  flat_idx * saver_.front_stride,  ptr.front,  ptr.front_h,  ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,   flat_idx * saver_.back_stride,   ptr.back,   ptr.back_h,   ptr.back_bf);
+            BIND_STAGED_FACE(saver_.left_gpu,   flat_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+            BIND_STAGED_FACE(saver_.right_gpu,  flat_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
         } else {
-            ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
-                flat_idx * saver_.top_stride;
-            ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
-                flat_idx * saver_.bottom_stride;
-            ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
-                flat_idx * saver_.front_stride;
-            ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
-                flat_idx * saver_.back_stride;
-            ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
-                flat_idx * saver_.left_stride;
-            ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
-                flat_idx * saver_.right_stride;
+            ptr.top = direct.top + flat_idx * saver_.top_stride;
+            ptr.bottom = direct.bottom + flat_idx * saver_.bottom_stride;
+            ptr.front = direct.front + flat_idx * saver_.front_stride;
+            ptr.back = direct.back + flat_idx * saver_.back_stride;
+            ptr.left = direct.left + flat_idx * saver_.left_stride;
+            ptr.right = direct.right + flat_idx * saver_.right_stride;
         }
         ptr.last_two = direct.last_two;
         return ptr;
