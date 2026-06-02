@@ -93,6 +93,10 @@ plugins:
         python:
           paths: [src]
           options:
+            # Inspect (= import) modules at build time so runtime docstring
+            # mutations from `WaveEquation.__init_subclass__` (auto-injected
+            # SPECS admonitions) are visible to griffe.
+            force_inspection: true
             show_source: false
             show_root_heading: true
             docstring_style: google
