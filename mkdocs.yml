@@ -129,6 +129,7 @@ nav:
           - Wavefields:
               - DAS: notebooks/04_das_zhao_vs_mu.ipynb
               - Elastic: notebooks/06_wavefield_elastic.ipynb
+              - Elastic vector-reflectivity: notebooks/16_elastic_vector_reflectivity.ipynb
               - Topography (irregular FS): notebooks/15_wavefield_topography.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
