@@ -340,18 +340,6 @@ class AcousticVTI1st(FirstOrderEquation):
         self.free_surface = False
 
     @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
-
-    @property
     def default_source_fields(self):
         return ["sH", "sV"]
 
@@ -581,18 +569,6 @@ class AcousticVTI1st3D(FirstOrderEquation):
                 "(TODO_free_surface). Use absorbing PML on all six sides."
             )
         self.free_surface = False
-
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
 
     @property
     def default_source_fields(self):

@@ -2,7 +2,7 @@ import jax, torch
 import numpy as np
 import jax.numpy as jnp
 from .base import SecondOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 from .utils import to_backend
 
 def cond_torch(pred, true_fn, false_fn, args):
@@ -63,6 +63,10 @@ class ViscoAcoustic(SecondOrderEquation):
         ModelSpec("Q", description="Quality factor controlling attenuation."),
         ModelSpec("omega", description="Angular reference frequency for visco-acoustic attenuation.", unit="rad/s"),
     )
+    FIELD_SPECS = (
+        FieldSpec("h1", aliases=("pressure", "p"), description="Primary visco-acoustic pressure-like wavefield.", supports_source=True, supports_receiver=True),
+        FieldSpec("h2", aliases=("pressure_prev",), description="Previous-step pressure-like wavefield.", internal=True),
+    )
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2, phase_shift=True, amplitude_damping=True):
         """Acoustic wave equation solver.
 
@@ -88,14 +92,6 @@ class ViscoAcoustic(SecondOrderEquation):
     @property
     def need_init(self):
         return True
-    
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
-    @property
-    def wavefields(self):
-        return ['h1', 'h2']
     
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)
