@@ -218,6 +218,24 @@ solver = PropTorch(
 )
 ```
 
+## Adding your own equation
+
+The equation classes above are plug-in units. The propagator owns the time
+loop and PML wiring, so a new equation is one Python file (eager) plus an
+optional CUDA equation directory and a five-line entry in `module.cpp`
+(`impl="c"`). The discovery is reflective: importing the class in
+`src/sweep/equations/__init__.py` makes it appear in `sweep list equations`
+and in `_equation_classes()`.
+
+Two entry points:
+
+- [Extending: Adding a New Equation](extending.md) — the reference: the
+  interface contract, the `CUDALayoutSpec` field table, and the C++
+  registration pattern.
+- [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb)
+  — a runnable walkthrough that builds and runs a toy `MyScalar` against
+  `PropTorch` end-to-end.
+
 ## See Also
 
 - [API Reference](../api/index.md) — full API for every equation class, including
@@ -227,3 +245,6 @@ solver = PropTorch(
   `impl="eager"` and `impl="c"`.
 - [Propagators](propagators.md) — wiring an equation into `PropTorch` or
   `PropJax`.
+- [Extending](extending.md) — adding a new equation class (reference) and the
+  [companion notebook](../notebooks/18_extending_add_new_equation.ipynb)
+  (runnable walkthrough).
