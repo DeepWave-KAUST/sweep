@@ -683,17 +683,16 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 boundary_dtype = 'fp32'
         if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
             raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
-        # Half-precision / int8 boundary storage is only implemented on the
-        # GPU-direct path; the cpu/disk staged transfer path reads the staging
-        # ring buffer as float32.  Reject the unsupported combo loudly instead
-        # of silently storing fp32 (or, on older paths, dereferencing a null
-        # half-precision pointer).
-        if boundary_dtype != 'fp32' and boundary_on_cpu:
+        # cpu staged storage supports fp32/fp16/bf16.  Not yet implemented on
+        # the staged path: int8 (needs a uint8+scale staging ring) and disk
+        # half-precision (needs dtype-aware disk I/O) -- reject those for now.
+        if boundary_on_cpu and boundary_dtype != 'fp32' and (
+            boundary_dtype == 'int8' or boundary_storage == 'disk'
+        ):
             raise ValueError(
-                f"boundary storage_dtype={boundary_dtype!r} requires storage='gpu'; "
-                f"got storage={boundary_storage!r}. cpu/disk boundary storage is "
-                "fp32-only (the staged transfer path does not implement "
-                "half-precision/int8 storage)."
+                f"boundary storage_dtype={boundary_dtype!r} with storage="
+                f"{boundary_storage!r} is not supported yet: cpu storage supports "
+                "fp32/fp16/bf16; disk and int8 staged storage are fp32-only."
             )
         if (
             self._boundary_cache_batch == self.B
@@ -733,23 +732,33 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             *self.shape_cuda,
         ]
 
+        # Storage dtype for the boundary buffers (fp32 default).  int8 is
+        # handled separately (gpu-only) below; ``last_two`` always stays fp32.
+        _bdry_dtype = {
+            'fp32': torch.float32,
+            'fp16': torch.float16,
+            'bf16': torch.bfloat16,
+        }.get(boundary_dtype, torch.float32)
+
         if boundary_on_cpu:
             if boundary_storage == "disk":
                 self._allocate_boundary_disk_files(layout.cpu_shapes, disk_dir)
                 self.boundary_cpu = self.boundary_cpu_allocator.zeros(
                     layout.gpu_shapes,
-                    dtype=torch.float32,
+                    dtype=_bdry_dtype,
                     dev='cpu',
                     pin_memory=staging_pinned,
                 )
             else:
                 self.boundary_cpu = self.boundary_cpu_allocator.zeros(
                     layout.cpu_shapes,
-                    dtype=torch.float32,
+                    dtype=_bdry_dtype,
                     dev='cpu',
                     pin_memory=staging_pinned,
                 )
-            self.boundary_gpu = self.boundary_gpu_allocator.zeros(layout.gpu_shapes)
+            # Staging ring must match the persistent buffer dtype.
+            self.boundary_gpu = self.boundary_gpu_allocator.zeros(
+                layout.gpu_shapes, dtype=_bdry_dtype)
             self.boundary_gpu_full = ()
             self.last_two = self.boundary_cpu_allocator.zeros(
                 [last_two_shape],
@@ -802,11 +811,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     scale_shapes, dtype=torch.float32)
                 self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
             else:
-                _bdry_dtype = {
-                    'fp32': torch.float32,
-                    'fp16': torch.float16,
-                    'bf16': torch.bfloat16,
-                }[boundary_dtype]
                 self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
                     layout.gpu_full_shapes, dtype=_bdry_dtype)
             self.last_two = self.forward_allocator.zeros([last_two_shape])[0]

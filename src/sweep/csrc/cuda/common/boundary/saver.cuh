@@ -25,6 +25,13 @@ static inline BoundaryDtype boundary_dtype_from_tensor(const torch::Tensor& t) {
     }
 }
 
+// Byte pointer into a boundary tensor at element offset `off_elems`, honoring
+// the tensor's dtype width.  Used so the gpu<->cpu<->disk byte copies work for
+// fp16/bf16 staging/storage, not just fp32.
+static inline char* boundary_byte_ptr(const torch::Tensor& t, int64_t off_elems) {
+    return static_cast<char*>(t.data_ptr()) + off_elems * t.element_size();
+}
+
 struct EffectiveBoundarySaver {
 
     torch::Tensor left_t, right_t;
@@ -584,11 +591,12 @@ struct EffectiveBoundarySaver {
         }
 
     inline void copy_2d_chunk_async(
-        float* dst,
+        void* dst,
         size_t dst_var_block,
-        const float* src,
+        const void* src,
         size_t src_var_block,
         size_t bytes,
+        size_t elem_size,
         cudaMemcpyKind kind,
         cudaStream_t stream
     ) const
@@ -598,9 +606,9 @@ struct EffectiveBoundarySaver {
         } else {
             cudaMemcpy2DAsync(
                 dst,
-                dst_var_block * sizeof(float),
+                dst_var_block * elem_size,
                 src,
-                src_var_block * sizeof(float),
+                src_var_block * elem_size,
                 bytes,
                 nvar,
                 kind,
@@ -622,43 +630,48 @@ struct EffectiveBoundarySaver {
             size_t left_gpu_var_block = left_gpu.stride(0);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
-            size_t top_bytes = len * top_time_block * sizeof(float);
-            size_t left_bytes = len * left_time_block * sizeof(float);
+            size_t es = top_t.element_size();
+            size_t top_bytes = (size_t)len * top_time_block * es;
+            size_t left_bytes = (size_t)len * left_time_block * es;
 
             TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
             copy_2d_chunk_async(
-                top_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(top_t, (int64_t)start * top_time_block),
                 top_var_block,
-                top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(top_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
             copy_2d_chunk_async(
-                bottom_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(bottom_t, (int64_t)start * top_time_block),
                 top_var_block,
-                bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(bottom_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
             copy_2d_chunk_async(
-                left_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(left_t, (int64_t)start * left_time_block),
                 left_var_block,
-                left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(left_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
             copy_2d_chunk_async(
-                right_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(right_t, (int64_t)start * left_time_block),
                 left_var_block,
-                right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(right_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
@@ -681,50 +694,51 @@ struct EffectiveBoundarySaver {
 
 
         TORCH_CHECK(left_t.dtype() == torch::kFloat32 || left_t.dtype() == torch::kHalf || left_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
+        size_t es = left_t.element_size();
         cudaMemcpyAsync(
-            left_t.data_ptr<float>() + start * nvar * left_block,
-            left_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(left_t, (int64_t)start * nvar * left_block),
+            boundary_byte_ptr(left_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            right_t.data_ptr<float>() + start * nvar * left_block,
-            right_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(right_t, (int64_t)start * nvar * left_block),
+            boundary_byte_ptr(right_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            front_t.data_ptr<float>() + start * nvar * front_block,
-            front_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(front_t, (int64_t)start * nvar * front_block),
+            boundary_byte_ptr(front_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            back_t.data_ptr<float>() + start * nvar * front_block,
-            back_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(back_t, (int64_t)start * nvar * front_block),
+            boundary_byte_ptr(back_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            top_t.data_ptr<float>() + start * nvar * bottom_block,
-            top_gpu.data_ptr<float>() + bottom_gpu_offset,
-            bottom_elems * sizeof(float),
+            boundary_byte_ptr(top_t, (int64_t)start * nvar * bottom_block),
+            boundary_byte_ptr(top_gpu, (int64_t)bottom_gpu_offset),
+            bottom_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            bottom_t.data_ptr<float>() + start * nvar * bottom_block,
-            bottom_gpu.data_ptr<float>() + bottom_gpu_offset,
-            bottom_elems * sizeof(float),
+            boundary_byte_ptr(bottom_t, (int64_t)start * nvar * bottom_block),
+            boundary_byte_ptr(bottom_gpu, (int64_t)bottom_gpu_offset),
+            bottom_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
@@ -752,42 +766,47 @@ struct EffectiveBoundarySaver {
         size_t left_gpu_var_block = left_gpu.stride(0);
         size_t left_gpu_time_block = left_gpu.stride(1);
 
-        size_t top_bytes = len * top_time_block * sizeof(float);
-        size_t left_bytes = len * left_time_block * sizeof(float);
+        size_t es = top_t.element_size();
+        size_t top_bytes = (size_t)len * top_time_block * es;
+        size_t left_bytes = (size_t)len * left_time_block * es;
 
         copy_2d_chunk_async(
-            top_t.data_ptr<float>() + stage_start * top_time_block,
+            boundary_byte_ptr(top_t, (int64_t)stage_start * top_time_block),
             top_var_block,
-            top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+            boundary_byte_ptr(top_gpu, (int64_t)gpu_start * top_gpu_time_block),
             top_gpu_var_block,
             top_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
         copy_2d_chunk_async(
-            bottom_t.data_ptr<float>() + stage_start * top_time_block,
+            boundary_byte_ptr(bottom_t, (int64_t)stage_start * top_time_block),
             top_var_block,
-            bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+            boundary_byte_ptr(bottom_gpu, (int64_t)gpu_start * top_gpu_time_block),
             top_gpu_var_block,
             top_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
         copy_2d_chunk_async(
-            left_t.data_ptr<float>() + stage_start * left_time_block,
+            boundary_byte_ptr(left_t, (int64_t)stage_start * left_time_block),
             left_var_block,
-            left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+            boundary_byte_ptr(left_gpu, (int64_t)gpu_start * left_gpu_time_block),
             left_gpu_var_block,
             left_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
         copy_2d_chunk_async(
-            right_t.data_ptr<float>() + stage_start * left_time_block,
+            boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block),
             left_var_block,
-            right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+            boundary_byte_ptr(right_gpu, (int64_t)gpu_start * left_gpu_time_block),
             left_gpu_var_block,
             left_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
@@ -1026,45 +1045,50 @@ struct EffectiveBoundarySaver {
             size_t top_gpu_var_block = top_gpu.stride(0);
             size_t left_gpu_var_block = left_gpu.stride(0);
 
-            size_t top_bytes = len * top_time_block * sizeof(float);
-            size_t left_bytes = len * left_time_block * sizeof(float);
+            size_t es = top_t.element_size();
+            size_t top_bytes = (size_t)len * top_time_block * es;
+            size_t left_bytes = (size_t)len * left_time_block * es;
             size_t top_gpu_time_block = top_gpu.stride(1);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
             TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
             copy_2d_chunk_async(
-                top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(top_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
-                top_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(top_t, (int64_t)start * top_time_block),
                 top_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
             copy_2d_chunk_async(
-                bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(bottom_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
-                bottom_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(bottom_t, (int64_t)start * top_time_block),
                 top_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
             copy_2d_chunk_async(
-                left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(left_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
-                left_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(left_t, (int64_t)start * left_time_block),
                 left_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
             copy_2d_chunk_async(
-                right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(right_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
-                right_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(right_t, (int64_t)start * left_time_block),
                 left_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
@@ -1086,50 +1110,51 @@ struct EffectiveBoundarySaver {
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
         TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
+        size_t es = top_t.element_size();
         cudaMemcpyAsync(
-            top_gpu.data_ptr<float>() + top_gpu_offset,
-            top_t.data_ptr<float>() + start * nvar * top_block,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(top_gpu, (int64_t)top_gpu_offset),
+            boundary_byte_ptr(top_t, (int64_t)start * nvar * top_block),
+            top_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            bottom_gpu.data_ptr<float>() + top_gpu_offset,
-            bottom_t.data_ptr<float>() + start * nvar * top_block,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(bottom_gpu, (int64_t)top_gpu_offset),
+            boundary_byte_ptr(bottom_t, (int64_t)start * nvar * top_block),
+            top_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            front_gpu.data_ptr<float>() + front_gpu_offset,
-            front_t.data_ptr<float>() + start * nvar * front_block,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(front_gpu, (int64_t)front_gpu_offset),
+            boundary_byte_ptr(front_t, (int64_t)start * nvar * front_block),
+            front_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            back_gpu.data_ptr<float>() + front_gpu_offset,
-            back_t.data_ptr<float>() + start * nvar * front_block,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(back_gpu, (int64_t)front_gpu_offset),
+            boundary_byte_ptr(back_t, (int64_t)start * nvar * front_block),
+            front_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            left_gpu.data_ptr<float>() + left_gpu_offset,
-            left_t.data_ptr<float>() + start * nvar * left_block,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(left_gpu, (int64_t)left_gpu_offset),
+            boundary_byte_ptr(left_t, (int64_t)start * nvar * left_block),
+            left_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            right_gpu.data_ptr<float>() + left_gpu_offset,
-            right_t.data_ptr<float>() + start * nvar * left_block,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(right_gpu, (int64_t)left_gpu_offset),
+            boundary_byte_ptr(right_t, (int64_t)start * nvar * left_block),
+            left_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
