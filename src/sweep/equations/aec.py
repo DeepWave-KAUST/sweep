@@ -1,5 +1,5 @@
 from .base import FirstOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 
 def step(p, vx, vz, txx, tzz, txz,
          vp, vs, rho, 
@@ -46,16 +46,16 @@ class AEC(FirstOrderEquation):
         ModelSpec("vs", aliases=("s_velocity",), description="Coupled acoustic-elastic S-wave velocity model.", unit="m/s"),
         ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
     )
+    FIELD_SPECS = (
+        FieldSpec("p", aliases=("pressure",), description="Acoustic-elastic coupled pressure field.", supports_source=True, supports_receiver=True),
+        FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
+        FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
+        FieldSpec("txx", description="Normal stress component in the x direction.", supports_source=True, supports_receiver=True),
+        FieldSpec("tzz", description="Normal stress component in the z direction.", supports_source=True, supports_receiver=True),
+        FieldSpec("txz", description="Shear stress component.", supports_source=True),
+    )
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
-        
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
-    @property
-    def wavefields(self):
-        return ['p', 'vx', 'vz', 'txx', 'tzz', 'txz']
-    
+
     def func(self, wavefields, models, dt, h, b, **kwargs):
         return step(*wavefields, *models, dt, h, b, pd=self.pd, **kwargs)

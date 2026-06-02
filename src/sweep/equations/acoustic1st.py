@@ -141,10 +141,6 @@ class Acoustic1st(FirstOrderEquation):
             'spml': step_spml
             }[pml_type]
     
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
     def wavefields_cpml(self):
         return ['p', 'vx', 'vz', 'phix', 'phiz', 'psix', 'psiz']
 

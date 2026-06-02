@@ -1,5 +1,5 @@
 from .base import FirstOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 
 # 10.1190/GEO2016-0254.1
 def step(vx, vz, txx, tzz, txz,
@@ -71,16 +71,20 @@ class ElasticLSRTM(FirstOrderEquation):
         ModelSpec("vs", aliases=("s_velocity",), description="Background elastic S-wave velocity model.", unit="m/s"),
         ModelSpec("rho", aliases=("density",), description="Background density model.", unit="kg/m^3"),
     )
+    FIELD_SPECS = (
+        FieldSpec("vx", aliases=("velocity_x", "background_vx"), description="Background particle velocity in the x direction.", internal=True),
+        FieldSpec("vz", aliases=("velocity_z", "background_vz"), description="Background particle velocity in the z direction.", internal=True),
+        FieldSpec("txx", aliases=("background_txx",), description="Background normal stress in the x direction.", supports_source=True),
+        FieldSpec("tzz", aliases=("background_tzz",), description="Background normal stress in the z direction.", supports_source=True),
+        FieldSpec("txz", aliases=("background_txz",), description="Background shear stress.", supports_source=True),
+        FieldSpec("vxs", aliases=("scattered_vx",), description="Scattered particle velocity in the x direction.", supports_receiver=True),
+        FieldSpec("vzs", aliases=("scattered_vz",), description="Scattered particle velocity in the z direction.", supports_receiver=True),
+        FieldSpec("txxs", aliases=("scattered_txx",), description="Scattered normal stress in the x direction.", supports_receiver=True),
+        FieldSpec("tzzs", aliases=("scattered_tzz",), description="Scattered normal stress in the z direction.", supports_receiver=True),
+        FieldSpec("txzs", aliases=("scattered_txz",), description="Scattered shear stress.", supports_receiver=True),
+    )
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
 
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
-    @property
-    def wavefields(self):
-        return ['vx', 'vz', 'txx', 'tzz', 'txz', 'vxs', 'vzs', 'txxs', 'tzzs', 'txzs']
-    
     def func(self, wavefields, models, dt, h, b, **kwargs):
         return step(*wavefields, *models, dt, h, b, pd=self.pd, **kwargs)

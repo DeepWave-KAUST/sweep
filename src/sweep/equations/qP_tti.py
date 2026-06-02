@@ -159,18 +159,6 @@ class AcousticTTI(SecondOrderEquation):
         self.op = {"torch": torch, "jax": jnp}[backend]
 
     @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
-
-    @property
     def default_source_fields(self):
         return ["h1"]
 
