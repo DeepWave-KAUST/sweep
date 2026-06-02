@@ -56,6 +56,100 @@ class WaveEquation:
     FIELD_SPECS: tuple = ()
     MODEL_SPECS: tuple = ()
 
+    @staticmethod
+    def _render_specs_admonition(model_specs, field_specs,
+                                 default_source, default_receiver,
+                                 default_pml):
+        """Render ``!!! info`` admonition blocks from spec tables.
+
+        Returns a markdown string that mirrors the hand-written
+        ``Models`` / ``Wavefields`` / ``Defaults`` admonitions used in
+        the equation docstrings. The output is unindented so it can be
+        appended to any ``cls.__doc__`` and rendered after
+        ``inspect.getdoc`` dedents the source.
+        """
+        parts = []
+        if model_specs:
+            parts.append('!!! info "Models (constructor input order)"\n')
+            for s in model_specs:
+                unit = f" ({s.unit})" if s.unit else ""
+                parts.append(f"    - ``{s.name}``{unit}: {s.description}")
+            parts.append("")
+        if field_specs:
+            parts.append('!!! info "Wavefields"\n')
+            for s in field_specs:
+                alias = ""
+                if s.aliases:
+                    alias = " (aliases: " + ", ".join(f"``{a}``" for a in s.aliases) + ")"
+                in_src = s.name in (default_source or [])
+                in_rcv = s.name in (default_receiver or [])
+                desc = s.description.rstrip(".")
+                if s.internal:
+                    suffix = " (internal)."
+                elif in_src and in_rcv:
+                    suffix = "; default source and receiver."
+                elif in_src:
+                    suffix = "; default source."
+                elif in_rcv:
+                    suffix = "; default receiver."
+                else:
+                    suffix = "."
+                parts.append(f"    - ``{s.name}``{alias}: {desc}{suffix}")
+            parts.append("")
+        defaults = []
+        if default_source:
+            defaults.append(f"    - ``source_type``: ``{list(default_source)!r}``")
+        if default_receiver:
+            defaults.append(f"    - ``receiver_type``: ``{list(default_receiver)!r}``")
+        if default_pml:
+            defaults.append(f"    - ``pml_type``: ``{default_pml!r}``")
+        if defaults:
+            parts.append('!!! info "Defaults"\n')
+            parts.extend(defaults)
+            parts.append("")
+        return "\n".join(parts)
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Skip facades / placeholders that declare neither table — they have
+        # no specs to render, and instantiating them (e.g. AcousticAniso's
+        # __new__ dispatch) would cause surprises.
+        if not (cls.FIELD_SPECS or cls.MODEL_SPECS):
+            return
+        # Dedent the source docstring with cleandoc so the appended
+        # admonition section (which is unindented) lines up with the
+        # original prose at the same indentation level.
+        import inspect as _inspect
+        existing_doc = _inspect.cleandoc(cls.__doc__ or "")
+        # If a subclass author already hand-wrote the ``!!! info "Models"``
+        # admonition into the docstring, leave their text in place — the
+        # automatic injection is opt-in by deleting the hand-written block.
+        if '!!! info "Models' in existing_doc:
+            return
+        # Resolve defaults via instantiation when possible; otherwise derive
+        # from the SPECS tables.
+        try:
+            inst = cls()
+        except Exception:
+            inst = None
+        if inst is not None:
+            try:
+                default_source = list(inst.default_source_fields)
+                default_receiver = list(inst.default_receiver_fields)
+                default_pml = inst.default_pml_type
+            except Exception:
+                inst = None
+        if inst is None:
+            default_source = [s.name for s in cls.FIELD_SPECS if s.supports_source][:1]
+            default_receiver = [s.name for s in cls.FIELD_SPECS if s.supports_receiver][:1]
+            default_pml = getattr(cls, "default_pml_type", None)
+        section = WaveEquation._render_specs_admonition(
+            cls.MODEL_SPECS, cls.FIELD_SPECS,
+            default_source, default_receiver, default_pml,
+        )
+        if section:
+            cls.__doc__ = existing_doc.rstrip() + "\n\n" + section
+
     @classmethod
     def supports_torch_binding(cls):
         """Return True when the equation class exposes a compiled ``_C`` binding hook."""

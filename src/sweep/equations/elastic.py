@@ -25,35 +25,7 @@ class Elastic(FirstOrderEquation):
     media: velocity-stress finite-difference method*, Geophysics 51(4),
     [10.1190/1.1442147](https://doi.org/10.1190/1.1442147).
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): Elastic P-wave velocity model.
-        - ``vs`` (m/s): Elastic S-wave velocity model.
-        - ``rho`` (kg/m^3): Density model.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction; default receiver.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction; default receiver.
-        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
-        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
-        - ``sxz`` (aliases: ``stress_xz``, ``shear_xz``): Shear stress component.
-        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
-        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
-        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
-        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
-        - ``m_txxx``: CPML memory variable for dsxx/dx (internal).
-        - ``m_txxz``: Reserved elastic auxiliary field (internal).
-        - ``m_tzzx``: Reserved elastic auxiliary field (internal).
-        - ``m_tzzz``: CPML memory variable for dszz/dz (internal).
-        - ``m_txzx``: CPML memory variable for dsxz/dx (internal).
-        - ``m_txzz``: CPML memory variable for dsxz/dz (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'szz']``
-        - ``receiver_type``: ``['vx', 'vz']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
