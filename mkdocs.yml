@@ -130,6 +130,7 @@ nav:
       - Backends: user-guide/backends.md
       - Equations: user-guide/equations.md
       - Propagators: user-guide/propagators.md
+      - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
   - Examples:
       - Overview: examples/index.md
@@ -157,6 +158,8 @@ nav:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
           - HPC:
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
+          - Extending:
+              - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
   - API Reference:
