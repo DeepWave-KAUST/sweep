@@ -34,6 +34,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r docs/requirements.txt
+          # CPU-only torch wheel — sweep's optional torch backend is
+          # imported at the top of several equation modules (das.py,
+          # elasticP.py, visco_acoustic.py); without it, mkdocstrings
+          # cannot resolve `sweep.equations.DAS` and the docs build
+          # fails.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           # Install sweep itself (without the CUDA extension) so
           # mkdocstrings' force_inspection mode can import the
           # package — its docstring section comes from the runtime
