@@ -1,5 +1,5 @@
 from .base import SecondOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 
 def step(u_now, u_pre, vp, rx, rz, dt, h, b, lap_u_now, dpdx, dpdz, dvpdx, dvpdz):
     a = 1 / (1 + b * dt)
@@ -20,6 +20,10 @@ class AcousticVRR(SecondOrderEquation):
         ModelSpec("rx", description="Auxiliary horizontal parameter used by the VRR formulation."),
         ModelSpec("rz", description="Auxiliary vertical parameter used by the VRR formulation."),
     )
+    FIELD_SPECS = (
+        FieldSpec("h1", aliases=("pressure", "p"), description="Primary acoustic VRR pressure-like wavefield.", supports_source=True, supports_receiver=True),
+        FieldSpec("h2", aliases=("pressure_prev",), description="Previous-step pressure-like wavefield.", internal=True),
+    )
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Acoustic wave equation solver.
 
@@ -29,14 +33,6 @@ class AcousticVRR(SecondOrderEquation):
         super().__init__(spatial_order, device, backend, other_kernels=True)
         super().init_laplace(ltype='1dsep', backend=backend)
 
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
-    @property
-    def wavefields(self):
-        return ['h1', 'h2']
-    
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
         vp = models[0]

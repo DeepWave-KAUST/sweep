@@ -1,5 +1,5 @@
 from .base import FirstOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 
 def step(p, vx, vz, txx, tzz, txz,
          ps, vxs, vzs, txxs, tzzs, txzs,
@@ -78,17 +78,23 @@ class AECLSRTM(FirstOrderEquation):
         ModelSpec("vs", aliases=("s_velocity",), description="Background S-wave velocity model.", unit="m/s"),
         ModelSpec("rho", aliases=("density",), description="Background density model.", unit="kg/m^3"),
     )
+    FIELD_SPECS = (
+        FieldSpec("p", aliases=("pressure", "background"), description="Background coupled pressure field.", supports_source=True),
+        FieldSpec("vx", aliases=("velocity_x", "background_vx"), description="Background particle velocity in the x direction.", internal=True),
+        FieldSpec("vz", aliases=("velocity_z", "background_vz"), description="Background particle velocity in the z direction.", internal=True),
+        FieldSpec("txx", aliases=("background_txx",), description="Background normal stress in the x direction.", supports_source=True),
+        FieldSpec("tzz", aliases=("background_tzz",), description="Background normal stress in the z direction.", supports_source=True),
+        FieldSpec("txz", aliases=("background_txz",), description="Background shear stress.", supports_source=True),
+        FieldSpec("ps", aliases=("scattered", "scattered_pressure", "data"), description="Scattered pressure field used for AEC-LSRTM data prediction.", supports_receiver=True),
+        FieldSpec("vxs", description="Scattered particle velocity in the x direction.", supports_receiver=True),
+        FieldSpec("vzs", description="Scattered particle velocity in the z direction.", supports_receiver=True),
+        FieldSpec("txxs", description="Scattered normal stress in the x direction.", supports_receiver=True),
+        FieldSpec("tzzs", description="Scattered normal stress in the z direction.", supports_receiver=True),
+        FieldSpec("txzs", description="Scattered shear stress.", supports_receiver=True),
+    )
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         super().__init__(spatial_order, device, backend)
 
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
-    @property
-    def wavefields(self):
-        return ['p', 'vx', 'vz', 'txx', 'tzz', 'txz', 'ps', 'vxs', 'vzs', 'txxs', 'tzzs', 'txzs']
-    
     def func(self, wavefields, models, dt, h, b, **kwargs):
         return step(*wavefields, *models, dt, h, b, pd=self.pd, **kwargs)
