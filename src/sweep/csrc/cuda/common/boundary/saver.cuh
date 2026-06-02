@@ -822,10 +822,11 @@ struct EffectiveBoundarySaver {
         meta->top_file_var_block = static_cast<size_t>(nt) * top_time_block;
         meta->left_file_var_block = static_cast<size_t>(nt) * left_time_block;
         meta->nvar = nvar;
-        meta->top = top_t.data_ptr<float>() + stage_start * top_time_block;
-        meta->bottom = bottom_t.data_ptr<float>() + stage_start * top_time_block;
-        meta->left = left_t.data_ptr<float>() + stage_start * left_time_block;
-        meta->right = right_t.data_ptr<float>() + stage_start * left_time_block;
+        meta->elem_size = es;
+        meta->top = boundary_byte_ptr(top_t, (int64_t)stage_start * top_time_block);
+        meta->bottom = boundary_byte_ptr(bottom_t, (int64_t)stage_start * top_time_block);
+        meta->left = boundary_byte_ptr(left_t, (int64_t)stage_start * left_time_block);
+        meta->right = boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block);
         cudaLaunchHostFunc(stream, write_boundary_disk_2d_callback, meta);
     }
 
@@ -848,6 +849,7 @@ struct EffectiveBoundarySaver {
         size_t top_gpu_block = top_gpu.stride(0);
         size_t front_gpu_block = front_gpu.stride(0);
         size_t left_gpu_block = left_gpu.stride(0);
+        size_t es = top_t.element_size();
 
         size_t top_elems = len * nvar * top_block;
         size_t front_elems = len * nvar * front_block;
@@ -860,44 +862,44 @@ struct EffectiveBoundarySaver {
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
         cudaMemcpyAsync(
-            top_t.data_ptr<float>() + top_stage_offset,
-            top_gpu.data_ptr<float>() + top_gpu_offset,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(top_t, (int64_t)top_stage_offset),
+            boundary_byte_ptr(top_gpu, (int64_t)top_gpu_offset),
+            top_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            bottom_t.data_ptr<float>() + top_stage_offset,
-            bottom_gpu.data_ptr<float>() + top_gpu_offset,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(bottom_t, (int64_t)top_stage_offset),
+            boundary_byte_ptr(bottom_gpu, (int64_t)top_gpu_offset),
+            top_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            front_t.data_ptr<float>() + front_stage_offset,
-            front_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(front_t, (int64_t)front_stage_offset),
+            boundary_byte_ptr(front_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            back_t.data_ptr<float>() + front_stage_offset,
-            back_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(back_t, (int64_t)front_stage_offset),
+            boundary_byte_ptr(back_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            left_t.data_ptr<float>() + left_stage_offset,
-            left_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(left_t, (int64_t)left_stage_offset),
+            boundary_byte_ptr(left_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            right_t.data_ptr<float>() + left_stage_offset,
-            right_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(right_t, (int64_t)left_stage_offset),
+            boundary_byte_ptr(right_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
@@ -910,12 +912,13 @@ struct EffectiveBoundarySaver {
         meta->top_offset = static_cast<size_t>(start) * nvar * top_block;
         meta->front_offset = static_cast<size_t>(start) * nvar * front_block;
         meta->left_offset = static_cast<size_t>(start) * nvar * left_block;
-        meta->top = top_t.data_ptr<float>() + top_stage_offset;
-        meta->bottom = bottom_t.data_ptr<float>() + top_stage_offset;
-        meta->front = front_t.data_ptr<float>() + front_stage_offset;
-        meta->back = back_t.data_ptr<float>() + front_stage_offset;
-        meta->left = left_t.data_ptr<float>() + left_stage_offset;
-        meta->right = right_t.data_ptr<float>() + left_stage_offset;
+        meta->elem_size = es;
+        meta->top = boundary_byte_ptr(top_t, (int64_t)top_stage_offset);
+        meta->bottom = boundary_byte_ptr(bottom_t, (int64_t)top_stage_offset);
+        meta->front = boundary_byte_ptr(front_t, (int64_t)front_stage_offset);
+        meta->back = boundary_byte_ptr(back_t, (int64_t)front_stage_offset);
+        meta->left = boundary_byte_ptr(left_t, (int64_t)left_stage_offset);
+        meta->right = boundary_byte_ptr(right_t, (int64_t)left_stage_offset);
         cudaLaunchHostFunc(stream, write_boundary_disk_3d_callback, meta);
     }
 
@@ -953,35 +956,40 @@ struct EffectiveBoundarySaver {
         size_t left_var_block = left_t.stride(0);
         size_t top_file_var_block = static_cast<size_t>(nt) * top_time_block;
         size_t left_file_var_block = static_cast<size_t>(nt) * left_time_block;
-        float* top_dst = top_t.data_ptr<float>() + stage_start * top_time_block;
-        float* bottom_dst = bottom_t.data_ptr<float>() + stage_start * top_time_block;
-        float* left_dst = left_t.data_ptr<float>() + stage_start * left_time_block;
-        float* right_dst = right_t.data_ptr<float>() + stage_start * left_time_block;
+        size_t es = top_t.element_size();
+        char* top_dst = boundary_byte_ptr(top_t, (int64_t)stage_start * top_time_block);
+        char* bottom_dst = boundary_byte_ptr(bottom_t, (int64_t)stage_start * top_time_block);
+        char* left_dst = boundary_byte_ptr(left_t, (int64_t)stage_start * left_time_block);
+        char* right_dst = boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block);
 
         for (int v = 0; v < nvar; ++v) {
             read_boundary_file_chunk(
                 paths[0],
                 static_cast<size_t>(v) * top_file_var_block + top_offset,
-                top_dst + static_cast<size_t>(v) * top_var_block,
-                top_elems
+                top_dst + static_cast<size_t>(v) * top_var_block * es,
+                top_elems,
+                es
             );
             read_boundary_file_chunk(
                 paths[1],
                 static_cast<size_t>(v) * top_file_var_block + top_offset,
-                bottom_dst + static_cast<size_t>(v) * top_var_block,
-                top_elems
+                bottom_dst + static_cast<size_t>(v) * top_var_block * es,
+                top_elems,
+                es
             );
             read_boundary_file_chunk(
                 paths[2],
                 static_cast<size_t>(v) * left_file_var_block + left_offset,
-                left_dst + static_cast<size_t>(v) * left_var_block,
-                left_elems
+                left_dst + static_cast<size_t>(v) * left_var_block * es,
+                left_elems,
+                es
             );
             read_boundary_file_chunk(
                 paths[3],
                 static_cast<size_t>(v) * left_file_var_block + left_offset,
-                right_dst + static_cast<size_t>(v) * left_var_block,
-                left_elems
+                right_dst + static_cast<size_t>(v) * left_var_block * es,
+                left_elems,
+                es
             );
         }
     }
@@ -1008,11 +1016,12 @@ struct EffectiveBoundarySaver {
         size_t front_stage_offset = static_cast<size_t>(stage_start) * nvar * front_block;
         size_t left_stage_offset = static_cast<size_t>(stage_start) * nvar * left_block;
 
+        size_t es = top_t.element_size();
         std::exception_ptr read_error = nullptr;
         std::mutex read_error_mutex;
-        auto read_one = [&](std::string path, size_t offset, float* dst, size_t elems) {
+        auto read_one = [&](std::string path, size_t offset, void* dst, size_t elems) {
             try {
-                read_boundary_file_chunk(path, offset, dst, elems);
+                read_boundary_file_chunk(path, offset, dst, elems, es);
             } catch (...) {
                 std::lock_guard<std::mutex> lock(read_error_mutex);
                 if (!read_error)
@@ -1022,12 +1031,12 @@ struct EffectiveBoundarySaver {
 
         std::vector<std::thread> readers;
         readers.reserve(6);
-        readers.emplace_back(read_one, paths[0], top_offset, top_t.data_ptr<float>() + top_stage_offset, top_elems);
-        readers.emplace_back(read_one, paths[1], top_offset, bottom_t.data_ptr<float>() + top_stage_offset, top_elems);
-        readers.emplace_back(read_one, paths[2], front_offset, front_t.data_ptr<float>() + front_stage_offset, front_elems);
-        readers.emplace_back(read_one, paths[3], front_offset, back_t.data_ptr<float>() + front_stage_offset, front_elems);
-        readers.emplace_back(read_one, paths[4], left_offset, left_t.data_ptr<float>() + left_stage_offset, left_elems);
-        readers.emplace_back(read_one, paths[5], left_offset, right_t.data_ptr<float>() + left_stage_offset, left_elems);
+        readers.emplace_back(read_one, paths[0], top_offset, (void*)boundary_byte_ptr(top_t, (int64_t)top_stage_offset), top_elems);
+        readers.emplace_back(read_one, paths[1], top_offset, (void*)boundary_byte_ptr(bottom_t, (int64_t)top_stage_offset), top_elems);
+        readers.emplace_back(read_one, paths[2], front_offset, (void*)boundary_byte_ptr(front_t, (int64_t)front_stage_offset), front_elems);
+        readers.emplace_back(read_one, paths[3], front_offset, (void*)boundary_byte_ptr(back_t, (int64_t)front_stage_offset), front_elems);
+        readers.emplace_back(read_one, paths[4], left_offset, (void*)boundary_byte_ptr(left_t, (int64_t)left_stage_offset), left_elems);
+        readers.emplace_back(read_one, paths[5], left_offset, (void*)boundary_byte_ptr(right_t, (int64_t)left_stage_offset), left_elems);
         for (auto& reader : readers)
             reader.join();
         if (read_error)

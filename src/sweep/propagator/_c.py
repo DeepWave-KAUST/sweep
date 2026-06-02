@@ -648,14 +648,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = None
         self._boundary_disk_files = ()
 
-    def _allocate_boundary_disk_files(self, shapes, disk_dir):
+    def _allocate_boundary_disk_files(self, shapes, disk_dir, element_size=4):
         root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
         files = []
         for idx, shape in enumerate(shapes):
             path = os.path.join(root, f"boundary_{idx}.bin")
             numel = int(torch.Size(shape).numel())
             with open(path, "wb") as handle:
-                handle.truncate(numel * torch.empty((), dtype=torch.float32).element_size())
+                handle.truncate(numel * element_size)
             files.append(path)
         self._boundary_disk_root = root
         self._boundary_disk_files = tuple(files)
@@ -683,16 +683,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 boundary_dtype = 'fp32'
         if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
             raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
-        # cpu staged storage supports fp32/fp16/bf16.  Not yet implemented on
-        # the staged path: int8 (needs a uint8+scale staging ring) and disk
-        # half-precision (needs dtype-aware disk I/O) -- reject those for now.
-        if boundary_on_cpu and boundary_dtype != 'fp32' and (
-            boundary_dtype == 'int8' or boundary_storage == 'disk'
-        ):
+        # Staged (cpu/disk) storage supports fp32/fp16/bf16.  int8 needs a
+        # uint8 + per-block-scale staging ring that the staged path does not
+        # implement yet, so reject it loudly instead of silently storing fp32.
+        if boundary_on_cpu and boundary_dtype == 'int8':
             raise ValueError(
-                f"boundary storage_dtype={boundary_dtype!r} with storage="
-                f"{boundary_storage!r} is not supported yet: cpu storage supports "
-                "fp32/fp16/bf16; disk and int8 staged storage are fp32-only."
+                f"boundary storage_dtype='int8' with storage={boundary_storage!r} "
+                "is not supported: staged (cpu/disk) storage supports "
+                "fp32/fp16/bf16; int8 is gpu-only."
             )
         if (
             self._boundary_cache_batch == self.B
@@ -742,7 +740,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         if boundary_on_cpu:
             if boundary_storage == "disk":
-                self._allocate_boundary_disk_files(layout.cpu_shapes, disk_dir)
+                self._allocate_boundary_disk_files(
+                    layout.cpu_shapes, disk_dir,
+                    element_size=torch.empty((), dtype=_bdry_dtype).element_size())
                 self.boundary_cpu = self.boundary_cpu_allocator.zeros(
                     layout.gpu_shapes,
                     dtype=_bdry_dtype,

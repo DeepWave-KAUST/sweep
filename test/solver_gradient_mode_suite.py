@@ -1071,6 +1071,8 @@ def main():
         "bs_gpu_int8",
         "bs_cpu_fp16",
         "bs_cpu_bf16",
+        "bs_disk_fp16",
+        "bs_disk_bf16",
     }
     solver_keys = parse_csv(args.solvers, SOLVERS, label="solver")
     scenario_keys = parse_csv(args.scenarios, SCENARIOS, label="scenario")
