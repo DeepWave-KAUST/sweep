@@ -45,6 +45,23 @@ Before opening a PR, please confirm:
 4. The PR description explains *why* the change is needed; reviewers should
    not have to reconstruct intent from the diff.
 
+## Adding a new equation
+
+SWEEP discovers equation classes by reflecting over `sweep.equations`'s
+namespace — there is no manual registry to update. A new equation is one
+Python file under `src/sweep/equations/` (eager) plus, optionally, a CUDA
+equation directory under `src/sweep/csrc/cuda/equations/` and a five-line
+entry in `src/sweep/csrc/bindings/module.cpp` (`impl="c"`).
+
+Two entry points:
+
+- The [Extending guide](docs/user-guide/extending.md) — reference: interface
+  contract, `CUDALayoutSpec` field table, C++ registration pattern,
+  out-of-scope boundary.
+- The [Add a new equation notebook](examples/notebooks/18_extending_add_new_equation.ipynb)
+  — runnable walkthrough: builds a toy `MyScalar` from scratch, runs it
+  end-to-end against `PropTorch`, plots the result.
+
 ## Reporting issues
 
 Use the GitHub issue tracker at
