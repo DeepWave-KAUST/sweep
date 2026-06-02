@@ -96,7 +96,7 @@ plugins:
             show_source: false
             show_root_heading: true
             docstring_style: google
-            docstring_section_style: table
+            docstring_section_style: list
             members_order: source
             separate_signature: true
             show_signature_annotations: true
