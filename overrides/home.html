@@ -70,5 +70,13 @@
   </div>
 {% endblock %}
 
-{# Hide the page tabs sidebar/TOC on the homepage even when present. #}
-{% block site_nav %}{% endblock %}
+{# Keep Material's default `site_nav` block intact so the mobile hamburger
+   has a drawer to open. On desktop we hide both sidebars via the
+   `data-sweep-home` attribute set below + CSS in extra.css. #}
+
+{% block extrahead %}
+  {{ super() }}
+  <script>
+    document.documentElement.setAttribute('data-sweep-home', 'true');
+  </script>
+{% endblock %}
