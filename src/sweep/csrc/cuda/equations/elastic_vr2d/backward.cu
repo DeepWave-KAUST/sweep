@@ -246,6 +246,9 @@ void backward_segment_evr(
                 p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc, solver);
         }
 
+        // adjoint FS BC zeroing (no-op if !free_surface)
+        elastic_vr2d_kernels::evr_adjoint_zero_top_fs<0><<<launch_config.grid, launch_config.block>>>(adj_view, solver);
+
         const int now_offset = (it - start) + 1;   // seg index of p^{it}
         LAUNCH_CALCULATE_GRAD_EVR_NOBS(
             order, launch_config.grid, launch_config.block,
@@ -388,6 +391,11 @@ BackwardOutput backward(const BackwardInput& in)
                 it, adjoint_nsrc, solver
             );
         }
+
+        // 1b. Adjoint of the forward free-surface BC (szz=sxz=0 at the surface):
+        //     zero the adjoint szz/sxz at the surface row before grad/adjoint
+        //     kernels read them. No-op when free_surface=false.
+        elastic_vr2d_kernels::evr_adjoint_zero_top_fs<0><<<launch_config.grid, launch_config.block>>>(adj_view, solver);
 
         // 2. Saved forward momentum at time t (px in channel 0, pz in channel 1)
         const float* fpx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
@@ -587,6 +595,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc, solver
             );
         }
+
+        // 1b. adjoint FS BC zeroing (no-op if !free_surface)
+        elastic_vr2d_kernels::evr_adjoint_zero_top_fs<0><<<launch_config.grid, launch_config.block>>>(adj_view, solver);
 
         // 2. Un-inject the forward source (negated) from the reconstructed field.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
@@ -828,6 +839,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
                 field, p.adjoint_source[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc, solver);
         }
+
+        // adjoint FS BC zeroing (no-op if !free_surface)
+        elastic_vr2d_kernels::evr_adjoint_zero_top_fs<0><<<launch_config.grid, launch_config.block>>>(adj_view, solver);
 
         replay_forward_to_time_evr(
             p, forward, current_px, current_pz, it, steps, num_ckpt,
