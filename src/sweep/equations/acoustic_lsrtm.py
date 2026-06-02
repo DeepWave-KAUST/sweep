@@ -75,31 +75,7 @@ class AcousticLSRTM(SecondOrderEquation):
     receivers on the scattered field ``sh1`` — the standard layout for
     least-squares reverse-time migration.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): Background acoustic velocity model.
-        - ``mp`` (aliases: ``reflectivity``, ``ref``): Acoustic reflectivity perturbation used for LSRTM.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``, ``background``): Background acoustic pressure-like wavefield; default source.
-        - ``h2`` (aliases: ``pressure_prev``, ``background_prev``): Previous-step background wavefield (internal).
-        - ``psix``: Background CPML memory variable for the x-derivative term (internal).
-        - ``psiz``: Background CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: Background CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetaz``: Background CPML auxiliary wavefield for the z-direction update (internal).
-        - ``sh1`` (aliases: ``scattered``, ``scattered_pressure``, ``data``): Scattered acoustic wavefield used for LSRTM data prediction; default receiver.
-        - ``sh2`` (aliases: ``scattered_prev``): Previous-step scattered wavefield (internal).
-        - ``spsix``: Scattered-wave CPML memory variable for the x-derivative term (internal).
-        - ``spsiz``: Scattered-wave CPML memory variable for the z-derivative term (internal).
-        - ``szetax``: Scattered-wave CPML auxiliary wavefield for the x-direction update (internal).
-        - ``szetaz``: Scattered-wave CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['sh1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
 
     MODEL_SPECS = (

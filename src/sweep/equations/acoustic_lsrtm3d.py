@@ -113,35 +113,7 @@ class AcousticLSRTM3D(SecondOrderEquation):
     carry their own CPML memory variables on every face. Defaults:
     source on ``h1``, receivers on ``sh1``.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): Background 3D acoustic velocity model.
-        - ``mp`` (aliases: ``reflectivity``, ``ref``): 3D acoustic reflectivity perturbation used for LSRTM.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``, ``background``): Background 3D acoustic pressure-like wavefield; default source.
-        - ``h2`` (aliases: ``pressure_prev``, ``background_prev``): Previous-step background wavefield (internal).
-        - ``psix``: Background CPML memory variable for the x-derivative term (internal).
-        - ``psiy``: Background CPML memory variable for the y-derivative term (internal).
-        - ``psiz``: Background CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: Background CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetay``: Background CPML auxiliary wavefield for the y-direction update (internal).
-        - ``zetaz``: Background CPML auxiliary wavefield for the z-direction update (internal).
-        - ``sh1`` (aliases: ``scattered``, ``scattered_pressure``, ``data``): Scattered 3D acoustic wavefield used for LSRTM data prediction; default receiver.
-        - ``sh2`` (aliases: ``scattered_prev``): Previous-step scattered wavefield (internal).
-        - ``spsix``: Scattered-wave CPML memory variable for the x-derivative term (internal).
-        - ``spsiy``: Scattered-wave CPML memory variable for the y-derivative term (internal).
-        - ``spsiz``: Scattered-wave CPML memory variable for the z-derivative term (internal).
-        - ``szetax``: Scattered-wave CPML auxiliary wavefield for the x-direction update (internal).
-        - ``szetay``: Scattered-wave CPML auxiliary wavefield for the y-direction update (internal).
-        - ``szetaz``: Scattered-wave CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['sh1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
 
     MODEL_SPECS = (
