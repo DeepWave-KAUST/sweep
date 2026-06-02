@@ -1,5 +1,3 @@
-# # AUTO-GENERATED FILE - DO NOT EDIT MANUALLY
-
 from .base import WaveEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
