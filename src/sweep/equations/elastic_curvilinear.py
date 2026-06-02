@@ -272,18 +272,6 @@ class ElasticCurvilinear(FirstOrderEquation):
         # signature doesn't include it.
 
     @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
-
-    @property
     def default_source_fields(self):
         return ["sxx", "szz"]
 

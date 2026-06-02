@@ -1,7 +1,7 @@
 import torch
 import jax.numpy as jnp
 from .base import FirstOrderEquation
-from .fields import ModelSpec
+from .fields import FieldSpec, ModelSpec
 
 def step(vx, vz, txx, tzz, txz,
          vp, vs, rho, 
@@ -63,23 +63,22 @@ class ElasticP(FirstOrderEquation):
         ModelSpec("vs", aliases=("s_velocity",), description="Elastic S-wave velocity model.", unit="m/s"),
         ModelSpec("rho", aliases=("density",), description="Density model.", unit="kg/m^3"),
     )
+    FIELD_SPECS = (
+        FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_receiver=True),
+        FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
+        FieldSpec("txx", description="Normal stress component in the x direction.", supports_source=True, supports_receiver=True),
+        FieldSpec("tzz", description="Normal stress component in the z direction.", supports_source=True, supports_receiver=True),
+        FieldSpec("txz", description="Shear stress component.", supports_source=True),
+    )
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         self.backend = backend
         self.op = {'torch': torch, 'jax': jnp}[backend]
         super().__init__(spatial_order, device, backend)
-        
+
     @property
     def need_init(self):
         return True
 
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-    
-    @property
-    def wavefields(self):
-        return ['vx', 'vz', 'txx', 'tzz', 'txz']
-    
     def func(self, wavefields, models, dt, h, b, **kwargs):
         return step(*wavefields, *models, dt, h, b, self.k, self.pd, self.op, **kwargs)

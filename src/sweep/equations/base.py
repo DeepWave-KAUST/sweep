@@ -49,6 +49,13 @@ class WaveEquation:
     # override.
     supports_apm = False
 
+    # Class-level spec tables. Subclasses that declare these tables drive
+    # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``
+    # properties below automatically; manual property overrides remain
+    # supported for backwards compatibility (the override wins).
+    FIELD_SPECS: tuple = ()
+    MODEL_SPECS: tuple = ()
+
     @classmethod
     def supports_torch_binding(cls):
         """Return True when the equation class exposes a compiled ``_C`` binding hook."""
@@ -123,18 +130,80 @@ class WaveEquation:
         self.b = pml_func(**kwargs)
         self.b = to_backend(self.b, self.backend, self.device)
 
+    # Each of the four properties below resolves in the same order:
+    #   1. an instance-level write (``self.wavefields = ...`` etc.) wins,
+    #      so legacy equations like ``Acoustic1st`` that set names from
+    #      ``__init__`` based on the chosen PML type keep working;
+    #   2. the class-level ``FIELD_SPECS`` / ``MODEL_SPECS`` table is used
+    #      when no instance write happened — this is the recommended path
+    #      for new equations;
+    #   3. otherwise a ``NotImplementedError`` (names) or a derivation from
+    #      ``self.wavefields`` / ``self.models`` (specs) provides the
+    #      pre-spec-tables fallback.
+    #
+    # FieldSpec order is semantically significant. The propagators map
+    # source/receiver names to positional wavefield indices, and equation
+    # step functions are expected to return tensors in the same order.
+    # Reordering field specs therefore changes forward/backward behavior,
+    # source injection, receiver sampling, checkpointing, and CUDA bindings.
+
     @property
     def field_specs(self):
-        # FieldSpec order is semantically significant. The propagators map
-        # source/receiver names to positional wavefield indices, and equation
-        # step functions are expected to return tensors in the same order.
-        # Reordering field specs therefore changes forward/backward behavior,
-        # source injection, receiver sampling, checkpointing, and CUDA bindings.
+        override = self.__dict__.get('_sweep_field_specs_override')
+        if override is not None:
+            return override
+        if self.FIELD_SPECS:
+            return list(self.FIELD_SPECS)
         return ensure_field_specs(self.wavefields, [])
+
+    @field_specs.setter
+    def field_specs(self, value):
+        self.__dict__['_sweep_field_specs_override'] = list(value)
 
     @property
     def model_specs(self):
+        override = self.__dict__.get('_sweep_model_specs_override')
+        if override is not None:
+            return override
+        if self.MODEL_SPECS:
+            return list(self.MODEL_SPECS)
         return ensure_model_specs(self.models, [])
+
+    @model_specs.setter
+    def model_specs(self, value):
+        self.__dict__['_sweep_model_specs_override'] = list(value)
+
+    @property
+    def wavefields(self):
+        override = self.__dict__.get('_sweep_wavefields_override')
+        if override is not None:
+            return override
+        if self.FIELD_SPECS:
+            return [spec.name for spec in self.FIELD_SPECS]
+        raise NotImplementedError(
+            f"{type(self).__name__} must declare ``FIELD_SPECS`` or set "
+            "``self.wavefields``."
+        )
+
+    @wavefields.setter
+    def wavefields(self, value):
+        self.__dict__['_sweep_wavefields_override'] = list(value)
+
+    @property
+    def models(self):
+        override = self.__dict__.get('_sweep_models_override')
+        if override is not None:
+            return override
+        if self.MODEL_SPECS:
+            return [spec.name for spec in self.MODEL_SPECS]
+        raise NotImplementedError(
+            f"{type(self).__name__} must declare ``MODEL_SPECS`` or set "
+            "``self.models``."
+        )
+
+    @models.setter
+    def models(self, value):
+        self.__dict__['_sweep_models_override'] = list(value)
 
     @classmethod
     def _field_specs_for_query(cls):

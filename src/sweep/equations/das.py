@@ -1078,18 +1078,6 @@ class DASZhao(FirstOrderEquation):
         super().__init__(spatial_order, device, backend, ndim=2)
 
     @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
-
-    @property
     def default_source_fields(self):
         return ["sxx", "szz"]
 
@@ -1260,18 +1248,6 @@ class DASZhao3D(FirstOrderEquation):
         super().__init__(spatial_order, device, backend, ndim=3)
 
     @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
-
-    @property
     def default_source_fields(self):
         return ["sxx", "syy", "szz"]
 
@@ -1417,18 +1393,6 @@ class DASMu(FirstOrderEquation):
                 on ``'torch'``. Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend, ndim=2)
-
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
 
     @property
     def default_source_fields(self):
@@ -1619,18 +1583,6 @@ class DASMu3D(FirstOrderEquation):
                 on ``'torch'``. Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend, ndim=3)
-
-    @property
-    def models(self):
-        return [spec.name for spec in self.MODEL_SPECS]
-
-    @property
-    def wavefields(self):
-        return [spec.name for spec in self.FIELD_SPECS]
-
-    @property
-    def field_specs(self):
-        return list(self.FIELD_SPECS)
 
     @property
     def default_source_fields(self):
