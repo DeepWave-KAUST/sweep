@@ -106,6 +106,20 @@ plugins:
             show_signature_annotations: true
             merge_init_into_class: true
             line_length: 88
+            # Hide noise attributes from the rendered class page:
+            #   - "!^_[^_]" — single-underscore private (mkdocstrings default)
+            #   - "!^__"    — dunder attributes (``__doc__``, ``__module__``,
+            #                 ``__annotations__``, etc.)
+            #   - FIELD_SPECS / MODEL_SPECS — already rendered by the
+            #     auto-injected admonitions in the class docstring
+            #     (``WaveEquation.__init_subclass__``).
+            filters:
+              - "!^_[^_]"
+              - "!^__"
+              - "!^FIELD_SPECS$"
+              - "!^MODEL_SPECS$"
+              - "!^default_pml_type$"
+              - "!^supports_apm$"
 
 nav:
   - Home: index.md
