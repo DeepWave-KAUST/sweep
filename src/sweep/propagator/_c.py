@@ -683,6 +683,18 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 boundary_dtype = 'fp32'
         if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
             raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
+        # Half-precision / int8 boundary storage is only implemented on the
+        # GPU-direct path; the cpu/disk staged transfer path reads the staging
+        # ring buffer as float32.  Reject the unsupported combo loudly instead
+        # of silently storing fp32 (or, on older paths, dereferencing a null
+        # half-precision pointer).
+        if boundary_dtype != 'fp32' and boundary_on_cpu:
+            raise ValueError(
+                f"boundary storage_dtype={boundary_dtype!r} requires storage='gpu'; "
+                f"got storage={boundary_storage!r}. cpu/disk boundary storage is "
+                "fp32-only (the staged transfer path does not implement "
+                "half-precision/int8 storage)."
+            )
         if (
             self._boundary_cache_batch == self.B
             and
