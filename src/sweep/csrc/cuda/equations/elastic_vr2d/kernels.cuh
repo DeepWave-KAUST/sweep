@@ -5,6 +5,7 @@
 #include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"
+#include "../../common/elastic_free_surface.cuh"
 
 // Soares & Sacchi 2025 first-order momentum-stress vector-reflectivity
 // elastic equation. Mirrors elastic2d kernel layout (LAUNCH macros +
@@ -176,12 +177,17 @@ __global__ void evr_momentum_kernel(
     auto f = wf.offset(b, spatial_size);
 
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    // z-derivatives of stress: image-method mirror at the top free surface
+    // (odd parity), else plain staggered FD. Matches the eager step core.
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.szz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
 
+    // Free surface: the top has no PML (the surface replaces it), so the top
+    // physical rows take the plain (non-PML) update path.
     bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * (dsxx_dx + dsxz_dz);   // px += ...
@@ -243,9 +249,9 @@ __global__ void evr_momentum_kernel_nopml(
     auto f = wf.offset(b, spatial_size);
 
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.szz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
 
     f.vx[idx] -= solver.dt * (dsxx_dx + dsxz_dz);
     f.vz[idx] -= solver.dt * (dsxz_dx + dszz_dz);
@@ -309,13 +315,17 @@ __global__ void evr_stress_kernel(
     const float* Rsz_b  = Rs_z + b * spatial_size;
 
     // Momentum derivatives (same stagger as elastic vx/vz derivatives).
+    // z-derivatives use the image-method mirror at the top free surface
+    // (pz odd like vz, px even like vx), matching the eager step core.
     float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dpz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
-    float dpx_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
     float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
+    // Free surface: top physical rows are not in the PML zone.
     bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
 
     if (in_pml) {
         // CPML on the momentum derivatives (same memvar layout as elastic m_vxx etc.).
@@ -371,6 +381,13 @@ __global__ void evr_stress_kernel(
     f.szz[idx] += solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
     f.sxz[idx] += solver.dt * (gamma_S_xz + gamma_S_zx);
 
+    // Free-surface BC: zero the normal + shear stress at the surface row
+    // (matches the eager zero_top_row), applied after the stress update.
+    if (elastic_is_top_free_surface_row(solver, ix, iz)) {
+        f.szz[idx] = 0.f;
+        f.sxz[idx] = 0.f;
+    }
+
     if (u_this_b) {
         int comp_stride = solver.B * spatial_size;
         u_this_b[0 * comp_stride + idx] = f.vx[idx];   // px
@@ -422,8 +439,8 @@ __global__ void evr_stress_kernel_nopml(
     const float* Rsz_b  = Rs_z + b * spatial_size;
 
     float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dpz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
-    float dpx_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
     float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
     float dvp_dx = evr_model_grad_x<Order>(vp_b, ix, iz, grad_ctx);
@@ -487,6 +504,26 @@ __global__ void evr_stress_kernel_nopml(
 //   - chain rule through cached velocity gradients for grad_vp, grad_vs
 //   - no /rho in momentum_adjoint
 // ---------------------------------------------------------------------------
+
+// Adjoint of the forward free-surface BC (szz = sxz = 0 at the surface row).
+// The zeroing is a self-adjoint projection, so its transpose is the SAME
+// zeroing applied to the ADJOINT stress at the START of each adjoint step
+// (before any kernel reads the adjoint szz/sxz). No-op when free_surface=false
+// (elastic_is_top_free_surface_row returns false).
+template<int Order>
+__global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContext solver)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+    if (!elastic_is_top_free_surface_row(solver, ix, iz)) return;
+    int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+    int idx = iz * solver.nx + ix;
+    f.szz[idx] = 0.f;
+    f.sxz[idx] = 0.f;
+}
 
 template<int Order>
 __global__ void evr_stress_adjoint_prepare(
@@ -707,8 +744,10 @@ __global__ void evr_stress_adjoint_apply(
     //   a_px gets dpx_dx (->-sgrad<X,FORWARD>) and dpx_dz (->-sgrad<Z,BACKWARD>)
     //   a_pz gets dpz_dz (->-sgrad<Z,FORWARD>) and dpz_dx (->-sgrad<X,BACKWARD>)
     float dqxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(qxx_b, ix, 0, iz, grad_ctx);
-    float dqxz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(qxz_b, ix, 0, iz, grad_ctx);
-    float dqzz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(qzz_b, ix, 0, iz, grad_ctx);
+    // z-derivative transposes use the image-method ADJOINT at the free surface
+    // (forward dpx_dz was FORWARD/even, dpz_dz was BACKWARD/odd).
+    float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(qxz_b, ix, iz, grad_ctx, solver, false);
+    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true);
     float dqzx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qzx_b, ix, 0, iz, grad_ctx);
 
     int idx = iz * solver.nx + ix;
@@ -830,8 +869,10 @@ __global__ void evr_momentum_adjoint_apply(
     // (D_f^T=-D_b, D_b^T=-D_f). p* hold dt*adjoint-momentum
     // (pxx<-dsxx_dx[F-x], pzz<-dszz_dz[F-z], pxz<-dsxz_dz[B-z], pzx<-dsxz_dx[B-x]).
     float dpxx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(pxx_b, ix, 0, iz, grad_ctx);  // (F-x)^T
-    float dpzz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(pzz_b, ix, 0, iz, grad_ctx);  // (F-z)^T
-    float dpxz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(pxz_b, ix, 0, iz, grad_ctx);   // (B-z)^T
+    // z-derivative transposes use the image-method ADJOINT at the free surface
+    // (forward dszz_dz was FORWARD/odd, dsxz_dz was BACKWARD/odd).
+    float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(pzz_b, ix, iz, grad_ctx, solver, true);  // (F-z)^T
+    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true); // (B-z)^T
     float dpzx_dx = sgradient<2, Order, X, DIFF_FORWARD>(pzx_b, ix, 0, iz, grad_ctx);   // (B-x)^T
 
     int idx = iz * solver.nx + ix;
@@ -929,8 +970,10 @@ __global__ void calculate_grad_evr_nobs(
     // AFTER the momentum step but BEFORE the stress step at time t (which is
     // what the gamma terms in the forward stress update consumed).
     float fpx_x = sgradient<2, Order, X, DIFF_BACKWARD>(fpx_b, ix, 0, iz, grad_ctx);
-    float fpz_z = sgradient<2, Order, Z, DIFF_BACKWARD>(fpz_b, ix, 0, iz, grad_ctx);
-    float fpx_z = sgradient<2, Order, Z, DIFF_FORWARD>(fpx_b, ix, 0, iz, grad_ctx);
+    // forward momentum z-derivatives use the image-method mirror at the surface
+    // (matches the forward stress kernel: pz BACKWARD/odd, px FORWARD/even).
+    float fpz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fpz_b, ix, iz, grad_ctx, solver, true);
+    float fpx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(fpx_b, ix, iz, grad_ctx, solver, false);
     float fpz_x = sgradient<2, Order, X, DIFF_FORWARD>(fpz_b, ix, 0, iz, grad_ctx);
 
     // Forward velocity gradients (4th-order central) -- needed for the

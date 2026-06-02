@@ -52,14 +52,14 @@ def _geometry():
     return sources, receivers
 
 
-def _make_prop(impl, **ckpt_kwargs):
+def _make_prop(impl, free_surface=False, **ckpt_kwargs):
     eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     kw = dict(use_ckpt=False)
     kw.update(ckpt_kwargs)
     return PropTorch(
         eq, shape=(NZ, NX),
         abcn=ABCN, dh=DH, dt=DT,
-        impl=impl,
+        impl=impl, free_surface=free_surface,
         eager_options={"use_compile": False} if impl == "eager" else None,
         **kw,
     )
@@ -234,6 +234,49 @@ def test_gradient_consistency_ckpt_recursive():
         pytest.skip("CUDA not available")
     _run_ckpt_case("ckpt_recursive",
                    {"use_ckpt": True, "ckpt_mode": "recursive", "ckpt_num": 5})
+
+
+@pytest.mark.parametrize("tag,prop_ckpt,fwd_kw", [
+    ("full",           {},                                                          {}),
+    ("bs",             {},                                                          {"use_boundary_saving": True}),
+    ("ckpt_chunk",     {"use_ckpt": True, "ckpt_mode": "chunk", "ckpt_chunks": 16}, {}),
+    ("ckpt_recursive", {"use_ckpt": True, "ckpt_mode": "recursive", "ckpt_num": 5}, {}),
+])
+def test_gradient_consistency_free_surface(tag, prop_ckpt, fwd_kw):
+    """All four backward modes (full / boundary-saving / chunk- and recursive-
+    checkpoint) must match eager autograd with free_surface=True (image-method
+    top surface + sigma_zz = sigma_xz = 0 BC)."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    wavelet = _wavelet()
+    sources, receivers = _geometry()
+
+    target_models = _layered_models_with_grad()
+    with torch.no_grad():
+        target_models[0] += 30.0
+    with torch.no_grad():
+        target_syn = _make_prop("eager", free_surface=True)(
+            wavelet, sources, receivers, models=target_models)
+
+    # eager autograd reference (mode-independent), free surface ON
+    eager_grads, _ = _compute_grads(
+        "eager", wavelet, sources, receivers, target_syn,
+        prop_ckpt={"free_surface": True})
+    # candidate impl='c' for this backward mode, free surface ON
+    c_grads, _ = _compute_grads(
+        "c", wavelet, sources, receivers, target_syn,
+        prop_ckpt={"free_surface": True, **prop_ckpt}, **fwd_kw)
+
+    failed = []
+    for name in ("vp", "vs", "Rp_x", "Rp_z", "Rs_x", "Rs_z"):
+        rel = _rel_l2(c_grads[name], eager_grads[name])
+        cos = _cosine(c_grads[name], eager_grads[name])
+        print(f"  [{tag}/fs] grad_{name:5s}: rel_l2 = {rel:.4e}  cos = {cos:.4f}")
+        if not (rel < 1.5 and cos > 0.8):
+            failed.append(f"{name}: rel_l2={rel:.4e}, cos={cos:.4f}")
+    assert not failed, (f"[{tag}/fs] free-surface gradient consistency failed:\n  "
+                        + "\n  ".join(failed))
 
 
 if __name__ == "__main__":

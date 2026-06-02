@@ -46,7 +46,7 @@ import numpy as np
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from ._free_surface import zero_top_row
+from ._free_surface import zero_top_row, top_free_surface_derivative
 from sweep.scalars import fd_coefficients
 
 
@@ -200,9 +200,15 @@ def elastic_vr_step_core(
 
     # ---- 1. Stress spatial derivatives (from incoming stress) ----
     dsxx_dx = pd.x_forward(sxx)    # sxx (i, j)          -> (i+1/2, j)   feeds px
-    dszz_dz = pd.z_forward(szz)    # szz (i, j)          -> (i, j+1/2)   feeds pz
-    dsxz_dz = pd.z_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i+1/2, j)   feeds px
     dsxz_dx = pd.x_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i, j+1/2)   feeds pz
+    # z-derivatives of stress: image-method mirror at the top free surface
+    # (odd parity, mirroring _elastic_step_core txz_z/tzz_z), else plain FD.
+    if free_surface:
+        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
+        dsxz_dz = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
+    else:
+        dszz_dz = pd.z_forward(szz)    # szz (i, j)          -> (i, j+1/2)   feeds pz
+        dsxz_dz = pd.z_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i+1/2, j)   feeds px
 
     # ---- 2. CPML accumulation on stress derivatives ----
     m_sxxx = axh * m_sxxx + bxh * dsxx_dx
@@ -223,9 +229,15 @@ def elastic_vr_step_core(
     # Same stagger pattern as standard Elastic. Each output lives at the
     # location of the corresponding sigma component it feeds:
     dpx_dx = pd.x_backward(px)     # px (i+1/2, j)   -> (i, j)         feeds sigma_xx
-    dpz_dz = pd.z_backward(pz)     # pz (i, j+1/2)   -> (i, j)         feeds sigma_zz
-    dpx_dz = pd.z_forward(px)      # px (i+1/2, j)   -> (i+1/2, j+1/2) feeds sigma_xz
     dpz_dx = pd.x_forward(pz)      # pz (i, j+1/2)   -> (i+1/2, j+1/2) feeds sigma_xz
+    # z-derivatives of momentum: image-method mirror at the top free surface
+    # (pz odd like vz, px even like vx; mirrors _elastic_step_core), else plain.
+    if free_surface:
+        dpz_dz = top_free_surface_derivative(pz, pd.z_backward, top_halo, odd=True, axis=-2)
+        dpx_dz = top_free_surface_derivative(px, pd.z_forward, top_halo, odd=False, axis=-2)
+    else:
+        dpz_dz = pd.z_backward(pz)     # pz (i, j+1/2)   -> (i, j)         feeds sigma_zz
+        dpx_dz = pd.z_forward(px)      # px (i+1/2, j)   -> (i+1/2, j+1/2) feeds sigma_xz
 
     # ---- 5. CPML accumulation on momentum derivatives ----
     # Pattern from _elastic_step_core: half-grid axis uses (axh, bxh)
