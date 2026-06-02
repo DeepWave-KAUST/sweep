@@ -93,27 +93,7 @@ class AcousticTTI(SecondOrderEquation):
 
     Reference: Liang K. et al. 2022, 10.1190/geo2022-0292.1.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): TTI acoustic reference velocity.
-        - ``epsilon``: Thomsen epsilon parameter.
-        - ``delta``: Thomsen delta parameter.
-        - ``theta`` (rad): Tilt angle parameter.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``): Primary acoustic-TTI pressure-like wavefield; default source and receiver.
-        - ``h2`` (aliases: ``pressure_prev``): Previous-step pressure-like wavefield (internal).
-        - ``psix``: CPML memory variable for the x-derivative term (internal).
-        - ``psiz``: CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['h1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="TTI acoustic reference velocity.", unit="m/s"),

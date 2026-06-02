@@ -297,46 +297,7 @@ class ElasticVRR(FirstOrderEquation):
     formulation*, SEG Technical Program Expanded Abstracts,
     doi 10.1190/image2025-4316471.1.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): Elastic P-wave velocity model.
-        - ``vs`` (m/s): Elastic S-wave velocity model.
-        - ``Rp_x``: P-impedance vector reflectivity, x component.
-        - ``Rp_z``: P-impedance vector reflectivity, z component.
-        - ``Rs_x``: S-impedance vector reflectivity, x component.
-        - ``Rs_z``: S-impedance vector reflectivity, z component.
-
-    !!! info "Wavefields"
-
-        - ``px`` (aliases: ``momentum_x``): Particle momentum x-component
-          (= rho * vx); default receiver.
-        - ``pz`` (aliases: ``momentum_z``): Particle momentum z-component
-          (= rho * vz); default receiver.
-        - ``sxx`` (aliases: ``stress_xx``): Normal stress in x; default source.
-        - ``szz`` (aliases: ``stress_zz``): Normal stress in z; default source.
-        - ``sxz`` (aliases: ``stress_xz``, ``shear_xz``): Shear stress.
-        - ``m_pxx, m_pxz, m_pzx, m_pzz``: CPML memory variables for
-          momentum-gradient terms (internal).
-        - ``m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz``: CPML memory
-          variables for stress-gradient terms (internal). Two slots
-          (``m_sxxz``, ``m_szzx``) are kept for layout symmetry with
-          :class:`Elastic` but never written.
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'szz']``
-        - ``receiver_type``: ``['px', 'pz']``
-        - ``pml_type``: ``'cpmls'``
-
-    Notes
-    -----
-    Velocity-vs-momentum at sources / receivers. With density removed from
-    the model, the natural physical receiver is particle MOMENTUM
-    ``p_i = rho v_i`` rather than velocity. Multiply the receiver record by
-    the auxiliary ``1/rho`` at the receiver location to recover velocity if
-    that's the desired output. Same applies to a body-force source: inject
-    into ``px/pz`` directly (the standard explosive ``[sxx, szz]`` source
-    needs no rho rescaling because stress is unchanged).
+    
     """
 
     MODEL_SPECS = (

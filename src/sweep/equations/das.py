@@ -991,37 +991,7 @@ class DASZhao(FirstOrderEquation):
     Reference: Zhao Y. et al. 2022, *DAS modelling using a stress and
     normal-strain-rate elastic formulation*.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
-        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
-
-    !!! info "Wavefields"
-
-        - ``exx_t``: Normal strain-rate in the x direction; default receiver.
-        - ``ezz_t``: Normal strain-rate in the z direction; default receiver.
-        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
-        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
-        - ``txx`` (aliases: ``tau_xx``): Auxiliary stress-like variable tau_xx (internal).
-        - ``tzz`` (aliases: ``tau_zz``): Auxiliary stress-like variable tau_zz (internal).
-        - ``m_sxx_xf``: CPML memory variable for forward d(sxx)/dx (internal).
-        - ``m_sxx_xb``: CPML memory variable for backward d2(sxx)/dx2 (internal).
-        - ``m_szz_zf``: CPML memory variable for forward d(szz)/dz (internal).
-        - ``m_szz_zb``: CPML memory variable for backward d2(szz)/dz2 (internal).
-        - ``m_txx_zf``: CPML memory variable for forward d(txx)/dz (internal).
-        - ``m_txx_zb``: CPML memory variable for backward d2(txx)/dz2 (internal).
-        - ``m_tzz_xf``: CPML memory variable for forward d(tzz)/dx (internal).
-        - ``m_tzz_xb``: CPML memory variable for backward d2(tzz)/dx2 (internal).
-        - ``das35_t``: 35.3 degree helical-fiber axial strain-rate.
-        - ``das54x_t``: 54.7 degree helical-fiber axial strain-rate for x-oriented core.
-        - ``das54z_t``: 54.7 degree helical-fiber axial strain-rate for z-oriented core.
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'szz']``
-        - ``receiver_type``: ``['exx_t', 'ezz_t']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     MODEL_SPECS = (
@@ -1137,51 +1107,7 @@ class DASZhao3D(FirstOrderEquation):
 
     Reference: Zhao Y. et al. 2022.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
-        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
-
-    !!! info "Wavefields"
-
-        - ``exx_t``: Normal strain-rate in the x direction; default receiver.
-        - ``eyy_t``: Normal strain-rate in the y direction; default receiver.
-        - ``ezz_t``: Normal strain-rate in the z direction; default receiver.
-        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
-        - ``syy`` (aliases: ``stress_yy``): Normal stress in the y direction; default source.
-        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
-        - ``txx`` (aliases: ``tau_xx``): Auxiliary stress-like variable tau_xx (internal).
-        - ``tyy`` (aliases: ``tau_yy``): Auxiliary stress-like variable tau_yy (internal).
-        - ``tzz`` (aliases: ``tau_zz``): Auxiliary stress-like variable tau_zz (internal).
-        - ``m_sxx_xf``: CPML memory variable for forward d(sxx)/dx (internal).
-        - ``m_sxx_xb``: CPML memory variable for backward d2(sxx)/dx2 (internal).
-        - ``m_syy_yf``: CPML memory variable for forward d(syy)/dy (internal).
-        - ``m_syy_yb``: CPML memory variable for backward d2(syy)/dy2 (internal).
-        - ``m_szz_zf``: CPML memory variable for forward d(szz)/dz (internal).
-        - ``m_szz_zb``: CPML memory variable for backward d2(szz)/dz2 (internal).
-        - ``m_txx_yf``: CPML memory variable for forward d(txx)/dy (internal).
-        - ``m_txx_yb``: CPML memory variable for backward d2(txx)/dy2 (internal).
-        - ``m_txx_zf``: CPML memory variable for forward d(txx)/dz (internal).
-        - ``m_txx_zb``: CPML memory variable for backward d2(txx)/dz2 (internal).
-        - ``m_tyy_xf``: CPML memory variable for forward d(tyy)/dx (internal).
-        - ``m_tyy_xb``: CPML memory variable for backward d2(tyy)/dx2 (internal).
-        - ``m_tyy_zf``: CPML memory variable for forward d(tyy)/dz (internal).
-        - ``m_tyy_zb``: CPML memory variable for backward d2(tyy)/dz2 (internal).
-        - ``m_tzz_xf``: CPML memory variable for forward d(tzz)/dx (internal).
-        - ``m_tzz_xb``: CPML memory variable for backward d2(tzz)/dx2 (internal).
-        - ``m_tzz_yf``: CPML memory variable for forward d(tzz)/dy (internal).
-        - ``m_tzz_yb``: CPML memory variable for backward d2(tzz)/dy2 (internal).
-        - ``das35_t``: 35.3 degree helical-fiber axial strain-rate.
-        - ``das54x_t``: 54.7 degree helical-fiber axial strain-rate for x-oriented core.
-        - ``das54y_t``: 54.7 degree helical-fiber axial strain-rate for y-oriented core.
-        - ``das54z_t``: 54.7 degree helical-fiber axial strain-rate for z-oriented core.
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'syy', 'szz']``
-        - ``receiver_type``: ``['exx_t', 'eyy_t', 'ezz_t']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
@@ -1310,38 +1236,7 @@ class DASMu(FirstOrderEquation):
     Reference: Mu & Hung 2022, *Velocity-stress-strain coupling for DAS
     forward modelling*.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
-        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction.
-        - ``sxx`` (aliases: ``stress_xx``, ``sigma_xx``): Normal stress in the x direction; default source.
-        - ``szz`` (aliases: ``stress_zz``, ``sigma_zz``): Normal stress in the z direction; default source.
-        - ``sxz`` (aliases: ``stress_xz``, ``sigma_xz``, ``sigma_zx``): Shear stress component.
-        - ``exx``: Integrated normal strain in the x direction; default receiver.
-        - ``ezz``: Integrated normal strain in the z direction; default receiver.
-        - ``exz``: Integrated shear strain component; default receiver.
-        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
-        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
-        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
-        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
-        - ``m_txxx``: CPML memory variable for dsxx/dx (internal).
-        - ``m_txxz``: Reserved elastic auxiliary field (internal).
-        - ``m_tzzx``: Reserved elastic auxiliary field (internal).
-        - ``m_tzzz``: CPML memory variable for dszz/dz (internal).
-        - ``m_txzx``: CPML memory variable for dsxz/dx (internal).
-        - ``m_txzz``: CPML memory variable for dsxz/dz (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'szz']``
-        - ``receiver_type``: ``['exx', 'ezz', 'exz']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
@@ -1470,53 +1365,7 @@ class DASMu3D(FirstOrderEquation):
 
     Reference: Mu & Hung 2022.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s) (aliases: ``p_velocity``): Elastic P-wave velocity model.
-        - ``vs`` (m/s) (aliases: ``s_velocity``): Elastic S-wave velocity model.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density model.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction.
-        - ``vy`` (aliases: ``velocity_y``): Particle velocity in the y direction.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction.
-        - ``sxx`` (aliases: ``stress_xx``, ``sigma_xx``): Normal stress in the x direction; default source.
-        - ``syy`` (aliases: ``stress_yy``, ``sigma_yy``): Normal stress in the y direction; default source.
-        - ``szz`` (aliases: ``stress_zz``, ``sigma_zz``): Normal stress in the z direction; default source.
-        - ``sxy`` (aliases: ``stress_xy``, ``sigma_xy``, ``sigma_yx``): Shear stress xy component.
-        - ``sxz`` (aliases: ``stress_xz``, ``sigma_xz``, ``sigma_zx``): Shear stress xz component.
-        - ``syz`` (aliases: ``stress_yz``, ``sigma_yz``, ``sigma_zy``): Shear stress yz component.
-        - ``exx``: Integrated normal strain in the x direction; default receiver.
-        - ``eyy``: Integrated normal strain in the y direction; default receiver.
-        - ``ezz``: Integrated normal strain in the z direction; default receiver.
-        - ``exy``: Integrated shear strain xy component.
-        - ``exz``: Integrated shear strain xz component.
-        - ``eyz``: Integrated shear strain yz component.
-        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
-        - ``m_vxy``: CPML memory variable for dvx/dy (internal).
-        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
-        - ``m_vyx``: CPML memory variable for dvy/dx (internal).
-        - ``m_vyy``: CPML memory variable for dvy/dy (internal).
-        - ``m_vyz``: CPML memory variable for dvy/dz (internal).
-        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
-        - ``m_vzy``: CPML memory variable for dvz/dy (internal).
-        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
-        - ``m_sxxx``: CPML memory variable for dsxx/dx (internal).
-        - ``m_szzz``: CPML memory variable for dszz/dz (internal).
-        - ``m_sxyx``: CPML memory variable for dsxy/dx (internal).
-        - ``m_sxyy``: CPML memory variable for dsxy/dy (internal).
-        - ``m_sxzx``: CPML memory variable for dsxz/dx (internal).
-        - ``m_sxzz``: CPML memory variable for dsxz/dz (internal).
-        - ``m_syyy``: CPML memory variable for dsyy/dy (internal).
-        - ``m_syzy``: CPML memory variable for dsyz/dy (internal).
-        - ``m_syzz``: CPML memory variable for dsyz/dz (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'syy', 'szz']``
-        - ``receiver_type``: ``['exx', 'eyy', 'ezz', 'exy', 'exz', 'eyz']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     MODEL_SPECS = DASZhao.MODEL_SPECS

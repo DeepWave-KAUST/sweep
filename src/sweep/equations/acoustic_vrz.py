@@ -148,25 +148,7 @@ class AcousticVRZ(SecondOrderEquation):
 
     Reference: 10.3997/2214-4609.202010332.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): Acoustic velocity model.
-        - ``z``: Auxiliary parameter used by the VRZ formulation.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``): Primary VRZ acoustic pressure-like wavefield; default source and receiver.
-        - ``h2`` (aliases: ``pressure_prev``): Previous-step VRZ acoustic pressure-like wavefield (internal).
-        - ``psix``: CPML memory variable for the x-derivative term (internal).
-        - ``psiz``: CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['h1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic velocity model.", unit="m/s"),
@@ -274,27 +256,7 @@ class AcousticVRZ3D(SecondOrderEquation):
 
     Reference: 10.3997/2214-4609.202010332.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): 3D acoustic velocity model.
-        - ``z``: Auxiliary parameter used by the 3D VRZ formulation.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``): Primary 3D VRZ acoustic pressure-like wavefield; default source and receiver.
-        - ``h2`` (aliases: ``pressure_prev``): Previous-step 3D VRZ acoustic pressure-like wavefield (internal).
-        - ``psix``: CPML memory variable for the x-derivative term (internal).
-        - ``psiy``: CPML memory variable for the y-derivative term (internal).
-        - ``psiz``: CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetay``: CPML auxiliary wavefield for the y-direction update (internal).
-        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['h1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic velocity model.", unit="m/s"),

@@ -28,14 +28,12 @@ from pathlib import Path
 _LAZY_SUBMODULES = {
     "backend",
     "equations",
-    "jax",
     "memory",
     "operators",
     "propagator",
     "receivers",
     "signal",
     "sources",
-    "torch",
     "utils",
 }
 

@@ -69,28 +69,7 @@ class AcousticTariq(SecondOrderEquation):
     Reference: Alkhalifah T. 2000, *An acoustic wave equation for
     anisotropic media*, 10.1190/1.1444815.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vv``: Squared vertical velocity-like parameter for the Tariq qP formulation.
-        - ``v`` (m/s) (aliases: ``velocity``): Velocity-like parameter for the Tariq qP formulation.
-        - ``eta``: Anellipticity parameter for the Tariq qP formulation.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``): Primary acoustic-Tariq qP pressure-like wavefield; default source and receiver.
-        - ``h2`` (aliases: ``pressure_prev``): Previous-step pressure-like wavefield (internal).
-        - ``f1``: Auxiliary wavefield integrating the primary pressure (Tariq qP) (internal).
-        - ``f2``: Previous-step auxiliary wavefield (Tariq qP) (internal).
-        - ``psix``: CPML memory variable for the x-derivative term (internal).
-        - ``psiz``: CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['h1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
     MODEL_SPECS = (
         ModelSpec("vv", description="Squared vertical velocity-like parameter for the Tariq qP formulation."),

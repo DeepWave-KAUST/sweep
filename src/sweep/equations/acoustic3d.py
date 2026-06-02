@@ -52,26 +52,7 @@ class Acoustic3D(SecondOrderEquation):
     separable 1-D Laplacians in z / y / x) and absorbed on every face by a
     split-step CPML formulation (``cpmlr`` by default).
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): 3D acoustic P-wave velocity model.
-
-    !!! info "Wavefields"
-
-        - ``h1`` (aliases: ``pressure``, ``p``): Primary 3D acoustic pressure-like wavefield; default source and receiver.
-        - ``h2`` (aliases: ``pressure_prev``): Previous-step pressure-like wavefield (internal).
-        - ``psix``: CPML memory variable for the x-derivative term (internal).
-        - ``psiy``: CPML memory variable for the y-derivative term (internal).
-        - ``psiz``: CPML memory variable for the z-derivative term (internal).
-        - ``zetax``: CPML auxiliary wavefield for the x-direction update (internal).
-        - ``zetay``: CPML auxiliary wavefield for the y-direction update (internal).
-        - ``zetaz``: CPML auxiliary wavefield for the z-direction update (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['h1']``
-        - ``pml_type``: ``'cpmlr'``
+    
     """
 
     MODEL_SPECS = (

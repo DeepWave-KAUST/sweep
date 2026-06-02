@@ -238,29 +238,7 @@ class AcousticVTI1st(FirstOrderEquation):
         Thomsen L. 1986, *Weak elastic anisotropy*, Geophysics 51,
             1954–1966.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s) (aliases: ``velocity``): Vertical P-wave velocity.
-        - ``epsilon``: Thomsen epsilon anisotropy parameter (ε ≥ δ required).
-        - ``delta``: Thomsen delta anisotropy parameter.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in x.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in z; default receiver.
-        - ``sH`` (aliases: ``stress_h``, ``sigma_H``): Horizontal normal stress σ_11 = σ_22; default source.
-        - ``sV`` (aliases: ``stress_v``, ``sigma_V``): Vertical normal stress σ_33; default source.
-        - ``m_sHx``: CPML memory variable for ∂σ_H/∂x (internal).
-        - ``m_sVz``: CPML memory variable for ∂σ_V/∂z (internal).
-        - ``m_vxx``: CPML memory variable for ∂v_x/∂x (internal).
-        - ``m_vzz``: CPML memory variable for ∂v_z/∂z (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sH', 'sV']``
-        - ``receiver_type``: ``['vz']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     # TODO_free_surface: Implement a Mittet/Robertsson-style anisotropic
@@ -486,32 +464,7 @@ class AcousticVTI1st3D(FirstOrderEquation):
 
     Reference: Duveneck E. et al. 2008, 10.1190/1.3059320.
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s) (aliases: ``velocity``): Vertical P-wave velocity.
-        - ``epsilon``: Thomsen epsilon anisotropy parameter (ε ≥ δ required).
-        - ``delta``: Thomsen delta anisotropy parameter.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in x.
-        - ``vy`` (aliases: ``velocity_y``): Particle velocity in y.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in z; default receiver.
-        - ``sH`` (aliases: ``stress_h``, ``sigma_H``): Horizontal normal stress σ_11 = σ_22; default source.
-        - ``sV`` (aliases: ``stress_v``, ``sigma_V``): Vertical normal stress σ_33; default source.
-        - ``m_sHx``: CPML memory variable for ∂σ_H/∂x (internal).
-        - ``m_sHy``: CPML memory variable for ∂σ_H/∂y (internal).
-        - ``m_sVz``: CPML memory variable for ∂σ_V/∂z (internal).
-        - ``m_vxx``: CPML memory variable for ∂v_x/∂x (internal).
-        - ``m_vyy``: CPML memory variable for ∂v_y/∂y (internal).
-        - ``m_vzz``: CPML memory variable for ∂v_z/∂z (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sH', 'sV']``
-        - ``receiver_type``: ``['vz']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     MODEL_SPECS = AcousticVTI1st.MODEL_SPECS
