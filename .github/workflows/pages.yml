@@ -32,7 +32,13 @@ jobs:
           cache-dependency-path: docs/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r docs/requirements.txt
+        run: |
+          pip install -r docs/requirements.txt
+          # Install sweep itself (without the CUDA extension) so
+          # mkdocstrings' force_inspection mode can import the
+          # package — its docstring section comes from the runtime
+          # `WaveEquation.__init_subclass__` admonition injection.
+          pip install --no-build-isolation -e .
 
       - name: Build site
         run: mkdocs build
