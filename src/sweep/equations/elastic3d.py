@@ -313,52 +313,7 @@ class Elastic(FirstOrderEquation):
     media: velocity-stress finite-difference method*, Geophysics 51(4),
     [10.1190/1.1442147](https://doi.org/10.1190/1.1442147).
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp`` (m/s): 3D elastic P-wave velocity model.
-        - ``vs`` (m/s): 3D elastic S-wave velocity model.
-        - ``rho`` (kg/m^3): 3D density model.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in the x direction; default receiver.
-        - ``vy`` (aliases: ``velocity_y``): Particle velocity in the y direction; default receiver.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in the z direction; default receiver.
-        - ``sxx`` (aliases: ``stress_xx``): Normal stress in the x direction; default source.
-        - ``syy`` (aliases: ``stress_yy``): Normal stress in the y direction; default source.
-        - ``szz`` (aliases: ``stress_zz``): Normal stress in the z direction; default source.
-        - ``sxy`` (aliases: ``stress_xy``, ``shear_xy``): Shear stress component.
-        - ``sxz`` (aliases: ``stress_xz``, ``shear_xz``): Shear stress component.
-        - ``syz`` (aliases: ``stress_yz``, ``shear_yz``): Shear stress component.
-        - ``m_vxx``: CPML memory variable for dvx/dx (internal).
-        - ``m_vxy``: CPML memory variable for dvx/dy (internal).
-        - ``m_vxz``: CPML memory variable for dvx/dz (internal).
-        - ``m_vyx``: CPML memory variable for dvy/dx (internal).
-        - ``m_vyy``: CPML memory variable for dvy/dy (internal).
-        - ``m_vyz``: CPML memory variable for dvy/dz (internal).
-        - ``m_vzx``: CPML memory variable for dvz/dx (internal).
-        - ``m_vzy``: CPML memory variable for dvz/dy (internal).
-        - ``m_vzz``: CPML memory variable for dvz/dz (internal).
-        - ``m_sxxx``: CPML memory variable for dsxx/dx (internal).
-        - ``m_szzz``: CPML memory variable for dszz/dz (internal).
-        - ``m_sxyx``: CPML memory variable for dsxy/dx (internal).
-        - ``m_sxyy``: CPML memory variable for dsxy/dy (internal).
-        - ``m_sxzx``: CPML memory variable for dsxz/dx (internal).
-        - ``m_sxzz``: CPML memory variable for dsxz/dz (internal).
-        - ``m_syyy``: CPML memory variable for dsyy/dy (internal).
-        - ``m_syzy``: CPML memory variable for dsyz/dy (internal).
-        - ``m_syzz``: CPML memory variable for dsyz/dz (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'syy', 'szz']``
-        - ``receiver_type``: ``['vx', 'vy', 'vz']``
-        - ``pml_type``: ``'cpmls'``
-
-    Note:
-        The class is named ``Elastic`` in this module but is exposed as
-        :class:`Elastic3D` from :mod:`sweep.equations`; use the 3-D name
-        in user code.
+    
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="3D elastic P-wave velocity model.", unit="m/s"),

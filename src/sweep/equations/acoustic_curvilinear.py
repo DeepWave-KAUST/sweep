@@ -41,22 +41,7 @@ class AcousticCurvilinear(SecondOrderEquation):
     ``topography`` and attach its padded metric tensors to this
     equation via ``set_curvilinear_metrics`` before the first step.
 
-    !!! info "Models (constructor input order)"
-        - ``vp`` (m/s): Acoustic P-wave velocity.
-
-    !!! info "Wavefields"
-        Same as :class:`Acoustic`: ``h1`` (pressure) + 5 CPML auxiliary.
-
-    !!! info "Defaults"
-        - ``source_type``: ``['h1']``
-        - ``receiver_type``: ``['h1']``
-        - ``pml_type``: ``'cpmlr'``
-
-    Notes
-    -----
-    ``impl='c'`` is not supported on this equation (no CUDA kernel
-    counterpart). The propagator routes it through the eager Python
-    backend.
+    
     """
 
     MODEL_SPECS = (

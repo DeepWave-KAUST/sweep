@@ -287,45 +287,7 @@ class ElasticTTISG(ElasticTTI):
     SG reference companion to the RSG implementation. CPML follows the
     staggered-grid ``cpmls`` convention (8 profiles).
 
-    !!! info "Models (constructor input order)"
-
-        - ``vp0`` (m/s): VTI-frame vertical P velocity.
-        - ``vs0`` (m/s): VTI-frame vertical S velocity.
-        - ``rho`` (kg/m^3) (aliases: ``density``): Density.
-        - ``epsilon``: Thomsen epsilon.
-        - ``delta``: Thomsen delta.
-        - ``gamma``: Thomsen gamma.
-        - ``theta`` (rad): Tilt angle.
-        - ``phi`` (rad): Azimuth angle.
-
-    !!! info "Wavefields"
-
-        - ``vx`` (aliases: ``velocity_x``): Particle velocity in x; default receiver.
-        - ``vy`` (aliases: ``velocity_y``): Particle velocity in y.
-        - ``vz`` (aliases: ``velocity_z``): Particle velocity in z; default receiver.
-        - ``sxx`` (aliases: ``stress_xx``): Normal stress xx; default source.
-        - ``szz`` (aliases: ``stress_zz``): Normal stress zz; default source.
-        - ``syz`` (aliases: ``stress_yz``): Shear stress yz.
-        - ``sxz`` (aliases: ``stress_xz``): Shear stress xz.
-        - ``sxy`` (aliases: ``stress_xy``): Shear stress xy.
-        - ``m_vxx``: CPML memory for dvx/dx (internal).
-        - ``m_vxz``: CPML memory for dvx/dz (internal).
-        - ``m_vyx``: CPML memory for dvy/dx (internal).
-        - ``m_vyz``: CPML memory for dvy/dz (internal).
-        - ``m_vzx``: CPML memory for dvz/dx (internal).
-        - ``m_vzz``: CPML memory for dvz/dz (internal).
-        - ``m_txxx``: CPML memory for dsxx/dx (internal).
-        - ``m_txzz``: CPML memory for dsxz/dz (internal).
-        - ``m_txyx``: CPML memory for dsxy/dx (internal).
-        - ``m_tyzz``: CPML memory for dsyz/dz (internal).
-        - ``m_txzx``: CPML memory for dsxz/dx (internal).
-        - ``m_tzzz``: CPML memory for dszz/dz (internal).
-
-    !!! info "Defaults"
-
-        - ``source_type``: ``['sxx', 'szz']``
-        - ``receiver_type``: ``['vx', 'vz']``
-        - ``pml_type``: ``'cpmls'``
+    
     """
 
     prepare_models_for_c = True

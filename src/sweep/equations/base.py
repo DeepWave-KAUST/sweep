@@ -116,10 +116,14 @@ class WaveEquation:
         # __new__ dispatch) would cause surprises.
         if not (cls.FIELD_SPECS or cls.MODEL_SPECS):
             return
+        # Dedent the source docstring with cleandoc so the appended
+        # admonition section (which is unindented) lines up with the
+        # original prose at the same indentation level.
+        import inspect as _inspect
+        existing_doc = _inspect.cleandoc(cls.__doc__ or "")
         # If a subclass author already hand-wrote the ``!!! info "Models"``
         # admonition into the docstring, leave their text in place — the
         # automatic injection is opt-in by deleting the hand-written block.
-        existing_doc = cls.__doc__ or ""
         if '!!! info "Models' in existing_doc:
             return
         # Resolve defaults via instantiation when possible; otherwise derive
