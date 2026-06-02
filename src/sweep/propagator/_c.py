@@ -665,22 +665,24 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
         # Precedence: explicit Python kwarg (from BoundaryOptions /
-        # boundary_saving_config dict) wins over env var, which wins over
-        # the legacy SWEEP_FP16_BOUNDARY=1 gate, which wins over the
-        # ``fp32`` default.  Once resolved, sync into the env so the C++
-        # saver's ``sweep_boundary_dtype_env()`` sees the same choice.
-        import os as _os_d
+        # boundary_saving_config dict) wins over the SWEEP_BOUNDARY_DTYPE env
+        # var (the documented global override), which wins over the legacy
+        # SWEEP_FP16_BOUNDARY=1 gate, which wins over the ``fp32`` default.
+        # This only decides what dtype to ALLOCATE the boundary buffers in; we
+        # deliberately do NOT write the choice back into os.environ.  The C++
+        # saver derives the storage dtype from the buffer tensors it is handed
+        # (see csrc/.../boundary/saver.cuh), so a per-instance storage_dtype
+        # cannot leak into later default-config propagators in the same process.
         if boundary_dtype is None:
-            _env_dtype = _os_d.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
+            _env_dtype = os.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
             if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
                 boundary_dtype = _env_dtype
-            elif _os_d.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
+            elif os.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
                 boundary_dtype = 'fp16'
             else:
                 boundary_dtype = 'fp32'
         if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
             raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
-        _os_d.environ['SWEEP_BOUNDARY_DTYPE'] = boundary_dtype
         if (
             self._boundary_cache_batch == self.B
             and

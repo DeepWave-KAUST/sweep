@@ -13,6 +13,18 @@
 #include "kernels.cuh"
 #include "types.cuh"
 
+// Map a boundary-buffer tensor's dtype to the storage-dtype enum.  Python
+// allocates the buffers in the requested precision, so the tensor itself is
+// the source of truth (uint8 == the INT8 path's quantized main buffer).
+static inline BoundaryDtype boundary_dtype_from_tensor(const torch::Tensor& t) {
+    switch (t.scalar_type()) {
+        case torch::kUInt8:    return BoundaryDtype::INT8;
+        case torch::kHalf:     return BoundaryDtype::FP16;
+        case torch::kBFloat16: return BoundaryDtype::BF16;
+        default:               return BoundaryDtype::FP32;
+    }
+}
+
 struct EffectiveBoundarySaver {
 
     torch::Tensor left_t, right_t;
@@ -345,13 +357,25 @@ struct EffectiveBoundarySaver {
         else
             store_on_gpu = (dim == 2);   // default
 
-        // FP16 / BF16 / INT8 storage gate.  Sourced from
-        // SWEEP_BOUNDARY_DTYPE env (with legacy SWEEP_FP16_BOUNDARY
-        // fallback).  Last-two and staging buffers remain FP32 —
-        // last_two is a full-wavefield snapshot used to bootstrap
-        // backward, staging is the INT8 path's per-timestep FP32 view
-        // before quantization.
-        const BoundaryDtype runtime_dtype = sweep_boundary_dtype_env();
+        // FP16 / BF16 / INT8 storage gate.  Derived from the boundary buffers
+        // Python hands us (allocated in the requested precision) rather than a
+        // process-global env var — this prevents a per-instance storage_dtype
+        // from leaking across propagator instances.  The SWEEP_BOUNDARY_DTYPE
+        // env is consulted only for the (normally unreachable) C++-side
+        // self-allocation fallback where no buffer is passed.  Last-two and
+        // staging buffers remain FP32 — last_two is a full-wavefield snapshot
+        // used to bootstrap backward, staging is the INT8 path's per-timestep
+        // FP32 view before quantization.
+        BoundaryDtype runtime_dtype;
+        if (!boundary_gpu.empty() && boundary_gpu[0].scalar_type() == torch::kUInt8) {
+            runtime_dtype = BoundaryDtype::INT8;        // uint8 main buffer => INT8 path
+        } else if (!boundary_cpu.empty()) {
+            runtime_dtype = boundary_dtype_from_tensor(boundary_cpu[0]);
+        } else if (!boundary_gpu.empty()) {
+            runtime_dtype = boundary_dtype_from_tensor(boundary_gpu[0]);
+        } else {
+            runtime_dtype = sweep_boundary_dtype_env();
+        }
         const bool use_int8 = (runtime_dtype == BoundaryDtype::INT8);
         torch::Dtype dtype_storage;
         switch (runtime_dtype) {
