@@ -538,7 +538,7 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         return self.kernel
 
     def init_laplace(self, ltype='1dsep', backend=None):
-        """Build the Laplacian kernel stack for this equation.
+        """Build the separable Laplacian kernel stack for this equation.
 
         Args:
             ltype: Laplacian formulation. Defaults to ``'1dsep'`` (matches
@@ -548,18 +548,27 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
                   equation, used by :class:`Acoustic`, :class:`AcousticVRZ`, …).
                 - ``'3dsep'``: separable 1-D second-derivative kernels along
                   z / y / x (3-D equation, used by :class:`Acoustic3D` etc.).
-                - ``'2dmix'``: a single 2-D non-separable cross-stencil
-                  (legacy path, not currently used by any in-tree equation).
+
+                The legacy ``'2dmix'`` (non-separable 2-D cross-stencil) path
+                was removed in this release — it had no in-tree callers.
             backend: Deprecated and ignored. The Laplacian uses
                 ``self.backend`` set on construction; this kwarg is kept only
                 for backwards compatibility with existing call sites.
+
+        Raises:
+            ValueError: if ``ltype`` is not ``'1dsep'`` or ``'3dsep'``.
         """
         del backend  # unused; kept for backwards compatibility
-        if ltype in ['1dsep', '3dsep']:
-            self.kernel = to_backend(self.kf(self.so, mode='x')[0,0][self.so//2,:], backend=self.backend, device=self.device)
-            self.laplace_kernels = self._prepare_separable_laplace_kernels()
-        else:
-            self.laplace_kernels = self.kernel
+        if ltype not in ('1dsep', '3dsep'):
+            raise ValueError(
+                f"init_laplace: ltype must be '1dsep' or '3dsep', got {ltype!r}. "
+                "The legacy '2dmix' non-separable path was removed."
+            )
+        self.kernel = to_backend(
+            self.kf(self.so, mode='x')[0, 0][self.so // 2, :],
+            backend=self.backend, device=self.device,
+        )
+        self.laplace_kernels = self._prepare_separable_laplace_kernels()
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]
