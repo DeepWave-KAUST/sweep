@@ -5,7 +5,7 @@ pytest.skip("Legacy exploratory script kept for manual inspection only.", allow_
 import sys
 sys.path.append('../src')
 import numpy as np
-from sweep.operators.general import PartialDerivative
+from sweep.operators.general import StaggeredDerivative
 from sweep.equations.utils import to_backend
 
 backend = 'jax'
@@ -17,7 +17,7 @@ if backend == 'torch':
     import torch
     torch.backends.cudnn.benchmark = True
 
-op = PartialDerivative(spatial_order=4, backend=backend, device='cuda')
+op = StaggeredDerivative(spatial_order=4, backend=backend, device='cuda')
 op.to_backend(to_backend)
 
 shape = (1, 1, 3, 3)

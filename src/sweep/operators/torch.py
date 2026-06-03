@@ -71,7 +71,24 @@ def _zero_halo_3d(out, padding):
         out[..., :, :, -pad_x:] = 0
     return out
 
-def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
+def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
+    """Separable per-axis 2nd derivatives of a 2-D wavefield.
+
+    Naming: ``d2`` = second derivative (∂²); ``2d`` = 2-D wavefield.
+    Returns the **components**, not their sum — sum them yourself for an
+    isotropic Laplacian or use :func:`laplacian_2d` for the shortcut.
+
+    Implementation: two separable 1-D ``conv2d`` calls, one per axis.
+
+    Args:
+        u: Input wavefield, shape ``(B, 1, nz, nx)``.
+        k1d: 1-D kernel of length ``2M+1`` (or a tuple ``(kz, kx)`` of
+            pre-shaped 4-D kernels for the cached path).
+        hz, hx: Grid spacings along z and x.
+
+    Returns:
+        ``(d2u_dz2, d2u_dx2)`` — two tensors of the same shape as ``u``.
+    """
     if isinstance(k1d, tuple):
         kz, kx = k1d
         pad = max(kz.shape[-3], kx.shape[-1]) // 2
@@ -83,10 +100,24 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     lapz = F.conv2d(u, kz, padding=(pad, 0)) / (hz*hz)
     return lapz, lapx
 
-def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
-    """
-    u: (B, 1, nz, ny, nx)
-    k1d: (k,)
+def separable_d2_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
+    """Separable per-axis 2nd derivatives of a 3-D wavefield.
+
+    Naming: ``d2`` = second derivative (∂²); ``3d`` = 3-D wavefield.
+    Returns the **components**, not their sum — sum them yourself for an
+    isotropic Laplacian or use :func:`laplacian_3d` for the shortcut.
+
+    Implementation: three separable 1-D ``conv3d`` calls, one per axis.
+
+    Args:
+        u: Input wavefield, shape ``(B, 1, nz, ny, nx)``.
+        k1d: 1-D kernel of length ``2M+1`` (or a tuple ``(kz, ky, kx)``
+            of pre-shaped 5-D kernels for the cached path).
+        hz, hy, hx: Grid spacings along z, y, and x.
+
+    Returns:
+        ``(d2u_dz2, d2u_dy2, d2u_dx2)`` — three tensors of the same
+        shape as ``u``.
     """
     if isinstance(k1d, tuple):
         kz, ky, kx = k1d
@@ -109,7 +140,7 @@ def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
 # torch.compile on Elastic / DAS (their step calls these kernels 8+ times).
 # Measured on RTX 6000 Ada, removing the decorator also makes eager Elastic
 # ~6% faster, so the decorator was net cost even without torch.compile.
-def apply_kernels_torch(u, kernels):
+def apply_kernels(u, kernels):
     # u: (B, 1, H, W). kernels: (1, 1, kh, kw) or (K, 1, kh, kw).
     _, _, KH, KW = kernels.shape
     padding = (KH // 2, KW // 2)
@@ -117,18 +148,35 @@ def apply_kernels_torch(u, kernels):
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
 
-def apply_kernels_torch3d(u, kernels):
+def apply_kernels_3d(u, kernels):
     # u: (B, 1, D, H, W). kernels: (1, 1, kD, kH, kW) or (K, 1, kD, kH, kW).
     _, _, KD, KH, KW = kernels.shape
     padding = (KD // 2, KH // 2, KW // 2)
     conv_out = F.conv3d(u, kernels, padding=padding)
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
-def laplace2d(u: torch.Tensor, 
-            h: float | torch.Tensor, 
-            kernel: torch.Tensor) -> torch.Tensor:
-    padding = kernel.shape[-1] // 2
-    return torch.nn.functional.conv2d(u, kernel, padding=padding) / (h*h)
+
+def laplacian_2d(u, k1d, hz=1.0, hx=1.0):
+    """Isotropic 2-D Laplacian via separable kernels: ``d2z + d2x``.
+
+    Convenience wrapper around :func:`separable_d2_2d` for callers that
+    only need the scalar Laplacian ``∇²u`` (the common isotropic-acoustic
+    case). Anisotropic equations should keep using
+    :func:`separable_d2_2d` and combine the two components themselves.
+    """
+    d2z, d2x = separable_d2_2d(u, k1d, hz=hz, hx=hx)
+    return d2z + d2x
+
+
+def laplacian_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
+    """Isotropic 3-D Laplacian via separable kernels: ``d2z + d2y + d2x``.
+
+    Convenience wrapper around :func:`separable_d2_3d`; see
+    :func:`laplacian_2d` for the rationale.
+    """
+    d2z, d2y, d2x = separable_d2_3d(u, k1d, hz=hz, hy=hy, hx=hx)
+    return d2z + d2y + d2x
+
 
 def gradient(u, h, axis, kernels=None):
     h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)

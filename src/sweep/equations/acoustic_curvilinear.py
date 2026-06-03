@@ -8,7 +8,7 @@ computational (ξ, η) domain via the simple linear stretch
 for the metric derivation.
 
 Strategy:
-  - Reuse the existing ``laplace1d_sep`` and ``gradient`` primitives on
+  - Reuse the existing ``separable_d2_2d`` and ``gradient`` primitives on
     the computational grid — they are direction-independent FD ops and
     don't care that ``η`` is dimensionless.
   - Combine ``p_ξξ`` / ``p_ηη`` / mixed ``p_ξη`` / first-order ``p_η``
@@ -67,14 +67,10 @@ class AcousticCurvilinear(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
-        use_fast_grad_kernels = backend == "torch" and "cuda" in str(device)
-        super().__init__(
-            spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels
-        )
-        super().init_laplace(ltype="1dsep", backend=backend)
-        self.grad_kernels = None
-        if use_fast_grad_kernels:
-            self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        super().__init__(spatial_order, device, backend, dim=dim)
+        super().init_separable_laplace()
+        if backend == "torch" and "cuda" in str(device):
+            super().init_grad_kernels()
         # Filled by Propagator at init time once topography is processed.
         self._curv_alpha = None
         self._curv_metric_pηη = None
@@ -118,7 +114,7 @@ class AcousticCurvilinear(SecondOrderEquation):
         hz = self._curv_d_eta
 
         # Base derivatives on the computational (ξ, η) grid.
-        lap_pηη, lap_pξξ = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_pηη, lap_pξξ = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         p_η = self.gradient(u_now, hz, -2, kernels=self.grad_kernels)
         # Mixed partial p_ξη = ∂(p_η)/∂ξ.
         p_ξη = self.gradient(p_η, hx, -1, kernels=self.grad_kernels)

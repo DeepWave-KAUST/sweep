@@ -1,9 +1,9 @@
 
 import numpy as np
 from .utils import to_backend
-from sweep.operators.general import PartialDerivative
+from sweep.operators.general import StaggeredDerivative
 from sweep.scalars import generate_convolution_kernel
-from sweep.operators.factory import OperatorBase
+from sweep.operators.factory import LaplaceGradientOps
 from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
 from .fields import (
     available_role_specs,
@@ -457,7 +457,7 @@ class FirstOrderEquation(WaveEquation, ):
         self.backend = backend
         self.ndim = ndim
         self.use_habc = False
-        self.pd = PartialDerivative(spatial_order, device, backend, ndim=ndim)
+        self.pd = StaggeredDerivative(spatial_order, device, backend, ndim=ndim)
         self.pd.to_backend(to_backend)
 
     def init(self, shape, device='cpu', h=1.0):
@@ -486,7 +486,7 @@ class FirstOrderEquation(WaveEquation, ):
             self._axis_spacing(h, 2),
         )
 
-class SecondOrderEquation(OperatorBase, WaveEquation):
+class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
     """
     Base class for second-order equations.
     This class can be extended to implement specific second-order equations.
@@ -498,7 +498,7 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
 
         :param initial_condition: The initial condition for the equation.
         """
-        OperatorBase.__init__(self, backend=backend)
+        LaplaceGradientOps.__init__(self, backend=backend)
         WaveEquation.__init__(self, spatial_order, device, backend, **kwargs)
         dim = kwargs.get('dim', 2)
         self.ndim = dim
@@ -513,13 +513,12 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
 
-        other_kernels = kwargs.get('other_kernels', False)
         self.kf = kernel_func
-        if other_kernels:
-            self.lkernel_x = to_backend(kernel_func(spatial_order, mode='x', no_center=False, grid='normal'), backend=backend, device=device)
-            self.lkernel_z = to_backend(kernel_func(spatial_order, mode='z', no_center=False, grid='normal'), backend=backend, device=device)
-            self.gkernel_x = to_backend(kernel_func(spatial_order, derivative_order=1, mode='x', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
-            self.gkernel_z = to_backend(kernel_func(spatial_order, derivative_order=1, mode='z', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
+        # Subclasses that need the gradient fast path call
+        # ``self.init_grad_kernels()`` after ``__init__``; ``None`` means
+        # ``self.gradient(u, h, axis, kernels=None)`` falls back to
+        # ``torch.gradient`` (the slow general path).
+        self.grad_kernels = None
 
     def _prepare_separable_laplace_kernels(self):
         if self.backend != 'torch':
@@ -537,17 +536,100 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
             )
         return self.kernel
 
-    def init_laplace(self, ltype='2dmix', backend='jax'):
-        """Overwrting the proporty <laplace>.
+    def init_separable_laplace(self):
+        """Build the separable 1-D second-derivative kernel stack.
+
+        Dispatches on ``self.ndim`` (2 or 3) — no explicit mode argument
+        needed. The kernel stack is stored on ``self.laplace_kernels``
+        and consumed by ``self.separable_d2_2d`` / ``separable_d2_3d``
+        (per-axis components) and ``self.laplacian_2d`` /
+        ``laplacian_3d`` (isotropic ``∇²u`` shortcut).
+
+        Replaces the old ``init_laplace(ltype='1dsep'|'3dsep')`` entry,
+        which required callers to repeat what ``self.ndim`` already
+        encoded.
+        """
+        self.kernel = to_backend(
+            self.kf(self.so, mode='x')[0, 0][self.so // 2, :],
+            backend=self.backend, device=self.device,
+        )
+        self.laplace_kernels = self._prepare_separable_laplace_kernels()
+
+    def laplacian(self, u, h):
+        """Isotropic Laplacian ``∇²u`` using cached ``self.laplace_kernels``.
+
+        Auto-dispatches on ``self.ndim`` (2 or 3); unpacks the scalar /
+        per-axis ``h`` for you. Use this from your ``func()`` instead of
+        the lower-level :meth:`laplacian_2d` / :meth:`laplacian_3d` when
+        the equation is isotropic.
 
         Args:
-            ltype (str, optional): Should be '2dmix' or '1dsep'. Defaults to '2dmix'.
+            u: Input wavefield, shape ``(B, 1, nz, nx)`` for 2-D or
+                ``(B, 1, nz, ny, nx)`` for 3-D.
+            h: Grid spacing — either a scalar or a length-``ndim`` array
+                / tuple. Forwarded through :meth:`_spacings_2d` /
+                :meth:`_spacings_3d` for unpacking.
+
+        Returns:
+            A tensor of the same shape as ``u`` containing ``∇²u``.
+
+        Requires that :meth:`init_separable_laplace` was called in the
+        equation's ``__init__``.
         """
-        if ltype in ['1dsep', '3dsep']:
-            self.kernel = to_backend(self.kf(self.so, mode='x')[0,0][self.so//2,:], backend=self.backend, device=self.device)
-            self.laplace_kernels = self._prepare_separable_laplace_kernels()
-        else:
-            self.laplace_kernels = self.kernel
+        if self.ndim == 2:
+            hz, hx = self._spacings_2d(h)
+            return self.laplacian_2d(u, self.laplace_kernels, hz, hx)
+        hz, hy, hx = self._spacings_3d(h)
+        return self.laplacian_3d(u, self.laplace_kernels, hz, hy, hx)
+
+    def separable_d2(self, u, h):
+        """Per-axis 2nd derivative components using cached kernels.
+
+        Auto-dispatches on ``self.ndim`` (2 or 3); unpacks ``h``. Use
+        this when the equation is anisotropic and needs the components
+        separately (e.g. VTI / TTI ``d²u/∂z²`` and ``d²u/∂x²``
+        weighted by different stiffness factors).
+
+        Args:
+            u: Input wavefield.
+            h: Grid spacing (scalar or length-``ndim``).
+
+        Returns:
+            ``(d2u_dz2, d2u_dx2)`` in 2-D or
+            ``(d2u_dz2, d2u_dy2, d2u_dx2)`` in 3-D — a tuple of tensors
+            of the same shape as ``u``.
+        """
+        if self.ndim == 2:
+            hz, hx = self._spacings_2d(h)
+            return self.separable_d2_2d(u, self.laplace_kernels, hz, hx)
+        hz, hy, hx = self._spacings_3d(h)
+        return self.separable_d2_3d(u, self.laplace_kernels, hz, hy, hx)
+
+    def init_grad_kernels(self):
+        """Build 2-D 1st-derivative fixed-stencil kernels for the fast path.
+
+        Stored as ``self.gkernel_x / self.gkernel_z`` and bundled into
+        ``self.grad_kernels = {-2: gkernel_z, -1: gkernel_x}``, ready to
+        pass through ``self.gradient(u, h, axis, kernels=self.grad_kernels)``
+        in the equation's step function. The fast path uses a single
+        ``conv2d`` per axis and is ~5-10x faster than the default
+        ``torch.gradient`` fallback on CUDA.
+
+        Call after :meth:`init_separable_laplace`. Only meaningful for 2-D
+        equations — 3-D variants currently build their own
+        ``self.grad_kernels`` dict from a custom 3-D stencil.
+        """
+        self.gkernel_x = to_backend(
+            self.kf(self.so, derivative_order=1, mode='x',
+                    no_center=True, grid='normal', sign=-1),
+            backend=self.backend, device=self.device,
+        )
+        self.gkernel_z = to_backend(
+            self.kf(self.so, derivative_order=1, mode='z',
+                    no_center=True, grid='normal', sign=-1),
+            backend=self.backend, device=self.device,
+        )
+        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]

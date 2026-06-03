@@ -1,33 +1,47 @@
-class OperatorBase:
-    """ Base class for operators.
+class LaplaceGradientOps:
+    """Backend-dispatched second-derivative and gradient operator bundle.
+
+    On construction this class imports five backend-specific functions
+    from either :mod:`sweep.operators.torch` or :mod:`sweep.operators.jax`
+    and binds them as instance attributes:
+
+    - :func:`separable_d2_2d` / :func:`separable_d2_3d` — return per-axis
+      second derivatives ``(d2z, d2x[, d2y])`` for anisotropic equations.
+    - :func:`laplacian_2d` / :func:`laplacian_3d` — return the scalar
+      isotropic Laplacian ``∇²u`` (= sum of the per-axis components).
+    - :func:`gradient` — first-order partial derivative along one axis.
+
+    Mixed into :class:`sweep.equations.base.SecondOrderEquation` so every
+    2-D / 3-D second-order acoustic equation can call
+    ``self.laplacian_2d(...)`` or ``self.separable_d2_2d(...)`` etc.
+    without an explicit operator object.
     """
 
     def __init__(self, backend: str = 'torch'):
-        """ Initialize Laplace operator.
-         Args:
-             backend (str, optional): Backend to use ('torch' or 'jax'). Defaults to 'torch'.
-         """
+        """Bind second-derivative + gradient operators for the chosen backend.
+
+        Args:
+            backend: ``'torch'`` (default) or ``'jax'``. The corresponding
+                ``sweep.operators.<backend>`` module is imported lazily so
+                installations that lack one backend stay importable.
+        """
         if backend == 'jax':
-            from sweep.operators.jax import laplace2d as lap2d_jax
-            from sweep.operators.jax import laplace1d_sep as lap1d_jax
-            from sweep.operators.jax import laplace3d_sep as lap3d_jax
-            from sweep.operators.jax import gradient as gradient_jax
-
-            self.laplace2d = lap2d_jax
-            self.laplace1d_sep = lap1d_jax
-            self.laplace3d_sep = lap3d_jax
-            self.gradient = gradient_jax
-
+            from sweep.operators.jax import (
+                separable_d2_2d, separable_d2_3d,
+                laplacian_2d, laplacian_3d, gradient,
+            )
         elif backend == 'torch':
-            from sweep.operators.torch import laplace2d as lap2d_torch
-            from sweep.operators.torch import laplace1d_sep as lap1d_torch
-            from sweep.operators.torch import gradient as gradient_torch
-            from sweep.operators.torch import laplace3d_sep as lap3d_torch
-            
-            self.gradient = gradient_torch
-            self.laplace2d = lap2d_torch
-            self.laplace1d_sep = lap1d_torch
-            self.laplace3d_sep = lap3d_torch # Reuse 1D kernel for 3D by applying it sequentially
+            from sweep.operators.torch import (
+                separable_d2_2d, separable_d2_3d,
+                laplacian_2d, laplacian_3d, gradient,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported backend {backend!r}; expected 'torch' or 'jax'."
+            )
 
-
-
+        self.separable_d2_2d = separable_d2_2d
+        self.separable_d2_3d = separable_d2_3d
+        self.laplacian_2d = laplacian_2d
+        self.laplacian_3d = laplacian_3d
+        self.gradient = gradient

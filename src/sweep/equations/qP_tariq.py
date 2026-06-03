@@ -108,9 +108,9 @@ class AcousticTariq(SecondOrderEquation):
             dim: Stored dimensionality. Always ``2`` for this class.
                 Defaults to 2.
         """
-        super().__init__(spatial_order, device, backend, other_kernels=True)
-        super().init_laplace(ltype="1dsep", backend=backend)
-        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        super().__init__(spatial_order, device, backend)
+        super().init_separable_laplace()
+        super().init_grad_kernels()
 
     @property
     def default_source_fields(self):
@@ -122,7 +122,7 @@ class AcousticTariq(SecondOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)
-        nabla_z, nabla_x = self.laplace1d_sep(wavefields[0], self.laplace_kernels, hz, hx)
-        _, dpdx2 = self.laplace1d_sep(wavefields[2], self.laplace_kernels, hz, hx)
-        dpdx2dz2, _ = self.laplace1d_sep(dpdx2, self.laplace_kernels, hz, hx)
+        nabla_z, nabla_x = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
+        _, dpdx2 = self.separable_d2_2d(wavefields[2], self.laplace_kernels, hz, hx)
+        dpdx2dz2, _ = self.separable_d2_2d(dpdx2, self.laplace_kernels, hz, hx)
         return step_cpml(*wavefields, *models, dt, h, b, self.b, nabla_x, nabla_z, dpdx2dz2, self.gradient, self.grad_kernels, **kwargs)

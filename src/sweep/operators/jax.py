@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
-from jax import vmap, lax
-from jax.scipy.signal import convolve2d as conv2d
+from jax import lax
 
 
 def _resolve_spacing_for_axis(h, axis, ndim):
@@ -47,9 +46,20 @@ def _zero_halo(out, padding):
     return out
 
 @jax.jit
-def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
-    """
-    Anisotropic spacing: Laplace = d2/dz2 / hz^2 + d2/dx2 / hx^2
+def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
+    """Separable per-axis 2nd derivatives of a 2-D wavefield (JAX).
+
+    Naming: ``d2`` = second derivative (∂²); ``2d`` = 2-D wavefield.
+    Returns the **components**, not their sum — sum them yourself for an
+    isotropic Laplacian or use :func:`laplacian_2d` for the shortcut.
+
+    Args:
+        u: Input wavefield, shape ``(B, 1, nz, nx)``.
+        k1d: 1-D kernel of length ``2M+1``.
+        hz, hx: Grid spacings along z and x.
+
+    Returns:
+        ``(d2u_dz2, d2u_dx2)`` — two arrays of the same shape as ``u``.
     """
     # k1d = jnp.asarray(k1d, dtype=u.dtype)
     kz = k1d[:, None, None, None]  # (k,1,1,1)
@@ -72,16 +82,22 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     return d2z / (hz * hz), d2x / (hx * hx)
 
 
-def laplace3d_sep(u, k1d, hz, hy, hx):
-    """ 3D Laplace operator using JAX.
-     Args:
-         u (jnp.ndarray): Input wavefield of shape (batch, 1, depth, height, width).
-         h (float): Grid spacing.
-         kernel (jnp.ndarray): 3D convolution kernel of shape (1, 1, kD, kH, kW).
+def separable_d2_3d(u, k1d, hz, hy, hx):
+    """Separable per-axis 2nd derivatives of a 3-D wavefield (JAX).
 
-     Returns:
-         jnp.ndarray: Resulting wavefield after applying the Laplace operator.
-     """
+    Naming: ``d2`` = second derivative (∂²); ``3d`` = 3-D wavefield.
+    Returns the **components**, not their sum — sum them yourself for an
+    isotropic Laplacian or use :func:`laplacian_3d` for the shortcut.
+
+    Args:
+        u: Input wavefield, shape ``(B, 1, nz, ny, nx)``.
+        k1d: 1-D kernel of length ``2M+1``.
+        hz, hy, hx: Grid spacings along z, y, x.
+
+    Returns:
+        ``(d2u_dz2, d2u_dy2, d2u_dx2)`` — three arrays of the same
+        shape as ``u``.
+    """
     kz = k1d[None, None, :, None, None]  # (1,1,k,1,1)
     ky = k1d[None, None, None, :, None]  # (1,1,1,k,1)
     kx = k1d[None, None, None, None, :]  # (1,1,1,1,k)
@@ -98,36 +114,19 @@ def laplace3d_sep(u, k1d, hz, hy, hx):
     return d2z, d2y, d2x
 
 
-def _laplace(image, kernel):
-    # Expected input shape: (height, width)
-    return conv2d(image, kernel, mode='same')
+@jax.jit
+def laplacian_2d(u, k1d, hz=1.0, hx=1.0):
+    """Isotropic 2-D Laplacian via separable kernels: ``d2z + d2x``."""
+    d2z, d2x = separable_d2_2d(u, k1d, hz=hz, hx=hx)
+    return d2z + d2x
 
-batch_convolve2d = vmap(vmap(_laplace, in_axes=(0, None)), in_axes=(0, None))
 
 @jax.jit
-def laplace2d(u, h=1.0, kernel=None):
-    return batch_convolve2d(u, kernel) / (h ** 2)
+def laplacian_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
+    """Isotropic 3-D Laplacian via separable kernels: ``d2z + d2y + d2x``."""
+    d2z, d2y, d2x = separable_d2_3d(u, k1d, hz=hz, hy=hy, hx=hx)
+    return d2z + d2y + d2x
 
-def laplace3d(u, kernel=None, h=1.0):
-    """ 3D Laplace operator using JAX.
-     Args:
-         u (jnp.ndarray): Input wavefield of shape (batch, 1, depth, height, width).
-         h (float): Grid spacing.
-         kernel (jnp.ndarray): 3D convolution kernel of shape (1, 1, kD, kH, kW).
-
-     Returns:
-         jnp.ndarray: Resulting wavefield after applying the Laplace operator.
-     """
-    dn = jax.lax.conv_dimension_numbers(u.shape, kernel.shape,
-                                        ('NCDHW', 'OIDHW', 'NCDHW'))
-    out = jax.lax.conv_general_dilated(u,    # lhs = image tensor
-                                       kernel,  # rhs = conv kernel tensor
-                                       (1,1,1), # window strides
-                                       'SAME',  # padding mode
-                                       (1,1,1), # lhs/image dilation
-                                       (1,1,1), # rhs/kernel dilation
-                                       dn)      # dimension_numbers
-    return out / (h ** 2)
 
 def _normalize_2d_kernel_bank(kernels):
     kernels = jnp.asarray(kernels)
@@ -150,7 +149,7 @@ def _normalize_3d_kernel_bank(kernels):
 
 
 @jax.jit
-def apply_kernels_jax(u, kernels):
+def apply_kernels(u, kernels):
     # u: (B, 1, H, W)
     # kernels: (K, kh, kw) or (K, 1, kh, kw)
     kernel_bank = _normalize_2d_kernel_bank(kernels)
@@ -168,7 +167,7 @@ def apply_kernels_jax(u, kernels):
 
 
 @jax.jit
-def apply_kernels_jax3d(u, kernels):
+def apply_kernels_3d(u, kernels):
     # u: (B, 1, D, H, W)
     # kernels: (K, kD, kH, kW) or (K, 1, kD, kH, kW)
     kernel_bank = _normalize_3d_kernel_bank(kernels)
@@ -183,6 +182,7 @@ def apply_kernels_jax3d(u, kernels):
         dimension_numbers=("NCDHW", "OIDHW", "NCDHW"),
     )
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(axis=1, keepdims=True)
+
 
 def gradient(u, h, axis, kernels=None):
     h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)
