@@ -660,6 +660,53 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = root
         self._boundary_disk_files = tuple(files)
 
+    def _int8_scale_shapes(self, main_shapes, block=256):
+        """Per-face FP32 scale-buffer shapes for INT8 boundary storage.
+
+        Mirror each uint8 main shape but collapse the spatial dims of one
+        timestep slot to ``ceil(cells_per_step / block)`` blocks, preserving
+        the outer (time*field, batch[, ...]) axes so ``_slice_boundary_buffers``
+        narrows the same batch axis as the main tensors.  Used for both the
+        gpu-direct (full-nt) buffers and the staged (ring) buffers, so the
+        C++ saver sees a consistent per-step block count on either path.
+        """
+        scale_shapes = []
+        for s in main_shapes:
+            if self.ndim == 3:
+                outer = (s[0], s[1])
+                spatial = s[2:]
+            else:
+                outer = (s[0], s[1], s[2])
+                spatial = s[3:]
+            cells_per_step = 1
+            for d in spatial:
+                cells_per_step *= d
+            n_blocks = (cells_per_step + block - 1) // block
+            scale_shapes.append(tuple(outer) + (n_blocks,))
+        return tuple(scale_shapes)
+
+    def _allocate_boundary_disk_files_int8(self, main_shapes, scale_shapes, disk_dir):
+        """Disk files for staged INT8: N uint8 main files (es=1) followed by
+        N FP32 per-block scale files (es=4), full-nt sized.  The order
+        (main..., scale...) matches the concatenation the C++ saver expects
+        in ``boundary_disk_files``."""
+        root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
+        files = []
+        for idx, shape in enumerate(main_shapes):
+            path = os.path.join(root, f"boundary_{idx}.bin")
+            numel = int(torch.Size(shape).numel())
+            with open(path, "wb") as handle:
+                handle.truncate(numel * 1)  # uint8 main
+            files.append(path)
+        for idx, shape in enumerate(scale_shapes):
+            path = os.path.join(root, f"boundary_scale_{idx}.bin")
+            numel = int(torch.Size(shape).numel())
+            with open(path, "wb") as handle:
+                handle.truncate(numel * 4)  # fp32 scale
+            files.append(path)
+        self._boundary_disk_root = root
+        self._boundary_disk_files = tuple(files)
+
     def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None):
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
@@ -683,15 +730,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 boundary_dtype = 'fp32'
         if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
             raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
-        # Staged (cpu/disk) storage supports fp32/fp16/bf16.  int8 needs a
-        # uint8 + per-block-scale staging ring that the staged path does not
-        # implement yet, so reject it loudly instead of silently storing fp32.
-        if boundary_on_cpu and boundary_dtype == 'int8':
-            raise ValueError(
-                f"boundary storage_dtype='int8' with storage={boundary_storage!r} "
-                "is not supported: staged (cpu/disk) storage supports "
-                "fp32/fp16/bf16; int8 is gpu-only."
-            )
+        # All storage locations (gpu/cpu/disk) support every storage_dtype
+        # (fp32/fp16/bf16/int8).  Staged int8 uses a uint8 main + FP32 per-block
+        # scale ring (and, for disk, parallel uint8 + scale files); see the
+        # int8 allocation branch below and saver.cuh / runtime.cuh.
         if (
             self._boundary_cache_batch == self.B
             and
@@ -738,7 +780,42 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             'bf16': torch.bfloat16,
         }.get(boundary_dtype, torch.float32)
 
-        if boundary_on_cpu:
+        if boundary_on_cpu and boundary_dtype == 'int8':
+            # Staged INT8: a persistent uint8 main + FP32 per-block scale on
+            # the cpu side (boundary_cpu = main..., scale...) AND a uint8 main
+            # ring + FP32 scale ring on the gpu (boundary_gpu = main..., scale
+            # ...), both concatenated main-then-scale to mirror the gpu-direct
+            # layout the saver already splits.  For storage='disk' the cpu side
+            # is staging-sized and the full-nt data lives in uint8 + FP32 files.
+            _BLOCK = 256
+            cpu_main_shapes = (layout.gpu_shapes if boundary_storage == "disk"
+                               else layout.cpu_shapes)
+            ring_main_shapes = layout.gpu_shapes
+            cpu_scale_shapes = self._int8_scale_shapes(cpu_main_shapes, _BLOCK)
+            ring_scale_shapes = self._int8_scale_shapes(ring_main_shapes, _BLOCK)
+            if boundary_storage == "disk":
+                self._allocate_boundary_disk_files_int8(
+                    layout.cpu_shapes,
+                    self._int8_scale_shapes(layout.cpu_shapes, _BLOCK),
+                    disk_dir)
+            cpu_main = self.boundary_cpu_allocator.zeros(
+                cpu_main_shapes, dtype=torch.uint8, dev='cpu', pin_memory=staging_pinned)
+            cpu_scale = self.boundary_cpu_allocator.zeros(
+                cpu_scale_shapes, dtype=torch.float32, dev='cpu', pin_memory=staging_pinned)
+            self.boundary_cpu = tuple(cpu_main) + tuple(cpu_scale)
+            ring_main = self.boundary_gpu_allocator.zeros(
+                ring_main_shapes, dtype=torch.uint8)
+            ring_scale = self.boundary_gpu_allocator.zeros(
+                ring_scale_shapes, dtype=torch.float32)
+            self.boundary_gpu = tuple(ring_main) + tuple(ring_scale)
+            self.boundary_gpu_full = ()
+            self.last_two = self.boundary_cpu_allocator.zeros(
+                [last_two_shape],
+                dtype=torch.float32,
+                dev='cpu',
+                pin_memory=staging_pinned,
+            )[0]
+        elif boundary_on_cpu:
             if boundary_storage == "disk":
                 self._allocate_boundary_disk_files(
                     layout.cpu_shapes, disk_dir,
@@ -783,32 +860,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 # N = 4 (2D) or 6 (3D).  Saver detects this pattern via
                 # dtype and binds main + scale + allocates FP32 staging
                 # internally.  See saver.cuh allocate_int8_main_and_scale.
-                _BLOCK = 256
-                main_shapes = layout.gpu_full_shapes
-                main_tensors = self.boundary_gpu_allocator.zeros(
-                    main_shapes, dtype=torch.uint8)
                 # Scale shapes preserve the batch dimension so that
                 # ``_slice_boundary_buffers`` narrows the same axis as the
-                # main tensors.  Spatial dims collapse to n_blocks.
+                # main tensors.  Spatial dims collapse to n_blocks (shared
+                # with the staged int8 path via ``_int8_scale_shapes``).
                 #   3D main  (nvar*nt, B, W, Ny_b, Nx_b)
                 #     scale  (nvar*nt, B, n_blocks_per_step)
                 #   2D main  (nvar, nt, B, W, Nx_b)
                 #     scale  (nvar, nt, B, n_blocks_per_step)
-                scale_shapes = []
-                for s in main_shapes:
-                    if self.ndim == 3:
-                        outer = (s[0], s[1])
-                        spatial = s[2:]
-                    else:
-                        outer = (s[0], s[1], s[2])
-                        spatial = s[3:]
-                    cells_per_step = 1
-                    for d in spatial:
-                        cells_per_step *= d
-                    n_blocks = (cells_per_step + _BLOCK - 1) // _BLOCK
-                    scale_shapes.append(outer + (n_blocks,))
+                main_shapes = layout.gpu_full_shapes
+                main_tensors = self.boundary_gpu_allocator.zeros(
+                    main_shapes, dtype=torch.uint8)
                 scale_tensors = self.boundary_gpu_allocator.zeros(
-                    scale_shapes, dtype=torch.float32)
+                    self._int8_scale_shapes(main_shapes), dtype=torch.float32)
                 self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
             else:
                 self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(

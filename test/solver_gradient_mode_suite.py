@@ -113,8 +113,14 @@ SOLVERS = {
             "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
             "bs_disk",
             "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
             "ckpt_recursive",
@@ -139,8 +145,14 @@ SOLVERS = {
             "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
             "bs_disk",
             "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
             "ckpt_recursive",
@@ -201,8 +213,14 @@ SOLVERS = {
             "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
             "bs_disk",
             "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
         ),
@@ -962,6 +980,7 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
             "mode": mode,
             "status": "error",
             "seconds": "",
+            "peak_mem_mb": "",
             "loss_eager": f"{eager_result['loss']:.9e}",
             "loss_candidate": "",
             "metrics": "",
@@ -970,6 +989,12 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
             "error": "",
         }
         try:
+            # Peak GPU-memory of this mode's full build+forward+backward.  The
+            # shared input tensors (models/observed/wavelet) are allocated
+            # before the reset, so cross-mode deltas isolate the solver's
+            # internal storage (boundary buffers, checkpoints, wavefields).
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
             solver = build_solver(spec, "cuda", mode, scenario, shape, device, args, run_dir, case_key)
             candidate = run_gradient(
                 solver,
@@ -982,6 +1007,8 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
                 spec.model_names,
                 device,
             )
+            torch.cuda.synchronize(device)
+            row["peak_mem_mb"] = f"{torch.cuda.max_memory_allocated(device) / (1024 ** 2):.1f}"
             metrics = {
                 name: metric_pair(eager_result["grads"][name], candidate["grads"][name])
                 for name in eager_result["grads"]
@@ -1009,7 +1036,7 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
                 }
             )
             print(
-                f"  {mode}: {status} "
+                f"  {mode}: {status} [peak={row['peak_mem_mb']}MB] "
                 + ", ".join(
                     f"{name} rel_l2={item['rel_l2']:.3e} cos={item['cosine']:.3f}"
                     for name, item in metrics.items()
@@ -1037,6 +1064,7 @@ def write_summaries(run_dir: Path, rows: list[dict]):
         "mode",
         "status",
         "seconds",
+        "peak_mem_mb",
         "loss_eager",
         "loss_candidate",
         "metrics",
@@ -1071,8 +1099,12 @@ def main():
         "bs_gpu_int8",
         "bs_cpu_fp16",
         "bs_cpu_bf16",
+        "bs_cpu_int8",
+        "bs_cpu_pinned_int8",
         "bs_disk_fp16",
         "bs_disk_bf16",
+        "bs_disk_int8",
+        "bs_disk_async_int8",
     }
     solver_keys = parse_csv(args.solvers, SOLVERS, label="solver")
     scenario_keys = parse_csv(args.scenarios, SCENARIOS, label="scenario")
