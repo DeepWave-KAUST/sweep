@@ -13,6 +13,40 @@
 
 #include "saver.cuh"
 
+// Bind one staged boundary face to the typed pointer matching the staging
+// tensor's dtype (fp32/fp16/bf16) at element offset OFF.  Mirrors view()'s
+// GPU-direct binding so the existing dtype-dispatched save/restore kernels work
+// for the cpu/disk staging ring too.  OFF is an element offset (dtype-agnostic).
+// A macro (not a function) so it assigns directly to the __restrict__-qualified
+// pointer members of GeneralBoundaryPointer (a reference param would drop the
+// restrict qualifier).
+#define BIND_STAGED_FACE(STG, OFF, PF, PH, PBF)                                \
+    do {                                                                       \
+        const torch::Tensor& _stg = (STG);                                     \
+        const int64_t _off = (OFF);                                            \
+        const auto _st = _stg.scalar_type();                                   \
+        if (_st == torch::kHalf)                                               \
+            (PH) = reinterpret_cast<__half*>(_stg.data_ptr()) + _off;          \
+        else if (_st == torch::kBFloat16)                                      \
+            (PBF) = reinterpret_cast<__nv_bfloat16*>(_stg.data_ptr()) + _off;  \
+        else                                                                   \
+            (PF) = reinterpret_cast<float*>(_stg.data_ptr()) + _off;           \
+    } while (0)
+
+// Bind one staged INT8 boundary face: the uint8 main RING at element
+// (cell) offset QOFF, the FP32 per-block scale RING at block offset SOFF,
+// and the shared FP32 transient staging buffer TRANS (no offset — one
+// timestep, reused every step).  The two-pass save/restore in
+// quantize_step/dequantize_step then compresses TRANS -> ring (QOFF/SOFF
+// pre-applied, so it is called with step_idx == 0).  RING_Q / RING_S are
+// the saver's ring tensors; PQ/PS/PT are GeneralBoundaryPointer members.
+#define BIND_STAGED_INT8(RING_Q, QOFF, RING_S, SOFF, TRANS, PQ, PS, PT)        \
+    do {                                                                       \
+        (PQ) = reinterpret_cast<uint8_t*>((RING_Q).data_ptr()) + (QOFF);       \
+        (PS) = (RING_S).data_ptr<float>() + (SOFF);                            \
+        (PT) = (TRANS);                                                         \
+    } while (0)
+
 struct BoundaryChunk {
     int it = 0;
     int buf_idx = 0;
@@ -233,15 +267,31 @@ public:
 
         int gpu_idx = chunk.ring_start + chunk.buf_idx;
         GeneralBoundaryPointer ptr{};
-        ptr.top = saver_.top_gpu.data_ptr<float>() + gpu_idx * saver_.top_stride;
-        ptr.bottom = saver_.bottom_gpu.data_ptr<float>() + gpu_idx * saver_.bottom_stride;
-        ptr.left = saver_.left_gpu.data_ptr<float>() + gpu_idx * saver_.left_stride;
-        ptr.right = saver_.right_gpu.data_ptr<float>() + gpu_idx * saver_.right_stride;
+        ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
         ptr.last_two = direct.last_two;
+        if (ptr.dtype == BoundaryDtype::INT8) {
+            // Staged INT8: uint8 ring (cells/step) + scale ring (blocks/step)
+            // + shared FP32 transient (direct.*).  Scale ring per-step stride
+            // is its outer-time stride (dim 0 in 3D, dim 1 in 2D).
+            const int sd = (dim_ == 3) ? 0 : 1;
+            BIND_STAGED_INT8(saver_.top_gpu,    gpu_idx * saver_.top_stride,    saver_.top_scale_gpu,    gpu_idx * saver_.top_scale_gpu.stride(sd),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
+            BIND_STAGED_INT8(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, gpu_idx * saver_.bottom_scale_gpu.stride(sd), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
+            BIND_STAGED_INT8(saver_.left_gpu,   gpu_idx * saver_.left_stride,   saver_.left_scale_gpu,   gpu_idx * saver_.left_scale_gpu.stride(sd),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
+            BIND_STAGED_INT8(saver_.right_gpu,  gpu_idx * saver_.right_stride,  saver_.right_scale_gpu,  gpu_idx * saver_.right_scale_gpu.stride(sd),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            if (dim_ == 3) {
+                BIND_STAGED_INT8(saver_.front_gpu, gpu_idx * saver_.front_stride, saver_.front_scale_gpu, gpu_idx * saver_.front_scale_gpu.stride(sd), direct.front, ptr.front_q, ptr.front_scale, ptr.front);
+                BIND_STAGED_INT8(saver_.back_gpu,  gpu_idx * saver_.back_stride,  saver_.back_scale_gpu,  gpu_idx * saver_.back_scale_gpu.stride(sd),  direct.back,  ptr.back_q,  ptr.back_scale,  ptr.back);
+            }
+            return ptr;
+        }
+        BIND_STAGED_FACE(saver_.top_gpu,    gpu_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+        BIND_STAGED_FACE(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+        BIND_STAGED_FACE(saver_.left_gpu,   gpu_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+        BIND_STAGED_FACE(saver_.right_gpu,  gpu_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
 
         if (dim_ == 3) {
-            ptr.front = saver_.front_gpu.data_ptr<float>() + gpu_idx * saver_.front_stride;
-            ptr.back = saver_.back_gpu.data_ptr<float>() + gpu_idx * saver_.back_stride;
+            BIND_STAGED_FACE(saver_.front_gpu, gpu_idx * saver_.front_stride, ptr.front, ptr.front_h, ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,  gpu_idx * saver_.back_stride,  ptr.back,  ptr.back_h,  ptr.back_bf);
         }
         return ptr;
     }
@@ -262,18 +312,42 @@ public:
 
             if (staged_) {
                 int gpu_idx = chunk.ring_start + chunk.buf_idx;
-                ptr.top = saver_.top_gpu.data_ptr<float>() +
-                    field_idx * saver_.top_gpu.stride(0) +
-                    gpu_idx * saver_.top_gpu.stride(1);
-                ptr.bottom = saver_.bottom_gpu.data_ptr<float>() +
-                    field_idx * saver_.bottom_gpu.stride(0) +
-                    gpu_idx * saver_.bottom_gpu.stride(1);
-                ptr.left = saver_.left_gpu.data_ptr<float>() +
-                    field_idx * saver_.left_gpu.stride(0) +
-                    gpu_idx * saver_.left_gpu.stride(1);
-                ptr.right = saver_.right_gpu.data_ptr<float>() +
-                    field_idx * saver_.right_gpu.stride(0) +
-                    gpu_idx * saver_.right_gpu.stride(1);
+                ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+                if (ptr.dtype == BoundaryDtype::INT8) {
+                    BIND_STAGED_INT8(saver_.top_gpu,
+                        field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
+                        saver_.top_scale_gpu,
+                        field_idx * saver_.top_scale_gpu.stride(0) + gpu_idx * saver_.top_scale_gpu.stride(1),
+                        direct.top, ptr.top_q, ptr.top_scale, ptr.top);
+                    BIND_STAGED_INT8(saver_.bottom_gpu,
+                        field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
+                        saver_.bottom_scale_gpu,
+                        field_idx * saver_.bottom_scale_gpu.stride(0) + gpu_idx * saver_.bottom_scale_gpu.stride(1),
+                        direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
+                    BIND_STAGED_INT8(saver_.left_gpu,
+                        field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
+                        saver_.left_scale_gpu,
+                        field_idx * saver_.left_scale_gpu.stride(0) + gpu_idx * saver_.left_scale_gpu.stride(1),
+                        direct.left, ptr.left_q, ptr.left_scale, ptr.left);
+                    BIND_STAGED_INT8(saver_.right_gpu,
+                        field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
+                        saver_.right_scale_gpu,
+                        field_idx * saver_.right_scale_gpu.stride(0) + gpu_idx * saver_.right_scale_gpu.stride(1),
+                        direct.right, ptr.right_q, ptr.right_scale, ptr.right);
+                } else {
+                BIND_STAGED_FACE(saver_.top_gpu,
+                    field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
+                    ptr.top, ptr.top_h, ptr.top_bf);
+                BIND_STAGED_FACE(saver_.bottom_gpu,
+                    field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
+                    ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+                BIND_STAGED_FACE(saver_.left_gpu,
+                    field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
+                    ptr.left, ptr.left_h, ptr.left_bf);
+                BIND_STAGED_FACE(saver_.right_gpu,
+                    field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
+                    ptr.right, ptr.right_h, ptr.right_bf);
+                }
             } else if (direct.dtype == BoundaryDtype::FP16) {
                 ptr.top_h    = direct.top_h    + field_idx * saver_.top_t.stride(0);
                 ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
@@ -350,19 +424,32 @@ public:
             ptr.back   = direct.back;
             ptr.left   = direct.left;
             ptr.right  = direct.right;
+        } else if (staged_) {
+            ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+            if (ptr.dtype == BoundaryDtype::INT8) {
+                // 3D staged INT8: uint8 ring + scale ring indexed by the same
+                // flat (gpu_time*nvar + field) index; shared FP32 transient.
+                BIND_STAGED_INT8(saver_.top_gpu,    flat_idx * saver_.top_stride,    saver_.top_scale_gpu,    flat_idx * saver_.top_scale_gpu.stride(0),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
+                BIND_STAGED_INT8(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, flat_idx * saver_.bottom_scale_gpu.stride(0), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
+                BIND_STAGED_INT8(saver_.front_gpu,  flat_idx * saver_.front_stride,  saver_.front_scale_gpu,  flat_idx * saver_.front_scale_gpu.stride(0),  direct.front,  ptr.front_q,  ptr.front_scale,  ptr.front);
+                BIND_STAGED_INT8(saver_.back_gpu,   flat_idx * saver_.back_stride,   saver_.back_scale_gpu,   flat_idx * saver_.back_scale_gpu.stride(0),   direct.back,   ptr.back_q,   ptr.back_scale,   ptr.back);
+                BIND_STAGED_INT8(saver_.left_gpu,   flat_idx * saver_.left_stride,   saver_.left_scale_gpu,   flat_idx * saver_.left_scale_gpu.stride(0),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
+                BIND_STAGED_INT8(saver_.right_gpu,  flat_idx * saver_.right_stride,  saver_.right_scale_gpu,  flat_idx * saver_.right_scale_gpu.stride(0),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            } else {
+            BIND_STAGED_FACE(saver_.top_gpu,    flat_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+            BIND_STAGED_FACE(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+            BIND_STAGED_FACE(saver_.front_gpu,  flat_idx * saver_.front_stride,  ptr.front,  ptr.front_h,  ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,   flat_idx * saver_.back_stride,   ptr.back,   ptr.back_h,   ptr.back_bf);
+            BIND_STAGED_FACE(saver_.left_gpu,   flat_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+            BIND_STAGED_FACE(saver_.right_gpu,  flat_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
+            }
         } else {
-            ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
-                flat_idx * saver_.top_stride;
-            ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
-                flat_idx * saver_.bottom_stride;
-            ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
-                flat_idx * saver_.front_stride;
-            ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
-                flat_idx * saver_.back_stride;
-            ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
-                flat_idx * saver_.left_stride;
-            ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
-                flat_idx * saver_.right_stride;
+            ptr.top = direct.top + flat_idx * saver_.top_stride;
+            ptr.bottom = direct.bottom + flat_idx * saver_.bottom_stride;
+            ptr.front = direct.front + flat_idx * saver_.front_stride;
+            ptr.back = direct.back + flat_idx * saver_.back_stride;
+            ptr.left = direct.left + flat_idx * saver_.left_stride;
+            ptr.right = direct.right + flat_idx * saver_.right_stride;
         }
         ptr.last_two = direct.last_two;
         return ptr;
@@ -692,15 +779,28 @@ public:
             gpu_idx = buf_idx;
 
         GeneralBoundaryPointer ptr{};
-        ptr.top = saver_.top_gpu.data_ptr<float>() + gpu_idx * saver_.top_stride;
-        ptr.bottom = saver_.bottom_gpu.data_ptr<float>() + gpu_idx * saver_.bottom_stride;
-        ptr.left = saver_.left_gpu.data_ptr<float>() + gpu_idx * saver_.left_stride;
-        ptr.right = saver_.right_gpu.data_ptr<float>() + gpu_idx * saver_.right_stride;
+        ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
         ptr.last_two = direct.last_two;
+        if (ptr.dtype == BoundaryDtype::INT8) {
+            const int sd = (dim_ == 3) ? 0 : 1;
+            BIND_STAGED_INT8(saver_.top_gpu,    gpu_idx * saver_.top_stride,    saver_.top_scale_gpu,    gpu_idx * saver_.top_scale_gpu.stride(sd),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
+            BIND_STAGED_INT8(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, gpu_idx * saver_.bottom_scale_gpu.stride(sd), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
+            BIND_STAGED_INT8(saver_.left_gpu,   gpu_idx * saver_.left_stride,   saver_.left_scale_gpu,   gpu_idx * saver_.left_scale_gpu.stride(sd),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
+            BIND_STAGED_INT8(saver_.right_gpu,  gpu_idx * saver_.right_stride,  saver_.right_scale_gpu,  gpu_idx * saver_.right_scale_gpu.stride(sd),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            if (dim_ == 3) {
+                BIND_STAGED_INT8(saver_.front_gpu, gpu_idx * saver_.front_stride, saver_.front_scale_gpu, gpu_idx * saver_.front_scale_gpu.stride(sd), direct.front, ptr.front_q, ptr.front_scale, ptr.front);
+                BIND_STAGED_INT8(saver_.back_gpu,  gpu_idx * saver_.back_stride,  saver_.back_scale_gpu,  gpu_idx * saver_.back_scale_gpu.stride(sd),  direct.back,  ptr.back_q,  ptr.back_scale,  ptr.back);
+            }
+            return ptr;
+        }
+        BIND_STAGED_FACE(saver_.top_gpu,    gpu_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+        BIND_STAGED_FACE(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+        BIND_STAGED_FACE(saver_.left_gpu,   gpu_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+        BIND_STAGED_FACE(saver_.right_gpu,  gpu_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
 
         if (dim_ == 3) {
-            ptr.front = saver_.front_gpu.data_ptr<float>() + gpu_idx * saver_.front_stride;
-            ptr.back = saver_.back_gpu.data_ptr<float>() + gpu_idx * saver_.back_stride;
+            BIND_STAGED_FACE(saver_.front_gpu, gpu_idx * saver_.front_stride, ptr.front, ptr.front_h, ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,  gpu_idx * saver_.back_stride,  ptr.back,  ptr.back_h,  ptr.back_bf);
         }
         return ptr;
     }
@@ -727,18 +827,42 @@ public:
                 if (!boundary_disk_async_read_)
                     gpu_idx = buf_idx;
 
-                ptr.top = saver_.top_gpu.data_ptr<float>() +
-                    field_idx * saver_.top_gpu.stride(0) +
-                    gpu_idx * saver_.top_gpu.stride(1);
-                ptr.bottom = saver_.bottom_gpu.data_ptr<float>() +
-                    field_idx * saver_.bottom_gpu.stride(0) +
-                    gpu_idx * saver_.bottom_gpu.stride(1);
-                ptr.left = saver_.left_gpu.data_ptr<float>() +
-                    field_idx * saver_.left_gpu.stride(0) +
-                    gpu_idx * saver_.left_gpu.stride(1);
-                ptr.right = saver_.right_gpu.data_ptr<float>() +
-                    field_idx * saver_.right_gpu.stride(0) +
-                    gpu_idx * saver_.right_gpu.stride(1);
+                ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+                if (ptr.dtype == BoundaryDtype::INT8) {
+                    BIND_STAGED_INT8(saver_.top_gpu,
+                        field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
+                        saver_.top_scale_gpu,
+                        field_idx * saver_.top_scale_gpu.stride(0) + gpu_idx * saver_.top_scale_gpu.stride(1),
+                        direct.top, ptr.top_q, ptr.top_scale, ptr.top);
+                    BIND_STAGED_INT8(saver_.bottom_gpu,
+                        field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
+                        saver_.bottom_scale_gpu,
+                        field_idx * saver_.bottom_scale_gpu.stride(0) + gpu_idx * saver_.bottom_scale_gpu.stride(1),
+                        direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
+                    BIND_STAGED_INT8(saver_.left_gpu,
+                        field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
+                        saver_.left_scale_gpu,
+                        field_idx * saver_.left_scale_gpu.stride(0) + gpu_idx * saver_.left_scale_gpu.stride(1),
+                        direct.left, ptr.left_q, ptr.left_scale, ptr.left);
+                    BIND_STAGED_INT8(saver_.right_gpu,
+                        field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
+                        saver_.right_scale_gpu,
+                        field_idx * saver_.right_scale_gpu.stride(0) + gpu_idx * saver_.right_scale_gpu.stride(1),
+                        direct.right, ptr.right_q, ptr.right_scale, ptr.right);
+                } else {
+                BIND_STAGED_FACE(saver_.top_gpu,
+                    field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
+                    ptr.top, ptr.top_h, ptr.top_bf);
+                BIND_STAGED_FACE(saver_.bottom_gpu,
+                    field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
+                    ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+                BIND_STAGED_FACE(saver_.left_gpu,
+                    field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
+                    ptr.left, ptr.left_h, ptr.left_bf);
+                BIND_STAGED_FACE(saver_.right_gpu,
+                    field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
+                    ptr.right, ptr.right_h, ptr.right_bf);
+                }
             } else if (direct.dtype == BoundaryDtype::FP16) {
                 ptr.top_h    = direct.top_h    + field_idx * saver_.top_t.stride(0);
                 ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
@@ -823,19 +947,30 @@ public:
             ptr.back   = direct.back;
             ptr.left   = direct.left;
             ptr.right  = direct.right;
+        } else if (staged_) {
+            ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
+            if (ptr.dtype == BoundaryDtype::INT8) {
+                BIND_STAGED_INT8(saver_.top_gpu,    flat_idx * saver_.top_stride,    saver_.top_scale_gpu,    flat_idx * saver_.top_scale_gpu.stride(0),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
+                BIND_STAGED_INT8(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, flat_idx * saver_.bottom_scale_gpu.stride(0), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
+                BIND_STAGED_INT8(saver_.front_gpu,  flat_idx * saver_.front_stride,  saver_.front_scale_gpu,  flat_idx * saver_.front_scale_gpu.stride(0),  direct.front,  ptr.front_q,  ptr.front_scale,  ptr.front);
+                BIND_STAGED_INT8(saver_.back_gpu,   flat_idx * saver_.back_stride,   saver_.back_scale_gpu,   flat_idx * saver_.back_scale_gpu.stride(0),   direct.back,   ptr.back_q,   ptr.back_scale,   ptr.back);
+                BIND_STAGED_INT8(saver_.left_gpu,   flat_idx * saver_.left_stride,   saver_.left_scale_gpu,   flat_idx * saver_.left_scale_gpu.stride(0),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
+                BIND_STAGED_INT8(saver_.right_gpu,  flat_idx * saver_.right_stride,  saver_.right_scale_gpu,  flat_idx * saver_.right_scale_gpu.stride(0),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            } else {
+            BIND_STAGED_FACE(saver_.top_gpu,    flat_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
+            BIND_STAGED_FACE(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
+            BIND_STAGED_FACE(saver_.front_gpu,  flat_idx * saver_.front_stride,  ptr.front,  ptr.front_h,  ptr.front_bf);
+            BIND_STAGED_FACE(saver_.back_gpu,   flat_idx * saver_.back_stride,   ptr.back,   ptr.back_h,   ptr.back_bf);
+            BIND_STAGED_FACE(saver_.left_gpu,   flat_idx * saver_.left_stride,   ptr.left,   ptr.left_h,   ptr.left_bf);
+            BIND_STAGED_FACE(saver_.right_gpu,  flat_idx * saver_.right_stride,  ptr.right,  ptr.right_h,  ptr.right_bf);
+            }
         } else {
-            ptr.top = (staged_ ? saver_.top_gpu.data_ptr<float>() : direct.top) +
-                flat_idx * saver_.top_stride;
-            ptr.bottom = (staged_ ? saver_.bottom_gpu.data_ptr<float>() : direct.bottom) +
-                flat_idx * saver_.bottom_stride;
-            ptr.front = (staged_ ? saver_.front_gpu.data_ptr<float>() : direct.front) +
-                flat_idx * saver_.front_stride;
-            ptr.back = (staged_ ? saver_.back_gpu.data_ptr<float>() : direct.back) +
-                flat_idx * saver_.back_stride;
-            ptr.left = (staged_ ? saver_.left_gpu.data_ptr<float>() : direct.left) +
-                flat_idx * saver_.left_stride;
-            ptr.right = (staged_ ? saver_.right_gpu.data_ptr<float>() : direct.right) +
-                flat_idx * saver_.right_stride;
+            ptr.top = direct.top + flat_idx * saver_.top_stride;
+            ptr.bottom = direct.bottom + flat_idx * saver_.bottom_stride;
+            ptr.front = direct.front + flat_idx * saver_.front_stride;
+            ptr.back = direct.back + flat_idx * saver_.back_stride;
+            ptr.left = direct.left + flat_idx * saver_.left_stride;
+            ptr.right = direct.right + flat_idx * saver_.right_stride;
         }
         ptr.last_two = direct.last_two;
         return ptr;
@@ -1166,6 +1301,15 @@ private:
             if (boundary_disk_async_read_) {
                 start_async_disk_read(start, len, slot);
             } else {
+                // The synchronous disk read below overwrites the shared CPU
+                // staging buffer (boundary_cpu / saver_.*_t).  The previous
+                // chunk's H2D copy reads that same buffer, so we must wait for
+                // it to finish before clobbering it — otherwise the host races
+                // ahead of the (possibly backlogged) copy stream and the
+                // in-flight H2D picks up this chunk's freshly-read bytes,
+                // scrambling the restored boundary for nvar>1.  (ring_buffers
+                // is 1 on this path, so the staging buffer is reused verbatim.)
+                cudaStreamSynchronize(copy_stream_);
                 auto read_start = Clock::now();
                 if (dim_ == 2)
                     saver_.load_disk_to_cpu_2d(start, len, disk_files_);
@@ -1274,6 +1418,13 @@ private:
     inline void run_disk_reader_task(int start, int len, int slot)
     {
         int stage_start = slot * transfer_interval_;
+        // This slot's staging region was last read by its previous H2D copy
+        // (tracked by copy_ready_[slot]).  Wait for that copy to finish before
+        // the disk read below overwrites the region, or the in-flight H2D
+        // would pick up the new chunk's bytes and scramble the restored
+        // boundary for nvar>1.  (compute_ready_ already gates the H2D's write
+        // to top_gpu; this gates the disk read's write to the CPU staging.)
+        cudaEventSynchronize(copy_ready_[slot]);
         auto read_start = Clock::now();
         if (dim_ == 2)
             saver_.load_disk_to_cpu_2d(start, len, disk_files_, stage_start);

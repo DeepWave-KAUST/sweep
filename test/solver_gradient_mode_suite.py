@@ -113,8 +113,14 @@ SOLVERS = {
             "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
             "bs_disk",
             "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
             "ckpt_recursive",
@@ -139,8 +145,14 @@ SOLVERS = {
             "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
             "bs_disk",
             "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
             "ckpt_recursive",
@@ -201,8 +213,14 @@ SOLVERS = {
             "bs_gpu_int8",
             "bs_cpu",
             "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
             "bs_disk",
             "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
         ),
@@ -465,12 +483,19 @@ def make_geometry(spec: SolverSpec, shape: tuple[int, ...], scenario: ScenarioSp
 
 
 def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOptions | None:
-    # FP16/BF16 PoC modes: same CUDAOptions as the FP32 counterpart; the
-    # storage dtype is forced via env var by ``run_case``.
     if mode == "full":
         return None
-    if mode in ("bs_gpu_fp16", "bs_gpu_bf16", "bs_gpu_int8"):
-        mode = "bs_gpu"
+
+    # Optional storage-dtype suffix (_fp16/_bf16/_int8) on any bs_* mode; the
+    # base mode selects the storage location.  The dtype is passed via the
+    # BoundaryOptions.storage_dtype kwarg -- the C++ saver derives the storage
+    # dtype from the buffer tensors, so it works for cpu/disk staging too.
+    storage_dtype = "fp32"
+    for _sfx in ("_fp16", "_bf16", "_int8"):
+        if mode.endswith(_sfx):
+            storage_dtype = _sfx[1:]
+            mode = mode[: -len(_sfx)]
+            break
 
     if mode.startswith("bs_"):
         storage = "gpu"
@@ -511,6 +536,7 @@ def build_cuda_options(mode: str, args, run_dir: Path, case_key: str) -> CUDAOpt
                 strategy="boundary",
                 boundary=BoundaryOptions(
                     storage=storage,
+                    storage_dtype=storage_dtype,
                     transfer_interval=transfer_interval,
                     pinned_memory=pinned,
                     disk_dir=str(disk_dir) if disk_dir is not None else None,
@@ -954,6 +980,7 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
             "mode": mode,
             "status": "error",
             "seconds": "",
+            "peak_mem_mb": "",
             "loss_eager": f"{eager_result['loss']:.9e}",
             "loss_candidate": "",
             "metrics": "",
@@ -962,6 +989,12 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
             "error": "",
         }
         try:
+            # Peak GPU-memory of this mode's full build+forward+backward.  The
+            # shared input tensors (models/observed/wavelet) are allocated
+            # before the reset, so cross-mode deltas isolate the solver's
+            # internal storage (boundary buffers, checkpoints, wavefields).
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
             solver = build_solver(spec, "cuda", mode, scenario, shape, device, args, run_dir, case_key)
             candidate = run_gradient(
                 solver,
@@ -974,6 +1007,8 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
                 spec.model_names,
                 device,
             )
+            torch.cuda.synchronize(device)
+            row["peak_mem_mb"] = f"{torch.cuda.max_memory_allocated(device) / (1024 ** 2):.1f}"
             metrics = {
                 name: metric_pair(eager_result["grads"][name], candidate["grads"][name])
                 for name in eager_result["grads"]
@@ -1001,7 +1036,7 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
                 }
             )
             print(
-                f"  {mode}: {status} "
+                f"  {mode}: {status} [peak={row['peak_mem_mb']}MB] "
                 + ", ".join(
                     f"{name} rel_l2={item['rel_l2']:.3e} cos={item['cosine']:.3f}"
                     for name, item in metrics.items()
@@ -1029,6 +1064,7 @@ def write_summaries(run_dir: Path, rows: list[dict]):
         "mode",
         "status",
         "seconds",
+        "peak_mem_mb",
         "loss_eager",
         "loss_candidate",
         "metrics",
@@ -1061,6 +1097,14 @@ def main():
         "bs_gpu_fp16",
         "bs_gpu_bf16",
         "bs_gpu_int8",
+        "bs_cpu_fp16",
+        "bs_cpu_bf16",
+        "bs_cpu_int8",
+        "bs_cpu_pinned_int8",
+        "bs_disk_fp16",
+        "bs_disk_bf16",
+        "bs_disk_int8",
+        "bs_disk_async_int8",
     }
     solver_keys = parse_csv(args.solvers, SOLVERS, label="solver")
     scenario_keys = parse_csv(args.scenarios, SCENARIOS, label="scenario")
