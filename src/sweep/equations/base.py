@@ -3,7 +3,7 @@ import numpy as np
 from .utils import to_backend
 from sweep.operators.general import StaggeredDerivative
 from sweep.scalars import generate_convolution_kernel
-from sweep.operators.factory import OperatorBase
+from sweep.operators.factory import LaplaceGradientOps
 from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
 from .fields import (
     available_role_specs,
@@ -486,7 +486,7 @@ class FirstOrderEquation(WaveEquation, ):
             self._axis_spacing(h, 2),
         )
 
-class SecondOrderEquation(OperatorBase, WaveEquation):
+class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
     """
     Base class for second-order equations.
     This class can be extended to implement specific second-order equations.
@@ -498,7 +498,7 @@ class SecondOrderEquation(OperatorBase, WaveEquation):
 
         :param initial_condition: The initial condition for the equation.
         """
-        OperatorBase.__init__(self, backend=backend)
+        LaplaceGradientOps.__init__(self, backend=backend)
         WaveEquation.__init__(self, spatial_order, device, backend, **kwargs)
         dim = kwargs.get('dim', 2)
         self.ndim = dim
