@@ -112,8 +112,7 @@ class MyScalar(SecondOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now, u_pre = wavefields
         (vp,) = models
-        hz, hx = self._spacings_2d(h)
-        lap = self.laplacian_2d(u_now, self.laplace_kernels, hz, hx)
+        lap = self.laplacian(u_now, h)
         u_next = 2 * u_now - u_pre + (vp * dt) ** 2 * lap
         return u_next, u_now
 ```

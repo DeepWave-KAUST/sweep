@@ -555,6 +555,56 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         )
         self.laplace_kernels = self._prepare_separable_laplace_kernels()
 
+    def laplacian(self, u, h):
+        """Isotropic Laplacian ``∇²u`` using cached ``self.laplace_kernels``.
+
+        Auto-dispatches on ``self.ndim`` (2 or 3); unpacks the scalar /
+        per-axis ``h`` for you. Use this from your ``func()`` instead of
+        the lower-level :meth:`laplacian_2d` / :meth:`laplacian_3d` when
+        the equation is isotropic.
+
+        Args:
+            u: Input wavefield, shape ``(B, 1, nz, nx)`` for 2-D or
+                ``(B, 1, nz, ny, nx)`` for 3-D.
+            h: Grid spacing — either a scalar or a length-``ndim`` array
+                / tuple. Forwarded through :meth:`_spacings_2d` /
+                :meth:`_spacings_3d` for unpacking.
+
+        Returns:
+            A tensor of the same shape as ``u`` containing ``∇²u``.
+
+        Requires that :meth:`init_separable_laplace` was called in the
+        equation's ``__init__``.
+        """
+        if self.ndim == 2:
+            hz, hx = self._spacings_2d(h)
+            return self.laplacian_2d(u, self.laplace_kernels, hz, hx)
+        hz, hy, hx = self._spacings_3d(h)
+        return self.laplacian_3d(u, self.laplace_kernels, hz, hy, hx)
+
+    def separable_d2(self, u, h):
+        """Per-axis 2nd derivative components using cached kernels.
+
+        Auto-dispatches on ``self.ndim`` (2 or 3); unpacks ``h``. Use
+        this when the equation is anisotropic and needs the components
+        separately (e.g. VTI / TTI ``d²u/∂z²`` and ``d²u/∂x²``
+        weighted by different stiffness factors).
+
+        Args:
+            u: Input wavefield.
+            h: Grid spacing (scalar or length-``ndim``).
+
+        Returns:
+            ``(d2u_dz2, d2u_dx2)`` in 2-D or
+            ``(d2u_dz2, d2u_dy2, d2u_dx2)`` in 3-D — a tuple of tensors
+            of the same shape as ``u``.
+        """
+        if self.ndim == 2:
+            hz, hx = self._spacings_2d(h)
+            return self.separable_d2_2d(u, self.laplace_kernels, hz, hx)
+        hz, hy, hx = self._spacings_3d(h)
+        return self.separable_d2_3d(u, self.laplace_kernels, hz, hy, hx)
+
     def init_grad_kernels(self):
         """Build 2-D 1st-derivative fixed-stencil kernels for the fast path.
 
