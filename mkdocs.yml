@@ -129,6 +129,7 @@ nav:
   - User Guide:
       - Backends: user-guide/backends.md
       - Equations: user-guide/equations.md
+      - Operators: user-guide/operators.md
       - Propagators: user-guide/propagators.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
@@ -180,6 +181,8 @@ nav:
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md
           - DAS family: api/equations/das.md
+      - Operators:
+          - api/operators/index.md
       - Propagators:
           - api/propagators/index.md
           - Propagator Options: api/propagators/options.md
