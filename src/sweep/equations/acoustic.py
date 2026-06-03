@@ -93,12 +93,10 @@ class Acoustic(SecondOrderEquation):
             dim: Stored dimensionality. Always ``2`` for this class; use
                 :class:`Acoustic3D` for 3-D. Defaults to 2.
         """
-        use_fast_grad_kernels = backend == 'torch' and 'cuda' in str(device)
-        super().__init__(spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels)
+        super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
-        self.grad_kernels = None
-        if use_fast_grad_kernels:
-            self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        if backend == 'torch' and 'cuda' in str(device):
+            super().init_grad_kernels()
 
     @property
     def default_source_fields(self):

@@ -513,15 +513,12 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         kernel_func = {2: generate_convolution_kernel, 3: generate_convolution_kernel}[dim]
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
 
-        other_kernels = kwargs.get('other_kernels', False)
         self.kf = kernel_func
-        if other_kernels:
-            # 1st-derivative fixed-stencil kernels, consumed by callers that
-            # build ``self.grad_kernels = {-2: gkernel_z, -1: gkernel_x}`` and
-            # pass it through to ``self.gradient(u, h, axis, kernels=...)``
-            # for the fast CUDA conv path (see Acoustic.step_cpml).
-            self.gkernel_x = to_backend(kernel_func(spatial_order, derivative_order=1, mode='x', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
-            self.gkernel_z = to_backend(kernel_func(spatial_order, derivative_order=1, mode='z', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
+        # Subclasses that need the gradient fast path call
+        # ``self.init_grad_kernels()`` after ``__init__``; ``None`` means
+        # ``self.gradient(u, h, axis, kernels=None)`` falls back to
+        # ``torch.gradient`` (the slow general path).
+        self.grad_kernels = None
 
     def _prepare_separable_laplace_kernels(self):
         if self.backend != 'torch':
@@ -557,6 +554,32 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
             backend=self.backend, device=self.device,
         )
         self.laplace_kernels = self._prepare_separable_laplace_kernels()
+
+    def init_grad_kernels(self):
+        """Build 2-D 1st-derivative fixed-stencil kernels for the fast path.
+
+        Stored as ``self.gkernel_x / self.gkernel_z`` and bundled into
+        ``self.grad_kernels = {-2: gkernel_z, -1: gkernel_x}``, ready to
+        pass through ``self.gradient(u, h, axis, kernels=self.grad_kernels)``
+        in the equation's step function. The fast path uses a single
+        ``conv2d`` per axis and is ~5-10x faster than the default
+        ``torch.gradient`` fallback on CUDA.
+
+        Call after :meth:`init_separable_laplace`. Only meaningful for 2-D
+        equations — 3-D variants currently build their own
+        ``self.grad_kernels`` dict from a custom 3-D stencil.
+        """
+        self.gkernel_x = to_backend(
+            self.kf(self.so, derivative_order=1, mode='x',
+                    no_center=True, grid='normal', sign=-1),
+            backend=self.backend, device=self.device,
+        )
+        self.gkernel_z = to_backend(
+            self.kf(self.so, derivative_order=1, mode='z',
+                    no_center=True, grid='normal', sign=-1),
+            backend=self.backend, device=self.device,
+        )
+        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]
