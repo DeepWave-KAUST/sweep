@@ -107,6 +107,12 @@ class BoundaryOptions:
             raise ValueError("BoundaryOptions.storage must be 'gpu', 'cpu', or 'disk'.")
         if self.storage_dtype not in {"fp32", "fp16", "bf16", "int8"}:
             raise ValueError("BoundaryOptions.storage_dtype must be 'fp32', 'fp16', 'bf16', or 'int8'.")
+        if self.storage_dtype != "fp32" and self.storage != "gpu":
+            raise ValueError(
+                f"BoundaryOptions.storage_dtype={self.storage_dtype!r} requires storage='gpu'. "
+                f"cpu/disk boundary storage is fp32-only (the staged transfer path does not "
+                f"implement half-precision/int8 storage); got storage={self.storage!r}."
+            )
         if self.transfer_interval is not None and self.transfer_interval < 1:
             raise ValueError("BoundaryOptions.transfer_interval must be >= 1.")
         if self.ring_buffers is not None and self.ring_buffers < 1:
