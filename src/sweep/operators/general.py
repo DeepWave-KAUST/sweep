@@ -31,7 +31,7 @@ def _prepare_jax_kernel_bank(kernel):
     return kernel
 
 
-class PartialDerivative:
+class StaggeredDerivative:
 
     def __init__(self, spatial_order:int=4, device='cpu', backend='torch', ndim=2):
         self.coes = staggered_grid_coes(int(spatial_order//2))

@@ -6,7 +6,7 @@ Three operator families are exposed:
   ``separable_d2_2d``, ``separable_d2_3d`` and ``gradient``. Inherited by
   :class:`sweep.equations.base.SecondOrderEquation`, so 2-D / 3-D second-order
   acoustic equations get these as ``self.separable_d2_2d(...)`` etc. for free.
-- :class:`PartialDerivative` — staggered-grid first-order derivatives with
+- :class:`StaggeredDerivative` — staggered-grid first-order derivatives with
   ``x_forward / x_backward / z_forward / z_backward`` (and ``y_*`` in 3-D).
   Instantiated automatically by
   :class:`sweep.equations.base.FirstOrderEquation` as ``self.pd``.
@@ -15,7 +15,7 @@ Three operator families are exposed:
 """
 
 from .factory import OperatorBase
-from .general import PartialDerivative
+from .general import StaggeredDerivative
 from .rsg import RSGDerivative
 
-__all__ = ["OperatorBase", "PartialDerivative", "RSGDerivative"]
+__all__ = ["OperatorBase", "StaggeredDerivative", "RSGDerivative"]

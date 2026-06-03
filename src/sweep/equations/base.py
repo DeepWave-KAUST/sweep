@@ -1,7 +1,7 @@
 
 import numpy as np
 from .utils import to_backend
-from sweep.operators.general import PartialDerivative
+from sweep.operators.general import StaggeredDerivative
 from sweep.scalars import generate_convolution_kernel
 from sweep.operators.factory import OperatorBase
 from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
@@ -457,7 +457,7 @@ class FirstOrderEquation(WaveEquation, ):
         self.backend = backend
         self.ndim = ndim
         self.use_habc = False
-        self.pd = PartialDerivative(spatial_order, device, backend, ndim=ndim)
+        self.pd = StaggeredDerivative(spatial_order, device, backend, ndim=ndim)
         self.pd.to_backend(to_backend)
 
     def init(self, shape, device='cpu', h=1.0):
