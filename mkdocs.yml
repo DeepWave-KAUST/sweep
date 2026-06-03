@@ -156,6 +156,7 @@ nav:
               - ElasticTTI: notebooks/10_wavefield_elastic_tti.ipynb
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
+              - Custom gradient: notebooks/14_custom_gradient.ipynb
           - HPC:
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
           - Extending:
