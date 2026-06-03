@@ -157,6 +157,7 @@ nav:
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
               - Custom gradient: notebooks/14_custom_gradient.ipynb
+              - ADCIG: notebooks/16_adcig.ipynb
           - HPC:
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
           - Extending:
