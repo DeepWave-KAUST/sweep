@@ -3,9 +3,9 @@
 Three operator families are exposed:
 
 - :class:`OperatorBase` — backend-dispatch bundle providing ``laplace2d``,
-  ``laplace1d_sep``, ``laplace3d_sep`` and ``gradient``. Inherited by
+  ``separable_d2_2d``, ``separable_d2_3d`` and ``gradient``. Inherited by
   :class:`sweep.equations.base.SecondOrderEquation`, so 2-D / 3-D second-order
-  acoustic equations get these as ``self.laplace1d_sep(...)`` etc. for free.
+  acoustic equations get these as ``self.separable_d2_2d(...)`` etc. for free.
 - :class:`PartialDerivative` — staggered-grid first-order derivatives with
   ``x_forward / x_backward / z_forward / z_backward`` (and ``y_*`` in 3-D).
   Instantiated automatically by

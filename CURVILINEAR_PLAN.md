@@ -69,7 +69,7 @@ Chain rule:
 Operators we need on the (ξ, η) computational grid:
 
   - p_ξ, p_η (first derivatives — reuse `pd.x_central` / `pd.z_central`)
-  - p_ξξ, p_ηη (separable laplacian — reuse `laplace1d_sep`)
+  - p_ξξ, p_ηη (separable laplacian — reuse `separable_d2_2d`)
   - **p_ξη — mixed partial** (compute as ``pd.x_central(p_η)``)
 
 Precomputed metric fields stored on the propagator:

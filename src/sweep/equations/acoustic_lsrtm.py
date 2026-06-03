@@ -136,8 +136,8 @@ class AcousticLSRTM(SecondOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)
-        lap_uz, lap_ux = self.laplace1d_sep(wavefields[0], self.laplace_kernels, hz, hx)
-        lap_suz, lap_sux = self.laplace1d_sep(wavefields[6], self.laplace_kernels, hz, hx)
+        lap_uz, lap_ux = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
+        lap_suz, lap_sux = self.separable_d2_2d(wavefields[6], self.laplace_kernels, hz, hx)
         out = step(*wavefields, *models, dt, h, b, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)

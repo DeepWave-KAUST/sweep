@@ -112,7 +112,7 @@ class Acoustic(SecondOrderEquation):
         u_now = wavefields[0]
         (vp,) = models
         hz, hx = self._spacings_2d(h)
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)

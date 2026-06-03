@@ -122,7 +122,7 @@ class AcousticTariq(SecondOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)
-        nabla_z, nabla_x = self.laplace1d_sep(wavefields[0], self.laplace_kernels, hz, hx)
-        _, dpdx2 = self.laplace1d_sep(wavefields[2], self.laplace_kernels, hz, hx)
-        dpdx2dz2, _ = self.laplace1d_sep(dpdx2, self.laplace_kernels, hz, hx)
+        nabla_z, nabla_x = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
+        _, dpdx2 = self.separable_d2_2d(wavefields[2], self.laplace_kernels, hz, hx)
+        dpdx2dz2, _ = self.separable_d2_2d(dpdx2, self.laplace_kernels, hz, hx)
         return step_cpml(*wavefields, *models, dt, h, b, self.b, nabla_x, nabla_z, dpdx2dz2, self.gradient, self.grad_kernels, **kwargs)

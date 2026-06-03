@@ -47,7 +47,7 @@ def _zero_halo(out, padding):
     return out
 
 @jax.jit
-def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
+def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
     """
     Anisotropic spacing: Laplace = d2/dz2 / hz^2 + d2/dx2 / hx^2
     """
@@ -72,7 +72,7 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     return d2z / (hz * hz), d2x / (hx * hx)
 
 
-def laplace3d_sep(u, k1d, hz, hy, hx):
+def separable_d2_3d(u, k1d, hz, hy, hx):
     """ 3D Laplace operator using JAX.
      Args:
          u (jnp.ndarray): Input wavefield of shape (batch, 1, depth, height, width).

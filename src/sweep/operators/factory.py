@@ -9,25 +9,25 @@ class OperatorBase:
          """
         if backend == 'jax':
             from sweep.operators.jax import laplace2d as lap2d_jax
-            from sweep.operators.jax import laplace1d_sep as lap1d_jax
-            from sweep.operators.jax import laplace3d_sep as lap3d_jax
+            from sweep.operators.jax import separable_d2_2d as lap1d_jax
+            from sweep.operators.jax import separable_d2_3d as lap3d_jax
             from sweep.operators.jax import gradient as gradient_jax
 
             self.laplace2d = lap2d_jax
-            self.laplace1d_sep = lap1d_jax
-            self.laplace3d_sep = lap3d_jax
+            self.separable_d2_2d = lap1d_jax
+            self.separable_d2_3d = lap3d_jax
             self.gradient = gradient_jax
 
         elif backend == 'torch':
             from sweep.operators.torch import laplace2d as lap2d_torch
-            from sweep.operators.torch import laplace1d_sep as lap1d_torch
+            from sweep.operators.torch import separable_d2_2d as lap1d_torch
             from sweep.operators.torch import gradient as gradient_torch
-            from sweep.operators.torch import laplace3d_sep as lap3d_torch
+            from sweep.operators.torch import separable_d2_3d as lap3d_torch
             
             self.gradient = gradient_torch
             self.laplace2d = lap2d_torch
-            self.laplace1d_sep = lap1d_torch
-            self.laplace3d_sep = lap3d_torch # Reuse 1D kernel for 3D by applying it sequentially
+            self.separable_d2_2d = lap1d_torch
+            self.separable_d2_3d = lap3d_torch # Reuse 1D kernel for 3D by applying it sequentially
 
 
 
