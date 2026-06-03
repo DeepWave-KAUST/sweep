@@ -185,7 +185,50 @@ The operator exposes four `(forward, backward) × (x, z)` methods:
 | `self.rsg.lz_bwd(u)` | rotated-staggered `∂u/∂z`, backward shift |
 
 Only 2-D is supported today; `RSGDerivative(ndim=3)` raises.
-`ElasticTTI.func` is the canonical reference.
+
+### Recipe — elastic velocity-stress update (isotropic, for clarity)
+
+`ElasticTTI` couples the full anisotropic stiffness tensor; the kernel
+structure is easier to read on the isotropic case. The
+**forward / backward pairing** is the key idea: stress lives on a
+half-shifted grid, so divergence terms (stress → velocity update) use
+the **backward** stencil, and gradient terms (velocity → stress update)
+use the **forward** stencil. Applying the same direction to both halves
+would offset the result by one rotated cell.
+
+```python
+def func(self, wavefields, models, dt, h, b, **kwargs):
+    vx, vz, sxx, szz, sxz = wavefields
+    vp, vs, rho = models
+    self.rsg.set_spacing(self._spacings_2d(h))
+
+    # 1) Velocity update from stress divergence — backward stencil.
+    dsxx_dx = self.rsg.lx_bwd(sxx)
+    dsxz_dz = self.rsg.lz_bwd(sxz)
+    dsxz_dx = self.rsg.lx_bwd(sxz)
+    dszz_dz = self.rsg.lz_bwd(szz)
+    vx_next = vx + dt / rho * (dsxx_dx + dsxz_dz)
+    vz_next = vz + dt / rho * (dsxz_dx + dszz_dz)
+
+    # 2) Stress update from velocity gradient — forward stencil.
+    dvx_dx = self.rsg.lx_fwd(vx_next)
+    dvz_dz = self.rsg.lz_fwd(vz_next)
+    dvx_dz = self.rsg.lz_fwd(vx_next)
+    dvz_dx = self.rsg.lx_fwd(vz_next)
+
+    lam_2mu = rho * vp ** 2
+    lam     = rho * (vp ** 2 - 2 * vs ** 2)
+    mu      = rho * vs ** 2
+    sxx_next = sxx + dt * (lam_2mu * dvx_dx + lam     * dvz_dz)
+    szz_next = szz + dt * (lam     * dvx_dx + lam_2mu * dvz_dz)
+    sxz_next = sxz + dt * mu * (dvz_dx + dvx_dz)
+
+    return vx_next, vz_next, sxx_next, szz_next, sxz_next
+```
+
+For the full anisotropic TTI case, `ElasticTTI.func` wraps these
+derivatives with a stiffness-tensor Bond rotation that mixes the four
+components — but the RSG calls themselves are the same eight lines.
 
 ## Spacing helpers on the base class
 
