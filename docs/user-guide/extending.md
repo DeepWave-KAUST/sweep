@@ -113,7 +113,7 @@ class MyScalar(SecondOrderEquation):
         u_now, u_pre = wavefields
         (vp,) = models
         hz, hx = self._spacings_2d(h)
-        lap_z, lap_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_z, lap_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         u_next = 2 * u_now - u_pre + (vp * dt) ** 2 * (lap_z + lap_x)
         return u_next, u_now
 ```

@@ -37,7 +37,7 @@ class AcousticVRR(SecondOrderEquation):
         u_now = wavefields[0]
         vp = models[0]
         hz, hx = self._spacings_2d(h)
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         lap_u_now = lap_u_now_x + lap_u_now_z
         dvpdx = self.gradient(vp, h, axis=-1)
         dvpdz = self.gradient(vp, h, axis=-2)

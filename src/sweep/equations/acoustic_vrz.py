@@ -207,7 +207,7 @@ class AcousticVRZ(SecondOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
         hz, hx = self._spacings_2d(h)
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         out = step_cpml(*wavefields, *models, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
@@ -324,7 +324,7 @@ class AcousticVRZ3D(SecondOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
         hz, hy, hx = self._spacings_3d(h)
-        lap_z, lap_y, lap_x = self.laplace3d_sep(u_now, self.laplace_kernels, hz, hy, hx)
+        lap_z, lap_y, lap_x = self.separable_d2_3d(u_now, self.laplace_kernels, hz, hy, hx)
         out = step_cpml_3d(*wavefields, *models, dt, h, b, lap_x, lap_y, lap_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)

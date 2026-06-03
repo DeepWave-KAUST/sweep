@@ -71,7 +71,7 @@ def _zero_halo_3d(out, padding):
         out[..., :, :, -pad_x:] = 0
     return out
 
-def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
+def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
     if isinstance(k1d, tuple):
         kz, kx = k1d
         pad = max(kz.shape[-3], kx.shape[-1]) // 2
@@ -83,7 +83,7 @@ def laplace1d_sep(u, k1d, hz=1.0, hx=1.0):
     lapz = F.conv2d(u, kz, padding=(pad, 0)) / (hz*hz)
     return lapz, lapx
 
-def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
+def separable_d2_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
     """
     u: (B, 1, nz, ny, nx)
     k1d: (k,)

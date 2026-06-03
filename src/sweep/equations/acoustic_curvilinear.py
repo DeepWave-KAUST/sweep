@@ -8,7 +8,7 @@ computational (ξ, η) domain via the simple linear stretch
 for the metric derivation.
 
 Strategy:
-  - Reuse the existing ``laplace1d_sep`` and ``gradient`` primitives on
+  - Reuse the existing ``separable_d2_2d`` and ``gradient`` primitives on
     the computational grid — they are direction-independent FD ops and
     don't care that ``η`` is dimensionless.
   - Combine ``p_ξξ`` / ``p_ηη`` / mixed ``p_ξη`` / first-order ``p_η``
@@ -118,7 +118,7 @@ class AcousticCurvilinear(SecondOrderEquation):
         hz = self._curv_d_eta
 
         # Base derivatives on the computational (ξ, η) grid.
-        lap_pηη, lap_pξξ = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_pηη, lap_pξξ = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         p_η = self.gradient(u_now, hz, -2, kernels=self.grad_kernels)
         # Mixed partial p_ξη = ∂(p_η)/∂ξ.
         p_ξη = self.gradient(p_η, hx, -1, kernels=self.grad_kernels)

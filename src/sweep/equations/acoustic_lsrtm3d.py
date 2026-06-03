@@ -178,8 +178,8 @@ class AcousticLSRTM3D(SecondOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hy, hx = self._spacings_3d(h)
-        lap_z, lap_y, lap_x = self.laplace3d_sep(wavefields[0], self.laplace_kernels, hz, hy, hx)
-        lap_sz, lap_sy, lap_sx = self.laplace3d_sep(wavefields[8], self.laplace_kernels, hz, hy, hx)
+        lap_z, lap_y, lap_x = self.separable_d2_3d(wavefields[0], self.laplace_kernels, hz, hy, hx)
+        lap_sz, lap_sy, lap_sx = self.separable_d2_3d(wavefields[8], self.laplace_kernels, hz, hy, hx)
         out = step_cpml(
             *wavefields,
             *models,

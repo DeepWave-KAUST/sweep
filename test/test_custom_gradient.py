@@ -33,7 +33,7 @@ def standard_imaging(eq):
     def fn(forward, adjoint, models, dt, h):
         vp = models[0]
         hz, hx = eq._spacings_2d(h)
-        lz, lx = eq.laplace1d_sep(forward['h1'], eq.laplace_kernels, hz, hx)
+        lz, lx = eq.separable_d2_2d(forward['h1'], eq.laplace_kernels, hz, hx)
         return 2.0 * dt * dt * vp * (lz + lx) * adjoint['h1']
     return fn
 
