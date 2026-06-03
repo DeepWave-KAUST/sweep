@@ -537,33 +537,19 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
             )
         return self.kernel
 
-    def init_laplace(self, ltype='1dsep', backend=None):
-        """Build the separable Laplacian kernel stack for this equation.
+    def init_separable_laplace(self):
+        """Build the separable 1-D second-derivative kernel stack.
 
-        Args:
-            ltype: Laplacian formulation. Defaults to ``'1dsep'`` (matches
-                every in-tree equation):
+        Dispatches on ``self.ndim`` (2 or 3) — no explicit mode argument
+        needed. The kernel stack is stored on ``self.laplace_kernels``
+        and consumed by ``self.separable_d2_2d`` / ``separable_d2_3d``
+        (per-axis components) and ``self.laplacian_2d`` /
+        ``laplacian_3d`` (isotropic ``∇²u`` shortcut).
 
-                - ``'1dsep'``: separable 1-D second-derivative kernels (2-D
-                  equation, used by :class:`Acoustic`, :class:`AcousticVRZ`, …).
-                - ``'3dsep'``: separable 1-D second-derivative kernels along
-                  z / y / x (3-D equation, used by :class:`Acoustic3D` etc.).
-
-                The legacy ``'2dmix'`` (non-separable 2-D cross-stencil) path
-                was removed in this release — it had no in-tree callers.
-            backend: Deprecated and ignored. The Laplacian uses
-                ``self.backend`` set on construction; this kwarg is kept only
-                for backwards compatibility with existing call sites.
-
-        Raises:
-            ValueError: if ``ltype`` is not ``'1dsep'`` or ``'3dsep'``.
+        Replaces the old ``init_laplace(ltype='1dsep'|'3dsep')`` entry,
+        which required callers to repeat what ``self.ndim`` already
+        encoded.
         """
-        del backend  # unused; kept for backwards compatibility
-        if ltype not in ('1dsep', '3dsep'):
-            raise ValueError(
-                f"init_laplace: ltype must be '1dsep' or '3dsep', got {ltype!r}. "
-                "The legacy '2dmix' non-separable path was removed."
-            )
         self.kernel = to_backend(
             self.kf(self.so, mode='x')[0, 0][self.so // 2, :],
             backend=self.backend, device=self.device,

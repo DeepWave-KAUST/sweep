@@ -166,7 +166,7 @@ class AcousticLSRTM3D(SecondOrderEquation):
                 on ``'torch'``. Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend, dim=3)
-        super().init_laplace(ltype="3dsep")
+        super().init_separable_laplace()
 
     @property
     def default_source_fields(self):

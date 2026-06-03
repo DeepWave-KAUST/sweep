@@ -75,7 +75,7 @@ class ViscoAcoustic(SecondOrderEquation):
         """
         
         super().__init__(spatial_order, device, backend, dim=dim)
-        super().init_laplace(ltype='1dsep', backend=backend)
+        super().init_separable_laplace()
 
         self.backend = backend
 

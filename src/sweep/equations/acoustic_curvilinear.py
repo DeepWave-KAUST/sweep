@@ -71,7 +71,7 @@ class AcousticCurvilinear(SecondOrderEquation):
         super().__init__(
             spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels
         )
-        super().init_laplace(ltype="1dsep", backend=backend)
+        super().init_separable_laplace()
         self.grad_kernels = None
         if use_fast_grad_kernels:
             self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
