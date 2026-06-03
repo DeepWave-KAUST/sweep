@@ -468,7 +468,12 @@ class FirstOrderEquation(WaveEquation, ):
         if axis < 0 or axis >= self.ndim:
             raise ValueError(f"Axis {axis} is out of bounds for ndim={self.ndim}.")
 
-        if np.isscalar(h):
+        # isinstance (not np.isscalar) keeps this traceable under torch.compile:
+        # np.isscalar returns a Python bool that triggers a Dynamo graph break
+        # (a hard error under fullgraph=True). numpy scalars (np.float32, 0-d
+        # arrays) fall through to the ndim==0 branch below, so behaviour is
+        # unchanged; np.float64 is a Python float subclass and matches here.
+        if isinstance(h, (int, float)):
             return h
 
         if hasattr(h, "ndim") and getattr(h, "ndim", 0) == 0:
@@ -639,7 +644,12 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         if axis < 0 or axis >= self.ndim:
             raise ValueError(f"Axis {axis} is out of bounds for ndim={self.ndim}.")
 
-        if np.isscalar(h):
+        # isinstance (not np.isscalar) keeps this traceable under torch.compile:
+        # np.isscalar returns a Python bool that triggers a Dynamo graph break
+        # (a hard error under fullgraph=True). numpy scalars (np.float32, 0-d
+        # arrays) fall through to the ndim==0 branch below, so behaviour is
+        # unchanged; np.float64 is a Python float subclass and matches here.
+        if isinstance(h, (int, float)):
             return h
 
         if hasattr(h, "ndim") and getattr(h, "ndim", 0) == 0:
