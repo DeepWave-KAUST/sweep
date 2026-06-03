@@ -98,17 +98,19 @@ fixed-stencil convolution that is ~5–10× faster on CUDA:
 
 ```python
 # In __init__:
-use_fast_grad_kernels = backend == "torch" and "cuda" in str(device)
-super().__init__(spatial_order, device, backend, dim=dim,
-                 other_kernels=use_fast_grad_kernels)
+super().__init__(spatial_order, device, backend, dim=dim)
 super().init_separable_laplace()
-self.grad_kernels = None
-if use_fast_grad_kernels:
-    self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+if backend == "torch" and "cuda" in str(device):
+    super().init_grad_kernels()        # builds self.gkernel_x/z + dict
 
 # In func() / step_cpml:
 dudz = self.gradient(u_now, h, axis=-2, kernels=self.grad_kernels)
 ```
+
+`self.grad_kernels` defaults to ``None`` (set in
+``SecondOrderEquation.__init__``); calling :meth:`init_grad_kernels`
+populates it with ``{-2: gkernel_z, -1: gkernel_x}`` and the
+``gradient(..., kernels=…)`` call automatically picks the fast path.
 
 `Acoustic.step_cpml` is the canonical reference.
 
