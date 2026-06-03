@@ -109,7 +109,7 @@ def laplace3d_sep(u, k1d, hz=1.0, hy=1.0, hx=1.0):
 # torch.compile on Elastic / DAS (their step calls these kernels 8+ times).
 # Measured on RTX 6000 Ada, removing the decorator also makes eager Elastic
 # ~6% faster, so the decorator was net cost even without torch.compile.
-def apply_kernels_torch(u, kernels):
+def apply_kernels(u, kernels):
     # u: (B, 1, H, W). kernels: (1, 1, kh, kw) or (K, 1, kh, kw).
     _, _, KH, KW = kernels.shape
     padding = (KH // 2, KW // 2)
@@ -117,14 +117,15 @@ def apply_kernels_torch(u, kernels):
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
 
-def apply_kernels_torch3d(u, kernels):
+def apply_kernels_3d(u, kernels):
     # u: (B, 1, D, H, W). kernels: (1, 1, kD, kH, kW) or (K, 1, kD, kH, kW).
     _, _, KD, KH, KW = kernels.shape
     padding = (KD // 2, KH // 2, KW // 2)
     conv_out = F.conv3d(u, kernels, padding=padding)
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
 
-def laplace2d(u: torch.Tensor, 
+
+def laplace2d(u: torch.Tensor,
             h: float | torch.Tensor, 
             kernel: torch.Tensor) -> torch.Tensor:
     padding = kernel.shape[-1] // 2
