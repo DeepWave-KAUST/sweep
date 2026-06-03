@@ -30,11 +30,11 @@ def build(device, nz=48, nx=56, abcn=30, M=2, dt=0.0015, dh=10.0, nt=120):
 
 
 def standard_imaging(eq):
-    def fn(uf, ub, models, dt, h):
+    def fn(forward, adjoint, models, dt, h):
         vp = models[0]
         hz, hx = eq._spacings_2d(h)
-        lz, lx = eq.laplace1d_sep(uf, eq.laplace_kernels, hz, hx)
-        return 2.0 * dt * dt * vp * (lz + lx) * ub
+        lz, lx = eq.laplace1d_sep(forward['h1'], eq.laplace_kernels, hz, hx)
+        return 2.0 * dt * dt * vp * (lz + lx) * adjoint['h1']
     return fn
 
 
@@ -70,7 +70,7 @@ def main():
 
     # ---------- 2. gradient mode + raw uf*ub ----------
     eq, prop = build(device)
-    prop.register_gradient("vp", lambda uf, ub, m, dt, h: uf * ub, mode="gradient")
+    prop.register_gradient("vp", lambda fwd, adj, m, dt, h: fwd['h1'] * adj['h1'], mode="gradient")
     vp = torch.as_tensor(vp_np, device=device).requires_grad_(True)
     rec_x = prop(wavelet, sources, receivers, models=[vp])
     (0.5 * rec_x.pow(2).sum()).backward()
@@ -81,7 +81,7 @@ def main():
 
     # ---------- 3. imaging mode ----------
     eq, prop = build(device)
-    prop.register_gradient("vp", lambda uf, ub, m, dt, h: uf * ub, mode="imaging")
+    prop.register_gradient("vp", lambda fwd, adj, m, dt, h: fwd['h1'] * adj['h1'], mode="imaging")
     vp = torch.as_tensor(vp_np, device=device).requires_grad_(True)
     images = prop.imaging(wavelet, sources, receivers, models=[vp])
     print(f"\n[3] imaging mode:")
