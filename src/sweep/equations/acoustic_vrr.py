@@ -30,8 +30,11 @@ class AcousticVRR(SecondOrderEquation):
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
-        super().__init__(spatial_order, device, backend, other_kernels=True)
+        super().__init__(spatial_order, device, backend)
         super().init_separable_laplace()
+        # NOTE: this equation's func() calls ``self.gradient(...)`` without
+        # ``kernels=`` (i.e. takes the slow torch.gradient fallback path),
+        # so we deliberately skip ``init_grad_kernels()``.
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]

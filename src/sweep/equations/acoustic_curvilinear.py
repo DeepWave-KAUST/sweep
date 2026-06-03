@@ -67,14 +67,10 @@ class AcousticCurvilinear(SecondOrderEquation):
     default_pml_type = "cpmlr"
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
-        use_fast_grad_kernels = backend == "torch" and "cuda" in str(device)
-        super().__init__(
-            spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels
-        )
+        super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
-        self.grad_kernels = None
-        if use_fast_grad_kernels:
-            self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        if backend == "torch" and "cuda" in str(device):
+            super().init_grad_kernels()
         # Filled by Propagator at init time once topography is processed.
         self._curv_alpha = None
         self._curv_metric_pηη = None

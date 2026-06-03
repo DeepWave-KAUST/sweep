@@ -108,9 +108,9 @@ class AcousticTariq(SecondOrderEquation):
             dim: Stored dimensionality. Always ``2`` for this class.
                 Defaults to 2.
         """
-        super().__init__(spatial_order, device, backend, other_kernels=True)
+        super().__init__(spatial_order, device, backend)
         super().init_separable_laplace()
-        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        super().init_grad_kernels()
 
     @property
     def default_source_fields(self):
