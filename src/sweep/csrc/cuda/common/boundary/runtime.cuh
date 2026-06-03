@@ -1194,6 +1194,15 @@ private:
             if (boundary_disk_async_read_) {
                 start_async_disk_read(start, len, slot);
             } else {
+                // The synchronous disk read below overwrites the shared CPU
+                // staging buffer (boundary_cpu / saver_.*_t).  The previous
+                // chunk's H2D copy reads that same buffer, so we must wait for
+                // it to finish before clobbering it — otherwise the host races
+                // ahead of the (possibly backlogged) copy stream and the
+                // in-flight H2D picks up this chunk's freshly-read bytes,
+                // scrambling the restored boundary for nvar>1.  (ring_buffers
+                // is 1 on this path, so the staging buffer is reused verbatim.)
+                cudaStreamSynchronize(copy_stream_);
                 auto read_start = Clock::now();
                 if (dim_ == 2)
                     saver_.load_disk_to_cpu_2d(start, len, disk_files_);
@@ -1302,6 +1311,13 @@ private:
     inline void run_disk_reader_task(int start, int len, int slot)
     {
         int stage_start = slot * transfer_interval_;
+        // This slot's staging region was last read by its previous H2D copy
+        // (tracked by copy_ready_[slot]).  Wait for that copy to finish before
+        // the disk read below overwrites the region, or the in-flight H2D
+        // would pick up the new chunk's bytes and scramble the restored
+        // boundary for nvar>1.  (compute_ready_ already gates the H2D's write
+        // to top_gpu; this gates the disk read's write to the CPU staging.)
+        cudaEventSynchronize(copy_ready_[slot]);
         auto read_start = Clock::now();
         if (dim_ == 2)
             saver_.load_disk_to_cpu_2d(start, len, disk_files_, stage_start);
