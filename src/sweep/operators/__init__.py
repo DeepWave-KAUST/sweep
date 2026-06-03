@@ -2,10 +2,14 @@
 
 Three operator families are exposed:
 
-- :class:`LaplaceGradientOps` — backend-dispatch bundle providing ``laplace2d``,
-  ``separable_d2_2d``, ``separable_d2_3d`` and ``gradient``. Inherited by
-  :class:`sweep.equations.base.SecondOrderEquation`, so 2-D / 3-D second-order
-  acoustic equations get these as ``self.separable_d2_2d(...)`` etc. for free.
+- :class:`LaplaceGradientOps` — backend-dispatch bundle providing
+  ``separable_d2_2d`` / ``separable_d2_3d`` (per-axis second-derivative
+  components for anisotropic equations), ``laplacian_2d`` /
+  ``laplacian_3d`` (isotropic ``∇²u`` shortcut = sum of components),
+  and ``gradient``. Inherited by
+  :class:`sweep.equations.base.SecondOrderEquation`, so 2-D / 3-D
+  second-order acoustic equations get these as ``self.laplacian_2d(...)``
+  / ``self.separable_d2_2d(...)`` etc. for free.
 - :class:`StaggeredDerivative` — staggered-grid first-order derivatives with
   ``x_forward / x_backward / z_forward / z_backward`` (and ``y_*`` in 3-D).
   Instantiated automatically by

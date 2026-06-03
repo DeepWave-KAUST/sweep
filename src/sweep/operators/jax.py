@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
-from jax import vmap, lax
-from jax.scipy.signal import convolve2d as conv2d
+from jax import lax
 
 
 def _resolve_spacing_for_axis(h, axis, ndim):
@@ -98,36 +97,19 @@ def separable_d2_3d(u, k1d, hz, hy, hx):
     return d2z, d2y, d2x
 
 
-def _laplace(image, kernel):
-    # Expected input shape: (height, width)
-    return conv2d(image, kernel, mode='same')
+@jax.jit
+def laplacian_2d(u, k1d, hz=1.0, hx=1.0):
+    """Isotropic 2-D Laplacian via separable kernels: ``d2z + d2x``."""
+    d2z, d2x = separable_d2_2d(u, k1d, hz=hz, hx=hx)
+    return d2z + d2x
 
-batch_convolve2d = vmap(vmap(_laplace, in_axes=(0, None)), in_axes=(0, None))
 
 @jax.jit
-def laplace2d(u, h=1.0, kernel=None):
-    return batch_convolve2d(u, kernel) / (h ** 2)
+def laplacian_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
+    """Isotropic 3-D Laplacian via separable kernels: ``d2z + d2y + d2x``."""
+    d2z, d2y, d2x = separable_d2_3d(u, k1d, hz=hz, hy=hy, hx=hx)
+    return d2z + d2y + d2x
 
-def laplace3d(u, kernel=None, h=1.0):
-    """ 3D Laplace operator using JAX.
-     Args:
-         u (jnp.ndarray): Input wavefield of shape (batch, 1, depth, height, width).
-         h (float): Grid spacing.
-         kernel (jnp.ndarray): 3D convolution kernel of shape (1, 1, kD, kH, kW).
-
-     Returns:
-         jnp.ndarray: Resulting wavefield after applying the Laplace operator.
-     """
-    dn = jax.lax.conv_dimension_numbers(u.shape, kernel.shape,
-                                        ('NCDHW', 'OIDHW', 'NCDHW'))
-    out = jax.lax.conv_general_dilated(u,    # lhs = image tensor
-                                       kernel,  # rhs = conv kernel tensor
-                                       (1,1,1), # window strides
-                                       'SAME',  # padding mode
-                                       (1,1,1), # lhs/image dilation
-                                       (1,1,1), # rhs/kernel dilation
-                                       dn)      # dimension_numbers
-    return out / (h ** 2)
 
 def _normalize_2d_kernel_bank(kernels):
     kernels = jnp.asarray(kernels)
