@@ -516,8 +516,10 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         other_kernels = kwargs.get('other_kernels', False)
         self.kf = kernel_func
         if other_kernels:
-            self.lkernel_x = to_backend(kernel_func(spatial_order, mode='x', no_center=False, grid='normal'), backend=backend, device=device)
-            self.lkernel_z = to_backend(kernel_func(spatial_order, mode='z', no_center=False, grid='normal'), backend=backend, device=device)
+            # 1st-derivative fixed-stencil kernels, consumed by callers that
+            # build ``self.grad_kernels = {-2: gkernel_z, -1: gkernel_x}`` and
+            # pass it through to ``self.gradient(u, h, axis, kernels=...)``
+            # for the fast CUDA conv path (see Acoustic.step_cpml).
             self.gkernel_x = to_backend(kernel_func(spatial_order, derivative_order=1, mode='x', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
             self.gkernel_z = to_backend(kernel_func(spatial_order, derivative_order=1, mode='z', no_center=True, grid='normal', sign=-1), backend=backend, device=device)
 
