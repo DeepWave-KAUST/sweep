@@ -25,6 +25,13 @@ static inline BoundaryDtype boundary_dtype_from_tensor(const torch::Tensor& t) {
     }
 }
 
+// Byte pointer into a boundary tensor at element offset `off_elems`, honoring
+// the tensor's dtype width.  Used so the gpu<->cpu<->disk byte copies work for
+// fp16/bf16 staging/storage, not just fp32.
+static inline char* boundary_byte_ptr(const torch::Tensor& t, int64_t off_elems) {
+    return static_cast<char*>(t.data_ptr()) + off_elems * t.element_size();
+}
+
 struct EffectiveBoundarySaver {
 
     torch::Tensor left_t, right_t;
@@ -45,6 +52,14 @@ struct EffectiveBoundarySaver {
     torch::Tensor left_scale_t, right_scale_t;
     torch::Tensor front_scale_t, back_scale_t;
     torch::Tensor bottom_scale_t, top_scale_t;
+
+    // INT8 staged path (storage='cpu'/'disk') only: per-face FP32 scale
+    // RING on the GPU, parallel to the uint8 main ring (top_gpu et al.).
+    // Each chunk is flushed to / loaded from the persistent FP32 scale
+    // buffer (top_scale_t et al.) alongside the uint8 main buffer.
+    torch::Tensor left_scale_gpu, right_scale_gpu;
+    torch::Tensor front_scale_gpu, back_scale_gpu;
+    torch::Tensor bottom_scale_gpu, top_scale_gpu;
 
     torch::Tensor left_staging_t, right_staging_t;
     torch::Tensor front_staging_t, back_staging_t;
@@ -208,6 +223,17 @@ struct EffectiveBoundarySaver {
                           top_scale_t, bottom_scale_t,
                           front_scale_t, back_scale_t,
                           left_scale_t, right_scale_t);
+    }
+
+    // Bind externally-allocated per-block FP32 scale RING tensors (staged
+    // INT8 only).  Parallel to bind_staging_tensors for the uint8 main
+    // ring; flushed to / loaded from the persistent scale buffer.
+    inline void bind_int8_scale_rings(const std::vector<torch::Tensor>& scales)
+    {
+        bind_tensor_group(scales, "boundary_gpu int8 scale ring",
+                          top_scale_gpu, bottom_scale_gpu,
+                          front_scale_gpu, back_scale_gpu,
+                          left_scale_gpu, right_scale_gpu);
     }
 
     // INT8 path: allocate transient FP32 staging buffer (one timestep
@@ -406,24 +432,53 @@ struct EffectiveBoundarySaver {
         int nz_boundary = nz_phys + 2 * tangent_pad;
         int ny_boundary = (dim == 3) ? ny_phys + 2 * tangent_pad : 1;
         
-        if (use_int8) {
-            // INT8 path: Python owns persistent uint8 main + FP32 scale
-            // tensors and passes them concatenated in ``boundary_gpu``
+        const size_t int8_faces = (dim == 3 ? 6 : 4);
+        if (use_int8 && store_on_gpu) {
+            // INT8 gpu-direct: Python owns persistent uint8 main + FP32
+            // scale tensors and passes them concatenated in ``boundary_gpu``
             // (first half = main, second half = scale).  We bind those
             // here and allocate FP32 staging buffers internally (single
             // timestep, transient).
-            TORCH_CHECK(store_on_gpu, "INT8 boundary path currently requires GPU storage.");
-            const size_t expected_n = (dim == 3 ? 6 : 4);
-            TORCH_CHECK(boundary_gpu.size() == 2 * expected_n,
-                        "INT8 boundary_gpu expects ", 2 * expected_n,
-                        " tensors (", expected_n, " main + ", expected_n,
+            TORCH_CHECK(boundary_gpu.size() == 2 * int8_faces,
+                        "INT8 boundary_gpu expects ", 2 * int8_faces,
+                        " tensors (", int8_faces, " main + ", int8_faces,
                         " scale), got ", boundary_gpu.size());
             std::vector<torch::Tensor> main_tensors(boundary_gpu.begin(),
-                                                    boundary_gpu.begin() + expected_n);
-            std::vector<torch::Tensor> scale_tensors(boundary_gpu.begin() + expected_n,
+                                                    boundary_gpu.begin() + int8_faces);
+            std::vector<torch::Tensor> scale_tensors(boundary_gpu.begin() + int8_faces,
                                                      boundary_gpu.end());
             bind_storage_tensors(main_tensors, "boundary_gpu int8 main");
             bind_int8_scales(scale_tensors);
+            allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
+                                  gpu_options.dtype(torch::kFloat32));
+        } else if (use_int8) {
+            // INT8 staged (cpu/disk): Python owns a persistent uint8 main +
+            // FP32 scale buffer (``boundary_cpu``; on disk these are the cpu
+            // staging buffers) AND a uint8 main + FP32 scale RING on the GPU
+            // (``boundary_gpu``).  Both are concatenated main-then-scale.  We
+            // bind the cpu side to top_t/top_scale_t, the gpu rings to
+            // top_gpu/top_scale_gpu, and allocate the shared FP32 transient
+            // staging internally (a single timestep, like gpu-direct).
+            TORCH_CHECK(boundary_cpu.size() == 2 * int8_faces,
+                        "INT8 staged boundary_cpu expects ", 2 * int8_faces,
+                        " tensors (", int8_faces, " main + ", int8_faces,
+                        " scale), got ", boundary_cpu.size());
+            TORCH_CHECK(boundary_gpu.size() == 2 * int8_faces,
+                        "INT8 staged boundary_gpu expects ", 2 * int8_faces,
+                        " tensors (", int8_faces, " main + ", int8_faces,
+                        " scale), got ", boundary_gpu.size());
+            std::vector<torch::Tensor> cpu_main(boundary_cpu.begin(),
+                                                boundary_cpu.begin() + int8_faces);
+            std::vector<torch::Tensor> cpu_scale(boundary_cpu.begin() + int8_faces,
+                                                 boundary_cpu.end());
+            std::vector<torch::Tensor> gpu_main(boundary_gpu.begin(),
+                                                boundary_gpu.begin() + int8_faces);
+            std::vector<torch::Tensor> gpu_scale(boundary_gpu.begin() + int8_faces,
+                                                 boundary_gpu.end());
+            bind_storage_tensors(cpu_main, "boundary_cpu int8 main");
+            bind_int8_scales(cpu_scale);
+            bind_staging_tensors(gpu_main, "boundary_gpu int8 main ring");
+            bind_int8_scale_rings(gpu_scale);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
                                   gpu_options.dtype(torch::kFloat32));
         } else if (!boundary_cpu.empty()) {
@@ -584,11 +639,12 @@ struct EffectiveBoundarySaver {
         }
 
     inline void copy_2d_chunk_async(
-        float* dst,
+        void* dst,
         size_t dst_var_block,
-        const float* src,
+        const void* src,
         size_t src_var_block,
         size_t bytes,
+        size_t elem_size,
         cudaMemcpyKind kind,
         cudaStream_t stream
     ) const
@@ -598,9 +654,9 @@ struct EffectiveBoundarySaver {
         } else {
             cudaMemcpy2DAsync(
                 dst,
-                dst_var_block * sizeof(float),
+                dst_var_block * elem_size,
                 src,
-                src_var_block * sizeof(float),
+                src_var_block * elem_size,
                 bytes,
                 nvar,
                 kind,
@@ -609,8 +665,81 @@ struct EffectiveBoundarySaver {
         }
     }
 
+    // INT8 staged only: copy the per-block FP32 scale RING (top_scale_gpu
+    // et al.) <-> the persistent FP32 scale buffer (top_scale_t et al.),
+    // exactly parallel to the uint8 main copy in flush_gpu_to_cpu /
+    // load_cpu_to_gpu.  ``kind`` selects direction: DeviceToHost flushes
+    // ring->cpu (forward), HostToDevice loads cpu->ring (backward).
+    // ``cpu_start`` indexes the persistent/staging scale buffer (== the
+    // main buffer's ``start``/``stage_start``); ``gpu_start`` indexes the
+    // ring.  es = 4 (scales are always FP32).
+    inline void copy_int8_scales(int cpu_start, int len, int gpu_start,
+                                 cudaMemcpyKind kind, cudaStream_t stream)
+    {
+        const size_t es = sizeof(float);
+        const bool d2h = (kind == cudaMemcpyDeviceToHost);
+        if (dim == 2) {
+            size_t top_var_block = top_scale_t.stride(0);
+            size_t top_time_block = top_scale_t.stride(1);
+            size_t left_var_block = left_scale_t.stride(0);
+            size_t left_time_block = left_scale_t.stride(1);
+            size_t top_gpu_var_block = top_scale_gpu.stride(0);
+            size_t top_gpu_time_block = top_scale_gpu.stride(1);
+            size_t left_gpu_var_block = left_scale_gpu.stride(0);
+            size_t left_gpu_time_block = left_scale_gpu.stride(1);
+            size_t top_bytes = (size_t)len * top_time_block * es;
+            size_t left_bytes = (size_t)len * left_time_block * es;
+            auto face = [&](const torch::Tensor& cpu_t, const torch::Tensor& gpu_t,
+                            size_t cpu_var_block, size_t cpu_time_block,
+                            size_t gpu_var_block, size_t gpu_time_block, size_t bytes) {
+                char* cpu_p = boundary_byte_ptr(cpu_t, (int64_t)cpu_start * cpu_time_block);
+                char* gpu_p = boundary_byte_ptr(gpu_t, (int64_t)gpu_start * gpu_time_block);
+                if (d2h)
+                    copy_2d_chunk_async(cpu_p, cpu_var_block, gpu_p, gpu_var_block, bytes, es, kind, stream);
+                else
+                    copy_2d_chunk_async(gpu_p, gpu_var_block, cpu_p, cpu_var_block, bytes, es, kind, stream);
+            };
+            face(top_scale_t, top_scale_gpu, top_var_block, top_time_block, top_gpu_var_block, top_gpu_time_block, top_bytes);
+            face(bottom_scale_t, bottom_scale_gpu, top_var_block, top_time_block, top_gpu_var_block, top_gpu_time_block, top_bytes);
+            face(left_scale_t, left_scale_gpu, left_var_block, left_time_block, left_gpu_var_block, left_gpu_time_block, left_bytes);
+            face(right_scale_t, right_scale_gpu, left_var_block, left_time_block, left_gpu_var_block, left_gpu_time_block, left_bytes);
+            return;
+        }
+
+        size_t top_block = top_scale_t.stride(0);
+        size_t front_block = front_scale_t.stride(0);
+        size_t left_block = left_scale_t.stride(0);
+        size_t top_gpu_block = top_scale_gpu.stride(0);
+        size_t front_gpu_block = front_scale_gpu.stride(0);
+        size_t left_gpu_block = left_scale_gpu.stride(0);
+        size_t top_elems = (size_t)len * nvar * top_block;
+        size_t front_elems = (size_t)len * nvar * front_block;
+        size_t left_elems = (size_t)len * nvar * left_block;
+        size_t top_gpu_offset = (size_t)gpu_start * nvar * top_gpu_block;
+        size_t front_gpu_offset = (size_t)gpu_start * nvar * front_gpu_block;
+        size_t left_gpu_offset = (size_t)gpu_start * nvar * left_gpu_block;
+        auto face = [&](const torch::Tensor& cpu_t, const torch::Tensor& gpu_t,
+                        size_t cpu_block, size_t gpu_offset, size_t elems) {
+            char* cpu_p = boundary_byte_ptr(cpu_t, (int64_t)cpu_start * nvar * cpu_block);
+            char* gpu_p = boundary_byte_ptr(gpu_t, (int64_t)gpu_offset);
+            if (d2h)
+                cudaMemcpyAsync(cpu_p, gpu_p, elems * es, kind, stream);
+            else
+                cudaMemcpyAsync(gpu_p, cpu_p, elems * es, kind, stream);
+        };
+        face(top_scale_t, top_scale_gpu, top_block, top_gpu_offset, top_elems);
+        face(bottom_scale_t, bottom_scale_gpu, top_block, top_gpu_offset, top_elems);
+        face(front_scale_t, front_scale_gpu, front_block, front_gpu_offset, front_elems);
+        face(back_scale_t, back_scale_gpu, front_block, front_gpu_offset, front_elems);
+        face(left_scale_t, left_scale_gpu, left_block, left_gpu_offset, left_elems);
+        face(right_scale_t, right_scale_gpu, left_block, left_gpu_offset, left_elems);
+    }
+
     inline void flush_gpu_to_cpu(int start, int len, cudaStream_t stream, int gpu_start = 0)
     {
+        // INT8 staged: flush the FP32 scale ring alongside the uint8 main.
+        if (top_t.defined() && top_t.dtype() == torch::kUInt8)
+            copy_int8_scales(start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
         if (dim == 2)
         {
             size_t top_var_block = top_t.stride(0);
@@ -622,43 +751,48 @@ struct EffectiveBoundarySaver {
             size_t left_gpu_var_block = left_gpu.stride(0);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
-            size_t top_bytes = len * top_time_block * sizeof(float);
-            size_t left_bytes = len * left_time_block * sizeof(float);
+            size_t es = top_t.element_size();
+            size_t top_bytes = (size_t)len * top_time_block * es;
+            size_t left_bytes = (size_t)len * left_time_block * es;
 
-            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
+            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16 || top_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
             copy_2d_chunk_async(
-                top_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(top_t, (int64_t)start * top_time_block),
                 top_var_block,
-                top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(top_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
             copy_2d_chunk_async(
-                bottom_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(bottom_t, (int64_t)start * top_time_block),
                 top_var_block,
-                bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(bottom_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
             copy_2d_chunk_async(
-                left_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(left_t, (int64_t)start * left_time_block),
                 left_var_block,
-                left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(left_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
             copy_2d_chunk_async(
-                right_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(right_t, (int64_t)start * left_time_block),
                 left_var_block,
-                right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(right_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyDeviceToHost,
                 stream
             );
@@ -680,51 +814,52 @@ struct EffectiveBoundarySaver {
         size_t bottom_gpu_offset = static_cast<size_t>(gpu_start) * nvar * bottom_gpu_block;
 
 
-        TORCH_CHECK(left_t.dtype() == torch::kFloat32 || left_t.dtype() == torch::kHalf || left_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
+        TORCH_CHECK(left_t.dtype() == torch::kFloat32 || left_t.dtype() == torch::kHalf || left_t.dtype() == torch::kBFloat16 || left_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+        size_t es = left_t.element_size();
         cudaMemcpyAsync(
-            left_t.data_ptr<float>() + start * nvar * left_block,
-            left_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(left_t, (int64_t)start * nvar * left_block),
+            boundary_byte_ptr(left_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            right_t.data_ptr<float>() + start * nvar * left_block,
-            right_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(right_t, (int64_t)start * nvar * left_block),
+            boundary_byte_ptr(right_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            front_t.data_ptr<float>() + start * nvar * front_block,
-            front_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(front_t, (int64_t)start * nvar * front_block),
+            boundary_byte_ptr(front_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            back_t.data_ptr<float>() + start * nvar * front_block,
-            back_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(back_t, (int64_t)start * nvar * front_block),
+            boundary_byte_ptr(back_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            top_t.data_ptr<float>() + start * nvar * bottom_block,
-            top_gpu.data_ptr<float>() + bottom_gpu_offset,
-            bottom_elems * sizeof(float),
+            boundary_byte_ptr(top_t, (int64_t)start * nvar * bottom_block),
+            boundary_byte_ptr(top_gpu, (int64_t)bottom_gpu_offset),
+            bottom_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
 
         cudaMemcpyAsync(
-            bottom_t.data_ptr<float>() + start * nvar * bottom_block,
-            bottom_gpu.data_ptr<float>() + bottom_gpu_offset,
-            bottom_elems * sizeof(float),
+            boundary_byte_ptr(bottom_t, (int64_t)start * nvar * bottom_block),
+            boundary_byte_ptr(bottom_gpu, (int64_t)bottom_gpu_offset),
+            bottom_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
@@ -740,8 +875,9 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 2)
             throw std::runtime_error("flush_gpu_to_disk_2d only supports 2D boundaries.");
-        if (paths.size() != 4)
-            throw std::runtime_error("2D disk boundary expects 4 file paths.");
+        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
+        if (paths.size() != (is_int8 ? 8u : 4u))
+            throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8) file paths.");
 
         size_t top_var_block = top_t.stride(0);
         size_t top_time_block = top_t.stride(1);
@@ -752,42 +888,47 @@ struct EffectiveBoundarySaver {
         size_t left_gpu_var_block = left_gpu.stride(0);
         size_t left_gpu_time_block = left_gpu.stride(1);
 
-        size_t top_bytes = len * top_time_block * sizeof(float);
-        size_t left_bytes = len * left_time_block * sizeof(float);
+        size_t es = top_t.element_size();
+        size_t top_bytes = (size_t)len * top_time_block * es;
+        size_t left_bytes = (size_t)len * left_time_block * es;
 
         copy_2d_chunk_async(
-            top_t.data_ptr<float>() + stage_start * top_time_block,
+            boundary_byte_ptr(top_t, (int64_t)stage_start * top_time_block),
             top_var_block,
-            top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+            boundary_byte_ptr(top_gpu, (int64_t)gpu_start * top_gpu_time_block),
             top_gpu_var_block,
             top_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
         copy_2d_chunk_async(
-            bottom_t.data_ptr<float>() + stage_start * top_time_block,
+            boundary_byte_ptr(bottom_t, (int64_t)stage_start * top_time_block),
             top_var_block,
-            bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+            boundary_byte_ptr(bottom_gpu, (int64_t)gpu_start * top_gpu_time_block),
             top_gpu_var_block,
             top_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
         copy_2d_chunk_async(
-            left_t.data_ptr<float>() + stage_start * left_time_block,
+            boundary_byte_ptr(left_t, (int64_t)stage_start * left_time_block),
             left_var_block,
-            left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+            boundary_byte_ptr(left_gpu, (int64_t)gpu_start * left_gpu_time_block),
             left_gpu_var_block,
             left_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
         copy_2d_chunk_async(
-            right_t.data_ptr<float>() + stage_start * left_time_block,
+            boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block),
             left_var_block,
-            right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+            boundary_byte_ptr(right_gpu, (int64_t)gpu_start * left_gpu_time_block),
             left_gpu_var_block,
             left_bytes,
+            es,
             cudaMemcpyDeviceToHost,
             stream
         );
@@ -803,11 +944,39 @@ struct EffectiveBoundarySaver {
         meta->top_file_var_block = static_cast<size_t>(nt) * top_time_block;
         meta->left_file_var_block = static_cast<size_t>(nt) * left_time_block;
         meta->nvar = nvar;
-        meta->top = top_t.data_ptr<float>() + stage_start * top_time_block;
-        meta->bottom = bottom_t.data_ptr<float>() + stage_start * top_time_block;
-        meta->left = left_t.data_ptr<float>() + stage_start * left_time_block;
-        meta->right = right_t.data_ptr<float>() + stage_start * left_time_block;
+        meta->elem_size = es;
+        meta->top = boundary_byte_ptr(top_t, (int64_t)stage_start * top_time_block);
+        meta->bottom = boundary_byte_ptr(bottom_t, (int64_t)stage_start * top_time_block);
+        meta->left = boundary_byte_ptr(left_t, (int64_t)stage_start * left_time_block);
+        meta->right = boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block);
         cudaLaunchHostFunc(stream, write_boundary_disk_2d_callback, meta);
+
+        if (is_int8) {
+            // INT8: flush the FP32 scale ring -> cpu scale staging (D2H), then
+            // write the scale to its own files (paths[4..7]) via a second meta
+            // reusing the same dtype-agnostic disk-write callback (es=4).
+            copy_int8_scales(stage_start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
+            size_t s_es = sizeof(float);
+            size_t s_top_time = top_scale_t.stride(1);
+            size_t s_left_time = left_scale_t.stride(1);
+            auto* smeta = new BoundaryDisk2DMeta();
+            smeta->paths = {paths[4], paths[5], paths[6], paths[7]};
+            smeta->top_elems = (size_t)len * s_top_time;
+            smeta->left_elems = (size_t)len * s_left_time;
+            smeta->start_top_offset = (size_t)start * s_top_time;
+            smeta->start_left_offset = (size_t)start * s_left_time;
+            smeta->top_var_block = top_scale_t.stride(0);
+            smeta->left_var_block = left_scale_t.stride(0);
+            smeta->top_file_var_block = (size_t)nt * s_top_time;
+            smeta->left_file_var_block = (size_t)nt * s_left_time;
+            smeta->nvar = nvar;
+            smeta->elem_size = s_es;
+            smeta->top = boundary_byte_ptr(top_scale_t, (int64_t)stage_start * s_top_time);
+            smeta->bottom = boundary_byte_ptr(bottom_scale_t, (int64_t)stage_start * s_top_time);
+            smeta->left = boundary_byte_ptr(left_scale_t, (int64_t)stage_start * s_left_time);
+            smeta->right = boundary_byte_ptr(right_scale_t, (int64_t)stage_start * s_left_time);
+            cudaLaunchHostFunc(stream, write_boundary_disk_2d_callback, smeta);
+        }
     }
 
     inline void flush_gpu_to_disk_3d(
@@ -820,8 +989,9 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 3)
             throw std::runtime_error("flush_gpu_to_disk_3d only supports 3D boundaries.");
-        if (paths.size() != 6)
-            throw std::runtime_error("3D disk boundary expects 6 file paths.");
+        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
+        if (paths.size() != (is_int8 ? 12u : 6u))
+            throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8) file paths.");
 
         size_t top_block = top_t.stride(0);
         size_t front_block = front_t.stride(0);
@@ -829,6 +999,7 @@ struct EffectiveBoundarySaver {
         size_t top_gpu_block = top_gpu.stride(0);
         size_t front_gpu_block = front_gpu.stride(0);
         size_t left_gpu_block = left_gpu.stride(0);
+        size_t es = top_t.element_size();
 
         size_t top_elems = len * nvar * top_block;
         size_t front_elems = len * nvar * front_block;
@@ -841,44 +1012,44 @@ struct EffectiveBoundarySaver {
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
         cudaMemcpyAsync(
-            top_t.data_ptr<float>() + top_stage_offset,
-            top_gpu.data_ptr<float>() + top_gpu_offset,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(top_t, (int64_t)top_stage_offset),
+            boundary_byte_ptr(top_gpu, (int64_t)top_gpu_offset),
+            top_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            bottom_t.data_ptr<float>() + top_stage_offset,
-            bottom_gpu.data_ptr<float>() + top_gpu_offset,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(bottom_t, (int64_t)top_stage_offset),
+            boundary_byte_ptr(bottom_gpu, (int64_t)top_gpu_offset),
+            top_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            front_t.data_ptr<float>() + front_stage_offset,
-            front_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(front_t, (int64_t)front_stage_offset),
+            boundary_byte_ptr(front_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            back_t.data_ptr<float>() + front_stage_offset,
-            back_gpu.data_ptr<float>() + front_gpu_offset,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(back_t, (int64_t)front_stage_offset),
+            boundary_byte_ptr(back_gpu, (int64_t)front_gpu_offset),
+            front_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            left_t.data_ptr<float>() + left_stage_offset,
-            left_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(left_t, (int64_t)left_stage_offset),
+            boundary_byte_ptr(left_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
         cudaMemcpyAsync(
-            right_t.data_ptr<float>() + left_stage_offset,
-            right_gpu.data_ptr<float>() + left_gpu_offset,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(right_t, (int64_t)left_stage_offset),
+            boundary_byte_ptr(right_gpu, (int64_t)left_gpu_offset),
+            left_elems * es,
             cudaMemcpyDeviceToHost,
             stream
         );
@@ -891,13 +1062,46 @@ struct EffectiveBoundarySaver {
         meta->top_offset = static_cast<size_t>(start) * nvar * top_block;
         meta->front_offset = static_cast<size_t>(start) * nvar * front_block;
         meta->left_offset = static_cast<size_t>(start) * nvar * left_block;
-        meta->top = top_t.data_ptr<float>() + top_stage_offset;
-        meta->bottom = bottom_t.data_ptr<float>() + top_stage_offset;
-        meta->front = front_t.data_ptr<float>() + front_stage_offset;
-        meta->back = back_t.data_ptr<float>() + front_stage_offset;
-        meta->left = left_t.data_ptr<float>() + left_stage_offset;
-        meta->right = right_t.data_ptr<float>() + left_stage_offset;
+        meta->elem_size = es;
+        meta->top = boundary_byte_ptr(top_t, (int64_t)top_stage_offset);
+        meta->bottom = boundary_byte_ptr(bottom_t, (int64_t)top_stage_offset);
+        meta->front = boundary_byte_ptr(front_t, (int64_t)front_stage_offset);
+        meta->back = boundary_byte_ptr(back_t, (int64_t)front_stage_offset);
+        meta->left = boundary_byte_ptr(left_t, (int64_t)left_stage_offset);
+        meta->right = boundary_byte_ptr(right_t, (int64_t)left_stage_offset);
         cudaLaunchHostFunc(stream, write_boundary_disk_3d_callback, meta);
+
+        if (is_int8) {
+            // INT8: flush FP32 scale ring -> cpu scale staging (D2H), then
+            // write scale to its own files (paths[6..11]) via a second meta
+            // reusing the dtype-agnostic 3D disk-write callback (es=4).
+            copy_int8_scales(stage_start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
+            size_t s_top_block = top_scale_t.stride(0);
+            size_t s_front_block = front_scale_t.stride(0);
+            size_t s_left_block = left_scale_t.stride(0);
+            size_t s_top_elems = (size_t)len * nvar * s_top_block;
+            size_t s_front_elems = (size_t)len * nvar * s_front_block;
+            size_t s_left_elems = (size_t)len * nvar * s_left_block;
+            size_t s_top_stage = (size_t)stage_start * nvar * s_top_block;
+            size_t s_front_stage = (size_t)stage_start * nvar * s_front_block;
+            size_t s_left_stage = (size_t)stage_start * nvar * s_left_block;
+            auto* smeta = new BoundaryDisk3DMeta();
+            smeta->paths = {paths[6], paths[7], paths[8], paths[9], paths[10], paths[11]};
+            smeta->top_elems = s_top_elems;
+            smeta->front_elems = s_front_elems;
+            smeta->left_elems = s_left_elems;
+            smeta->top_offset = (size_t)start * nvar * s_top_block;
+            smeta->front_offset = (size_t)start * nvar * s_front_block;
+            smeta->left_offset = (size_t)start * nvar * s_left_block;
+            smeta->elem_size = sizeof(float);
+            smeta->top = boundary_byte_ptr(top_scale_t, (int64_t)s_top_stage);
+            smeta->bottom = boundary_byte_ptr(bottom_scale_t, (int64_t)s_top_stage);
+            smeta->front = boundary_byte_ptr(front_scale_t, (int64_t)s_front_stage);
+            smeta->back = boundary_byte_ptr(back_scale_t, (int64_t)s_front_stage);
+            smeta->left = boundary_byte_ptr(left_scale_t, (int64_t)s_left_stage);
+            smeta->right = boundary_byte_ptr(right_scale_t, (int64_t)s_left_stage);
+            cudaLaunchHostFunc(stream, write_boundary_disk_3d_callback, smeta);
+        }
     }
 
     inline void flush_gpu_to_disk(
@@ -920,8 +1124,9 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 2)
             throw std::runtime_error("load_disk_to_cpu_2d only supports 2D boundaries.");
-        if (paths.size() != 4)
-            throw std::runtime_error("2D disk boundary expects 4 file paths.");
+        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
+        if (paths.size() != (is_int8 ? 8u : 4u))
+            throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8) file paths.");
 
         size_t top_time_block = top_t.stride(1);
         size_t left_time_block = left_t.stride(1);
@@ -934,36 +1139,71 @@ struct EffectiveBoundarySaver {
         size_t left_var_block = left_t.stride(0);
         size_t top_file_var_block = static_cast<size_t>(nt) * top_time_block;
         size_t left_file_var_block = static_cast<size_t>(nt) * left_time_block;
-        float* top_dst = top_t.data_ptr<float>() + stage_start * top_time_block;
-        float* bottom_dst = bottom_t.data_ptr<float>() + stage_start * top_time_block;
-        float* left_dst = left_t.data_ptr<float>() + stage_start * left_time_block;
-        float* right_dst = right_t.data_ptr<float>() + stage_start * left_time_block;
+        size_t es = top_t.element_size();
+        char* top_dst = boundary_byte_ptr(top_t, (int64_t)stage_start * top_time_block);
+        char* bottom_dst = boundary_byte_ptr(bottom_t, (int64_t)stage_start * top_time_block);
+        char* left_dst = boundary_byte_ptr(left_t, (int64_t)stage_start * left_time_block);
+        char* right_dst = boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block);
 
         for (int v = 0; v < nvar; ++v) {
             read_boundary_file_chunk(
                 paths[0],
                 static_cast<size_t>(v) * top_file_var_block + top_offset,
-                top_dst + static_cast<size_t>(v) * top_var_block,
-                top_elems
+                top_dst + static_cast<size_t>(v) * top_var_block * es,
+                top_elems,
+                es
             );
             read_boundary_file_chunk(
                 paths[1],
                 static_cast<size_t>(v) * top_file_var_block + top_offset,
-                bottom_dst + static_cast<size_t>(v) * top_var_block,
-                top_elems
+                bottom_dst + static_cast<size_t>(v) * top_var_block * es,
+                top_elems,
+                es
             );
             read_boundary_file_chunk(
                 paths[2],
                 static_cast<size_t>(v) * left_file_var_block + left_offset,
-                left_dst + static_cast<size_t>(v) * left_var_block,
-                left_elems
+                left_dst + static_cast<size_t>(v) * left_var_block * es,
+                left_elems,
+                es
             );
             read_boundary_file_chunk(
                 paths[3],
                 static_cast<size_t>(v) * left_file_var_block + left_offset,
-                right_dst + static_cast<size_t>(v) * left_var_block,
-                left_elems
+                right_dst + static_cast<size_t>(v) * left_var_block * es,
+                left_elems,
+                es
             );
+        }
+
+        if (is_int8) {
+            // INT8: read the FP32 per-block scale files (paths[4..7]) into the
+            // cpu scale staging; load_cpu_to_gpu then copies it to the ring.
+            size_t s_top_time = top_scale_t.stride(1);
+            size_t s_left_time = left_scale_t.stride(1);
+            size_t s_top_elems = (size_t)len * s_top_time;
+            size_t s_left_elems = (size_t)len * s_left_time;
+            size_t s_top_off = (size_t)start * s_top_time;
+            size_t s_left_off = (size_t)start * s_left_time;
+            size_t s_top_var = top_scale_t.stride(0);
+            size_t s_left_var = left_scale_t.stride(0);
+            size_t s_top_file_var = (size_t)nt * s_top_time;
+            size_t s_left_file_var = (size_t)nt * s_left_time;
+            const size_t ses = sizeof(float);
+            char* s_top_dst = boundary_byte_ptr(top_scale_t, (int64_t)stage_start * s_top_time);
+            char* s_bottom_dst = boundary_byte_ptr(bottom_scale_t, (int64_t)stage_start * s_top_time);
+            char* s_left_dst = boundary_byte_ptr(left_scale_t, (int64_t)stage_start * s_left_time);
+            char* s_right_dst = boundary_byte_ptr(right_scale_t, (int64_t)stage_start * s_left_time);
+            for (int v = 0; v < nvar; ++v) {
+                read_boundary_file_chunk(paths[4], (size_t)v * s_top_file_var + s_top_off,
+                                         s_top_dst + (size_t)v * s_top_var * ses, s_top_elems, ses);
+                read_boundary_file_chunk(paths[5], (size_t)v * s_top_file_var + s_top_off,
+                                         s_bottom_dst + (size_t)v * s_top_var * ses, s_top_elems, ses);
+                read_boundary_file_chunk(paths[6], (size_t)v * s_left_file_var + s_left_off,
+                                         s_left_dst + (size_t)v * s_left_var * ses, s_left_elems, ses);
+                read_boundary_file_chunk(paths[7], (size_t)v * s_left_file_var + s_left_off,
+                                         s_right_dst + (size_t)v * s_left_var * ses, s_left_elems, ses);
+            }
         }
     }
 
@@ -971,8 +1211,9 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 3)
             throw std::runtime_error("load_disk_to_cpu_3d only supports 3D boundaries.");
-        if (paths.size() != 6)
-            throw std::runtime_error("3D disk boundary expects 6 file paths.");
+        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
+        if (paths.size() != (is_int8 ? 12u : 6u))
+            throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8) file paths.");
 
         size_t top_block = top_t.stride(0);
         size_t front_block = front_t.stride(0);
@@ -989,11 +1230,12 @@ struct EffectiveBoundarySaver {
         size_t front_stage_offset = static_cast<size_t>(stage_start) * nvar * front_block;
         size_t left_stage_offset = static_cast<size_t>(stage_start) * nvar * left_block;
 
+        size_t es = top_t.element_size();
         std::exception_ptr read_error = nullptr;
         std::mutex read_error_mutex;
-        auto read_one = [&](std::string path, size_t offset, float* dst, size_t elems) {
+        auto read_one = [&](std::string path, size_t offset, void* dst, size_t elems) {
             try {
-                read_boundary_file_chunk(path, offset, dst, elems);
+                read_boundary_file_chunk(path, offset, dst, elems, es);
             } catch (...) {
                 std::lock_guard<std::mutex> lock(read_error_mutex);
                 if (!read_error)
@@ -1003,12 +1245,46 @@ struct EffectiveBoundarySaver {
 
         std::vector<std::thread> readers;
         readers.reserve(6);
-        readers.emplace_back(read_one, paths[0], top_offset, top_t.data_ptr<float>() + top_stage_offset, top_elems);
-        readers.emplace_back(read_one, paths[1], top_offset, bottom_t.data_ptr<float>() + top_stage_offset, top_elems);
-        readers.emplace_back(read_one, paths[2], front_offset, front_t.data_ptr<float>() + front_stage_offset, front_elems);
-        readers.emplace_back(read_one, paths[3], front_offset, back_t.data_ptr<float>() + front_stage_offset, front_elems);
-        readers.emplace_back(read_one, paths[4], left_offset, left_t.data_ptr<float>() + left_stage_offset, left_elems);
-        readers.emplace_back(read_one, paths[5], left_offset, right_t.data_ptr<float>() + left_stage_offset, left_elems);
+        readers.emplace_back(read_one, paths[0], top_offset, (void*)boundary_byte_ptr(top_t, (int64_t)top_stage_offset), top_elems);
+        readers.emplace_back(read_one, paths[1], top_offset, (void*)boundary_byte_ptr(bottom_t, (int64_t)top_stage_offset), top_elems);
+        readers.emplace_back(read_one, paths[2], front_offset, (void*)boundary_byte_ptr(front_t, (int64_t)front_stage_offset), front_elems);
+        readers.emplace_back(read_one, paths[3], front_offset, (void*)boundary_byte_ptr(back_t, (int64_t)front_stage_offset), front_elems);
+        readers.emplace_back(read_one, paths[4], left_offset, (void*)boundary_byte_ptr(left_t, (int64_t)left_stage_offset), left_elems);
+        readers.emplace_back(read_one, paths[5], left_offset, (void*)boundary_byte_ptr(right_t, (int64_t)left_stage_offset), left_elems);
+
+        if (is_int8) {
+            // INT8: read the FP32 per-block scale files (paths[6..11]) into the
+            // cpu scale staging in parallel; es=4 (the main reads use es=1).
+            const size_t ses = sizeof(float);
+            auto read_one_scale = [&](std::string path, size_t offset, void* dst, size_t elems) {
+                try {
+                    read_boundary_file_chunk(path, offset, dst, elems, ses);
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(read_error_mutex);
+                    if (!read_error)
+                        read_error = std::current_exception();
+                }
+            };
+            size_t s_top_block = top_scale_t.stride(0);
+            size_t s_front_block = front_scale_t.stride(0);
+            size_t s_left_block = left_scale_t.stride(0);
+            size_t s_top_elems = (size_t)len * nvar * s_top_block;
+            size_t s_front_elems = (size_t)len * nvar * s_front_block;
+            size_t s_left_elems = (size_t)len * nvar * s_left_block;
+            size_t s_top_off = (size_t)start * nvar * s_top_block;
+            size_t s_front_off = (size_t)start * nvar * s_front_block;
+            size_t s_left_off = (size_t)start * nvar * s_left_block;
+            size_t s_top_stage = (size_t)stage_start * nvar * s_top_block;
+            size_t s_front_stage = (size_t)stage_start * nvar * s_front_block;
+            size_t s_left_stage = (size_t)stage_start * nvar * s_left_block;
+            readers.emplace_back(read_one_scale, paths[6], s_top_off, (void*)boundary_byte_ptr(top_scale_t, (int64_t)s_top_stage), s_top_elems);
+            readers.emplace_back(read_one_scale, paths[7], s_top_off, (void*)boundary_byte_ptr(bottom_scale_t, (int64_t)s_top_stage), s_top_elems);
+            readers.emplace_back(read_one_scale, paths[8], s_front_off, (void*)boundary_byte_ptr(front_scale_t, (int64_t)s_front_stage), s_front_elems);
+            readers.emplace_back(read_one_scale, paths[9], s_front_off, (void*)boundary_byte_ptr(back_scale_t, (int64_t)s_front_stage), s_front_elems);
+            readers.emplace_back(read_one_scale, paths[10], s_left_off, (void*)boundary_byte_ptr(left_scale_t, (int64_t)s_left_stage), s_left_elems);
+            readers.emplace_back(read_one_scale, paths[11], s_left_off, (void*)boundary_byte_ptr(right_scale_t, (int64_t)s_left_stage), s_left_elems);
+        }
+
         for (auto& reader : readers)
             reader.join();
         if (read_error)
@@ -1017,6 +1293,9 @@ struct EffectiveBoundarySaver {
 
     inline void load_cpu_to_gpu(int start, int len, cudaStream_t stream, int gpu_start = 0)
     {
+        // INT8 staged: load the FP32 scale ring alongside the uint8 main.
+        if (top_t.defined() && top_t.dtype() == torch::kUInt8)
+            copy_int8_scales(start, len, gpu_start, cudaMemcpyHostToDevice, stream);
         if (dim == 2)
         {
             size_t top_var_block = top_t.stride(0);
@@ -1026,45 +1305,50 @@ struct EffectiveBoundarySaver {
             size_t top_gpu_var_block = top_gpu.stride(0);
             size_t left_gpu_var_block = left_gpu.stride(0);
 
-            size_t top_bytes = len * top_time_block * sizeof(float);
-            size_t left_bytes = len * left_time_block * sizeof(float);
+            size_t es = top_t.element_size();
+            size_t top_bytes = (size_t)len * top_time_block * es;
+            size_t left_bytes = (size_t)len * left_time_block * es;
             size_t top_gpu_time_block = top_gpu.stride(1);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
-            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
+            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16 || top_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
             copy_2d_chunk_async(
-                top_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(top_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
-                top_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(top_t, (int64_t)start * top_time_block),
                 top_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
             copy_2d_chunk_async(
-                bottom_gpu.data_ptr<float>() + gpu_start * top_gpu_time_block,
+                boundary_byte_ptr(bottom_gpu, (int64_t)gpu_start * top_gpu_time_block),
                 top_gpu_var_block,
-                bottom_t.data_ptr<float>() + start * top_time_block,
+                boundary_byte_ptr(bottom_t, (int64_t)start * top_time_block),
                 top_var_block,
                 top_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
             copy_2d_chunk_async(
-                left_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(left_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
-                left_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(left_t, (int64_t)start * left_time_block),
                 left_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
             copy_2d_chunk_async(
-                right_gpu.data_ptr<float>() + gpu_start * left_gpu_time_block,
+                boundary_byte_ptr(right_gpu, (int64_t)gpu_start * left_gpu_time_block),
                 left_gpu_var_block,
-                right_t.data_ptr<float>() + start * left_time_block,
+                boundary_byte_ptr(right_t, (int64_t)start * left_time_block),
                 left_var_block,
                 left_bytes,
+                es,
                 cudaMemcpyHostToDevice,
                 stream
             );
@@ -1085,51 +1369,52 @@ struct EffectiveBoundarySaver {
         size_t front_gpu_offset = static_cast<size_t>(gpu_start) * nvar * front_gpu_block;
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
-        TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16, "Boundary storage must be float32 / float16 / bfloat16.");
+        TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16 || top_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+        size_t es = top_t.element_size();
         cudaMemcpyAsync(
-            top_gpu.data_ptr<float>() + top_gpu_offset,
-            top_t.data_ptr<float>() + start * nvar * top_block,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(top_gpu, (int64_t)top_gpu_offset),
+            boundary_byte_ptr(top_t, (int64_t)start * nvar * top_block),
+            top_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            bottom_gpu.data_ptr<float>() + top_gpu_offset,
-            bottom_t.data_ptr<float>() + start * nvar * top_block,
-            top_elems * sizeof(float),
+            boundary_byte_ptr(bottom_gpu, (int64_t)top_gpu_offset),
+            boundary_byte_ptr(bottom_t, (int64_t)start * nvar * top_block),
+            top_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            front_gpu.data_ptr<float>() + front_gpu_offset,
-            front_t.data_ptr<float>() + start * nvar * front_block,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(front_gpu, (int64_t)front_gpu_offset),
+            boundary_byte_ptr(front_t, (int64_t)start * nvar * front_block),
+            front_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            back_gpu.data_ptr<float>() + front_gpu_offset,
-            back_t.data_ptr<float>() + start * nvar * front_block,
-            front_elems * sizeof(float),
+            boundary_byte_ptr(back_gpu, (int64_t)front_gpu_offset),
+            boundary_byte_ptr(back_t, (int64_t)start * nvar * front_block),
+            front_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            left_gpu.data_ptr<float>() + left_gpu_offset,
-            left_t.data_ptr<float>() + start * nvar * left_block,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(left_gpu, (int64_t)left_gpu_offset),
+            boundary_byte_ptr(left_t, (int64_t)start * nvar * left_block),
+            left_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
 
         cudaMemcpyAsync(
-            right_gpu.data_ptr<float>() + left_gpu_offset,
-            right_t.data_ptr<float>() + start * nvar * left_block,
-            left_elems * sizeof(float),
+            boundary_byte_ptr(right_gpu, (int64_t)left_gpu_offset),
+            boundary_byte_ptr(right_t, (int64_t)start * nvar * left_block),
+            left_elems * es,
             cudaMemcpyHostToDevice,
             stream
         );
