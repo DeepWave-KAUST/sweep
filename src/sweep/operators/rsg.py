@@ -173,16 +173,3 @@ class RSGDerivative:
 
     def lz_bwd(self, u):
         return self._conv2d(u, self._kz_bwd) * self._inv_2dz
-
-    # Backward-compatible aliases used by older tests/examples.
-    def dx_fwd(self, u):
-        return self.lx_fwd(u)
-
-    def dx_bwd(self, u):
-        return self.lx_bwd(u)
-
-    def dz_fwd(self, u):
-        return self.lz_fwd(u)
-
-    def dz_bwd(self, u):
-        return self.lz_bwd(u)

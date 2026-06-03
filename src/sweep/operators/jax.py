@@ -150,7 +150,7 @@ def _normalize_3d_kernel_bank(kernels):
 
 
 @jax.jit
-def apply_kernels_jax(u, kernels):
+def apply_kernels(u, kernels):
     # u: (B, 1, H, W)
     # kernels: (K, kh, kw) or (K, 1, kh, kw)
     kernel_bank = _normalize_2d_kernel_bank(kernels)
@@ -168,7 +168,7 @@ def apply_kernels_jax(u, kernels):
 
 
 @jax.jit
-def apply_kernels_jax3d(u, kernels):
+def apply_kernels_3d(u, kernels):
     # u: (B, 1, D, H, W)
     # kernels: (K, kD, kH, kW) or (K, 1, kD, kH, kW)
     kernel_bank = _normalize_3d_kernel_bank(kernels)
@@ -183,6 +183,7 @@ def apply_kernels_jax3d(u, kernels):
         dimension_numbers=("NCDHW", "OIDHW", "NCDHW"),
     )
     return conv_out if conv_out.shape[1] == 1 else conv_out.sum(axis=1, keepdims=True)
+
 
 def gradient(u, h, axis, kernels=None):
     h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)

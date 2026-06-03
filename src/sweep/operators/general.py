@@ -64,13 +64,11 @@ class PartialDerivative:
 
     def get_ops(self):
         if self.backend == 'jax':
-            from sweep.operators.jax import apply_kernels_jax as apply_kernels
-            from sweep.operators.jax import apply_kernels_jax3d as apply_kernels3d
+            from sweep.operators.jax import apply_kernels, apply_kernels_3d
         if self.backend == 'torch':
-            from sweep.operators.torch import apply_kernels_torch as apply_kernels
-            from sweep.operators.torch import apply_kernels_torch3d as apply_kernels3d
+            from sweep.operators.torch import apply_kernels, apply_kernels_3d
 
-        self.apply_kernels = apply_kernels3d if self.ndim == 3 else apply_kernels
+        self.apply_kernels = apply_kernels_3d if self.ndim == 3 else apply_kernels
 
     def to_backend(self, to: Callable, *args, **kwargs):
         self.kxf = to(self.kxf, self.backend, self.device)
