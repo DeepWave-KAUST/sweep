@@ -30,16 +30,29 @@ subclass.
 
 ## Path 1 — `SecondOrderEquation`
 
-The `LaplaceGradientOps` bundle, mixed into `SecondOrderEquation`, binds five
-backend-dispatched functions as instance attributes:
+The `LaplaceGradientOps` bundle, mixed into `SecondOrderEquation`, gives
+your equation two layers of operators:
 
-| Attribute | Returns | Used by |
-| --- | --- | --- |
-| `self.separable_d2_2d(u, kernels, hz, hx)` | `(d²u/∂z², d²u/∂x²)` tuple | anisotropic equations needing per-axis components |
-| `self.separable_d2_3d(u, kernels, hz, hy, hx)` | `(d²u/∂z², d²u/∂y², d²u/∂x²)` tuple | 3-D anisotropic equations |
-| `self.laplacian_2d(u, kernels, hz, hx)` | scalar `∇²u` (= sum of components) | isotropic equations |
-| `self.laplacian_3d(u, kernels, hz, hy, hx)` | scalar `∇²u` (= sum of components) | 3-D isotropic equations |
-| `self.gradient(u, h, axis, kernels=None)` | first-order `∂u/∂xᵢ` along one axis | CPML wiring, RTM imaging conditions |
+**Recommended (cached-kernel) shortcuts** — auto-dispatch on `self.ndim`,
+hide `self.laplace_kernels` and the `hz/hx[/hy]` unpacking. Use these
+from `func()`:
+
+| Attribute | Returns |
+| --- | --- |
+| `self.laplacian(u, h)` | scalar `∇²u` (= sum of components) — 2-D or 3-D |
+| `self.separable_d2(u, h)` | `(d²u/∂z², d²u/∂x²)` or `(d²u/∂z², d²u/∂y², d²u/∂x²)` tuple |
+
+**Lower-level free-function entry points** — pass `kernels` and per-axis
+spacings explicitly. Use these if you want a different kernel stack or
+non-uniform spacing per call:
+
+| Attribute | Returns |
+| --- | --- |
+| `self.separable_d2_2d(u, kernels, hz, hx)` | `(d²u/∂z², d²u/∂x²)` tuple |
+| `self.separable_d2_3d(u, kernels, hz, hy, hx)` | `(d²u/∂z², d²u/∂y², d²u/∂x²)` tuple |
+| `self.laplacian_2d(u, kernels, hz, hx)` | scalar `∇²u` |
+| `self.laplacian_3d(u, kernels, hz, hy, hx)` | scalar `∇²u` |
+| `self.gradient(u, h, axis, kernels=None)` | first-order `∂u/∂xᵢ` along one axis (CPML wiring, RTM imaging) |
 
 The Laplacian helpers consume `self.laplace_kernels`, populated by a single
 init call:
@@ -60,8 +73,7 @@ class MyScalar(SecondOrderEquation):
 def func(self, wavefields, models, dt, h, b, **kwargs):
     u_now, u_pre = wavefields
     (vp,) = models
-    hz, hx = self._spacings_2d(h)
-    lap = self.laplacian_2d(u_now, self.laplace_kernels, hz, hx)
+    lap = self.laplacian(u_now, h)                # ndim auto-dispatch
     u_next = 2 * u_now - u_pre + (vp * dt) ** 2 * lap
     return u_next, u_now
 ```
@@ -75,12 +87,11 @@ with different coefficients, so you need the components separately:
 def func(self, wavefields, models, dt, h, b, **kwargs):
     u_now, u_pre = wavefields
     vp, epsilon, delta = models
-    hz, hx = self._spacings_2d(h)
-    d2z, d2x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
+    d2z, d2x = self.separable_d2(u_now, h)        # ndim auto-dispatch
     vp2 = vp * vp
     u_next = 2 * u_now - u_pre + dt * dt * (
-        vp2 * (1 + 2 * epsilon) * d2x          # horizontal stiffer
-        + vp2 * (1 + 2 * delta) * d2z          # vertical
+        vp2 * (1 + 2 * epsilon) * d2x             # horizontal stiffer
+        + vp2 * (1 + 2 * delta) * d2z             # vertical
     )
     return u_next, u_now
 ```
