@@ -101,7 +101,7 @@ class Acoustic3D(SecondOrderEquation):
                 :class:`Acoustic` for 2-D. Defaults to 3.
         """
         super().__init__(spatial_order, device, backend, dim=dim)
-        super().init_laplace(ltype='3dsep', backend=backend)
+        super().init_separable_laplace()
 
     @property
     def default_source_fields(self):

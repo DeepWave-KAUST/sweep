@@ -112,7 +112,7 @@ class AcousticVTI(SecondOrderEquation):
                 Defaults to 2.
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
-        super().init_laplace(ltype="1dsep", backend=backend)
+        super().init_separable_laplace()
         self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
 
     @property

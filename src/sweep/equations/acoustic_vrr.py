@@ -31,7 +31,7 @@ class AcousticVRR(SecondOrderEquation):
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
-        super().init_laplace(ltype='1dsep', backend=backend)
+        super().init_separable_laplace()
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]

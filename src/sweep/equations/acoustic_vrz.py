@@ -193,7 +193,7 @@ class AcousticVRZ(SecondOrderEquation):
                 :class:`AcousticVRZ3D` for 3-D. Defaults to 2.
         """
         super().__init__(spatial_order, device, backend, other_kernels=True)
-        super().init_laplace(ltype='1dsep', backend=backend)
+        super().init_separable_laplace()
         self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
 
     @property
@@ -303,7 +303,7 @@ class AcousticVRZ3D(SecondOrderEquation):
                 :class:`AcousticVRZ` for 2-D. Defaults to 3.
         """
         super().__init__(spatial_order, device, backend, dim=dim)
-        super().init_laplace(ltype='3dsep', backend=backend)
+        super().init_separable_laplace()
         if backend == 'torch':
             self.grad_kernels = {
                 -3: to_backend(_gradient_kernel3d(spatial_order, -3), backend=backend, device=device),
