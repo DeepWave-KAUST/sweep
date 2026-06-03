@@ -107,12 +107,9 @@ class BoundaryOptions:
             raise ValueError("BoundaryOptions.storage must be 'gpu', 'cpu', or 'disk'.")
         if self.storage_dtype not in {"fp32", "fp16", "bf16", "int8"}:
             raise ValueError("BoundaryOptions.storage_dtype must be 'fp32', 'fp16', 'bf16', or 'int8'.")
-        if self.storage != "gpu" and self.storage_dtype == "int8":
-            raise ValueError(
-                f"BoundaryOptions.storage_dtype='int8' with storage={self.storage!r} "
-                "is not supported: staged (cpu/disk) storage supports fp32/fp16/bf16; "
-                "int8 is gpu-only."
-            )
+        # Every storage location (gpu/cpu/disk) supports every storage_dtype,
+        # including int8 (staged int8 uses a uint8 main + FP32 per-block scale
+        # ring, with parallel uint8/scale files for disk).
         if self.transfer_interval is not None and self.transfer_interval < 1:
             raise ValueError("BoundaryOptions.transfer_interval must be >= 1.")
         if self.ring_buffers is not None and self.ring_buffers < 1:
