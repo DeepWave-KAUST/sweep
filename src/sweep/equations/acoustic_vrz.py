@@ -192,9 +192,9 @@ class AcousticVRZ(SecondOrderEquation):
             dim: Stored dimensionality. Always ``2`` for this class; use
                 :class:`AcousticVRZ3D` for 3-D. Defaults to 2.
         """
-        super().__init__(spatial_order, device, backend, other_kernels=True)
-        super().init_laplace(ltype='1dsep', backend=backend)
-        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        super().__init__(spatial_order, device, backend)
+        super().init_separable_laplace()
+        super().init_grad_kernels()
 
     @property
     def default_source_fields(self):
@@ -207,7 +207,7 @@ class AcousticVRZ(SecondOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
         hz, hx = self._spacings_2d(h)
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         out = step_cpml(*wavefields, *models, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
@@ -303,7 +303,7 @@ class AcousticVRZ3D(SecondOrderEquation):
                 :class:`AcousticVRZ` for 2-D. Defaults to 3.
         """
         super().__init__(spatial_order, device, backend, dim=dim)
-        super().init_laplace(ltype='3dsep', backend=backend)
+        super().init_separable_laplace()
         if backend == 'torch':
             self.grad_kernels = {
                 -3: to_backend(_gradient_kernel3d(spatial_order, -3), backend=backend, device=device),
@@ -324,7 +324,7 @@ class AcousticVRZ3D(SecondOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
         hz, hy, hx = self._spacings_3d(h)
-        lap_z, lap_y, lap_x = self.laplace3d_sep(u_now, self.laplace_kernels, hz, hy, hx)
+        lap_z, lap_y, lap_x = self.separable_d2_3d(u_now, self.laplace_kernels, hz, hy, hx)
         out = step_cpml_3d(*wavefields, *models, dt, h, b, lap_x, lap_y, lap_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)

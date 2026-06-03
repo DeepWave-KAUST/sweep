@@ -75,7 +75,7 @@ class ViscoAcoustic(SecondOrderEquation):
         """
         
         super().__init__(spatial_order, device, backend, dim=dim)
-        super().init_laplace(ltype='1dsep', backend=backend)
+        super().init_separable_laplace()
 
         self.backend = backend
 
@@ -95,6 +95,6 @@ class ViscoAcoustic(SecondOrderEquation):
     
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)
-        laplace_u_now_z, laplace_u_now_x = self.laplace1d_sep(wavefields[0], self.laplace_kernels, hz, hx)
+        laplace_u_now_z, laplace_u_now_x = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
         laplace_u_now = laplace_u_now_x + laplace_u_now_z
         return step(*wavefields, *models, dt, h, b, self.k, laplace_u_now, self.phase_shift, self.amplitude_damping, self.op, self.cond_op, **kwargs)

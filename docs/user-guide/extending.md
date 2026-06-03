@@ -107,14 +107,13 @@ class MyScalar(SecondOrderEquation):
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         super().__init__(spatial_order, device, backend, dim=dim)
-        self.init_laplace(ltype="1dsep", backend=backend)
+        self.init_separable_laplace()
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now, u_pre = wavefields
         (vp,) = models
-        hz, hx = self._spacings_2d(h)
-        lap_z, lap_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
-        u_next = 2 * u_now - u_pre + (vp * dt) ** 2 * (lap_z + lap_x)
+        lap = self.laplacian(u_now, h)
+        u_next = 2 * u_now - u_pre + (vp * dt) ** 2 * lap
         return u_next, u_now
 ```
 

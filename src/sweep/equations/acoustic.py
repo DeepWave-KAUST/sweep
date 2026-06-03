@@ -93,12 +93,10 @@ class Acoustic(SecondOrderEquation):
             dim: Stored dimensionality. Always ``2`` for this class; use
                 :class:`Acoustic3D` for 3-D. Defaults to 2.
         """
-        use_fast_grad_kernels = backend == 'torch' and 'cuda' in str(device)
-        super().__init__(spatial_order, device, backend, dim=dim, other_kernels=use_fast_grad_kernels)
-        super().init_laplace(ltype='1dsep', backend=backend)
-        self.grad_kernels = None
-        if use_fast_grad_kernels:
-            self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        super().__init__(spatial_order, device, backend, dim=dim)
+        super().init_separable_laplace()
+        if backend == 'torch' and 'cuda' in str(device):
+            super().init_grad_kernels()
 
     @property
     def default_source_fields(self):
@@ -112,7 +110,7 @@ class Acoustic(SecondOrderEquation):
         u_now = wavefields[0]
         (vp,) = models
         hz, hx = self._spacings_2d(h)
-        lap_u_now_z, lap_u_now_x = self.laplace1d_sep(u_now, self.laplace_kernels, hz, hx)
+        lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)

@@ -131,9 +131,9 @@ class AcousticTTI(SecondOrderEquation):
             dim: Stored dimensionality. Always ``2`` for this class.
                 Defaults to 2.
         """
-        super().__init__(spatial_order, device, backend, other_kernels=True)
-        super().init_laplace(ltype="1dsep", backend=backend)
-        self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        super().__init__(spatial_order, device, backend)
+        super().init_separable_laplace()
+        super().init_grad_kernels()
         if backend == "jax" and jnp is None:
             raise ImportError("AcousticTTI with backend='jax' requires jax to be installed.")
         self.op = {"torch": torch, "jax": jnp}[backend]
@@ -148,5 +148,5 @@ class AcousticTTI(SecondOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         hz, hx = self._spacings_2d(h)
-        nabla_z, nabla_x = self.laplace1d_sep(wavefields[0], self.laplace_kernels, hz, hx)
+        nabla_z, nabla_x = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
         return step_cpml(*wavefields, *models, dt, h, b, self.b, nabla_x, nabla_z, self.gradient, self.op, self.grad_kernels, **kwargs)
