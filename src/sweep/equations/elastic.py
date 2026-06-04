@@ -1,7 +1,11 @@
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from ._elastic_step_core import elastic_step_core
+from ._elastic_step_core import (
+    elastic_step_core,
+    elastic_velocity_substep,
+    elastic_stress_substep,
+)
 from ._free_surface import zero_at_topo, zero_top_row
 from ._topography import (
     classify_topography,
@@ -52,6 +56,9 @@ class Elastic(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 8 profiles
     supports_apm = True          # APM (Cao & Chen 2018) dispatch in ``func``
+    # interior_substeps carry the free-surface BC, so eager boundary saving may
+    # run with free_surface=True (the propagator's guard skips this equation).
+    supports_bs_free_surface = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic equation operator.
@@ -99,26 +106,38 @@ class Elastic(FirstOrderEquation):
     def default_receiver_fields(self):
         return ["vx", "vz"]
 
-    def prepare_models(self, models):
-        vp, vs, rho = models
-        lame_lambda = rho * (vp**2 - 2 * vs**2)
-        lame_mu = rho * vs**2
-        return [vp, vs, rho, lame_lambda, lame_mu, lame_lambda + 2 * lame_mu]
-    
-    def func(self, wavefields, models, dt, h, b, **kwargs):
-        # Standard model unpacking (3 / 5 / 6).
-        if len(models) == 6:
-            vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = models
-        elif len(models) == 5:
-            vp, vs, rho, lame_lambda, lame_mu = models
-            lame_lambda_2mu = lame_lambda + 2 * lame_mu
-        elif len(models) == 3:
+    @staticmethod
+    def _lame(models):
+        """Normalise the model list to the canonical 6-tuple
+        ``(vp, vs, rho, λ, μ, λ+2μ)`` — the single source of truth for the
+        vp/vs→Lamé mapping, shared by ``func``, ``prepare_models`` and
+        ``interior_substeps``.
+
+        Accepts three levels of preparation:
+          * 3  ``(vp, vs, rho)``                     — raw physical models;
+          * 5  ``(vp, vs, rho, λ, μ)``               — λ+2μ derived;
+          * 6  ``(vp, vs, rho, λ, μ, λ+2μ)``         — already prepared (the
+            runtime path; returned as-is, so calling this per step is a cheap
+            no-op and does NOT recompute the moduli).
+        """
+        n = len(models)
+        if n == 6:
+            return tuple(models)
+        if n == 5:
+            vp, vs, rho, lam, mu = models
+            return vp, vs, rho, lam, mu, lam + 2 * mu
+        if n == 3:
             vp, vs, rho = models
-            lame_lambda = rho * (vp**2 - 2 * vs**2)
-            lame_mu = rho * vs**2
-            lame_lambda_2mu = lame_lambda + 2 * lame_mu
-        else:
-            raise ValueError(f"Elastic.func expected 3, 5, or 6 models, got {len(models)}")
+            lam = rho * (vp ** 2 - 2 * vs ** 2)
+            mu = rho * vs ** 2
+            return vp, vs, rho, lam, mu, lam + 2 * mu
+        raise ValueError(f"Elastic models must be a 3-, 5- or 6-tuple, got {n}")
+
+    def prepare_models(self, models):
+        return list(self._lame(models))
+
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = self._lame(models)
 
         # ---- APM dispatch ---------------------------------------------------
         # If the propagator's ``topography=`` was a 2-D air_mask it stored a
@@ -171,6 +190,44 @@ class Elastic(FirstOrderEquation):
             m_txxx, m_txxz, m_tzzx, m_tzzz,
             m_txzx, m_txzz,
         )
+
+    def interior_substeps(self):
+        """The Virieux leapfrog as reversible sub-steps, REUSING the shared
+        ``elastic_velocity_substep`` / ``elastic_stress_substep`` that
+        :func:`elastic_step_core` (and thus ``func``) is built from — no
+        rewritten copy of the physics.  Called with ``pml`` zeroed (boundary
+        saving reconstructs only the lossless interior) but the free-surface BC
+        KEPT, so the eager boundary-saving 'substep' driver inverts the step
+        exactly by composing the list in reverse order at ``-dt``."""
+        pd = self.pd
+        fs = bool(getattr(self, "free_surface", False))
+        topo = getattr(self, "_topo_rows_runtime", None)
+        top_halo = pd.coes.shape[0]
+        pml_zero = (0.0,) * 8
+
+        def _kw(models, dt, h):
+            _, _, rho, lam, mu, lam2mu = self._lame(models)
+            return dict(
+                lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
+                dt=dt, h=h, b=None, pd=pd, pml=pml_zero,
+                free_surface=fs, topo_rows=topo, lame_lambda_2mu=lam2mu,
+            )
+
+        def sub_v(wf, models, dt, h):
+            return list(elastic_velocity_substep(*wf, **_kw(models, dt, h)))
+
+        def sub_s(wf, models, dt, h):
+            out = list(elastic_stress_substep(*wf, **_kw(models, dt, h)))
+            if fs:  # post-step free-surface stress zeroing (mirrors ``func``)
+                if topo is not None:
+                    out[3] = zero_at_topo(out[3], topo, axis=-2)   # szz
+                    out[4] = zero_at_topo(out[4], topo, axis=-2)   # sxz
+                else:
+                    out[3] = zero_top_row(out[3], top_halo, axis=-2)
+                    out[4] = zero_top_row(out[4], top_halo, axis=-2)
+            return out
+
+        return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
 
     def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
                   dt, h, b, **kwargs):
