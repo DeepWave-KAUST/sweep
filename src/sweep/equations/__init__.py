@@ -36,7 +36,7 @@ except ModuleNotFoundError as _das_import_err:
     DASMu = DASMu3D = DASZhao = DASZhao3D = None
     gauge_average = helical_das_response = None
 
-# from .acoustic_vrr import AcousticVRR
+from .acoustic_vrr import AcousticVRR
 try:
     from .qP_tti import AcousticTTI
 except ModuleNotFoundError:
