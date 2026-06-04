@@ -321,3 +321,104 @@ def test_substep_round_trip_identity(name):
                 max(f.abs().max().item() for f in state[:3]), 1e-30)
     err = max((rev[k] - state[k]).abs().max().item() for k in range(3)) / scale
     assert err < 1e-5, f"{name}: round-trip relative error {err}"
+
+
+def _func_breaker(eq):
+    """Wrap ``eq.func`` so it corrupts its output only while ``flag['break']`` is
+    set — lets a test run a clean forward then a broken backward (reconstruction
+    + recompute use the corrupted op)."""
+    real_func = eq.func
+    flag = {"break": False}
+
+    def wrapped(wavefields, models, dt, h, b, **kw):
+        out = list(real_func(wavefields, models, dt, h, b, **kw))
+        if flag["break"]:
+            # Multiplicative, not additive: an additive constant cancels under
+            # swap2nd's u_{t+1} = 2u_t - u_{t-1} + ... structure (the recompute
+            # subtracts the same constant the reconstruction added).  A scale
+            # does not cancel, so it genuinely breaks forward-consistency.
+            out[0] = out[0] * 1.5
+        return out
+
+    eq.func = wrapped
+    return flag
+
+
+def test_self_check_raises_on_broken_reverse():
+    """The one-time interior forward-consistency probe must REFUSE rather than
+    silently return a wrong gradient when the reverse driver fails to invert the
+    step.  The forward builds a valid frame; then reconstruction + recompute use
+    a corrupted ``func`` so ``func(reconstructed S_i)`` no longer reproduces
+    ``S_{i+1}`` across the interior and the probe fires on the first backward
+    step."""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    prop = _build(cfg, memory=BOUNDARY)
+    flag = _func_breaker(prop._backend_impl.equation)
+    m = [torch.tensor(a, device="cuda", requires_grad=(i == 0))
+         for i, a in enumerate(init_m)]
+    loss = (prop(wavelet, src.copy(), rec.copy(), models=m) - obs).pow(2).mean()
+    flag["break"] = True
+    with pytest.raises(RuntimeError, match="does not invert"):
+        loss.backward()
+
+
+def test_multifield_second_order_reconstructs_all_pairs():
+    """swap2nd reconstructs EVERY now/prev field-pair, so a multi-field 2nd-order
+    equation (AcousticLSRTM: background h1/h2 + scattered sh1/sh2) recovers its
+    scattered field too: the self-check passes (no raise — the scattered field is
+    no longer zeroed) and the boundary-saved gradient matches the full-tape
+    gradient.  Before generalising swap2nd the scattered field was dropped and
+    the probe rejected this equation."""
+    from sweep.equations import AcousticLSRTM  # noqa: PLC0415
+    shape = (40, 48)
+
+    def build(bs):
+        eq = AcousticLSRTM(spatial_order=SO, device="cuda", backend="torch")
+        st, rt = list(eq.default_source_fields), list(eq.default_receiver_fields)
+        return PropTorch(
+            eq, impl="eager", eager_options=EagerOptions(use_compile=False),
+            memory=(BOUNDARY if bs else None), use_ckpt=False, shape=shape,
+            dev="cuda", dh=DH, dt=DT, source_type=st, receiver_type=rt, abcn=ABCN,
+            pml_type=eq.default_pml_type, free_surface=False, nt=NT, B=1,
+        )
+
+    wavelet = torch.tensor(_ricker(NT, DT), device="cuda")
+    s = np.array([[shape[1] // 2, shape[0] // 4]], dtype=np.int32)
+    rx = np.arange(2, shape[1] - 2, 6, dtype=np.int32)
+    rec = np.stack([rx, np.full(rx.size, SO // 2, np.int32)], -1)[None]
+    vp = _ramp(shape, 1800.0, 2400.0)
+    mp0 = np.zeros(shape, np.float32)
+    mp0[shape[0] // 3:2 * shape[0] // 3, shape[1] // 3:2 * shape[1] // 3] = 0.05
+    with torch.no_grad():
+        obs = build(False)(wavelet, s.copy(), rec.copy(),
+                           models=[torch.tensor(vp, device="cuda"),
+                                   torch.tensor(mp0 * 1.05, device="cuda")]).clone()
+
+    def mp_grad(bs):
+        m = [torch.tensor(vp, device="cuda", requires_grad=False),
+             torch.tensor(mp0, device="cuda", requires_grad=True)]
+        (build(bs)(wavelet, s.copy(), rec.copy(), models=m) - obs).pow(2).mean().backward()
+        return m[1].grad.detach()
+
+    gf = mp_grad(False)
+    gb = mp_grad(True)   # must NOT raise: the scattered field reconstructs now
+    cos = _cosine(gf, gb)
+    assert cos > 0.999, f"LSRTM mp grad cosine {cos}"
+
+
+def test_self_check_can_be_disabled():
+    """``self_check=False`` skips the probe — a broken reverse then returns a
+    (wrong) gradient WITHOUT raising.  Documents the escape hatch for equations
+    validated out-of-band."""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    prop = _build(cfg, memory=BOUNDARY)
+    prop._backend_impl.enable_eager_boundary_saving(True, self_check=False)
+    flag = _func_breaker(prop._backend_impl.equation)
+    m = [torch.tensor(a, device="cuda", requires_grad=(i == 0))
+         for i, a in enumerate(init_m)]
+    loss = (prop(wavelet, src.copy(), rec.copy(), models=m) - obs).pow(2).mean()
+    flag["break"] = True
+    loss.backward()                      # must NOT raise
+    assert m[0].grad is not None

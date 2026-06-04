@@ -59,16 +59,63 @@ def restore_ring(field, ring_values, rings):
     return field
 
 
+def _interior_index_tuple(shape, ndim, offsets):
+    """Index tuple for the lossless deep interior — strictly inside the PML +
+    stencil halo on every spatial axis (``[offset : N-offset]``), where the
+    reverse reconstruction is exact (CPML is zeroed there and the restored ring
+    sits outside it)."""
+    idx = [slice(None)] * len(shape)
+    spatial_axes = list(range(len(shape) - ndim, len(shape)))
+    for ai, ax in enumerate(spatial_axes):
+        off = offsets[ai]
+        idx[ax] = slice(off, shape[ax] - off)
+    return tuple(idx)
+
+
+def _interior_consistency_error(recomputed, frame, phys_indices, interior_idx):
+    """Max over physical fields of the interior relative-L2 between the
+    recomputed forward output ``func(reconstructed S_i)`` and the frame it must
+    reproduce (``S_{i+1}``, with the source re-injected).
+
+    This is exactly the property the autograd recompute relies on: the model
+    gradient is the VJP of ``func`` linearised at the reconstructed state, so if
+    that state re-runs forward to the SAME ``S_{i+1}`` across the lossless
+    interior, the gradient is correct; if it does not, the reverse driver fails
+    to invert the step and the gradient would be wrong.  Crucially this tolerates
+    fields the reverse driver intentionally drops (e.g. swap2nd zeroes fields 2+)
+    as long as ``func`` regenerates them — so it does NOT false-positive on
+    multi-field 2nd-order equations like LSRTM, where a naive state round-trip
+    would.
+
+    Returns ``(error, assessed)``; ``assessed`` is False when every reference
+    field norm is ~0 (a degenerate frame — nothing to check)."""
+    worst = 0.0
+    assessed = False
+    for f in phys_indices:
+        a = recomputed[f][interior_idx]
+        b = frame[f][interior_idx]
+        if not torch.isfinite(a).all():
+            return float("inf"), True
+        nb = b.norm().item()
+        if nb < 1e-20:
+            continue
+        assessed = True
+        worst = max(worst, (a - b).norm().item() / nb)
+    return worst, assessed
+
+
 class ReconState:
     """Per-rollout reconstruction state.  Replaces seistorch's class globals."""
 
-    __slots__ = ("frame", "cur_strip", "rings")
+    __slots__ = ("frame", "cur_strip", "rings", "checked")
 
     def __init__(self, nt, rings):
         self.frame = None
         # cur_strip[k] = [save_ring(S_k[f]) for f in ring_fields], k = 0..nt
         self.cur_strip = [None] * (nt + 1)
         self.rings = rings
+        # One-time self-check latch (first backward step probes the reverse).
+        self.checked = False
 
 
 class _BoundarySaveStep(torch.autograd.Function):
@@ -114,15 +161,30 @@ class _BoundarySaveStep(torch.autograd.Function):
 
         with torch.no_grad():
             if cfg["reverse"] == "swap2nd":
-                # frame = S_{i+1} = [u_{i+1}, u_i, cpml...].  Reverse to S_i.
-                u_ip1, u_i = frame[0], frame[1]
-                swapped = [u_i, u_ip1] + [zero] * (nwf - 2)
-                u_im1 = list(func(swapped, models, dt, h, None))[0]
-                u_im1 = reinject_source(u_im1)        # + src_i
-                u_i_c = restore_ring(u_i.clone(), st.cur_strip[i][0], rings)
-                prev = st.cur_strip[i - 1][0] if i - 1 >= 0 else st.cur_strip[0][0]
-                u_im1_c = restore_ring(u_im1, prev, rings)
-                S_i = [u_i_c, u_im1_c] + [zero] * (nwf - 2)
+                # frame holds each 2nd-order field as (now=u_{i+1}, prev=u_i).
+                # Reverse EVERY physical (now, prev) pair at once: swap each pair's
+                # two levels and run `func` a SINGLE time.  The coupled update then
+                # evaluates every cross-field term (e.g. LSRTM's mp*background
+                # source for the scattered field) at the correct swapped levels,
+                # so all pairs reconstruct together — not just field 0.  cpml +
+                # any unpaired field stay zeroed (lossless interior).  For a
+                # single-pair equation this is exactly the original swap2nd.
+                pairs = cfg["pairs"]
+                src_fields = set(cfg["source_indices"])
+                swapped = [zero] * nwf
+                for now_i, prev_i in pairs:
+                    swapped[now_i] = frame[prev_i]    # u_i      -> now slot
+                    swapped[prev_i] = frame[now_i]    # u_{i+1}  -> prev slot
+                out = list(func(swapped, models, dt, h, None))
+                prev_strip = st.cur_strip[i - 1] if i - 1 >= 0 else st.cur_strip[0]
+                S_i = [zero] * nwf
+                for pidx, (now_i, prev_i) in enumerate(pairs):
+                    u_i = frame[prev_i]
+                    u_im1 = out[now_i]                # reconstructed previous level
+                    if now_i in src_fields:
+                        u_im1 = reinject_source(u_im1)
+                    S_i[now_i] = restore_ring(u_i.clone(), st.cur_strip[i][pidx], rings)
+                    S_i[prev_i] = restore_ring(u_im1, prev_strip[pidx], rings)
             else:  # 1st-order leapfrog — 'substep' (exact, reuses forward sub-steps)
                 # Forward order was: step, then ADD source to the source field.
                 # Reverse: SUBTRACT source, zero CPML memory, then invert the
@@ -156,6 +218,40 @@ class _BoundarySaveStep(torch.autograd.Function):
         models_rg = [m.detach().requires_grad_(f) for m, f in zip(models, model_flags)]
         with torch.enable_grad():
             out_rg = func(S_i_rg, models_rg, dt, h, None)
+
+        # One-time self-check (first backward step only): does the reverse driver
+        # actually invert the step?  `out_rg` = func(reconstructed S_i) must
+        # reproduce the frame we reconstructed FROM (S_{i+1}) across the lossless
+        # interior, once the step's source is re-injected (the forward adds it
+        # after `func`; `out_rg` is pre-source).  If not, the reconstructed state
+        # is wrong and the gradient would be too — refuse loudly instead of
+        # silently returning a bad gradient.  Reuses `out_rg` (already computed)
+        # → ~free.  Forward-consistency (not state round-trip) is the right
+        # criterion: it tolerates fields the driver drops but `func` regenerates.
+        if cfg.get("self_check") and not st.checked:
+            st.checked = True
+            check = [o.detach() for o in out_rg]
+            src_op = cfg.get("src")
+            if src_op is not None:
+                wl = cfg["wavelet"][..., cfg["time_index"]]
+                for sidx in cfg["source_indices"]:
+                    check[sidx] = src_op(check[sidx], wl)
+            err, assessed = _interior_consistency_error(
+                check, frame, cfg["phys_indices"], cfg["interior_idx"]
+            )
+            tol = cfg.get("check_tol", 1e-2)
+            if assessed and not (err <= tol):
+                raise RuntimeError(
+                    f"Eager boundary saving: the '{cfg['reverse']}' reverse driver "
+                    f"does not invert one step of {type(cfg['equation']).__name__} "
+                    f"(interior forward-consistency rel-L2 = {err:.3g} > tol {tol:g}) "
+                    "— the reconstructed wavefield would yield a WRONG gradient. "
+                    "This equation is not supported by eager boundary saving; use "
+                    "impl='c' or chunk checkpointing (use_ckpt=True). If you have "
+                    "independently validated the gradient, skip this probe via "
+                    "enable_eager_boundary_saving(self_check=False)."
+                )
+
         diff_inputs = list(S_i_rg) + [m for m, f in zip(models_rg, model_flags) if f]
         grads = torch.autograd.grad(
             out_rg, diff_inputs, grad_outputs=grad_out,
