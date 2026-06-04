@@ -588,6 +588,14 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 self._crop_to_model(holder[i], model_shapes[i]).reshape(model_shapes[i])
                 for i in registered}
 
+    def enable_eager_boundary_saving(self, flag=True, mode=None):
+        """Route the eager rollout through pure-PyTorch boundary saving (see
+        ``_eager_boundary_saving``) instead of the full autograd tape.  Mutually
+        exclusive with ``use_ckpt``.  ``mode`` forces a reverse driver
+        ('swap2nd' | 'substep'); None auto-dispatches."""
+        self._eager_bs = bool(flag)
+        self._eager_bs_mode = mode
+
     def forward(
         self,
         wavelet,
@@ -700,6 +708,128 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 wavefield = list(wavefield)
                 end_t = min(start_t + chunk_size, nt)
                 record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
+        elif getattr(self, "_eager_bs", False):
+            # Pure-PyTorch boundary saving.  Each physics step is wrapped in a
+            # custom autograd.Function that stores only the boundary ring; source
+            # injection + receiver sampling stay as normal ops (their
+            # gather/scatter backward is value-free, so no full wavefield is
+            # retained).  Reconstruction state is per-rollout — no class globals.
+            from sweep.propagator._eager_boundary_saving import (
+                ReconState, _BoundarySaveStep, _ring_index_tuples, save_ring,
+            )
+            from sweep.equations.base import SecondOrderEquation
+            if return_wavefield:
+                raise ValueError("return_wavefield is not supported with eager boundary saving.")
+            multi_receiver = len(self.receiver_indices) > 1
+            halo = self._runtime_fd_halo()
+            offsets = tuple(self.abcn + halo for _ in range(self.ndim))
+            rings = _ring_index_tuples(tuple(wavefield[0].shape), self.ndim, offsets, halo)
+            state = ReconState(nt, rings)
+            nwf = len(self.wavefield_names)
+            nm = len(runtime_models)
+            # Dispatch the (exact) reverse-reconstruction driver on the time
+            # scheme.  Both reuse the forward physics — no per-equation adjoint:
+            #   2nd-order              -> swap2nd  (reuses func with time levels swapped)
+            #   1st-order + substeps   -> substep  (reuses interior_substeps reversed)
+            # 1st-order equations WITHOUT interior_substeps are unsupported
+            # (no approximate fallback).  A forced mode (from
+            # enable_eager_boundary_saving) overrides the dispatch.
+            is_2nd = isinstance(self.equation, SecondOrderEquation)
+            has_substeps = callable(getattr(self.equation, "interior_substeps", None))
+            forced = getattr(self, "_eager_bs_mode", None)
+            if forced is not None:
+                if forced not in ("swap2nd", "substep"):
+                    raise ValueError(
+                        f"Unknown eager boundary-saving reverse mode {forced!r}; "
+                        "expected 'swap2nd' or 'substep'."
+                    )
+                if forced == "substep" and not has_substeps:
+                    raise ValueError(
+                        f"reverse mode 'substep' needs {type(self.equation).__name__}"
+                        ".interior_substeps()."
+                    )
+                reverse_mode = forced
+            elif is_2nd:
+                reverse_mode = "swap2nd"
+            elif has_substeps:
+                reverse_mode = "substep"
+            else:
+                raise NotImplementedError(
+                    "Eager boundary saving for the 1st-order equation "
+                    f"'{type(self.equation).__name__}' requires an "
+                    "interior_substeps() hook (the exact reverse driver). Add one "
+                    "(reusing the equation's step core), or use impl='c' / chunk "
+                    "checkpointing (use_ckpt=True)."
+                )
+            # The substep reconstruction can carry the free-surface BC only if the
+            # equation's interior_substeps do so (declared via
+            # supports_bs_free_surface); the ring geometry below also assumes full
+            # PML.  swap2nd is always FS-safe (reuses ``func``).  Refuse rather
+            # than silently return a wrong near-surface gradient.
+            if (
+                reverse_mode == "substep"
+                and getattr(self, "free_surface", False)
+                and not getattr(self.equation, "supports_bs_free_surface", False)
+            ):
+                raise NotImplementedError(
+                    "Eager boundary saving with a free surface is not supported "
+                    f"for {type(self.equation).__name__} (its interior_substeps "
+                    "would drop the free-surface BC). Options: free_surface=False, "
+                    "impl='c', or chunk checkpointing (use_ckpt=True). Equations "
+                    "whose interior_substeps carry the free-surface BC (e.g. "
+                    "Elastic) set supports_bs_free_surface=True."
+                )
+            cpml_indices = [
+                k for k, name in enumerate(self.wavefield_names)
+                if getattr(self._wavefield_spec_index.get(name), "boundary_related", False)
+            ]
+            phys_indices = [k for k in range(nwf) if k not in cpml_indices]
+            ring_fields = [0] if is_2nd else phys_indices
+            state.cur_strip[0] = [save_ring(wavefield[f], rings) for f in ring_fields]
+            # Per-step physics callables, built ONCE and reused across every step
+            # + in backward.  With use_compile=True the inner step is
+            # torch.compile'd; the custom autograd.Function and the time loop stay
+            # eager (Dynamo treats the Function as an opaque boundary), so only
+            # the per-step kernels are fused.
+            bs_func = self.equation.func
+            bs_substeps = (
+                self.equation.interior_substeps() if reverse_mode == "substep" else None
+            )
+            if self.use_compile and hasattr(torch, "compile"):
+                dynamo_cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
+                if dynamo_cfg is not None and getattr(dynamo_cfg, "recompile_limit", 0) < 32:
+                    dynamo_cfg.recompile_limit = 32
+                compile_kwargs = {
+                    "mode": self.compile_mode,
+                    "dynamic": self.compile_dynamic,
+                    "fullgraph": self.compile_fullgraph,
+                }
+                if self.compile_backend is not None:
+                    compile_kwargs["backend"] = self.compile_backend
+                bs_func = torch.compile(bs_func, **compile_kwargs)
+                if bs_substeps is not None:
+                    bs_substeps = [torch.compile(ss, **compile_kwargs) for ss in bs_substeps]
+            for i in range(nt):
+                time = i if not adj else nt - i - 1
+                cfg = {
+                    "equation": self.equation, "dt": self.dt, "h": self._equation_spacing,
+                    "nwf": nwf, "nm": nm, "step": i, "nt": nt, "time_index": time,
+                    "state": state, "models": runtime_models, "src": src,
+                    "source_indices": self.source_indices, "wavelet": wavelet,
+                    "reverse": reverse_mode, "ring_fields": ring_fields,
+                    "cpml_indices": cpml_indices,
+                    "func": bs_func, "substeps": bs_substeps,
+                }
+                wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))
+                for source_idx in self.source_indices:
+                    wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+                if multi_receiver:
+                    record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+                else:
+                    receiver_idx = self.receiver_indices[0]
+                    record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+            # Seed the reconstruction with the final full frame (detached).
+            state.frame = [w.detach() for w in wavefield]
         else:
             multi_receiver = len(self.receiver_indices) > 1
             for i in range(nt):
