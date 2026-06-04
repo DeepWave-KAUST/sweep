@@ -588,13 +588,22 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 self._crop_to_model(holder[i], model_shapes[i]).reshape(model_shapes[i])
                 for i in registered}
 
-    def enable_eager_boundary_saving(self, flag=True, mode=None):
+    def enable_eager_boundary_saving(self, flag=True, mode=None, self_check=True, check_tol=1e-2):
         """Route the eager rollout through pure-PyTorch boundary saving (see
         ``_eager_boundary_saving``) instead of the full autograd tape.  Mutually
         exclusive with ``use_ckpt``.  ``mode`` forces a reverse driver
-        ('swap2nd' | 'substep'); None auto-dispatches."""
+        ('swap2nd' | 'substep'); None auto-dispatches.
+
+        ``self_check`` (default True) runs a one-time interior forward-
+        consistency probe on the first backward step: if the reverse driver does
+        not invert the step (``func(reconstructed S_i)`` differs from ``S_{i+1}``
+        in the lossless interior by rel-L2 > ``check_tol``), the propagator
+        raises instead of returning a wrong gradient.  Set ``self_check=False``
+        to skip the probe once an equation has been validated."""
         self._eager_bs = bool(flag)
         self._eager_bs_mode = mode
+        self._eager_bs_self_check = bool(self_check)
+        self._eager_bs_check_tol = float(check_tol)
 
     def forward(
         self,
@@ -715,7 +724,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             # gather/scatter backward is value-free, so no full wavefield is
             # retained).  Reconstruction state is per-rollout — no class globals.
             from sweep.propagator._eager_boundary_saving import (
-                ReconState, _BoundarySaveStep, _ring_index_tuples, save_ring,
+                ReconState, _BoundarySaveStep, _interior_index_tuple,
+                _ring_index_tuples, save_ring,
             )
             from sweep.equations.base import SecondOrderEquation
             if return_wavefield:
@@ -724,6 +734,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             halo = self._runtime_fd_halo()
             offsets = tuple(self.abcn + halo for _ in range(self.ndim))
             rings = _ring_index_tuples(tuple(wavefield[0].shape), self.ndim, offsets, halo)
+            interior_idx = _interior_index_tuple(tuple(wavefield[0].shape), self.ndim, offsets)
             state = ReconState(nt, rings)
             nwf = len(self.wavefield_names)
             nm = len(runtime_models)
@@ -784,7 +795,16 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 if getattr(self._wavefield_spec_index.get(name), "boundary_related", False)
             ]
             phys_indices = [k for k in range(nwf) if k not in cpml_indices]
-            ring_fields = [0] if is_2nd else phys_indices
+            # 2nd-order wavefields are stored as consecutive (now, prev) physical
+            # pairs.  swap2nd reconstructs EVERY pair — not just the first — so a
+            # multi-field equation (e.g. LSRTM: background h1/h2 + scattered
+            # sh1/sh2) recovers its full physical state, not only field 0.  A
+            # single-field equation has one pair, reducing to the original path.
+            second_order_pairs = [
+                (phys_indices[k], phys_indices[k + 1])
+                for k in range(0, len(phys_indices) - 1, 2)
+            ]
+            ring_fields = [now for now, _ in second_order_pairs] if is_2nd else phys_indices
             state.cur_strip[0] = [save_ring(wavefield[f], rings) for f in ring_fields]
             # Per-step physics callables, built ONCE and reused across every step
             # + in backward.  With use_compile=True the inner step is
@@ -817,7 +837,10 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     "state": state, "models": runtime_models, "src": src,
                     "source_indices": self.source_indices, "wavelet": wavelet,
                     "reverse": reverse_mode, "ring_fields": ring_fields,
-                    "cpml_indices": cpml_indices,
+                    "cpml_indices": cpml_indices, "phys_indices": phys_indices,
+                    "pairs": second_order_pairs, "interior_idx": interior_idx,
+                    "self_check": getattr(self, "_eager_bs_self_check", True),
+                    "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
                     "func": bs_func, "substeps": bs_substeps,
                 }
                 wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))
