@@ -588,7 +588,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 self._crop_to_model(holder[i], model_shapes[i]).reshape(model_shapes[i])
                 for i in registered}
 
-    def enable_eager_boundary_saving(self, flag=True, mode=None, self_check=True, check_tol=1e-2):
+    def enable_eager_boundary_saving(self, flag=True, mode=None, self_check=True,
+                                     check_tol=None, storage_dtype="fp32"):
         """Route the eager rollout through pure-PyTorch boundary saving (see
         ``_eager_boundary_saving``) instead of the full autograd tape.  Mutually
         exclusive with ``use_ckpt``.  ``mode`` forces a reverse driver
@@ -599,10 +600,19 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         not invert the step (``func(reconstructed S_i)`` differs from ``S_{i+1}``
         in the lossless interior by rel-L2 > ``check_tol``), the propagator
         raises instead of returning a wrong gradient.  Set ``self_check=False``
-        to skip the probe once an equation has been validated."""
+        to skip the probe once an equation has been validated.
+
+        ``storage_dtype`` ('fp32' | 'fp16' | 'bf16' | 'int8') compresses the
+        per-step boundary ring only (compute and the seed frame stay FP32) —
+        same split as the CUDA path.  ``check_tol=None`` picks a tolerance that
+        clears the storage quantization floor while still catching a broken
+        reverse (which gives O(0.1-1) error)."""
         self._eager_bs = bool(flag)
         self._eager_bs_mode = mode
         self._eager_bs_self_check = bool(self_check)
+        self._eager_bs_storage_dtype = storage_dtype
+        if check_tol is None:
+            check_tol = {"fp32": 1e-2, "fp16": 3e-2, "bf16": 6e-2, "int8": 1.5e-1}.get(storage_dtype, 1e-2)
         self._eager_bs_check_tol = float(check_tol)
 
     def forward(
@@ -805,7 +815,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 for k in range(0, len(phys_indices) - 1, 2)
             ]
             ring_fields = [now for now, _ in second_order_pairs] if is_2nd else phys_indices
-            state.cur_strip[0] = [save_ring(wavefield[f], rings) for f in ring_fields]
+            store_dtype = getattr(self, "_eager_bs_storage_dtype", "fp32")
+            state.cur_strip[0] = [save_ring(wavefield[f], rings, store_dtype) for f in ring_fields]
             # Per-step physics callables, built ONCE and reused across every step
             # + in backward.  With use_compile=True the inner step is
             # torch.compile'd; the custom autograd.Function and the time loop stay
@@ -841,6 +852,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     "pairs": second_order_pairs, "interior_idx": interior_idx,
                     "self_check": getattr(self, "_eager_bs_self_check", True),
                     "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
+                    "store_dtype": store_dtype,
                     "func": bs_func, "substeps": bs_substeps,
                 }
                 wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))

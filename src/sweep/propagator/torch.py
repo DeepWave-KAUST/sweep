@@ -205,8 +205,16 @@ def _apply_eager_memory(backend_impl, memory):
                 "(reconstruction rings are kept on device); cpu/disk staging is "
                 "available on the impl='c' path."
             )
+        # storage_dtype compresses the on-device ring (fp16/bf16/int8); compute
+        # and the seed frame stay FP32 (same split as the CUDA path).
+        storage_dtype = boundary.get("storage_dtype", "fp32")
+        if storage_dtype not in ("fp32", "fp16", "bf16", "int8"):
+            raise ValueError(
+                "Eager boundary saving storage_dtype must be 'fp32'/'fp16'/'bf16'/"
+                f"'int8', got {storage_dtype!r}."
+            )
         backend_impl.use_ckpt = False
-        backend_impl.enable_eager_boundary_saving(True)
+        backend_impl.enable_eager_boundary_saving(True, storage_dtype=storage_dtype)
         return
 
     if strategy == "ckpt":
