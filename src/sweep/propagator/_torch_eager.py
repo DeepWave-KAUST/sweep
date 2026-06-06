@@ -735,7 +735,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             # retained).  Reconstruction state is per-rollout — no class globals.
             from sweep.propagator._eager_boundary_saving import (
                 ReconState, _BoundarySaveStep, _interior_index_tuple,
-                _ring_index_tuples, save_ring,
+                _ring_index_tuples, save_step,
             )
             from sweep.equations.base import SecondOrderEquation
             if return_wavefield:
@@ -745,7 +745,6 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             offsets = tuple(self.abcn + halo for _ in range(self.ndim))
             rings = _ring_index_tuples(tuple(wavefield[0].shape), self.ndim, offsets, halo)
             interior_idx = _interior_index_tuple(tuple(wavefield[0].shape), self.ndim, offsets)
-            state = ReconState(nt, rings)
             nwf = len(self.wavefield_names)
             nm = len(runtime_models)
             # Dispatch the (exact) reverse-reconstruction driver on the time
@@ -816,7 +815,12 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             ]
             ring_fields = [now for now, _ in second_order_pairs] if is_2nd else phys_indices
             store_dtype = getattr(self, "_eager_bs_storage_dtype", "fp32")
-            state.cur_strip[0] = [save_ring(wavefield[f], rings, store_dtype) for f in ring_fields]
+            # Pre-allocate the whole ring storage as big contiguous buffers (CUDA-
+            # style), then write each step into a slice — no per-step allocation.
+            state = ReconState(nt, rings, tuple(wavefield[0].shape), len(ring_fields),
+                               store_dtype, wavefield[0].device)
+            for pos, f in enumerate(ring_fields):
+                save_step(state, 0, pos, wavefield[f])
             # Per-step physics callables, built ONCE and reused across every step
             # + in backward.  With use_compile=True the inner step is
             # torch.compile'd; the custom autograd.Function and the time loop stay
@@ -852,7 +856,6 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                     "pairs": second_order_pairs, "interior_idx": interior_idx,
                     "self_check": getattr(self, "_eager_bs_self_check", True),
                     "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
-                    "store_dtype": store_dtype,
                     "func": bs_func, "substeps": bs_substeps,
                 }
                 wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))
