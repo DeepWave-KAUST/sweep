@@ -29,6 +29,8 @@ the CUDA ``_bs`` path) and re-inject the saved boundary ring + the source.
 Memory: ``O(nt * halo * perimeter)`` instead of ``O(nt * Ncells * nfields)``.
 """
 
+import math
+
 import torch
 
 
@@ -75,36 +77,37 @@ def _dequantize_int8(codes, scale, n):
     return blocks.reshape(-1)[:n]
 
 
-def save_ring(field, rings, store_dtype="fp32"):
-    """Save the ring cells, optionally compressed.  ALL of this field's ring
-    slices are concatenated into ONE flat buffer before storing (a single tensor
-    for fp32/fp16/bf16, or a single codes+scale pair for int8) — this keeps the
-    saved-state tensor count ~ndim*2x lower, which matters because the CUDA
-    caching allocator rounds every allocation up to a 512-byte block: many tiny
-    per-slice tensors (esp. the int8 FP32 scales) would otherwise waste ~512 B
-    each.  Returns a tagged tuple carrying the per-slice shapes for restore."""
-    slices = [field[idx] for idx in rings]
-    shapes = [tuple(s.shape) for s in slices]
-    sizes = [s.numel() for s in slices]
-    flat = torch.cat([s.reshape(-1) for s in slices])    # contiguous copy (no alias)
-    if store_dtype == "int8":
+def _ring_slice_shape(shape, idx):
+    """Resolved shape of one ring index tuple against the (padded) field shape."""
+    return tuple(len(range(*sl.indices(shape[ax]))) if isinstance(sl, slice) else 1
+                 for ax, sl in enumerate(idx))
+
+
+def save_step(state, step, pos, field):
+    """Consolidate this field's ring slices into one flat buffer and write it into
+    the PRE-ALLOCATED per-rollout storage at ``[step, pos]`` (down-cast / int8
+    quantized to ``state.store_dtype``).  No per-step tensor allocation — the
+    persistent storage is a handful of big contiguous tensors (one ``buf`` for
+    fp32/fp16/bf16, or ``codes``+``scale`` for int8), like the CUDA boundary
+    saver — so it carries no per-tensor allocator rounding."""
+    flat = torch.cat([field[idx].reshape(-1) for idx in state.rings])
+    if state.store_dtype == "int8":
         codes, scale = _quantize_int8(flat)
-        return ("int8", codes, scale, flat.numel(), shapes, sizes)
-    if store_dtype in ("fp16", "bf16"):
-        return ("cast", flat.to(_STORE_DTYPE[store_dtype]), shapes, sizes)
-    return ("cast", flat, shapes, sizes)                 # fp32
-
-
-def restore_ring(field, saved, rings):
-    """Write a saved (consolidated) ring buffer back, up-casting / dequantizing
-    to the field's (FP32) dtype and splitting it across the ring slices."""
-    if saved[0] == "int8":
-        _, codes, scale, n, shapes, sizes = saved
-        flat = _dequantize_int8(codes, scale, n)
+        state.codes[step, pos].copy_(codes)
+        state.scale[step, pos].copy_(scale)
     else:
-        _, flat, shapes, sizes = saved
+        state.buf[step, pos].copy_(flat)             # copy_ casts fp32 -> store dtype
+
+
+def restore_step(state, step, pos, field):
+    """Read the saved ring buffer at ``[step, pos]``, up-cast / dequantize to the
+    field's FP32 dtype, and split it back across ``field``'s ring slices."""
+    if state.store_dtype == "int8":
+        flat = _dequantize_int8(state.codes[step, pos], state.scale[step, pos], state.total_cells)
+    else:
+        flat = state.buf[step, pos]
     off = 0
-    for idx, shp, sz in zip(rings, shapes, sizes):
+    for idx, shp, sz in zip(state.rings, state.ring_shapes, state.ring_sizes):
         field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
         off += sz
     return field
@@ -156,17 +159,35 @@ def _interior_consistency_error(recomputed, frame, phys_indices, interior_idx):
 
 
 class ReconState:
-    """Per-rollout reconstruction state.  Replaces seistorch's class globals."""
+    """Per-rollout reconstruction state with PRE-ALLOCATED ring storage.
 
-    __slots__ = ("frame", "cur_strip", "rings", "checked")
+    Mirrors the CUDA boundary saver: the per-step boundary ring of every saved
+    field lives in ONE big contiguous buffer indexed by ``[step, ring_field]``
+    (a single ``buf`` for fp32/fp16/bf16, or ``codes``+``scale`` for int8),
+    rather than a Python list of per-step tensors — so it avoids the caching
+    allocator's 512-byte per-tensor rounding (which otherwise wastes memory on
+    the many tiny per-step int8 scale tensors)."""
 
-    def __init__(self, nt, rings):
+    __slots__ = ("frame", "rings", "checked", "store_dtype",
+                 "ring_shapes", "ring_sizes", "total_cells", "buf", "codes", "scale")
+
+    def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device):
         self.frame = None
-        # cur_strip[k] = [save_ring(S_k[f]) for f in ring_fields], k = 0..nt
-        self.cur_strip = [None] * (nt + 1)
         self.rings = rings
-        # One-time self-check latch (first backward step probes the reverse).
-        self.checked = False
+        self.checked = False                         # one-time self-check latch
+        self.store_dtype = store_dtype
+        self.ring_shapes = [_ring_slice_shape(shape, idx) for idx in rings]
+        self.ring_sizes = [math.prod(s) for s in self.ring_shapes]
+        self.total_cells = sum(self.ring_sizes)
+        T, F = nt + 1, n_ring_fields
+        self.buf = self.codes = self.scale = None
+        if store_dtype == "int8":
+            padded = ((self.total_cells + _INT8_BLOCK - 1) // _INT8_BLOCK) * _INT8_BLOCK
+            self.codes = torch.zeros((T, F, padded), dtype=torch.int8, device=device)
+            self.scale = torch.zeros((T, F, padded // _INT8_BLOCK), dtype=torch.float32, device=device)
+        else:
+            self.buf = torch.zeros((T, F, self.total_cells),
+                                   dtype=_STORE_DTYPE[store_dtype], device=device)
 
 
 class _BoundarySaveStep(torch.autograd.Function):
@@ -185,10 +206,8 @@ class _BoundarySaveStep(torch.autograd.Function):
         with torch.no_grad():
             S_out = list(cfg["func"](S_in, models, cfg["dt"], cfg["h"], None))
         st = cfg["state"]
-        st.cur_strip[cfg["step"] + 1] = [
-            save_ring(S_out[f], st.rings, cfg.get("store_dtype", "fp32"))
-            for f in cfg["ring_fields"]
-        ]
+        for pos, f in enumerate(cfg["ring_fields"]):
+            save_step(st, cfg["step"] + 1, pos, S_out[f])
         ctx.cfg = cfg
         return tuple(S_out)
 
@@ -199,7 +218,6 @@ class _BoundarySaveStep(torch.autograd.Function):
         func, dt, h = cfg["func"], cfg["dt"], cfg["h"]
         nwf, nm, i = cfg["nwf"], cfg["nm"], cfg["step"]
         models = cfg["models"]
-        rings = st.rings
         ring_fields = cfg["ring_fields"]
         cpml_idx = cfg["cpml_indices"]
         frame = st.frame
@@ -228,15 +246,15 @@ class _BoundarySaveStep(torch.autograd.Function):
                     swapped[now_i] = frame[prev_i]    # u_i      -> now slot
                     swapped[prev_i] = frame[now_i]    # u_{i+1}  -> prev slot
                 out = list(func(swapped, models, dt, h, None))
-                prev_strip = st.cur_strip[i - 1] if i - 1 >= 0 else st.cur_strip[0]
+                prev_step = i - 1 if i - 1 >= 0 else 0
                 S_i = [zero] * nwf
                 for pidx, (now_i, prev_i) in enumerate(pairs):
                     u_i = frame[prev_i]
                     u_im1 = out[now_i]                # reconstructed previous level
                     if now_i in src_fields:
                         u_im1 = reinject_source(u_im1)
-                    S_i[now_i] = restore_ring(u_i.clone(), st.cur_strip[i][pidx], rings)
-                    S_i[prev_i] = restore_ring(u_im1, prev_strip[pidx], rings)
+                    S_i[now_i] = restore_step(st, i, pidx, u_i.clone())
+                    S_i[prev_i] = restore_step(st, prev_step, pidx, u_im1)
             else:  # 1st-order leapfrog — 'substep' (exact, reuses forward sub-steps)
                 # Forward order was: step, then ADD source to the source field.
                 # Reverse: SUBTRACT source, zero CPML memory, then invert the
@@ -257,7 +275,7 @@ class _BoundarySaveStep(torch.autograd.Function):
                 for c in cpml_idx:
                     S_i[c] = zero
                 for j, f in enumerate(ring_fields):
-                    S_i[f] = restore_ring(S_i[f], st.cur_strip[i][j], rings)
+                    S_i[f] = restore_step(st, i, j, S_i[f])
 
         st.frame = S_i
 
