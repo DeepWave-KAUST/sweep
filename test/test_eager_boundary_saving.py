@@ -422,3 +422,21 @@ def test_self_check_can_be_disabled():
     flag["break"] = True
     loss.backward()                      # must NOT raise
     assert m[0].grad is not None
+
+
+@pytest.mark.parametrize("dtype,min_cos", [("fp16", 0.9999), ("bf16", 0.9999), ("int8", 0.999)])
+def test_low_precision_ring_storage(dtype, min_cos):
+    """fp16/bf16/int8 compress the saved boundary ring only (compute and the seed
+    frame stay FP32, same split as the CUDA path).  The gradient stays close to
+    the fp32-BS gradient, degrading gracefully with precision: fp16/bf16 are
+    indistinguishable, int8 (~3.94x compression, DeepWave per-256-block) is a hair
+    looser."""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    g32 = _first_grad(_build(cfg, memory=BOUNDARY), cfg, init_m, obs, wavelet, src, rec)
+    mem = MemoryOptions(strategy="boundary",
+                        boundary=BoundaryOptions(storage="gpu", storage_dtype=dtype))
+    glp = _first_grad(_build(cfg, memory=mem), cfg, init_m, obs, wavelet, src, rec)
+    cos = _cosine(g32, glp)
+    assert cos > min_cos, f"{dtype}: cosine {cos} vs fp32-BS gradient"
+    assert torch.isfinite(glp).all()

@@ -49,13 +49,64 @@ def _ring_index_tuples(shape, ndim, offsets, halo):
     return rings
 
 
-def save_ring(field, rings):
-    return [field[idx].clone() for idx in rings]
+# Low-precision storage for the saved boundary ring (compute stays FP32; only
+# the stored values are compressed — same split as the CUDA `_bs` path, where
+# `last_two`/the seed frame stay FP32 and only the per-step boundary band is
+# down-cast / quantized).
+_STORE_DTYPE = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+_INT8_BLOCK = 256   # cells per FP32 scale (matches CUDA BOUNDARY_INT8_BLOCK)
 
 
-def restore_ring(field, ring_values, rings):
-    for idx, val in zip(rings, ring_values):
-        field[idx] = val
+def _quantize_int8(flat):
+    """DeepWave-style symmetric per-block INT8 on a 1-D tensor: one FP32 scale
+    per ``_INT8_BLOCK`` cells.  Returns (codes [int8, padded], scale [fp32])."""
+    n = flat.numel()
+    pad = (-n) % _INT8_BLOCK
+    if pad:
+        flat = torch.cat([flat, flat.new_zeros(pad)])
+    blocks = flat.view(-1, _INT8_BLOCK)
+    scale = (blocks.abs().amax(dim=1, keepdim=True) / 127.0).clamp_min(1e-30)
+    codes = torch.round(blocks / scale).clamp_(-127, 127).to(torch.int8)
+    return codes.reshape(-1), scale.squeeze(1)
+
+
+def _dequantize_int8(codes, scale, n):
+    blocks = codes.view(-1, _INT8_BLOCK).to(torch.float32) * scale.unsqueeze(1)
+    return blocks.reshape(-1)[:n]
+
+
+def save_ring(field, rings, store_dtype="fp32"):
+    """Save the ring cells, optionally compressed.  ALL of this field's ring
+    slices are concatenated into ONE flat buffer before storing (a single tensor
+    for fp32/fp16/bf16, or a single codes+scale pair for int8) — this keeps the
+    saved-state tensor count ~ndim*2x lower, which matters because the CUDA
+    caching allocator rounds every allocation up to a 512-byte block: many tiny
+    per-slice tensors (esp. the int8 FP32 scales) would otherwise waste ~512 B
+    each.  Returns a tagged tuple carrying the per-slice shapes for restore."""
+    slices = [field[idx] for idx in rings]
+    shapes = [tuple(s.shape) for s in slices]
+    sizes = [s.numel() for s in slices]
+    flat = torch.cat([s.reshape(-1) for s in slices])    # contiguous copy (no alias)
+    if store_dtype == "int8":
+        codes, scale = _quantize_int8(flat)
+        return ("int8", codes, scale, flat.numel(), shapes, sizes)
+    if store_dtype in ("fp16", "bf16"):
+        return ("cast", flat.to(_STORE_DTYPE[store_dtype]), shapes, sizes)
+    return ("cast", flat, shapes, sizes)                 # fp32
+
+
+def restore_ring(field, saved, rings):
+    """Write a saved (consolidated) ring buffer back, up-casting / dequantizing
+    to the field's (FP32) dtype and splitting it across the ring slices."""
+    if saved[0] == "int8":
+        _, codes, scale, n, shapes, sizes = saved
+        flat = _dequantize_int8(codes, scale, n)
+    else:
+        _, flat, shapes, sizes = saved
+    off = 0
+    for idx, shp, sz in zip(rings, shapes, sizes):
+        field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
+        off += sz
     return field
 
 
@@ -135,7 +186,8 @@ class _BoundarySaveStep(torch.autograd.Function):
             S_out = list(cfg["func"](S_in, models, cfg["dt"], cfg["h"], None))
         st = cfg["state"]
         st.cur_strip[cfg["step"] + 1] = [
-            save_ring(S_out[f], st.rings) for f in cfg["ring_fields"]
+            save_ring(S_out[f], st.rings, cfg.get("store_dtype", "fp32"))
+            for f in cfg["ring_fields"]
         ]
         ctx.cfg = cfg
         return tuple(S_out)
