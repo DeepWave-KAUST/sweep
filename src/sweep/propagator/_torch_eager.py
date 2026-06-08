@@ -615,6 +615,256 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             check_tol = {"fp32": 1e-2, "fp16": 3e-2, "bf16": 6e-2, "int8": 1.5e-1}.get(storage_dtype, 1e-2)
         self._eager_bs_check_tol = float(check_tol)
 
+    def _eager_bs_reverse_mode(self):
+        """Pick (and validate) the exact reverse-reconstruction driver for eager
+        boundary saving, dispatching on the equation's time scheme.  Both drivers
+        reuse the forward physics — there is no per-equation adjoint::
+
+            2nd-order             -> 'swap2nd'  (reuses func with time levels swapped)
+            1st-order + substeps  -> 'substep'  (reuses interior_substeps reversed)
+
+        1st-order equations *without* ``interior_substeps`` are unsupported (no
+        approximate fallback).  ``enable_eager_boundary_saving(mode=...)`` can
+        force a mode.  Raises if the forced/derived mode is unavailable, or unsafe
+        for the current BC (a free surface the substeps would silently drop).
+        """
+        from sweep.equations.base import SecondOrderEquation
+        is_2nd = isinstance(self.equation, SecondOrderEquation)
+        has_substeps = callable(getattr(self.equation, "interior_substeps", None))
+        forced = getattr(self, "_eager_bs_mode", None)
+        if forced is not None:
+            if forced not in ("swap2nd", "substep"):
+                raise ValueError(
+                    f"Unknown eager boundary-saving reverse mode {forced!r}; "
+                    "expected 'swap2nd' or 'substep'."
+                )
+            if forced == "substep" and not has_substeps:
+                raise ValueError(
+                    f"reverse mode 'substep' needs {type(self.equation).__name__}"
+                    ".interior_substeps()."
+                )
+            reverse_mode = forced
+        elif is_2nd:
+            reverse_mode = "swap2nd"
+        elif has_substeps:
+            reverse_mode = "substep"
+        else:
+            raise NotImplementedError(
+                "Eager boundary saving for the 1st-order equation "
+                f"'{type(self.equation).__name__}' requires an "
+                "interior_substeps() hook (the exact reverse driver). Add one "
+                "(reusing the equation's step core), or use impl='c' / chunk "
+                "checkpointing (use_ckpt=True)."
+            )
+        # The substep reconstruction carries the free-surface BC only if the
+        # equation's interior_substeps do (declared via supports_bs_free_surface);
+        # the ring geometry also assumes full PML.  swap2nd is always FS-safe
+        # (reuses ``func``).  Refuse rather than return a wrong near-surface grad.
+        if (
+            reverse_mode == "substep"
+            and getattr(self, "free_surface", False)
+            and not getattr(self.equation, "supports_bs_free_surface", False)
+        ):
+            raise NotImplementedError(
+                "Eager boundary saving with a free surface is not supported "
+                f"for {type(self.equation).__name__} (its interior_substeps "
+                "would drop the free-surface BC). Options: free_surface=False, "
+                "impl='c', or chunk checkpointing (use_ckpt=True). Equations "
+                "whose interior_substeps carry the free-surface BC (e.g. "
+                "Elastic) set supports_bs_free_surface=True."
+            )
+        return reverse_mode
+
+    def _init_eager_bs(self, wavefield, runtime_models, wavelet, src, nt):
+        """Set up the per-rollout state for eager (pure-PyTorch) boundary saving
+        and return ``(state, base_cfg, multi_receiver)``.
+
+        Builds the ring geometry, resolves the reverse driver, pre-allocates the
+        reconstruction storage (CUDA-style contiguous buffers) seeded with the
+        initial frame, prepares the (optionally compiled) per-step physics
+        callables, and assembles ``base_cfg`` — the part of the per-step config
+        that does not change across time.  The caller's loop adds only the varying
+        ``step``/``time_index`` keys.  Reconstruction state is per-rollout (no
+        class globals).
+        """
+        from sweep.propagator._eager_boundary_saving import (
+            ReconState, _interior_index_tuple, _ring_index_tuples, save_step,
+        )
+        from sweep.equations.base import SecondOrderEquation
+
+        multi_receiver = len(self.receiver_indices) > 1
+        halo = self._runtime_fd_halo()
+        offsets = tuple(self.abcn + halo for _ in range(self.ndim))
+        shape = tuple(wavefield[0].shape)
+        rings = _ring_index_tuples(shape, self.ndim, offsets, halo)
+        interior_idx = _interior_index_tuple(shape, self.ndim, offsets)
+        nwf = len(self.wavefield_names)
+        nm = len(runtime_models)
+        reverse_mode = self._eager_bs_reverse_mode()
+
+        cpml_indices = [
+            k for k, name in enumerate(self.wavefield_names)
+            if getattr(self._wavefield_spec_index.get(name), "boundary_related", False)
+        ]
+        phys_indices = [k for k in range(nwf) if k not in cpml_indices]
+        # 2nd-order wavefields are stored as consecutive (now, prev) physical
+        # pairs.  swap2nd reconstructs EVERY pair — so a multi-field equation
+        # (e.g. LSRTM: background h1/h2 + scattered sh1/sh2) recovers its full
+        # physical state, not only field 0.  A single-field equation has one pair
+        # (the original path).  ring_fields keys off the equation *type*, not the
+        # reverse mode, so a forced mode cannot change which fields are stored.
+        is_2nd = isinstance(self.equation, SecondOrderEquation)
+        second_order_pairs = [
+            (phys_indices[k], phys_indices[k + 1])
+            for k in range(0, len(phys_indices) - 1, 2)
+        ]
+        ring_fields = [now for now, _ in second_order_pairs] if is_2nd else phys_indices
+
+        # Pre-allocate the whole ring storage as big contiguous buffers (CUDA-
+        # style), then write each step into a slice — no per-step allocation.
+        # Seed step 0 with the initial frame.
+        store_dtype = getattr(self, "_eager_bs_storage_dtype", "fp32")
+        state = ReconState(nt, rings, shape, len(ring_fields), store_dtype,
+                           wavefield[0].device)
+        for pos, f in enumerate(ring_fields):
+            save_step(state, 0, pos, wavefield[f])
+
+        # Per-step physics callables, built ONCE and reused across every step + in
+        # backward.  With use_compile=True the inner step is torch.compile'd; the
+        # custom autograd.Function and the time loop stay eager (Dynamo treats the
+        # Function as an opaque boundary), so only the per-step kernels are fused.
+        bs_func = self.equation.func
+        bs_substeps = (
+            self.equation.interior_substeps() if reverse_mode == "substep" else None
+        )
+        if self.use_compile and hasattr(torch, "compile"):
+            dynamo_cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
+            if dynamo_cfg is not None and getattr(dynamo_cfg, "recompile_limit", 0) < 32:
+                dynamo_cfg.recompile_limit = 32
+            compile_kwargs = {
+                "mode": self.compile_mode,
+                "dynamic": self.compile_dynamic,
+                "fullgraph": self.compile_fullgraph,
+            }
+            if self.compile_backend is not None:
+                compile_kwargs["backend"] = self.compile_backend
+            bs_func = torch.compile(bs_func, **compile_kwargs)
+            if bs_substeps is not None:
+                bs_substeps = [torch.compile(ss, **compile_kwargs) for ss in bs_substeps]
+
+        # Constant part of the per-step config; the time loop adds step/time_index.
+        base_cfg = {
+            "equation": self.equation, "dt": self.dt, "h": self._equation_spacing,
+            "nwf": nwf, "nm": nm, "nt": nt,
+            "state": state, "models": runtime_models, "src": src,
+            "source_indices": self.source_indices, "wavelet": wavelet,
+            "reverse": reverse_mode, "ring_fields": ring_fields,
+            "cpml_indices": cpml_indices, "phys_indices": phys_indices,
+            "pairs": second_order_pairs, "interior_idx": interior_idx,
+            "self_check": getattr(self, "_eager_bs_self_check", True),
+            "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
+            "func": bs_func, "substeps": bs_substeps,
+        }
+        return state, base_cfg, multi_receiver
+
+    def _rollout_ckpt(self, wavefield, models, wavelet, src, rec, record,
+                      receivers, batch_size, nt, adj):
+        """Time loop under chunk gradient checkpointing: the nt steps are split
+        into ``ckpt_chunks``-sized chunks, each wrapped in ``ckpt_torch`` so its
+        activations are recomputed in backward instead of stored.  Writes the
+        receiver record in place and returns the final wavefield list.
+        """
+        chunk_size = int(max(1, self.ckpt_chunks))
+        record_chunk_shape = (batch_size, chunk_size, receivers.shape[1], len(self.receiver_type))
+        num_chunks = (nt + chunk_size - 1) // chunk_size
+        num_wavefields = len(wavefield)
+        num_models = len(models)
+
+        for chunk_idx in range(num_chunks):
+            start_t = chunk_idx * chunk_size
+
+            def checkpoint_chunk(*chunk_inputs, start_t=start_t):
+                state = list(chunk_inputs[:num_wavefields])
+                chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
+                chunk_runtime_models = self._prepare_runtime_models(chunk_models)
+                return self._run_chunk(
+                    state,
+                    chunk_runtime_models,
+                    self.dt,
+                    self._equation_spacing,
+                    None,
+                    wavelet,
+                    nt,
+                    start_t,
+                    chunk_size,
+                    src,
+                    rec,
+                    record_chunk_shape,
+                    adj=adj,
+                )
+
+            wavefield, chunk_record = ckpt_torch(checkpoint_chunk, *wavefield, *models, use_reentrant=False)
+            wavefield = list(wavefield)
+            end_t = min(start_t + chunk_size, nt)
+            record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
+        return wavefield
+
+    def _rollout_eager_bs(self, wavefield, runtime_models, wavelet, src, rec,
+                          record, receivers, nt, adj):
+        """Time loop under eager (pure-PyTorch) boundary saving: each physics step
+        is wrapped in a ``_BoundarySaveStep`` autograd.Function that stores only
+        the boundary ring (source injection + receiver sampling stay normal ops —
+        their gather/scatter backward is value-free, so no full wavefield is
+        retained).  Per-rollout setup lives in ``_init_eager_bs``; the loop adds
+        only the varying step/time keys to the constant ``base_cfg``.  Writes the
+        record in place, seeds the reconstruction with the final frame, and
+        returns the final wavefield list.
+        """
+        from sweep.propagator._eager_boundary_saving import _BoundarySaveStep
+        state, base_cfg, multi_receiver = self._init_eager_bs(
+            wavefield, runtime_models, wavelet, src, nt
+        )
+        for i in range(nt):
+            time = i if not adj else nt - i - 1
+            cfg = {**base_cfg, "step": i, "time_index": time}
+            wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))
+            for source_idx in self.source_indices:
+                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+            if multi_receiver:
+                record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+            else:
+                receiver_idx = self.receiver_indices[0]
+                record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+        # Seed the reconstruction with the final full frame (detached).
+        state.frame = [w.detach() for w in wavefield]
+        return wavefield
+
+    def _rollout_full(self, wavefield, runtime_models, wavelet, src, rec, record,
+                      receivers, nt, adj, return_wavefield, snapshots, snapshot_lookup):
+        """Plain time loop recording the full autograd tape (the default path):
+        PyTorch retains every step's activations and backward differentiates the
+        whole graph.  This is the only path that supports ``return_wavefield``
+        (wavefield snapshots).  Writes the record (and snapshots, if requested) in
+        place and returns the final wavefield list.
+        """
+        multi_receiver = len(self.receiver_indices) > 1
+        for i in range(nt):
+            wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None))
+            time = i if not adj else nt - i - 1
+            for source_idx in self.source_indices:
+                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+            if return_wavefield and i in snapshot_lookup:
+                snapshots[snapshot_lookup[i]] = torch.stack(
+                    [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
+                    0,
+                )
+            if multi_receiver:
+                record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+            else:
+                receiver_idx = self.receiver_indices[0]
+                record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+        return wavefield
+
     def forward(
         self,
         wavelet,
@@ -694,197 +944,20 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             raise ValueError("return_wavefield=True is not supported with chunk checkpointing in PropTorch yet.")
 
         if self.use_ckpt:
-            chunk_size = int(max(1, self.ckpt_chunks))
-            record_chunk_shape = (batch_size, chunk_size, receivers.shape[1], len(self.receiver_type))
-            num_chunks = (nt + chunk_size - 1) // chunk_size
-            num_wavefields = len(wavefield)
-            num_models = len(models)
-
-            for chunk_idx in range(num_chunks):
-                start_t = chunk_idx * chunk_size
-
-                def checkpoint_chunk(*chunk_inputs, start_t=start_t):
-                    state = list(chunk_inputs[:num_wavefields])
-                    chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
-                    chunk_runtime_models = self._prepare_runtime_models(chunk_models)
-                    return self._run_chunk(
-                        state,
-                        chunk_runtime_models,
-                        self.dt,
-                        self._equation_spacing,
-                        None,
-                        wavelet,
-                        nt,
-                        start_t,
-                        chunk_size,
-                        src,
-                        rec,
-                        record_chunk_shape,
-                        adj=adj,
-                    )
-
-                wavefield, chunk_record = ckpt_torch(checkpoint_chunk, *wavefield, *models, use_reentrant=False)
-                wavefield = list(wavefield)
-                end_t = min(start_t + chunk_size, nt)
-                record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
-        elif getattr(self, "_eager_bs", False):
-            # Pure-PyTorch boundary saving.  Each physics step is wrapped in a
-            # custom autograd.Function that stores only the boundary ring; source
-            # injection + receiver sampling stay as normal ops (their
-            # gather/scatter backward is value-free, so no full wavefield is
-            # retained).  Reconstruction state is per-rollout — no class globals.
-            from sweep.propagator._eager_boundary_saving import (
-                ReconState, _BoundarySaveStep, _interior_index_tuple,
-                _ring_index_tuples, save_step,
+            wavefield = self._rollout_ckpt(
+                wavefield, models, wavelet, src, rec, record, receivers, batch_size, nt, adj
             )
-            from sweep.equations.base import SecondOrderEquation
+        elif getattr(self, "_eager_bs", False):
             if return_wavefield:
                 raise ValueError("return_wavefield is not supported with eager boundary saving.")
-            multi_receiver = len(self.receiver_indices) > 1
-            halo = self._runtime_fd_halo()
-            offsets = tuple(self.abcn + halo for _ in range(self.ndim))
-            rings = _ring_index_tuples(tuple(wavefield[0].shape), self.ndim, offsets, halo)
-            interior_idx = _interior_index_tuple(tuple(wavefield[0].shape), self.ndim, offsets)
-            nwf = len(self.wavefield_names)
-            nm = len(runtime_models)
-            # Dispatch the (exact) reverse-reconstruction driver on the time
-            # scheme.  Both reuse the forward physics — no per-equation adjoint:
-            #   2nd-order              -> swap2nd  (reuses func with time levels swapped)
-            #   1st-order + substeps   -> substep  (reuses interior_substeps reversed)
-            # 1st-order equations WITHOUT interior_substeps are unsupported
-            # (no approximate fallback).  A forced mode (from
-            # enable_eager_boundary_saving) overrides the dispatch.
-            is_2nd = isinstance(self.equation, SecondOrderEquation)
-            has_substeps = callable(getattr(self.equation, "interior_substeps", None))
-            forced = getattr(self, "_eager_bs_mode", None)
-            if forced is not None:
-                if forced not in ("swap2nd", "substep"):
-                    raise ValueError(
-                        f"Unknown eager boundary-saving reverse mode {forced!r}; "
-                        "expected 'swap2nd' or 'substep'."
-                    )
-                if forced == "substep" and not has_substeps:
-                    raise ValueError(
-                        f"reverse mode 'substep' needs {type(self.equation).__name__}"
-                        ".interior_substeps()."
-                    )
-                reverse_mode = forced
-            elif is_2nd:
-                reverse_mode = "swap2nd"
-            elif has_substeps:
-                reverse_mode = "substep"
-            else:
-                raise NotImplementedError(
-                    "Eager boundary saving for the 1st-order equation "
-                    f"'{type(self.equation).__name__}' requires an "
-                    "interior_substeps() hook (the exact reverse driver). Add one "
-                    "(reusing the equation's step core), or use impl='c' / chunk "
-                    "checkpointing (use_ckpt=True)."
-                )
-            # The substep reconstruction can carry the free-surface BC only if the
-            # equation's interior_substeps do so (declared via
-            # supports_bs_free_surface); the ring geometry below also assumes full
-            # PML.  swap2nd is always FS-safe (reuses ``func``).  Refuse rather
-            # than silently return a wrong near-surface gradient.
-            if (
-                reverse_mode == "substep"
-                and getattr(self, "free_surface", False)
-                and not getattr(self.equation, "supports_bs_free_surface", False)
-            ):
-                raise NotImplementedError(
-                    "Eager boundary saving with a free surface is not supported "
-                    f"for {type(self.equation).__name__} (its interior_substeps "
-                    "would drop the free-surface BC). Options: free_surface=False, "
-                    "impl='c', or chunk checkpointing (use_ckpt=True). Equations "
-                    "whose interior_substeps carry the free-surface BC (e.g. "
-                    "Elastic) set supports_bs_free_surface=True."
-                )
-            cpml_indices = [
-                k for k, name in enumerate(self.wavefield_names)
-                if getattr(self._wavefield_spec_index.get(name), "boundary_related", False)
-            ]
-            phys_indices = [k for k in range(nwf) if k not in cpml_indices]
-            # 2nd-order wavefields are stored as consecutive (now, prev) physical
-            # pairs.  swap2nd reconstructs EVERY pair — not just the first — so a
-            # multi-field equation (e.g. LSRTM: background h1/h2 + scattered
-            # sh1/sh2) recovers its full physical state, not only field 0.  A
-            # single-field equation has one pair, reducing to the original path.
-            second_order_pairs = [
-                (phys_indices[k], phys_indices[k + 1])
-                for k in range(0, len(phys_indices) - 1, 2)
-            ]
-            ring_fields = [now for now, _ in second_order_pairs] if is_2nd else phys_indices
-            store_dtype = getattr(self, "_eager_bs_storage_dtype", "fp32")
-            # Pre-allocate the whole ring storage as big contiguous buffers (CUDA-
-            # style), then write each step into a slice — no per-step allocation.
-            state = ReconState(nt, rings, tuple(wavefield[0].shape), len(ring_fields),
-                               store_dtype, wavefield[0].device)
-            for pos, f in enumerate(ring_fields):
-                save_step(state, 0, pos, wavefield[f])
-            # Per-step physics callables, built ONCE and reused across every step
-            # + in backward.  With use_compile=True the inner step is
-            # torch.compile'd; the custom autograd.Function and the time loop stay
-            # eager (Dynamo treats the Function as an opaque boundary), so only
-            # the per-step kernels are fused.
-            bs_func = self.equation.func
-            bs_substeps = (
-                self.equation.interior_substeps() if reverse_mode == "substep" else None
+            wavefield = self._rollout_eager_bs(
+                wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj
             )
-            if self.use_compile and hasattr(torch, "compile"):
-                dynamo_cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
-                if dynamo_cfg is not None and getattr(dynamo_cfg, "recompile_limit", 0) < 32:
-                    dynamo_cfg.recompile_limit = 32
-                compile_kwargs = {
-                    "mode": self.compile_mode,
-                    "dynamic": self.compile_dynamic,
-                    "fullgraph": self.compile_fullgraph,
-                }
-                if self.compile_backend is not None:
-                    compile_kwargs["backend"] = self.compile_backend
-                bs_func = torch.compile(bs_func, **compile_kwargs)
-                if bs_substeps is not None:
-                    bs_substeps = [torch.compile(ss, **compile_kwargs) for ss in bs_substeps]
-            for i in range(nt):
-                time = i if not adj else nt - i - 1
-                cfg = {
-                    "equation": self.equation, "dt": self.dt, "h": self._equation_spacing,
-                    "nwf": nwf, "nm": nm, "step": i, "nt": nt, "time_index": time,
-                    "state": state, "models": runtime_models, "src": src,
-                    "source_indices": self.source_indices, "wavelet": wavelet,
-                    "reverse": reverse_mode, "ring_fields": ring_fields,
-                    "cpml_indices": cpml_indices, "phys_indices": phys_indices,
-                    "pairs": second_order_pairs, "interior_idx": interior_idx,
-                    "self_check": getattr(self, "_eager_bs_self_check", True),
-                    "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
-                    "func": bs_func, "substeps": bs_substeps,
-                }
-                wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))
-                for source_idx in self.source_indices:
-                    wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
-                if multi_receiver:
-                    record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
-                else:
-                    receiver_idx = self.receiver_indices[0]
-                    record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
-            # Seed the reconstruction with the final full frame (detached).
-            state.frame = [w.detach() for w in wavefield]
         else:
-            multi_receiver = len(self.receiver_indices) > 1
-            for i in range(nt):
-                wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None))
-                time = i if not adj else nt - i - 1
-                for source_idx in self.source_indices:
-                    wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
-                if return_wavefield and i in snapshot_lookup:
-                    snapshots[snapshot_lookup[i]] = torch.stack(
-                        [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
-                        0,
-                    )
-                if multi_receiver:
-                    record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
-                else:
-                    receiver_idx = self.receiver_indices[0]
-                    record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+            wavefield = self._rollout_full(
+                wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj,
+                return_wavefield, snapshots, snapshot_lookup,
+            )
 
         self.last_wavefields = tuple(wavefield) if self.store_last_wavefield else None
         # The eager backend reuses internal workspace buffers across calls.
