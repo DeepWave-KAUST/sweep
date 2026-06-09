@@ -171,7 +171,7 @@ ForwardOutput forward(const ForwardInput& in) {
             ctx
         );
 
-        wavefield.swap();
+        wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
 
         if (u_allt.defined()) {
             u_allt.select(0, it).select(0, 0).copy_(wavefield.u_now_t);

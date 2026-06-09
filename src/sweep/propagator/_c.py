@@ -915,6 +915,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         cuda_layout = self._cuda_layout()
         total_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
         wavefield_shapes = total_wavefields * [[self.B, 1, *self.shape_cuda]]
+        # The adjoint may need extra double-buffer tensors (fused single-kernel
+        # adjoint double-buffers zeta); the forward never does.
+        adjoint_wavefields_n = total_wavefields + int(getattr(cuda_layout, "adjoint_extra_nvar", 0))
+        adjoint_wavefield_shapes = adjoint_wavefields_n * [[self.B, 1, *self.shape_cuda]]
         if batch_size > (current_capacity or 0):
             self.forward_allocator = Allocator(self.dev)
             self.adjoint_allocator = Allocator(self.dev)
@@ -924,7 +928,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if need_forward and not self.forward_wavefields:
             self.forward_wavefields = self.forward_allocator.zeros(wavefield_shapes)
         if need_adjoint and not self.adjoint_wavefields:
-            self.adjoint_wavefields = self.adjoint_allocator.zeros(wavefield_shapes)
+            self.adjoint_wavefields = self.adjoint_allocator.zeros(adjoint_wavefield_shapes)
         self._buffer_capacity_batch = target_capacity
         self._boundary_cache_batch = None
         self._boundary_cache_ring_buffers = None

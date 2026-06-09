@@ -79,12 +79,12 @@ __device__ inline float acoustic_cpml_update_2d(
 
     float tmpx = ((1.0f + bx_) * lap_x + dbxdx_ * dudx) + daipxix_dx;
     w_sum += (1.0f + bx_) * tmpx + ax_ * f.zetax[idx];
-    f.psix[idx] = bx_ * dudx + ax_ * f.psix[idx];
+    (f.psixn ? f.psixn : f.psix)[idx] = bx_ * dudx + ax_ * f.psix[idx];   // race-free fwd double-buffer
     f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
 
     float tmpz = ((1.0f + bz_) * lap_z + dbzdz_ * dudz) + daipsiz_dz;
     w_sum += (1.0f + bz_) * tmpz + az_ * f.zetaz[idx];
-    f.psiz[idx] = bz_ * dudz + az_ * f.psiz[idx];
+    (f.psizn ? f.psizn : f.psiz)[idx] = bz_ * dudz + az_ * f.psiz[idx];   // race-free fwd double-buffer
     f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
 
     return w_sum;

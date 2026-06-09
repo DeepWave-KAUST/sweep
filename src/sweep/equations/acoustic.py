@@ -151,7 +151,15 @@ class Acoustic(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             base_nvar=3,
-            pml_nvar=4,
+            # psix, psiz, zetax, zetaz (4) + psixn, psizn (2) for the race-free
+            # forward psi double-buffer: the forward reads psi at neighbours then
+            # writes the next psi to a SEPARATE buffer (no in-place RAW race).
+            # bind() detects the larger count (3 u + 6 pml = 9) and swap_pml()
+            # rotates psix<->psixn each step.
+            pml_nvar=6,
+            # Fused single-kernel adjoint also double-buffers zeta: the ADJOINT
+            # wavefield gets +2 (zetaxn, zetazn) -> 11 tensors; forward stays 9.
+            adjoint_extra_nvar=2,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,

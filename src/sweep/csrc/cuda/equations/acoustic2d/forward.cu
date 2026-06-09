@@ -193,7 +193,7 @@ ForwardOutput forward(const ForwardInput& in) {
             ctx
         );
 
-        wavefield.swap();
+        wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
 
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), wavefield.checkpoint_tensors());
 

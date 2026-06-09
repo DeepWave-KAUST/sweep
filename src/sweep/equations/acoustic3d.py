@@ -154,7 +154,12 @@ class Acoustic3D(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             base_nvar=3,
-            pml_nvar=6,
+            # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3) for the
+            # race-free forward psi double-buffer (read psi, write psi*n, swap_pml).
+            pml_nvar=9,
+            # Fused single-kernel adjoint also double-buffers zeta: the ADJOINT
+            # wavefield gets +3 (zetaxn, zetayn, zetazn) -> 15 tensors; fwd stays 12.
+            adjoint_extra_nvar=3,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,
