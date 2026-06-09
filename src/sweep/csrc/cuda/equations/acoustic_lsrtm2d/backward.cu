@@ -19,6 +19,25 @@ namespace acoustic_lsrtm2d {
 
 namespace {
 
+// Proper transpose adjoint step for the lsrtm scattered field: v2_lambda =
+// vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
+// Replaces the old forward-operator adjoint (acoustic2nd = vp^2*lap), which is
+// non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
+static inline void run_lsrtm2d_adjoint_step(
+    int order, dim3 grid, dim3 block,
+    AcousticWavefieldPointer adj_view,
+    const torch::Tensor& vp,
+    LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml, SolverContext ctx)
+{
+    auto v2_lambda = torch::empty_like(vp);   // vp^2 * lambda_now (fully overwritten each step)
+    compute_v2_lambda_lsrtm2d<<<grid, block>>>(
+        vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.nz, ctx.B);
+    ACOUSTIC_LSRTM2D_ADJOINT(order, grid, block,
+        adj_view, v2_lambda.data_ptr<float>(), vp.data_ptr<float>(),
+        lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+}
+
 void advance_forward_interval_2d(
     AcousticWavefieldTensor& forward,
     int start,
@@ -138,21 +157,9 @@ void process_recursive_interval_2d(
         forward_step.swap();
 
         auto adj_view = adjoint.view();
-        ACOUSTIC_LSRTM2D_SINGLE(
-            order,
-            wave_grid,
-            wave_block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm2d_adjoint_step(
+            order, wave_grid, wave_block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
 
         add_source<<<adj_source_grid, adj_source_block>>>(
             adj_view.u_next,
@@ -300,21 +307,9 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
 
-        ACOUSTIC_LSRTM2D_SINGLE(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm2d_adjoint_step(
+            order, launch_config.grid, launch_config.block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -453,21 +448,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
         auto adj_view = adjoint.view();
         auto for_view_iter = forward.view();
 
-        ACOUSTIC_LSRTM2D_SINGLE(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm2d_adjoint_step(
+            order, launch_config.grid, launch_config.block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -526,21 +509,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     if (p.nt > 0) {
         auto adj_view = adjoint.view();
-        ACOUSTIC_LSRTM2D_SINGLE(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm2d_adjoint_step(
+            order, launch_config.grid, launch_config.block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -674,21 +645,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            ACOUSTIC_LSRTM2D_SINGLE(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                adj_view,
-                false,
-                nullptr,
-                vp.data_ptr<float>(),
-                lap_ctx,
-                grad_ctx,
-                grad_ctx_x,
-                grad_ctx_z,
-                cpml,
-                ctx
-            );
+            run_lsrtm2d_adjoint_step(
+                order, launch_config.grid, launch_config.block, adj_view,
+                vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
 
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
