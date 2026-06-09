@@ -412,9 +412,9 @@ __global__ void acoustic_vrz3nd(
 
     float rhs = kappa * (beta * w_sum + dbdx * px + dbdy * py + dbdz * pz);
 
-    f.psix[idx] = psixn;
-    f.psiy[idx] = psiyn;
-    f.psiz[idx] = psizn;
+    (f.psixn ? f.psixn : f.psix)[idx] = psixn;   // race-free forward psi double-buffer
+    (f.psiyn ? f.psiyn : f.psiy)[idx] = psiyn;
+    (f.psizn ? f.psizn : f.psiz)[idx] = psizn;
     f.zetax[idx] = zetaxn;
     f.zetay[idx] = zetayn;
     f.zetaz[idx] = zetazn;

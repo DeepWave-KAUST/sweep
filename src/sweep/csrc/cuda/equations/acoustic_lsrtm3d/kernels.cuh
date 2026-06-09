@@ -95,17 +95,17 @@ __device__ inline float acoustic_cpml_update_3d(
 
     float tmpx = ((1.0f + bx_) * lap_x + dbxdx_ * dudx) + ax_ * dpsixdx + daxdx * f.psix[idx];
     w_sum += (1.0f + bx_) * tmpx + ax_ * f.zetax[idx];
-    f.psix[idx] = bx_ * dudx + ax_ * f.psix[idx];
+    (f.psixn ? f.psixn : f.psix)[idx] = bx_ * dudx + ax_ * f.psix[idx];   // race-free fwd double-buffer
     f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
 
     float tmpy = ((1.0f + by_) * lap_y + dbydy_ * dudy) + ay_ * dpsiydy + daydy * f.psiy[idx];
     w_sum += (1.0f + by_) * tmpy + ay_ * f.zetay[idx];
-    f.psiy[idx] = by_ * dudy + ay_ * f.psiy[idx];
+    (f.psiyn ? f.psiyn : f.psiy)[idx] = by_ * dudy + ay_ * f.psiy[idx];   // race-free fwd double-buffer
     f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
 
     float tmpz = ((1.0f + bz_) * lap_z + dbzdz_ * dudz) + az_ * dpsizdz + dazdz * f.psiz[idx];
     w_sum += (1.0f + bz_) * tmpz + az_ * f.zetaz[idx];
-    f.psiz[idx] = bz_ * dudz + az_ * f.psiz[idx];
+    (f.psizn ? f.psizn : f.psiz)[idx] = bz_ * dudz + az_ * f.psiz[idx];   // race-free fwd double-buffer
     f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
 
     return w_sum;

@@ -15,6 +15,11 @@ class CUDALayoutSpec:
     checkpoint_nvar: int | None = None
     backward_workspace_nvar: int = 0
     backward_workspace_shapes: Callable | None = None
+    # Extra wavefield buffers allocated for the ADJOINT only (not the forward).
+    # The fused single-kernel adjoint double-buffers zeta (the forward already
+    # double-buffers psi via pml_nvar): adjoint gets base+pml+adjoint_extra
+    # tensors, forward stays base+pml.  0 = equation has no fused-adjoint path.
+    adjoint_extra_nvar: int = 0
     boundary_tangent_pad: int = 0
     boundary_save_nvar: int | None = None
 
