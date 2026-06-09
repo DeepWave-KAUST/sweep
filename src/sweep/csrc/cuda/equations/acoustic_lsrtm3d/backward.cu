@@ -99,7 +99,8 @@ void accumulate_imaging_3d(
     int B,
     int nx,
     int ny,
-    int nz
+    int nz,
+    float dt
 )
 {
     if (grad != nullptr) {
@@ -108,7 +109,7 @@ void accumulate_imaging_3d(
             adjoint_ptr,
             vp.data_ptr<float>(),
             grad->data_ptr<float>(),
-            B, nx, ny, nz
+            B, nx, ny, nz, dt
         );
         return;
     }
@@ -349,7 +350,7 @@ void process_recursive_interval_3d(
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 grad->data_ptr<float>(),
-                B, nx, ny, nz
+                B, nx, ny, nz, p.dt
             );
         } else {
             TORCH_CHECK(rtm_out != nullptr, "Recursive RTM accumulation requested without RTM output.");
@@ -562,7 +563,8 @@ void run_full_imaging(
             B,
             nx,
             ny,
-            nz
+            nz,
+            ctx.dt
         );
     }
 }
@@ -998,7 +1000,8 @@ void run_ckpt_imaging(
                 B,
                 nx,
                 ny,
-                nz
+                nz,
+                ctx.dt
             );
         }
     }
