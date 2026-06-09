@@ -168,11 +168,14 @@ class ReconState:
     allocator's 512-byte per-tensor rounding (which otherwise wastes memory on
     the many tiny per-step int8 scale tensors)."""
 
-    __slots__ = ("frame", "rings", "checked", "store_dtype",
-                 "ring_shapes", "ring_sizes", "total_cells", "buf", "codes", "scale")
+    __slots__ = ("frame", "rings", "checked", "store_dtype", "ring_shapes",
+                 "ring_sizes", "total_cells", "buf", "codes", "scale", "zero")
 
     def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device):
         self.frame = None
+        # Reused read-only zero placeholder for the cpml / unpaired field slots in
+        # backward — one buffer for the whole rollout, not a per-step zeros_like.
+        self.zero = torch.zeros(shape, dtype=torch.float32, device=device)
         self.rings = rings
         self.checked = False                         # one-time self-check latch
         self.store_dtype = store_dtype
@@ -199,7 +202,7 @@ class _BoundarySaveStep(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, cfg, *tensors):
+    def forward(ctx, cfg, step, time_index, *tensors):
         nwf, nm = cfg["nwf"], cfg["nm"]
         S_in = list(tensors[:nwf])
         models = list(tensors[nwf:nwf + nm])
@@ -207,8 +210,10 @@ class _BoundarySaveStep(torch.autograd.Function):
             S_out = list(cfg["func"](S_in, models, cfg["dt"], cfg["h"], None))
         st = cfg["state"]
         for pos, f in enumerate(cfg["ring_fields"]):
-            save_step(st, cfg["step"] + 1, pos, S_out[f])
+            save_step(st, step + 1, pos, S_out[f])
         ctx.cfg = cfg
+        ctx.step = step
+        ctx.time_index = time_index
         return tuple(S_out)
 
     @staticmethod
@@ -216,18 +221,13 @@ class _BoundarySaveStep(torch.autograd.Function):
         cfg = ctx.cfg
         st = cfg["state"]
         func, dt, h = cfg["func"], cfg["dt"], cfg["h"]
-        nwf, nm, i = cfg["nwf"], cfg["nm"], cfg["step"]
+        nwf, nm = cfg["nwf"], cfg["nm"]
+        i, time_index = ctx.step, ctx.time_index
         models = cfg["models"]
         ring_fields = cfg["ring_fields"]
         cpml_idx = cfg["cpml_indices"]
         frame = st.frame
-        zero = torch.zeros_like(frame[0])
-
-        def reinject_source(field):
-            src = cfg.get("src")
-            if src is None:
-                return field
-            return src(field, cfg["wavelet"][..., cfg["time_index"]])
+        zero = st.zero                               # reused, not per-step zeros_like
 
         with torch.no_grad():
             if cfg["reverse"] == "swap2nd":
@@ -246,13 +246,14 @@ class _BoundarySaveStep(torch.autograd.Function):
                     swapped[now_i] = frame[prev_i]    # u_i      -> now slot
                     swapped[prev_i] = frame[now_i]    # u_{i+1}  -> prev slot
                 out = list(func(swapped, models, dt, h, None))
-                prev_step = i - 1 if i - 1 >= 0 else 0
+                prev_step = max(i - 1, 0)
+                src_op = cfg.get("src")
                 S_i = [zero] * nwf
                 for pidx, (now_i, prev_i) in enumerate(pairs):
                     u_i = frame[prev_i]
                     u_im1 = out[now_i]                # reconstructed previous level
-                    if now_i in src_fields:
-                        u_im1 = reinject_source(u_im1)
+                    if now_i in src_fields and src_op is not None:
+                        u_im1 = src_op(u_im1, cfg["wavelet"][..., time_index])
                     S_i[now_i] = restore_step(st, i, pidx, u_i.clone())
                     S_i[prev_i] = restore_step(st, prev_step, pidx, u_im1)
             else:  # 1st-order leapfrog — 'substep' (exact, reuses forward sub-steps)
@@ -263,7 +264,7 @@ class _BoundarySaveStep(torch.autograd.Function):
                 frame_in = list(frame)
                 src = cfg.get("src")
                 if src is not None:
-                    wl = cfg["wavelet"][..., cfg["time_index"]]
+                    wl = cfg["wavelet"][..., time_index]
                     for sidx in cfg["source_indices"]:
                         frame_in[sidx] = src(frame[sidx].clone(), -wl)
                 for c in cpml_idx:
@@ -303,7 +304,7 @@ class _BoundarySaveStep(torch.autograd.Function):
             check = [o.detach() for o in out_rg]
             src_op = cfg.get("src")
             if src_op is not None:
-                wl = cfg["wavelet"][..., cfg["time_index"]]
+                wl = cfg["wavelet"][..., time_index]
                 for sidx in cfg["source_indices"]:
                     check[sidx] = src_op(check[sidx], wl)
             err, assessed = _interior_consistency_error(
@@ -330,4 +331,4 @@ class _BoundarySaveStep(torch.autograd.Function):
         grad_S = list(grads[:nwf])
         grad_M_iter = iter(grads[nwf:])
         grad_M = [next(grad_M_iter) if f else None for f in model_flags]
-        return tuple([None] + grad_S + grad_M)
+        return tuple([None, None, None] + grad_S + grad_M)

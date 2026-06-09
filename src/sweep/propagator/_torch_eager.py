@@ -101,22 +101,25 @@ class _PropTorchEager(PropBase, torch.nn.Module):
             dt, h, b = flat_args[-3:]
             return equation_step(wavefields, models, dt, h, b)
 
+        return self._maybe_compile(step_func)
+
+    def _maybe_compile(self, fn):
+        """``torch.compile`` *fn* with the propagator's compile settings, after
+        raising Dynamo's recompile limit.  Dynamo specializes the step on
+        per-tensor metadata; each wavefield's ``requires_grad`` flips False->True
+        the first time it absorbs a contribution from the (``requires_grad=True``)
+        models, forcing a recompile.  Elastic/DAS have many wavefields, so the
+        default cap of 8 is exhausted before Dynamo settles and it silently falls
+        back to eager — bump the cap so specialization can finish (Acoustic's
+        tighter step is unaffected).  Returns *fn* unchanged when compilation is
+        off.  Shared by the full-tape step and the eager boundary-saving step."""
         if not self.use_compile or not hasattr(torch, "compile"):
-            return step_func
-        # Dynamo specializes step_func on per-tensor metadata; each wavefield
-        # tensor's requires_grad flips from False to True the first time it
-        # absorbs a contribution from the (requires_grad=True) models, which
-        # forces a recompile. Elastic/DAS have many wavefields, so the
-        # default limit of 8 is exhausted before Dynamo settles, and it
-        # falls back to eager — the symptom that hid the @torch.jit.script
-        # graph break analysis in TODO.md [TASK 001]. Bump the cap so the
-        # specialization can finish; Acoustic's tighter step is unaffected.
+            return fn
         dynamo_config = getattr(torch, "_dynamo", None)
         if dynamo_config is not None:
             cfg = getattr(dynamo_config, "config", None)
-            if cfg is not None and hasattr(cfg, "recompile_limit"):
-                if cfg.recompile_limit < 32:
-                    cfg.recompile_limit = 32
+            if cfg is not None and hasattr(cfg, "recompile_limit") and cfg.recompile_limit < 32:
+                cfg.recompile_limit = 32
         compile_kwargs = {
             "mode": self.compile_mode,
             "dynamic": self.compile_dynamic,
@@ -124,7 +127,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         }
         if self.compile_backend is not None:
             compile_kwargs["backend"] = self.compile_backend
-        return torch.compile(step_func, **compile_kwargs)
+        return torch.compile(fn, **compile_kwargs)
 
     def _mark_compile_step_begin(self):
         if self.use_compile and self.dev is not None and "cuda" in str(self.dev):
@@ -683,9 +686,9 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         reconstruction storage (CUDA-style contiguous buffers) seeded with the
         initial frame, prepares the (optionally compiled) per-step physics
         callables, and assembles ``base_cfg`` — the part of the per-step config
-        that does not change across time.  The caller's loop adds only the varying
-        ``step``/``time_index`` keys.  Reconstruction state is per-rollout (no
-        class globals).
+        that does not change across time.  The caller passes the varying
+        ``step``/``time_index`` to ``_BoundarySaveStep.apply``.  Reconstruction
+        state is per-rollout (no class globals).
         """
         from sweep.propagator._eager_boundary_saving import (
             ReconState, _interior_index_tuple, _ring_index_tuples, save_step,
@@ -733,26 +736,13 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         # backward.  With use_compile=True the inner step is torch.compile'd; the
         # custom autograd.Function and the time loop stay eager (Dynamo treats the
         # Function as an opaque boundary), so only the per-step kernels are fused.
-        bs_func = self.equation.func
+        bs_func = self._maybe_compile(self.equation.func)
         bs_substeps = (
-            self.equation.interior_substeps() if reverse_mode == "substep" else None
+            [self._maybe_compile(ss) for ss in self.equation.interior_substeps()]
+            if reverse_mode == "substep" else None
         )
-        if self.use_compile and hasattr(torch, "compile"):
-            dynamo_cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
-            if dynamo_cfg is not None and getattr(dynamo_cfg, "recompile_limit", 0) < 32:
-                dynamo_cfg.recompile_limit = 32
-            compile_kwargs = {
-                "mode": self.compile_mode,
-                "dynamic": self.compile_dynamic,
-                "fullgraph": self.compile_fullgraph,
-            }
-            if self.compile_backend is not None:
-                compile_kwargs["backend"] = self.compile_backend
-            bs_func = torch.compile(bs_func, **compile_kwargs)
-            if bs_substeps is not None:
-                bs_substeps = [torch.compile(ss, **compile_kwargs) for ss in bs_substeps]
 
-        # Constant part of the per-step config; the time loop adds step/time_index.
+        # Constant per-step config; step/time_index pass to apply() as args.
         base_cfg = {
             "equation": self.equation, "dt": self.dt, "h": self._equation_spacing,
             "nwf": nwf, "nm": nm, "nt": nt,
@@ -815,8 +805,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         is wrapped in a ``_BoundarySaveStep`` autograd.Function that stores only
         the boundary ring (source injection + receiver sampling stay normal ops —
         their gather/scatter backward is value-free, so no full wavefield is
-        retained).  Per-rollout setup lives in ``_init_eager_bs``; the loop adds
-        only the varying step/time keys to the constant ``base_cfg``.  Writes the
+        retained).  Per-rollout setup lives in ``_init_eager_bs``; the loop passes
+        the varying step/time straight to ``_BoundarySaveStep.apply``.  Writes the
         record in place, seeds the reconstruction with the final frame, and
         returns the final wavefield list.
         """
@@ -826,8 +816,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         )
         for i in range(nt):
             time = i if not adj else nt - i - 1
-            cfg = {**base_cfg, "step": i, "time_index": time}
-            wavefield = list(_BoundarySaveStep.apply(cfg, *wavefield, *runtime_models))
+            wavefield = list(_BoundarySaveStep.apply(base_cfg, i, time, *wavefield, *runtime_models))
             for source_idx in self.source_indices:
                 wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
             if multi_receiver:
