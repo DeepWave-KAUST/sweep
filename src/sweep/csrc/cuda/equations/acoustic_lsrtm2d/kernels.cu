@@ -24,8 +24,11 @@ __global__ void calculate_grad_lsrtm_mp(
     const float* vp_b = vp + b * spatial_size;
     float* grad_b = grad_mp + b * spatial_size;
 
-    float v = vp_b[idx];
-    grad_b[idx] += (u_tt_b[idx] / (v * v)) * u_backward_b[idx];
+    // grad[mp] = sum_t adjoint_sc * d(sc_next)/d(mp).  Forward couples
+    //   sc_next += dt^2 * mp * bg_utt   (bg_utt = vp^2 * bg_w_sum, == saved u_tt_bg),
+    // so d(sc_next)/d(mp) = dt^2 * bg_utt = dt^2 * u_tt_bg.  (Was u_tt_bg/vp^2, which
+    // dropped dt^2*vp^2 -> grad ~1/(dt^2 vp^2) too small vs eager autograd.)
+    grad_b[idx] += dt * dt * u_tt_b[idx] * u_backward_b[idx];
 }
 
 __global__ void calculate_grad_lsrtm_mp_utt(
@@ -56,7 +59,7 @@ __global__ void calculate_grad_lsrtm_mp_utt(
     const float* vp_b = vp + b * spatial_size;
     float* grad_b = grad_mp + b * spatial_size;
 
+    // u_tt = d^2(bg)/dt^2 = bg_utt (= vp^2 * bg_w_sum); grad[mp] = sum_t u_back * dt^2 * bg_utt.
     float u_tt = (u_now_b[idx] - 2.0f * u_prev_b[idx] + u_next_b[idx]) / (dt * dt);
-    float v = vp_b[idx];
-    grad_b[idx] += (u_tt / (v * v)) * u_backward_b[idx];
+    grad_b[idx] += dt * dt * u_tt * u_backward_b[idx];
 }

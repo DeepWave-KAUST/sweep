@@ -271,7 +271,8 @@ __global__ void calculate_grad_lsrtm3d_mp(
     int B,
     int nx,
     int ny,
-    int nz
+    int nz,
+    float dt
 );
 
 __global__ void calculate_grad_lsrtm3d_mp_utt(
