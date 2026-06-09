@@ -17,6 +17,25 @@ namespace acoustic_lsrtm3d {
 
 namespace {
 
+// Proper transpose adjoint step for the lsrtm 3D scattered field: v2_lambda =
+// vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
+// Replaces the old forward-operator adjoint (acoustic3d_single = vp^2*lap),
+// non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
+static inline void run_lsrtm3d_adjoint_step(
+    int order, dim3 grid, dim3 block,
+    AcousticWavefieldPointer adj_view,
+    const torch::Tensor& vp,
+    LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_y, GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml, SolverContext ctx)
+{
+    auto v2_lambda = torch::empty_like(vp);   // vp^2 * lambda_now (fully overwritten each step)
+    compute_v2_lambda_lsrtm3d<<<grid, block>>>(
+        vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.ny, ctx.nz, ctx.B);
+    ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block,
+        adj_view, v2_lambda.data_ptr<float>(), vp.data_ptr<float>(),
+        lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+}
+
 std::vector<torch::Tensor> slice_wavefields(
     const std::vector<torch::Tensor>& tensors,
     size_t start,
@@ -305,22 +324,9 @@ void process_recursive_interval_3d(
 
         auto adj_view = adjoint.view();
 
-        ACOUSTIC_LSRTM3D_SINGLE(
-            order,
-            wave_grid,
-            wave_block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm3d_adjoint_step(
+            order, wave_grid, wave_block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 
         add_source_3d<<<adj_source_grid, adj_source_block>>>(
             adj_view.u_next,
@@ -513,22 +519,9 @@ void run_full_imaging(
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
 
-        ACOUSTIC_LSRTM3D_SINGLE(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            false,
-            u_thist,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm3d_adjoint_step(
+            order, launch_config.grid, launch_config.block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -684,22 +677,9 @@ void run_bs_imaging(
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
-        ACOUSTIC_LSRTM3D_SINGLE(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm3d_adjoint_step(
+            order, launch_config.grid, launch_config.block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -778,22 +758,9 @@ void run_bs_imaging(
     if (p.nt > 0) {
         auto adj_view = adjoint.view();
 
-        ACOUSTIC_LSRTM3D_SINGLE(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            false,
-            nullptr,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_lsrtm3d_adjoint_step(
+            order, launch_config.grid, launch_config.block, adj_view,
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -950,22 +917,9 @@ void run_ckpt_imaging(
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            ACOUSTIC_LSRTM3D_SINGLE(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                adj_view,
-                false,
-                nullptr,
-                vp.data_ptr<float>(),
-                lap_ctx,
-                grad_ctx,
-                grad_ctx_x,
-                grad_ctx_y,
-                grad_ctx_z,
-                cpml,
-                ctx
-            );
+            run_lsrtm3d_adjoint_step(
+                order, launch_config.grid, launch_config.block, adj_view,
+                vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
