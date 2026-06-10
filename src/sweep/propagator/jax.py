@@ -7,10 +7,15 @@ from sweep.utils.jax import edge_pad
 
 class PropJax(PropBase):
 
-    def __init__(self, *args, memory=None, **kwargs):
+    def __init__(self, *args, memory=None, scan_unroll=1, **kwargs):
 
         super().__init__(*args, **kwargs)
         self._bs_options = None
+        # lax.scan unroll factor for the time loop (forward and the
+        # boundary-saving reverse scan).  Launch-bound small grids gain
+        # substantially (512^2: ~1.6x at unroll=2-4); bandwidth-bound large
+        # grids lose a few percent — hence default 1.
+        self._scan_unroll = int(scan_unroll)
         if memory is not None:
             self._apply_memory_options(memory)
 
@@ -93,6 +98,7 @@ class PropJax(PropBase):
             free_surface=getattr(self, "free_surface", False),
             forced_mode=self._bs_options.get("mode"),
             storage_dtype=self._bs_options.get("storage_dtype", "fp32"),
+            scan_unroll=self._scan_unroll,
         )
         propagate = jbs.make_propagate(cfg)
         rec_seq = propagate(tuple(models), wavelet)    # [nt, B, nrec, ntype]
@@ -236,9 +242,6 @@ class PropJax(PropBase):
         for receiver_type in self.receiver_type:
             receiver_idx_at.append(self.wavefield_names.index(receiver_type))
 
-        ridxs = jnp.asarray(receiver_idx_at, dtype=jnp.int32)  
-        sidxs = jnp.asarray(source_idx_at, dtype=jnp.int32)
-
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
 
         if self._bs_options is not None:
@@ -282,14 +285,17 @@ class PropJax(PropBase):
 
             time = it if not adj else nt - it - 1
             # Forward propagation
-            wavefields = wave_equation(wavefields, models, dt, h, b, *aux_args)
-            wavefields_arr = jnp.stack(wavefields, axis=0)
-            # Add source
-            wf_src = jnp.take(wavefields_arr, sidxs, axis=0)
-            wf_src_new = jax.vmap(lambda w: src(w, wavelet[..., time]))(wf_src)
-            wavefields_arr = wavefields_arr.at[sidxs].set(wf_src_new)
+            wavefields = list(wave_equation(wavefields, models, dt, h, b, *aux_args))
+            # Add source — static per-field indexing.  A traced-index scatter
+            # into the stacked (nwf, ...) array (the previous jnp.take /
+            # .at[sidxs].set form) copies EVERY field each step (~43% of the
+            # step time at 2048^2); per-field .at adds touch only the source
+            # field and are bit-identical.
+            for sidx in source_idx_at:
+                wavefields[sidx] = src(wavefields[sidx], wavelet[..., time])
             # Save snapshots
             if snapshots is not None:
+                wavefields_arr = jnp.stack(wavefields, axis=0)
                 should_save = jnp.logical_and(
                     snapshot_pos < num_snapshots,
                     snapshot_targets[snapshot_pos] == it,
@@ -308,15 +314,15 @@ class PropJax(PropBase):
                     (snapshots, snapshot_pos),
                 )
 
-            # Record receivers
-            wf_sel = jnp.take(wavefields_arr, ridxs, axis=0) 
+            # Record receivers — stack only the receiver fields, not all nwf.
+            wf_sel = jnp.stack([wavefields[i] for i in receiver_idx_at], axis=0)
             def one_channel(wf):
                 y = rec(wf)
                 return y.reshape(batch_size, -1, y.shape[-1])
             all_rec = jax.vmap(one_channel)(wf_sel)
             rec_t = jnp.transpose(all_rec, (1, 2, 0, 3))[..., 0]
 
-            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), step_args, snapshots, snapshot_pos), rec_t
+            return (tuple(wavefields), step_args, snapshots, snapshot_pos), rec_t
 
 
         def step_fn_single_with_skip(carry, it):
@@ -360,7 +366,10 @@ class PropJax(PropBase):
         initial = (wavefields, step_args, snapshots, jnp.array(0, dtype=jnp.int32))
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
         num_steps = num_chunks if self.use_ckpt else nt
-        (final), rec_seq = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
+        unroll = self._scan_unroll if not self.use_ckpt else 1
+        (final), rec_seq = jax.lax.scan(
+            step_fn, initial, jnp.arange(num_steps), unroll=unroll
+        )
 
         n = num_steps * chunk_size if self.use_ckpt else nt
         rec_seq = rec_seq.reshape(n, batch_size, receivers.shape[1], len(self.receiver_type))

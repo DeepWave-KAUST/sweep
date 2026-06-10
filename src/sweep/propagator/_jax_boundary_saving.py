@@ -187,7 +187,7 @@ def resolve_reverse_mode(equation, forced=None, free_surface=False):
 def build_config(*, equation, wavefield_specs, wavefield_names, dt, h, shape,
                  ndim, abcn, halo, nt, S0, src, rec, source_indices,
                  receiver_indices, batch_size, free_surface=False,
-                 forced_mode=None, storage_dtype="fp32"):
+                 forced_mode=None, storage_dtype="fp32", scan_unroll=1):
     """Assemble the static per-rollout config consumed by ``make_propagate``.
 
     Mirrors ``PropTorch._init_eager_bs``: ring geometry from the spatial order
@@ -232,6 +232,7 @@ def build_config(*, equation, wavefield_specs, wavefield_names, dt, h, shape,
         "ring_fields": ring_fields, "pairs": pairs,
         "cpml_indices": cpml_indices, "phys_indices": phys_indices,
         "store_dtype": _STORE_DTYPE[storage_dtype],
+        "scan_unroll": int(scan_unroll),
     }
 
 
@@ -285,6 +286,7 @@ def make_propagate(cfg):
     nt = cfg["nt"]
     dt, h = cfg["dt"], cfg["h"]
     func = cfg["func"]
+    unroll = cfg.get("scan_unroll", 1)
 
     def step_with_rec(S, models, w_t):
         S_mid = func(S, models, dt, h, None)
@@ -299,7 +301,9 @@ def make_propagate(cfg):
             S1 = _inject(list(S_mid), w_t, cfg)
             return tuple(S1), (_sample(S1, cfg), ring_row)
 
-        S_final, (rec_seq, ring_rows) = jax.lax.scan(body, cfg["S0"], jnp.arange(nt))
+        S_final, (rec_seq, ring_rows) = jax.lax.scan(
+            body, cfg["S0"], jnp.arange(nt), unroll=unroll
+        )
         return rec_seq, ring_rows, S_final
 
     @jax.custom_vjp
@@ -334,7 +338,8 @@ def make_propagate(cfg):
         S_bar0 = jax.tree.map(jnp.zeros_like, S_final)
         g_models0 = jax.tree.map(jnp.zeros_like, models)
         (_, _, g_models), g_wt_seq = jax.lax.scan(
-            body, (S_final, S_bar0, g_models0), jnp.arange(nt), reverse=True
+            body, (S_final, S_bar0, g_models0), jnp.arange(nt),
+            reverse=True, unroll=unroll,
         )
         return g_models, jnp.moveaxis(g_wt_seq, 0, -1)
 
