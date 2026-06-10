@@ -160,7 +160,7 @@ nav:
               - ADCIG: notebooks/16_adcig.ipynb
           - HPC:
               - Memory strategies: notebooks/07_memory_strategies.ipynb
-              - FWI · boundary compression: notebooks/18_fwi_boundary_dtype.ipynb
+              - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
           - Extending:
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb

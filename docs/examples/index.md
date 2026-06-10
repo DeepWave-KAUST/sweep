@@ -170,6 +170,30 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/12_multi_gpu.ipynb)
 
+-   ![IFWI SIREN](../figures/gallery/13_ifwi_siren.png){ loading=lazy }
+
+    **IFWI · SIREN coordinate network**
+
+    ---
+
+    Implicit FWI: a SIREN coordinate network outputs `vp(x, z)` instead of a
+    grid of free parameters; its weights are inverted by backprop through the
+    propagator on Marmousi.
+
+    [:material-notebook-outline: Open notebook](../notebooks/13_ifwi_siren.ipynb)
+
+-   ![Custom gradients](../figures/gallery/14_custom_gradient.png){ loading=lazy }
+
+    **Custom gradients · imaging condition**
+
+    ---
+
+    Register your own imaging condition — override the default correlation with
+    a user-defined gradient kernel via the autograd hook and compare it to the
+    built-in one.
+
+    [:material-notebook-outline: Open notebook](../notebooks/14_custom_gradient.ipynb)
+
 -   ![Wavefield Topography](../figures/gallery/15_wavefield_topography.png){ loading=lazy }
 
     **Wavefield · irregular topography**
@@ -181,6 +205,65 @@ linked at the bottom of this page.
     reshapes the surface waves and primaries.
 
     [:material-notebook-outline: Open notebook](../notebooks/15_wavefield_topography.ipynb)
+
+-   ![ADCIG](../figures/gallery/16_adcig.png){ loading=lazy }
+
+    **ADCIG · angle-domain image gathers**
+
+    ---
+
+    Angle-domain common-image gathers — decompose the migrated image by
+    reflection angle; flat gathers indicate a correct migration velocity,
+    curved ones reveal the error.
+
+    [:material-notebook-outline: Open notebook](../notebooks/16_adcig.ipynb)
+
+-   ![Elastic vector reflectivity](../figures/gallery/16_elastic_vector_reflectivity.png){ loading=lazy }
+
+    **Elastic vector reflectivity**
+
+    ---
+
+    Forward-modeling validation of elastic vector-reflectivity
+    (Soares & Sacchi 2025) — the formulation reproduced and checked against
+    the reference.
+
+    [:material-notebook-outline: Open notebook](../notebooks/16_elastic_vector_reflectivity.ipynb)
+
+-   ![FWI VRZ Marmousi](../figures/gallery/17_fwi_vrz_marmousi.png){ loading=lazy }
+
+    **FWI · VRZ · Marmousi**
+
+    ---
+
+    Acoustic variable-density (VRZ) FWI on Marmousi — vector reflectivity from
+    impedance, inverted with the `AcousticVRZ` equation.
+
+    [:material-notebook-outline: Open notebook](../notebooks/17_fwi_vrz_marmousi.ipynb)
+
+-   ![Extending: add a new equation](../figures/gallery/18_extending_add_new_equation.png){ loading=lazy }
+
+    **Extending · add a new equation**
+
+    ---
+
+    Tutorial: add a brand-new wave equation to SWEEP — define its fields and
+    time step, register it, and drive it through `PropTorch` like any built-in.
+
+    [:material-notebook-outline: Open notebook](../notebooks/18_extending_add_new_equation.ipynb)
+
+-   ![FWI boundary compression](../figures/gallery/19_fwi_boundary_dtype.png){ loading=lazy }
+
+    **FWI · boundary compression**
+
+    ---
+
+    `storage_dtype` (fp16/bf16/int8) shrinks the saved boundary wavefield while
+    compute stays FP32. Marmousi FWI across the full `{gpu, cpu, disk} × dtype`
+    matrix (compiled **and** eager) — identical convergence, plus a runtime
+    GPU-memory breakdown.
+
+    [:material-notebook-outline: Open notebook](../notebooks/19_fwi_boundary_dtype.ipynb)
 
 </div>
 

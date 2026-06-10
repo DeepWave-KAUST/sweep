@@ -122,7 +122,7 @@ loss.backward()            # vp.grad ready for any torch.optim step
       </a>
 
       <a class="sweep-nb__cta" href="examples/">
-        <div class="sweep-nb__cta-num">12 notebooks · 9 equations</div>
+        <div class="sweep-nb__cta-num">21 notebooks · 9 equations</div>
         <div class="sweep-nb__cta-title">See every<br><span class="sweep-nb__cta-italic">example.</span></div>
         <div class="sweep-nb__cta-tags">
           <span>FWI</span><span>RTM</span><span>LSRTM</span><span>Elastic</span><span>VTI</span><span>TTI</span><span>DAS</span><span>3D</span><span>Multi-GPU</span>

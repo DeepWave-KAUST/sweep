@@ -182,6 +182,58 @@ def _normalize_cuda_memory_kwargs(merged):
     raise ValueError(f"Unsupported c memory strategy '{strategy}'. Expected 'boundary' or 'ckpt'.")
 
 
+def _apply_eager_memory(backend_impl, memory):
+    """Apply a ``MemoryOptions`` to an already-built eager backend.
+
+    Mirrors :func:`_normalize_cuda_memory_kwargs` for the pure-PyTorch path:
+    ``strategy='boundary'`` enables boundary-saving wavefield reconstruction,
+    ``strategy='ckpt'`` enables chunk checkpointing.  Boundary saving and
+    checkpointing are mutually exclusive (the eager forward checks ``use_ckpt``
+    first), so each branch disables the other.
+    """
+    md = options_to_dict(memory)
+    strategy = md.get("strategy")
+    if strategy is None:
+        raise ValueError("memory= must set strategy to 'boundary' or 'ckpt'.")
+
+    if strategy == "boundary":
+        boundary = md.get("boundary") or {}
+        storage = boundary.get("storage", "gpu")
+        if storage not in ("gpu", "cpu"):
+            raise ValueError(
+                "Eager boundary saving supports storage='gpu' or 'cpu' (the ring "
+                "buffer is kept on device, or offloaded to host RAM); disk staging "
+                "is available on the impl='c' path."
+            )
+        # storage_dtype compresses the ring (fp16/bf16/int8); storage='cpu' moves
+        # it off device.  Compute and the seed frame stay FP32 / on the compute
+        # device (same split as the CUDA path).
+        storage_dtype = boundary.get("storage_dtype", "fp32")
+        if storage_dtype not in ("fp32", "fp16", "bf16", "int8"):
+            raise ValueError(
+                "Eager boundary saving storage_dtype must be 'fp32'/'fp16'/'bf16'/"
+                f"'int8', got {storage_dtype!r}."
+            )
+        backend_impl.use_ckpt = False
+        backend_impl.enable_eager_boundary_saving(
+            True, storage=storage, storage_dtype=storage_dtype
+        )
+        return
+
+    if strategy == "ckpt":
+        ckpt = md.get("ckpt") or {}
+        mode = ckpt.get("mode", CKPT_DEFAULTS.mode)
+        if mode != "chunk":
+            raise ValueError("Eager checkpointing supports mode='chunk' only.")
+        backend_impl.enable_eager_boundary_saving(False)
+        backend_impl.use_ckpt = True
+        backend_impl.ckpt_mode = "chunk"
+        backend_impl.ckpt_chunks = ckpt.get("chunks", CKPT_DEFAULTS.chunks)
+        return
+
+    raise ValueError(f"Unsupported memory strategy '{strategy}' for impl='eager'.")
+
+
 def _resolve_backend_init_kwargs(*, impl, kwargs, backend_options, eager_options, cuda_options):
     if eager_options is not None and impl != "eager":
         raise ValueError("eager_options can only be used with impl='eager'.")
@@ -227,6 +279,7 @@ class PropTorch(torch.nn.Module):
         backend_options=None,
         eager_options=None,
         cuda_options=None,
+        memory=None,
         **kwargs,
     ):
         torch.nn.Module.__init__(self)
@@ -237,6 +290,24 @@ class PropTorch(torch.nn.Module):
             backend = getattr(equation, 'backend', 'torch')
         requested_impl = impl
         backend, impl = _normalize_backend_impl(backend, impl, equation=equation)
+
+        # ``memory=`` is the impl-agnostic, dataclass-style memory-strategy API
+        # (dict-style config still goes through boundary_saving_config=/use_ckpt=).
+        # For impl='c' it folds into cuda_options.memory; for impl='eager' it is
+        # applied to the backend after construction (see below).
+        if memory is not None and not isinstance(memory, MemoryOptions):
+            raise TypeError(
+                "memory= expects a MemoryOptions instance; for dict-style config "
+                "use boundary_saving_config=/use_ckpt= instead."
+            )
+        if memory is not None and impl == "c":
+            if cuda_options is not None and getattr(cuda_options, "memory", None) is not None:
+                raise ValueError(
+                    "Specify the memory strategy via either memory= or "
+                    "cuda_options.memory, not both."
+                )
+            cuda_options = CUDAOptions(memory=memory)
+            memory = None
 
         if impl == "eager" and (cuda_options is not None or CUDA_OPTION_KEYS & set(kwargs)):
             requested_norm = (
@@ -258,6 +329,8 @@ class PropTorch(torch.nn.Module):
         )
         if impl == "eager":
             backend_impl = _PropTorchEager(*args, **init_kwargs)
+            if memory is not None:
+                _apply_eager_memory(backend_impl, memory)
         else:
             from sweep.propagator._c import _CompiledPropagator
 
