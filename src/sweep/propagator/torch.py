@@ -199,14 +199,15 @@ def _apply_eager_memory(backend_impl, memory):
     if strategy == "boundary":
         boundary = md.get("boundary") or {}
         storage = boundary.get("storage", "gpu")
-        if storage != "gpu":
+        if storage not in ("gpu", "cpu"):
             raise ValueError(
-                "Eager boundary saving currently supports storage='gpu' only "
-                "(reconstruction rings are kept on device); cpu/disk staging is "
-                "available on the impl='c' path."
+                "Eager boundary saving supports storage='gpu' or 'cpu' (the ring "
+                "buffer is kept on device, or offloaded to host RAM); disk staging "
+                "is available on the impl='c' path."
             )
-        # storage_dtype compresses the on-device ring (fp16/bf16/int8); compute
-        # and the seed frame stay FP32 (same split as the CUDA path).
+        # storage_dtype compresses the ring (fp16/bf16/int8); storage='cpu' moves
+        # it off device.  Compute and the seed frame stay FP32 / on the compute
+        # device (same split as the CUDA path).
         storage_dtype = boundary.get("storage_dtype", "fp32")
         if storage_dtype not in ("fp32", "fp16", "bf16", "int8"):
             raise ValueError(
@@ -214,7 +215,9 @@ def _apply_eager_memory(backend_impl, memory):
                 f"'int8', got {storage_dtype!r}."
             )
         backend_impl.use_ckpt = False
-        backend_impl.enable_eager_boundary_saving(True, storage_dtype=storage_dtype)
+        backend_impl.enable_eager_boundary_saving(
+            True, storage=storage, storage_dtype=storage_dtype
+        )
         return
 
     if strategy == "ckpt":

@@ -106,6 +106,8 @@ def restore_step(state, step, pos, field):
         flat = _dequantize_int8(state.codes[step, pos], state.scale[step, pos], state.total_cells)
     else:
         flat = state.buf[step, pos]
+    if flat.device != field.device:                  # offloaded ring (cpu) -> compute device
+        flat = flat.to(field.device, non_blocking=True)
     off = 0
     for idx, shp, sz in zip(state.rings, state.ring_shapes, state.ring_sizes):
         field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
@@ -171,7 +173,13 @@ class ReconState:
     __slots__ = ("frame", "rings", "checked", "store_dtype", "ring_shapes",
                  "ring_sizes", "total_cells", "buf", "codes", "scale", "zero")
 
-    def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device):
+    def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device,
+                 storage_device=None):
+        # ``device`` is the compute device (where the wavefields live); the ring
+        # storage lives on ``storage_device`` instead (e.g. host RAM for the 'cpu'
+        # offload — trading device memory for per-step H2D/D2H copies).  The zero
+        # placeholder and reconstruction run on the compute device regardless.
+        storage_device = device if storage_device is None else storage_device
         self.frame = None
         # Reused read-only zero placeholder for the cpml / unpaired field slots in
         # backward — one buffer for the whole rollout, not a per-step zeros_like.
@@ -186,11 +194,11 @@ class ReconState:
         self.buf = self.codes = self.scale = None
         if store_dtype == "int8":
             padded = ((self.total_cells + _INT8_BLOCK - 1) // _INT8_BLOCK) * _INT8_BLOCK
-            self.codes = torch.zeros((T, F, padded), dtype=torch.int8, device=device)
-            self.scale = torch.zeros((T, F, padded // _INT8_BLOCK), dtype=torch.float32, device=device)
+            self.codes = torch.zeros((T, F, padded), dtype=torch.int8, device=storage_device)
+            self.scale = torch.zeros((T, F, padded // _INT8_BLOCK), dtype=torch.float32, device=storage_device)
         else:
             self.buf = torch.zeros((T, F, self.total_cells),
-                                   dtype=_STORE_DTYPE[store_dtype], device=device)
+                                   dtype=_STORE_DTYPE[store_dtype], device=storage_device)
 
 
 # ---- Reverse-reconstruction drivers --------------------------------------
