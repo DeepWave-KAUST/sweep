@@ -232,6 +232,32 @@ def test_wavelet_gradient():
     assert rel < 1e-2, f"wavelet grad rel_l2 {rel}"
 
 
+def test_source_encoding_mode():
+    """Mode B (3-D ``sources=(1, nsrc, ndim)``, per-source wavelets): the BS
+    custom VJP must match plain autodiff.  The JAX source has no explicit
+    encoding branch — ``SourceJax.multiwavelet`` covers it through fancy-index
+    broadcasting ((1,) shots vs nsrc points); this test guards that behavior
+    (verified against torch eager at rel ~5e-7 / grad cosine 1.0)."""
+    cfg = CASES["acoustic2d"]
+    nz, nx = _shape(2)
+    true_m, init_m = _models("acoustic", (nz, nx))
+    nsrc = 3
+    scales = np.array([1.0, -0.7, 0.45], np.float32)
+    wavelet = scales[:, None] * _ricker(NT, DT)[None, :]
+    src = np.array([[[nx // 4, 3], [nx // 2, 3], [3 * nx // 4, 3]]], dtype=np.int32)
+    rx = np.arange(2, nx - 2, 6, dtype=np.int32)
+    rec = np.stack([rx, np.full(rx.size, SO // 2, np.int32)], -1)[None]
+
+    obs = _build(cfg)(wavelet, src, rec, models=[jnp.asarray(true_m[0])])
+    g_full = _first_grad(_build(cfg), init_m, obs, wavelet, src, rec)
+    g_bs = _first_grad(_build(cfg, memory=BOUNDARY), init_m, obs, wavelet, src, rec)
+    r_full = _build(cfg)(wavelet, src, rec, models=[jnp.asarray(init_m[0])])
+    r_bs = _build(cfg, memory=BOUNDARY)(wavelet, src, rec, models=[jnp.asarray(init_m[0])])
+    assert _rel_l2(r_bs, r_full) < 1e-6
+    assert float(jnp.linalg.norm(g_full)) > 0
+    assert _cosine(g_full, g_bs) > 0.999
+
+
 def test_scan_unroll_preserves_gradients():
     """scan_unroll only restructures the loop — gradients must agree up to
     XLA float reassociation (bit-identical on GPU, reassociated on CPU), on
