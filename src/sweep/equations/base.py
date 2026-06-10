@@ -222,7 +222,13 @@ class WaveEquation:
     def init_abc(self, type='cpml', **kwargs):
         pml_func = {'cpmls': set_cpml_profiles_s, 'cpmlr': set_cpml_profiles_r,'spml': set_spml_profiles}[type]
         self.b = pml_func(**kwargs)
-        self.b = to_backend(self.b, self.backend, self.device)
+        # JAX: keep the profiles as numpy.  init_abc runs inside the user's
+        # jit trace, where jnp conversion yields tracers; caching those on the
+        # instance leaks them into the next trace (UnexpectedTracerError on
+        # the second jit of the same propagator).  Numpy arrays are trace-safe
+        # closure constants in every trace.
+        if self.backend != 'jax':
+            self.b = to_backend(self.b, self.backend, self.device)
 
     # Each of the four properties below resolves in the same order:
     #   1. an instance-level write (``self.wavefields = ...`` etc.) wins,
