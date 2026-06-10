@@ -24,24 +24,27 @@ def edge_pad_fwd(u, pad_width):
     Returns:
         jnp.array: Padded data.
     """
-    u = jnp.pad(u, pad_width, mode='edge')
-    return u, pad_width
+    return jnp.pad(u, pad_width, mode='edge'), None
 
-def edge_pad_bwd(pad_width, g):
+def edge_pad_bwd(pad_width, res, g):
     """Backward function of edge_pad.
 
     Args:
-        pad_width (jnp.array): The padding width for each dimension.
+        pad_width: The padding width pairs per dimension (static).
+        res: Residuals from the forward function (unused).
         g (jnp.array): The gradient.
 
     Returns:
-        jnp.array: The gradient of the input data.
-    """    
+        tuple: The gradient of the input data.
+    """
     slices = [
         slice(p0, g.shape[i] - p1)
         for i, (p0, p1) in enumerate(pad_width)
     ]
-    return g[tuple(slices)], None
+    return (g[tuple(slices)],)
 
-edge_pad = jax.custom_vjp(edge_pad_base)
+# pad_width must be a static (nondiff) argument: without nondiff_argnums a
+# pure-forward jit traces the primal with every argument lifted to a tracer,
+# and jnp.pad cannot take a traced pad_width (ConcretizationTypeError).
+edge_pad = jax.custom_vjp(edge_pad_base, nondiff_argnums=(1,))
 edge_pad.defvjp(edge_pad_fwd, edge_pad_bwd)
