@@ -174,7 +174,7 @@ class ReconState:
                  "ring_sizes", "total_cells", "buf", "codes", "scale", "zero")
 
     def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device,
-                 storage_device=None):
+                 storage_device=None, compute_dtype=torch.float32):
         # ``device`` is the compute device (where the wavefields live); the ring
         # storage lives on ``storage_device`` instead (e.g. host RAM for the 'cpu'
         # offload — trading device memory for per-step H2D/D2H copies).  The zero
@@ -183,7 +183,8 @@ class ReconState:
         self.frame = None
         # Reused read-only zero placeholder for the cpml / unpaired field slots in
         # backward — one buffer for the whole rollout, not a per-step zeros_like.
-        self.zero = torch.zeros(shape, dtype=torch.float32, device=device)
+        # Matches the wavefield (compute) dtype so it composes with the field ops.
+        self.zero = torch.zeros(shape, dtype=compute_dtype, device=device)
         self.rings = rings
         self.checked = False                         # one-time self-check latch
         self.store_dtype = store_dtype

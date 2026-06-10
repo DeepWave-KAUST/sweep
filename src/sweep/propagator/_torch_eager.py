@@ -735,7 +735,8 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         storage_loc = getattr(self, "_eager_bs_storage", "gpu")
         storage_device = wavefield[0].device if storage_loc == "gpu" else torch.device("cpu")
         state = ReconState(nt, rings, shape, len(ring_fields), store_dtype,
-                           wavefield[0].device, storage_device)
+                           wavefield[0].device, storage_device,
+                           compute_dtype=wavefield[0].dtype)
         for pos, f in enumerate(ring_fields):
             save_step(state, 0, pos, wavefield[f])
 

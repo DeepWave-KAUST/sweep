@@ -111,13 +111,13 @@ def _geometry(ndim):
 
 
 def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT, free_surface=False,
-           use_compile=False):
-    eq = cfg["cls"](spatial_order=SO, device="cuda", backend="torch")
+           use_compile=False, device="cuda"):
+    eq = cfg["cls"](spatial_order=SO, device=device, backend="torch")
     shape = _shape(cfg["ndim"])
     prop = PropTorch(
         eq, impl="eager", eager_options=EagerOptions(use_compile=use_compile),
         memory=memory, use_ckpt=use_ckpt,
-        shape=shape, dev="cuda", dh=DH, dt=DT,
+        shape=shape, dev=device, dh=DH, dt=DT,
         source_type=cfg["st"], receiver_type=cfg["rt"],
         abcn=ABCN, pml_type=eq.default_pml_type, free_surface=free_surface, nt=nt, B=1,
     )
@@ -127,23 +127,23 @@ def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT, free_surface=F
     return prop
 
 
-def _first_grad(prop, cfg, init_models, observed, wavelet, src, rec):
-    m = [torch.tensor(a, device="cuda", requires_grad=(i == 0))
+def _first_grad(prop, cfg, init_models, observed, wavelet, src, rec, device="cuda"):
+    m = [torch.tensor(a, device=device, requires_grad=(i == 0))
          for i, a in enumerate(init_models)]
     rec_out = prop(wavelet, src.copy(), rec.copy(), models=m)
     (rec_out - observed).pow(2).mean().backward()
     return m[0].grad.detach().clone()
 
 
-def _setup(cfg, nt=NT, free_surface=False):
+def _setup(cfg, nt=NT, free_surface=False, device="cuda"):
     shape = _shape(cfg["ndim"])
     true_m, init_m, _ = _models(cfg["kind"], shape)
-    wavelet = torch.tensor(_ricker(nt, DT), device="cuda")
+    wavelet = torch.tensor(_ricker(nt, DT), device=device)
     src, rec = _geometry(cfg["ndim"])
-    full = _build(cfg, nt=nt, free_surface=free_surface)
+    full = _build(cfg, nt=nt, free_surface=free_surface, device=device)
     with torch.no_grad():
         obs = full(wavelet, src.copy(), rec.copy(),
-                   models=[torch.tensor(a, device="cuda") for a in true_m]).clone()
+                   models=[torch.tensor(a, device=device) for a in true_m]).clone()
     return true_m, init_m, wavelet, src, rec, obs
 
 
@@ -469,3 +469,19 @@ def test_cpu_offload_int8():
     g8 = _first_grad(_build(cfg, memory=cpu8), cfg, init_m, obs, wavelet, src, rec)
     assert torch.isfinite(g8).all()
     assert _cosine(g32, g8) > 0.999
+
+
+def test_cpu_compute_device():
+    """Eager boundary saving is pure PyTorch, so it runs on a CPU compute device,
+    not just CUDA — a portability guard against accidental device hardcoding in
+    the reconstruction path.  (The GPU-memory tests are CUDA-gated; this case
+    builds and runs everything on CPU, exercising the swap2nd reverse driver and
+    the device-agnostic ring save/restore.)"""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg, device="cpu")
+    g_full = _first_grad(_build(cfg, device="cpu"), cfg, init_m, obs,
+                         wavelet, src, rec, device="cpu")
+    g_bs = _first_grad(_build(cfg, memory=BOUNDARY, device="cpu"), cfg, init_m, obs,
+                       wavelet, src, rec, device="cpu")
+    assert torch.isfinite(g_bs).all()
+    assert _cosine(g_full, g_bs) > 0.999
