@@ -440,3 +440,32 @@ def test_low_precision_ring_storage(dtype, min_cos):
     cos = _cosine(g32, glp)
     assert cos > min_cos, f"{dtype}: cosine {cos} vs fp32-BS gradient"
     assert torch.isfinite(glp).all()
+
+
+@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d"])
+def test_cpu_offload_matches_gpu(name):
+    """storage='cpu' offloads the ring buffer to host RAM (freeing GPU memory)
+    while compute and reconstruction stay on device — so the gradient is unchanged
+    and, for fp32, bit-identical to the on-device ring (the H2D/D2H copies are
+    lossless).  Covers both reverse drivers (swap2nd / substep)."""
+    cfg = CASES[name]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    g_gpu = _first_grad(_build(cfg, memory=BOUNDARY), cfg, init_m, obs, wavelet, src, rec)
+    cpu_mem = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage="cpu"))
+    g_cpu = _first_grad(_build(cfg, memory=cpu_mem), cfg, init_m, obs, wavelet, src, rec)
+    assert torch.isfinite(g_cpu).all()
+    rel = float((g_cpu - g_gpu).norm() / (g_gpu.norm() + 1e-30))
+    assert rel < 1e-5, f"{name}: cpu offload should match gpu ring (rel {rel})"
+
+
+def test_cpu_offload_int8():
+    """int8 + cpu offloads both the uint8 codes and the FP32 per-block scale to
+    host RAM; the gradient stays close to the fp32-BS gradient."""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    g32 = _first_grad(_build(cfg, memory=BOUNDARY), cfg, init_m, obs, wavelet, src, rec)
+    cpu8 = MemoryOptions(strategy="boundary",
+                         boundary=BoundaryOptions(storage="cpu", storage_dtype="int8"))
+    g8 = _first_grad(_build(cfg, memory=cpu8), cfg, init_m, obs, wavelet, src, rec)
+    assert torch.isfinite(g8).all()
+    assert _cosine(g32, g8) > 0.999

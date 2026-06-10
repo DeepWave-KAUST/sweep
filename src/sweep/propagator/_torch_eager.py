@@ -592,7 +592,7 @@ class _PropTorchEager(PropBase, torch.nn.Module):
                 for i in registered}
 
     def enable_eager_boundary_saving(self, flag=True, mode=None, self_check=True,
-                                     check_tol=None, storage_dtype="fp32"):
+                                     check_tol=None, storage_dtype="fp32", storage="gpu"):
         """Route the eager rollout through pure-PyTorch boundary saving (see
         ``_eager_boundary_saving``) instead of the full autograd tape.  Mutually
         exclusive with ``use_ckpt``.  ``mode`` forces a reverse driver
@@ -607,13 +607,17 @@ class _PropTorchEager(PropBase, torch.nn.Module):
 
         ``storage_dtype`` ('fp32' | 'fp16' | 'bf16' | 'int8') compresses the
         per-step boundary ring only (compute and the seed frame stay FP32) —
-        same split as the CUDA path.  ``check_tol=None`` picks a tolerance that
-        clears the storage quantization floor while still catching a broken
-        reverse (which gives O(0.1-1) error)."""
+        same split as the CUDA path.  ``storage`` ('gpu' | 'cpu') keeps the ring
+        buffer on device or offloads it to host RAM — the ring is the dominant
+        eager-BS GPU cost, so 'cpu' trades device memory for per-step H2D/D2H
+        copies.  ``check_tol=None`` picks a tolerance that clears the storage
+        quantization floor while still catching a broken reverse (O(0.1-1)
+        error)."""
         self._eager_bs = bool(flag)
         self._eager_bs_mode = mode
         self._eager_bs_self_check = bool(self_check)
         self._eager_bs_storage_dtype = storage_dtype
+        self._eager_bs_storage = storage
         if check_tol is None:
             check_tol = {"fp32": 1e-2, "fp16": 3e-2, "bf16": 6e-2, "int8": 1.5e-1}.get(storage_dtype, 1e-2)
         self._eager_bs_check_tol = float(check_tol)
@@ -728,8 +732,10 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         # style), then write each step into a slice — no per-step allocation.
         # Seed step 0 with the initial frame.
         store_dtype = getattr(self, "_eager_bs_storage_dtype", "fp32")
+        storage_loc = getattr(self, "_eager_bs_storage", "gpu")
+        storage_device = wavefield[0].device if storage_loc == "gpu" else torch.device("cpu")
         state = ReconState(nt, rings, shape, len(ring_fields), store_dtype,
-                           wavefield[0].device)
+                           wavefield[0].device, storage_device)
         for pos, f in enumerate(ring_fields):
             save_step(state, 0, pos, wavefield[f])
 
