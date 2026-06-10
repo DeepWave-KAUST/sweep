@@ -153,6 +153,12 @@ def _cosine(a, b):
     return float(np.dot(a / na, b / nb))
 
 
+def _rel_l2(a, b):
+    a = np.asarray(a, np.float64)
+    b = np.asarray(b, np.float64)
+    return float(np.linalg.norm(a - b) / max(np.linalg.norm(b), 1e-30))
+
+
 @pytest.mark.parametrize("name", list(CASES))
 def test_boundary_saving_matches_plain_autodiff(name):
     """Boundary-saving gradient == plain-autodiff gradient to ~fp32 precision.
@@ -224,6 +230,27 @@ def test_wavelet_gradient():
     assert _cosine(g_full, g_bs) > 0.999
     rel = float(jnp.linalg.norm(g_bs - g_full) / jnp.linalg.norm(g_full))
     assert rel < 1e-2, f"wavelet grad rel_l2 {rel}"
+
+
+def test_scan_unroll_preserves_gradients():
+    """scan_unroll only restructures the loop — gradients must agree up to
+    XLA float reassociation (bit-identical on GPU, reassociated on CPU), on
+    the plain path and through the BS custom VJP alike."""
+    cfg = CASES["acoustic2d"]
+    init_m, wavelet, src, rec, obs = _setup(cfg)
+
+    def grad_with(unroll, memory):
+        eq = cfg["cls"](spatial_order=SO, device="cpu", backend="jax")
+        prop = PropJax(eq, _shape(2), memory=memory, use_ckpt=False,
+                       dh=DH, dt=DT, source_type=cfg["st"], receiver_type=cfg["rt"],
+                       abcn=ABCN, nt=NT, B=1, scan_unroll=unroll)
+        return _first_grad(prop, init_m, obs, wavelet, src, rec)
+
+    for memory in (None, BOUNDARY):
+        g1 = grad_with(1, memory)
+        g4 = grad_with(4, memory)
+        rel = _rel_l2(g4, g1)
+        assert rel < 1e-5, f"unroll changed the gradient (memory={memory}): rel {rel}"
 
 
 def test_forward_matches_plain_path():

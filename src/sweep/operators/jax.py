@@ -1,3 +1,14 @@
+"""JAX implementations of the spatial finite-difference operators.
+
+Selected by ``OperatorBase(backend='jax')`` (see ``operators/factory.py``) and
+bound onto the equation instances, so the same equation ``func`` runs on
+either backend.  All operators are pure functions of jnp arrays.
+
+Performance note: inside the propagator's ``lax.scan`` time loop the step is
+memory-bandwidth-bound on large grids and launch-bound on small ones — the
+choice of stencil implementation here (conv vs slicing) is NOT the bottleneck
+(measured; see _poc/mb_ops.py on the boundary-saving branch).
+"""
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -185,6 +196,17 @@ def apply_kernels_3d(u, kernels):
 
 
 def gradient(u, h, axis, kernels=None):
+    """First derivative of ``u`` along ``axis``.
+
+    With ``kernels`` (a per-axis 2-D conv-kernel dict, as built by
+    ``init_grad_kernels``): an FD-order-matched convolution with the stencil
+    halo zeroed.  Without (the common JAX path — ``grad_kernels`` is only
+    initialized on torch+cuda): falls back to ``jnp.gradient``, i.e.
+    SECOND-order central differences with one-sided edges, regardless of the
+    equation's ``spatial_order``.  These derivatives feed the CPML auxiliary
+    terms, whose coefficients vanish in the interior, so the lower order only
+    affects the absorbing band.
+    """
     h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)
     if kernels is not None:
         if axis not in kernels:
