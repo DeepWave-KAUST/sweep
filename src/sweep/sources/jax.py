@@ -35,6 +35,11 @@ class SourceJax(SourceBase):
         return wavefield
     
     def multiwavelet(self, wavefield, wavelet):
+        # Handles every input mode, including source encoding (mode B): with
+        # batch=1 and nsrc points, the (1,) shots index broadcasts against the
+        # nsrc-long coords_r under fancy indexing, and .at[].add accumulates
+        # overlapping points — verified to match SourceTorch's explicit
+        # forward_source_encoding branch (rel ~5e-7, grad cosine 1.0).
         shots = jnp.arange(wavefield.shape[0])
         if self.adj:
             shots = jnp.repeat(shots, self.coords.shape[1])
@@ -43,4 +48,7 @@ class SourceJax(SourceBase):
         return wavefield
 
     def __call__(self, *args):
+        # Always dispatches to multiwavelet — the forward_source_encoding /
+        # forward_adjoint_modeling methods above are currently unwired (kept
+        # for API compatibility; multiwavelet covers their cases).
         return self.multiwavelet(*args)

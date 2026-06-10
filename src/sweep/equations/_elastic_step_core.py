@@ -36,7 +36,7 @@ from ._free_surface import (
 )
 
 
-def elastic_step_core(
+def elastic_velocity_substep(
     vx, vz, sxx, szz, sxz,
     m_vxx, m_vxz, m_vzx, m_vzz,
     m_txxx, m_txxz, m_tzzx, m_tzzz,
@@ -49,49 +49,14 @@ def elastic_step_core(
     topo_rows=None,
     lame_lambda_2mu=None,
 ):
-    """One leapfrog step on the 2-D first-order velocity-stress elastic
-    equations.  Pure stencil + CPML + state update; NO post-step BC
-    enforcement (callers do that).
-
-    Parameters
-    ----------
-    vx, vz, sxx, szz, sxz
-        Five wavefields at time level n.
-    m_vxx ... m_txzz
-        Ten CPML memory variables.
-    lame_lambda, lame_mu, mu_xz
-        Effective Lamé parameters.  ``mu_xz`` is μ at the σ_xz staggered
-        node — equal to ``lame_mu`` in the bulk case, harmonic-averaged
-        for APM.
-    rho_x, rho_z
-        Effective densities at the v_x and v_z staggered nodes
-        respectively.  Equal in the bulk case, modified per
-        Cao & Chen 2018 in APM.
-    dt, h, b
-        Time step, grid spacing, batch size (latter passed through for
-        API parity with the rest of SWEEP).
-    pd
-        Partial-derivative module (provides ``x_forward``, ``z_forward``,
-        ``x_backward``, ``z_backward`` and a ``coes`` attribute holding
-        the stencil half-width).
-    pml
-        Tuple of 8 CPML profiles ``(az, bz, azh, bzh, ax, bx, axh, bxh)``.
-    free_surface, topo_rows
-        If ``free_surface=True``, replace the top z-derivatives with the
-        image-method derivatives.  ``topo_rows`` selects the per-column
-        staircase variant; ``None`` selects the flat-top variant.
-    lame_lambda_2mu
-        Optional precomputed ``λ + 2 μ``.  If ``None``, computed locally.
-    """
+    """Velocity sub-step: update ``(vx, vz)`` from the stress gradients (a pure
+    shear — stresses are read, not written).  This is the first half of
+    :func:`elastic_step_core`; factored out so the eager boundary-saving reverse
+    driver can REUSE it (composed in reverse order at ``-dt`` with ``pml`` zeroed)
+    instead of duplicating the physics.  Returns all 15 fields with ``vx``/``vz``
+    and the four stress-derivative CPML memories updated."""
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
-    lame_lambda_2mu = (lame_lambda + 2 * lame_mu) if lame_lambda_2mu is None else lame_lambda_2mu
-
-    # Topo path picks per-column ``top_free_surface_derivative_topo`` (image-
-    # method mirror with column-dependent surface row). When ``topo_rows`` is
-    # None we fall back to the flat ``top_free_surface_derivative`` used by
-    # the historic free-surface=True path.  When free_surface is False the
-    # plain ``pd.z_*`` derivatives apply at every row.
     has_topo = free_surface and topo_rows is not None
 
     # ---- Stress gradients ------------------------------------------------
@@ -128,6 +93,39 @@ def elastic_step_core(
     m_txxx = axh * m_txxx + bxh * txx_x
     txx_x = txx_x + m_txxx
     vx = vx + dt / rho_x * (txx_x + txz_z)
+
+    return (
+        vx, vz, sxx, szz, sxz,
+        m_vxx, m_vxz, m_vzx, m_vzz,
+        m_txxx, m_txxz, m_tzzx, m_tzzz,
+        m_txzx, m_txzz,
+    )
+
+
+def elastic_stress_substep(
+    vx, vz, sxx, szz, sxz,
+    m_vxx, m_vxz, m_vzx, m_vzz,
+    m_txxx, m_txxz, m_tzzx, m_tzzz,
+    m_txzx, m_txzz,
+    *,
+    lame_lambda, lame_mu, mu_xz,
+    rho_x, rho_z,
+    dt, h, b, pd, pml,
+    free_surface=False,
+    topo_rows=None,
+    lame_lambda_2mu=None,
+):
+    """Stress sub-step: update ``(sxx, szz, sxz)`` from the velocity gradients (a
+    pure shear — velocities are read, not written).  Second half of
+    :func:`elastic_step_core`; reused by the boundary-saving reverse driver.
+    Returns all 15 fields with the stresses and the four velocity-derivative CPML
+    memories updated.  Post-step free-surface stress zeroing is left to the
+    caller (``Elastic.func`` / the reverse closure), matching the historic
+    layout."""
+    az, bz, azh, bzh, ax, bx, axh, bxh = pml
+    top_halo = pd.coes.shape[0]
+    has_topo = free_surface and topo_rows is not None
+    lame_lambda_2mu = (lame_lambda + 2 * lame_mu) if lame_lambda_2mu is None else lame_lambda_2mu
 
     # ---- Velocity gradients ----------------------------------------------
     vx_x = pd.x_backward(vx)
@@ -172,3 +170,45 @@ def elastic_step_core(
         m_txxx, m_txxz, m_tzzx, m_tzzz,
         m_txzx, m_txzz,
     )
+
+
+def elastic_step_core(
+    vx, vz, sxx, szz, sxz,
+    m_vxx, m_vxz, m_vzx, m_vzz,
+    m_txxx, m_txxz, m_tzzx, m_tzzz,
+    m_txzx, m_txzz,
+    *,
+    lame_lambda, lame_mu, mu_xz,
+    rho_x, rho_z,
+    dt, h, b, pd, pml,
+    free_surface=False,
+    topo_rows=None,
+    lame_lambda_2mu=None,
+):
+    """One leapfrog step on the 2-D first-order velocity-stress elastic
+    equations: ``stress ∘ velocity``.  Pure stencil + CPML + state update; NO
+    post-step BC enforcement (callers do that).
+
+    Composed from :func:`elastic_velocity_substep` then
+    :func:`elastic_stress_substep` so the forward step and the boundary-saving
+    reverse share one implementation of the physics (the reverse composes the
+    same two sub-steps in the opposite order at ``-dt`` with ``pml`` zeroed).
+
+    Parameters are unchanged from the historic monolithic version: ``pml`` is the
+    8-tuple ``(az, bz, azh, bzh, ax, bx, axh, bxh)``; ``free_surface``/
+    ``topo_rows`` select the image-method top derivatives; ``lame_lambda_2mu`` is
+    an optional precomputed ``λ + 2 μ``.
+    """
+    kw = dict(
+        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=mu_xz,
+        rho_x=rho_x, rho_z=rho_z, dt=dt, h=h, b=b, pd=pd, pml=pml,
+        free_surface=free_surface, topo_rows=topo_rows,
+        lame_lambda_2mu=lame_lambda_2mu,
+    )
+    state = elastic_velocity_substep(
+        vx, vz, sxx, szz, sxz,
+        m_vxx, m_vxz, m_vzx, m_vzz,
+        m_txxx, m_txxz, m_tzzx, m_tzzz,
+        m_txzx, m_txzz, **kw,
+    )
+    return elastic_stress_substep(*state, **kw)

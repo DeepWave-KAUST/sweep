@@ -182,3 +182,29 @@ class Acoustic1st(FirstOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         return self.step(*wavefields, *models, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
+
+    def interior_substeps(self):
+        """The lossless-interior leapfrog as an ordered list of reversible
+        sub-steps (single source of truth — used for BOTH forward and reverse).
+
+        Each sub-step updates ONE field group using the OTHER (a pure shear), so
+        evaluating it at ``-dt`` exactly inverts it; composing the list in
+        reverse order at ``-dt`` therefore inverts the whole step exactly — no
+        separate, sign-flipped reverse body to maintain.  The forward step is
+        ``compose(substeps, +dt)`` in order (+ CPML, handled by ``func``)."""
+        pd = self.pd
+
+        def sub_v(wf, models, dt, h):          # velocities from pressure
+            p, vx, vz = wf[0], wf[1], wf[2]
+            rho = models[1]
+            vz = vz - dt / rho * pd.z_backward(p)
+            vx = vx - dt / rho * pd.x_backward(p)
+            return [p, vx, vz, *wf[3:]]
+
+        def sub_p(wf, models, dt, h):          # pressure from velocities
+            p, vx, vz = wf[0], wf[1], wf[2]
+            vp, rho = models[0], models[1]
+            p = p - vp ** 2 * rho * dt * (pd.z_forward(vz) + pd.x_forward(vx))
+            return [p, vx, vz, *wf[3:]]
+
+        return [sub_v, sub_p]   # forward order; reverse = reversed(...) at -dt

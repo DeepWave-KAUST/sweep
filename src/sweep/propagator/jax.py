@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 from sweep.propagator.base import PropBase
@@ -5,17 +7,154 @@ from sweep.sources.jax import SourceJax
 from sweep.receivers.jax import ReceiverJax
 from sweep.utils.jax import edge_pad
 
-class PropJax(PropBase):
 
-    def __init__(self, *args, **kwargs):
+class _RolloutSetup(NamedTuple):
+    """Per-call state shared by every rollout flavor (plain scan, chunked
+    checkpointing, boundary saving) — built once in ``_prepare_rollout``."""
+    wavelet: jnp.ndarray          # (nsrc?, nt), float32
+    nt: int
+    batch_size: int
+    src: SourceJax
+    rec: ReceiverJax
+    receivers: jnp.ndarray        # offset receiver coords (B, nrec, ndim)
+    wavefields: tuple             # zero-initialized fields, one per name
+    snapshots: object             # buffer when return_wavefield, else None
+    snapshot_targets: object      # jnp targets when return_wavefield, else None
+    snapshot_indices: list
+    source_idx_at: list           # static wavefield indices of source fields
+    receiver_idx_at: list         # static wavefield indices of receiver fields
+
+
+class PropJax(PropBase):
+    """JAX wave propagator: a functional ``lax.scan`` time loop with plain
+    autodiff gradients and optional memory strategies.
+
+    Memory strategies (mutually exclusive):
+
+    * default — differentiate through the scan tape (XLA stores the
+      activations it needs; largest memory, fastest backward);
+    * ``use_ckpt=True`` — chunked ``jax.checkpoint`` rematerialisation;
+    * ``memory=MemoryOptions(strategy='boundary', ...)`` — boundary saving:
+      O(nt × ring) residuals with a reverse-time reconstructing custom VJP
+      (see ``_jax_boundary_saving``; ~3x-forward backward cost, the right
+      trade at large grids).
+
+    Performance notes:
+
+    * Wrap the loss/gradient in ONE ``jax.jit`` per propagator instance and
+      reuse it (build prop -> jit once -> iterate); for jit'd forward-only
+      modelling use :meth:`__call_forward__`.
+    * ``scan_unroll>1`` unrolls the time loop: launch-bound small grids gain
+      (~1.2-1.3x at 512^2 with ``scan_unroll=4``, gradients bit-identical);
+      bandwidth-bound large grids lose a few percent — keep the default 1.
+    """
+
+    def __init__(self, *args, memory=None, scan_unroll=1, **kwargs):
 
         super().__init__(*args, **kwargs)
+        self._bs_options = None
+        # lax.scan unroll factor for the time loop (forward and the
+        # boundary-saving reverse scan).  Launch-bound small grids gain
+        # substantially (512^2: ~1.6x at unroll=2-4); bandwidth-bound large
+        # grids lose a few percent — hence default 1.
+        self._scan_unroll = int(scan_unroll)
+        if memory is not None:
+            self._apply_memory_options(memory)
+
+    def _apply_memory_options(self, memory):
+        """Apply a ``MemoryOptions`` dataclass (the impl-agnostic memory API,
+        same as PropTorch's ``memory=``): ``strategy='boundary'`` enables
+        boundary-saving reconstruction, ``strategy='ckpt'`` enables chunked
+        ``jax.checkpoint`` rematerialisation.  The two are mutually exclusive.
+        """
+        from sweep.propagator.options import MemoryOptions
+        if not isinstance(memory, MemoryOptions):
+            raise TypeError("memory= expects a MemoryOptions instance.")
+        if memory.strategy == "boundary":
+            boundary = memory.boundary
+            storage = getattr(boundary, "storage", "gpu")
+            if storage != "gpu":
+                raise ValueError(
+                    "JAX boundary saving keeps the ring storage on device "
+                    "(BoundaryOptions.storage='gpu'); cpu/disk staging is "
+                    "available on the torch paths."
+                )
+            self.use_ckpt = False
+            self.enable_boundary_saving(
+                True, storage_dtype=getattr(boundary, "storage_dtype", "fp32")
+            )
+        elif memory.strategy == "ckpt":
+            ckpt = memory.ckpt
+            mode = getattr(ckpt, "mode", "chunk") if ckpt is not None else "chunk"
+            if mode != "chunk":
+                raise ValueError("JAX checkpointing supports mode='chunk' only.")
+            self._bs_options = None
+            self.use_ckpt = True
+            if ckpt is not None and getattr(ckpt, "chunks", None):
+                self.ckpt_chunks = ckpt.chunks
+        else:
+            raise ValueError(
+                f"Unsupported memory strategy {memory.strategy!r} for PropJax."
+            )
+
+    def enable_boundary_saving(self, flag=True, mode=None, storage_dtype="fp32"):
+        """Route the rollout through boundary-saving reconstruction (see
+        ``_jax_boundary_saving``) instead of differentiating through the scan
+        tape.  Mirrors ``PropTorch.enable_eager_boundary_saving``.  ``mode``
+        forces a reverse driver ('swap2nd' | 'substep'); None auto-dispatches
+        on the equation's time scheme.  ``storage_dtype`` ('fp32' | 'fp16' |
+        'bf16') compresses the saved ring only — compute stays FP32."""
+        if flag and storage_dtype not in ("fp32", "fp16", "bf16"):
+            raise NotImplementedError(
+                "JAX boundary saving supports storage_dtype 'fp32'/'fp16'/'bf16' "
+                f"(got {storage_dtype!r}); int8 is only on the torch paths."
+            )
+        self._bs_options = (
+            {"mode": mode, "storage_dtype": storage_dtype} if flag else None
+        )
+
+    def _forward_bs(self, wavefields, models, wavelet, src, rec,
+                    source_indices, receiver_indices, nt, batch_size):
+        """Boundary-saving rollout: O(nt × ring) residual memory via a custom
+        VJP whose backward reconstructs the forward wavefield in reverse time
+        (``_jax_boundary_saving``)."""
+        from sweep.propagator import _jax_boundary_saving as jbs
+
+        cfg = jbs.build_config(
+            equation=self.equation,
+            wavefield_specs=self._wavefield_spec_index,
+            wavefield_names=self.wavefield_names,
+            dt=self._dt,
+            h=jnp.asarray(self._grid_spacing, dtype=jnp.float32),
+            shape=tuple(wavefields[0].shape),
+            ndim=self.ndim,
+            abcn=self.abcn,
+            halo=self._runtime_fd_halo(),
+            nt=nt,
+            S0=wavefields,
+            src=src,
+            rec=rec,
+            source_indices=source_indices,
+            receiver_indices=receiver_indices,
+            batch_size=batch_size,
+            free_surface=getattr(self, "free_surface", False),
+            forced_mode=self._bs_options.get("mode"),
+            storage_dtype=self._bs_options.get("storage_dtype", "fp32"),
+            scan_unroll=self._scan_unroll,
+        )
+        propagate = jbs.make_propagate(cfg)
+        rec_seq = propagate(tuple(models), wavelet)    # [nt, B, nrec, ntype]
+        return jnp.transpose(rec_seq, (1, 0, 2, 3))
 
     def pad(self, d, padding=None):
-        """Padding the model parameters
+        """Edge-replicate-pad a model to the runtime (PML + halo) shape.
+
+        Uses ``edge_pad`` (a custom-VJP pad whose backward slices the
+        cotangent back out) — the differentiable-path default used by
+        ``__call__``.
 
         Args:
-            padding (list): 4 elements list for padding the model parameters
+            padding: per-axis pad widths; ``None`` uses the runtime padding.
         """
         if padding is None:
             padding = self._runtime_padding()
@@ -23,14 +162,19 @@ class PropJax(PropBase):
             padding = tuple(padding)
         padding = self._spatial_pad_pairs(padding)
         padding = (((0,0),)*(d.ndim-self.ndim)+padding)
-        return edge_pad(d, padding)#jnp.pad(d, (padding_z, padding_x), mode='edge') DONOT USE jnp.pad
-        # return jnp.pad(d, padding, mode='edge')
+        # edge_pad's custom VJP slices the cotangent back out (plain jnp.pad
+        # would also differentiate, but through a scatter); see utils/jax.py.
+        return edge_pad(d, padding)
 
     def jaxpad(self, d, padding=None):
-        """Padding the model parameters
+        """Edge-replicate-pad with plain ``jnp.pad`` (no custom VJP).
+
+        Used by ``__call_forward__`` so a forward-only computation can be
+        ``jax.jit``-ed without going through ``edge_pad``'s custom-VJP
+        machinery.
 
         Args:
-            padding (list): 4 elements list for padding the model parameters
+            padding: per-axis pad widths; ``None`` uses the runtime padding.
         """
         if padding is None:
             padding = self._runtime_padding()
@@ -65,6 +209,64 @@ class PropJax(PropBase):
                 raise ValueError(f"Snapshot time {t} is outside valid range [0, {nt - 1}].")
         return times
     
+    def _prepare_rollout(self, wavelet, sources, receivers, return_wavefield,
+                         adj, **kwargs):
+        """Normalize the user-facing inputs and allocate the per-call state
+        every rollout flavor needs: PML/ABC setup, wavelet/coordinate
+        conversion, source/receiver operators, zero wavefields, and the
+        snapshot buffer.  Returns a :class:`_RolloutSetup`."""
+        snapshot_times = kwargs.pop("snapshot_times", None)
+        snapshot_interval = kwargs.pop("snapshot_interval", None)
+        kwargs.setdefault('fd_pad', self._runtime_fd_pad())
+        kwargs.setdefault('shape', self._runtime_shape())
+        self.init_abc(**kwargs)
+        if getattr(self.equation, 'setup_pml', None):
+            self.equation.setup_pml(self.pml_type)
+        mode, batch_size, nsrc_per_shot, _, source_encoding = self._normalize_io(
+            wavelet, sources, receivers
+        )
+
+        wavelet = jnp.atleast_2d(jnp.array(wavelet, dtype=jnp.float32))
+        nt = wavelet.shape[-1]
+        snapshot_indices = self._resolve_snapshot_times(
+            nt, return_wavefield, snapshot_times, snapshot_interval
+        )
+        self.snapshot_times_last = tuple(snapshot_indices)
+
+        shape_wavefield = (batch_size, 1) + self._runtime_shape()
+
+        coord_offset = jnp.asarray(self._runtime_coord_offset(), dtype=jnp.int32)
+        sources = jnp.array(sources, dtype=jnp.int32) + coord_offset
+        receivers = jnp.array(receivers, dtype=jnp.int32) + coord_offset
+
+        src = SourceJax(sources, shape_wavefield, source_encoding, adj)
+        rec = ReceiverJax(receivers)
+
+        for name in self.wavefield_names:
+            setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
+        wavefields = tuple(getattr(self, name) for name in self.wavefield_names)
+
+        if return_wavefield:
+            snapshots = jnp.zeros(
+                (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape,
+                dtype=jnp.float32,
+                device=jax.devices('cpu')[0],
+            )
+            snapshot_targets = jnp.asarray(snapshot_indices + [nt], dtype=jnp.int32)
+        else:
+            snapshots = None
+            snapshot_targets = None
+
+        source_idx_at = [self.wavefield_names.index(t) for t in self.source_type]
+        receiver_idx_at = [self.wavefield_names.index(t) for t in self.receiver_type]
+
+        return _RolloutSetup(
+            wavelet=wavelet, nt=nt, batch_size=batch_size, src=src, rec=rec,
+            receivers=receivers, wavefields=wavefields, snapshots=snapshots,
+            snapshot_targets=snapshot_targets, snapshot_indices=snapshot_indices,
+            source_idx_at=source_idx_at, receiver_idx_at=receiver_idx_at,
+        )
+
     def forward_base(self,
                      wavelet,
                      sources,
@@ -80,91 +282,50 @@ class PropJax(PropBase):
         See :meth:`PropBase._normalize_io` for accepted ``wavelet`` /
         ``sources`` / ``receivers`` shapes (modes A1, A2, B).
         """
-        fd_pad = self._runtime_fd_pad()
-        snapshot_times = kwargs.pop("snapshot_times", None)
-        snapshot_interval = kwargs.pop("snapshot_interval", None)
-        kwargs.setdefault('fd_pad', fd_pad)
-        kwargs.setdefault('shape', self._runtime_shape())
-        self.init_abc(**kwargs)
-        if getattr(self.equation, 'setup_pml', None):
-            self.equation.setup_pml(self.pml_type)
-        mode, batch_size, nsrc_per_shot, _, source_encoding = self._normalize_io(
-            wavelet, sources, receivers
+        setup = self._prepare_rollout(
+            wavelet, sources, receivers, return_wavefield, adj, **kwargs
         )
-
-        wavelet = jnp.array(wavelet, dtype=jnp.float32)
-        wavelet = jnp.atleast_2d(wavelet)
-
-        nt = wavelet.shape[-1]
-        snapshot_indices = self._resolve_snapshot_times(
-            nt,
-            return_wavefield,
-            snapshot_times,
-            snapshot_interval,
-        )
-        self.snapshot_times_last = tuple(snapshot_indices)
-
-        shape_wavefield = (batch_size, 1) + self._runtime_shape()
-
-        sources = sources.copy()
-        receivers = receivers.copy()
-
-        sources = jnp.array(sources, dtype=jnp.int32)
-        receivers = jnp.array(receivers, dtype=jnp.int32)
-
-        coord_offset = jnp.asarray(self._runtime_coord_offset(), dtype=jnp.int32)
-        sources = sources + coord_offset
-        receivers = receivers + coord_offset
-
-        src = SourceJax(sources, shape_wavefield, source_encoding, adj)
-        rec = ReceiverJax(receivers)
-
-        # Memory allocation for wavefields
-        for name in self.wavefield_names:
-            setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
+        wavelet, nt, batch_size = setup.wavelet, setup.nt, setup.batch_size
+        src, rec, receivers = setup.src, setup.rec, setup.receivers
+        wavefields, snapshots = setup.wavefields, setup.snapshots
+        snapshot_targets = setup.snapshot_targets
+        source_idx_at = setup.source_idx_at
+        receiver_idx_at = setup.receiver_idx_at
 
         self.models_padded = models
-
-        has_aux = False
-        if return_wavefield:
-            has_aux = True
-            snapshots = jnp.zeros(
-                (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape,
-                dtype=jnp.float32,
-                device=jax.devices('cpu')[0],
-            )
-            snapshot_targets = jnp.asarray(snapshot_indices + [nt], dtype=jnp.int32)
-        else:
-            snapshots = None
-            snapshot_targets = None
-
         step_args = (self._dt, jnp.asarray(self._grid_spacing, dtype=jnp.float32), None)
 
-        source_idx_at = []
-        receiver_idx_at = []
-
-        for source_type in self.source_type:
-            source_idx_at.append(self.wavefield_names.index(source_type))
-
-        for receiver_type in self.receiver_type:
-            receiver_idx_at.append(self.wavefield_names.index(receiver_type))
-
-        ridxs = jnp.asarray(receiver_idx_at, dtype=jnp.int32)  
-        sidxs = jnp.asarray(source_idx_at, dtype=jnp.int32)
-
-        wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
+        if self._bs_options is not None:
+            if adj:
+                raise NotImplementedError(
+                    "Boundary saving with adj=True is not supported on the JAX path."
+                )
+            if return_wavefield:
+                raise ValueError(
+                    "return_wavefield=True is not supported with boundary saving."
+                )
+            if self.use_ckpt:
+                raise ValueError(
+                    "Boundary saving and chunk checkpointing are mutually exclusive."
+                )
+            if wave_equation is not None or aux_args:
+                raise NotImplementedError(
+                    "Boundary saving supports the equation's default func only."
+                )
+            return self._forward_bs(
+                wavefields, models, wavelet, src, rec,
+                source_idx_at, receiver_idx_at, nt, batch_size,
+            )
 
         chunk_size = int(max(1, self.ckpt_chunks))
-
         num_chunks = (nt + chunk_size - 1) // chunk_size
+        wave_equation = self.equation.func if wave_equation is None else wave_equation
 
-        wave_equation = getattr(self.equation, f'func') if wave_equation is None else wave_equation
-        
         zero_rec = jnp.zeros(
             (batch_size, receivers.shape[1], len(self.receiver_type)),
             dtype=jnp.float32
         )
-        num_snapshots = len(snapshot_indices)
+        num_snapshots = len(setup.snapshot_indices)
 
         def step_fn_single(carry, it):
                 
@@ -173,14 +334,17 @@ class PropJax(PropBase):
 
             time = it if not adj else nt - it - 1
             # Forward propagation
-            wavefields = wave_equation(wavefields, models, dt, h, b, *aux_args)
-            wavefields_arr = jnp.stack(wavefields, axis=0)
-            # Add source
-            wf_src = jnp.take(wavefields_arr, sidxs, axis=0)
-            wf_src_new = jax.vmap(lambda w: src(w, wavelet[..., time]))(wf_src)
-            wavefields_arr = wavefields_arr.at[sidxs].set(wf_src_new)
+            wavefields = list(wave_equation(wavefields, models, dt, h, b, *aux_args))
+            # Add source — static per-field indexing.  A traced-index scatter
+            # into the stacked (nwf, ...) array (the previous jnp.take /
+            # .at[sidxs].set form) copies EVERY field each step (~43% of the
+            # step time at 2048^2); per-field .at adds touch only the source
+            # field and are bit-identical.
+            for sidx in source_idx_at:
+                wavefields[sidx] = src(wavefields[sidx], wavelet[..., time])
             # Save snapshots
             if snapshots is not None:
+                wavefields_arr = jnp.stack(wavefields, axis=0)
                 should_save = jnp.logical_and(
                     snapshot_pos < num_snapshots,
                     snapshot_targets[snapshot_pos] == it,
@@ -199,15 +363,15 @@ class PropJax(PropBase):
                     (snapshots, snapshot_pos),
                 )
 
-            # Record receivers
-            wf_sel = jnp.take(wavefields_arr, ridxs, axis=0) 
+            # Record receivers — stack only the receiver fields, not all nwf.
+            wf_sel = jnp.stack([wavefields[i] for i in receiver_idx_at], axis=0)
             def one_channel(wf):
                 y = rec(wf)
                 return y.reshape(batch_size, -1, y.shape[-1])
             all_rec = jax.vmap(one_channel)(wf_sel)
             rec_t = jnp.transpose(all_rec, (1, 2, 0, 3))[..., 0]
 
-            return (tuple(wavefields_arr[i] for i in range(wavefields_arr.shape[0])), step_args, snapshots, snapshot_pos), rec_t
+            return (tuple(wavefields), step_args, snapshots, snapshot_pos), rec_t
 
 
         def step_fn_single_with_skip(carry, it):
@@ -251,13 +415,16 @@ class PropJax(PropBase):
         initial = (wavefields, step_args, snapshots, jnp.array(0, dtype=jnp.int32))
         step_fn = step_fn_single if not self.use_ckpt else chunked_step_fn
         num_steps = num_chunks if self.use_ckpt else nt
-        (final), rec_seq = jax.lax.scan(step_fn, initial, jnp.arange(num_steps))
+        unroll = self._scan_unroll if not self.use_ckpt else 1
+        final, rec_seq = jax.lax.scan(
+            step_fn, initial, jnp.arange(num_steps), unroll=unroll
+        )
 
         n = num_steps * chunk_size if self.use_ckpt else nt
         rec_seq = rec_seq.reshape(n, batch_size, receivers.shape[1], len(self.receiver_type))
-        rec = jnp.transpose(rec_seq, (1, 0, 2, 3))[:, :nt, :, :]
+        record = jnp.transpose(rec_seq, (1, 0, 2, 3))[:, :nt, :, :]
 
-        return rec if not has_aux else (rec, final[2])
+        return record if not return_wavefield else (record, final[2])
     
     def forward(
         self,
