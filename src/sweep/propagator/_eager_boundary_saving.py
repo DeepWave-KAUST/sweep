@@ -385,63 +385,17 @@ class _EagerBoundarySavingMixin:
 
     def _eager_bs_reverse_mode(self):
         """Pick (and validate) the exact reverse-reconstruction driver for eager
-        boundary saving, dispatching on the equation's time scheme.  Both drivers
-        reuse the forward physics — there is no per-equation adjoint::
-
-            2nd-order             -> 'swap2nd'  (reuses func with time levels swapped)
-            1st-order + substeps  -> 'substep'  (reuses interior_substeps reversed)
-
-        1st-order equations *without* ``interior_substeps`` are unsupported (no
-        approximate fallback).  ``enable_eager_boundary_saving(mode=...)`` can
-        force a mode.  Raises if the forced/derived mode is unavailable, or unsafe
-        for the current BC (a free surface the substeps would silently drop).
-        """
-        from sweep.equations.base import SecondOrderEquation
-        is_2nd = isinstance(self.equation, SecondOrderEquation)
-        has_substeps = callable(getattr(self.equation, "interior_substeps", None))
-        forced = getattr(self, "_eager_bs_mode", None)
-        if forced is not None:
-            if forced not in _REVERSE_DRIVERS:
-                raise ValueError(
-                    f"Unknown eager boundary-saving reverse mode {forced!r}; "
-                    f"registered drivers: {sorted(_REVERSE_DRIVERS)}."
-                )
-            if forced == "substep" and not has_substeps:
-                raise ValueError(
-                    f"reverse mode 'substep' needs {type(self.equation).__name__}"
-                    ".interior_substeps()."
-                )
-            reverse_mode = forced
-        elif is_2nd:
-            reverse_mode = "swap2nd"
-        elif has_substeps:
-            reverse_mode = "substep"
-        else:
-            raise NotImplementedError(
-                "Eager boundary saving for the 1st-order equation "
-                f"'{type(self.equation).__name__}' requires an "
-                "interior_substeps() hook (the exact reverse driver). Add one "
-                "(reusing the equation's step core), or use impl='c' / chunk "
-                "checkpointing (use_ckpt=True)."
-            )
-        # The substep reconstruction carries the free-surface BC only if the
-        # equation's interior_substeps do (declared via supports_bs_free_surface);
-        # the ring geometry also assumes full PML.  swap2nd is always FS-safe
-        # (reuses ``func``).  Refuse rather than return a wrong near-surface grad.
-        if (
-            reverse_mode == "substep"
-            and getattr(self, "free_surface", False)
-            and not getattr(self.equation, "supports_bs_free_surface", False)
-        ):
-            raise NotImplementedError(
-                "Eager boundary saving with a free surface is not supported "
-                f"for {type(self.equation).__name__} (its interior_substeps "
-                "would drop the free-surface BC). Options: free_surface=False, "
-                "impl='c', or chunk checkpointing (use_ckpt=True). Equations "
-                "whose interior_substeps carry the free-surface BC (e.g. "
-                "Elastic) set supports_bs_free_surface=True."
-            )
-        return reverse_mode
+        boundary saving — dispatch rules live in the backend-shared
+        ``_bs_dispatch`` module (same registry pattern as the JAX path).
+        ``enable_eager_boundary_saving(mode=...)`` can force a mode."""
+        from sweep.propagator._bs_dispatch import resolve_reverse_mode
+        return resolve_reverse_mode(
+            self.equation, _REVERSE_DRIVERS,
+            forced=getattr(self, "_eager_bs_mode", None),
+            free_surface=getattr(self, "free_surface", False),
+            label="eager boundary saving",
+            alternatives="impl='c' or chunk checkpointing (use_ckpt=True)",
+        )
 
     def _init_eager_bs(self, wavefield, runtime_models, wavelet, src, nt):
         """Set up the per-rollout state for eager (pure-PyTorch) boundary saving

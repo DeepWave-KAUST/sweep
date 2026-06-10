@@ -135,51 +135,14 @@ def _reconstruct_substep(frame, ring_t, ring_tm1, w_t, models, cfg):
 # ---- driver resolution ------------------------------------------------------
 
 def resolve_reverse_mode(equation, forced=None, free_surface=False):
-    """Pick (and validate) the reverse driver for this equation — same dispatch
-    rules as ``PropTorch._eager_bs_reverse_mode`` (keep the two in sync)::
-
-        2nd-order             -> 'swap2nd'  (reuses func with time levels swapped)
-        1st-order + substeps  -> 'substep'  (reuses interior_substeps reversed)
-    """
-    from sweep.equations.base import SecondOrderEquation
-    is_2nd = isinstance(equation, SecondOrderEquation)
-    has_substeps = callable(getattr(equation, "interior_substeps", None))
-    if forced is not None:
-        if forced not in _REVERSE_DRIVERS:
-            raise ValueError(
-                f"Unknown boundary-saving reverse mode {forced!r}; "
-                f"registered drivers: {sorted(_REVERSE_DRIVERS)}."
-            )
-        if forced == "substep" and not has_substeps:
-            raise ValueError(
-                f"reverse mode 'substep' needs {type(equation).__name__}"
-                ".interior_substeps()."
-            )
-        reverse_mode = forced
-    elif is_2nd:
-        reverse_mode = "swap2nd"
-    elif has_substeps:
-        reverse_mode = "substep"
-    else:
-        raise NotImplementedError(
-            "Boundary saving for the 1st-order equation "
-            f"'{type(equation).__name__}' requires an interior_substeps() hook "
-            "(the exact reverse driver). Add one (reusing the equation's step "
-            "core), or use chunk checkpointing (use_ckpt=True)."
-        )
-    if (
-        reverse_mode == "substep"
-        and free_surface
-        and not getattr(equation, "supports_bs_free_surface", False)
-    ):
-        raise NotImplementedError(
-            "Boundary saving with a free surface is not supported for "
-            f"{type(equation).__name__} (its interior_substeps would drop the "
-            "free-surface BC). Options: free_surface=False or chunk "
-            "checkpointing (use_ckpt=True). Equations whose interior_substeps "
-            "carry the free-surface BC set supports_bs_free_surface=True."
-        )
-    return reverse_mode
+    """Pick (and validate) the reverse driver for this equation — dispatch
+    rules live in the backend-shared ``_bs_dispatch`` module."""
+    from sweep.propagator._bs_dispatch import resolve_reverse_mode as _resolve
+    return _resolve(
+        equation, _REVERSE_DRIVERS, forced=forced, free_surface=free_surface,
+        label="boundary saving",
+        alternatives="chunk checkpointing (use_ckpt=True)",
+    )
 
 
 # ---- config -----------------------------------------------------------------
