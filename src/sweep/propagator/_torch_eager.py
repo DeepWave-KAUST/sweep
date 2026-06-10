@@ -7,7 +7,7 @@ from sweep.propagator.options import EAGER_DEFAULTS
 from sweep.receivers.torch import ReceiverTorch
 from sweep.sources.torch import SourceTorch
 from sweep.utils.torch import EdgePadding
-from sweep.propagator._torch_eager_boundary import _EagerBoundarySavingMixin
+from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
 from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
 
