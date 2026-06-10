@@ -193,6 +193,82 @@ class ReconState:
                                    dtype=_STORE_DTYPE[store_dtype], device=device)
 
 
+# ---- Reverse-reconstruction drivers --------------------------------------
+# Each driver reconstructs S_i (the step's input) from ``frame`` (= S_{i+1}) using
+# forward physics ONLY — the gradient itself is autograd, in _BoundarySaveStep.
+# Drivers are looked up by name (``cfg["reverse"]``) so a new time scheme can
+# register one (``@register_reverse_driver``) without touching _BoundarySaveStep.
+# A driver returns the reconstructed field list (saved ring restored, source
+# re-injected, CPML zeroed in the lossless interior).
+_REVERSE_DRIVERS = {}
+
+
+def register_reverse_driver(name):
+    """Register a reverse-reconstruction driver under ``name`` (the value used by
+    ``enable_eager_boundary_saving(mode=name)`` / ``cfg['reverse']``)."""
+    def _register(fn):
+        _REVERSE_DRIVERS[name] = fn
+        return fn
+    return _register
+
+
+@register_reverse_driver("swap2nd")
+def _reconstruct_swap2nd(frame, cfg, st, step, time_index, zero):
+    """2nd-order-in-time reverse step.  ``frame`` holds each physical field as a
+    (now=u_{i+1}, prev=u_i) pair; swapping the two levels and running ``func`` ONCE
+    yields u_{i-1} for EVERY pair at once — the coupled update evaluates each
+    cross-field term (e.g. LSRTM's mp*background source for the scattered field) at
+    the correct swapped levels, so multi-field equations reconstruct fully, not
+    just field 0.  cpml + any unpaired field stay zeroed (lossless interior).  For
+    a single-pair equation this is exactly the original swap2nd."""
+    func, dt, h, models, nwf = cfg["func"], cfg["dt"], cfg["h"], cfg["models"], cfg["nwf"]
+    pairs = cfg["pairs"]
+    src_fields = set(cfg["source_indices"])
+    src_op = cfg.get("src")
+    swapped = [zero] * nwf
+    for now_i, prev_i in pairs:
+        swapped[now_i] = frame[prev_i]               # u_i      -> now slot
+        swapped[prev_i] = frame[now_i]               # u_{i+1}  -> prev slot
+    out = list(func(swapped, models, dt, h, None))
+    prev_step = max(step - 1, 0)
+    S_i = [zero] * nwf
+    for pidx, (now_i, prev_i) in enumerate(pairs):
+        u_i = frame[prev_i]
+        u_im1 = out[now_i]                           # reconstructed previous level
+        if now_i in src_fields and src_op is not None:
+            u_im1 = src_op(u_im1, cfg["wavelet"][..., time_index])
+        S_i[now_i] = restore_step(st, step, pidx, u_i.clone())
+        S_i[prev_i] = restore_step(st, prev_step, pidx, u_im1)
+    return S_i
+
+
+@register_reverse_driver("substep")
+def _reconstruct_substep(frame, cfg, st, step, time_index, zero):
+    """1st-order leapfrog reverse step.  Forward order was: step, then ADD source.
+    Reverse: SUBTRACT source, zero CPML memory, then invert the leapfrog EXACTLY by
+    composing the forward sub-steps (``cfg['substeps']``, built once / compiled if
+    use_compile) in REVERSE order at -dt; finally restore the saved ring."""
+    dt, h, models = cfg["dt"], cfg["h"], cfg["models"]
+    cpml_idx, ring_fields = cfg["cpml_indices"], cfg["ring_fields"]
+    frame_in = list(frame)
+    src = cfg.get("src")
+    if src is not None:
+        wl = cfg["wavelet"][..., time_index]
+        for sidx in cfg["source_indices"]:
+            frame_in[sidx] = src(frame[sidx].clone(), -wl)
+    for c in cpml_idx:
+        frame_in[c] = zero
+    state = frame_in
+    for ss in reversed(cfg["substeps"]):
+        state = ss(state, models, -dt, h)
+    S_i = list(state)
+    for c in cpml_idx:
+        S_i[c] = zero
+    for j, f in enumerate(ring_fields):
+        S_i[f] = restore_step(st, step, j, S_i[f])
+    return S_i
+
+
 class _BoundarySaveStep(torch.autograd.Function):
     """One time step ``S_out = equation.func(S_in, models)``.
 
@@ -224,60 +300,12 @@ class _BoundarySaveStep(torch.autograd.Function):
         nwf, nm = cfg["nwf"], cfg["nm"]
         i, time_index = ctx.step, ctx.time_index
         models = cfg["models"]
-        ring_fields = cfg["ring_fields"]
-        cpml_idx = cfg["cpml_indices"]
         frame = st.frame
-        zero = st.zero                               # reused, not per-step zeros_like
 
+        # Reverse-reconstruct S_i (the step input) from frame (= S_{i+1}) via the
+        # registered driver — forward physics only; the gradient is autograd below.
         with torch.no_grad():
-            if cfg["reverse"] == "swap2nd":
-                # frame holds each 2nd-order field as (now=u_{i+1}, prev=u_i).
-                # Reverse EVERY physical (now, prev) pair at once: swap each pair's
-                # two levels and run `func` a SINGLE time.  The coupled update then
-                # evaluates every cross-field term (e.g. LSRTM's mp*background
-                # source for the scattered field) at the correct swapped levels,
-                # so all pairs reconstruct together — not just field 0.  cpml +
-                # any unpaired field stay zeroed (lossless interior).  For a
-                # single-pair equation this is exactly the original swap2nd.
-                pairs = cfg["pairs"]
-                src_fields = set(cfg["source_indices"])
-                swapped = [zero] * nwf
-                for now_i, prev_i in pairs:
-                    swapped[now_i] = frame[prev_i]    # u_i      -> now slot
-                    swapped[prev_i] = frame[now_i]    # u_{i+1}  -> prev slot
-                out = list(func(swapped, models, dt, h, None))
-                prev_step = max(i - 1, 0)
-                src_op = cfg.get("src")
-                S_i = [zero] * nwf
-                for pidx, (now_i, prev_i) in enumerate(pairs):
-                    u_i = frame[prev_i]
-                    u_im1 = out[now_i]                # reconstructed previous level
-                    if now_i in src_fields and src_op is not None:
-                        u_im1 = src_op(u_im1, cfg["wavelet"][..., time_index])
-                    S_i[now_i] = restore_step(st, i, pidx, u_i.clone())
-                    S_i[prev_i] = restore_step(st, prev_step, pidx, u_im1)
-            else:  # 1st-order leapfrog — 'substep' (exact, reuses forward sub-steps)
-                # Forward order was: step, then ADD source to the source field.
-                # Reverse: SUBTRACT source, zero CPML memory, then invert the
-                # leapfrog EXACTLY by composing the forward sub-steps (built once,
-                # compiled if use_compile) in REVERSE order at -dt.
-                frame_in = list(frame)
-                src = cfg.get("src")
-                if src is not None:
-                    wl = cfg["wavelet"][..., time_index]
-                    for sidx in cfg["source_indices"]:
-                        frame_in[sidx] = src(frame[sidx].clone(), -wl)
-                for c in cpml_idx:
-                    frame_in[c] = zero
-                state = frame_in
-                for ss in reversed(cfg["substeps"]):
-                    state = ss(state, models, -dt, h)
-                S_i = list(state)
-                for c in cpml_idx:
-                    S_i[c] = zero
-                for j, f in enumerate(ring_fields):
-                    S_i[f] = restore_step(st, i, j, S_i[f])
-
+            S_i = _REVERSE_DRIVERS[cfg["reverse"]](frame, cfg, st, i, time_index, st.zero)
         st.frame = S_i
 
         # Re-run the (forward, +dt) step under autograd for input/model grads.

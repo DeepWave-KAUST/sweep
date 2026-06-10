@@ -636,10 +636,11 @@ class _PropTorchEager(PropBase, torch.nn.Module):
         has_substeps = callable(getattr(self.equation, "interior_substeps", None))
         forced = getattr(self, "_eager_bs_mode", None)
         if forced is not None:
-            if forced not in ("swap2nd", "substep"):
+            from sweep.propagator._eager_boundary_saving import _REVERSE_DRIVERS
+            if forced not in _REVERSE_DRIVERS:
                 raise ValueError(
                     f"Unknown eager boundary-saving reverse mode {forced!r}; "
-                    "expected 'swap2nd' or 'substep'."
+                    f"registered drivers: {sorted(_REVERSE_DRIVERS)}."
                 )
             if forced == "substep" and not has_substeps:
                 raise ValueError(
