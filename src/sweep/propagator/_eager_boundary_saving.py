@@ -33,22 +33,13 @@ import math
 
 import torch
 
-
-def _ring_index_tuples(shape, ndim, offsets, halo):
-    """Index tuples for the ``halo``-wide innermost-PML ring on both sides of
-    every spatial axis (the cells the interior stencil reads)."""
-    spatial_axes = list(range(len(shape) - ndim, len(shape)))
-    rings = []
-    for ai, ax in enumerate(spatial_axes):
-        axis_len = shape[ax]
-        off = offsets[ai]
-        low = slice(off - halo, off)
-        high = slice(axis_len - off, axis_len - off + halo)
-        for sl in (low, high):
-            idx = [slice(None)] * len(shape)
-            idx[ax] = sl
-            rings.append(tuple(idx))
-    return rings
+# Ring geometry is backend-agnostic and shared with the JAX boundary-saving
+# path; re-exported here so existing imports keep working.
+from sweep.propagator._ring_geometry import (  # noqa: F401
+    _interior_index_tuple,
+    _ring_index_tuples,
+    _ring_slice_shape,
+)
 
 
 # Low-precision storage for the saved boundary ring (compute stays FP32; only
@@ -75,12 +66,6 @@ def _quantize_int8(flat):
 def _dequantize_int8(codes, scale, n):
     blocks = codes.view(-1, _INT8_BLOCK).to(torch.float32) * scale.unsqueeze(1)
     return blocks.reshape(-1)[:n]
-
-
-def _ring_slice_shape(shape, idx):
-    """Resolved shape of one ring index tuple against the (padded) field shape."""
-    return tuple(len(range(*sl.indices(shape[ax]))) if isinstance(sl, slice) else 1
-                 for ax, sl in enumerate(idx))
 
 
 def save_step(state, step, pos, field):
@@ -113,19 +98,6 @@ def restore_step(state, step, pos, field):
         field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
         off += sz
     return field
-
-
-def _interior_index_tuple(shape, ndim, offsets):
-    """Index tuple for the lossless deep interior — strictly inside the PML +
-    stencil halo on every spatial axis (``[offset : N-offset]``), where the
-    reverse reconstruction is exact (CPML is zeroed there and the restored ring
-    sits outside it)."""
-    idx = [slice(None)] * len(shape)
-    spatial_axes = list(range(len(shape) - ndim, len(shape)))
-    for ai, ax in enumerate(spatial_axes):
-        off = offsets[ai]
-        idx[ax] = slice(off, shape[ax] - off)
-    return tuple(idx)
 
 
 def _interior_consistency_error(recomputed, frame, phys_indices, interior_idx):

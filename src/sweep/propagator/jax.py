@@ -7,9 +7,96 @@ from sweep.utils.jax import edge_pad
 
 class PropJax(PropBase):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, memory=None, **kwargs):
 
         super().__init__(*args, **kwargs)
+        self._bs_options = None
+        if memory is not None:
+            self._apply_memory_options(memory)
+
+    def _apply_memory_options(self, memory):
+        """Apply a ``MemoryOptions`` dataclass (the impl-agnostic memory API,
+        same as PropTorch's ``memory=``): ``strategy='boundary'`` enables
+        boundary-saving reconstruction, ``strategy='ckpt'`` enables chunked
+        ``jax.checkpoint`` rematerialisation.  The two are mutually exclusive.
+        """
+        from sweep.propagator.options import MemoryOptions
+        if not isinstance(memory, MemoryOptions):
+            raise TypeError("memory= expects a MemoryOptions instance.")
+        if memory.strategy == "boundary":
+            boundary = memory.boundary
+            storage = getattr(boundary, "storage", "gpu")
+            if storage != "gpu":
+                raise ValueError(
+                    "JAX boundary saving keeps the ring storage on device "
+                    "(BoundaryOptions.storage='gpu'); cpu/disk staging is "
+                    "available on the torch paths."
+                )
+            self.use_ckpt = False
+            self.enable_boundary_saving(
+                True, storage_dtype=getattr(boundary, "storage_dtype", "fp32")
+            )
+        elif memory.strategy == "ckpt":
+            ckpt = memory.ckpt
+            mode = getattr(ckpt, "mode", "chunk") if ckpt is not None else "chunk"
+            if mode != "chunk":
+                raise ValueError("JAX checkpointing supports mode='chunk' only.")
+            self._bs_options = None
+            self.use_ckpt = True
+            if ckpt is not None and getattr(ckpt, "chunks", None):
+                self.ckpt_chunks = ckpt.chunks
+        else:
+            raise ValueError(
+                f"Unsupported memory strategy {memory.strategy!r} for PropJax."
+            )
+
+    def enable_boundary_saving(self, flag=True, mode=None, storage_dtype="fp32"):
+        """Route the rollout through boundary-saving reconstruction (see
+        ``_jax_boundary_saving``) instead of differentiating through the scan
+        tape.  Mirrors ``PropTorch.enable_eager_boundary_saving``.  ``mode``
+        forces a reverse driver ('swap2nd' | 'substep'); None auto-dispatches
+        on the equation's time scheme.  ``storage_dtype`` ('fp32' | 'fp16' |
+        'bf16') compresses the saved ring only — compute stays FP32."""
+        if flag and storage_dtype not in ("fp32", "fp16", "bf16"):
+            raise NotImplementedError(
+                "JAX boundary saving supports storage_dtype 'fp32'/'fp16'/'bf16' "
+                f"(got {storage_dtype!r}); int8 is only on the torch paths."
+            )
+        self._bs_options = (
+            {"mode": mode, "storage_dtype": storage_dtype} if flag else None
+        )
+
+    def _forward_bs(self, wavefields, models, wavelet, src, rec,
+                    source_indices, receiver_indices, nt, batch_size):
+        """Boundary-saving rollout: O(nt × ring) residual memory via a custom
+        VJP whose backward reconstructs the forward wavefield in reverse time
+        (``_jax_boundary_saving``)."""
+        from sweep.propagator import _jax_boundary_saving as jbs
+
+        cfg = jbs.build_config(
+            equation=self.equation,
+            wavefield_specs=self._wavefield_spec_index,
+            wavefield_names=self.wavefield_names,
+            dt=self._dt,
+            h=jnp.asarray(self._grid_spacing, dtype=jnp.float32),
+            shape=tuple(wavefields[0].shape),
+            ndim=self.ndim,
+            abcn=self.abcn,
+            halo=self._runtime_fd_halo(),
+            nt=nt,
+            S0=wavefields,
+            src=src,
+            rec=rec,
+            source_indices=source_indices,
+            receiver_indices=receiver_indices,
+            batch_size=batch_size,
+            free_surface=getattr(self, "free_surface", False),
+            forced_mode=self._bs_options.get("mode"),
+            storage_dtype=self._bs_options.get("storage_dtype", "fp32"),
+        )
+        propagate = jbs.make_propagate(cfg)
+        rec_seq = propagate(tuple(models), wavelet)    # [nt, B, nrec, ntype]
+        return jnp.transpose(rec_seq, (1, 0, 2, 3))
 
     def pad(self, d, padding=None):
         """Padding the model parameters
@@ -153,6 +240,28 @@ class PropJax(PropBase):
         sidxs = jnp.asarray(source_idx_at, dtype=jnp.int32)
 
         wavefields = tuple([getattr(self, name) for name in self.wavefield_names])
+
+        if self._bs_options is not None:
+            if adj:
+                raise NotImplementedError(
+                    "Boundary saving with adj=True is not supported on the JAX path."
+                )
+            if return_wavefield:
+                raise ValueError(
+                    "return_wavefield=True is not supported with boundary saving."
+                )
+            if self.use_ckpt:
+                raise ValueError(
+                    "Boundary saving and chunk checkpointing are mutually exclusive."
+                )
+            if wave_equation is not None or aux_args:
+                raise NotImplementedError(
+                    "Boundary saving supports the equation's default func only."
+                )
+            return self._forward_bs(
+                wavefields, models, wavelet, src, rec,
+                source_idx_at, receiver_idx_at, nt, batch_size,
+            )
 
         chunk_size = int(max(1, self.ckpt_chunks))
 
