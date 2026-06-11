@@ -10,20 +10,20 @@
 
 #define ACOUSTIC_LSRTM2D_SINGLE(order, grid, block, ...)                         \
     do {                                                                         \
-        if      ((order) == 2) acoustic2nd<2><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 4) acoustic2nd<4><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 6) acoustic2nd<6><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 8) acoustic2nd<8><<<grid, block>>>(__VA_ARGS__);    \
-        else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);   \
+        if      ((order) == 2) acoustic2d_single<2><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 4) acoustic2d_single<4><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 6) acoustic2d_single<6><<<grid, block>>>(__VA_ARGS__);    \
+        else if ((order) == 8) acoustic2d_single<8><<<grid, block>>>(__VA_ARGS__);    \
+        else                   acoustic2d_single<-1><<<grid, block>>>(__VA_ARGS__);   \
     } while (0)
 
 #define ACOUSTIC_LSRTM2D_SINGLE_NOPML(order, grid, block, ...)                   \
     do {                                                                         \
-        if      ((order) == 2) acoustic2nd_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic2nd_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic2nd_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic2nd_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic2nd_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
+        if      ((order) == 2) acoustic2d_single_nopml<2><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 4) acoustic2d_single_nopml<4><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 6) acoustic2d_single_nopml<6><<<grid, block>>>(__VA_ARGS__); \
+        else if ((order) == 8) acoustic2d_single_nopml<8><<<grid, block>>>(__VA_ARGS__); \
+        else                   acoustic2d_single_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
     } while (0)
 
 #define ACOUSTIC_LSRTM2D_COUPLED(order, grid, block, ...)                        \
@@ -101,7 +101,7 @@ __device__ inline float acoustic_cpml_update_2d(
 }
 
 template <int Order>
-__global__ void acoustic2nd(
+__global__ void acoustic2d_single(
     AcousticWavefieldPointer wf,
     bool save_all_wavefields,
     float* __restrict__ u_this,
@@ -143,7 +143,7 @@ __global__ void acoustic2nd(
 }
 
 template <int Order>
-__global__ void acoustic2nd_nopml(
+__global__ void acoustic2d_single_nopml(
     AcousticWavefieldPointer wf,
     const float* __restrict__ vp,
     LaplaceParam lap_ctx,
