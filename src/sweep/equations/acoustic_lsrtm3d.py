@@ -220,7 +220,9 @@ class AcousticLSRTM3D(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             base_nvar=6,
-            pml_nvar=12,
+            # 2 wavefields (bg+sc); each: psix,psiy,psiz,zetax,zetay,zetaz (6) +
+            # psixn,psiyn,psizn (3) for the race-free forward double-buffer -> 2*9=18.
+            pml_nvar=18,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,

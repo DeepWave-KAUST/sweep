@@ -15,19 +15,19 @@
         else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-// Proper adjoint of `L u = v^2 · ∇²u`:  L^* λ = ∇²(v^2 · λ)
-// Used in adjoint propagation. Differs from forward kernel only in the
-// non-PML branch (interior): computes ∇²(v²·λ) on a pre-computed `v2_lambda`
-// buffer instead of v²·∇²λ. PML branch left identical to forward (slight
-// residual error in PML zone; sufficient to clean up the interior box
-// anomaly).
-#define ACOUSTIC2D_ADJOINT(order, grid, block, ...)                                  \
-    do {                                                        \
-        if      ((order) == 2) acoustic2nd_adjoint<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic2nd_adjoint<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic2nd_adjoint<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic2nd_adjoint<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic2nd_adjoint<-1><<<grid, block>>>(__VA_ARGS__);\
+
+
+
+// FUSED exact adjoint: ONE launch, no scratch (recompute g_* inline at each tap),
+// writes next psi/zeta to SEPARATE buffers (double-buffer) -> race-free + ~forward
+// bandwidth.  Caller swaps psi/zeta via swap_aux() each step.
+#define ACOUSTIC2D_ADJOINT_FUSED(order, grid, block, ...)                                     \
+    do {                                                                                       \
+        if      ((order) == 2) acoustic2nd_adjoint_fused<2><<<grid, block>>>(__VA_ARGS__);     \
+        else if ((order) == 4) acoustic2nd_adjoint_fused<4><<<grid, block>>>(__VA_ARGS__);     \
+        else if ((order) == 6) acoustic2nd_adjoint_fused<6><<<grid, block>>>(__VA_ARGS__);     \
+        else if ((order) == 8) acoustic2nd_adjoint_fused<8><<<grid, block>>>(__VA_ARGS__);     \
+        else                   acoustic2nd_adjoint_fused<-1><<<grid, block>>>(__VA_ARGS__);    \
     } while (0)
 
 // Pre-pass: clear air cells (above per-column topo surface).  Launched
@@ -156,16 +156,18 @@ __global__ void acoustic2nd(
     float daipsiz_dz = az_ * dpsizdz + dazdz * f.psiz[idx];
     float daipxix_dx = ax_ * dpsixdx + daxdx * f.psix[idx];
 
-    // X direction
+    // X direction.  Race-free: read psix at neighbours (above), write the NEXT
+    // psix to a separate buffer (psixn) when double-buffering; fall back to
+    // in-place when psixn is null (equations that have not opted in).
     float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
     w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[idx];
-    f.psix[idx]  = bx_ * dudx + ax_ * f.psix[idx];
+    (f.psixn ? f.psixn : f.psix)[idx]  = bx_ * dudx + ax_ * f.psix[idx];
     f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
 
     // Z direction
     float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
     w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[idx];
-    f.psiz[idx]  = bz_ * dudz + az_ * f.psiz[idx];
+    (f.psizn ? f.psizn : f.psiz)[idx]  = bz_ * dudz + az_ * f.psiz[idx];
     f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
 
     f.u_next[idx] =
@@ -177,116 +179,138 @@ __global__ void acoustic2nd(
         u_this_b[idx] = (v * v) * (lap_x + lap_z);
 }
 
-// Helper: pre-compute v2_lambda[idx] = vp[idx]^2 * lambda[idx]
-// Used by the adjoint kernel which then computes ∇²(v²·λ) on this buffer.
-// `static` so each translation unit has its own copy (header-defined).
-static __global__ void compute_v2_lambda_2d(
-    const float* __restrict__ vp,
-    const float* __restrict__ lambda,
-    float* __restrict__ v2_lambda,
-    int nx, int nz, int B
-) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-    if (ix >= nx || iz >= nz || b >= B) return;
-    int spatial_size = nx * nz;
-    int idx = b * spatial_size + iz * nx + ix;
-    float v = vp[idx];
-    v2_lambda[idx] = v * v * lambda[idx];
-}
 
-// Proper-adjoint kernel for the acoustic wave equation.
-// Computes  λ_next = 2 λ_now - λ_pre + dt² · ∇²(v² · λ_now)
-// in the non-PML branch.  PML branch retains forward formulation for now.
+
+
+
+// ---------------------------------------------------------------------------
+// FUSED exact discrete adjoint — single kernel, NO scratch.
+// Same math as prepare/apply but the per-cell scratch (g_l/g_g/g_q) is
+// recomputed INLINE at each stencil tap from the *current* adjoint fields,
+// instead of being materialised in global memory.  Reads current
+// lambda(u_now)/psi/zeta at idx+neighbours, writes next-step lambda (u_next)
+// and the next-step aux into SEPARATE buffers (psi*_out/zeta*_out) -> read-old
+// / write-new, exactly like the forward time-step, so there is no race even
+// though aux is now read at neighbours.  Caller must double-buffer the aux and
+// swap (psi*_out/zeta*_out) <-> (f.psi*/f.zeta*) each step.
+// Each tap is read once and feeds all three transposed stencils
+// (Lx(g_lx), Dx(g_gx), Dx(g_qx)) -> bandwidth-optimal (no 6/9-field round-trip).
 template<int Order>
-__global__ void acoustic2nd_adjoint(
+__global__ void acoustic2nd_adjoint_fused(
     AcousticWavefieldPointer wf,
-    const float* __restrict__ v2_lambda,  // pre-computed v^2 · λ_now
     const float* __restrict__ vp,
     LaplaceParam lap_ctx,
-    GradParam grad_ctx,
     GradParam grad_ctx_x,
     GradParam grad_ctx_z,
     AcousticCPMLPointer cpml,
-    SolverContext solver
+    SolverContext solver,
+    float* __restrict__ psix_out,
+    float* __restrict__ psiz_out,
+    float* __restrict__ zetax_out,
+    float* __restrict__ zetaz_out
 ){
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
-
     if (ix >= solver.nx || iz >= solver.nz) return;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static  = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
     if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
+        iz < halo || iz >= solver.nz - halo) return;
+    if (solver.has_topo && iz < solver.topo_rows[ix]) return;
 
-    int spatial_size = solver.nx * solver.nz;
+    int sp = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
+    int oidx = b * sp + idx;
+    auto f = wf.offset(b, sp);
+    const float* vpb = vp + b * sp;
+    int sz = solver.nx;                       // z-stride
+    float dt2 = solver.dt * solver.dt;
+    const float* lc = lap_ctx.coeff;          // [c0(center), c1, ..., cM]
+    const float* gc = grad_ctx_x.coeff;       // [_, c1, ..., cM]  (antisymmetric)
+    float invdx2 = 1.0f / (lap_ctx.dx * lap_ctx.dx);
+    float invdz2 = 1.0f / (lap_ctx.dz * lap_ctx.dz);
+    float invdx  = 1.0f / lap_ctx.dx;
+    float invdz  = 1.0f / lap_ctx.dz;
 
-    auto f = wf.offset(b, spatial_size);
-    const float* vp_b = vp + b * spatial_size;
-    const float* v2l_b = v2_lambda + b * spatial_size;
+    float gun = f.u_now[idx];
+    float c0c = vpb[idx]; c0c = c0c * c0c * dt2;
+    float gw  = c0c * gun;                     // c * lambda at idx
 
-    if (solver.has_topo && iz < solver.topo_rows[ix]) {
+    // gw at a linear index n  (c[n]*lambda[n])
+    #define GW_AT(n) ( vpb[n]*vpb[n]*dt2 * f.u_now[n] )
+
+    // Interior fast-path: aux all 0, g_lx=g_lz=gw -> 2L - L_prev + Lap(gw).
+    bool pure_interior =
+        (ix >= solver.abcn + 2 * halo) && (ix < solver.nx - solver.abcn - 2 * halo) &&
+        (iz >= (solver.free_surface ? 0 : solver.abcn) + 2 * halo) &&
+        (iz < solver.nz - solver.abcn - 2 * halo);
+    if (pure_interior) {
+        float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
+        #pragma unroll
+        for (int k = 1; k <= halo; ++k) {
+            lapx += lc[k] * (GW_AT(idx + k)      + GW_AT(idx - k));
+            lapz += lc[k] * (GW_AT(idx + k * sz) + GW_AT(idx - k * sz));
+        }
+        f.u_next[idx] = 2.0f * gun - f.u_prev[idx] + lapx * invdx2 + lapz * invdz2;
+        psix_out[oidx] = 0.f; psiz_out[oidx] = 0.f;
+        zetax_out[oidx] = 0.f; zetaz_out[oidx] = 0.f;
         return;
     }
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    float ax_ = cpml.ax[ix], az_ = cpml.az[iz];
+    float bx_ = cpml.bx[ix], bz_ = cpml.bz[iz];
+    float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
+    float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
 
-    if (!in_pml) {
-        // Non-PML: proper adjoint. Compute ∇²(v² · λ_now) on the pre-computed
-        // v2_lambda buffer.  This is the transpose of `v² · ∇²λ` from the
-        // forward kernel.
-        float lap_x = laplace<2, Order, X>(v2l_b, ix, 0, iz, lap_ctx);
-        float lap_z = laplace<2, Order, Z>(v2l_b, ix, 0, iz, lap_ctx);
-        float dt2 = solver.dt * solver.dt;
-        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
-                        dt2 * (lap_x + lap_z);
-        return;
+    float gtmpx0 = bx_ * f.zetax[idx] + (1.0f + bx_) * gw;
+    float gtmpz0 = bz_ * f.zetaz[idx] + (1.0f + bz_) * gw;
+
+    // local g_tmp / g_l / g_g / g_q at a tap, given the 1D PML index for that axis
+    #define GTMP_X(n, nix) ( cpml.bx[nix]*f.zetax[n] + (1.0f+cpml.bx[nix])*(vpb[n]*vpb[n]*dt2)*f.u_now[n] )
+    #define GTMP_Z(n, niz) ( cpml.bz[niz]*f.zetaz[n] + (1.0f+cpml.bz[niz])*(vpb[n]*vpb[n]*dt2)*f.u_now[n] )
+
+    // X-direction: Lx(g_lx), Dx(g_gx), Dx(g_qx); one read per tap.
+    float Lx_glx = -lc[0] * ((1.0f + bx_) * gtmpx0);
+    float Dx_ggx = 0.0f, Dx_gqx = 0.0f;
+    #pragma unroll
+    for (int k = 1; k <= halo; ++k) {
+        int np = idx + k, nm = idx - k, nixp = ix + k, nixm = ix - k;
+        float tp = GTMP_X(np, nixp), tm = GTMP_X(nm, nixm);
+        float bxp = cpml.bx[nixp], bxm = cpml.bx[nixm];
+        Lx_glx += lc[k] * ((1.0f + bxp) * tp + (1.0f + bxm) * tm);
+        Dx_ggx += gc[k] * ((bxp * f.psix[np] + cpml.dbxdx[nixp] * tp)
+                         - (bxm * f.psix[nm] + cpml.dbxdx[nixm] * tm));
+        Dx_gqx += gc[k] * (cpml.ax[nixp] * tp - cpml.ax[nixm] * tm);
     }
+    Lx_glx *= invdx2; Dx_ggx *= invdx; Dx_gqx *= invdx;
 
-    // PML branch: keep forward formulation for now (residual error in PML
-    // zone but main bug — box anomaly in non-PML interior — is addressed).
-    float v  = vp_b[idx];
-    float v2_dt2 = (v * v) * solver.dt * solver.dt;
-    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
-    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+    // Z-direction
+    float Lz_glz = -lc[0] * ((1.0f + bz_) * gtmpz0);
+    float Dz_ggz = 0.0f, Dz_gqz = 0.0f;
+    #pragma unroll
+    for (int k = 1; k <= halo; ++k) {
+        int np = idx + k * sz, nm = idx - k * sz, nizp = iz + k, nizm = iz - k;
+        float tp = GTMP_Z(np, nizp), tm = GTMP_Z(nm, nizm);
+        float bzp = cpml.bz[nizp], bzm = cpml.bz[nizm];
+        Lz_glz += lc[k] * ((1.0f + bzp) * tp + (1.0f + bzm) * tm);
+        Dz_ggz += gc[k] * ((bzp * f.psiz[np] + cpml.dbzdz[nizp] * tp)
+                         - (bzm * f.psiz[nm] + cpml.dbzdz[nizm] * tm));
+        Dz_gqz += gc[k] * (cpml.az[nizp] * tp - cpml.az[nizm] * tm);
+    }
+    Lz_glz *= invdz2; Dz_ggz *= invdz; Dz_gqz *= invdz;
 
-    float ax_ = cpml.ax[ix];
-    float az_ = cpml.az[iz];
-    float bx_ = cpml.bx[ix];
-    float bz_ = cpml.bz[iz];
-    float dbxdx_ = cpml.dbxdx[ix];
-    float dbzdz_ = cpml.dbzdz[iz];
-
-    float w_sum = 0.0f;
-    float dudz     = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
-    float dudx     = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-    float dpsizdz  = gradient<2, Order, Z>(f.psiz, ix, 0, iz, grad_ctx);
-    float dpsixdx  = gradient<2, Order, X>(f.psix, ix, 0, iz, grad_ctx);
-    float daxdx    = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
-    float dazdz    = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
-    float daipsiz_dz = az_ * dpsizdz + dazdz * f.psiz[idx];
-    float daipxix_dx = ax_ * dpsixdx + daxdx * f.psix[idx];
-
-    float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
-    w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[idx];
-    f.psix[idx]  = bx_ * dudx + ax_ * f.psix[idx];
-    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
-
-    float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
-    w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[idx];
-    f.psiz[idx]  = bz_ * dudz + az_ * f.psiz[idx];
-    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
-
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + v2_dt2 * w_sum;
+    f.u_next[idx] = 2.0f * gun - f.u_prev[idx]
+                  + (Lx_glx + Lz_glz - Dx_ggx - Dz_ggz);
+    psix_out[oidx]  = ax_ * f.psix[idx] + daxdx * gtmpx0 - Dx_gqx;
+    psiz_out[oidx]  = az_ * f.psiz[idx] + dazdz * gtmpz0 - Dz_gqz;
+    zetax_out[oidx] = ax_ * (f.zetax[idx] + gw);
+    zetaz_out[oidx] = az_ * (f.zetaz[idx] + gw);
+    #undef GW_AT
+    #undef GTMP_X
+    #undef GTMP_Z
 }
 
 template<int Order>

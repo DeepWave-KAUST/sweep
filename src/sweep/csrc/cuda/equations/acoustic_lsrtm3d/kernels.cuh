@@ -35,6 +35,16 @@
         else                   acoustic_lsrtm3d_coupled<-1><<<grid, block>>>(__VA_ARGS__); \
     } while (0)
 
+// Proper-adjoint (transpose) of the scattered-field propagation: L* = lap(v^2.l).
+#define ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block, ...)                                  \
+    do {                                                                                    \
+        if      ((order) == 2) acoustic_lsrtm3d_adjoint<2><<<grid, block>>>(__VA_ARGS__);   \
+        else if ((order) == 4) acoustic_lsrtm3d_adjoint<4><<<grid, block>>>(__VA_ARGS__);   \
+        else if ((order) == 6) acoustic_lsrtm3d_adjoint<6><<<grid, block>>>(__VA_ARGS__);   \
+        else if ((order) == 8) acoustic_lsrtm3d_adjoint<8><<<grid, block>>>(__VA_ARGS__);   \
+        else                   acoustic_lsrtm3d_adjoint<-1><<<grid, block>>>(__VA_ARGS__);  \
+    } while (0)
+
 template <int Order>
 __device__ inline float acoustic_cpml_update_3d(
     AcousticWavefieldPointer f,
@@ -95,17 +105,17 @@ __device__ inline float acoustic_cpml_update_3d(
 
     float tmpx = ((1.0f + bx_) * lap_x + dbxdx_ * dudx) + ax_ * dpsixdx + daxdx * f.psix[idx];
     w_sum += (1.0f + bx_) * tmpx + ax_ * f.zetax[idx];
-    f.psix[idx] = bx_ * dudx + ax_ * f.psix[idx];
+    (f.psixn ? f.psixn : f.psix)[idx] = bx_ * dudx + ax_ * f.psix[idx];   // race-free fwd double-buffer
     f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
 
     float tmpy = ((1.0f + by_) * lap_y + dbydy_ * dudy) + ay_ * dpsiydy + daydy * f.psiy[idx];
     w_sum += (1.0f + by_) * tmpy + ay_ * f.zetay[idx];
-    f.psiy[idx] = by_ * dudy + ay_ * f.psiy[idx];
+    (f.psiyn ? f.psiyn : f.psiy)[idx] = by_ * dudy + ay_ * f.psiy[idx];   // race-free fwd double-buffer
     f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
 
     float tmpz = ((1.0f + bz_) * lap_z + dbzdz_ * dudz) + az_ * dpsizdz + dazdz * f.psiz[idx];
     w_sum += (1.0f + bz_) * tmpz + az_ * f.zetaz[idx];
-    f.psiz[idx] = bz_ * dudz + az_ * f.psiz[idx];
+    (f.psizn ? f.psizn : f.psiz)[idx] = bz_ * dudz + az_ * f.psiz[idx];   // race-free fwd double-buffer
     f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
 
     return w_sum;
@@ -203,6 +213,83 @@ __global__ void acoustic3d_single_nopml(
     }
 }
 
+// v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
+static __global__ void compute_v2_lambda_lsrtm3d(
+    const float* __restrict__ vp,
+    const float* __restrict__ lambda,
+    float* __restrict__ v2_lambda,
+    int nx, int ny, int nz, int B
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / nz; int iz = iz_global % nz;
+    if (b >= B || ix >= nx || iy >= ny || iz >= nz) return;
+    int sp = nx * ny * nz; int idx = b * sp + iz * (nx * ny) + iy * nx + ix;
+    float v = vp[idx];
+    v2_lambda[idx] = v * v * lambda[idx];
+}
+
+// Proper adjoint (transpose) of the lsrtm 3D scattered-field propagation:
+//   lambda_next = 2 lambda_now - lambda_pre + dt^2 * lap(v^2 * lambda_now)
+// in the non-PML interior -- transpose of forward v^2*lap(lambda) (non-self-
+// adjoint when vp varies).  PML band keeps forward CPML (acoustic_cpml_update_3d).
+// Mirrors the acoustic2d fix (5188031).  Requires v2_lambda = vp^2*lambda_now.
+template <int Order>
+__global__ void acoustic_lsrtm3d_adjoint(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ v2_lambda,
+    const float* __restrict__ vp,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_y,
+    GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / solver.nz; int iz = iz_global % solver.nz;
+    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    if (ix < halo || ix >= solver.nx - halo || iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int stride_z = solver.nx * solver.ny;
+    int spatial_size = stride_z * solver.nz;
+    int idx = iz * stride_z + iy * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+    const float* vp_b = vp + b * spatial_size;
+    const float* v2l_b = v2_lambda + b * spatial_size;
+    float dt2 = solver.dt * solver.dt;
+
+    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
+                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
+                  (iz >= solver.nz - solver.abcn - halo);
+
+    if (!in_pml) {
+        // L* = lap(v^2 . lambda)  (transpose of forward v^2 . lap(lambda))
+        float lap_x = laplace<3, Order, X>(v2l_b, ix, iy, iz, lap_ctx);
+        float lap_y = laplace<3, Order, Y>(v2l_b, ix, iy, iz, lap_ctx);
+        float lap_z = laplace<3, Order, Z>(v2l_b, ix, iy, iz, lap_ctx);
+        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + dt2 * (lap_x + lap_y + lap_z);
+        return;
+    }
+
+    // PML band: keep the forward CPML formulation (shared lsrtm update).
+    float w_sum = acoustic_cpml_update_3d<Order>(
+        f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo);
+    float v = vp_b[idx];
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (v * v) * dt2 * w_sum;
+}
+
 template <int Order>
 __global__ void acoustic_lsrtm3d_coupled(
     AcousticWavefieldPointer bg,
@@ -271,7 +358,8 @@ __global__ void calculate_grad_lsrtm3d_mp(
     int B,
     int nx,
     int ny,
-    int nz
+    int nz,
+    float dt
 );
 
 __global__ void calculate_grad_lsrtm3d_mp_utt(
