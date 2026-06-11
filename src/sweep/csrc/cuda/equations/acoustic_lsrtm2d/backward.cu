@@ -21,7 +21,7 @@ namespace {
 
 // Proper transpose adjoint step for the lsrtm scattered field: v2_lambda =
 // vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
-// Replaces the old forward-operator adjoint (acoustic2nd = vp^2*lap), which is
+// Replaces the old forward-operator adjoint (acoustic2d_single = vp^2*lap), which is
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
 static inline void run_lsrtm2d_adjoint_step(
     int order, dim3 grid, dim3 block,
