@@ -66,9 +66,9 @@ ForwardOutput forward(const ForwardInput& in) {
     AcousticWavefieldTensor bg;
     AcousticWavefieldTensor sc;
     if (!p.wavefields.empty()) {
-        TORCH_CHECK(p.wavefields.size() == 14, "Acoustic LSRTM 2D expects 14 wavefield tensors.");
-        bg.bind(slice_wavefields(p.wavefields, 0, 7), 2, true);
-        sc.bind(slice_wavefields(p.wavefields, 7, 7), 2, true);
+        TORCH_CHECK(p.wavefields.size() == 18, "Acoustic LSRTM 2D expects 18 wavefield tensors (bg+sc, each 9 with psi double-buffer).");
+        bg.bind(slice_wavefields(p.wavefields, 0, 9), 2, true);
+        sc.bind(slice_wavefields(p.wavefields, 9, 9), 2, true);
     } else {
         bg.allocate(vp, 2, true);
         sc.allocate(vp, 2, true);
@@ -197,8 +197,8 @@ ForwardOutput forward(const ForwardInput& in) {
             ctx
         );
 
-        bg.swap();
-        sc.swap();
+        bg.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
+        sc.swap_pml();
 
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), bg.checkpoint_tensors());
     }

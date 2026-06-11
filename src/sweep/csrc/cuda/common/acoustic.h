@@ -98,13 +98,26 @@ struct AcousticWavefieldPointer {
     float* __restrict__ zetay;
     float* __restrict__ zetaz;
 
+    // Optional double-buffer "next" psi (race-free forward: read psi*, write psi*n).
+    // nullptr when the equation does not opt into psi double-buffering.
+    float* __restrict__ psixn = nullptr;
+    float* __restrict__ psiyn = nullptr;
+    float* __restrict__ psizn = nullptr;
+
+    // Optional double-buffer "next" zeta (fused adjoint: read zeta at neighbours
+    // via g_tmp, write next zeta to a SEPARATE buffer).  nullptr unless the bound
+    // tensor list opts into the aux (zeta) double-buffer.
+    float* __restrict__ zetaxn = nullptr;
+    float* __restrict__ zetayn = nullptr;
+    float* __restrict__ zetazn = nullptr;
+
     __device__ AcousticWavefieldPointer offset(
         int b,
         int spatial_size
     ) const {
 
         AcousticWavefieldPointer out = *this;
- 
+
         int shift = b * spatial_size;
 
         out.u_prev += shift;
@@ -118,6 +131,14 @@ struct AcousticWavefieldPointer {
         if (out.zetax) out.zetax += shift;
         if (out.zetay) out.zetay += shift;
         if (out.zetaz) out.zetaz += shift;
+
+        if (out.psixn) out.psixn += shift;
+        if (out.psiyn) out.psiyn += shift;
+        if (out.psizn) out.psizn += shift;
+
+        if (out.zetaxn) out.zetaxn += shift;
+        if (out.zetayn) out.zetayn += shift;
+        if (out.zetazn) out.zetazn += shift;
 
         return out;
     }
@@ -141,9 +162,22 @@ struct AcousticWavefieldTensor {
     torch::Tensor zetay_t;
     torch::Tensor zetaz_t;
 
+    // Optional double-buffer "next" psi (set only when the bound tensor list
+    // includes them, i.e. the equation opts into psi double-buffering).
+    torch::Tensor psixn_t;
+    torch::Tensor psiyn_t;
+    torch::Tensor psizn_t;
+
+    // Optional double-buffer "next" zeta (fused adjoint only).
+    torch::Tensor zetaxn_t;
+    torch::Tensor zetayn_t;
+    torch::Tensor zetazn_t;
+
     int dim = 2;
     bool use_pml = true;
     bool allocated = false;
+    bool double_buffer_psi = false;   // true when psi*n_t are present
+    bool double_buffer_aux = false;   // true when zeta*n_t are present (fused adjoint)
 
     // =========================
     // Allocate (only once)
@@ -192,13 +226,15 @@ struct AcousticWavefieldTensor {
 
         if (dim == 2) {
             TORCH_CHECK(
-                tensors.size() == (use_pml ? 7 : 3),
-                "Acoustic 2D wavefields expect 7 tensors with PML or 3 tensors without PML"
+                !use_pml ? tensors.size() == 3
+                         : (tensors.size() == 7 || tensors.size() == 9 || tensors.size() == 11),
+                "Acoustic 2D wavefields expect 3 (no PML), 7 (PML), 9 (PML+psi double-buffer), or 11 (PML+psi+zeta double-buffer) tensors"
             );
         } else {
             TORCH_CHECK(
-                tensors.size() == (use_pml ? 9 : 3),
-                "Acoustic 3D wavefields expect 9 tensors with PML or 3 tensors without PML"
+                !use_pml ? tensors.size() == 3
+                         : (tensors.size() == 9 || tensors.size() == 12 || tensors.size() == 15),
+                "Acoustic 3D wavefields expect 3 (no PML), 9 (PML), 12 (PML+psi double-buffer), or 15 (PML+psi+zeta double-buffer) tensors"
             );
         }
 
@@ -219,6 +255,34 @@ struct AcousticWavefieldTensor {
                 psiy_t = torch::Tensor();
                 zetay_t = torch::Tensor();
             }
+
+            // Optional psi double-buffer: extra "next" psi tensors appended
+            // after the standard PML set (2D: +2 -> 9, 3D: +3 -> 12).  The fused
+            // adjoint adds a zeta double-buffer on top (2D: +2 -> 11, 3D: +3 -> 15);
+            // tail order is psixn,psizn[,psiyn], zetaxn,zetazn[,zetayn].
+            double_buffer_aux = (dim == 2 ? tensors.size() == 11
+                                          : tensors.size() == 15);
+            double_buffer_psi = double_buffer_aux ||
+                                (dim == 2 ? tensors.size() == 9
+                                          : tensors.size() == 12);
+            if (double_buffer_psi) {
+                psixn_t = tensors[i++];
+                psizn_t = tensors[i++];
+                if (dim == 3) psiyn_t = tensors[i++];
+            } else {
+                psixn_t = torch::Tensor();
+                psizn_t = torch::Tensor();
+                psiyn_t = torch::Tensor();
+            }
+            if (double_buffer_aux) {
+                zetaxn_t = tensors[i++];
+                zetazn_t = tensors[i++];
+                if (dim == 3) zetayn_t = tensors[i++];
+            } else {
+                zetaxn_t = torch::Tensor();
+                zetazn_t = torch::Tensor();
+                zetayn_t = torch::Tensor();
+            }
         } else {
             psix_t = torch::Tensor();
             psiy_t = torch::Tensor();
@@ -226,6 +290,8 @@ struct AcousticWavefieldTensor {
             zetax_t = torch::Tensor();
             zetay_t = torch::Tensor();
             zetaz_t = torch::Tensor();
+            double_buffer_psi = false;
+            double_buffer_aux = false;
         }
 
         allocated = true;
@@ -255,9 +321,27 @@ struct AcousticWavefieldTensor {
                 v.psiy = nullptr;
                 v.zetay = nullptr;
             }
+
+            if (double_buffer_psi) {
+                v.psixn = psixn_t.data_ptr<float>();
+                v.psizn = psizn_t.data_ptr<float>();
+                v.psiyn = (dim == 3) ? psiyn_t.data_ptr<float>() : nullptr;
+            } else {
+                v.psixn = v.psiyn = v.psizn = nullptr;
+            }
+
+            if (double_buffer_aux) {
+                v.zetaxn = zetaxn_t.data_ptr<float>();
+                v.zetazn = zetazn_t.data_ptr<float>();
+                v.zetayn = (dim == 3) ? zetayn_t.data_ptr<float>() : nullptr;
+            } else {
+                v.zetaxn = v.zetayn = v.zetazn = nullptr;
+            }
         } else {
             v.psix = v.psiy = v.psiz = nullptr;
             v.zetax = v.zetay = v.zetaz = nullptr;
+            v.psixn = v.psiyn = v.psizn = nullptr;
+            v.zetaxn = v.zetayn = v.zetazn = nullptr;
         }
 
         return v;
@@ -289,6 +373,39 @@ struct AcousticWavefieldTensor {
     {
         std::swap(u_prev_t, u_now_t);
         std::swap(u_now_t,  u_next_t);
+    }
+
+    // Forward double-buffer swap: rotate u AND swap psi <-> psin so the next
+    // step reads the freshly-written psi (race-free forward).  Use this only
+    // when the forward kernel writes psi*n; otherwise use swap() (u-only).
+    // No-op on psi if not double-buffering, so it is safe to call either way.
+    void swap_pml()
+    {
+        std::swap(u_prev_t, u_now_t);
+        std::swap(u_now_t,  u_next_t);
+        if (double_buffer_psi) {
+            std::swap(psix_t, psixn_t);
+            std::swap(psiz_t, psizn_t);
+            if (dim == 3) std::swap(psiy_t, psiyn_t);
+        }
+    }
+
+    // Fused-adjoint double-buffer swap: rotate u AND psi<->psin AND zeta<->zetan.
+    // Use ONLY with the fused adjoint kernel (which writes psi*n AND zeta*n).
+    void swap_aux()
+    {
+        std::swap(u_prev_t, u_now_t);
+        std::swap(u_now_t,  u_next_t);
+        if (double_buffer_psi) {
+            std::swap(psix_t, psixn_t);
+            std::swap(psiz_t, psizn_t);
+            if (dim == 3) std::swap(psiy_t, psiyn_t);
+        }
+        if (double_buffer_aux) {
+            std::swap(zetax_t, zetaxn_t);
+            std::swap(zetaz_t, zetazn_t);
+            if (dim == 3) std::swap(zetay_t, zetayn_t);
+        }
     }
 
 };

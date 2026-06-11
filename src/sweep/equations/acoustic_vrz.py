@@ -235,7 +235,9 @@ class AcousticVRZ(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             base_nvar=3,
-            pml_nvar=4,
+            # psix,psiz,zetax,zetaz (4) + psixn,psizn (2): race-free forward psi
+            # double-buffer (read psi, write psi*n, swap_pml).
+            pml_nvar=6,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
@@ -352,7 +354,9 @@ class AcousticVRZ3D(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             base_nvar=3,
-            pml_nvar=6,
+            # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3): race-free
+            # forward psi double-buffer (read psi, write psi*n, swap_pml).
+            pml_nvar=9,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,

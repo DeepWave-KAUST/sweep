@@ -42,6 +42,35 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 namespace {
 
+// Scratch for the 3D exact discrete-adjoint step: 9 per-cell fields packed
+// into one zeros tensor (halo/air cells stay 0; see acoustic_adjoint_prepare_3d).
+
+// One exact-adjoint 3D time step: PREPARE (local scratch) then APPLY
+// (transposed stencils on scratch).  Replaces compute_v2_lambda_3d +
+// acoustic_adjoint_kernel_3d (which copied the forward in the PML band).
+static inline void run_acoustic3d_adjoint_step(
+    int order, dim3 grid, dim3 block,
+    AcousticWavefieldPointer adj_view,
+    const float* vp_ptr,
+    LaplaceParam lap_ctx, GradParam grad_ctx,
+    GradParam grad_ctx_x, GradParam grad_ctx_y, GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml, SolverContext ctx)
+{
+    // FUSED single-kernel exact 3D adjoint: recompute the per-cell g_* inline at
+    // each stencil tap and write next-step psi/zeta into the wavefield's
+    // double-buffer out-tensors (psi*n/zeta*n).  Read-old/write-new => race-free
+    // even though aux is read at neighbours; no 9-field scratch round-trip =>
+    // ~forward bandwidth.  Caller must swap_aux() each step.
+    TORCH_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
+        "fused 3D adjoint needs the adjoint wavefield bound with psi+zeta "
+        "double-buffer (15 tensors); set cuda_layout.adjoint_extra_nvar=3.");
+    (void)grad_ctx;
+    ACOUSTIC3D_ADJOINT_FUSED(order, grid, block,
+        adj_view, vp_ptr, lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx,
+        adj_view.psixn, adj_view.psiyn, adj_view.psizn,
+        adj_view.zetaxn, adj_view.zetayn, adj_view.zetazn);
+}
+
 void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp)
 {
     out.image = torch::zeros_like(vp);
@@ -254,7 +283,6 @@ void process_recursive_interval_3d(
     std::vector<AcousticWavefieldTensor>& scratch_states,
     int scratch_depth,
     torch::Tensor& u_this_scratch,
-    torch::Tensor& v2_lambda_scratch,
     int B,
     int nx,
     int ny,
@@ -299,28 +327,11 @@ void process_recursive_interval_3d(
 
         auto adj_view = adjoint.view();
 
-        compute_v2_lambda_3d<<<wave_grid, wave_block>>>(
-            vp.data_ptr<float>(),
-            adj_view.u_now,
-            v2_lambda_scratch.data_ptr<float>(),
-            nx, ny, nz, ctx.B
-        );
-
-        ACOUSTIC3D_ADJOINT(
-            order,
-            wave_grid,
-            wave_block,
-            adj_view,
-            v2_lambda_scratch.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_acoustic3d_adjoint_step(
+            order, wave_grid, wave_block,
+            adj_view, vp.data_ptr<float>(),
+            lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
+            cpml, ctx);
 
         add_source_3d<<<adj_source_grid, adj_source_block>>>(
             adj_view.u_next,
@@ -331,7 +342,7 @@ void process_recursive_interval_3d(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
 
         accumulate_source_gradient_3d(
             forward_source_grid,
@@ -420,7 +431,6 @@ void process_recursive_interval_3d(
         scratch_states,
         scratch_depth + 1,
         u_this_scratch,
-        v2_lambda_scratch,
         B,
         nx,
         ny,
@@ -457,7 +467,6 @@ void process_recursive_interval_3d(
         scratch_states,
         scratch_depth + 1,
         u_this_scratch,
-        v2_lambda_scratch,
         B,
         nx,
         ny,
@@ -496,9 +505,6 @@ void run_full_imaging(
     // Buffer for pre-computed v^2 * lambda_now (proper-adjoint kernel input).
     // Python-side (PropTorch) manages the buffer via adjoint_workspace[0] so
     // it can be reused across backward calls.
-    auto v2_lambda = !p.adjoint_workspace.empty()
-        ? p.adjoint_workspace[0]
-        : torch::empty_like(vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -524,28 +530,11 @@ void run_full_imaging(
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
 
-        compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
-            vp.data_ptr<float>(),
-            adj_view.u_now,
-            v2_lambda.data_ptr<float>(),
-            nx, ny, nz, B
-        );
-
-        ACOUSTIC3D_ADJOINT(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            v2_lambda.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_acoustic3d_adjoint_step(
+            order, launch_config.grid, launch_config.block,
+            adj_view, vp.data_ptr<float>(),
+            lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
+            cpml, ctx);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -556,7 +545,7 @@ void run_full_imaging(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
 
         accumulate_source_gradient_3d(
             forward_source_config.grid,
@@ -653,9 +642,6 @@ void run_bs_imaging(
     auto f_this = torch::zeros_like(vp);
 
     // Buffer for v^2 * lambda_now; Python-managed via adjoint_workspace[0].
-    auto v2_lambda = !p.adjoint_workspace.empty()
-        ? p.adjoint_workspace[0]
-        : torch::empty_like(vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -710,28 +696,11 @@ void run_bs_imaging(
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
-        compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
-            vp.data_ptr<float>(),
-            adj_view.u_now,
-            v2_lambda.data_ptr<float>(),
-            nx, ny, nz, B
-        );
-
-        ACOUSTIC3D_ADJOINT(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            v2_lambda.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_acoustic3d_adjoint_step(
+            order, launch_config.grid, launch_config.block,
+            adj_view, vp.data_ptr<float>(),
+            lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
+            cpml, ctx);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -742,7 +711,7 @@ void run_bs_imaging(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
 
         accumulate_source_gradient_3d(
             fwd_source_config.grid,
@@ -811,28 +780,11 @@ void run_bs_imaging(
     if (p.nt > 0) {
         auto adj_view = adjoint.view();
 
-        compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
-            vp.data_ptr<float>(),
-            adj_view.u_now,
-            v2_lambda.data_ptr<float>(),
-            nx, ny, nz, B
-        );
-
-        ACOUSTIC3D_ADJOINT(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            v2_lambda.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        run_acoustic3d_adjoint_step(
+            order, launch_config.grid, launch_config.block,
+            adj_view, vp.data_ptr<float>(),
+            lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
+            cpml, ctx);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -843,7 +795,7 @@ void run_bs_imaging(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
 
         accumulate_source_gradient_3d(
             fwd_source_config.grid,
@@ -935,9 +887,6 @@ void run_ckpt_imaging(
     auto chunk_forward = torch::zeros({p.checkpoint_interval, B, nz, ny, nx}, vp.options());
 
     // Buffer for v^2 * lambda_now; Python-managed via adjoint_workspace[0].
-    auto v2_lambda = !p.adjoint_workspace.empty()
-        ? p.adjoint_workspace[0]
-        : torch::empty_like(vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -998,28 +947,11 @@ void run_ckpt_imaging(
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            compute_v2_lambda_3d<<<launch_config.grid, launch_config.block>>>(
-                vp.data_ptr<float>(),
-                adj_view.u_now,
-                v2_lambda.data_ptr<float>(),
-                nx, ny, nz, B
-            );
-
-            ACOUSTIC3D_ADJOINT(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                adj_view,
-                v2_lambda.data_ptr<float>(),
-                vp.data_ptr<float>(),
-                lap_ctx,
-                grad_ctx,
-                grad_ctx_x,
-                grad_ctx_y,
-                grad_ctx_z,
-                cpml,
-                ctx
-            );
+            run_acoustic3d_adjoint_step(
+                order, launch_config.grid, launch_config.block,
+                adj_view, vp.data_ptr<float>(),
+                lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
+                cpml, ctx);
 
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
@@ -1030,7 +962,7 @@ void run_ckpt_imaging(
                 ctx
             );
 
-            adjoint.swap();
+            adjoint.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
 
             accumulate_source_gradient_3d(
                 fwd_source_config.grid,
@@ -1169,10 +1101,7 @@ void run_recursive_imaging(
     for (auto& scratch_state : scratch_states)
         scratch_state.allocate(vp, 3, true);
     auto u_this_scratch = torch::empty_like(vp);
-    // Scratch buffer for v^2 * lambda_now; Python-managed via adjoint_workspace[0].
-    auto v2_lambda_scratch = !p.adjoint_workspace.empty()
-        ? p.adjoint_workspace[0]
-        : torch::empty_like(vp);
+    // Scratch for the exact discrete-adjoint step (prepare/apply).
 
     AcousticWavefieldTensor start_state;
     start_state.allocate(vp, 3, true);
@@ -1216,7 +1145,6 @@ void run_recursive_imaging(
             scratch_states,
             0,
             u_this_scratch,
-            v2_lambda_scratch,
             B,
             nx,
             ny,
