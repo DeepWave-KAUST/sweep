@@ -8,6 +8,14 @@
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
 
+// NOTE: the background-field kernels below are LSRTM-private. They MUST NOT
+// reuse the global names ``acoustic2nd`` / ``acoustic2nd_nopml`` defined in
+// ../acoustic2d/kernels.cuh: both headers are compiled into separate TUs of
+// the same extension, and two __global__ templates with one mangled name but
+// different bodies make the CUDA runtime's stub->module resolution pick a
+// winner per process (ODR violation) — observed as 1-ULP bimodal forward
+// output and the DD backward losing its cut-aware nopml bands. Hence the
+// ``acoustic2d_single*`` names (mirrors lsrtm3d's ``acoustic3d_single*``).
 #define ACOUSTIC_LSRTM2D_SINGLE(order, grid, block, ...)                         \
     do {                                                                         \
         if      ((order) == 2) acoustic2d_single<2><<<grid, block>>>(__VA_ARGS__);    \
