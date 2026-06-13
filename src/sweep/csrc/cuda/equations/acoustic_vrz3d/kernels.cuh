@@ -713,9 +713,12 @@ __global__ void acoustic_vrz3nd_adjoint(
 
     float rhs = kappa * (beta * w_sum + dbdx * px + dbdy * py + dbdz * pz);
 
-    f.psix[idx] = psixn;
-    f.psiy[idx] = psiyn;
-    f.psiz[idx] = psizn;
+    // Race-free adjoint psi double-buffer: dpsi*d* above neighbour-reads psi
+    // in this same launch, so the new psi must land in psi*n (caller pairs
+    // with swap_pml()).  zeta is only ever read at idx — in-place is safe.
+    (f.psixn ? f.psixn : f.psix)[idx] = psixn;
+    (f.psiyn ? f.psiyn : f.psiy)[idx] = psiyn;
+    (f.psizn ? f.psizn : f.psiz)[idx] = psizn;
     f.zetax[idx] = zetaxn;
     f.zetay[idx] = zetayn;
     f.zetaz[idx] = zetazn;

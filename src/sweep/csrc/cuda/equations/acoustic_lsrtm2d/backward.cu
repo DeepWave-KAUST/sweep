@@ -170,7 +170,7 @@ void process_recursive_interval_2d(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         calculate_grad_lsrtm_mp<<<wave_grid, wave_block>>>(
             bg_utt.data_ptr<float>(),
@@ -284,9 +284,9 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 7), 2, true);
+        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -320,7 +320,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
             p.u_forward[it].data_ptr<float>(),
@@ -382,9 +382,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 7), 2, true);
+        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
@@ -461,7 +461,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         ACOUSTIC_LSRTM2D_SINGLE_NOPML(
             order,
@@ -522,7 +522,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
     }
 
     out.grads = {grad_wavelet, grad_vp, grad_mp};
@@ -561,9 +561,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 7), 2, true);
+        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
@@ -658,7 +658,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 ctx
             );
 
-            adjoint.swap();
+            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
             calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
                 chunk_forward[it - start].data_ptr<float>(),
@@ -721,9 +721,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 7), 2, true);
+        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     auto grad_wavelet = torch::zeros_like(p.forward_source);

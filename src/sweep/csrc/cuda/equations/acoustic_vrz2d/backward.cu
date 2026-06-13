@@ -73,7 +73,7 @@ BackwardOutput backward(const BackwardInput& in)
     if (!in.adjoint_wavefields.empty())
         adjoint.bind(in.adjoint_wavefields, 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz(adjoint);
 
     auto grad_vp = torch::zeros_like(vp);
@@ -143,7 +143,7 @@ BackwardOutput backward(const BackwardInput& in)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         BUILD_VRZ_GRAD_FIELDS(
             order,
@@ -223,11 +223,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
     if (!p.adjoint_wavefields.empty())
         adjoint.bind(p.adjoint_wavefields, 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz(adjoint);
 
     AcousticWavefieldTensor forward;
-    forward.allocate(vp, 2, false);
+    if (!p.forward_wavefields.empty())
+        forward.bind(p.forward_wavefields, 2, false);
+    else
+        forward.allocate(vp, 2, false);
     forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
     forward.u_next_t.zero_();
@@ -334,7 +337,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         ACOUSTIC_VRZ2D_NOPML(
             order,
@@ -451,7 +454,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     if (!p.adjoint_wavefields.empty())
         adjoint.bind(p.adjoint_wavefields, 2, true);
     else
-        adjoint.allocate(vp, 2, true);
+        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz(adjoint);
 
     AcousticWavefieldTensor forward;
@@ -627,7 +630,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 ctx
             );
 
-            adjoint.swap();
+            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
             BUILD_VRZ_GRAD_FIELDS(
                 order,
