@@ -12,6 +12,7 @@ class Layout:
         free_surface=False,     # whether the top boundary is free surface (stress=0) or not (absorbing)
         width=-1,               # width of the boundary to be saved, default to M (the stencil radius)
         tangent_pad=0,           # extra saved cells in tangential directions
+        cut_mask=0,             # DD cut-face bitmask (x_lo=1,x_hi=2,z_lo=4,z_hi=8,y_lo=16,y_hi=32)
         **kwargs
     ):
 
@@ -34,21 +35,26 @@ class Layout:
         self.transfer_interval = transfer_interval
 
         # -------------------------
-        # physical domain (match SolverContext)
+        # physical domain (match SolverContext::phys_* exactly, incl. the
+        # cut-aware shrink: a cut face carries only the M halo, not abcn+M)
         # -------------------------
+        self.cut_mask = cut_mask
+        cx_lo = bool(cut_mask & 1);  cx_hi = bool(cut_mask & 2)
+        cz_lo = bool(cut_mask & 4);  cz_hi = bool(cut_mask & 8)
+        cy_lo = bool(cut_mask & 16); cy_hi = bool(cut_mask & 32)
 
-        self.phys_x0 = abcn + M
-        self.phys_x1 = self.nx - abcn - M
+        self.phys_x0 = M if cx_lo else abcn + M
+        self.phys_x1 = self.nx - (M if cx_hi else abcn + M)
 
         if dim == 3:
-            self.phys_y0 = abcn + M
-            self.phys_y1 = self.ny - abcn - M
+            self.phys_y0 = M if cy_lo else abcn + M
+            self.phys_y1 = self.ny - (M if cy_hi else abcn + M)
         else:
             self.phys_y0 = 0
             self.phys_y1 = 1
 
-        self.phys_z0 = M if free_surface else abcn + M
-        self.phys_z1 = self.nz - abcn - M
+        self.phys_z0 = M if free_surface else (M if cz_lo else abcn + M)
+        self.phys_z1 = self.nz - (M if cz_hi else abcn + M)
 
         self.nx_phys = self.phys_x1 - self.phys_x0
         self.ny_phys = self.phys_y1 - self.phys_y0

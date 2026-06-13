@@ -148,7 +148,7 @@ def test_two_tile_bitexact(abcn, src_gx, free_surface):
     runner_full.run_to(NT)
 
     # ---------------- two tiles ----------------
-    runners, records, rec_split = [], [], []
+    runners, records, rec_split, los = [], [], [], []
     for xi in range(2):
         topo = MeshTopology(py=1, px=2, shot_groups=1, world_size=2, rank=xi)
         x0 = xi * nxp
@@ -170,20 +170,35 @@ def test_two_tile_bitexact(abcn, src_gx, free_surface):
         )
 
         prop = make_prop((NZ, nxp), abcn, free_surface, topo=topo)
+        # cut-aware low pad: edge side keeps abcn+M, cut side carries only M
+        # (prop.padding is F.pad order: x_lo is index 0).
+        los.append(prop.padding[0] + M)
         runner, record = make_runner(
             prop, tile_wavelet, tile_sources, tile_receivers, vp_tile
         )
+        # Tell the forward which x-faces are cuts so its in_pml split uses the
+        # cut-aware phys bounds that match the asymmetric pad. Without this the
+        # kernel falls back to the symmetric abcn+M split and treats cut-side
+        # interior cells as PML (algebraically zero, but FMA-reordered → drift).
+        cm = 0
+        if topo.neighbour_rank("x", -1) is not None:
+            cm |= 1
+        if topo.neighbour_rank("x", +1) is not None:
+            cm |= 2
+        runner.p.cut_face_mask = cm
         runners.append(runner)
         records.append(record)
 
     r0, r1 = runners
-    lo, hi = pad, pad + nxp
+    lo0, lo1 = los
+    hi0, hi1 = lo0 + nxp, lo1 + nxp
     for it in range(NT):
         r0.run_to(it + 1)
         r1.run_to(it + 1)
         u0, u1 = r0.u_now, r1.u_now
-        u0[..., hi:hi + M] = u1[..., lo:lo + M]
-        u1[..., lo - M:lo] = u0[..., hi - M:hi]
+        # tile0 high halo <- tile1 low interior; tile1 low halo <- tile0 high interior
+        u0[..., hi0:hi0 + M] = u1[..., lo1:lo1 + M]
+        u1[..., lo1 - M:lo1] = u0[..., hi0 - M:hi0]
 
     # ---------------- compare ----------------
     # records, mapped back to global receiver order
@@ -193,9 +208,9 @@ def test_two_tile_bitexact(abcn, src_gx, free_surface):
             rec_tiles[:, gi] = rec[:, j]
     assert torch.equal(rec_tiles, record_full), "record differs from single domain"
 
-    # final u_now over each tile's physical region
+    # final u_now over each tile's physical region (per-tile interior offset)
     u_full = runner_full.u_now
-    for xi, r in enumerate(runners):
+    for xi, (r, lo_i) in enumerate(zip(runners, los)):
         ref = u_full[..., pad + xi * nxp: pad + xi * nxp + nxp]
-        got = r.u_now[..., lo:hi]
+        got = r.u_now[..., lo_i:lo_i + nxp]
         assert torch.equal(got, ref), f"tile {xi} final u_now differs"

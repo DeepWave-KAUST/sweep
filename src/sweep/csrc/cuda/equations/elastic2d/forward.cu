@@ -113,6 +113,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
+    solver.cut_mask = p.cut_face_mask;   // cut-aware phys bounds (0 = single domain)
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
@@ -350,6 +351,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
                          dx, 0.f, dz};
     solver.topo_category = p.topo_category.data_ptr<int>();
     solver.use_apm = true;
+    solver.cut_mask = p.cut_face_mask;   // cut-aware phys bounds (0 = single domain)
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;

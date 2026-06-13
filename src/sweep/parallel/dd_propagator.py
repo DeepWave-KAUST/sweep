@@ -1,0 +1,473 @@
+"""One-call domain-decomposed propagator (model-parallel, multi-GPU).
+
+Wraps the per-step stepped driver + NCCL halo exchange (proven bitwise in
+``test/dd_nccl_*.py``) behind a single object so callers never hand-slice the
+model, fill halos, remap source/receiver coordinates, or drive the time loop:
+
+    topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
+    ddp  = DDPropagator(eq, global_shape=(nz, nx), dh=10., dt=dt, nt=nt,
+                        abcn=20, spatial_order=4, source_type=["h1"],
+                        receiver_type=["h1"], model_parallel=topo, dev=dev)
+    rec  = ddp.forward(wavelet, sources_global, receivers_global,
+                       models=[vp_tile_or_global])     # tile OR global (auto-sliced)
+    grads = ddp.gradient(adjoint_source_tile)          # -> [grad_model_tile, ...]
+    full = ddp.gather_record(rec)                      # rank-0 assembled record
+
+What it does internally (x-cut decomposition, v1):
+  * ``MeshTopology.local_extent`` -> this rank's tile shape / x-offset;
+  * a ONE-TIME NCCL model-halo exchange fills each tile's cut-side pad with the
+    true neighbour material, so the user supplies only its own tile (no global
+    model needed) and never edge-replicates by hand;
+  * ``partition_global_coords`` keeps only this tile's sources/receivers
+    (shifted to tile-local; a zero-amplitude dummy keeps nsrc/nrec >= 1);
+  * the equation family selects the exchange protocol — acoustic advances one
+    full step then exchanges ``u_now`` (M wide); elastic uses the half-step
+    protocol (phase-1 velocity, exchange v; phase-2 stress + tail, exchange s);
+  * the backward replays boundary-saving reconstruction with the per-step
+    lambda/recon halo exchanges and ``cut_face_mask`` set, then returns each
+    tile's INTERIOR model gradient (cut-side pad gradients belong to the
+    neighbour and are dropped — proven correct in test_dd_*_backward_two_tile).
+
+v1 scope: x-cut (``py == 1``), acoustic2d/3d + elastic2d/3d, boundary saving
+on gpu-direct storage, fixed acquisition geometry per instance (capture once;
+later ``forward`` calls rebind models + wavelet).  Free surface supported.
+"""
+
+from __future__ import annotations
+
+from typing import List, Optional, Sequence
+
+import numpy as np
+import torch
+
+from sweep.parallel._topology import MeshTopology
+from sweep.parallel.mesh import ModelParallelMesh
+from sweep.parallel.routing import partition_global_coords
+from sweep.propagator.torch import PropTorch
+from sweep.propagator._stepped import (
+    SteppedBackwardRunner,
+    SteppedBindingRunner,
+    acoustic_adj_pairs,
+    acoustic_psi_pairs,
+)
+
+X_LO_BIT, X_HI_BIT = 1, 2
+Y_LO_BIT, Y_HI_BIT = 16, 32
+
+# Per-family wavefield-list geometry (see acoustic.h / elastic.h ::bind and
+# sweep/propagator/_stepped.py).  ``nv``/``nphys``/``nrecon`` are 2-D, 3-D.
+_FAMILIES = {
+    "acoustic": dict(nwf=(9, 12), nphys=None, nv=None, nrecon=(3, 3),
+                     half_step=False),
+    "elastic": dict(nwf=(15, 36), nphys=(5, 9), nv=(2, 3), nrecon=(7, 12),
+                    half_step=True),
+}
+
+
+def _family_of(equation) -> str:
+    name = type(equation).__name__.lower()
+    if "elastic" in name:
+        return "elastic"
+    if "acoustic" in name:
+        return "acoustic"
+    raise ValueError(
+        f"DDPropagator v1 supports acoustic/elastic only, got {type(equation).__name__}"
+    )
+
+
+class DDPropagator:
+    """Domain-decomposed (model-parallel) propagator over an x-cut mesh."""
+
+    def __init__(
+        self,
+        equation,
+        global_shape: Sequence[int],
+        *,
+        dh: float,
+        dt: float,
+        nt: int,
+        abcn: int,
+        spatial_order: int,
+        source_type: Sequence[str],
+        receiver_type: Sequence[str],
+        model_parallel: MeshTopology,
+        dev: torch.device,
+        free_surface: bool = False,
+        pml_type: Optional[str] = None,
+        B: int = 1,
+    ) -> None:
+        self.topo = model_parallel
+        self.global_shape = tuple(int(s) for s in global_shape)
+        self.ndim = len(self.global_shape)
+        if self.ndim not in (2, 3):
+            raise ValueError("global_shape must be 2-D or 3-D")
+        self.equation = equation
+        self.family = _family_of(equation)
+        self.dev = dev
+        self.nt = int(nt)
+        self.abcn = int(abcn)
+        self.so = int(spatial_order)
+        self.M = self.so // 2
+        self.pad = self.abcn + self.M
+        self.free_surface = bool(free_surface)
+        self.world = self.topo.world_size
+        self.rank = self.topo.rank
+        self._st = dict(_FAMILIES[self.family])
+
+        self.local_shape, self.offsets = self.topo.local_extent(self.global_shape)
+        self.x0 = self.offsets[-1]                       # global x-origin of tile
+        self.nxp = self.local_shape[-1]
+        if self.ndim == 3:
+            self.y0 = self.offsets[1]
+            self.nyp = self.local_shape[1]
+        # interior offsets (self.lo / self.hi / self.lo_y / self.hi_y) are
+        # derived from self.prop.padding after the propagator is built, so they
+        # follow the propagator's (possibly cut-aware, asymmetric) pad.
+
+        # cut-face mask + active halo axes: a cut exists wherever a neighbour is
+        # present.  x-cut (px>1) and, for 3-D, y-cut (py>1) -> 2x2 when both.
+        self.cut_mask = 0
+        axes = []
+        if self.topo.neighbour_rank("x", -1) is not None:
+            self.cut_mask |= X_LO_BIT
+        if self.topo.neighbour_rank("x", +1) is not None:
+            self.cut_mask |= X_HI_BIT
+        if self.topo.px > 1:
+            axes.append("x")
+        if self.ndim == 3:
+            if self.topo.neighbour_rank("y", -1) is not None:
+                self.cut_mask |= Y_LO_BIT
+            if self.topo.neighbour_rank("y", +1) is not None:
+                self.cut_mask |= Y_HI_BIT
+            if self.topo.py > 1:
+                axes.append("y")
+        self.axes = tuple(axes)
+
+        pml = pml_type or ("cpmls" if self.family == "elastic" else "cpmlr")
+        self.prop = PropTorch(
+            equation, backend="torch", impl="c", shape=self.local_shape, dev=dev,
+            dh=dh, dt=dt, source_type=list(source_type),
+            receiver_type=list(receiver_type), abcn=abcn,
+            free_surface=self.free_surface, pml_type=pml, nt=nt, B=B,
+            use_ckpt=False,
+            boundary_saving_config={"enabled": True, "storage": "gpu",
+                                    "transfer_interval": 1, "pinned_memory": False},
+            model_parallel=self.topo,
+        )
+
+        # Per-side interior offsets in the runtime (shape_cuda) frame. The prop
+        # allocates a cut-aware pad — cut faces carry only the M halo, edge
+        # faces carry abcn+M — so read its per-side low pad instead of assuming
+        # the symmetric ``abcn+M``.  self.prop.padding is in F.pad order:
+        # (x_lo, x_hi, [y_lo, y_hi,] z_lo, z_hi); add M for the stencil halo.
+        ppad = self.prop.padding
+        self.lo = ppad[0] + self.M
+        self.hi = self.lo + self.nxp
+        if self.ndim == 3:
+            self.lo_y = ppad[2] + self.M
+            self.hi_y = self.lo_y + self.nyp
+
+        # process group + halo exchangers (one per direction-set, reused)
+        self.mesh = (ModelParallelMesh(grid=(self.topo.py, self.topo.px))
+                     if self.world > 1 else None)
+        self._fwd_halo = None
+        self._bwd_halo = None
+        self._model_halo = None
+
+        self._captured = False
+        self._nwf = self._st["nwf"][0 if self.ndim == 2 else 1]
+        self._nrecon = self._st["nrecon"][0 if self.ndim == 2 else 1]
+        if self.family == "elastic":
+            self._nv = self._st["nv"][0 if self.ndim == 2 else 1]
+            self._nphys = self._st["nphys"][0 if self.ndim == 2 else 1]
+
+    # ------------------------------------------------------------------ utils
+    def _halo(self, attr):
+        if self.world == 1:
+            return None
+        from sweep.parallel.fast_halo import FastHaloSet
+        cur = getattr(self, attr)
+        if cur is None:
+            cur = FastHaloSet(self.mesh, self.M, self.axes)
+            setattr(self, attr, cur)
+        return cur
+
+    def _halo_view(self, field):
+        """Crop the field to owned±M in each CUT axis (plus-stencil: corners
+        unread, so x and y halos exchange independently)."""
+        sl = [slice(None)] * field.ndim
+        if self.topo.px > 1:
+            sl[-1] = slice(self.lo - self.M, self.hi + self.M)
+        if self.ndim == 3 and self.topo.py > 1:
+            sl[-2] = slice(self.lo_y - self.M, self.hi_y + self.M)
+        return field[tuple(sl)]
+
+    def _exchange(self, halo, tensor):
+        if halo is not None:
+            halo.exchange(self._halo_view(tensor))
+
+    def _slice_tile(self, model):
+        """Accept a global (Nz,[Ny,]Nx) or already-tiled (Nz,[Ny,]nyp,nxp) array."""
+        arr = model.detach().cpu().numpy() if torch.is_tensor(model) else np.asarray(model)
+        if tuple(arr.shape) == self.global_shape:
+            if self.ndim == 2:
+                return arr[:, self.x0: self.x0 + self.nxp].copy()
+            return arr[:, self.y0: self.y0 + self.nyp,
+                       self.x0: self.x0 + self.nxp].copy()
+        if tuple(arr.shape) == self.local_shape:
+            return arr.copy()
+        raise ValueError(
+            f"model shape {arr.shape} matches neither global {self.global_shape} "
+            f"nor tile {self.local_shape}"
+        )
+
+    def _repad_runtime_model(self, rt: torch.Tensor, tile: np.ndarray) -> None:
+        """Write a physical tile into the runtime-padded model ``rt`` in place,
+        edge-replicating the pad (FS-aware z), then leaving the cut-side x pad
+        for the model-halo exchange to overwrite.  Matches the propagator's
+        edge padding (np.pad(edge), proven bitwise for the NCCL checks)."""
+        lo_x, hi_x = self.lo, self.hi
+        ztop = self.M if self.free_surface else self.pad
+        t = torch.as_tensor(tile, device=rt.device, dtype=rt.dtype)
+        nz = tile.shape[0]
+        if self.ndim == 2:
+            t = t.reshape(1, 1, nz, self.nxp)
+            rt.zero_()
+            rt[..., ztop:ztop + nz, lo_x:hi_x] = t
+            # x edges over interior-z band, then z edges over full width
+            rt[..., ztop:ztop + nz, :lo_x] = rt[..., ztop:ztop + nz, lo_x:lo_x + 1]
+            rt[..., ztop:ztop + nz, hi_x:] = rt[..., ztop:ztop + nz, hi_x - 1:hi_x]
+            rt[..., :ztop, :] = rt[..., ztop:ztop + 1, :]
+            rt[..., ztop + nz:, :] = rt[..., ztop + nz - 1: ztop + nz, :]
+        else:
+            ny = tile.shape[1]
+            lo_y, hi_y = self.lo_y, self.hi_y
+            t = t.reshape(1, 1, nz, ny, self.nxp)
+            rt.zero_()
+            rt[..., ztop:ztop + nz, lo_y:hi_y, lo_x:hi_x] = t
+            zi, yi = slice(ztop, ztop + nz), slice(lo_y, hi_y)
+            # x edges (z,y interior) -> y edges (z interior, full x) -> z edges (full)
+            rt[..., zi, yi, :lo_x] = rt[..., zi, yi, lo_x:lo_x + 1]
+            rt[..., zi, yi, hi_x:] = rt[..., zi, yi, hi_x - 1:hi_x]
+            rt[..., zi, :lo_y, :] = rt[..., zi, lo_y:lo_y + 1, :]
+            rt[..., zi, hi_y:, :] = rt[..., zi, hi_y - 1:hi_y, :]
+            rt[..., :ztop, :, :] = rt[..., ztop:ztop + 1, :, :]
+            rt[..., ztop + nz:, :, :] = rt[..., ztop + nz - 1: ztop + nz, :, :]
+
+    def _set_models(self, model_tiles: List[np.ndarray]):
+        """Rebind both forward and backward params' runtime models from physical
+        tiles: edge re-pad, then one NCCL model-halo exchange to fill cut pads."""
+        mhalo = self._halo("_model_halo")
+        for rt_f, rt_b, tile in zip(self.fp.models, self.bp.models, model_tiles):
+            self._repad_runtime_model(rt_f, tile)
+            self._exchange(mhalo, rt_f)
+            rt_b.copy_(rt_f)
+
+    # --------------------------------------------------------------- capture
+    def _capture(self, wavelet, loc_src, loc_rec, tiles):
+        impl = self.prop._backend_impl
+        cap = {}
+        f_orig, b_orig = impl.forward_func, impl.backward_bs_func
+
+        def fwrap(p):
+            out = f_orig(p); cap["fp"] = p; cap["fraw"] = out; return out
+
+        def bwrap(p):
+            out = b_orig(p); cap["bp"] = p; return out
+
+        impl.forward_func, impl.backward_bs_func = fwrap, bwrap
+        models = [torch.tensor(t, device=self.dev, requires_grad=True) for t in tiles]
+        syn = self.prop(wavelet, loc_src, loc_rec, models=models)
+        rec = syn[0] if isinstance(syn, (tuple, list)) else syn
+        rec.sum().backward()
+        impl.forward_func, impl.backward_bs_func = f_orig, b_orig
+
+        self.fp, self.bp = cap["fp"], cap["bp"]
+        self.f_func, self.b_func = f_orig, b_orig
+        self._cuda_ndim = cap["fraw"][2].ndim
+
+        L = list(self.fp.wavefields)
+        if not L:
+            L = [torch.zeros_like(self.fp.models[0]) for _ in range(self._nwf)]
+        self.L_fwd = L
+        self.L_adj = list(self.bp.adjoint_wavefields)
+        if not self.L_adj:
+            self.L_adj = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nwf)]
+        self.recon = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nrecon)]
+        # acoustic grads_out = [grad_wavelet, *model_grads] (size = models + 1);
+        # elastic has no wavelet grad (size = models).
+        if self.family == "acoustic":
+            self.gbufs = ([torch.zeros_like(self.bp.forward_source)]
+                          + [torch.zeros_like(m) for m in self.bp.models])
+        else:
+            self.gbufs = [torch.zeros_like(m) for m in self.bp.models]
+        self.bp.grads_out = self.gbufs
+        # acoustic backward produces source/receiver illumination; elastic none
+        if self.family == "acoustic":
+            self.illum = [torch.zeros_like(self.bp.models[0]),
+                          torch.zeros_like(self.bp.models[0])]
+        else:
+            self.illum = []
+        self.bp.illum_out = self.illum
+        self.record = torch.zeros_like(cap["fraw"][2])
+        self.fp.record_out = self.record
+        self._captured = True
+
+    # --------------------------------------------------------------- forward
+    def forward(self, wavelet, sources_global, receivers_global, models):
+        """Run the DD forward; return this rank's tile record (raw CUDA layout).
+        ``models`` is a list of global or already-tiled physical arrays."""
+        tiles = [self._slice_tile(m) for m in models]
+        sg = torch.as_tensor(np.asarray(sources_global), dtype=torch.int64)
+        rg = torch.as_tensor(np.asarray(receivers_global), dtype=torch.int64)
+        loc_s, mask_s = partition_global_coords(sg, self.topo, self.global_shape)
+        loc_r, mask_r = partition_global_coords(rg, self.topo, self.global_shape)
+        self._owns_src = bool(mask_s.any())
+        self._own_rec_idx = torch.nonzero(mask_r[0], as_tuple=False).flatten().tolist()
+
+        dummy = [1, 1] if self.ndim == 2 else [1, 1, 1]
+        if self._owns_src:
+            ls = loc_s[mask_s].reshape(1, -1, self.ndim).to(torch.int32).numpy()
+            wav = np.asarray(wavelet, dtype=np.float32)
+        else:
+            ls = np.array([[dummy]], dtype=np.int32)
+            wav = np.zeros(self.nt, dtype=np.float32)
+        if self._own_rec_idx:
+            lr = loc_r[0, mask_r[0]].reshape(1, -1, self.ndim).to(torch.int32).numpy()
+        else:
+            lr = np.array([[dummy]], dtype=np.int32)
+
+        if not self._captured:
+            self._capture(wav, ls, lr, tiles)
+        self._set_models(tiles)
+        # ALL forward kernels are now cut-aware (in_pml uses phys_x0/x1 or
+        # && !cut_*): the forward needs the mask too, else cut-side interior
+        # cells fall into the zero-coeff PML branch and drift in the last ulp
+        # against the single-domain reference (the asymmetric-pad invariant).
+        self.fp.cut_face_mask = self.cut_mask
+
+        for t in self.L_fwd:
+            t.zero_()
+        self.record.zero_()
+        fhalo = self._halo("_fwd_halo")
+
+        with torch.no_grad():
+            if self.family == "acoustic":
+                runner = SteppedBindingRunner(
+                    self.f_func, self.fp, self.L_fwd, acoustic_psi_pairs(self.ndim))
+                # NOTE: a SPECFEM-style comm/compute overlap (phase-1 cut strips
+                # -> async halo exchange on a comm stream || phase-2 interior) is
+                # only ~2% faster on weak 3D AND is INCORRECT when a source sits
+                # in a cut boundary strip: the source is injected in phase 2, so
+                # the strip exchanged after phase 1 is missing the source term
+                # (the bench dodges this with `assert src not within M of cut`).
+                # Correct overlap needs the source injected per-phase (a kernel
+                # change). Until then the serial path is the source-safe default.
+                for it in range(self.nt):
+                    runner.run_to(it + 1)
+                    self._exchange(fhalo, runner.u_now)
+            else:
+                runner = SteppedBindingRunner(
+                    self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
+                for it in range(self.nt):
+                    runner.run_phase(it + 1, 1)
+                    for f in range(self._nv):
+                        self._exchange(fhalo, self.L_fwd[f])
+                    runner.run_phase(it + 1, 2)
+                    for f in range(self._nv, self._nphys):
+                        self._exchange(fhalo, self.L_fwd[f])
+
+        # A tile owning no real receivers carries only a dummy receiver; its
+        # record is meaningless.  Zero it so a residual/adjoint derived from it
+        # injects nothing on this tile — otherwise the dummy's recorded value
+        # becomes a spurious adjoint source that corrupts the gradient near the
+        # cut (matters for y-cut/2x2, where receivers at a fixed y leave whole
+        # tile rows without receivers; x-cut with x-spread receivers never hit
+        # it).
+        if not self._own_rec_idx:
+            self.record.zero_()
+        # hand the DD-consistent ring to the backward params
+        self.bp.boundary_gpu = list(self.fp.boundary_gpu)
+        self.bp.u_last_two = self.fp.last_two
+        return self.record
+
+    # -------------------------------------------------------------- gradient
+    def gradient(self, adjoint_source_tile):
+        """Run the DD backward for an adjoint source (raw CUDA layout, this
+        tile's receivers) and return ``[grad_model_tile, ...]`` (interior)."""
+        if not self._captured:
+            raise RuntimeError("call forward() before gradient()")
+        self.bp.adjoint_source = torch.as_tensor(
+            adjoint_source_tile, device=self.dev, dtype=torch.float32)
+        for t in self.L_adj + self.recon + self.gbufs + self.illum:
+            t.zero_()
+        self.bp.cut_face_mask = self.cut_mask
+        bhalo = self._halo("_bwd_halo")
+        nv = self._nv if self.family == "elastic" else None
+
+        with torch.no_grad():
+            if self.family == "acoustic":
+                br = SteppedBackwardRunner(
+                    self.b_func, self.bp, self.L_adj, self.recon,
+                    adj_pairs=acoustic_adj_pairs(self.ndim))
+                for it in range(self.nt - 1, -1, -1):
+                    br.run_segment(it + 1, it)
+                    if it == 0:
+                        break
+                    self._exchange(bhalo, br.lambda_now)
+                    self._exchange(bhalo, br.recon_u_now)
+            else:
+                br = SteppedBackwardRunner(
+                    self.b_func, self.bp, self.L_adj, self.recon,
+                    adj_pairs=(), adj_u_blocks=(), recon_u_blocks=())
+                for it in range(self.nt - 1, 0, -1):     # elastic BS floor it==1
+                    br.run_phase(it + 1, it, 1)
+                    for a, b in [(self.L_adj, range(nv)),
+                                 (self.recon, range(nv, self._nphys))]:
+                        for f in b:
+                            self._exchange(bhalo, a[f])
+                    br.run_phase(it + 1, it, 2)
+                    for a, b in [(self.L_adj, range(nv, self._nphys)),
+                                 (self.recon, range(nv))]:
+                        for f in b:
+                            self._exchange(bhalo, a[f])
+
+        # crop the runtime model grad to the physical tile interior (z is
+        # FS-aware: top pad = M under free surface; cut-side x-pad grad belongs
+        # to the neighbour and is dropped — proven in test_dd_*_backward).
+        ztop = self.M if self.free_surface else self.pad
+        nz = self.global_shape[0]
+        if self.ndim == 2:
+            interior = (..., slice(ztop, ztop + nz), slice(self.lo, self.hi))
+        else:
+            interior = (..., slice(ztop, ztop + nz),
+                        slice(self.lo_y, self.hi_y), slice(self.lo, self.hi))
+        # grads_out slot 0 is grad_wavelet for acoustic; model grads are the rest
+        model_grads = self.gbufs[1:] if self.family == "acoustic" else self.gbufs
+        return [g[interior].clone() for g in model_grads]
+
+    # ---------------------------------------------------------------- gather
+    def gather_record(self, tile_record):
+        """Assemble the global record on rank 0 (returns None on other ranks)."""
+        if self.world == 1:
+            return tile_record
+        import torch.distributed as dist
+        payload = (self._own_rec_idx, tile_record.detach().cpu())
+        gathered = [None] * self.world
+        dist.gather_object(payload, gathered if self.rank == 0 else None, dst=0)
+        if self.rank != 0:
+            return None
+        # place each tile's receiver columns at their global index
+        ncomp_axis = tile_record.ndim
+        full = None
+        nrec_global = max(max(idx) for idx, _ in gathered if idx) + 1
+        for idx, rc in gathered:
+            if not idx:
+                continue
+            if full is None:
+                shape = list(rc.shape)
+                shape[-2] = nrec_global
+                full = torch.zeros(shape, dtype=rc.dtype)
+            for j, gi in enumerate(idx):
+                full[..., gi, :] = rc[..., j, :]
+        return full

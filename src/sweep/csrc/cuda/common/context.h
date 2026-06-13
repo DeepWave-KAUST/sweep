@@ -73,23 +73,27 @@ struct SolverContext {
     // Physical domain (computed)
     // ===============================
 
+    // Cut-aware physical bounds: a cut (neighbour-facing) face carries only
+    // the stencil halo M (HaloExchange fills it) instead of a full abcn PML
+    // pad, so the interior starts/ends M from the buffer edge there. With
+    // cut_mask == 0 every expression collapses to the legacy ``abcn + M``.
     __host__ __device__
-    inline int phys_x0() const { return abcn + M; }
+    inline int phys_x0() const { return cut_x_lo() ? M : abcn + M; }
 
     __host__ __device__
-    inline int phys_x1() const { return nx - abcn - M; }
+    inline int phys_x1() const { return nx - (cut_x_hi() ? M : abcn + M); }
 
     __host__ __device__
-    inline int phys_y0() const { return abcn + M; }
+    inline int phys_y0() const { return cut_y_lo() ? M : abcn + M; }
 
     __host__ __device__
-    inline int phys_y1() const { return ny - abcn - M; }
+    inline int phys_y1() const { return ny - (cut_y_hi() ? M : abcn + M); }
 
     __host__ __device__
-    inline int phys_z0() const { return free_surface ? M : abcn + M; }
+    inline int phys_z0() const { return free_surface ? M : (cut_z_lo() ? M : abcn + M); }
 
     __host__ __device__
-    inline int phys_z1() const { return nz - abcn - M; }
+    inline int phys_z1() const { return nz - (cut_z_hi() ? M : abcn + M); }
 
     __host__ __device__
     inline int nx_phys() const { return phys_x1() - phys_x0(); }

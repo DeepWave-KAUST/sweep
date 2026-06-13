@@ -146,9 +146,13 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     // Position-based PML / interior split. All ax/bx CPML coefficients vanish
     // outside the PML band, so the auxiliary fields m_szzz/m_sxzx/m_sxzz/m_sxxx
     // become 0 → 0 in the interior. Skip the four reads + four writes.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware: a DD cut face has zero PML coefficients, so its interior must
+    // take the fast path too (matches the backward kernels) — a single domain
+    // (no cuts) collapses to the legacy symmetric split bit-for-bit.
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iz < (solver.free_surface ? halo : solver.abcn + halo)) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho * (dsxx_dx + dsxz_dz);
@@ -240,8 +244,10 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     int top_pml = solver.free_surface
         ? (solver.surface_row(ix) + 1)
         : (solver.abcn + halo);
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iz < top_pml) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
