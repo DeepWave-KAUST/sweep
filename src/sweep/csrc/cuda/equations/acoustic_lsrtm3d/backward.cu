@@ -337,7 +337,7 @@ void process_recursive_interval_3d(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         accumulate_source_gradient_3d(
             forward_source_grid,
@@ -490,9 +490,9 @@ void run_full_imaging(
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 9), 3, true);
+        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 12), 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
 
     float* u_thist = nullptr;
 
@@ -532,7 +532,7 @@ void run_full_imaging(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         accumulate_source_gradient_3d(
             forward_source_config.grid,
@@ -610,9 +610,9 @@ void run_bs_imaging(
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 9), 3, true);
+        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 12), 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
 
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
@@ -690,7 +690,7 @@ void run_bs_imaging(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         accumulate_source_gradient_3d(
             fwd_source_config.grid,
@@ -771,7 +771,7 @@ void run_bs_imaging(
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         accumulate_source_gradient_3d(
             fwd_source_config.grid,
@@ -834,9 +834,9 @@ void run_ckpt_imaging(
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 9), 3, true);
+        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 12), 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
 
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
@@ -930,7 +930,7 @@ void run_ckpt_imaging(
                 ctx
             );
 
-            adjoint.swap();
+            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
             accumulate_source_gradient_3d(
                 fwd_source_config.grid,
@@ -1023,9 +1023,9 @@ void run_recursive_imaging(
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
-        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 9), 3, true);
+        adjoint.bind(slice_wavefields(p.adjoint_wavefields, 0, 12), 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     AcousticCPMLTensor cpml_tensor;
