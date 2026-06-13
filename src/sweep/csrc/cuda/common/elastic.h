@@ -251,7 +251,18 @@ struct ElasticWavefieldTensor {
         reset_optional_3d();
         reset_optional_pml();
 
-        if (tensors.size() == 15) {
+        // Layouts: with PML 15 (2D) / 36 (3D); without PML the physical
+        // fields only: 5 (2D) / 9 (3D).  The 9-tensor no-pml case falls
+        // through to the 3D branch (which reads exactly 9 when use_pml
+        // is false).
+        TORCH_CHECK(
+            use_pml_ ? (tensors.size() == 15 || tensors.size() == 36)
+                     : (tensors.size() == 5 || tensors.size() == 9),
+            "ElasticWavefieldTensor::bind: expected ",
+            use_pml_ ? "15 (2D) or 36 (3D)" : "5 (2D) or 9 (3D)",
+            " tensors, got ", tensors.size());
+
+        if (tensors.size() == 15 || tensors.size() == 5) {
             dim = 2;
 
             vx_t = tensors[i++];
