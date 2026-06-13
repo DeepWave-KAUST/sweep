@@ -38,12 +38,16 @@ __global__ void record_kernel_3d(
     SolverContext solver
 );
 
+// ``cut_mask`` (SolverContext::cut_mask semantics: bit0 = x_lo, bit1 = x_hi,
+// bit2 = z_lo, bit3 = z_hi) skips the rim-zeroing on domain-decomposition
+// cut faces; 0 (default) reproduces the legacy all-faces behaviour.
 __global__ void set_boundary_zeros(
     float* __restrict__ u,           // (B, nz, nx)
     int width,
     int nx,
     int nz,
-    bool free_surface
+    bool free_surface,
+    int cut_mask = 0
 );
 
 __global__ void set_boundary_zeros_3d(

@@ -42,6 +42,32 @@ struct SolverContext {
     const int* topo_category = nullptr;
     bool use_apm = false;
 
+    // Domain-decomposition cut-face bitmask (BackwardInput::cut_face_mask):
+    //   bit0 = x_lo, bit1 = x_hi, bit2 = z_lo, bit3 = z_hi,
+    //   bit4 = y_lo, bit5 = y_hi.
+    // 0 (default) = single domain — every kernel below behaves exactly as
+    // before.  Backward drivers copy BackwardInput::cut_face_mask here.
+    int cut_mask = 0;
+
+    __host__ __device__ inline bool cut_x_lo() const { return cut_mask & 1; }
+    __host__ __device__ inline bool cut_x_hi() const { return cut_mask & 2; }
+    __host__ __device__ inline bool cut_z_lo() const { return cut_mask & 4; }
+    __host__ __device__ inline bool cut_z_hi() const { return cut_mask & 8; }
+    __host__ __device__ inline bool cut_y_lo() const { return cut_mask & 16; }
+    __host__ __device__ inline bool cut_y_hi() const { return cut_mask & 32; }
+
+    // Ranged x stencil launch (DD phase-split forward): the kernel adds
+    // ``x_base`` to its block/thread-derived ix and early-returns at
+    // ``x_end()``.  Defaults (0, -1 = nx) leave every legacy launch
+    // bit-identical.  Only the acoustic2d/3d forward stencil + air-clear
+    // kernels honour these.
+    int x_base = 0;
+    int x_limit = -1;
+
+    __host__ __device__ inline int x_end() const {
+        return x_limit < 0 ? nx : x_limit;
+    }
+
 
     // ===============================
     // Physical domain (computed)

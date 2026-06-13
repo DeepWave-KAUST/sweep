@@ -26,7 +26,8 @@ public:
         const torch::Tensor& checkpoint_steps,
         bool checkpoint_on_cpu,
         const char* role,
-        const char* label = "checkpoint"
+        const char* label = "checkpoint",
+        int it_begin = 0
     )
         : checkpoints_(checkpoints),
           expected_tensors_(expected_tensors),
@@ -60,6 +61,14 @@ public:
         if (recursive_) {
             TORCH_CHECK(checkpoint_steps_.defined(), "Recursive checkpointing expects checkpoint_steps");
             TORCH_CHECK(checkpoint_steps_.dim() == 1, "checkpoint_steps must be 1-D");
+            // Stepped forward: checkpoints at steps <= it_begin were taken by
+            // earlier segments; the cursor consumes steps in ascending order.
+            if (it_begin > 0) {
+                const int num_steps = static_cast<int>(checkpoint_steps_.numel());
+                const int* steps = checkpoint_steps_.data_ptr<int>();
+                while (next_checkpoint_idx_ < num_steps && steps[next_checkpoint_idx_] <= it_begin)
+                    ++next_checkpoint_idx_;
+            }
         }
     }
 
