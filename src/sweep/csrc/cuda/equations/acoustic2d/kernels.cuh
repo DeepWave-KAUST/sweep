@@ -68,10 +68,10 @@ static __global__ void acoustic2d_air_clear_kernel(
     float* __restrict__ u_this,
     SolverContext solver
 ){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    if (ix >= solver.x_end() || iz >= solver.nz) return;
     if (!solver.has_topo) return;
     if (iz >= solver.topo_rows[ix]) return;
     int spatial_size = solver.nx * solver.nz;
@@ -105,11 +105,11 @@ __global__ void acoustic2nd(
     AcousticCPMLPointer cpml,
     SolverContext solver
 ){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
 
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    if (ix >= solver.x_end() || iz >= solver.nz) return;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static  = is_runtime ? 0 : (Order / 2);
@@ -282,10 +282,17 @@ __global__ void acoustic2nd_adjoint_fused(
     #define GW_AT(n) ( vpb[n]*vpb[n]*dt2 * f.u_now[n] )
 
     // Interior fast-path: aux all 0, g_lx=g_lz=gw -> 2L - L_prev + Lap(gw).
+    // On a DD cut side the bound collapses from abcn + 2*halo to halo: a
+    // cut clears the global PML band, so cut-adjacent cells are genuine
+    // interior cells and must take the SAME fast path (same FP expression)
+    // as the matching single-domain cells — taps read lambda from the
+    // exchanged M-halo and vp from the tile model's halo slice.
     bool pure_interior =
-        (ix >= solver.abcn + 2 * halo) && (ix < solver.nx - solver.abcn - 2 * halo) &&
-        (iz >= (solver.free_surface ? 0 : solver.abcn) + 2 * halo) &&
-        (iz < solver.nz - solver.abcn - 2 * halo);
+        (ix >= (solver.cut_x_lo() ? halo : solver.abcn + 2 * halo)) &&
+        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.abcn + 2 * halo)) &&
+        (iz >= (solver.cut_z_lo() ? halo
+                : (solver.free_surface ? 0 : solver.abcn) + 2 * halo)) &&
+        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.abcn + 2 * halo));
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll
@@ -378,12 +385,18 @@ __global__ void acoustic2nd_nopml(
         M = Order / 2;
     }
 
-    // int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
-    int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
-
-    int top_halo = solver.free_surface ? 2*M: halo;
-    // top_halo = (solver.free_surface && solver.abcn > 0) ? 2*M : top_halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + strip + halo, or 2M without PML); on a DD cut side the
+    // band collapses to the stencil halo M — the cut-adjacent cells are
+    // computed by plain reverse leapfrog reading the per-step exchanged
+    // M-halo of u_now (no PML there; restore skips the cut-face strip).
+    int wide = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hz_lo = solver.cut_z_lo() ? M : (solver.free_surface ? 2*M : wide);
+    int hz_hi = solver.cut_z_hi() ? M : wide;
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iz < hz_lo || iz >= solver.nz - hz_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;

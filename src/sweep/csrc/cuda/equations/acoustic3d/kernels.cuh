@@ -50,12 +50,12 @@ static __global__ void acoustic3d_air_clear_kernel(
     float* __restrict__ u_this,
     SolverContext solver
 ){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iy = blockIdx.y * blockDim.y + threadIdx.y;
     int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz) return;
+    if (b >= solver.B || ix >= solver.x_end() || iy >= solver.ny || iz >= solver.nz) return;
     if (!solver.has_topo) return;
     if (iz >= solver.topo_rows[iy * solver.nx + ix]) return;
     int spatial_size = solver.nx * solver.ny * solver.nz;
@@ -87,14 +87,14 @@ __global__ void acoustic_forward_kernel_3d(
     SolverContext solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iy = blockIdx.y * blockDim.y + threadIdx.y;
     int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
 
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
+    if (b >= solver.B || ix >= solver.x_end() || iy >= solver.ny || iz >= solver.nz)
         return;
 
     constexpr bool is_runtime = (Order == -1);
@@ -334,13 +334,19 @@ __global__ void acoustic_adjoint_fused_3d(
     #define GW_AT(n) ( vpb[n]*vpb[n]*dt2 * f.u_now[n] )
 
     // Interior fast-path (aux all 0, g_l*=gw): 2L - L_prev + Lap(gw).
+    // On a DD cut side the bound collapses to the stencil halo so that
+    // cut-adjacent cells take the SAME fast path (same FP expression) as
+    // the matching single-domain interior cells — see acoustic2d.
     int x0 = solver.phys_x0(), x1 = solver.phys_x1();
     int y0 = solver.phys_y0(), y1 = solver.phys_y1();
     int z0 = solver.phys_z0(), z1 = solver.phys_z1();
     bool pure_interior =
-        (ix >= x0 + halo) && (ix < x1 - halo) &&
-        (iy >= y0 + halo) && (iy < y1 - halo) &&
-        (iz >= z0 + halo) && (iz < z1 - halo);
+        (ix >= (solver.cut_x_lo() ? halo : x0 + halo)) &&
+        (ix < (solver.cut_x_hi() ? solver.nx - halo : x1 - halo)) &&
+        (iy >= (solver.cut_y_lo() ? halo : y0 + halo)) &&
+        (iy < (solver.cut_y_hi() ? solver.ny - halo : y1 - halo)) &&
+        (iz >= (solver.cut_z_lo() ? halo : z0 + halo)) &&
+        (iz < (solver.cut_z_hi() ? solver.nz - halo : z1 - halo));
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapy = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll
@@ -460,13 +466,20 @@ __global__ void acoustic_nopml_3d(
         M = Order / 2;
     }
 
-    int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
+    // Per-side exclusion bands; a DD cut side collapses to the stencil
+    // halo M (cut-adjacent cells are computed by plain reverse leapfrog
+    // from the per-step exchanged M-halo) — see acoustic2d nopml.
+    int wide = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hy_lo = solver.cut_y_lo() ? M : wide;
+    int hy_hi = solver.cut_y_hi() ? M : wide;
+    int hz_lo = solver.cut_z_lo() ? M : (solver.free_surface ? 2*M : wide);
+    int hz_hi = solver.cut_z_hi() ? M : wide;
 
-    int top_halo = solver.free_surface ? 2*M : halo;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < top_halo || iz >= solver.nz - halo)
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iy < hy_lo || iy >= solver.ny - hy_hi ||
+        iz < hz_lo || iz >= solver.nz - hz_hi)
         return;
     
     int stride_y = solver.nx;
