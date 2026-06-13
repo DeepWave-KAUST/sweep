@@ -283,7 +283,12 @@ class Warpper(torch.autograd.Function):
             ctx.backward_ckpt_func = backward_ckpt_func
             ctx.backward_recursive_ckpt_func = backward_recursive_ckpt_func
             ctx.forward_source = wavelet
-            ctx.forward_wavefields = forward_wavefields
+            # save_all binds the propagator's persistent buffers; the other
+            # modes (BS/ckpt) pass per-call transient scratch that must NOT
+            # outlive the forward — and their backwards expect an empty list
+            # here (the ckpt recompute allocates its own legacy 7/9-slot
+            # state paired with the u-only swap()).
+            ctx.forward_wavefields = forward_wavefields if save_all_wavefields else ()
             ctx.adjoint_wavefields = adjoint_wavefields
             ctx.adjoint_workspace = adjoint_workspace
             ctx.source_illumination_buffer = source_illumination_buffer
@@ -891,12 +896,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
     def __del__(self):
         self._remove_boundary_disk_cache()
 
-    def _ensure_wavefield_buffers(self, batch_size, need_forward=False, need_adjoint=True):
+    def _ensure_wavefield_buffers(self, batch_size, persist_forward_state=False, need_adjoint=True):
+        # persist_forward_state: keep the forward propagation-state buffers
+        # (u_prev/now/next + psi/zeta, shape [B,1,*spatial]) as persistent,
+        # reused-across-calls tensors. True only in save_all (full) mode,
+        # whose backward replays from these. BS/ckpt/no-grad use per-call
+        # transient state instead (_transient_forward_wavefields) — they are
+        # NOT gated here. This is orthogonal to save_all_wavefields, which
+        # gates the big (nt,B,*spatial) u_allt history array, not this state.
         current_capacity = self._buffer_capacity_batch
         if (
             current_capacity is not None
             and batch_size <= current_capacity
-            and (not need_forward or self.forward_wavefields)
+            and (not persist_forward_state or self.forward_wavefields)
             and (not need_adjoint or self.adjoint_wavefields)
         ):
             return
@@ -925,7 +937,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.forward_wavefields = ()
             self.adjoint_wavefields = ()
 
-        if need_forward and not self.forward_wavefields:
+        if persist_forward_state and not self.forward_wavefields:
             self.forward_wavefields = self.forward_allocator.zeros(wavefield_shapes)
         if need_adjoint and not self.adjoint_wavefields:
             self.adjoint_wavefields = self.adjoint_allocator.zeros(adjoint_wavefield_shapes)
@@ -936,6 +948,25 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
     def _slice_wavefield_buffers(self, batch_size):
         return tuple(t[:batch_size] for t in self.forward_wavefields), tuple(t[:batch_size] for t in self.adjoint_wavefields)
+
+    def _transient_forward_wavefields(self, batch_size):
+        """Per-call zeroed forward wavefields for the non-save_all modes
+        (boundary saving / checkpoint / no-grad forward).
+
+        All wavefield state is allocated Python-side so ``cuda_layout``
+        stays the single layout authority — the C++-internal ``allocate()``
+        once missed the psi double-buffer slots and silently re-enabled the
+        in-place psi RAW race.  Deliberately transient (not the persistent
+        Allocator): propagation scratch with one-call lifetime, exactly like
+        the C++ scratch it replaces, so boundary-saving backward peak memory
+        is unchanged.
+        """
+        cuda_layout = self._cuda_layout()
+        n_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
+        return tuple(
+            torch.zeros([batch_size, 1, *self.shape_cuda], device=self.dev)
+            for _ in range(n_wavefields)
+        )
 
     def _ensure_adjoint_workspace_buffers(self, batch_size):
         cuda_layout = self._cuda_layout()
@@ -1196,7 +1227,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         )
         checkpoint_on_cpu = bool(use_checkpoint and self.ckpt_storage == "cpu")
         save_all_wavefields = bool(requires_backward and not use_boundary_saving and not use_checkpoint)
-        self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_backward)
+        self._ensure_wavefield_buffers(batch_size, persist_forward_state=save_all_wavefields, need_adjoint=requires_backward)
         self._ensure_adjoint_workspace_buffers(batch_size)
         if use_checkpoint:
             if use_recursive_checkpoint:
@@ -1205,6 +1236,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             elif self.backward_ckpt_func is not None:
                 self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
+        if not forward_wavefields:
+            forward_wavefields = self._transient_forward_wavefields(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
         checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_checkpoint else ()
 
@@ -1506,7 +1539,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         models = [m[None, None, ...].repeat(batch_size, *([1] * (m.ndim + 1))) for m in self.models_padded]
         requires_model_grad = any(m.requires_grad for m in models)
         save_all_wavefields = bool(self.ndim == 2 or (requires_model_grad and not use_boundary_saving and not use_ckpt))
-        self._ensure_wavefield_buffers(batch_size, need_forward=save_all_wavefields, need_adjoint=requires_model_grad)
+        self._ensure_wavefield_buffers(batch_size, persist_forward_state=save_all_wavefields, need_adjoint=requires_model_grad)
         self._ensure_adjoint_workspace_buffers(batch_size)
         if use_ckpt:
             if use_recursive_checkpoint:
@@ -1546,7 +1579,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         _C = _get_C()
         fwd = _C.ForwardInput()
-        fwd.wavefields = list(forward_wavefields) if save_all_wavefields else []
+        fwd.wavefields = (
+            list(forward_wavefields) if save_all_wavefields
+            else list(self._transient_forward_wavefields(batch_size))
+        )
         fwd.last_two = last_two
         if boundary_on_disk and use_boundary_saving:
             fwd.boundary_cpu = [b.zero_() for b in boundary_cpu]
@@ -1601,6 +1637,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.checkpoint_count = int(checkpoint_steps.numel()) if use_recursive_checkpoint else self.ckpt_num
 
         u_forward, u_last_two, syn = self.forward_func(fwd)
+        fwd.wavefields = []  # release per-call scratch before the backward half
         # Permute to canonical (B, nt, nrec, nfield) for the user-facing
         # output; RTM is currently single-channel acoustic-only so this
         # always lands as (B, nt, nrec, 1).

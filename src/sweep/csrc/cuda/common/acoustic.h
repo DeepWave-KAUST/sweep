@@ -182,10 +182,20 @@ struct AcousticWavefieldTensor {
     // =========================
     // Allocate (only once)
     // =========================
+    // double_buffer_psi_: pass true at call sites whose stepping pairs with
+    // swap_pml() (the forward time loops).  The stencil kernels neighbour-read
+    // psi* in the same launch that writes the new psi, so the write must land
+    // in psi*n (read-old/write-new, swap_pml() per step) — matching the
+    // Python-bound 9/12-tensor layout.  Without it the kernel falls back to
+    // the legacy in-place write, an intra-launch RAW race (nondeterministic
+    // at ulp level in 3-D).  Call sites that pair with the u-only swap()
+    // (checkpoint recompute, adjoint states) must keep the default: they
+    // never swap psi, so a psi*n write would be lost.
     void allocate(
         const torch::Tensor& vp,
         int dim_,
-        bool use_pml_ = true
+        bool use_pml_ = true,
+        bool double_buffer_psi_ = false
     )
     {
         if (allocated) return;
@@ -208,6 +218,13 @@ struct AcousticWavefieldTensor {
             if (dim == 3) {
                 psiy_t  = torch::zeros_like(vp);
                 zetay_t = torch::zeros_like(vp);
+            }
+
+            if (double_buffer_psi_) {
+                psixn_t = torch::zeros_like(vp);
+                psizn_t = torch::zeros_like(vp);
+                if (dim == 3) psiyn_t = torch::zeros_like(vp);
+                double_buffer_psi = true;
             }
         }
 

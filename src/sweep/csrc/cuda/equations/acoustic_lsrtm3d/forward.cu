@@ -71,8 +71,8 @@ ForwardOutput forward(const ForwardInput& in) {
         bg.bind(slice_wavefields(p.wavefields, 0, 12), 3, true);
         sc.bind(slice_wavefields(p.wavefields, 12, 12), 3, true);
     } else {
-        bg.allocate(vp, 3, true);
-        sc.allocate(vp, 3, true);
+        bg.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+        sc.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     }
 
     AcousticCPMLTensor cpml_tensor;

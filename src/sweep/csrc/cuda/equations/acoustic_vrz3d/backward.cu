@@ -72,7 +72,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     if (!in.adjoint_wavefields.empty())
         adjoint.bind(in.adjoint_wavefields, 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz3d(adjoint);
 
     auto grad_vp = torch::zeros_like(vp);
@@ -148,7 +148,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         BUILD_VRZ_GRAD_FIELDS_3D(
             order,
@@ -249,14 +249,16 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     if (!p.adjoint_wavefields.empty())
         adjoint.bind(p.adjoint_wavefields, 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz3d(adjoint);
 
     AcousticWavefieldTensor forward;
+    // Recon steps with the NOPML kernel — u triple buffer only; psi/zeta
+    // would be dead weight (use_pml=false, 3 tensors, like vrz2d/acoustic).
     if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields, 3, true);
+        forward.bind(p.forward_wavefields, 3, false);
     else
-        forward.allocate(vp, 3, true);
+        forward.allocate(vp, 3, false);
 
     forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
@@ -374,7 +376,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
             ctx
         );
 
-        adjoint.swap();
+        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         auto for_view = forward.view();
 
@@ -513,7 +515,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     if (!p.adjoint_wavefields.empty())
         adjoint.bind(p.adjoint_wavefields, 3, true);
     else
-        adjoint.allocate(vp, 3, true);
+        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz3d(adjoint);
 
     AcousticWavefieldTensor forward;
@@ -695,7 +697,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
                 ctx
             );
 
-            adjoint.swap();
+            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
             BUILD_VRZ_GRAD_FIELDS_3D(
                 order,
