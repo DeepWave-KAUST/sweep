@@ -181,9 +181,16 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
 
     float inv_rho = 1.f / rho_b[idx];
 
+    // DD cut faces (solver.cut_mask) carry no PML (per-rank widths zero the
+    // profile there), and the matching cells of the un-split run take the
+    // interior branch.  The PML branch with all-zero coefficients is
+    // mathematically identity but NOT bitwise identical (different FMA
+    // contraction), so the cut-side band must take the interior branch too.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -315,9 +322,12 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
+    // Cut-aware interior band — see elastic_velocity_kernel_3d.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -454,13 +464,23 @@ __global__ void elastic_velocity_kernel_3d_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 1*M+1;
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // collapses to the stencil halo M — there is no PML at a cut, the
+    // restore skips the cut-face strip, and the cut-adjacent cells are
+    // reconstructed by the plain reverse stencil reading the per-phase
+    // exchanged M-halo (see acoustic2nd_nopml / elastic2d nopml kernels).
+    // z is never cut (the elastic backward rejects z cut bits).
+    int wide = solver.abcn + 1*M+1;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hy_lo = solver.cut_y_lo() ? M : wide;
+    int hy_hi = solver.cut_y_hi() ? M : wide;
+    int top_halo = solver.free_surface ? M : wide;
 
-    int top_halo = solver.free_surface ? M: halo;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < top_halo || iz >= solver.nz - halo)
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iy < hy_lo || iy >= solver.ny - hy_hi ||
+        iz < top_halo || iz >= solver.nz - wide)
         return;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
@@ -524,13 +544,23 @@ __global__ void elastic_stress_kernel_3d_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 1*M+1;
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // collapses to the stencil halo M — there is no PML at a cut, the
+    // restore skips the cut-face strip, and the cut-adjacent cells are
+    // reconstructed by the plain reverse stencil reading the per-phase
+    // exchanged M-halo (see acoustic2nd_nopml / elastic2d nopml kernels).
+    // z is never cut (the elastic backward rejects z cut bits).
+    int wide = solver.abcn + 1*M+1;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hy_lo = solver.cut_y_lo() ? M : wide;
+    int hy_hi = solver.cut_y_hi() ? M : wide;
+    int top_halo = solver.free_surface ? M : wide;
 
-    int top_halo = solver.free_surface ? M: halo;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < top_halo || iz >= solver.nz - halo)
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iy < hy_lo || iy >= solver.ny - hy_hi ||
+        iz < top_halo || iz >= solver.nz - wide)
         return;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
@@ -797,6 +827,10 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
@@ -833,9 +867,16 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     float tmp_syzy = f.m_syzy[idx] + bar_dsyz_dy;
     float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
 
+    // DD cut faces (solver.cut_mask) carry no PML and the matching cells
+    // of the un-split run take the interior branch; the cut-side band must
+    // take it too (different FMA contraction on the PML branch — see
+    // elastic_velocity_kernel_3d).  p at cut-side halo cells feeds owned
+    // cells through the apply stencil, so this is required for bitwise DD.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -1127,6 +1168,10 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
@@ -1241,9 +1286,12 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float tmp_vzy = f.m_vzy[idx] + bar_dvz_dy;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
 
+    // Cut-aware interior band — see elastic_velocity_adjoint_prepare_3d.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {

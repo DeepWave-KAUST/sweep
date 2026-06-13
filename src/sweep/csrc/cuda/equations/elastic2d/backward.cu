@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <algorithm>
 
 #include "kernels.cuh"
 #include "elastic2d.h"
@@ -18,13 +19,14 @@ namespace elastic2d {
 
 namespace {
 
-void apply_adjoint_step_2d(
+// Stress-adjoint half of the adjoint step (prepare + apply): reads the
+// adjoint stresses (same-cell), writes the adjoint velocities.
+void apply_stress_adjoint_2d(
     int order,
     const fdtd::LaunchConfig& launch_config,
     ElasticWavefieldTensor& adjoint,
     const torch::Tensor& lambda,
     const torch::Tensor& mu,
-    const torch::Tensor& rho,
     ElasticCPMLPointer cpml_view,
     SGradParam grad_ctx,
     SolverContext solver,
@@ -80,6 +82,23 @@ void apply_adjoint_step_2d(
         solver
     );
 
+}
+
+// Velocity-adjoint half of the adjoint step (prepare + apply): reads the
+// adjoint velocities (same-cell), writes the adjoint stresses.
+void apply_velocity_adjoint_2d(
+    int order,
+    const fdtd::LaunchConfig& launch_config,
+    ElasticWavefieldTensor& adjoint,
+    const torch::Tensor& rho,
+    ElasticCPMLPointer cpml_view,
+    SGradParam grad_ctx,
+    SolverContext solver,
+    ElasticAdjointWorkspaceTensor& workspace
+)
+{
+    auto adj_view = adjoint.view();
+
     LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
         order,
         launch_config.grid,
@@ -106,6 +125,103 @@ void apply_adjoint_step_2d(
         grad_ctx,
         solver
     );
+}
+
+void apply_adjoint_step_2d(
+    int order,
+    const fdtd::LaunchConfig& launch_config,
+    ElasticWavefieldTensor& adjoint,
+    const torch::Tensor& lambda,
+    const torch::Tensor& mu,
+    const torch::Tensor& rho,
+    ElasticCPMLPointer cpml_view,
+    SGradParam grad_ctx,
+    SolverContext solver,
+    ElasticAdjointWorkspaceTensor& workspace
+)
+{
+    apply_stress_adjoint_2d(order, launch_config, adjoint, lambda, mu,
+                            cpml_view, grad_ctx, solver, workspace);
+    apply_velocity_adjoint_2d(order, launch_config, adjoint, rho,
+                              cpml_view, grad_ctx, solver, workspace);
+}
+
+// Validate the stepped-backward segment fields (bw_it_begin/bw_it_end),
+// the DD cut mask and the backward phase split for the elastic2d entry
+// points.  ``need_recon`` is true for boundary-saving mode, where the
+// 7-tensor reconstruction list must be Python-owned to survive segments.
+void check_stepped_backward_elastic_2d(const BackwardInput& p, bool need_recon)
+{
+    const int it_hi = p.bw_begin();
+    const int it_lo = p.bw_it_end;
+    TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+                "stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
+                it_lo, ", ", it_hi, ") with nt=", p.nt);
+    TORCH_CHECK((p.cut_face_mask & ~0xF) == 0,
+                "2D cut_face_mask uses bits 0..3 (x_lo, x_hi, z_lo, z_hi) only, got ",
+                p.cut_face_mask);
+    TORCH_CHECK(p.step_phase >= 0 && p.step_phase <= 2,
+                "elastic backward step_phase must be 0, 1 or 2");
+    const bool phased = (p.step_phase != 0);
+    if (phased) {
+        TORCH_CHECK(need_recon,
+                    "phased elastic backward (step_phase) is only supported "
+                    "for the boundary-saving path (backward_bs)");
+        TORCH_CHECK(it_hi == it_lo + 1,
+                    "elastic backward phase-split requires a single-step "
+                    "segment (bw_it_begin == bw_it_end + 1)");
+    }
+    if (need_recon && p.cut_face_mask != 0) {
+        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
+                    "domain-decomposed backward_bs (cut_face_mask) supports "
+                    "gpu-direct boundary storage only "
+                    "(boundary_on_cpu/boundary_on_disk unsupported in v1)");
+    }
+    if (!p.bw_stepped() && !phased)
+        return;
+    TORCH_CHECK(p.adjoint_wavefields.size() == 15,
+                "stepped elastic backward requires the 15-tensor adjoint "
+                "wavefield list bound from Python");
+    TORCH_CHECK(p.grads_out.size() == p.models.size(),
+                "stepped elastic backward requires Python-bound grads_out "
+                "(one per model: vp, vs, rho — elastic computes no "
+                "grad_wavelet)");
+    TORCH_CHECK(p.illum_out.empty(),
+                "elastic backward computes no illuminations; illum_out must "
+                "be empty");
+    if (need_recon) {
+        TORCH_CHECK(p.forward_wavefields.size() == 7,
+                    "stepped elastic backward_bs requires the 7-tensor "
+                    "reconstruction list [vx, vz, sxx, szz, sxz, fvx_prev, "
+                    "fvz_prev] bound from Python");
+        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
+                    "stepped backward_bs supports gpu-direct boundary storage "
+                    "only (boundary_on_cpu/boundary_on_disk unsupported in v1)");
+    }
+}
+
+// Bind the three model-gradient accumulators from Python when provided
+// (stepped), else fall back to internal zero allocation (legacy
+// monolithic behaviour).  Bound tensors are accumulated "+=" and NOT
+// zeroed here — Python zeroes them once before the first segment.
+void bind_elastic_grads(
+    const BackwardInput& p,
+    torch::Tensor& grad_vp,
+    torch::Tensor& grad_vs,
+    torch::Tensor& grad_rho)
+{
+    if (!p.grads_out.empty()) {
+        TORCH_CHECK(p.grads_out.size() == 3,
+                    "elastic grads_out must hold exactly {grad_vp, grad_vs, "
+                    "grad_rho}");
+        grad_vp = p.grads_out[0];
+        grad_vs = p.grads_out[1];
+        grad_rho = p.grads_out[2];
+    } else {
+        grad_vp = torch::zeros_like(p.models[0]);
+        grad_vs = torch::zeros_like(p.models[0]);
+        grad_rho = torch::zeros_like(p.models[0]);
+    }
 }
 
 int find_previous_checkpoint_idx(
@@ -384,6 +500,14 @@ BackwardOutput backward(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
+    check_stepped_backward_elastic_2d(p, /*need_recon=*/false);
+    // Segment bounds: process [it_lo, it_hi) in descending order.  Defaults
+    // (bw_it_begin = -1 => nt, bw_it_end = 0) reproduce the monolithic call.
+    // it == 0 keeps its legacy asymmetry (gradient only, no adjoint step)
+    // and runs in whichever segment contains it — position-based, so any
+    // partition reproduces the monolithic loop bit-for-bit.
+    const int it_hi = p.bw_begin();
+    const int it_lo = p.bw_it_end;
     BackwardOutput out;
 
     float dx = p.spacing[0];
@@ -409,6 +533,8 @@ BackwardOutput backward(const BackwardInput& in)
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
+    // DD: cut-aware PML predicates in the adjoint prepare kernels.
+    solver.cut_mask = p.cut_face_mask;
 
     ElasticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -421,9 +547,8 @@ BackwardOutput backward(const BackwardInput& in)
 
     auto adj_view = adjoint.view();
 
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_vs = torch::zeros_like(vp);
-    auto grad_rho = torch::zeros_like(vp);
+    torch::Tensor grad_vp, grad_vs, grad_rho;
+    bind_elastic_grads(p, grad_vp, grad_vs, grad_rho);
     ElasticAdjointWorkspaceTensor workspace;
     init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
@@ -439,7 +564,7 @@ BackwardOutput backward(const BackwardInput& in)
 
     auto zero_velocity = torch::zeros_like(vp);
 
-    for (int it = p.nt - 1; it >= 0; --it) {
+    for (int it = it_hi - 1; it >= it_lo; --it) {
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -518,6 +643,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
+    TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
+                "checkpoint backward does not support bw_it_begin/bw_it_end, "
+                "step_phase or cut_face_mask in v1");
 
     TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
     TORCH_CHECK(p.checkpoints.size() == 15, "Elastic 2D checkpointing expects 15 checkpoint tensors");
@@ -633,6 +761,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
+    TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
+                "checkpoint backward does not support bw_it_begin/bw_it_end, "
+                "step_phase or cut_face_mask in v1");
 
     TORCH_CHECK(p.checkpoints.size() == 15, "Elastic 2D recursive checkpointing expects 15 checkpoint tensors");
 
@@ -804,6 +935,22 @@ BackwardOutput backward_bs(const BackwardInput& in)
     const auto& p = in;
     BackwardOutput out;
 
+    check_stepped_backward_elastic_2d(p, /*need_recon=*/true);
+    // Segment bounds: process [it_lo, it_hi) in descending order.  Defaults
+    // (bw_it_begin = -1 => nt, bw_it_end = 0) reproduce the monolithic call.
+    // The elastic BS loop legacy floor is it == 1 (no it==0 tail), so the
+    // segment containing it == 0 simply runs nothing extra.
+    const int it_hi = p.bw_begin();
+    const int it_lo = p.bw_it_end;
+    const bool first_segment = (it_hi == static_cast<int>(p.nt));
+    // Phase split (DD): 1 = inject + stress recon/restore + gradient +
+    // stress adjoint; 2 = velocity adjoint + fv_prev capture + velocity
+    // recon/restore.  The driver exchanges the adjoint-velocity and
+    // recon-stress halos between phases, and the adjoint-stress and
+    // recon-velocity halos after phase 2 (each M wide).
+    const bool do_p1 = (p.step_phase != 2);
+    const bool do_p2 = (p.step_phase != 1);
+
     float dx = p.spacing[0];
     float dz = p.spacing[1];
 
@@ -829,37 +976,61 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
+    // DD: skip cut faces in the strip restore, collapse the NOPML exclusion
+    // bands to the stencil halo on cut sides, and route cut-side cells of
+    // the adjoint prepare kernels through the interior branch.
+    solver.cut_mask = p.cut_face_mask;
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
-    auto f_this = torch::zeros_like(vp); // for gradient calculation
-    
     ElasticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2);
+
+    // Reconstruction state: 5 physical fields plus the carried fv*_prev
+    // velocities (v at time it+1, consumed by the gradient kernel).  When
+    // stepping, all 7 must be Python-owned to survive segment boundaries.
     ElasticWavefieldTensor forward;
+    torch::Tensor fvx_prev, fvz_prev;
+    if (!p.forward_wavefields.empty()) {
+        TORCH_CHECK(p.forward_wavefields.size() == 7,
+                    "elastic2d backward_bs reconstruction list must hold 7 "
+                    "tensors [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]; got ",
+                    p.forward_wavefields.size());
+        forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(),
+                                                p.forward_wavefields.begin() + 5),
+                     /*use_pml=*/false);
+        fvx_prev = p.forward_wavefields[5];
+        fvz_prev = p.forward_wavefields[6];
+    } else {
+        forward.allocate(vp, 2, false);
+        fvx_prev = torch::zeros_like(vp);
+        fvz_prev = torch::zeros_like(vp);
+    }
 
     auto mu  = rho * vs * vs;
     auto lambda = rho * (vp * vp - 2 * vs * vs);
 
-    // Copy last step of forward wavefield from u_last_two
-    forward.allocate(vp, 2, false);
-    forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
-    forward.vz_t.copy_(p.u_last_two.select(0,1).select(0,0));
-    forward.sxx_t.copy_(p.u_last_two.select(0,2).select(0,0));
-    forward.szz_t.copy_(p.u_last_two.select(0,3).select(0,0));
-    forward.sxz_t.copy_(p.u_last_two.select(0,4).select(0,0));
+    // Seed the reverse reconstruction from the saved last snapshot — FIRST
+    // segment only (and not on a phase-2 re-entry); re-running this
+    // mid-stream would clobber the carried reconstruction state.
+    if (first_segment && do_p1) {
+        forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
+        forward.vz_t.copy_(p.u_last_two.select(0,1).select(0,0));
+        forward.sxx_t.copy_(p.u_last_two.select(0,2).select(0,0));
+        forward.szz_t.copy_(p.u_last_two.select(0,3).select(0,0));
+        forward.sxz_t.copy_(p.u_last_two.select(0,4).select(0,0));
+    }
 
     auto neg_forward_source = -p.forward_source;
 
     // Generate pointer views
     auto for_view = forward.view();
     auto adj_view = adjoint.view();
-    
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_vs = torch::zeros_like(vp);
-    auto grad_rho = torch::zeros_like(vp);
+
+    torch::Tensor grad_vp, grad_vs, grad_rho;
+    bind_elastic_grads(p, grad_vp, grad_vs, grad_rho);
     ElasticAdjointWorkspaceTensor workspace;
     init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
@@ -885,16 +1056,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
-    // Set boundarys of the last frame to be zeors
-    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vx, solver.abcn+solver.M, nx, nz);
-    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.vz, solver.abcn+solver.M, nx, nz);
-    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.szz, solver.abcn+solver.M, nx, nz);
-    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxx, solver.abcn+solver.M, nx, nz);
-    // set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.sxz, solver.abcn+solver.M, nx, nz);
-
-    auto fvz_prev = torch::zeros_like(vp);
-    auto fvx_prev = torch::zeros_like(vp);
-
     AsyncCopyContext async_copy(staged_boundary);
     BoundaryRuntime boundary_runtime(
         boundary_saver,
@@ -911,10 +1072,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
-    // auto u_all_for = torch::zeros({nt, B, 1, nz, nx}, vp.options());
-    // auto u_all_adj = torch::zeros({nt, B, 1, nz, nx}, vp.options());
+    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
 
-    for (int it = p.nt - 1; it >= 1; --it) {
+        if (do_p1) {
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
@@ -995,12 +1155,26 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         );
 
-        apply_adjoint_step_2d(
+        apply_stress_adjoint_2d(
             order,
             launch_config,
             adjoint,
             lambda,
             mu,
+            cpml_view,
+            grad_ctx,
+            solver,
+            workspace
+        );
+
+        }  // do_p1
+
+        if (do_p2) {
+
+        apply_velocity_adjoint_2d(
+            order,
+            launch_config,
+            adjoint,
             rho,
             cpml_view,
             grad_ctx,
@@ -1042,15 +1216,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
 
-        // u_all_for[it].copy_(forward.vz_t); // for visualization
-        // u_all_adj[it].copy_(adjoint.vz_t); // for visualization
+        }  // do_p2
     }
 
     out.grads = {grad_vp, grad_vs, grad_rho};
     return out;
 
 }
-
 
 // ---------------------------------------------------------------------------
 // APM backward — full & boundary-saving modes.
@@ -1153,6 +1325,9 @@ BackwardOutput apm_backward(const BackwardInput& in)
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
+    TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
+                "APM backward does not support bw_it_begin/bw_it_end, "
+                "step_phase or cut_face_mask in v1");
 
     TORCH_CHECK(p.models.size() >= 11,
         "elastic2d::apm_backward expects 11-tensor models list "
@@ -1285,6 +1460,9 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
     BackwardOutput out;
+    TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
+                "APM backward does not support bw_it_begin/bw_it_end, "
+                "step_phase or cut_face_mask in v1");
 
     TORCH_CHECK(p.models.size() >= 11,
         "elastic2d::apm_backward_bs expects 11-tensor models list");

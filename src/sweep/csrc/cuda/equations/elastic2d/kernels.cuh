@@ -320,10 +320,19 @@ __global__ void elastic_velocity_kernel_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + M+1;
-
-    int top_halo = solver.free_surface ? M: halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // collapses to the stencil halo M — there is no PML at a cut, the
+    // restore skips the cut-face strip, and the cut-adjacent cells are
+    // reconstructed by the plain reverse stencil reading the per-phase
+    // exchanged M-halo (see acoustic2nd_nopml).
+    int wide = solver.abcn + M+1;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hz_lo = (solver.cut_z_lo() || solver.free_surface) ? M : wide;
+    int hz_hi = solver.cut_z_hi() ? M : wide;
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iz < hz_lo || iz >= solver.nz - hz_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -371,10 +380,19 @@ __global__ void elastic_stress_kernel_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + M+1;
-
-    int top_halo = solver.free_surface ? M: halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // collapses to the stencil halo M — there is no PML at a cut, the
+    // restore skips the cut-face strip, and the cut-adjacent cells are
+    // reconstructed by the plain reverse stencil reading the per-phase
+    // exchanged M-halo (see acoustic2nd_nopml).
+    int wide = solver.abcn + M+1;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hz_lo = (solver.cut_z_lo() || solver.free_surface) ? M : wide;
+    int hz_hi = solver.cut_z_hi() ? M : wide;
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iz < hz_lo || iz >= solver.nz - hz_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -526,9 +544,15 @@ __global__ void elastic_stress_adjoint_prepare(
     // q* outputs collapse to bar_dv*_d* and the four m_v* writes become
     // 0 -> 0. Skip them — saves 4 reads + 4 writes per interior cell.
     // Matches the forward elastic_stress_kernel fast-path (line 230).
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // DD cut faces (solver.cut_mask) carry no PML; the matching cells of
+    // the un-split run take the interior branch, so the cut-side band must
+    // take it too (the zero-coefficient PML branch is mathematically the
+    // identity but not bitwise identical — q at cut-side halo cells feeds
+    // owned cells through the apply stencil).
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iz < (solver.free_surface ? halo : solver.abcn + halo)) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -648,9 +672,11 @@ __global__ void elastic_velocity_adjoint_prepare(
     // elastic_stress_adjoint_prepare above: ax/az/bx/bz vanish outside the
     // PML band, m_s* aux fields stay 0, so the four p* outputs collapse to
     // the bar_ds*_d* values and the four m_s* writes become 0 -> 0.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // DD cut faces take the interior branch (see stress prepare above).
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iz < (solver.free_surface ? halo : solver.abcn + halo)) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;
