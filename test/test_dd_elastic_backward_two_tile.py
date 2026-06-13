@@ -323,6 +323,8 @@ def build_tiles_2d(src_gx, free_surface, residual_raw):
         t.owns_src = owns_src
         t.cut_face_mask = X_HI_BIT if xi == 0 else X_LO_BIT
         t.x_off = x0
+        t.lo = prop.padding[0] + M       # cut-aware x interior offset
+        t.hi = t.lo + NXP2
 
         # this tile's receivers' traces of the shared synthetic residual
         adj = torch.zeros_like(t.bp.adjoint_source)
@@ -339,21 +341,21 @@ def replay_dd_forward_2d(tiles, global_models_t):
     exchange v M-wide -> phase 2 (s + save tail) -> exchange s M-wide."""
     with torch.no_grad():
         for t in tiles:
+            t.fp.cut_face_mask = t.cut_face_mask
+            start = PAD + t.x_off - t.lo
             for mt, mf in zip(t.fp.models, global_models_t):
-                sl = mf[..., :, t.x_off:t.x_off + NXP2 + 2 * PAD]
-                mt.copy_(sl)
+                mt.copy_(mf[..., :, start:start + mt.shape[-1]])
             for mt, mf in zip(t.bp.models, global_models_t):
-                sl = mf[..., :, t.x_off:t.x_off + NXP2 + 2 * PAD]
-                mt.copy_(sl)
+                mt.copy_(mf[..., :, start:start + mt.shape[-1]])
 
         r0, r1 = tiles[0].fwd_runner(), tiles[1].fwd_runner()
-        lo, hi = PAD, PAD + NXP2
+        lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
 
         def _swap(L0, L1, slots):
             for f in slots:
                 a, b = L0[f], L1[f]
-                a[..., hi:hi + M] = b[..., lo:lo + M]
-                b[..., lo - M:lo] = a[..., hi - M:hi]
+                a[..., hi0:hi0 + M] = b[..., lo1:lo1 + M]
+                b[..., lo1 - M:lo1] = a[..., hi0 - M:hi0]
 
         for it in range(NT2):
             r0.run_phase(it + 1, 1)
@@ -374,12 +376,12 @@ def replay_dd_backward_2d(tiles):
         t.zero_backward_state()
         t.bp.cut_face_mask = t.cut_face_mask
     b0, b1 = tiles[0].bwd_runner(), tiles[1].bwd_runner()
-    lo, hi = PAD, PAD + NXP2
+    lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
 
     def _swap(pairs):
         for a, b in pairs:
-            a[..., hi:hi + M] = b[..., lo:lo + M]
-            b[..., lo - M:lo] = a[..., hi - M:hi]
+            a[..., hi0:hi0 + M] = b[..., lo1:lo1 + M]
+            b[..., lo1 - M:lo1] = a[..., hi0 - M:hi0]
 
     adj_v = list(zip(b0.L_adj[:NV[2]], b1.L_adj[:NV[2]]))
     adj_s = list(zip(b0.L_adj[NV[2]:NPHYS[2]], b1.L_adj[NV[2]:NPHYS[2]]))
@@ -443,13 +445,14 @@ def test_dd_elastic_backward_two_tile_bitexact(src_gx, free_surface):
 
     # ---------------- assemble + compare (owned slices) ----------------
     t0, t1 = tiles
-    own = slice(PAD, PAD + NXP2)
+    own0 = slice(t0.lo, t0.lo + NXP2)
+    own1 = slice(t1.lo, t1.lo + NXP2)
     for k, name in enumerate(["grad_vp", "grad_vs", "grad_rho"]):
         g_ref = ref.gbufs[k]
-        assert torch.equal(t0.gbufs[k][..., own], g_ref[..., PAD:PAD + NXP2]), \
+        assert torch.equal(t0.gbufs[k][..., own0], g_ref[..., PAD:PAD + NXP2]), \
             f"tile0 {name} differs (bitwise)"
         assert torch.equal(
-            t1.gbufs[k][..., own], g_ref[..., PAD + NXP2:PAD + 2 * NXP2]
+            t1.gbufs[k][..., own1], g_ref[..., PAD + NXP2:PAD + 2 * NXP2]
         ), f"tile1 {name} differs (bitwise)"
 
 
@@ -501,6 +504,8 @@ def build_tiles_3d(free_surface, residual_raw):
         t.owns_src = owns_src
         t.cut_face_mask = X_HI_BIT if xi == 0 else X_LO_BIT
         t.x_off = x0
+        t.lo = prop.padding[0] + M       # cut-aware x interior offset
+        t.hi = t.lo + NXP3
         # elastic3d FORWARD kernels are cut-aware (E1): the forward replay
         # needs the mask too, or cut-adjacent owned cells take the
         # zero-coefficient PML branch and diverge in the last ulp.
@@ -518,21 +523,20 @@ def build_tiles_3d(free_surface, residual_raw):
 def replay_dd_forward_3d(tiles, global_models_t):
     with torch.no_grad():
         for t in tiles:
+            start = PAD + t.x_off - t.lo
             for mt, mf in zip(t.fp.models, global_models_t):
-                sl = mf[..., :, :, t.x_off:t.x_off + NXP3 + 2 * PAD]
-                mt.copy_(sl)
+                mt.copy_(mf[..., :, :, start:start + mt.shape[-1]])
             for mt, mf in zip(t.bp.models, global_models_t):
-                sl = mf[..., :, :, t.x_off:t.x_off + NXP3 + 2 * PAD]
-                mt.copy_(sl)
+                mt.copy_(mf[..., :, :, start:start + mt.shape[-1]])
 
         r0, r1 = tiles[0].fwd_runner(), tiles[1].fwd_runner()
-        lo, hi = PAD, PAD + NXP3
+        lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
 
         def _swap(L0, L1, slots):
             for f in slots:
                 a, b = L0[f], L1[f]
-                a[..., hi:hi + M] = b[..., lo:lo + M]
-                b[..., lo - M:lo] = a[..., hi - M:hi]
+                a[..., hi0:hi0 + M] = b[..., lo1:lo1 + M]
+                b[..., lo1 - M:lo1] = a[..., hi0 - M:hi0]
 
         for it in range(NT3):
             r0.run_phase(it + 1, 1)
@@ -552,12 +556,12 @@ def replay_dd_backward_3d(tiles):
         t.zero_backward_state()
         t.bp.cut_face_mask = t.cut_face_mask
     b0, b1 = tiles[0].bwd_runner(), tiles[1].bwd_runner()
-    lo, hi = PAD, PAD + NXP3
+    lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
 
     def _swap(pairs):
         for a, b in pairs:
-            a[..., hi:hi + M] = b[..., lo:lo + M]
-            b[..., lo - M:lo] = a[..., hi - M:hi]
+            a[..., hi0:hi0 + M] = b[..., lo1:lo1 + M]
+            b[..., lo1 - M:lo1] = a[..., hi0 - M:hi0]
 
     adj_v = list(zip(b0.L_adj[:NV[3]], b1.L_adj[:NV[3]]))
     adj_s = list(zip(b0.L_adj[NV[3]:NPHYS[3]], b1.L_adj[NV[3]:NPHYS[3]]))
@@ -613,13 +617,14 @@ def test_dd_elastic_backward_two_tile_3d_bitexact(free_surface):
     replay_dd_backward_3d(tiles)
 
     t0, t1 = tiles
-    own = slice(PAD, PAD + NXP3)
+    own0 = slice(t0.lo, t0.lo + NXP3)
+    own1 = slice(t1.lo, t1.lo + NXP3)
     for k, name in enumerate(["grad_vp", "grad_vs", "grad_rho"]):
         g_ref = ref.gbufs[k]
-        assert torch.equal(t0.gbufs[k][..., own], g_ref[..., PAD:PAD + NXP3]), \
+        assert torch.equal(t0.gbufs[k][..., own0], g_ref[..., PAD:PAD + NXP3]), \
             f"tile0 {name} differs (bitwise)"
         assert torch.equal(
-            t1.gbufs[k][..., own], g_ref[..., PAD + NXP3:PAD + 2 * NXP3]
+            t1.gbufs[k][..., own1], g_ref[..., PAD + NXP3:PAD + 2 * NXP3]
         ), f"tile1 {name} differs (bitwise)"
 
 

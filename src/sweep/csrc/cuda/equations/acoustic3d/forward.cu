@@ -56,6 +56,10 @@ ForwardOutput forward(const ForwardInput& in)
         ctx.topo_rows = p.topo_rows.data_ptr<int>();
         ctx.has_topo  = true;
     }
+    // Cut-aware physical bounds: a cut face carries only the M halo (no abcn
+    // PML pad), so phys_x0()/phys_x1()/... must shrink there. 0 = single
+    // domain (every bound collapses to the legacy abcn+M).
+    ctx.cut_mask = p.cut_face_mask;
 
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(nt) : p.it_end;
@@ -66,7 +70,6 @@ ForwardOutput forward(const ForwardInput& in)
 
     // ---- DD phase-split step (comm/compute overlap) ----
     const int phase = p.step_phase;
-    const int pad_x = abcn + M;
     const bool cut_x_lo = (p.cut_face_mask & 1) != 0;
     const bool cut_x_hi = (p.cut_face_mask & 2) != 0;
     if (phase != 0) {
@@ -80,9 +83,9 @@ ForwardOutput forward(const ForwardInput& in)
         TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
                     "phased forward v1 supports x-face cuts only (bits 0/1), got ",
                     p.cut_face_mask);
-        TORCH_CHECK(nx >= 2 * (pad_x + M),
-                    "tile too narrow for phase-split strips: nx=", nx,
-                    " < 2*(abcn+2M)=", 2 * (pad_x + M));
+        TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * M,
+                    "tile too narrow for phase-split strips: nx_phys=",
+                    ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * M);
     }
 
     AcousticWavefieldTensor wavefield;
@@ -252,14 +255,14 @@ ForwardOutput forward(const ForwardInput& in)
         if (phase == 1) {
             // Boundary phase: ONLY the cut-adjacent M-wide physical edge
             // strips — exactly what the halo exchange sends.
-            if (cut_x_lo) launch_stencil(pad_x, pad_x + M);
-            if (cut_x_hi) launch_stencil(nx - pad_x - M, nx - pad_x);
+            if (cut_x_lo) launch_stencil(ctx.phys_x0(), ctx.phys_x0() + M);
+            if (cut_x_hi) launch_stencil(ctx.phys_x1() - M, ctx.phys_x1());
         } else if (phase == 2) {
             // Interior phase: strict complement of the phase-1 strips (no
             // overlap — re-running a strip cell would double-advance its
             // CPML psi double-buffer write).
-            launch_stencil(cut_x_lo ? pad_x + M : 0,
-                           cut_x_hi ? nx - pad_x - M : nx);
+            launch_stencil(cut_x_lo ? ctx.phys_x0() + M : 0,
+                           cut_x_hi ? ctx.phys_x1() - M : nx);
         } else {
             launch_stencil(0, nx);
         }

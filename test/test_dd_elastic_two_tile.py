@@ -200,7 +200,7 @@ def test_two_tile_elastic_bitexact(src_gx, free_surface):
     assert record_full.abs().max() > 0, "reference record all zero"
 
     # ---------------- two tiles ----------------
-    runners, records, rec_split = [], [], []
+    runners, records, rec_split, los = [], [], [], []
     for xi in range(2):
         topo = MeshTopology(py=1, px=2, shot_groups=1, world_size=2, rank=xi)
         x0 = xi * nxp
@@ -225,19 +225,31 @@ def test_two_tile_elastic_bitexact(src_gx, free_surface):
         runner, record = make_runner(
             prop, tile_wavelet, tile_sources, tile_receivers, tile_models
         )
-        # Static halo: true neighbour model values in the pad columns.
-        fix_tile_models(runner.p, runner_full.p, x0)
+        # cut faces so the forward in_pml split uses the cut-aware phys bounds
+        # matching the asymmetric pad.
+        cm = 0
+        if topo.neighbour_rank("x", -1) is not None:
+            cm |= 1
+        if topo.neighbour_rank("x", +1) is not None:
+            cm |= 2
+        runner.p.cut_face_mask = cm
+        lo_x = prop.padding[0] + M
+        los.append(lo_x)
+        # Static halo: true neighbour model values in the pad columns. The
+        # tile's runtime column 0 maps to global runtime column PAD + x0 - lo_x.
+        fix_tile_models(runner.p, runner_full.p, PAD + x0 - lo_x)
         runners.append(runner)
         records.append(record)
 
     r0, r1 = runners
-    lo, hi = PAD, PAD + nxp
+    lo0, hi0 = los[0], los[0] + nxp
+    lo1, hi1 = los[1], los[1] + nxp
 
     def _swap_fields(slots, width):
         for f in slots:
             a, b = r0.L[f], r1.L[f]
-            a[..., hi:hi + width] = b[..., lo:lo + width]
-            b[..., lo - width:lo] = a[..., hi - width:hi]
+            a[..., hi0:hi0 + width] = b[..., lo1:lo1 + width]
+            b[..., lo1 - width:lo1] = a[..., hi0 - width:hi0]
 
     # Half-step protocol: the per-step error path "stale transverse CPML
     # memory in the halo columns -> locally recomputed halo v -> owned s"
@@ -264,9 +276,10 @@ def test_two_tile_elastic_bitexact(src_gx, free_surface):
     # final state over each tile's physical region — every wavefield slot
     # (5 physical + 10 CPML memories) must be bitwise identical.
     for xi, r in enumerate(runners):
+        lo_x = los[xi]
         for f in range(NWF):
             ref = runner_full.L[f][..., PAD + xi * nxp: PAD + xi * nxp + nxp]
-            got = r.L[f][..., lo:hi]
+            got = r.L[f][..., lo_x:lo_x + nxp]
             assert torch.equal(got, ref), (
                 f"tile {xi} wavefield slot {f} differs over physical region"
             )

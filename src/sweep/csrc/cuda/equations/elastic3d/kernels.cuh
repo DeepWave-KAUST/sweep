@@ -1594,9 +1594,16 @@ __global__ void elastic3d_velocity_kernel_apm(
     float iry = invry_b[idx];
     float irz = invrz_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware interior split: a DD cut face has zero PML coefficients, so its
+    // interior takes the fast path (matches the backward kernels). z is never
+    // split in v1 (cut_z_* == false), so its terms are unchanged; a single
+    // domain (no cuts) collapses to the legacy symmetric split bit-for-bit.
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iy < solver.abcn + halo) && !solver.cut_y_lo()) ||
+                  ((iy >= solver.ny - solver.abcn - halo) && !solver.cut_y_hi()) ||
+                  ((iz < solver.abcn + halo) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * irx * (dsxx_dx + dsxy_dy + dsxz_dz);
@@ -1734,9 +1741,16 @@ __global__ void elastic3d_stress_kernel_apm(
     float lzx  = lzzxx_b[idx], lzy  = lzzyy_b[idx];
     float mxy  = muxy_b[idx],  mxz  = muxz_b[idx],  myz  = muyz_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware interior split: a DD cut face has zero PML coefficients, so its
+    // interior takes the fast path (matches the backward kernels). z is never
+    // split in v1 (cut_z_* == false), so its terms are unchanged; a single
+    // domain (no cuts) collapses to the legacy symmetric split bit-for-bit.
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iy < solver.abcn + halo) && !solver.cut_y_lo()) ||
+                  ((iy >= solver.ny - solver.abcn - halo) && !solver.cut_y_hi()) ||
+                  ((iz < solver.abcn + halo) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * (axx * dvx_dx + lxy * dvy_dy + lxz * dvz_dz);

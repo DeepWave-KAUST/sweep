@@ -268,6 +268,10 @@ def build_tiles(residual_raw):
         t.owns_src = owns_src
         t.cut_face_mask = X_HI_BIT if xi == 0 else X_LO_BIT
         t.x_off = xi * NXP  # run-grid offset of the tile in the global grid
+        # cut-aware interior offset: edge side keeps abcn+M, cut side carries
+        # only M (prop.padding is F.pad order, x_lo at index 0).
+        t.lo = prop.padding[0] + M
+        t.hi = t.lo + NXP
 
         # this tile's receivers' traces of the shared synthetic residual
         adj = torch.zeros_like(t.bp.adjoint_source)
@@ -287,18 +291,26 @@ def replay_dd_forward(tiles, global_model):
         # halo (the fused adjoint reads vp at stencil taps); overwrite the
         # edge-replicated padding with the global padded slice.
         for t in tiles:
-            sl = global_model[..., :, t.x_off:t.x_off + NXP + 2 * PAD]
+            # the forward also needs its cut faces so the in_pml split uses the
+            # cut-aware phys bounds matching the asymmetric pad (the backward
+            # already sets bp.cut_face_mask in replay_dd_backward).
+            t.fp.cut_face_mask = t.cut_face_mask
+            # per-side slice: tile runtime ix=0 maps to global_model column
+            # (PAD + x_off - t.lo); width = the tile's runtime model width.
+            start = PAD + t.x_off - t.lo
+            w = t.fp.models[0].shape[-1]
+            sl = global_model[..., :, start:start + w]
             t.fp.models[0].copy_(sl)
             t.bp.models[0].copy_(sl)
 
         r0, r1 = tiles[0].fwd_runner(), tiles[1].fwd_runner()
-        lo, hi = PAD, PAD + NXP
+        lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
         for it in range(NT):
             r0.run_to(it + 1)
             r1.run_to(it + 1)
             u0, u1 = r0.u_now, r1.u_now
-            u0[..., hi:hi + M] = u1[..., lo:lo + M]
-            u1[..., lo - M:lo] = u0[..., hi - M:hi]
+            u0[..., hi0:hi0 + M] = u1[..., lo1:lo1 + M]
+            u1[..., lo1 - M:lo1] = u0[..., hi0 - M:hi0]
 
         # hand the DD-consistent forward products to the backward inputs
         # (normally the same storages already, but rebind to be explicit)
@@ -313,7 +325,7 @@ def replay_dd_backward(tiles):
         t.zero_backward_state()
         t.bp.cut_face_mask = t.cut_face_mask
     r0, r1 = tiles[0].bwd_runner(), tiles[1].bwd_runner()
-    lo, hi = PAD, PAD + NXP
+    lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
     with torch.no_grad():
         for it in range(NT - 1, -1, -1):
             r0.run_segment(it + 1, it)
@@ -321,11 +333,11 @@ def replay_dd_backward(tiles):
             if it == 0:
                 break  # adjoint-only tail: nothing left to consume halos
             l0, l1 = r0.lambda_now, r1.lambda_now
-            l0[..., hi:hi + M] = l1[..., lo:lo + M]
-            l1[..., lo - M:lo] = l0[..., hi - M:hi]
+            l0[..., hi0:hi0 + M] = l1[..., lo1:lo1 + M]
+            l1[..., lo1 - M:lo1] = l0[..., hi0 - M:hi0]
             f0, f1 = r0.recon_u_now, r1.recon_u_now
-            f0[..., hi:hi + M] = f1[..., lo:lo + M]
-            f1[..., lo - M:lo] = f0[..., hi - M:hi]
+            f0[..., hi0:hi0 + M] = f1[..., lo1:lo1 + M]
+            f1[..., lo1 - M:lo1] = f0[..., hi0 - M:hi0]
     assert r0.k_adj == NT and r0.k_f == NT - 1
     assert r1.k_adj == NT and r1.k_f == NT - 1
 
@@ -375,21 +387,22 @@ def test_dd_backward_two_tile_bitexact():
 
     # ---------------- assemble + compare (owned slices) ----------------
     t0, t1 = tiles
-    own = slice(PAD, PAD + NXP)            # owned columns, tile-local
+    own0 = slice(t0.lo, t0.lo + NXP)       # owned columns, per-tile interior
+    own1 = slice(t1.lo, t1.lo + NXP)
     g_ref = ref.gbufs[1]
 
     # grad_vp
-    assert torch.equal(t0.gbufs[1][..., own], g_ref[..., PAD:PAD + NXP]), \
+    assert torch.equal(t0.gbufs[1][..., own0], g_ref[..., PAD:PAD + NXP]), \
         "tile0 grad_vp differs (bitwise)"
-    assert torch.equal(t1.gbufs[1][..., own], g_ref[..., PAD + NXP:PAD + 2 * NXP]), \
+    assert torch.equal(t1.gbufs[1][..., own1], g_ref[..., PAD + NXP:PAD + 2 * NXP]), \
         "tile1 grad_vp differs (bitwise)"
 
     # illuminations
     for k, name in enumerate(["source_illum", "receiver_illum"]):
-        assert torch.equal(t0.ibufs[k][..., own], ref.ibufs[k][..., PAD:PAD + NXP]), \
+        assert torch.equal(t0.ibufs[k][..., own0], ref.ibufs[k][..., PAD:PAD + NXP]), \
             f"tile0 {name} differs (bitwise)"
         assert torch.equal(
-            t1.ibufs[k][..., own], ref.ibufs[k][..., PAD + NXP:PAD + 2 * NXP]
+            t1.ibufs[k][..., own1], ref.ibufs[k][..., PAD + NXP:PAD + 2 * NXP]
         ), f"tile1 {name} differs (bitwise)"
 
     # grad_wavelet from the owning tile (tile1)

@@ -198,6 +198,8 @@ def build_tiles(residual_raw):
         t.rec_idxs = idxs
         t.cut_face_mask = X_HI_BIT if xi == 0 else X_LO_BIT
         t.x_off = x0
+        t.lo = prop.padding[0] + M       # cut-aware x interior offset
+        t.hi = t.lo + NXP
 
         adj = torch.zeros_like(t.bp.adjoint_source)
         for j, gi in enumerate(idxs):
@@ -218,17 +220,20 @@ def test_dd_backward_two_tile_3d_bitexact():
     g_model = ref.fp.models[0]
     with torch.no_grad():
         for t in tiles:
-            sl = g_model[..., :, :, t.x_off:t.x_off + NXP + 2 * PAD]
+            t.fp.cut_face_mask = t.cut_face_mask
+            start = PAD + t.x_off - t.lo
+            w = t.fp.models[0].shape[-1]
+            sl = g_model[..., :, :, start:start + w]
             t.fp.models[0].copy_(sl)
             t.bp.models[0].copy_(sl)
         r0, r1 = tiles[0].fwd_runner(), tiles[1].fwd_runner()
-        lo, hi = PAD, PAD + NXP
+        lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
         for it in range(NT):
             r0.run_to(it + 1)
             r1.run_to(it + 1)
             u0, u1 = r0.u_now, r1.u_now
-            u0[..., hi:hi + M] = u1[..., lo:lo + M]
-            u1[..., lo - M:lo] = u0[..., hi - M:hi]
+            u0[..., hi0:hi0 + M] = u1[..., lo1:lo1 + M]
+            u1[..., lo1 - M:lo1] = u0[..., hi0 - M:hi0]
         for t in tiles:
             t.bp.boundary_gpu = list(t.fp.boundary_gpu)
             t.bp.u_last_two = t.fp.last_two
@@ -267,7 +272,7 @@ def test_dd_backward_two_tile_3d_bitexact():
         t.zero_backward_state()
         t.bp.cut_face_mask = t.cut_face_mask
     b0, b1 = tiles[0].bwd_runner(), tiles[1].bwd_runner()
-    lo, hi = PAD, PAD + NXP
+    lo0, hi0, lo1, hi1 = tiles[0].lo, tiles[0].hi, tiles[1].lo, tiles[1].hi
     with torch.no_grad():
         for it in range(NT - 1, -1, -1):
             b0.run_segment(it + 1, it)
@@ -275,26 +280,27 @@ def test_dd_backward_two_tile_3d_bitexact():
             if it == 0:
                 break
             l0, l1 = b0.lambda_now, b1.lambda_now
-            l0[..., hi:hi + M] = l1[..., lo:lo + M]
-            l1[..., lo - M:lo] = l0[..., hi - M:hi]
+            l0[..., hi0:hi0 + M] = l1[..., lo1:lo1 + M]
+            l1[..., lo1 - M:lo1] = l0[..., hi0 - M:hi0]
             f0, f1 = b0.recon_u_now, b1.recon_u_now
-            f0[..., hi:hi + M] = f1[..., lo:lo + M]
-            f1[..., lo - M:lo] = f0[..., hi - M:hi]
+            f0[..., hi0:hi0 + M] = f1[..., lo1:lo1 + M]
+            f1[..., lo1 - M:lo1] = f0[..., hi0 - M:hi0]
     assert b0.k_adj == NT and b0.k_f == NT - 1
 
     # ---------------- assemble + compare ----------------
     t0, t1 = tiles
-    own = slice(PAD, PAD + NXP)
+    own0 = slice(t0.lo, t0.lo + NXP)
+    own1 = slice(t1.lo, t1.lo + NXP)
     g_ref = ref.gbufs[1]
-    assert torch.equal(t0.gbufs[1][..., own], g_ref[..., PAD:PAD + NXP]), \
+    assert torch.equal(t0.gbufs[1][..., own0], g_ref[..., PAD:PAD + NXP]), \
         "tile0 grad_vp differs (bitwise)"
-    assert torch.equal(t1.gbufs[1][..., own], g_ref[..., PAD + NXP:PAD + 2 * NXP]), \
+    assert torch.equal(t1.gbufs[1][..., own1], g_ref[..., PAD + NXP:PAD + 2 * NXP]), \
         "tile1 grad_vp differs (bitwise)"
     for k, name in enumerate(["source_illum", "receiver_illum"]):
-        assert torch.equal(t0.ibufs[k][..., own],
+        assert torch.equal(t0.ibufs[k][..., own0],
                            ref.ibufs[k][..., PAD:PAD + NXP]), \
             f"tile0 {name} differs (bitwise)"
-        assert torch.equal(t1.ibufs[k][..., own],
+        assert torch.equal(t1.ibufs[k][..., own1],
                            ref.ibufs[k][..., PAD + NXP:PAD + 2 * NXP]), \
             f"tile1 {name} differs (bitwise)"
     assert t1.owns_src and not t0.owns_src

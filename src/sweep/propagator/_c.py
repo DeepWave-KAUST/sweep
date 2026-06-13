@@ -785,6 +785,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self._image_method_active,
             self.equation.so // 2 + 1,
             tangent_pad=cuda_layout.boundary_tangent_pad,
+            cut_mask=getattr(self, "_dd_cut_mask", 0),
         )
 
         self.boundary_cpu_allocator = Allocator('cpu')
@@ -1169,20 +1170,21 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         sources = sources.copy()
         receivers = receivers.copy()
 
-        if self._image_method_active:
-            sources[..., 0] += base_shift
-            receivers[..., 0] += base_shift
-
-            if self.ndim == 3:
-                sources[..., 1] += base_shift
-                receivers[..., 1] += base_shift
-
-            # For cuda implementation, we pad in z-direction for free surface with width M
-            sources[..., -1] += M
-            receivers[..., -1] += M
-        else:
-            sources += base_shift
-            receivers += base_shift
+        # Per-axis low-side runtime shift = (PML low pad) + stencil halo M.
+        # Reduces to the symmetric ``abcn + M`` on un-split runs and to ``M``
+        # on cut / image-method-top faces, so source/receiver coords land in
+        # the right runtime cell on a compact-padded tile. ``self.padding`` is
+        # in F.pad order: (x_lo, x_hi, [y_lo, y_hi,] z_lo, z_hi).
+        shift_x = self.padding[0] + M
+        shift_z = self.padding[-2] + M
+        sources[..., 0] += shift_x
+        receivers[..., 0] += shift_x
+        if self.ndim == 3:
+            shift_y = self.padding[2] + M
+            sources[..., 1] += shift_y
+            receivers[..., 1] += shift_y
+        sources[..., -1] += shift_z
+        receivers[..., -1] += shift_z
 
         # Canonicalize wavelet/sources to (B, nsrc_per_shot, nt) / (B, nsrc_per_shot, ndim).
         # `mode` was validated by _normalize_io above.
@@ -1516,17 +1518,18 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         sources = sources.copy()
         receivers = receivers.copy()
-        if self._image_method_active:
-            sources[..., 0] += base_shift
-            receivers[..., 0] += base_shift
-            if self.ndim == 3:
-                sources[..., 1] += base_shift
-                receivers[..., 1] += base_shift
-            sources[..., -1] += M
-            receivers[..., -1] += M
-        else:
-            sources += base_shift
-            receivers += base_shift
+        # Per-axis low-side runtime shift (see forward path for rationale):
+        # (PML low pad) + halo M, per ``self.padding`` (x_lo, x_hi, [y..,] z..).
+        shift_x = self.padding[0] + M
+        shift_z = self.padding[-2] + M
+        sources[..., 0] += shift_x
+        receivers[..., 0] += shift_x
+        if self.ndim == 3:
+            shift_y = self.padding[2] + M
+            sources[..., 1] += shift_y
+            receivers[..., 1] += shift_y
+        sources[..., -1] += shift_z
+        receivers[..., -1] += shift_z
 
         if isinstance(wavelet, torch.Tensor):
             wavelet_t = wavelet.to(self.dev, dtype=torch.float32)

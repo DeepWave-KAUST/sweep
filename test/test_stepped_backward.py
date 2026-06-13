@@ -359,3 +359,19 @@ def test_stepped_backward_guards_rtm():
     p.bw_it_begin, p.bw_it_end = int(p.nt), 1
     with pytest.raises(RuntimeError, match="stepped RTM not supported"):
         _C.acoustic2d_rtm(p)
+
+
+@cuda_only
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_full_backward_rejects_cut_face_mask(ndim):
+    # Domain decomposition is boundary-saving only: the full-storage backward
+    # has no reconstruction halo to exchange, so cut_face_mask must be rejected
+    # there (DD goes through backward_bs).
+    prop, wavelet, sources, receivers, models = build(ndim, nt=16)
+    cap = capture_backward(prop)
+    run_public_once(prop, wavelet, sources, receivers, models)
+    assert cap["mode"] == "backward_func", "expected the full-storage backward"
+    p, func = cap["params"], cap["func"]
+    p.cut_face_mask = 2  # x_hi
+    with pytest.raises(RuntimeError, match="boundary-saving only"):
+        func(p)

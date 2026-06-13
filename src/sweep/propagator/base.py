@@ -226,17 +226,57 @@ class PropBase:
 
         # PML layout: image method suppresses top PML (top halo holds the
         # mirror); APM and no-FS use full PML on all sides.
-        if self._image_method_active:
-            self.padding_z = (0, self.abcn)
-            shape_z = self.shape[0] + self.abcn
-        else:
-            self.padding_z = (self.abcn, self.abcn)
-            shape_z = self.shape[0] + 2*self.abcn
-
-        self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
+        #
+        # Per-side PML widths. Without a model-parallel mesh every interior
+        # face gets the full ``abcn`` pad (image method still drops the z-low
+        # PML). With a mesh, cut (neighbour-facing) faces get 0 PML width —
+        # only the stencil halo (added below in ``shape_cuda``) is allocated
+        # there, since :class:`HaloExchange` supplies those cells. This is the
+        # cut-aware compact padding: interior tiles no longer waste an ``abcn``
+        # pad on every split face. Layout = ``[z_lo, z_hi, (y_lo, y_hi,) x_lo,
+        # x_hi]`` (SWEEP's ``build_rank_pml_widths`` order).
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
-        self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
+        if self.model_parallel is not None:
+            from sweep.parallel.pml import build_rank_pml_widths
+            _pw = list(build_rank_pml_widths(
+                self.model_parallel, abcn=self.abcn, ndim=self.ndim,
+                image_method_active=self._image_method_active))
+        else:
+            _z_lo = 0 if self._image_method_active else self.abcn
+            _pw = [_z_lo, self.abcn] + [self.abcn] * (2 * (self.ndim - 1))
+
+        self.padding_z = (_pw[0], _pw[1])
+        shape_z = self.shape[0] + _pw[0] + _pw[1]
+        if self.ndim == 3:
+            y_lo, y_hi, x_lo, x_hi = _pw[2], _pw[3], _pw[4], _pw[5]
+            spatial_shape = (self.shape[1] + y_lo + y_hi,
+                             self.shape[2] + x_lo + x_hi)
+            # F.pad / EdgePadding order is last-axis-first: (x_lo, x_hi, y_lo, y_hi)
+            spatial_pad = (x_lo, x_hi, y_lo, y_hi)
+        else:
+            x_lo, x_hi = _pw[2], _pw[3]
+            spatial_shape = (self.shape[1] + x_lo + x_hi,)
+            spatial_pad = (x_lo, x_hi)
+
+        self.padding = spatial_pad + self.padding_z
+        self.shape = (shape_z,) + spatial_shape
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
+
+        # DD cut-face bitmask (x_lo=1, x_hi=2, y_lo=16, y_hi=32; z is never
+        # split in v1). Passed to the boundary Layout so its phys_* bounds
+        # match this (possibly asymmetric) pad. 0 = single domain.
+        self._dd_cut_mask = 0
+        mp = self.model_parallel
+        if mp is not None:
+            if not mp.is_edge("x", "low"):
+                self._dd_cut_mask |= 1
+            if not mp.is_edge("x", "high"):
+                self._dd_cut_mask |= 2
+            if self.ndim == 3:
+                if not mp.is_edge("y", "low"):
+                    self._dd_cut_mask |= 16
+                if not mp.is_edge("y", "high"):
+                    self._dd_cut_mask |= 32
 
         # Topography is processed AFTER self.shape is PML-padded so the
         # runtime-coord conversion can compute the final padded surface row.

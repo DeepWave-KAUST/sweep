@@ -149,14 +149,19 @@ __global__ void acoustic2nd(
 
     // Position-based PML / interior split. ax/bx/dbxdx coefficient arrays are
     // exactly zero outside the PML band, and the centered gradient of those
-    // arrays vanishes once the stencil clears the band (>= abcn + halo from
-    // the edge). Skipping the full PML update there is bit-equivalent and
-    // avoids ~8 aux-field loads/stores per cell. The check is warp-coherent
-    // (same outcome for 32 consecutive ix values), so warps diverge only at
-    // the abcn boundary.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // arrays vanishes once the stencil clears the band. Skipping the full PML
+    // update there is bit-equivalent and avoids ~8 aux-field loads/stores per
+    // cell. The check is warp-coherent (same outcome for 32 consecutive ix
+    // values), so warps diverge only at the abcn boundary.
+    //
+    // Use the cut-aware physical bounds (phys_x0/x1/z0/z1): a DD cut face
+    // carries only the M halo with zero PML coefficients, so its interior must
+    // take the fast path too — otherwise the algebraically-equal zero-coeff
+    // PML branch reorders the FMAs and seeds ulp drift. For a single domain
+    // (cut_mask == 0) every bound collapses to the legacy abcn+M / free-surface
+    // form, bit-for-bit.
+    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
+                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
 
     if (!in_pml) {
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
