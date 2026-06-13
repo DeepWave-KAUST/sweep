@@ -81,21 +81,24 @@ __global__ void boundary_kernel2d(
     int right_end   = x1 - offset;
     int right_start = right_end - width;
 
+    // DD cut faces (ctx.cut_mask: bit0=x_lo/left, bit1=x_hi/right,
+    // bit2=z_lo/top, bit3=z_hi/bottom) are skipped: the strip there is
+    // reverse-leapfrog-computed + halo-exchanged instead of restored.
     bool is_top =
         (iz >= top_start && iz < top_end) &&
-        (ix >= x_t0 && ix < x_t1);
+        (ix >= x_t0 && ix < x_t1) && !ctx.cut_z_lo();
 
     bool is_bottom =
         (iz >= bot_start && iz < bot_end) &&
-        (ix >= x_t0 && ix < x_t1);
+        (ix >= x_t0 && ix < x_t1) && !ctx.cut_z_hi();
 
     bool is_left =
         (ix >= left_start && ix < left_end) &&
-        (iz >= z_t0 && iz < z_t1);
+        (iz >= z_t0 && iz < z_t1) && !ctx.cut_x_lo();
 
     bool is_right =
         (ix >= right_start && ix < right_end) &&
-        (iz >= z_t0 && iz < z_t1);
+        (iz >= z_t0 && iz < z_t1) && !ctx.cut_x_hi();
 
     if (!(is_top || is_bottom || is_left || is_right))
         return;
@@ -187,10 +190,10 @@ __device__ __forceinline__ void boundary_kernel2d_body(
     int left_start = x0 + offset, left_end = left_start + width;
     int right_end  = x1 - offset, right_start = right_end - width;
 
-    bool is_top    = iz >= top_start && iz < top_end  && ix >= x_t0 && ix < x_t1;
-    bool is_bottom = iz >= bot_start && iz < bot_end  && ix >= x_t0 && ix < x_t1;
-    bool is_left   = ix >= left_start && ix < left_end && iz >= z_t0 && iz < z_t1;
-    bool is_right  = ix >= right_start && ix < right_end && iz >= z_t0 && iz < z_t1;
+    bool is_top    = iz >= top_start && iz < top_end  && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_lo();
+    bool is_bottom = iz >= bot_start && iz < bot_end  && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_hi();
+    bool is_left   = ix >= left_start && ix < left_end && iz >= z_t0 && iz < z_t1 && !ctx.cut_x_lo();
+    bool is_right  = ix >= right_start && ix < right_end && iz >= z_t0 && iz < z_t1 && !ctx.cut_x_hi();
 
     if (!(is_top || is_bottom || is_left || is_right)) return;
     int idx3 = iz * ctx.nx + ix;
@@ -329,35 +332,36 @@ __global__ void boundary_kernel3d(
     int right_end   = x1 - offset;
     int right_start = right_end - width;
 
+    // DD cut faces (ctx.cut_mask) are skipped — see boundary_kernel2d.
     bool is_top =
         iz >= top_start && iz < top_end &&
         iy >= y_t0 && iy < y_t1 &&
-        ix >= x_t0 && ix < x_t1;
+        ix >= x_t0 && ix < x_t1 && !ctx.cut_z_lo();
 
     bool is_bottom =
         iz >= bot_start && iz < bot_end &&
         iy >= y_t0 && iy < y_t1 &&
-        ix >= x_t0 && ix < x_t1;
+        ix >= x_t0 && ix < x_t1 && !ctx.cut_z_hi();
 
     bool is_front =
         iy >= front_start && iy < front_end &&
         iz >= z_t0 && iz < z_t1 &&
-        ix >= x_t0 && ix < x_t1;
+        ix >= x_t0 && ix < x_t1 && !ctx.cut_y_lo();
 
     bool is_back =
         iy >= back_start && iy < back_end &&
         iz >= z_t0 && iz < z_t1 &&
-        ix >= x_t0 && ix < x_t1;
+        ix >= x_t0 && ix < x_t1 && !ctx.cut_y_hi();
 
     bool is_left =
         ix >= left_start && ix < left_end &&
         iz >= z_t0 && iz < z_t1 &&
-        iy >= y_t0 && iy < y_t1;
+        iy >= y_t0 && iy < y_t1 && !ctx.cut_x_lo();
 
     bool is_right =
         ix >= right_start && ix < right_end &&
         iz >= z_t0 && iz < z_t1 &&
-        iy >= y_t0 && iy < y_t1;
+        iy >= y_t0 && iy < y_t1 && !ctx.cut_x_hi();
 
     if (!(is_top || is_bottom || is_front || is_back || is_left || is_right))
         return;
@@ -538,12 +542,12 @@ __device__ __forceinline__ void boundary_kernel3d_body(
     int left_start = x0 + offset, left_end = left_start + width;
     int right_end = x1 - offset, right_start = right_end - width;
 
-    bool is_top    = iz >= top_start  && iz < top_end  && iy >= y_t0 && iy < y_t1 && ix >= x_t0 && ix < x_t1;
-    bool is_bottom = iz >= bot_start  && iz < bot_end  && iy >= y_t0 && iy < y_t1 && ix >= x_t0 && ix < x_t1;
-    bool is_front  = iy >= front_start && iy < front_end && iz >= z_t0 && iz < z_t1 && ix >= x_t0 && ix < x_t1;
-    bool is_back   = iy >= back_start  && iy < back_end  && iz >= z_t0 && iz < z_t1 && ix >= x_t0 && ix < x_t1;
-    bool is_left   = ix >= left_start  && ix < left_end  && iz >= z_t0 && iz < z_t1 && iy >= y_t0 && iy < y_t1;
-    bool is_right  = ix >= right_start && ix < right_end && iz >= z_t0 && iz < z_t1 && iy >= y_t0 && iy < y_t1;
+    bool is_top    = iz >= top_start  && iz < top_end  && iy >= y_t0 && iy < y_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_lo();
+    bool is_bottom = iz >= bot_start  && iz < bot_end  && iy >= y_t0 && iy < y_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_hi();
+    bool is_front  = iy >= front_start && iy < front_end && iz >= z_t0 && iz < z_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_y_lo();
+    bool is_back   = iy >= back_start  && iy < back_end  && iz >= z_t0 && iz < z_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_y_hi();
+    bool is_left   = ix >= left_start  && ix < left_end  && iz >= z_t0 && iz < z_t1 && iy >= y_t0 && iy < y_t1 && !ctx.cut_x_lo();
+    bool is_right  = ix >= right_start && ix < right_end && iz >= z_t0 && iz < z_t1 && iy >= y_t0 && iy < y_t1 && !ctx.cut_x_hi();
 
     if (!(is_top || is_bottom || is_front || is_back || is_left || is_right)) return;
 
@@ -679,6 +683,7 @@ __global__ void boundary_kernel3d_compact(
         iy = y_t0 + yloc;
         ix = x_t0 + xloc;
         idx = ((((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
+        if (ctx.cut_z_lo()) return;
         boundary = top;
     } else if (local < 2 * top_count) {
         local -= top_count;
@@ -691,6 +696,7 @@ __global__ void boundary_kernel3d_compact(
         iy = y_t0 + yloc;
         ix = x_t0 + xloc;
         idx = ((((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc);
+        if (ctx.cut_z_hi()) return;
         boundary = bottom;
     } else if (local < 2 * top_count + front_count) {
         local -= 2 * top_count;
@@ -703,6 +709,7 @@ __global__ void boundary_kernel3d_compact(
         iy = front_start + yloc;
         ix = x_t0 + xloc;
         idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
+        if (ctx.cut_y_lo()) return;
         boundary = front;
     } else if (local < 2 * top_count + 2 * front_count) {
         local -= 2 * top_count + front_count;
@@ -715,6 +722,7 @@ __global__ void boundary_kernel3d_compact(
         iy = back_start + yloc;
         ix = x_t0 + xloc;
         idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc);
+        if (ctx.cut_y_hi()) return;
         boundary = back;
     } else if (local < 2 * top_count + 2 * front_count + left_count) {
         local -= 2 * top_count + 2 * front_count;
@@ -727,6 +735,7 @@ __global__ void boundary_kernel3d_compact(
         iy = y_t0 + yloc;
         ix = left_start + xloc;
         idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
+        if (ctx.cut_x_lo()) return;
         boundary = left;
     } else {
         local -= 2 * top_count + 2 * front_count + left_count;
@@ -739,6 +748,7 @@ __global__ void boundary_kernel3d_compact(
         iy = y_t0 + yloc;
         ix = right_start + xloc;
         idx = ((((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc);
+        if (ctx.cut_x_hi()) return;
         boundary = right;
     }
 
@@ -799,6 +809,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         int yloc = rem / nx_boundary; int xloc = rem - yloc * nx_boundary;
         iz = top_start + zloc; iy = y_t0 + yloc; ix = x_t0 + xloc;
         idx = ((((int64_t)it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc;
+        if (ctx.cut_z_lo()) return;
         boundary = top;
     } else if (local < 2 * top_count) {
         local -= top_count;
@@ -807,6 +818,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         int yloc = rem / nx_boundary; int xloc = rem - yloc * nx_boundary;
         iz = bot_start + zloc; iy = y_t0 + yloc; ix = x_t0 + xloc;
         idx = ((((int64_t)it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc;
+        if (ctx.cut_z_hi()) return;
         boundary = bottom;
     } else if (local < 2 * top_count + front_count) {
         local -= 2 * top_count;
@@ -815,6 +827,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         int yloc = rem / nx_boundary; int xloc = rem - yloc * nx_boundary;
         iz = z_t0 + zloc; iy = front_start + yloc; ix = x_t0 + xloc;
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc;
+        if (ctx.cut_y_lo()) return;
         boundary = front;
     } else if (local < 2 * top_count + 2 * front_count) {
         local -= 2 * top_count + front_count;
@@ -823,6 +836,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         int yloc = rem / nx_boundary; int xloc = rem - yloc * nx_boundary;
         iz = z_t0 + zloc; iy = back_start + yloc; ix = x_t0 + xloc;
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc;
+        if (ctx.cut_y_hi()) return;
         boundary = back;
     } else if (local < 2 * top_count + 2 * front_count + left_count) {
         local -= 2 * top_count + 2 * front_count;
@@ -831,6 +845,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         int yloc = rem / width; int xloc = rem - yloc * width;
         iz = z_t0 + zloc; iy = y_t0 + yloc; ix = left_start + xloc;
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc;
+        if (ctx.cut_x_lo()) return;
         boundary = left;
     } else {
         local -= 2 * top_count + 2 * front_count + left_count;
@@ -839,6 +854,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         int yloc = rem / width; int xloc = rem - yloc * width;
         iz = z_t0 + zloc; iy = y_t0 + yloc; ix = right_start + xloc;
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc;
+        if (ctx.cut_x_hi()) return;
         boundary = right;
     }
 
