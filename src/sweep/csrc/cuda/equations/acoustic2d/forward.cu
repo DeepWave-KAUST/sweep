@@ -67,7 +67,7 @@ ForwardOutput forward(const ForwardInput& in) {
     if (!p.wavefields.empty())
         wavefield.bind(p.wavefields, 2, true);
     else
-        wavefield.allocate(vp, 2, true);
+        wavefield.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
