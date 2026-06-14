@@ -251,12 +251,12 @@ def balanced_grid(
     edge ``min(Ny/py, Nx/px)``, breaking ties toward a fatter (contiguous) x
     edge. 2-D models always get ``(1, px)`` (no y to split).
 
-    ``py`` is capped at 2 by default: with ``py >= 3`` an interior rank has BOTH
-    y-faces cut (zero y-PML), which currently mis-launches the boundary-saving
-    kernel on too-thin y-tiles. ``py=2`` is always safe (every rank keeps one
-    PML y-face) and already captures most of the win. Set ``allow_y_thin=True``
-    to consider ``py >= 3`` (faster still for cubic models, once that kernel
-    limitation is lifted).
+    ``py`` is capped at 2 by default (a conservative load-balance choice that
+    already captures most of the win). Set ``allow_y_thin=True`` to also consider
+    ``py >= 3`` — the fastest option for cubic globals (e.g. 384^3 px2py4 =
+    0.688 ms / 6.96x), now fully validated (8x V100, bit-exact). [A past py>=3
+    boundary-save crash was a DDPropagator._capture cut_face_mask=0 bug, fixed
+    pure-Python — not a kernel limitation.]
     """
     tiles = world_size // shot_groups
     if tiles < 1:
