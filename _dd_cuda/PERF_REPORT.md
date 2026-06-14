@@ -118,8 +118,9 @@ x-cut tile is thinnest.** Shipped as `sweep.parallel.balanced_grid(world, shape)
 (returns the recommended `(py, px)`; pure arithmetic, additive — does not change
 any default). Default caps `py<=2` (a conservative load-balance choice that
 already captures +9–43 %). `py>=3` (the cubic optimum, e.g. 384³ px2py4 =
-0.688 ms / 6.96×) is opt-in via `allow_y_thin=True` and is **validated** (8× V100
-bit-exact).
+0.688 ms / 6.96×) is opt-in by raising `max_py` (e.g. `max_py=world`) and is
+**validated** (8× V100 bit-exact). (The former `allow_y_thin=True` bool is kept
+as a deprecated alias.)
 
 **py>=3 boundary-save crash — FIXED (`83a70df`, ibex bit-exact confirmed).** An
 earlier `CUDA error: invalid configuration argument` for `py>=3` was **not** a
