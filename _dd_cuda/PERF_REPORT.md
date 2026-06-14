@@ -136,3 +136,44 @@ cutting more axes is super-linear via cut-aware PML savings). Use
 `balanced_grid()` instead of a 1-D x-cut. Bench tools: `dd_ddp_timing.py`
 (production-path per-decomposition timing), `dd_axis_strong.sbatch`,
 `dd_axis_generalize.sbatch`.
+
+## Round 4: per-step / per-forward driver optimizations (2026-06-15)
+
+A pass over the DD driver targeting the per-step Python overhead (×nt), the
+per-forward redundancy, and readability/extensibility. All bit-exact — ibex
+`dd_api_check` acoustic/elastic 2D/3D (+ free surface) PASS, the 3D 2×2 corner
+stays PASS_TOL (≤1e-5) as before; per-change gate sbatches in `_dd_cuda/`.
+
+* **per-step caching** (`89154ca`) — the stepped runners rebuilt
+  `list(wavefields)` every step and `DDPropagator._halo_view` rebuilt the halo
+  crop slice every exchange. The bound order depends only on `(k%3, k%2)` (≤6
+  distinct lists) and the crop slice is loop-invariant, so both are cached.
+  Bit-exact (same persistent tensors; only roles rotate).
+* **`forward(models=None)`** (`622100a`) — an FWI epoch fires many shots through
+  one model, yet forward re-padded the runtime model and ran the NCCL model-halo
+  collective every shot. `models=None` reuses the buffers a prior forward set →
+  one model-halo per epoch, not per shot. Explicit on purpose (no version-
+  guessing that could silently run on a stale model).
+* **elastic halo aggregation** (`9db162a`) — the elastic loop fired a separate
+  `batch_isend_irecv`+wait per field (nphys = 5 in 2-D, 9 in 3-D) each step.
+  `FastHaloGroup` concatenates each field-group (velocity / stress fwd;
+  adjoint+recon bwd) into ONE batched P2P → 2 waits/step. **Measured
+  1.28–1.30× elastic-2D forward** (2× V100, nphys=5, tiles 64²/128², nt300;
+  `dd_agg_bench.py`); larger for 3-D (nphys=9 → 2). Bit-exact.
+  *True comm/compute overlap stays acoustic-only:* the elastic kernel's
+  `step_phase` is a velocity/stress field-group split, not the strip/interior
+  spatial split overlap needs (phase 2 reads all velocity halos), so hiding the
+  exchange behind interior compute would require a C++ kernel sub-split.
+* **shot-parallel gradient** (`789fe7d`) — `gradient()` all_reduces the per-tile
+  gradient across the shot process group when `shot_groups>1` (the FWI gradient
+  is a sum over shots), enabling combined shot+model parallelism without a B>1
+  rewrite. No-op for `shot_groups==1`. (`dd_shotpar_check.py`, world=4 = 2×2.)
+* **API / readability** — `balanced_grid(max_py=…)` replaces the misleading
+  `allow_y_thin` bool (`d0728b5`, deprecated alias kept); `FastHaloSet.exchange`
+  deduped via `_get` (`dcfb3a9`); `forward()` split into `_prepare_call` + per-
+  family loop helpers — 33 lines, was ~120 (`4ace00d`).
+* **stale-test fix** (`f8711cd`) — `test_dd_tiles_3d` / `test_dd_elastic_tiles_3d`
+  predated the cut-aware pad (symmetric `PAD` offsets, missing/mis-offset
+  model-halo fill) and asserted against the wrong tile region → spurious gross
+  failures; migrated to per-tile `prop.padding` offsets. Production path was
+  always correct.
