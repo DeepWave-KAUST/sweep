@@ -173,6 +173,7 @@ class DDPropagator:
         self._fwd_halo = None
         self._bwd_halo = None
         self._model_halo = None
+        self._halo_sl_cache = {}     # field.ndim -> cut-axis crop slice tuple
 
         # comm/compute overlap (acoustic forward): a dedicated comm stream runs
         # step's halo exchange while step's interior computes. Eligible
@@ -204,13 +205,19 @@ class DDPropagator:
 
     def _halo_view(self, field):
         """Crop the field to owned±M in each CUT axis (plus-stencil: corners
-        unread, so x and y halos exchange independently)."""
-        sl = [slice(None)] * field.ndim
-        if self.topo.px > 1:
-            sl[-1] = slice(self.lo - self.M, self.hi + self.M)
-        if self.ndim == 3 and self.topo.py > 1:
-            sl[-2] = slice(self.lo_y - self.M, self.hi_y + self.M)
-        return field[tuple(sl)]
+        unread, so x and y halos exchange independently). The slice tuple is
+        loop-invariant (lo/hi/M fixed once captured), so build it once per
+        field ndim and reuse it for every step's exchange."""
+        sl = self._halo_sl_cache.get(field.ndim)
+        if sl is None:
+            s = [slice(None)] * field.ndim
+            if self.topo.px > 1:
+                s[-1] = slice(self.lo - self.M, self.hi + self.M)
+            if self.ndim == 3 and self.topo.py > 1:
+                s[-2] = slice(self.lo_y - self.M, self.hi_y + self.M)
+            sl = tuple(s)
+            self._halo_sl_cache[field.ndim] = sl
+        return field[sl]
 
     def _exchange(self, halo, tensor):
         if halo is not None:
