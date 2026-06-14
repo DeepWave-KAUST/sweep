@@ -223,6 +223,15 @@ class DDPropagator:
         if halo is not None:
             halo.exchange(self._halo_view(tensor))
 
+    def _exchange_group(self, halo, tensors):
+        """Halo-exchange a group of fields in ONE batched P2P (elastic velocity
+        / stress groups). Collapses ``len(tensors)`` separate NCCL rounds into a
+        single isend/irecv+wait — the per-step latency win for the multi-field
+        elastic protocol (acoustic exchanges a single field, so it uses
+        :meth:`_exchange`/the overlap path instead)."""
+        if halo is not None:
+            halo.exchange_group([self._halo_view(t) for t in tensors])
+
     def _src_away_from_cuts(self, sg) -> bool:
         """True when no source sits within M of an x-cut line (k*nxp). The
         forward injects the source in phase 2 — after phase 1's cut strips have
@@ -530,13 +539,15 @@ class DDPropagator:
             else:
                 runner = SteppedBindingRunner(
                     self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
+                # elastic slots don't rotate -> field lists are fixed; batch the
+                # velocity (phase 1) and stress (phase 2) halos into one P2P each
+                vel = [self.L_fwd[f] for f in range(self._nv)]
+                stress = [self.L_fwd[f] for f in range(self._nv, self._nphys)]
                 for it in range(self.nt):
                     runner.run_phase(it + 1, 1)
-                    for f in range(self._nv):
-                        self._exchange(fhalo, self.L_fwd[f])
+                    self._exchange_group(fhalo, vel)
                     runner.run_phase(it + 1, 2)
-                    for f in range(self._nv, self._nphys):
-                        self._exchange(fhalo, self.L_fwd[f])
+                    self._exchange_group(fhalo, stress)
 
         # A tile owning no real receivers carries only a dummy receiver; its
         # record is meaningless.  Zero it so a residual/adjoint derived from it
@@ -581,17 +592,17 @@ class DDPropagator:
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
                     adj_pairs=(), adj_u_blocks=(), recon_u_blocks=())
+                # fixed elastic slots -> precompute each phase's exchange group
+                # (adjoint + recon fields) and batch into one P2P per phase
+                ph1 = ([self.L_adj[f] for f in range(nv)]
+                       + [self.recon[f] for f in range(nv, self._nphys)])
+                ph2 = ([self.L_adj[f] for f in range(nv, self._nphys)]
+                       + [self.recon[f] for f in range(nv)])
                 for it in range(self.nt - 1, 0, -1):     # elastic BS floor it==1
                     br.run_phase(it + 1, it, 1)
-                    for a, b in [(self.L_adj, range(nv)),
-                                 (self.recon, range(nv, self._nphys))]:
-                        for f in b:
-                            self._exchange(bhalo, a[f])
+                    self._exchange_group(bhalo, ph1)
                     br.run_phase(it + 1, it, 2)
-                    for a, b in [(self.L_adj, range(nv, self._nphys)),
-                                 (self.recon, range(nv))]:
-                        for f in b:
-                            self._exchange(bhalo, a[f])
+                    self._exchange_group(bhalo, ph2)
 
         # crop the runtime model grad to the physical tile interior (z is
         # FS-aware: top pad = M under free surface; cut-side x-pad grad belongs
