@@ -25,7 +25,7 @@ Top-level objects:
     Convenience: call :class:`HaloExchange` for each field in a list.
 """
 
-from sweep.parallel._topology import MeshTopology
+from sweep.parallel._topology import MeshTopology, balanced_grid
 from sweep.parallel.halo import HaloExchange, exchange_halos
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.pml import build_rank_pml_widths
@@ -36,6 +36,7 @@ __all__ = [
     "HaloExchange",
     "MeshTopology",
     "ModelParallelMesh",
+    "balanced_grid",
     "build_rank_pml_widths",
     "exchange_halos",
     "partition_global_coords",

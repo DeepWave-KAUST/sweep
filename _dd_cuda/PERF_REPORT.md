@@ -69,8 +69,66 @@ each step to redundantly compute the K·M halo region: 2(K−1)M extra x-cells =
 ~9.4 % extra compute > the 7.2 % comm saved → slower; on fat weak tiles it is
 roughly neutral. So the textbook latency-hiding lever does not apply.
 
-**Conclusion: the clean optimizations are maximized.** Strong scaling ~5.9× is
-the practical limit (comm is irreducibly ~0.2 ms split 3-ways and only partly
-hideable; the compute-only floor is 7.36× anyway). Weak scaling already meets
-the 8× goal. Further would need fragile low-level work (copy-engine 2-D strided
-DMA, exposing the NCCL event for a GPU-side P2P sync) with modest, capped return.
+**Conclusion (round 2): the *x-cut* clean optimizations are maximized.** Strong
+scaling ~5.9× is the practical limit *for x-cut* (comm is irreducibly ~0.2 ms
+split 3-ways and only partly hideable; the x-cut compute-only floor is 7.36×).
+Weak scaling already meets the 8× goal. — But round 3 found the x-cut *axis
+choice itself* was the limit; see below.
+
+## Round 3: copy-engine (rejected) + decomposition-axis (the real win)
+
+**Copy-engine halo staging — TRIED, REJECTED (net-negative).** Hypothesis: move
+the strided halo staging copies off the SMs onto the GPU copy engine
+(`cudaMemcpy2DAsync`) so they overlap the stencil. Implemented + validated
+**bit-exact** (dd_api_check px8 acoustic/elastic 2D/3D all PASS with the engine
+genuinely on). But it is **slower** everywhere: the isolated strided copy went
+0.074→0.094 ms (+27 %, DMA launch latency dominates these tiny D2D strided
+copies), and every end-to-end config regressed (strong px8 overlap 0.841→0.908,
++compute-stream 0.829→0.885). Reverted. (Reusable finding: cudaMemcpy2DAsync D2D
+is the wrong tool for small strided halo strips on V100.)
+
+**Decomposition axis — the actual lever.** The 7.36× compute floor was blamed on
+launch-amortization; it is really the **x-cut tile SHAPE**. A 1-D x-cut shrinks
+the *contiguous* x-dimension (px8: Nx/8) — worst for the FD kernel and the halo
+copy. Cutting more axes (a) saves more cut-aware PML (more cut faces → less PML
+work) and (b) gives a squarer tile. Compute-floor sweep, equal 8.39 M cells/tile
+(global 256²×1024 / 8), none-mode on 8× V100:
+
+| decomposition | tile (Nz,Ny,Nx) | x_contig | per_step | peak_mem |
+|---------------|-----------------|----------|----------|----------|
+| x-cut px8 py1 | (256,256,128)   | 128      | 0.666 ms | 0.80 GB |
+| **bal px4 py2** | (256,128,256) | 256      | **0.608 ms** | **0.74 GB** |
+| bal px2 py4   | (256, 64,512)   | 512      | 0.683 ms | 0.82 GB |
+| y-cut px1 py8 | (256, 32,1024)  | 1024     | 1.031 ms | 1.03 GB |
+
+Not monotonic — a **balanced** tile wins; y-cut (fat x, thin y) is *worst*
+(refutes "fat contiguous x is better"). End-to-end via the production
+`DDPropagator` (correct corner halo; forward, 8× V100):
+
+| global (Nz,Ny,Nx) | x-cut px8 | balanced px4 py2 | speedup | mem |
+|-------------------|-----------|------------------|---------|-----|
+| 256 × 256 × 1024  | 0.893 ms (6.55×) | **0.814 ms (7.18×)** | +9 %  | 2.69→2.56 GB |
+| 384 × 384 × 384   | 1.026 ms (4.67×) | **0.716 ms (6.69×)** | +43 % | 2.84→2.29 GB |
+| 512 × 512 × 512   | 1.890 ms        | **1.439 ms**         | +31 % | 5.66→4.71 GB |
+| 256 × 512 × 1024  | 1.673 ms        | **1.417 ms**         | +15 % | 4.94→4.54 GB |
+
+**The balanced 2-D decomposition is up to ~1.5× faster and ~18 % lighter for
+strong scaling, generalising across shapes — biggest for cubic globals where the
+x-cut tile is thinnest.** Shipped as `sweep.parallel.balanced_grid(world, shape)`
+(returns the recommended `(py, px)`; pure arithmetic, additive — does not change
+any default). Default caps `py<=2` (always safe). `py>=3` (cubic optimum, e.g.
+384³ px2py4 = 0.688 ms / 6.96×) needs `allow_y_thin=True` and is gated on the
+boundary-save fix below.
+
+**Known limitation (separate bug):** with boundary saving on, `py>=3` (an
+interior rank with BOTH y-faces cut → zero y-PML) mis-launches the y
+boundary-save kernel → `CUDA error: invalid configuration argument`. x is
+already guarded (px8 fine); y is not. Tracked for a kernel fix; until then the
+safe `py<=2` balanced grid already captures +9–43 %.
+
+**Updated bottom line:** weak 8× met; **strong scaling improves from ~5.9× to
+7.0–7.2× simply by choosing a balanced grid** (≈8× compute is reachable because
+cutting more axes is super-linear via cut-aware PML savings). Use
+`balanced_grid()` instead of a 1-D x-cut. Bench tools: `dd_ddp_timing.py`
+(production-path per-decomposition timing), `dd_axis_strong.sbatch`,
+`dd_axis_generalize.sbatch`.
