@@ -216,13 +216,13 @@ def main():
             for it in range(nt):
                 runner.run_phase(it + 1, 1)          # cut boundary strips
                 comm_evt.record()
+                un = runner.u_next[..., lo - M: hi + M]
                 with torch.cuda.stream(comm):
                     comm.wait_event(comm_evt)
-                    # u_next strips -> NCCL + staging on the comm stream;
-                    # after phase-2's swap this tensor IS u_now, so the
-                    # halo lands where the next step's stencil reads it.
-                    fast_set.exchange(runner.u_next[..., lo - M: hi + M])
-                runner.run_phase(it + 1, 2)          # interior + tail
+                    fast_set.exchange_start(un)      # copy-send + P2P (no wait)
+                runner.run_phase(it + 1, 2)          # interior + tail (overlaps P2P)
+                with torch.cuda.stream(comm):
+                    fast_set.exchange_finish(un)     # wait P2P + copy-recv
                 compute.wait_stream(comm)            # halo ready for next phase 1
         torch.cuda.synchronize()
         dist.barrier()
