@@ -48,3 +48,29 @@ STRONG (fixed global 256×256×1024, split):
 Remaining levers are deep/fragile (custom fused strided-halo copy kernels, a
 GPU-event P2P sync to drop the CPU `work.wait`, or splitting z) — not worth the
 robustness cost for the residual strong-scaling gap.
+
+## Comm profile + why K-step doesn't help (loop round 2)
+
+Per-step halo exchange breakdown (256³ x-halo, 2 ranks, ms):
+
+| copy-send | copy-recv | P2P+wait | Python/API | full |
+|-----------|-----------|----------|------------|------|
+| 0.025 | 0.051 | 0.068 | 0.054 | 0.198 |
+
+No single dominant component — copies, P2P+wait, and Python overhead are each
+~1/3. Only the P2P (~0.04 ms, NVLink) can truly overlap compute; the strided
+staging copies use SMs (compete with phase-2) and `work.wait`/Python are CPU,
+so the SPECFEM overlap recovers only a fraction.
+
+**K-step exchange (wider halo, exchange every K steps) is net-negative here.**
+It amortizes the per-exchange overhead (~0.064 ms/step saved at K=4) but forces
+each step to redundantly compute the K·M halo region: 2(K−1)M extra x-cells =
+12/nxp_eff of the tile. On the thin strong-scaling tiles (nxp=128) that is
+~9.4 % extra compute > the 7.2 % comm saved → slower; on fat weak tiles it is
+roughly neutral. So the textbook latency-hiding lever does not apply.
+
+**Conclusion: the clean optimizations are maximized.** Strong scaling ~5.9× is
+the practical limit (comm is irreducibly ~0.2 ms split 3-ways and only partly
+hideable; the compute-only floor is 7.36× anyway). Weak scaling already meets
+the 8× goal. Further would need fragile low-level work (copy-engine 2-D strided
+DMA, exposing the NCCL event for a GPU-side P2P sync) with modest, capped return.
