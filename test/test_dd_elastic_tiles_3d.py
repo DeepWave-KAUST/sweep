@@ -160,14 +160,18 @@ def fix_tile_models(tile_p, full_p, y0_run, x0_run):
         mt.copy_(src)
 
 
-def _exchange_axis(L_lo, L_hi, dim, n_phys, slots):
+def _exchange_axis(L_lo, L_hi, dim, n_phys, slots, lo_a, lo_b):
     """Copy M-wide halos of the given field slots across one cut along
     `dim` (full extent on the other axes, so ghost-of-ghost propagates for
     the next axis). Used per HALF step: v slots (0..2) between the velocity
     and stress phases, s slots (3..8) after the stress phase — owned stress
     cells then always read exchanged velocities, which keeps the transverse
-    CPML memory divergence in halo cells from reaching owned cells."""
-    lo, hi = PAD, PAD + n_phys
+    CPML memory divergence in halo cells from reaching owned cells.
+
+    Cut-aware: with the asymmetric pad the two tiles' low-side offsets along
+    `dim` differ (edge=abcn+M, cut=M), so ``lo_a``/``lo_b`` (=
+    ``prop.padding[axis_lo]+M`` of the low/high tile) are passed explicitly."""
+    hi_a = lo_a + n_phys
 
     def sl(t, a, b):
         idx = [slice(None)] * t.ndim
@@ -176,8 +180,8 @@ def _exchange_axis(L_lo, L_hi, dim, n_phys, slots):
 
     for f in slots:
         a, b = L_lo[f], L_hi[f]
-        sl(a, hi, hi + M).copy_(sl(b, lo, lo + M))
-        sl(b, lo - M, lo).copy_(sl(a, hi - M, hi))
+        sl(a, hi_a, hi_a + M).copy_(sl(b, lo_b, lo_b + M))
+        sl(b, lo_b - M, lo_b).copy_(sl(a, hi_a - M, hi_a))
 
 
 @cuda_only
@@ -238,7 +242,14 @@ def test_tiles_3d_elastic_bitexact(py, px, free_surface):
 
         prop = make_prop((NZ, nyp, nxp), free_surface, topo=topo)
         runner, record = make_runner(prop, t_wav, t_src, t_rec, tile_models)
-        fix_tile_models(runner.p, runner_full.p, y0, x0)
+        # cut-aware per-tile low offsets (cut face = M, edge face = abcn+M)
+        pad3 = prop.padding   # (x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+        lo_y, lo_x = pad3[2] + M, pad3[0] + M
+        # Static model-halo fill from the reference's RUNTIME-padded models: the
+        # tile runtime origin (0,0) maps to full runtime (PAD+y0-lo_y, ..) — the
+        # symmetric-pad call passed the physical (y0,x0), which is only correct
+        # when lo==PAD (now corrected for the cut-aware asymmetric pad).
+        fix_tile_models(runner.p, runner_full.p, PAD + y0 - lo_y, PAD + x0 - lo_x)
         # Cut-face mask (bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi): the
         # kernels move the cut-side zero-coefficient PML band onto the
         # interior branch so cut-adjacent owned cells match the un-split
@@ -247,7 +258,7 @@ def test_tiles_3d_elastic_bitexact(py, px, free_surface):
             (1 if xi > 0 else 0) | (2 if xi < px - 1 else 0)
             | (16 if yi > 0 else 0) | (32 if yi < py - 1 else 0)
         )
-        tiles[rank] = (runner, record)
+        tiles[rank] = (runner, record, lo_y, lo_x)
 
     def rank_at(yi, xi):
         return yi * px + xi
@@ -256,34 +267,34 @@ def test_tiles_3d_elastic_bitexact(py, px, free_surface):
         # x exchanges first (full y extent incl. y halos), then y
         for yi in range(py):
             for xi in range(px - 1):
-                a = tiles[rank_at(yi, xi)][0].L
-                b = tiles[rank_at(yi, xi + 1)][0].L
-                _exchange_axis(a, b, -1, nxp, slots)
+                ta = tiles[rank_at(yi, xi)]
+                tb = tiles[rank_at(yi, xi + 1)]
+                _exchange_axis(ta[0].L, tb[0].L, -1, nxp, slots, ta[3], tb[3])
         for xi in range(px):
             for yi in range(py - 1):
-                a = tiles[rank_at(yi, xi)][0].L
-                b = tiles[rank_at(yi + 1, xi)][0].L
-                _exchange_axis(a, b, -2, nyp, slots)
+                ta = tiles[rank_at(yi, xi)]
+                tb = tiles[rank_at(yi + 1, xi)]
+                _exchange_axis(ta[0].L, tb[0].L, -2, nyp, slots, ta[2], tb[2])
 
     with torch.no_grad():
         for it in range(NT):
-            for r, (runner, _) in tiles.items():
+            for r, (runner, _, _, _) in tiles.items():
                 runner.run_phase(it + 1, 1)
             _exchange_all_cuts(range(3))           # vx, vy, vz
-            for r, (runner, _) in tiles.items():
+            for r, (runner, _, _, _) in tiles.items():
                 runner.run_phase(it + 1, 2)
             _exchange_all_cuts(range(3, NPHYS))    # 6 stress fields
 
     # ---------------- compare ----------------
     rec_tiles = torch.zeros_like(record_full)
-    for rank, (_, record) in tiles.items():
+    for rank, (_, record, _, _) in tiles.items():
         for j, gi in enumerate(rec_split[rank]):
             rec_tiles[:, :, gi] = record[:, :, j]
     assert torch.equal(rec_tiles, record_full), "record differs"
 
     # final state over each tile's physical region — every wavefield slot
     # (9 physical + 27 CPML memories) must be bitwise identical.
-    for rank, (runner, _) in tiles.items():
+    for rank, (runner, _, lo_y, lo_x) in tiles.items():
         topo_yi, topo_xi = rank // px, rank % px
         for f in range(NWF):
             ref = runner_full.L[f][
@@ -291,7 +302,7 @@ def test_tiles_3d_elastic_bitexact(py, px, free_surface):
                 PAD + topo_yi * nyp: PAD + topo_yi * nyp + nyp,
                 PAD + topo_xi * nxp: PAD + topo_xi * nxp + nxp,
             ]
-            got = runner.L[f][..., PAD:PAD + nyp, PAD:PAD + nxp]
+            got = runner.L[f][..., lo_y:lo_y + nyp, lo_x:lo_x + nxp]
             assert torch.equal(got, ref), (
                 f"tile {rank} wavefield slot {f} differs over physical region"
             )

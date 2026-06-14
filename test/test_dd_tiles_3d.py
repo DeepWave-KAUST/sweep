@@ -100,18 +100,23 @@ def make_runner(prop, wavelet, sources, receivers, vp_np):
     return SteppedBindingRunner(func, p, L, acoustic_psi_pairs(3)), record
 
 
-def _exchange_axis(u_lo_tile, u_hi_tile, dim, n_phys):
+def _exchange_axis(u_lo_tile, u_hi_tile, dim, n_phys, lo_a, lo_b):
     """Copy M-wide u_now halos across one cut along `dim` (full extent on
-    the other axes, so ghost-of-ghost propagates for the next axis)."""
-    lo, hi = PAD, PAD + n_phys
+    the other axes, so ghost-of-ghost propagates for the next axis).
+
+    With the cut-aware asymmetric pad the two tiles' low-side offsets along
+    `dim` differ (edge face = abcn+M, cut face = M), so each side's interior
+    bounds are passed explicitly: ``lo_a`` for the low tile, ``lo_b`` for the
+    high tile (both ``prop.padding[axis_lo] + M``)."""
+    hi_a = lo_a + n_phys
 
     def sl(t, a, b):
         idx = [slice(None)] * t.ndim
         idx[dim] = slice(a, b)
         return t[tuple(idx)]
 
-    sl(u_lo_tile, hi, hi + M).copy_(sl(u_hi_tile, lo, lo + M))
-    sl(u_hi_tile, lo - M, lo).copy_(sl(u_lo_tile, hi - M, hi))
+    sl(u_lo_tile, hi_a, hi_a + M).copy_(sl(u_hi_tile, lo_b, lo_b + M))
+    sl(u_hi_tile, lo_b - M, lo_b).copy_(sl(u_lo_tile, hi_a - M, hi_a))
 
 
 @cuda_only
@@ -163,41 +168,60 @@ def test_tiles_3d_bitexact(py, px):
             t_rec = np.array([[[1, 1, 1]]], dtype=np.int32)
 
         prop = make_prop((NZ, nyp, nxp), topo=topo)
-        tiles[rank] = make_runner(prop, t_wav, t_src, t_rec, vp_t)
+        runner, record = make_runner(prop, t_wav, t_src, t_rec, vp_t)
+        # cut-aware pad: cut faces carry only M (no abcn), so read the per-tile,
+        # per-axis low offset from prop.padding (F.pad order x_lo,x_hi,y_lo,..)
+        # and tell the forward which faces are cuts (else cut-side interior cells
+        # fall into the zero-coeff PML branch and the record/u_now drift grossly).
+        pad3 = prop.padding
+        lo_x, lo_y = pad3[0] + M, pad3[2] + M
+        cm = 0
+        if topo.neighbour_rank("x", -1) is not None:
+            cm |= 1
+        if topo.neighbour_rank("x", +1) is not None:
+            cm |= 2
+        if topo.neighbour_rank("y", -1) is not None:
+            cm |= 16
+        if topo.neighbour_rank("y", +1) is not None:
+            cm |= 32
+        runner.p.cut_face_mask = cm
+        tiles[rank] = (runner, record, lo_y, lo_x)
 
     def rank_at(yi, xi):
         return yi * px + xi
 
     with torch.no_grad():
         for it in range(NT):
-            for r, (runner, _) in tiles.items():
+            for r, (runner, _, _, _) in tiles.items():
                 runner.run_to(it + 1)
             # x exchanges first (full y extent incl. y halos), then y
             for yi in range(py):
                 for xi in range(px - 1):
-                    a = tiles[rank_at(yi, xi)][0].u_now
-                    b = tiles[rank_at(yi, xi + 1)][0].u_now
-                    _exchange_axis(a, b, -1, nxp)
+                    ta = tiles[rank_at(yi, xi)]
+                    tb = tiles[rank_at(yi, xi + 1)]
+                    _exchange_axis(ta[0].u_now, tb[0].u_now, -1, nxp, ta[3], tb[3])
             for xi in range(px):
                 for yi in range(py - 1):
-                    a = tiles[rank_at(yi, xi)][0].u_now
-                    b = tiles[rank_at(yi + 1, xi)][0].u_now
-                    _exchange_axis(a, b, -2, nyp)
+                    ta = tiles[rank_at(yi, xi)]
+                    tb = tiles[rank_at(yi + 1, xi)]
+                    _exchange_axis(ta[0].u_now, tb[0].u_now, -2, nyp, ta[2], tb[2])
 
     # ---------------- compare ----------------
     rec_tiles = torch.zeros_like(record_full)
-    for rank, (_, record) in tiles.items():
+    for rank, (_, record, _, _) in tiles.items():
         for j, gi in enumerate(rec_split[rank]):
             rec_tiles[:, gi] = record[:, j]
     assert torch.equal(rec_tiles, record_full), "record differs"
 
+    # single-domain reference keeps the symmetric PAD; each tile's interior is at
+    # its own cut-aware (lo_y, lo_x).
     u_full = runner_full.u_now
-    for rank, (runner, _) in tiles.items():
+    for rank, (runner, _, lo_y, lo_x) in tiles.items():
         topo_yi, topo_xi = rank // px, rank % px
         ref = u_full[
             ...,
             PAD + topo_yi * nyp: PAD + topo_yi * nyp + nyp,
             PAD + topo_xi * nxp: PAD + topo_xi * nxp + nxp,
         ]
-        got = runner.u_now[..., PAD:PAD + nyp, PAD:PAD + nxp]
+        got = runner.u_now[..., lo_y:lo_y + nyp, lo_x:lo_x + nxp]
         assert torch.equal(got, ref), f"tile {rank} final u_now differs"
