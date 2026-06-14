@@ -116,15 +116,18 @@ Not monotonic — a **balanced** tile wins; y-cut (fat x, thin y) is *worst*
 strong scaling, generalising across shapes — biggest for cubic globals where the
 x-cut tile is thinnest.** Shipped as `sweep.parallel.balanced_grid(world, shape)`
 (returns the recommended `(py, px)`; pure arithmetic, additive — does not change
-any default). Default caps `py<=2` (always safe). `py>=3` (cubic optimum, e.g.
-384³ px2py4 = 0.688 ms / 6.96×) needs `allow_y_thin=True` and is gated on the
-boundary-save fix below.
+any default). Default caps `py<=2` (a conservative load-balance choice that
+already captures +9–43 %). `py>=3` (the cubic optimum, e.g. 384³ px2py4 =
+0.688 ms / 6.96×) is opt-in via `allow_y_thin=True` and is **validated** (8× V100
+bit-exact).
 
-**Known limitation (separate bug):** with boundary saving on, `py>=3` (an
-interior rank with BOTH y-faces cut → zero y-PML) mis-launches the y
-boundary-save kernel → `CUDA error: invalid configuration argument`. x is
-already guarded (px8 fine); y is not. Tracked for a kernel fix; until then the
-safe `py<=2` balanced grid already captures +9–43 %.
+**py>=3 boundary-save crash — FIXED (`83a70df`, ibex bit-exact confirmed).** An
+earlier `CUDA error: invalid configuration argument` for `py>=3` was **not** a
+missing y-kernel guard: `DDPropagator._capture` ran a public fwd/bwd with
+`cut_face_mask=0` on a thin cut-aware tile, so the kernel sized a cut face as
+full PML → negative boundary count → invalid launch. Fix is pure-Python
+(`_capture` fwrap/bwrap set the mask; **no CUDA rebuild**); `Boundary3D::front_back`
+is dead code. See lesson_dd_capture_cut_mask.
 
 **Updated bottom line:** weak 8× met; **strong scaling improves from ~5.9× to
 7.0–7.2× simply by choosing a balanced grid** (≈8× compute is reachable because

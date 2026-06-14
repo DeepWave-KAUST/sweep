@@ -346,6 +346,13 @@ class DDPropagator:
         self.fp.record_out = self.record
         self._captured = True
 
+    def __call__(self, *args, **kwargs):
+        """Alias for :meth:`forward` so a ``DDPropagator`` can be invoked like
+        the single-domain ``PropTorch`` (``ddp(...)`` == ``ddp.forward(...)``).
+        DDPropagator is a composition wrapper, not an ``nn.Module``, so it does
+        not get ``__call__`` for free."""
+        return self.forward(*args, **kwargs)
+
     # --------------------------------------------------------------- forward
     def forward(self, wavelet, sources_global, receivers_global, models):
         """Run the DD forward; return this rank's tile record (raw CUDA layout).
