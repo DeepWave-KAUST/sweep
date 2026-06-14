@@ -184,6 +184,7 @@ class DDPropagator:
                             and (self.cut_mask & ~0x3) == 0)
 
         self._captured = False
+        self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
         self._nwf = self._st["nwf"][0 if self.ndim == 2 else 1]
         self._nrecon = self._st["nrecon"][0 if self.ndim == 2 else 1]
         if self.family == "elastic":
@@ -344,6 +345,10 @@ class DDPropagator:
         self.bp.illum_out = self.illum
         self.record = torch.zeros_like(cap["fraw"][2])
         self.fp.record_out = self.record
+        # cache the canonical wavelet shape (ForwardInput.forward_source is
+        # write-only; the backward params expose it) for per-shot _set_geometry.
+        fsrc = getattr(self.bp, "forward_source", None)
+        self._fs_shape = tuple(fsrc.shape) if fsrc is not None else None
         self._captured = True
 
     def __call__(self, *args, **kwargs):
@@ -352,6 +357,45 @@ class DDPropagator:
         DDPropagator is a composition wrapper, not an ``nn.Module``, so it does
         not get ``__call__`` for free."""
         return self.forward(*args, **kwargs)
+
+    # ------------------------------------------------------------- geometry
+    def _runtime_coords(self, loc):
+        """Physical per-tile coords (1, n, ndim) -> runtime int32 on device,
+        applying the SAME per-axis low-side shift as ``_c.py`` (PML low pad +
+        stencil halo M, cut-aware via ``self.prop.padding``)."""
+        pad, M = self.prop.padding, self.M
+        out = np.array(loc, dtype=np.int32).copy()
+        out[..., 0] += pad[0] + M
+        if self.ndim == 3:
+            out[..., 1] += pad[2] + M
+        out[..., -1] += pad[-2] + M
+        return torch.as_tensor(out, dtype=torch.int32, device=self.dev)
+
+    def _set_geometry(self, ls, lr, wav):
+        """Re-apply this call's source/receiver/wavelet onto the captured params
+        WITHOUT a full re-capture. The C++ params store geometry as plain coord
+        arrays plus the wavelet, so multi-shot only needs those fields swapped;
+        the wavefield/record/grad buffers are reused untouched. ``ls``/``lr``
+        already encode per-tile ownership (dummy + zero wavelet off-tile).
+        Forward and backward params use different field NAMES for the same
+        quantities (see probe): fp.source/sources_loc/receivers_loc vs
+        bp.forward_source/forward_sources_loc/adjoint_sources_loc."""
+        src_rt = self._runtime_coords(ls)        # (1, npts, ndim)
+        rec_rt = self._runtime_coords(lr)        # (1, nrec, ndim)
+        fs = None
+        if self._fs_shape is not None:
+            fs = torch.as_tensor(wav, dtype=torch.float32, device=self.dev).reshape(self._fs_shape)
+        # forward params
+        self.fp.sources_loc = src_rt
+        self.fp.receivers_loc = rec_rt
+        if fs is not None:
+            self.fp.source = fs
+        # backward params (reconstruct forward from source; adjoint injected at
+        # the receivers -> adjoint_sources_loc carries the receiver coords)
+        self.bp.forward_sources_loc = src_rt
+        self.bp.adjoint_sources_loc = rec_rt
+        if fs is not None:
+            self.bp.forward_source = fs
 
     # --------------------------------------------------------------- forward
     def forward(self, wavelet, sources_global, receivers_global, models):
@@ -377,8 +421,15 @@ class DDPropagator:
         else:
             lr = np.array([[dummy]], dtype=np.int32)
 
+        geom_key = (ls.tobytes(), lr.tobytes(), wav.tobytes())
         if not self._captured:
             self._capture(wav, ls, lr, tiles)
+            self._geom_key = geom_key
+        elif geom_key != self._geom_key:
+            # source/receiver/wavelet changed since capture (multi-shot) — swap
+            # them on the captured params; fixed geometry hits the cache (no-op).
+            self._set_geometry(ls, lr, wav)
+            self._geom_key = geom_key
         self._set_models(tiles)
         # ALL forward kernels are now cut-aware (in_pml uses phys_x0/x1 or
         # && !cut_*): the forward needs the mask too, else cut-side interior
