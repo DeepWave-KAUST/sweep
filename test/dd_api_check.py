@@ -125,6 +125,8 @@ def main():
     ap.add_argument("--nt", type=int, default=60)
     ap.add_argument("--px", type=int, default=0, help="x tiles (default: world)")
     ap.add_argument("--py", type=int, default=1, help="y tiles (3-D only, 2x2 = px=py=2)")
+    ap.add_argument("--ny", type=int, default=20,
+                    help="3-D global Ny (must be a multiple of py; bump for py>=3)")
     ap.add_argument("--free-surface", action="store_true")
     args = ap.parse_args()
     fam, ndim, so, abcn, nt, fs = (args.family, args.ndim, args.so, args.abcn,
@@ -140,7 +142,7 @@ def main():
     px = args.px or world
     py = args.py
     assert px * py == world, f"px*py={px * py} != world={world}"
-    nz, ny = 48, 20
+    nz, ny = 48, args.ny
     nxp = 28
     nx = nxp * px
     shape = (nz, nx) if ndim == 2 else (nz, ny, nx)
