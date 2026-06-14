@@ -104,12 +104,47 @@ class FastHaloExchanger:
             rview.copy_(rbuf)
 
 
+class FastHaloGroup:
+    """Exchange a FIXED list of wavefields in ONE batched isend/irecv.
+
+    The elastic DD loop exchanges every velocity (then every stress) field
+    after each half-step.  Running a separate ``batch_isend_irecv`` + ``wait``
+    per field costs ``nphys`` (5 in 2-D, 9 in 3-D) synchronisation rounds per
+    step; concatenating all fields of a group into a single P2P op list
+    collapses that to ONE wait, cutting per-step comm latency (the bare P2P
+    bandwidth is unchanged — this trades many small launches/waits for one).
+
+    Fields must keep fixed addresses across steps — true for the elastic slots
+    (no buffer-role rotation).  Both ranks build the op list in the same field
+    order, so the per-field send/recv matching is exactly the per-field path's,
+    just batched (bit-identical).
+    """
+
+    def __init__(self, fields, mesh: ModelParallelMesh, halo: int,
+                 axes: Sequence[str]) -> None:
+        self._ex = [FastHaloExchanger(f, mesh, halo, axes) for f in fields]
+        self._ops = [op for ex in self._ex for op in ex._ops]
+
+    def __call__(self) -> None:
+        if not self._ops:
+            return
+        for ex in self._ex:
+            for sbuf, sview in ex._send_views:
+                sbuf.copy_(sview)
+        for req in dist.batch_isend_irecv(self._ops):
+            req.wait()
+        for ex in self._ex:
+            for rview, rbuf in ex._recv_views:
+                rview.copy_(rbuf)
+
+
 class FastHaloSet:
     """Per-tensor exchanger cache for role-rotating wavefield lists.
 
     The stepped runners cycle u_now through 3 fixed tensors; ``exchange``
     builds (once) and reuses one :class:`FastHaloExchanger` per distinct
-    tensor identity.
+    tensor identity.  ``exchange_group`` batches a fixed list of fields
+    (elastic velocity / stress) into one :class:`FastHaloGroup`.
     """
 
     def __init__(self, mesh: ModelParallelMesh, halo: int, axes: Sequence[str]):
@@ -117,6 +152,7 @@ class FastHaloSet:
         self.halo = halo
         self.axes = tuple(axes)
         self._cache: Dict[int, FastHaloExchanger] = {}
+        self._group_cache: Dict[tuple, FastHaloGroup] = {}
 
     def _get(self, wavefield: torch.Tensor) -> "FastHaloExchanger":
         key = wavefield.data_ptr()
@@ -129,6 +165,16 @@ class FastHaloSet:
     def exchange(self, wavefield: torch.Tensor) -> None:
         """Blocking exchange: build-or-reuse this tensor's exchanger and run it."""
         self._get(wavefield)()
+
+    def exchange_group(self, fields: Sequence[torch.Tensor]) -> None:
+        """Blocking exchange of several fixed-address fields in ONE batched P2P
+        (elastic velocity / stress groups). Cached by the fields' data_ptrs."""
+        key = tuple(f.data_ptr() for f in fields)
+        grp = self._group_cache.get(key)
+        if grp is None:
+            grp = FastHaloGroup(list(fields), self.mesh, self.halo, self.axes)
+            self._group_cache[key] = grp
+        grp()
 
     def exchange_start(self, wavefield: torch.Tensor) -> None:
         """Phase A of an overlapped exchange (see FastHaloExchanger). Pair with
