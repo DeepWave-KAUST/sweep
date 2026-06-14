@@ -65,6 +65,8 @@ class FastHaloExchanger:
                 self._ops.append(dist.P2POp(dist.isend, sbuf, high, group=mesh.model_pg))
                 self._ops.append(dist.P2POp(dist.irecv, rbuf, high, group=mesh.model_pg))
 
+        self._pending: Optional[list] = None
+
     def __call__(self) -> None:
         if not self._ops:
             return
@@ -72,6 +74,32 @@ class FastHaloExchanger:
             sbuf.copy_(sview)
         for req in dist.batch_isend_irecv(self._ops):
             req.wait()
+        for rview, rbuf in self._recv_views:
+            rview.copy_(rbuf)
+
+    def exchange_start(self) -> None:
+        """Phase A of an overlapped exchange: copy the send strips and launch
+        the batched P2P on the CURRENT stream (caller sets it to a comm stream),
+        WITHOUT waiting. The recv-copy is deferred to :meth:`exchange_finish`
+        so the caller can enqueue interior compute in between — that compute
+        then runs concurrently with the in-flight P2P."""
+        if not self._ops:
+            return
+        for sbuf, sview in self._send_views:
+            sbuf.copy_(sview)
+        self._pending = dist.batch_isend_irecv(self._ops)
+
+    def exchange_finish(self) -> None:
+        """Phase B: wait for the P2P to complete, then copy the received strips
+        into the halo. ``req.wait()`` runs AFTER the interior compute has been
+        enqueued, so the GPU already overlapped it; the recv-copy is correctly
+        ordered after the transfer (no race)."""
+        if not self._ops:
+            return
+        if self._pending is not None:
+            for req in self._pending:
+                req.wait()
+            self._pending = None
         for rview, rbuf in self._recv_views:
             rview.copy_(rbuf)
 
@@ -97,3 +125,20 @@ class FastHaloSet:
             ex = FastHaloExchanger(wavefield, self.mesh, self.halo, self.axes)
             self._cache[key] = ex
         ex()
+
+    def _get(self, wavefield: torch.Tensor) -> "FastHaloExchanger":
+        key = wavefield.data_ptr()
+        ex = self._cache.get(key)
+        if ex is None:
+            ex = FastHaloExchanger(wavefield, self.mesh, self.halo, self.axes)
+            self._cache[key] = ex
+        return ex
+
+    def exchange_start(self, wavefield: torch.Tensor) -> None:
+        """Phase A of an overlapped exchange (see FastHaloExchanger). Pair with
+        :meth:`exchange_finish` on the SAME tensor, with interior compute in
+        between, both on a comm stream."""
+        self._get(wavefield).exchange_start()
+
+    def exchange_finish(self, wavefield: torch.Tensor) -> None:
+        self._get(wavefield).exchange_finish()

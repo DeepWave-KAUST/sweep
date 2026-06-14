@@ -174,6 +174,15 @@ class DDPropagator:
         self._bwd_halo = None
         self._model_halo = None
 
+        # comm/compute overlap (acoustic forward): a dedicated comm stream runs
+        # step it's halo exchange while step it's interior computes. Eligible
+        # only for x-face cuts (the phase-split forward emits x cut strips) AND
+        # when no source sits in a cut strip (checked per-call in forward).
+        self._comm_stream = None
+        self._comm_evt = None
+        self._overlap_ok = (self.world > 1 and self.cut_mask != 0
+                            and (self.cut_mask & ~0x3) == 0)
+
         self._captured = False
         self._nwf = self._st["nwf"][0 if self.ndim == 2 else 1]
         self._nrecon = self._st["nrecon"][0 if self.ndim == 2 else 1]
@@ -205,6 +214,19 @@ class DDPropagator:
     def _exchange(self, halo, tensor):
         if halo is not None:
             halo.exchange(self._halo_view(tensor))
+
+    def _src_away_from_cuts(self, sg) -> bool:
+        """True when no source sits within M of an x-cut line (k*nxp). The
+        forward injects the source in phase 2 — after phase 1's cut strips have
+        been exchanged — so a source IN a strip would cross the cut one step
+        late. Comm/compute overlap is only correct (bit-exact vs serial) when
+        every source is clear of the strips; otherwise we fall back to serial.
+        ``sg`` is the global source-coord tensor (B, nsrc, ndim), x at index 0."""
+        cuts = [k * self.nxp for k in range(1, self.topo.px)]
+        if not cuts:
+            return True
+        xs = sg.reshape(-1, self.ndim)[:, 0].tolist()
+        return all(abs(int(x) - c) > self.M for x in xs for c in cuts)
 
     def _slice_tile(self, model):
         """Accept a global (Nz,[Ny,]Nx) or already-tiled (Nz,[Ny,]nyp,nxp) array."""
@@ -355,17 +377,32 @@ class DDPropagator:
             if self.family == "acoustic":
                 runner = SteppedBindingRunner(
                     self.f_func, self.fp, self.L_fwd, acoustic_psi_pairs(self.ndim))
-                # NOTE: a SPECFEM-style comm/compute overlap (phase-1 cut strips
-                # -> async halo exchange on a comm stream || phase-2 interior) is
-                # only ~2% faster on weak 3D AND is INCORRECT when a source sits
-                # in a cut boundary strip: the source is injected in phase 2, so
-                # the strip exchanged after phase 1 is missing the source term
-                # (the bench dodges this with `assert src not within M of cut`).
-                # Correct overlap needs the source injected per-phase (a kernel
-                # change). Until then the serial path is the source-safe default.
-                for it in range(self.nt):
-                    runner.run_to(it + 1)
-                    self._exchange(fhalo, runner.u_now)
+                if self._overlap_ok and self._src_away_from_cuts(sg):
+                    # True comm/compute overlap: phase-1 cut strips -> async halo
+                    # exchange on a comm stream (no inline req.wait, so phase-2
+                    # is enqueued immediately and runs concurrently) -> phase-2
+                    # interior -> compute waits for comm. Bit-identical to serial
+                    # (pure reordering); source-in-strip ruled out above.
+                    if self._comm_stream is None:
+                        self._comm_stream = torch.cuda.Stream()
+                        self._comm_evt = torch.cuda.Event()
+                    comm, evt = self._comm_stream, self._comm_evt
+                    compute = torch.cuda.current_stream()
+                    for it in range(self.nt):
+                        runner.run_phase(it + 1, 1)
+                        evt.record()
+                        un = self._halo_view(runner.u_next)
+                        with torch.cuda.stream(comm):
+                            comm.wait_event(evt)
+                            fhalo.exchange_start(un)        # copy-send + P2P (no wait)
+                        runner.run_phase(it + 1, 2)         # interior, overlaps P2P
+                        with torch.cuda.stream(comm):
+                            fhalo.exchange_finish(un)       # wait P2P + copy-recv
+                        compute.wait_stream(comm)
+                else:
+                    for it in range(self.nt):
+                        runner.run_to(it + 1)
+                        self._exchange(fhalo, runner.u_now)
             else:
                 runner = SteppedBindingRunner(
                     self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
