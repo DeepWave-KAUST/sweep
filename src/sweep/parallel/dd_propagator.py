@@ -454,6 +454,35 @@ class DDPropagator:
         it.  (This is explicit on purpose — the propagator never guesses whether
         an in-place optimiser step changed the model, which would risk silently
         running on a stale model.)"""
+        sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
+        fhalo = self._halo("_fwd_halo")
+        with torch.no_grad():
+            if self.family == "acoustic":
+                self._forward_loop_acoustic(fhalo, sg)
+            else:
+                self._forward_loop_elastic(fhalo)
+
+        # A tile owning no real receivers carries only a dummy receiver; its
+        # record is meaningless.  Zero it so a residual/adjoint derived from it
+        # injects nothing on this tile — otherwise the dummy's recorded value
+        # becomes a spurious adjoint source that corrupts the gradient near the
+        # cut (matters for y-cut/2x2, where receivers at a fixed y leave whole
+        # tile rows without receivers; x-cut with x-spread receivers never hit
+        # it).
+        if not self._own_rec_idx:
+            self.record.zero_()
+        # hand the DD-consistent ring to the backward params
+        self.bp.boundary_gpu = list(self.fp.boundary_gpu)
+        self.bp.u_last_two = self.fp.last_two
+        return self.record
+
+    def _prepare_call(self, wavelet, sources_global, receivers_global, models):
+        """Per-call forward setup shared by every step loop: slice the model (or
+        reuse it for ``models=None``), partition the source/receiver coords to
+        this tile, (re)capture or re-apply the geometry, rebind the model, set
+        the cut-face mask, and zero the forward buffers. Returns the GLOBAL
+        source tensor ``sg`` (the acoustic overlap path needs it to rule out a
+        source sitting in a cut strip)."""
         if models is None:
             if not self._captured:
                 raise RuntimeError(
@@ -500,68 +529,54 @@ class DDPropagator:
         # cells fall into the zero-coeff PML branch and drift in the last ulp
         # against the single-domain reference (the asymmetric-pad invariant).
         self.fp.cut_face_mask = self.cut_mask
-
         for t in self.L_fwd:
             t.zero_()
         self.record.zero_()
-        fhalo = self._halo("_fwd_halo")
+        return sg
 
-        with torch.no_grad():
-            if self.family == "acoustic":
-                runner = SteppedBindingRunner(
-                    self.f_func, self.fp, self.L_fwd, acoustic_psi_pairs(self.ndim))
-                if self._overlap_ok and self._src_away_from_cuts(sg):
-                    # True comm/compute overlap: phase-1 cut strips -> async halo
-                    # exchange on a comm stream (no inline req.wait, so phase-2
-                    # is enqueued immediately and runs concurrently) -> phase-2
-                    # interior -> compute waits for comm. Bit-identical to serial
-                    # (pure reordering); source-in-strip ruled out above.
-                    if self._comm_stream is None:
-                        self._comm_stream = torch.cuda.Stream()
-                        self._comm_evt = torch.cuda.Event()
-                    comm, evt = self._comm_stream, self._comm_evt
-                    compute = torch.cuda.current_stream()
-                    for it in range(self.nt):
-                        runner.run_phase(it + 1, 1)
-                        evt.record()
-                        un = self._halo_view(runner.u_next)
-                        with torch.cuda.stream(comm):
-                            comm.wait_event(evt)
-                            fhalo.exchange_start(un)        # copy-send + P2P (no wait)
-                        runner.run_phase(it + 1, 2)         # interior, overlaps P2P
-                        with torch.cuda.stream(comm):
-                            fhalo.exchange_finish(un)       # wait P2P + copy-recv
-                        compute.wait_stream(comm)
-                else:
-                    for it in range(self.nt):
-                        runner.run_to(it + 1)
-                        self._exchange(fhalo, runner.u_now)
-            else:
-                runner = SteppedBindingRunner(
-                    self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
-                # elastic slots don't rotate -> field lists are fixed; batch the
-                # velocity (phase 1) and stress (phase 2) halos into one P2P each
-                vel = [self.L_fwd[f] for f in range(self._nv)]
-                stress = [self.L_fwd[f] for f in range(self._nv, self._nphys)]
-                for it in range(self.nt):
-                    runner.run_phase(it + 1, 1)
-                    self._exchange_group(fhalo, vel)
-                    runner.run_phase(it + 1, 2)
-                    self._exchange_group(fhalo, stress)
+    def _forward_loop_acoustic(self, fhalo, sg):
+        """Acoustic forward time loop. Uses true comm/compute overlap (phase-1
+        cut strips exchanged async on a comm stream while phase-2 interior
+        computes, then compute waits for comm) when eligible — x-face cuts only
+        and no source in a cut strip — else a serial step-then-exchange loop.
+        Both are bit-identical (the overlap is a pure reordering)."""
+        runner = SteppedBindingRunner(
+            self.f_func, self.fp, self.L_fwd, acoustic_psi_pairs(self.ndim))
+        if self._overlap_ok and self._src_away_from_cuts(sg):
+            if self._comm_stream is None:
+                self._comm_stream = torch.cuda.Stream()
+                self._comm_evt = torch.cuda.Event()
+            comm, evt = self._comm_stream, self._comm_evt
+            compute = torch.cuda.current_stream()
+            for it in range(self.nt):
+                runner.run_phase(it + 1, 1)
+                evt.record()
+                un = self._halo_view(runner.u_next)
+                with torch.cuda.stream(comm):
+                    comm.wait_event(evt)
+                    fhalo.exchange_start(un)        # copy-send + P2P (no wait)
+                runner.run_phase(it + 1, 2)         # interior, overlaps P2P
+                with torch.cuda.stream(comm):
+                    fhalo.exchange_finish(un)       # wait P2P + copy-recv
+                compute.wait_stream(comm)
+        else:
+            for it in range(self.nt):
+                runner.run_to(it + 1)
+                self._exchange(fhalo, runner.u_now)
 
-        # A tile owning no real receivers carries only a dummy receiver; its
-        # record is meaningless.  Zero it so a residual/adjoint derived from it
-        # injects nothing on this tile — otherwise the dummy's recorded value
-        # becomes a spurious adjoint source that corrupts the gradient near the
-        # cut (matters for y-cut/2x2, where receivers at a fixed y leave whole
-        # tile rows without receivers; x-cut with x-spread receivers never hit
-        # it).
-        if not self._own_rec_idx:
-            self.record.zero_()
-        # hand the DD-consistent ring to the backward params
-        self.bp.boundary_gpu = list(self.fp.boundary_gpu)
-        self.bp.u_last_two = self.fp.last_two
-        return self.record
+    def _forward_loop_elastic(self, fhalo):
+        """Elastic forward time loop: phase-1 velocity update + batched velocity-
+        halo exchange, phase-2 stress update + batched stress-halo exchange.
+        Elastic slots don't rotate, so the field lists are fixed across steps."""
+        runner = SteppedBindingRunner(
+            self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
+        vel = [self.L_fwd[f] for f in range(self._nv)]
+        stress = [self.L_fwd[f] for f in range(self._nv, self._nphys)]
+        for it in range(self.nt):
+            runner.run_phase(it + 1, 1)
+            self._exchange_group(fhalo, vel)
+            runner.run_phase(it + 1, 2)
+            self._exchange_group(fhalo, stress)
 
     # -------------------------------------------------------------- gradient
     def gradient(self, adjoint_source_tile):
