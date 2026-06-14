@@ -78,11 +78,11 @@ def main():
         # shot_group 0; each already holds A+B after all_reduce)
         worst = 2
         for k in range(len(ref)):
-            full = torch.zeros_like(ref[k][..., :nz, :])  # (.., nz, nx) interior
-            for r in range(px):                            # ranks 0,1 = sg0 tiles
+            want = ref[k][..., pad:pad + nz, pad:pad + nx]   # interior (nz, nx)
+            full = torch.zeros_like(want)                    # assemble x-tiles into it
+            for r in range(px):                              # ranks 0,1 = sg0 tiles
                 x0, nxp_r, g_list = gathered[r]
                 full[..., :, x0:x0 + nxp_r] = g_list[k]
-            want = ref[k][..., pad:pad + nz, pad:pad + nx]
             bit = torch.equal(full, want)
             mad = (full - want).abs().max().item()
             rel = mad / (want.abs().max().item() + 1e-30)
