@@ -345,10 +345,27 @@ class DDPropagator:
         self.bp.illum_out = self.illum
         self.record = torch.zeros_like(cap["fraw"][2])
         self.fp.record_out = self.record
-        # cache the canonical wavelet shape (ForwardInput.forward_source is
-        # write-only; the backward params expose it) for per-shot _set_geometry.
+        # Cache the canonical wavelet shape + the per-tile source/receiver counts
+        # so per-shot _set_geometry can validate and reshape. The wavelet lives on
+        # the forward params as write-only ``fp.source``; the SAME wavelet is also
+        # exposed (readable) as ``bp.forward_source``, which is what we read here.
         fsrc = getattr(self.bp, "forward_source", None)
         self._fs_shape = tuple(fsrc.shape) if fsrc is not None else None
+        self._cap_ls_shape = tuple(np.asarray(loc_src).shape)
+        self._cap_lr_shape = tuple(np.asarray(loc_rec).shape)
+        # Fail loud NOW (on every path, not just multi-shot) if the C bindings
+        # ever rename a geometry field that _set_geometry writes.
+        for obj, who, fields in (
+            (self.fp, "ForwardInput", ("sources_loc", "receivers_loc", "source")),
+            (self.bp, "BackwardInput",
+             ("forward_sources_loc", "adjoint_sources_loc", "forward_source")),
+        ):
+            missing = [f for f in fields if not hasattr(obj, f)]
+            if missing:
+                raise AttributeError(
+                    f"DDPropagator._set_geometry expects {who} fields {missing}, "
+                    f"absent on this build — the C param bindings changed; update "
+                    f"_set_geometry's field names.")
         self._captured = True
 
     def __call__(self, *args, **kwargs):
@@ -380,6 +397,17 @@ class DDPropagator:
         Forward and backward params use different field NAMES for the same
         quantities (see probe): fp.source/sources_loc/receivers_loc vs
         bp.forward_source/forward_sources_loc/adjoint_sources_loc."""
+        # The captured fp/bp coord arrays + record buffers are sized for the FIRST
+        # shot's per-tile source/receiver counts; a later shot with a different
+        # count would silently mis-shape the wavelet reshape or overrun the record.
+        # Require a fixed per-tile (#sources, #receivers) across shots — fail loud.
+        if ls.shape != self._cap_ls_shape or lr.shape != self._cap_lr_shape:
+            raise ValueError(
+                f"DDPropagator multi-shot: per-tile source/receiver count changed "
+                f"since capture (src {self._cap_ls_shape}->{tuple(ls.shape)}, "
+                f"rec {self._cap_lr_shape}->{tuple(lr.shape)}). Re-geometry needs a "
+                f"fixed per-tile layout (same #sources/shot and a fixed receiver "
+                f"spread); the captured buffers are sized for the first shot.")
         src_rt = self._runtime_coords(ls)        # (1, npts, ndim)
         rec_rt = self._runtime_coords(lr)        # (1, nrec, ndim)
         fs = None
