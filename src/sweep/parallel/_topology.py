@@ -217,3 +217,69 @@ class MeshTopology:
         raise ValueError(
             f"global_shape must be 2-D or 3-D, got ndim={ndim} ({global_shape!r})"
         )
+
+
+def balanced_grid(
+    world_size: int,
+    global_shape: Tuple[int, ...],
+    *,
+    shot_groups: int = 1,
+    allow_y_thin: bool = False,
+) -> Tuple[int, int]:
+    """Recommend a ``(py, px)`` DD grid that keeps each rank's tile compact.
+
+    A 1-D x-cut (``py=1, px=world``) shrinks the *contiguous* x-dimension to
+    ``Nx/world``; on 8 GPUs that is the slow, memory-heavy choice. Measured on
+    8x V100 (acoustic 3-D, end-to-end forward via :class:`DDPropagator`), a
+    balanced 2-D cut is **substantially faster and lighter** for strong scaling
+    because cutting more axes saves more cut-aware PML *and* a squarer tile runs
+    the FD kernel more efficiently:
+
+    ===================  ============  ==================  ========
+    global (Nz,Ny,Nx)    x-cut px8     balanced px4,py2    speedup
+    ===================  ============  ==================  ========
+    256 x 256 x 1024     0.893 ms      0.814 ms            +9 %
+    384 x 384 x 384      1.026 ms      0.716 ms            +43 %
+    512 x 512 x 512      1.890 ms      1.439 ms            +31 %
+    ===================  ============  ==================  ========
+
+    (peak memory also drops ~17-19 %.) The win grows the thinner the x-cut tile
+    would be — i.e. for cubic / strong-scaling problems.
+
+    This returns the ``(py, px)`` factorisation of the per-shot-group tile count
+    (``world_size // shot_groups``) that MAXIMISES the smaller horizontal tile
+    edge ``min(Ny/py, Nx/px)``, breaking ties toward a fatter (contiguous) x
+    edge. 2-D models always get ``(1, px)`` (no y to split).
+
+    ``py`` is capped at 2 by default: with ``py >= 3`` an interior rank has BOTH
+    y-faces cut (zero y-PML), which currently mis-launches the boundary-saving
+    kernel on too-thin y-tiles. ``py=2`` is always safe (every rank keeps one
+    PML y-face) and already captures most of the win. Set ``allow_y_thin=True``
+    to consider ``py >= 3`` (faster still for cubic models, once that kernel
+    limitation is lifted).
+    """
+    tiles = world_size // shot_groups
+    if tiles < 1:
+        raise ValueError(f"world_size={world_size} < shot_groups={shot_groups}")
+    ndim = len(global_shape)
+    if ndim == 2:
+        return (1, tiles)
+    if ndim != 3:
+        raise ValueError(f"global_shape must be 2-D or 3-D, got {global_shape!r}")
+    _, Ny, Nx = (int(s) for s in global_shape)
+    py_cap = tiles if allow_y_thin else min(2, tiles)
+
+    best = None  # (sort key, (py, px))
+    for py in range(1, py_cap + 1):
+        if tiles % py:
+            continue
+        px = tiles // py
+        if Ny % py or Nx % px:
+            continue
+        ny, nx = Ny // py, Nx // px
+        key = (min(ny, nx), nx)            # squarest tile, then fattest x
+        if best is None or key > best[0]:
+            best = (key, (py, px))
+    if best is None:                        # nothing divides evenly -> x-cut
+        return (1, tiles)
+    return best[1]
