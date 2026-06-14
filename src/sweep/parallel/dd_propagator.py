@@ -435,8 +435,25 @@ class DDPropagator:
     # --------------------------------------------------------------- forward
     def forward(self, wavelet, sources_global, receivers_global, models):
         """Run the DD forward; return this rank's tile record (raw CUDA layout).
-        ``models`` is a list of global or already-tiled physical arrays."""
-        tiles = [self._slice_tile(m) for m in models]
+
+        ``models`` is a list of global or already-tiled physical arrays, OR
+        ``None`` to REUSE the model already edge-padded and halo-exchanged by a
+        previous forward.  An FWI epoch fires many shots through the SAME model
+        (only the source moves), so re-padding the runtime model and running the
+        NCCL model-halo collective on every shot is pure waste; pass ``models``
+        on the first shot of the epoch and ``models=None`` for the rest to skip
+        it.  (This is explicit on purpose — the propagator never guesses whether
+        an in-place optimiser step changed the model, which would risk silently
+        running on a stale model.)"""
+        if models is None:
+            if not self._captured:
+                raise RuntimeError(
+                    "DDPropagator.forward(models=None) reuses the previously set "
+                    "model, but no forward has run yet — pass models on the first "
+                    "call.")
+            tiles = None
+        else:
+            tiles = [self._slice_tile(m) for m in models]
         sg = torch.as_tensor(np.asarray(sources_global), dtype=torch.int64)
         rg = torch.as_tensor(np.asarray(receivers_global), dtype=torch.int64)
         loc_s, mask_s = partition_global_coords(sg, self.topo, self.global_shape)
@@ -465,7 +482,10 @@ class DDPropagator:
             # them on the captured params; fixed geometry hits the cache (no-op).
             self._set_geometry(ls, lr, wav)
             self._geom_key = geom_key
-        self._set_models(tiles)
+        # Re-pad the runtime model + run the NCCL model-halo only when the caller
+        # supplied a (possibly updated) model; models=None reuses the buffers.
+        if tiles is not None:
+            self._set_models(tiles)
         # ALL forward kernels are now cut-aware (in_pml uses phys_x0/x1 or
         # && !cut_*): the forward needs the mask too, else cut-side interior
         # cells fall into the zero-coeff PML branch and drift in the last ulp
