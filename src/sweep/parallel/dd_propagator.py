@@ -291,10 +291,21 @@ class DDPropagator:
         cap = {}
         f_orig, b_orig = impl.forward_func, impl.backward_bs_func
 
+        # The capture's public forward/backward must carry the cut-face mask,
+        # exactly like the real stepped runs (see forward()/gradient()). The
+        # cut-aware pad makes an interior tile thin on its cut faces (M halo, no
+        # abcn PML); without the mask the kernel treats a cut face as a full
+        # abcn+M PML, so phys_y1 - phys_y0 (the boundary-save extent) goes
+        # NEGATIVE and the compact boundary kernel launches with a <= 0 grid ->
+        # CUDA "invalid configuration argument". This only bites when a tile is
+        # thin enough to flip the sign — py>=3 (both y-faces cut) is the first
+        # such case; x stays safe only because its per-tile interior is wider.
         def fwrap(p):
+            p.cut_face_mask = self.cut_mask
             out = f_orig(p); cap["fp"] = p; cap["fraw"] = out; return out
 
         def bwrap(p):
+            p.cut_face_mask = self.cut_mask
             out = b_orig(p); cap["bp"] = p; return out
 
         impl.forward_func, impl.backward_bs_func = fwrap, bwrap
