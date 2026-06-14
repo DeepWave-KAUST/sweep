@@ -175,7 +175,7 @@ class DDPropagator:
         self._model_halo = None
 
         # comm/compute overlap (acoustic forward): a dedicated comm stream runs
-        # step it's halo exchange while step it's interior computes. Eligible
+        # step's halo exchange while step's interior computes. Eligible
         # only for x-face cuts (the phase-split forward emits x cut strips) AND
         # when no source sits in a cut strip (checked per-call in forward).
         self._comm_stream = None

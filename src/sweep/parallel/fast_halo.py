@@ -118,14 +118,6 @@ class FastHaloSet:
         self.axes = tuple(axes)
         self._cache: Dict[int, FastHaloExchanger] = {}
 
-    def exchange(self, wavefield: torch.Tensor) -> None:
-        key = wavefield.data_ptr()
-        ex = self._cache.get(key)
-        if ex is None:
-            ex = FastHaloExchanger(wavefield, self.mesh, self.halo, self.axes)
-            self._cache[key] = ex
-        ex()
-
     def _get(self, wavefield: torch.Tensor) -> "FastHaloExchanger":
         key = wavefield.data_ptr()
         ex = self._cache.get(key)
@@ -133,6 +125,10 @@ class FastHaloSet:
             ex = FastHaloExchanger(wavefield, self.mesh, self.halo, self.axes)
             self._cache[key] = ex
         return ex
+
+    def exchange(self, wavefield: torch.Tensor) -> None:
+        """Blocking exchange: build-or-reuse this tensor's exchanger and run it."""
+        self._get(wavefield)()
 
     def exchange_start(self, wavefield: torch.Tensor) -> None:
         """Phase A of an overlapped exchange (see FastHaloExchanger). Pair with
