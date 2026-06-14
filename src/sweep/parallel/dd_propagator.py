@@ -616,7 +616,19 @@ class DDPropagator:
                         slice(self.lo_y, self.hi_y), slice(self.lo, self.hi))
         # grads_out slot 0 is grad_wavelet for acoustic; model grads are the rest
         model_grads = self.gbufs[1:] if self.family == "acoustic" else self.gbufs
-        return [g[interior].clone() for g in model_grads]
+        out = [g[interior].clone() for g in model_grads]
+        # Shot-parallel: with shot_groups>1 each group ran a DIFFERENT shot on
+        # the SAME tile, so the FWI gradient (a sum over shots) needs the per-
+        # tile gradients summed across the shot process group (the shot_groups
+        # ranks sharing this (yi,xi) tile). One all_reduce per model leaves every
+        # rank holding the shot-summed tile gradient. Pure model-parallel
+        # (shot_groups==1) skips it.
+        if (self.topo.shot_groups > 1 and self.mesh is not None
+                and self.mesh.shot_pg is not None):
+            import torch.distributed as dist
+            for g in out:
+                dist.all_reduce(g, op=dist.ReduceOp.SUM, group=self.mesh.shot_pg)
+        return out
 
     # ---------------------------------------------------------------- gather
     def gather_record(self, tile_record):
