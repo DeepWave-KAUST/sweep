@@ -165,13 +165,27 @@ class SteppedBindingRunner:
         self.psi_pairs = tuple(psi_pairs)
         self.u_blocks = tuple(u_blocks)
         self.k = 0
+        # The bound order depends only on (k % 3, k % 2) — the u-triple phase
+        # and the psi-pair swap parity — so there are at most 6 distinct lists.
+        # Cache them (keyed on that pair) instead of re-allocating a fresh
+        # ``list(self.L)`` every time step.  The tensors are the SAME persistent
+        # objects (only their roles rotate), so a reused ordering stays correct.
+        self._rot_cache = {}
+
+    def _bound_wavefields(self):
+        key = (self.k % 3, self.k % 2)
+        out = self._rot_cache.get(key)
+        if out is None:
+            out = rotate_wavefield_roles(
+                self.L, self.k, u_blocks=self.u_blocks, psi_pairs=self.psi_pairs
+            )
+            self._rot_cache[key] = out
+        return out
 
     def run_to(self, it_end: int) -> None:
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
-        p.wavefields = rotate_wavefield_roles(
-            self.L, self.k, u_blocks=self.u_blocks, psi_pairs=self.psi_pairs
-        )
+        p.wavefields = self._bound_wavefields()
         self.func(p)
         self.k = int(it_end)
 
@@ -196,9 +210,7 @@ class SteppedBindingRunner:
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
         p.step_phase = int(phase)
-        p.wavefields = rotate_wavefield_roles(
-            self.L, self.k, u_blocks=self.u_blocks, psi_pairs=self.psi_pairs
-        )
+        p.wavefields = self._bound_wavefields()
         try:
             self.func(p)
         finally:
@@ -271,17 +283,32 @@ class SteppedBackwardRunner:
         self.recon_u_blocks = tuple(recon_u_blocks)
         self.k_adj = 0
         self.k_f = 0
+        # Both rotations depend only on (k % 3, k % 2) -> <=6 distinct lists
+        # each; cache instead of re-allocating per segment (see the forward
+        # runner's _rot_cache note).
+        self._adj_cache = {}
+        self._recon_cache = {}
 
     def _bind_lists(self):
         p = self.p
-        p.adjoint_wavefields = rotate_wavefield_roles(
-            self.L_adj, self.k_adj,
-            u_blocks=self.adj_u_blocks, psi_pairs=self.adj_pairs,
-        )
-        if self.L_recon is not None:
-            p.forward_wavefields = rotate_wavefield_roles(
-                self.L_recon, self.k_f, u_blocks=self.recon_u_blocks
+        ak = (self.k_adj % 3, self.k_adj % 2)
+        adj = self._adj_cache.get(ak)
+        if adj is None:
+            adj = rotate_wavefield_roles(
+                self.L_adj, self.k_adj,
+                u_blocks=self.adj_u_blocks, psi_pairs=self.adj_pairs,
             )
+            self._adj_cache[ak] = adj
+        p.adjoint_wavefields = adj
+        if self.L_recon is not None:
+            rk = (self.k_f % 3, self.k_f % 2)
+            rec = self._recon_cache.get(rk)
+            if rec is None:
+                rec = rotate_wavefield_roles(
+                    self.L_recon, self.k_f, u_blocks=self.recon_u_blocks
+                )
+                self._recon_cache[rk] = rec
+            p.forward_wavefields = rec
 
     def run_segment(self, bw_it_begin: int, bw_it_end: int):
         """Run the segment [bw_it_end, bw_it_begin); segments must be issued
