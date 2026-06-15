@@ -119,8 +119,7 @@ x-cut tile is thinnest.** Shipped as `sweep.parallel.balanced_grid(world, shape)
 any default). Default caps `py<=2` (a conservative load-balance choice that
 already captures +9–43 %). `py>=3` (the cubic optimum, e.g. 384³ px2py4 =
 0.688 ms / 6.96×) is opt-in by raising `max_py` (e.g. `max_py=world`) and is
-**validated** (8× V100 bit-exact). (The former `allow_y_thin=True` bool is kept
-as a deprecated alias.)
+**validated** (8× V100 bit-exact).
 
 **py>=3 boundary-save crash — FIXED (`83a70df`, ibex bit-exact confirmed).** An
 earlier `CUDA error: invalid configuration argument` for `py>=3` was **not** a
@@ -168,8 +167,15 @@ stays PASS_TOL (≤1e-5) as before; per-change gate sbatches in `_dd_cuda/`.
   gradient across the shot process group when `shot_groups>1` (the FWI gradient
   is a sum over shots), enabling combined shot+model parallelism without a B>1
   rewrite. No-op for `shot_groups==1`. (`dd_shotpar_check.py`, world=4 = 2×2.)
+* **autograd-transparent forward** — DD now behaves like single-domain
+  `PropTorch`: if a model tensor `requires_grad`, the record carries a grad_fn
+  and a plain `loss.backward()` populates each model's `.grad` (per-tile leaf →
+  tile grad; replicated global leaf → global grad, `all_reduce` to assemble) via
+  a `_DDForward(autograd.Function)` whose backward runs the DD adjoint. The
+  explicit `gradient()` method is **removed** (dev-stage, no back-compat) — an
+  arbitrary adjoint goes through `record.backward(gradient=adjoint)`.
 * **API / readability** — `balanced_grid(max_py=…)` replaces the misleading
-  `allow_y_thin` bool (`d0728b5`, deprecated alias kept); `FastHaloSet.exchange`
+  `allow_y_thin` bool (**removed**, no deprecated alias); `FastHaloSet.exchange`
   deduped via `_get` (`dcfb3a9`); `forward()` split into `_prepare_call` + per-
   family loop helpers — 33 lines, was ~120 (`4ace00d`).
 * **stale-test fix** (`f8711cd`) — `test_dd_tiles_3d` / `test_dd_elastic_tiles_3d`

@@ -225,7 +225,6 @@ def balanced_grid(
     *,
     shot_groups: int = 1,
     max_py: int = 2,
-    allow_y_thin: Optional[bool] = None,
 ) -> Tuple[int, int]:
     """Recommend a ``(py, px)`` DD grid that keeps each rank's tile compact.
 
@@ -259,21 +258,10 @@ def balanced_grid(
     (8x V100, bit-exact). [A past py>=3 boundary-save crash was a
     DDPropagator._capture cut_face_mask=0 bug, fixed pure-Python — not a kernel
     limitation.]
-
-    The legacy boolean ``allow_y_thin`` is still accepted as a deprecated alias
-    (``True`` == ``max_py=world_size``, ``False`` == ``max_py=2``); prefer
-    ``max_py``, which is both clearer and more flexible.
     """
     tiles = world_size // shot_groups
     if tiles < 1:
         raise ValueError(f"world_size={world_size} < shot_groups={shot_groups}")
-    if allow_y_thin is not None:
-        import warnings
-        warnings.warn(
-            "balanced_grid(allow_y_thin=...) is deprecated; use max_py instead "
-            "(allow_y_thin=True == max_py=world_size, False == max_py=2).",
-            DeprecationWarning, stacklevel=2)
-        max_py = tiles if allow_y_thin else 2
     if max_py < 1:
         raise ValueError(f"max_py={max_py} must be >= 1")
     ndim = len(global_shape)

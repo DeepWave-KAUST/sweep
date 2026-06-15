@@ -101,9 +101,10 @@ def main():
                        dtype=np.int32)
     wav = ricker(nt, DT, scale=1e6 if fam == "elastic" else 1.0)
 
+    models_t = [torch.tensor(m, device=dev, requires_grad=True) for m in models]
     torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
-    rec_tile = ddp.forward(wav, src, rec, models=models)
-    grads = ddp.gradient(rec_tile)
+    rec_tile = ddp.forward(wav, src, rec, models=models_t)   # autograd forward
+    rec_tile.backward(gradient=rec_tile.detach())            # adjoint = record
     torch.cuda.synchronize()
     peak = torch.cuda.max_memory_allocated() / 2**30
 

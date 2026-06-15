@@ -1,17 +1,24 @@
 """One-call domain-decomposed propagator (model-parallel, multi-GPU).
 
 Wraps the per-step stepped driver + NCCL halo exchange (proven bitwise in
-``test/dd_nccl_*.py``) behind a single object so callers never hand-slice the
-model, fill halos, remap source/receiver coordinates, or drive the time loop:
+``test/dd_nccl_*.py``) behind a single object that behaves like the
+single-domain ``PropTorch`` — same call signature, and the forward is
+AUTOGRAD-TRANSPARENT, so a plain ``loss.backward()`` gives you the model
+gradient (no manual adjoint). Callers never hand-slice the model, fill halos,
+remap source/receiver coordinates, or drive the time loop:
 
     topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
     ddp  = DDPropagator(eq, global_shape=(nz, nx), dh=10., dt=dt, nt=nt,
                         abcn=20, spatial_order=4, source_type=["h1"],
                         receiver_type=["h1"], model_parallel=topo, dev=dev)
-    rec  = ddp.forward(wavelet, sources_global, receivers_global,
-                       models=[vp_tile_or_global])     # tile OR global (auto-sliced)
-    grads = ddp.gradient(adjoint_source_tile)          # -> [grad_model_tile, ...]
-    full = ddp.gather_record(rec)                      # rank-0 assembled record
+    vp   = vp_tile.requires_grad_()                    # this rank's model tile
+    syn  = ddp(wavelet, sources_global, receivers_global, models=[vp])
+    loss = 0.5 * (syn - obs_tile).pow(2).sum()
+    loss.backward()                                    # -> vp.grad (this tile)
+    full = ddp.gather_record(syn)                      # rank-0 assembled record
+
+(For an arbitrary adjoint source instead of an L2 misfit, use
+``syn.backward(gradient=adjoint_source_tile)``.)
 
 What it does internally (x-cut decomposition, v1):
   * ``MeshTopology.local_extent`` -> this rank's tile shape / x-offset;
@@ -73,6 +80,60 @@ def _family_of(equation) -> str:
     raise ValueError(
         f"DDPropagator v1 supports acoustic/elastic only, got {type(equation).__name__}"
     )
+
+
+class _DDForward(torch.autograd.Function):
+    """Differentiable bridge so a domain-decomposed forward composes with plain
+    autograd — ``loss.backward()`` on a misfit of the returned record populates
+    each model tensor's ``.grad``, identical to single-domain ``PropTorch``.
+
+    forward runs the DD stepped forward (no autograd inside — gradients flow
+    through the C++/NCCL stepped calls, not the tape); backward runs the DD
+    adjoint (:meth:`DDPropagator.gradient`) with the incoming record-gradient as
+    the adjoint source. The ``.grad`` matches the SHAPE of the model you passed:
+
+      * a per-tile model (``local_shape``) gets its tile's interior gradient —
+        the canonical model-parallel case (each rank owns + optimises its tile);
+      * a replicated global model (``global_shape``) gets a global-shaped grad
+        with THIS rank's tile filled (``all_reduce`` across ranks to assemble
+        the full gradient; only valid when the global model fits on each GPU).
+    """
+
+    @staticmethod
+    def forward(ctx, ddp, wavelet, sources, receivers, *models):
+        ctx.ddp = ddp
+        ctx.shapes = [tuple(m.shape) for m in models]
+        # autograd.Function.forward runs with grad DISABLED; the first call's
+        # one-time _capture builds a transient prop graph and backward()s it to
+        # grab the bp params, so re-enable grad around the call. The detached
+        # models keep the DD forward itself off the tape (gradients flow through
+        # _DDForward.backward, not autograd); the stepped loop has its own
+        # no_grad. Without this, a first forward on the autograd path crashes
+        # ("element 0 does not require grad").
+        with torch.enable_grad():
+            rec = ddp.forward(wavelet, sources, receivers,
+                              models=[m.detach() for m in models])
+        return rec.detach().clone()
+
+    @staticmethod
+    def backward(ctx, grad_record):
+        ddp = ctx.ddp
+        tile_grads = ddp._run_adjoint(grad_record.contiguous())
+        out = []
+        for shp, g in zip(ctx.shapes, tile_grads):
+            if shp == ddp.global_shape:        # replicated global model
+                full = g.new_zeros(shp)
+                gt = g.reshape(ddp.local_shape)
+                if ddp.ndim == 2:
+                    full[:, ddp.x0:ddp.x0 + ddp.nxp] = gt
+                else:
+                    full[:, ddp.y0:ddp.y0 + ddp.nyp,
+                         ddp.x0:ddp.x0 + ddp.nxp] = gt
+                out.append(full)
+            else:                              # per-tile model
+                out.append(g.reshape(shp))
+        # grads align to (ddp, wavelet, sources, receivers, *models)
+        return (None, None, None, None) + tuple(out)
 
 
 class DDPropagator:
@@ -453,7 +514,22 @@ class DDPropagator:
         on the first shot of the epoch and ``models=None`` for the rest to skip
         it.  (This is explicit on purpose — the propagator never guesses whether
         an in-place optimiser step changed the model, which would risk silently
-        running on a stale model.)"""
+        running on a stale model.)
+
+        AUTOGRAD: if any model tensor ``requires_grad``, the returned record is
+        differentiable — ``loss.backward()`` on a misfit populates each model's
+        ``.grad`` (== :meth:`gradient` of the residual), exactly like the
+        single-domain ``PropTorch`` autograd path. With no grad-requiring model
+        it stays on the fast ``torch.no_grad`` stepped path; the explicit
+        :meth:`gradient` adjoint API remains for manual control."""
+        if (models is not None
+                and any(torch.is_tensor(m) and m.requires_grad for m in models)):
+            if not all(torch.is_tensor(m) for m in models):
+                raise TypeError(
+                    "DDPropagator autograd forward needs every model as a tensor "
+                    "when any requires grad (got a mix of tensor/non-tensor).")
+            return _DDForward.apply(
+                self, wavelet, sources_global, receivers_global, *models)
         sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
         fhalo = self._halo("_fwd_halo")
         with torch.no_grad():
@@ -579,11 +655,14 @@ class DDPropagator:
             self._exchange_group(fhalo, stress)
 
     # -------------------------------------------------------------- gradient
-    def gradient(self, adjoint_source_tile):
-        """Run the DD backward for an adjoint source (raw CUDA layout, this
-        tile's receivers) and return ``[grad_model_tile, ...]`` (interior)."""
+    def _run_adjoint(self, adjoint_source_tile):
+        """Internal VJP: run the DD backward for an adjoint source (raw CUDA
+        layout, this tile's receivers) and return ``[grad_model_tile, ...]``
+        (interior). Drives :class:`_DDForward.backward`; users get gradients via
+        autograd (``loss.backward()`` / ``record.backward(gradient=adjoint)``),
+        not by calling this directly."""
         if not self._captured:
-            raise RuntimeError("call forward() before gradient()")
+            raise RuntimeError("forward() must run before the adjoint")
         self.bp.adjoint_source = torch.as_tensor(
             adjoint_source_tile, device=self.dev, dtype=torch.float32)
         for t in self.L_adj + self.recon + self.gbufs + self.illum:
