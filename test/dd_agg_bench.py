@@ -21,7 +21,8 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Elastic  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 
 DT = 0.0015
 
@@ -56,10 +57,11 @@ def main():
         src = np.array([[[nx // 2, nz // 4]]], dtype=np.int32)
         rec = np.array([[[ix, 2] for ix in range(2, nx - 2, 4)]], dtype=np.int32)
         topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
-        ddp = DDPropagator(Elastic(spatial_order=so, device=dev, backend="torch"),
-                           shape, dh=10.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
-                           source_type=["sxx", "szz"], receiver_type=["vx", "vz"],
-                           model_parallel=topo, dev=dev)
+        prop = PropTorch(Elastic(spatial_order=so, device=dev, backend="torch"),
+                         backend="torch", impl="c", shape=shape, dh=10.0, dt=DT, nt=nt,
+                         abcn=abcn, source_type=["sxx", "szz"],
+                         receiver_type=["vx", "vz"], dev=dev)
+        ddp = ModelParallel(prop, topo)
 
         def timeit(reps):
             torch.cuda.synchronize(); dist.barrier(); t0 = time.time()
@@ -76,7 +78,7 @@ def main():
         new_ms = timeit(8)                               # batched FastHaloGroup
         ddp._exchange_group = types.MethodType(per_field_group, ddp)
         old_ms = timeit(8)                               # per-field exchange
-        ddp._exchange_group = types.MethodType(DDPropagator._exchange_group, ddp)
+        ddp._exchange_group = types.MethodType(ModelParallel._exchange_group, ddp)
 
         if rank == 0:
             nphys = ddp._nphys

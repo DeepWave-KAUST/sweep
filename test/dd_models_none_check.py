@@ -1,4 +1,4 @@
-"""Validate DDPropagator.forward(models=None) model-reuse fast path.
+"""Validate ModelParallel.forward(models=None) model-reuse fast path.
 
 torchrun --standalone --nproc-per-node=<P> test/dd_models_none_check.py
 
@@ -22,7 +22,8 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Acoustic  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 
 DT = 0.0015
 
@@ -52,12 +53,11 @@ def main():
     srcB = np.array([[[2 * nx // 3, nz // 4]]], dtype=np.int32)
 
     def mk():
-        return DDPropagator(Acoustic(spatial_order=so, device=dev, backend="torch"),
-                            shape, dh=10.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
-                            source_type=["h1"], receiver_type=["h1"],
-                            model_parallel=MeshTopology(py=1, px=world, shot_groups=1,
-                                                        world_size=world, rank=rank),
-                            dev=dev)
+        prop = PropTorch(Acoustic(spatial_order=so, device=dev, backend="torch"),
+                         backend="torch", impl="c", shape=shape, dh=10.0, dt=DT, nt=nt,
+                         abcn=abcn, source_type=["h1"], receiver_type=["h1"], dev=dev)
+        return ModelParallel(prop, MeshTopology(py=1, px=world, shot_groups=1,
+                                                world_size=world, rank=rank))
 
     # models=None is a FORWARD-ONLY (no_grad) reuse fast path: the record of a
     # shot that reuses the model must be bit-identical to passing the same model

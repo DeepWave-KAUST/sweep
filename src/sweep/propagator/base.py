@@ -120,6 +120,11 @@ class PropBase:
         self._wavefield_spec_index = build_field_index(self.wavefield_specs)
         self.shape = shape
         self.ndim = len(shape)
+        # Physical (pre-pad) shape: self.shape is overwritten with the padded
+        # runtime shape below, so retain it for a strategy wrapper (e.g.
+        # sweep.parallel.ModelParallel) that reads a built propagator's
+        # global-problem spec. (dh/dt are already registered as buffers later.)
+        self._shape_phys = tuple(int(s) for s in shape)
         if device is not None and dev is not None and device != dev:
             import warnings
             warnings.warn(

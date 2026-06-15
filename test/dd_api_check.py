@@ -1,9 +1,9 @@
-"""DDPropagator (one-call multi-GPU DD API) vs single-domain reference.
+"""ModelParallel (one-call multi-GPU DD API) vs single-domain reference.
 
 torchrun --standalone --nproc-per-node=<P> test/dd_api_check.py \
     [--family acoustic|elastic] [--ndim 2|3] [--so 4] [--abcn 10] [--free-surface]
 
-Each rank drives the global problem through DDPropagator (which auto-slices the
+Each rank drives the global problem through ModelParallel (which auto-slices the
 tile, fills the model halo, remaps src/rec, and runs the per-step halo loop).
 Rank 0 also builds the full single-domain reference (stepped forward record +
 monolithic backward_bs grads_out, cropped to the physical interior) and
@@ -28,7 +28,7 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Acoustic, Acoustic3D, Elastic, Elastic3D  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 from sweep.propagator._stepped import (  # noqa: E402
     SteppedBackwardRunner, SteppedBindingRunner,
@@ -163,10 +163,10 @@ def main():
 
     topo = MeshTopology(py=py, px=px, shot_groups=1, world_size=world, rank=rank)
     st, rt = types(fam, ndim)
-    ddp = DDPropagator(eq_cls(fam, ndim)(spatial_order=so, device=dev, backend="torch"),
-                       shape, dh=10.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
-                       source_type=st, receiver_type=rt, model_parallel=topo, dev=dev,
-                       free_surface=fs)
+    prop = PropTorch(eq_cls(fam, ndim)(spatial_order=so, device=dev, backend="torch"),
+                     backend="torch", impl="c", shape=shape, dh=10.0, dt=DT, nt=nt,
+                     abcn=abcn, source_type=st, receiver_type=rt, dev=dev, free_surface=fs)
+    ddp = ModelParallel(prop, topo)
     # autograd path: slice the global model to this rank's tile as a leaf, then
     # backward with adjoint = the tile record (same adjoint the old explicit
     # ddp.gradient(rec_tile) used) -> each tile's .grad is the model gradient.
