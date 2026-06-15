@@ -103,7 +103,7 @@ work) and (b) gives a squarer tile. Compute-floor sweep, equal 8.39 M cells/tile
 
 Not monotonic — a **balanced** tile wins; y-cut (fat x, thin y) is *worst*
 (refutes "fat contiguous x is better"). End-to-end via the production
-`DDPropagator` (correct corner halo; forward, 8× V100):
+`ModelParallel` (correct corner halo; forward, 8× V100):
 
 | global (Nz,Ny,Nx) | x-cut px8 | balanced px4 py2 | speedup | mem |
 |-------------------|-----------|------------------|---------|-----|
@@ -123,7 +123,7 @@ already captures +9–43 %). `py>=3` (the cubic optimum, e.g. 384³ px2py4 =
 
 **py>=3 boundary-save crash — FIXED (`83a70df`, ibex bit-exact confirmed).** An
 earlier `CUDA error: invalid configuration argument` for `py>=3` was **not** a
-missing y-kernel guard: `DDPropagator._capture` ran a public fwd/bwd with
+missing y-kernel guard: `ModelParallel._capture` ran a public fwd/bwd with
 `cut_face_mask=0` on a thin cut-aware tile, so the kernel sized a cut face as
 full PML → negative boundary count → invalid launch. Fix is pure-Python
 (`_capture` fwrap/bwrap set the mask; **no CUDA rebuild**); `Boundary3D::front_back`
@@ -144,7 +144,7 @@ per-forward redundancy, and readability/extensibility. All bit-exact — ibex
 stays PASS_TOL (≤1e-5) as before; per-change gate sbatches in `_dd_cuda/`.
 
 * **per-step caching** (`89154ca`) — the stepped runners rebuilt
-  `list(wavefields)` every step and `DDPropagator._halo_view` rebuilt the halo
+  `list(wavefields)` every step and `ModelParallel._halo_view` rebuilt the halo
   crop slice every exchange. The bound order depends only on `(k%3, k%2)` (≤6
   distinct lists) and the crop slice is loop-invariant, so both are cached.
   Bit-exact (same persistent tensors; only roles rotate).
