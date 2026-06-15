@@ -4,7 +4,7 @@ torchrun --standalone --nproc-per-node=4 test/dd_shotpar_check.py
 
 Layout: world=4 = shot_groups(2) x px(2), py=1. shot_group 0 (ranks 0,1)
 runs shot A; shot_group 1 (ranks 2,3) runs shot B; within each group the model
-is x-decomposed over 2 tiles. DDPropagator.gradient() all_reduces each tile's
+is x-decomposed over 2 tiles. ModelParallel.gradient() all_reduces each tile's
 gradient across the shot process group, so after it rank with (xi) holds
 grad_tile(A) + grad_tile(B). Assemble over xi on rank 0 and compare to the
 single-domain reference grad_A + grad_B (dd_api_check.reference per shot).
@@ -25,7 +25,8 @@ if str(REPO / "src") not in sys.path:
 sys.path.insert(0, str(REPO / "test"))
 
 from sweep.equations import Acoustic  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 from dd_api_check import reference, ricker  # noqa: E402
 
 DT = 0.0015
@@ -55,10 +56,10 @@ def main():
     src = srcA if shot_group == 0 else srcB
 
     topo = MeshTopology(py=py, px=px, shot_groups=sgN, world_size=world, rank=rank)
-    ddp = DDPropagator(Acoustic(spatial_order=so, device=dev, backend="torch"),
-                       shape, dh=10.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
-                       source_type=["h1"], receiver_type=["h1"],
-                       model_parallel=topo, dev=dev)
+    prop = PropTorch(Acoustic(spatial_order=so, device=dev, backend="torch"),
+                     backend="torch", impl="c", shape=shape, dh=10.0, dt=DT, nt=nt,
+                     abcn=abcn, source_type=["h1"], receiver_type=["h1"], dev=dev)
+    ddp = ModelParallel(prop, topo)
     vp_t = torch.tensor(vp[:, ddp.x0:ddp.x0 + ddp.nxp], device=dev,
                         requires_grad=True)        # this rank's model tile (leaf)
     rec_tile = ddp.forward(wav, src, rec, models=[vp_t])     # differentiable record

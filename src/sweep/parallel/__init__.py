@@ -32,7 +32,7 @@ from sweep.parallel.pml import build_rank_pml_widths
 from sweep.parallel.routing import partition_global_coords
 
 __all__ = [
-    "DDPropagator",
+    "ModelParallel",
     "HaloExchange",
     "MeshTopology",
     "ModelParallelMesh",
@@ -43,8 +43,8 @@ __all__ = [
 ]
 
 
-def __getattr__(name):  # lazy: DDPropagator pulls in PropTorch (heavy import)
-    if name == "DDPropagator":
-        from sweep.parallel.dd_propagator import DDPropagator
-        return DDPropagator
+def __getattr__(name):  # lazy: ModelParallel pulls in PropTorch (heavy import)
+    if name == "ModelParallel":
+        from sweep.parallel.dd_propagator import ModelParallel
+        return ModelParallel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

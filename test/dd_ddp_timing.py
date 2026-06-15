@@ -1,4 +1,4 @@
-"""Time DDPropagator.forward end-to-end for a given decomposition.
+"""Time ModelParallel.forward end-to-end for a given decomposition.
 
 Uses the PRODUCTION DD path (correct multi-axis / corner halo exchange and the
 acoustic comm/compute overlap), so unlike dd_nccl_bench it is correct for 2-D
@@ -24,7 +24,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Acoustic3D  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 
 DT = 0.0005
 
@@ -66,10 +67,11 @@ def main():
     wav = ricker(nt, DT)
 
     topo = MeshTopology(py=py, px=px, shot_groups=1, world_size=world, rank=rank)
-    ddp = DDPropagator(Acoustic3D(spatial_order=args.so, device=dev, backend="torch"),
-                       shape, dh=10.0, dt=DT, nt=nt, abcn=args.abcn,
-                       spatial_order=args.so, source_type=["h1"], receiver_type=["h1"],
-                       model_parallel=topo, dev=dev, free_surface=False)
+    prop = PropTorch(Acoustic3D(spatial_order=args.so, device=dev, backend="torch"),
+                     backend="torch", impl="c", shape=shape, dh=10.0, dt=DT, nt=nt,
+                     abcn=args.abcn, source_type=["h1"], receiver_type=["h1"], dev=dev,
+                     free_surface=False)
+    ddp = ModelParallel(prop, topo)
 
     def one():
         dist.barrier()

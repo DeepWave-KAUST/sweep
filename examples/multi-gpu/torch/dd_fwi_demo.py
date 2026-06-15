@@ -1,4 +1,4 @@
-"""DDPropagator end-to-end demo: build a domain-decomposed solver, run the
+"""ModelParallel end-to-end demo: build a domain-decomposed solver, run the
 forward to get synthetic data, then a plain ``loss.backward()`` to get the
 model gradient of an FWI misfit — the three things you do every FWI iteration.
 
@@ -29,7 +29,8 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Acoustic                       # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology      # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel      # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 
 DT = 0.0015
 
@@ -68,14 +69,14 @@ def main():
     src = np.array([[[nx // 2, 3]]], dtype=np.int32)                        # surface shot
     rec = np.array([[[ix, 3] for ix in range(2, nx - 2, 2)]], dtype=np.int32)  # surface line
 
-    # ---- 2. BUILD THE DD SOLVER (wrap-and-go; 1-D x-cut: py=1, px=world) ----
-    topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
+    # ---- 2. BUILD THE DD SOLVER: build a normal global propagator, then
+    #         ModelParallel(prop, mesh) runs it decomposed (1-D x-cut, py=1) ----
+    mesh = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
     eq = Acoustic(spatial_order=so, device=dev, backend="torch")
-    ddp = DDPropagator(
-        eq, global_shape=(nz, nx), dh=dh, dt=DT, nt=nt, abcn=abcn,
-        spatial_order=so, source_type=["h1"], receiver_type=["h1"],
-        model_parallel=topo, dev=dev, free_surface=False,
-    )
+    prop = PropTorch(eq, backend="torch", impl="c", shape=(nz, nx), dh=dh, dt=DT,
+                     nt=nt, abcn=abcn, source_type=["h1"], receiver_type=["h1"],
+                     dev=dev, free_surface=False)
+    ddp = ModelParallel(prop, mesh)
     if rank == 0:
         print(f"[demo] world={world}  global=(nz={nz}, nx={nx})  "
               f"tile per GPU = (nz={nz}, nxp={nx // world})  nt={nt}")
@@ -120,7 +121,7 @@ def main():
                 a.set_xlabel("x"); a.set_ylabel("z")
                 for k in range(1, world):                    # tile cut lines
                     a.axvline(k * (nx // world), color="k", ls="--", lw=0.6, alpha=0.5)
-            fig.suptitle("DDPropagator: build solver -> forward (syn) -> loss.backward() (gradient)")
+            fig.suptitle("ModelParallel: build solver -> forward (syn) -> loss.backward() (gradient)")
             fig.tight_layout()
             out = Path(__file__).resolve().parent / "dd_fwi_demo.png"
             fig.savefig(out, dpi=140, bbox_inches="tight")

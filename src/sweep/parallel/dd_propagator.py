@@ -7,10 +7,10 @@ AUTOGRAD-TRANSPARENT, so a plain ``loss.backward()`` gives you the model
 gradient (no manual adjoint). Callers never hand-slice the model, fill halos,
 remap source/receiver coordinates, or drive the time loop:
 
-    topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
-    ddp  = DDPropagator(eq, global_shape=(nz, nx), dh=10., dt=dt, nt=nt,
-                        abcn=20, spatial_order=4, source_type=["h1"],
-                        receiver_type=["h1"], model_parallel=topo, dev=dev)
+    mesh = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
+    prop = PropTorch(eq, shape=(nz, nx), dh=10., dt=dt, nt=nt, abcn=20,
+                     source_type=["h1"], receiver_type=["h1"], dev=dev)
+    ddp  = ModelParallel(prop, mesh)                   # decompose across the mesh
     vp   = vp_tile.requires_grad_()                    # this rank's model tile
     syn  = ddp(wavelet, sources_global, receivers_global, models=[vp])
     loss = 0.5 * (syn - obs_tile).pow(2).sum()
@@ -78,7 +78,7 @@ def _family_of(equation) -> str:
     if "acoustic" in name:
         return "acoustic"
     raise ValueError(
-        f"DDPropagator v1 supports acoustic/elastic only, got {type(equation).__name__}"
+        f"ModelParallel v1 supports acoustic/elastic only, got {type(equation).__name__}"
     )
 
 
@@ -89,7 +89,7 @@ class _DDForward(torch.autograd.Function):
 
     forward runs the DD stepped forward (no autograd inside — gradients flow
     through the C++/NCCL stepped calls, not the tape); backward runs the DD
-    adjoint (:meth:`DDPropagator.gradient`) with the incoming record-gradient as
+    adjoint (:meth:`ModelParallel._run_adjoint`) with the incoming record-gradient as
     the adjoint source. The ``.grad`` matches the SHAPE of the model you passed:
 
       * a per-tile model (``local_shape``) gets its tile's interior gradient —
@@ -136,27 +136,46 @@ class _DDForward(torch.autograd.Function):
         return (None, None, None, None) + tuple(out)
 
 
-class DDPropagator:
-    """Domain-decomposed (model-parallel) propagator over an x-cut mesh."""
+class ModelParallel:
+    """Run a single-domain :class:`PropTorch` decomposed across GPUs (model
+    parallel / domain decomposition) — a strategy wrapper in the spirit of
+    ``torch.nn.parallel.DistributedDataParallel``::
 
-    def __init__(
-        self,
-        equation,
-        global_shape: Sequence[int],
-        *,
-        dh: float,
-        dt: float,
-        nt: int,
-        abcn: int,
-        spatial_order: int,
-        source_type: Sequence[str],
-        receiver_type: Sequence[str],
-        model_parallel: MeshTopology,
-        dev: torch.device,
-        free_surface: bool = False,
-        pml_type: Optional[str] = None,
-        B: int = 1,
-    ) -> None:
+        prop = PropTorch(eq, shape=(nz, nx), dh=dh, dt=dt, nt=nt, abcn=abcn, ...)
+        ddp  = ModelParallel(prop, mesh)        # mesh = MeshTopology(py, px, ...)
+        syn  = ddp(wavelet, sources, receivers, models=[vp])   # same call as prop
+        loss = 0.5 * (syn - obs).pow(2).sum(); loss.backward()  # autograd-transparent
+
+    ``prop`` specifies the GLOBAL problem (equation, grid spacing, nt, abcn,
+    spatial order, source/receiver types, free surface, PML, B) — the propagator
+    you would build to run on one GPU if the model fit.  ``ModelParallel`` reads
+    that spec and builds per-tile solvers with cut-aware padding internally: a
+    model-parallel grid cannot reuse one global prop's symmetric pad, so ``prop``
+    is a config carrier, not the compute object (constructing it is cheap — the
+    big buffers are allocated lazily at forward, which only the per-tile solvers
+    do).  ``mesh`` is the :class:`MeshTopology` (x-cut ``py=1``; 3-D may add a
+    y-cut ``py>1`` — see :func:`sweep.parallel.balanced_grid`)."""
+
+    def __init__(self, prop, mesh: MeshTopology) -> None:
+        # Read the global-problem spec off the single-domain propagator.
+        # dh/dt are stored as buffer tensors (dh per-axis); recover plain Python
+        # for the per-tile prop (scalar dh when the spacing is uniform).
+        self._global_prop = prop
+        equation = prop.equation
+        global_shape = prop._shape_phys
+        if torch.is_tensor(prop.dh):
+            _dh = prop.dh.flatten().tolist()
+            dh = _dh[0] if len(set(_dh)) == 1 else _dh
+        else:
+            dh = prop.dh
+        dt = float(prop.dt) if torch.is_tensor(prop.dt) else prop.dt
+        nt, abcn, B = prop.nt, prop.abcn, prop.B
+        spatial_order = prop.equation.so
+        source_type, receiver_type = prop.source_type, prop.receiver_type
+        free_surface, pml_type = prop.free_surface, prop.pml_type
+        dev = prop.dev
+        model_parallel = mesh
+
         self.topo = model_parallel
         self.global_shape = tuple(int(s) for s in global_shape)
         self.ndim = len(self.global_shape)
@@ -440,15 +459,15 @@ class DDPropagator:
             missing = [f for f in fields if not hasattr(obj, f)]
             if missing:
                 raise AttributeError(
-                    f"DDPropagator._set_geometry expects {who} fields {missing}, "
+                    f"ModelParallel._set_geometry expects {who} fields {missing}, "
                     f"absent on this build — the C param bindings changed; update "
                     f"_set_geometry's field names.")
         self._captured = True
 
     def __call__(self, *args, **kwargs):
-        """Alias for :meth:`forward` so a ``DDPropagator`` can be invoked like
+        """Alias for :meth:`forward` so a ``ModelParallel`` can be invoked like
         the single-domain ``PropTorch`` (``ddp(...)`` == ``ddp.forward(...)``).
-        DDPropagator is a composition wrapper, not an ``nn.Module``, so it does
+        ModelParallel is a composition wrapper, not an ``nn.Module``, so it does
         not get ``__call__`` for free."""
         return self.forward(*args, **kwargs)
 
@@ -480,7 +499,7 @@ class DDPropagator:
         # Require a fixed per-tile (#sources, #receivers) across shots — fail loud.
         if ls.shape != self._cap_ls_shape or lr.shape != self._cap_lr_shape:
             raise ValueError(
-                f"DDPropagator multi-shot: per-tile source/receiver count changed "
+                f"ModelParallel multi-shot: per-tile source/receiver count changed "
                 f"since capture (src {self._cap_ls_shape}->{tuple(ls.shape)}, "
                 f"rec {self._cap_lr_shape}->{tuple(lr.shape)}). Re-geometry needs a "
                 f"fixed per-tile layout (same #sources/shot and a fixed receiver "
@@ -526,7 +545,7 @@ class DDPropagator:
                 and any(torch.is_tensor(m) and m.requires_grad for m in models)):
             if not all(torch.is_tensor(m) for m in models):
                 raise TypeError(
-                    "DDPropagator autograd forward needs every model as a tensor "
+                    "ModelParallel autograd forward needs every model as a tensor "
                     "when any requires grad (got a mix of tensor/non-tensor).")
             return _DDForward.apply(
                 self, wavelet, sources_global, receivers_global, *models)
@@ -562,7 +581,7 @@ class DDPropagator:
         if models is None:
             if not self._captured:
                 raise RuntimeError(
-                    "DDPropagator.forward(models=None) reuses the previously set "
+                    "ModelParallel.forward(models=None) reuses the previously set "
                     "model, but no forward has run yet — pass models on the first "
                     "call.")
             tiles = None

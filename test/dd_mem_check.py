@@ -1,4 +1,4 @@
-"""Per-GPU memory balance check for DDPropagator (real DD run).
+"""Per-GPU memory balance check for ModelParallel (real DD run).
 
 torchrun --standalone --nproc-per-node=<P> test/dd_mem_check.py \
     --family acoustic --ndim 3 --px 8 --nz 192 --nyp 192 --nxp 192 --nt 400
@@ -23,7 +23,8 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Acoustic3D, Elastic3D, Acoustic, Elastic  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 
 DT = 0.0005
 
@@ -75,10 +76,11 @@ def main():
         st = ["sxx", "syy", "szz"] if ndim == 3 else ["sxx", "szz"]
         rt = ["vx", "vy", "vz"] if ndim == 3 else ["vx", "vz"]
         nmodel = 3
-    ddp = DDPropagator(eqc(spatial_order=args.so, device=dev, backend="torch"),
-                       global_shape, dh=10.0, dt=DT, nt=nt, abcn=args.abcn,
-                       spatial_order=args.so, source_type=st, receiver_type=rt,
-                       model_parallel=topo, dev=dev, free_surface=args.free_surface)
+    prop = PropTorch(eqc(spatial_order=args.so, device=dev, backend="torch"),
+                     backend="torch", impl="c", shape=global_shape, dh=10.0, dt=DT,
+                     nt=nt, abcn=args.abcn, source_type=st, receiver_type=rt, dev=dev,
+                     free_surface=args.free_surface)
+    ddp = ModelParallel(prop, topo)
 
     # this rank's OWN tile model (uniform) — no global model on any card
     ls = ddp.local_shape

@@ -23,7 +23,8 @@ if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
 from sweep.equations import Acoustic                  # noqa: E402
-from sweep.parallel import DDPropagator, MeshTopology  # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
+from sweep.propagator.torch import PropTorch  # noqa: E402
 
 DT = 0.0015
 
@@ -53,10 +54,10 @@ def main():
     rec = np.array([[[ix, 2] for ix in range(2, nx - 2, 4)]], dtype=np.int32)
 
     topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
-    ddp = DDPropagator(Acoustic(spatial_order=so, device=dev, backend="torch"),
-                       (nz, nx), dh=12.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
-                       source_type=["h1"], receiver_type=["h1"],
-                       model_parallel=topo, dev=dev)
+    prop = PropTorch(Acoustic(spatial_order=so, device=dev, backend="torch"),
+                     backend="torch", impl="c", shape=(nz, nx), dh=12.0, dt=DT, nt=nt,
+                     abcn=abcn, source_type=["h1"], receiver_type=["h1"], dev=dev)
+    ddp = ModelParallel(prop, topo)
     x0 = ddp.x0
 
     obs = ddp.forward(wav, src, rec, models=[true_g]).clone()    # no-grad obs
