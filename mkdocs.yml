@@ -164,6 +164,9 @@ nav:
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
           - Extending:
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
+          - Sensitivity & resolution:
+              - Acoustic · radiation (Vp, ρ): notebooks/20_radiation_acoustic.ipynb
+              - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
   - API Reference:
