@@ -648,10 +648,17 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         )
 
     def _remove_boundary_disk_cache(self):
-        if self._boundary_disk_root is not None:
-            shutil.rmtree(self._boundary_disk_root, ignore_errors=True)
-        self._boundary_disk_root = None
-        self._boundary_disk_files = ()
+        # Bypass nn.Module.__setattr__ for these book-keeping attrs: they are
+        # plain state, not Parameters/submodules. __setattr__ runs
+        # isinstance(value, Parameter), which on interpreter shutdown fails with
+        # TypeError once torch.Tensor has been torn down to None -- and __del__
+        # calls this method, so the failure surfaces as "Exception ignored in
+        # __del__". Writing straight to __dict__ avoids that path entirely.
+        root = self.__dict__.get("_boundary_disk_root")
+        if root is not None:
+            shutil.rmtree(root, ignore_errors=True)
+        self.__dict__["_boundary_disk_root"] = None
+        self.__dict__["_boundary_disk_files"] = ()
 
     def _allocate_boundary_disk_files(self, shapes, disk_dir, element_size=4):
         root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
