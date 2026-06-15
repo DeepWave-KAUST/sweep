@@ -167,9 +167,18 @@ def main():
                        shape, dh=10.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
                        source_type=st, receiver_type=rt, model_parallel=topo, dev=dev,
                        free_surface=fs)
-    rec_tile = ddp.forward(wav, src, rec, models=models_np)   # pass GLOBAL, auto-slice
-    grads_tile = ddp.gradient(rec_tile)                       # adjoint = tile record
+    # autograd path: slice the global model to this rank's tile as a leaf, then
+    # backward with adjoint = the tile record (same adjoint the old explicit
+    # ddp.gradient(rec_tile) used) -> each tile's .grad is the model gradient.
+    def _slice(m):
+        if ndim == 2:
+            return m[:, ddp.x0:ddp.x0 + ddp.nxp]
+        return m[:, ddp.y0:ddp.y0 + ddp.nyp, ddp.x0:ddp.x0 + ddp.nxp]
+    tiles = [torch.tensor(_slice(m), device=dev, requires_grad=True) for m in models_np]
+    rec_tile = ddp.forward(wav, src, rec, models=tiles)       # differentiable record
     full_rec = ddp.gather_record(rec_tile)
+    rec_tile.backward(gradient=rec_tile.detach())             # adjoint = tile record
+    grads_tile = [t.grad for t in tiles]
 
     y0 = getattr(ddp, "y0", 0); nyp = getattr(ddp, "nyp", ny)
     payload = (ddp._own_rec_idx, ddp.x0, ddp.nxp, y0, nyp, [g.cpu() for g in grads_tile])
@@ -202,7 +211,10 @@ def main():
                 else:
                     want = ref_g[k][..., ztop:ztop + nz, pad + y0: pad + y0 + nyp_r,
                                     pad + x0: pad + x0 + nxp_r]
-                worst = min(worst, grade(f"tile{r} grad[{k}]", g, want.cpu(), g_scale[k]))
+                # tile .grad is (nz,[nyp,]nxp); reshape the runtime-padded
+                # reference slice to match (same numel, leading B/C dims dropped)
+                worst = min(worst, grade(f"tile{r} grad[{k}]", g,
+                                         want.cpu().reshape(g.shape), g_scale[k]))
         print(f"[rank0] family={fam} ndim={ndim} grid={shape} px={px} py={py} "
               f"so={so} fs={fs} nt={nt}")
         print("DD_API_CHECK:", {2: "PASS", 1: "PASS_TOL", 0: "FAIL"}[worst])

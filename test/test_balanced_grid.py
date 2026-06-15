@@ -31,15 +31,6 @@ def test_max_py_unlocks_cubic_optimum():
     assert balanced_grid(8, (384, 384, 384), max_py=3) == (2, 4)
 
 
-def test_allow_y_thin_deprecated_alias():
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        assert balanced_grid(8, (384, 384, 384), allow_y_thin=True) == (4, 2)
-        assert balanced_grid(8, (384, 384, 384), allow_y_thin=False) == (2, 4)
-    assert any(issubclass(x.category, DeprecationWarning) for x in w)
-
-
 def test_falls_back_when_indivisible():
     # Ny/Nx not divisible by any balanced py<=2 factor -> x-cut fallback path
     py, px = balanced_grid(8, (256, 250, 1000))
@@ -52,7 +43,7 @@ def test_world_one():
 
 if __name__ == "__main__":
     for fn in [test_safe_default_beats_x_cut, test_two_d_is_x_cut_only,
-               test_max_py_unlocks_cubic_optimum, test_allow_y_thin_deprecated_alias,
+               test_max_py_unlocks_cubic_optimum,
                test_falls_back_when_indivisible, test_world_one]:
         fn()
         print(f"OK {fn.__name__}")

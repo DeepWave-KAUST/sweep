@@ -59,22 +59,22 @@ def main():
                                                         world_size=world, rank=rank),
                             dev=dev)
 
+    # models=None is a FORWARD-ONLY (no_grad) reuse fast path: the record of a
+    # shot that reuses the model must be bit-identical to passing the same model
+    # again. (Gradient FWI uses the autograd path with the model leaf passed each
+    # shot, so models=None is for forward-only modelling / obs generation.)
     # Path 1: reuse — set model on shot A, reuse for shot B
     d1 = mk()
     d1.forward(wav, srcA, rec, models=[vp])
     recB_reuse = d1.forward(wav, srcB, rec, models=None).detach().clone()
-    gB_reuse = [g.clone() for g in d1.gradient(recB_reuse)]
 
     # Path 2: explicit — pass the same vp again for shot B
     d2 = mk()
     d2.forward(wav, srcA, rec, models=[vp])
     recB_expl = d2.forward(wav, srcB, rec, models=[vp]).detach().clone()
-    gB_expl = [g.clone() for g in d2.gradient(recB_expl)]
 
     rec_bit = torch.equal(recB_reuse, recB_expl)
-    g_bit = all(torch.equal(a, b) for a, b in zip(gB_reuse, gB_expl))
     rec_d = (recB_reuse - recB_expl).abs().max().item()
-    g_d = max((a - b).abs().max().item() for a, b in zip(gB_reuse, gB_expl)) if gB_reuse else 0.0
 
     # Fail-loud guard: models=None before any forward must raise
     guard_ok = False
@@ -85,9 +85,8 @@ def main():
 
     if rank == 0:
         print(f"[rank0] reuse-vs-explicit record bit={rec_bit} max|d|={rec_d:.3e}")
-        print(f"[rank0] reuse-vs-explicit grad   bit={g_bit} max|d|={g_d:.3e}")
         print(f"[rank0] models=None pre-capture guard raised: {guard_ok}")
-        ok = rec_bit and g_bit and guard_ok
+        ok = rec_bit and guard_ok
         print("MODELS_NONE_CHECK:", "PASS" if ok else "FAIL")
         if not ok:
             sys.exit(1)

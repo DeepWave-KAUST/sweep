@@ -59,8 +59,11 @@ def main():
                        shape, dh=10.0, dt=DT, nt=nt, abcn=abcn, spatial_order=so,
                        source_type=["h1"], receiver_type=["h1"],
                        model_parallel=topo, dev=dev)
-    rec_tile = ddp.forward(wav, src, rec, models=[vp])
-    grads_tile = ddp.gradient(rec_tile)            # E6 all_reduces across shot_pg
+    vp_t = torch.tensor(vp[:, ddp.x0:ddp.x0 + ddp.nxp], device=dev,
+                        requires_grad=True)        # this rank's model tile (leaf)
+    rec_tile = ddp.forward(wav, src, rec, models=[vp_t])     # differentiable record
+    rec_tile.backward(gradient=rec_tile.detach())  # adjoint = record; _run_adjoint
+    grads_tile = [vp_t.grad]                        # all_reduced across shot_pg (E6)
 
     payload = (ddp.x0, ddp.nxp, [g.cpu() for g in grads_tile])
     gathered = [None] * world
