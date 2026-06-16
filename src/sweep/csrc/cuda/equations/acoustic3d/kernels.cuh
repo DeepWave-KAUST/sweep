@@ -281,7 +281,9 @@ __global__ void acoustic_adjoint_fused_3d(
     float* __restrict__ psiz_out,
     float* __restrict__ zetax_out,
     float* __restrict__ zetay_out,
-    float* __restrict__ zetaz_out
+    float* __restrict__ zetaz_out,
+    const float* __restrict__ grad_forward_img,  // u_forward[it+1] (vp^2 Lap u), or nullptr
+    float* __restrict__ grad_out                 // vp gradient accumulator, or nullptr
 ){
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
     int iy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -316,6 +318,16 @@ __global__ void acoustic_adjoint_fused_3d(
     float invdz  = 1.0f / lap_ctx.dz;
 
     float gun = f.u_now[idx];
+
+    // FUSED vp-gradient imaging (lagged one step): at kernel entry u_now holds the
+    // post-source adjoint field of step it+1, so accumulate the imaging correlation
+    // for that step here instead of a separate calculate_grad_3d pass.  Bit-identical
+    // to calculate_grad_3d (same operands, same op order); halo/air cells skipped
+    // above carry adjoint==0, so omitting their imaging contributes exactly 0.
+    if (grad_out != nullptr)
+        grad_out[oidx] += 2.f * solver.dt * solver.dt
+                        * grad_forward_img[oidx] * gun / vpb[idx];
+
     float c0c = vpb[idx]; c0c = c0c * c0c * dt2;
     float gw  = c0c * gun;                     // c * lambda at idx
 
