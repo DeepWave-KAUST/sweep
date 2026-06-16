@@ -351,8 +351,11 @@ __global__ void acoustic_adjoint_fused_3d(
         }
         f.u_next[idx] = 2.0f * gun - f.u_prev[idx]
                       + lapx * invdx2 + lapy * invdy2 + lapz * invdz2;
-        psix_out[oidx] = psiy_out[oidx] = psiz_out[oidx] = 0.f;
-        zetax_out[oidx] = zetay_out[oidx] = zetaz_out[oidx] = 0.f;
+        // Interior aux stays 0: both psi/zeta double-buffers are zero-allocated
+        // and no path ever writes a non-zero into the deep interior, so the
+        // out-buffers are already 0 here — skip the 6 redundant full-grid zero
+        // writes (mirrors the forward kernel's interior early-return; the only
+        // readers are PML-band stencils, which read the *input* psi=0).
         return;
     }
 
