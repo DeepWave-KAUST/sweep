@@ -583,7 +583,10 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_full_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Skip the per-timestep illumination pass for a plain FWI gradient that does
+    // not request it; the vp gradient (calculate_grad) is unaffected.
+    run_full_imaging(p, &grad, &grad_wavelet,
+                     p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
