@@ -282,6 +282,31 @@ def overwrite_at_topo(base, repl, iz_surf, axis):
     return torch.where(mask, repl, base)
 
 
+def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2, topo_rows=None):
+    """Robertsson free-surface sigma_xx correction, shared across the staggered
+    elastic equations (Elastic, DASMu, ElasticVR).
+
+    At a free surface sigma_zz = 0 forces the surface-row sigma_xx to
+    ``sxx_pre + dt * c_surf * vx_x`` -- the image-method mirror alone leaves it
+    ~mu/lambda too large.  ``c_surf`` is the modified coefficient and ``vx_x`` the
+    matching x velocity-gradient, both expressed in each caller's own variables:
+      * Elastic / DASMu : c_surf = 4 mu (lam+mu)/(lam+2mu),  vx_x = d vx/dx
+      * ElasticVR (native, momentum px = rho*vx, no explicit rho needed):
+                          c_surf = 4 vs^2 (vp^2 - vs^2)/vp^2,  vx_x = d px/dx
+    Overwrites the flat top row (``overwrite_top_row``) or, when ``topo_rows`` is
+    given, the per-column surface row along topography (``overwrite_at_topo``).
+    Env-gated by ``SWEEP_FS_MOD_SXX`` (default on); returns ``sxx`` unchanged off.
+    """
+    import os as _os
+
+    if _os.environ.get("SWEEP_FS_MOD_SXX", "1") != "1":
+        return sxx
+    sxx_surf = sxx_pre + dt * c_surf * vx_x
+    if topo_rows is not None:
+        return overwrite_at_topo(sxx, sxx_surf, topo_rows, axis=axis)
+    return overwrite_top_row(sxx, sxx_surf, top_halo, axis=axis)
+
+
 def zero_at_topo(u, iz_surf, axis):
     """Zero exactly the surface row per column (one cell per ``ix`` at
     ``z == iz_surf[ix]``).
