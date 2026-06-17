@@ -280,9 +280,9 @@ __global__ void elastic_stress_kernel(
     if (elastic_is_top_free_surface_row(solver, ix, iz)) {
         // Robertsson free-surface fix: surface-row sigma_xx uses the modified
         // coefficient 4 mu (lam+mu)/(lam+2mu) * dvx_dx (from sigma_zz=0).
-        // Flat surface only — eager gates this on ``not has_topo``.
-        if (!solver.has_topo)
-            f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvx_dx + dvz_dz);
+        // Applies at any FS row — flat top row OR per-column along topography
+        // (image-method mirror alone leaves the surface sigma_xx too large).
+        f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvx_dx + dvz_dz);
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
     }
@@ -452,9 +452,9 @@ __global__ void elastic_stress_adjoint_prepare(
     }
 
     float bar_dvx_dx, bar_dvz_dz, bar_dvx_dz, bar_dvz_dx;
-    if (is_fs && !solver.has_topo) {
-        // Transpose of the Robertsson FS sigma_xx fix (flat only — eager gates on
-        // not has_topo): at the surface row the forward sets
+    if (is_fs) {
+        // Transpose of the Robertsson FS sigma_xx fix (flat top row OR per-column
+        // along topography): at the surface row the forward sets
         // sxx = old_sxx + dt * C_surf * dvx_dx  with C_surf = 4 mu (lam+mu)/(lam+2mu);
         // the dvz_dz dependence cancels and szz/sxz are zeroed.
         float c_surf = 4.f * mu_ * (lam + mu_) / (lam + 2.f * mu_);
@@ -748,9 +748,9 @@ __global__ void calculate_grad_elastic_bs(
     float bar_szz = is_fs ? 0.f : a.szz[idx];
     float bar_sxz = is_fs ? 0.f : a.sxz[idx];
     float grad_lambda, grad_mu;
-    if (is_fs && !solver.has_topo) {
-        // Material derivative of the Robertsson FS sigma_xx fix (flat only — eager
-        // gates on not has_topo): surface sxx = old + dt * C_surf * dvx_dx,
+    if (is_fs) {
+        // Material derivative of the Robertsson FS sigma_xx fix (flat top row OR
+        // per-column along topography): surface sxx = old + dt * C_surf * dvx_dx,
         // C_surf = 4 mu (lam+mu)/(lam+2mu), szz/sxz zeroed.  With
         // lam=rho(vp^2-2vs^2), mu=rho vs^2, lam+2mu=rho vp^2:
         // dC/dlam = 4 vs^4/vp^4,  dC/dmu = 4 (vp^4 - 2 vp^2 vs^2 + 2 vs^4)/vp^4.
@@ -846,10 +846,10 @@ __global__ void calculate_grad_elastic_nobs(
     float bar_szz = is_fs ? 0.f : a.szz[idx];
     float bar_sxz = is_fs ? 0.f : a.sxz[idx];
     float grad_lambda, grad_mu;
-    if (is_fs && !solver.has_topo) {
-        // Material derivative of the Robertsson FS sigma_xx fix (flat only; see
-        // calculate_grad_elastic_bs): surface sxx = old + dt * C_surf * dvx_dx,
-        // C_surf = 4 mu (lam+mu)/(lam+2mu); szz/sxz zeroed.
+    if (is_fs) {
+        // Material derivative of the Robertsson FS sigma_xx fix (flat top row OR
+        // per-column along topography; see calculate_grad_elastic_bs):
+        // surface sxx = old + dt * C_surf * dvx_dx, C_surf = 4 mu (lam+mu)/(lam+2mu).
         float vp2 = vp_b[idx] * vp_b[idx];
         float vs2 = vs_b[idx] * vs_b[idx];
         float vp4 = vp2 * vp2;

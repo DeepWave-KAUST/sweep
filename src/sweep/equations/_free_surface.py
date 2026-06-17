@@ -270,6 +270,18 @@ def zero_above_topo(u, iz_surf, axis):
     return u.masked_fill(mask, 0.0)
 
 
+def overwrite_at_topo(base, repl, iz_surf, axis):
+    """Per-column version of :func:`overwrite_top_row`: set the surface row
+    (``z == iz_surf[ix]``) of ``base`` to the corresponding entry of ``repl``;
+    all other cells are left untouched.  Used for the Robertsson surface-sigma_xx
+    modified coefficient under irregular topography."""
+    import torch
+
+    z, surf, ax, nz = _broadcast_topo(base, iz_surf, axis)
+    mask = (z == surf).expand_as(base)
+    return torch.where(mask, repl, base)
+
+
 def zero_at_topo(u, iz_surf, axis):
     """Zero exactly the surface row per column (one cell per ``ix`` at
     ``z == iz_surf[ix]``).

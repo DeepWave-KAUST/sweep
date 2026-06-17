@@ -36,6 +36,7 @@ from ._free_surface import (
     top_free_surface_derivative,
     top_free_surface_derivative_topo,
     overwrite_top_row,
+    overwrite_at_topo,
     get_o2_pd as _get_o2_pd,
     fs_deriv as _fs_deriv,
     near_surface_o2_count as _near_surface_o2_count,
@@ -164,11 +165,18 @@ def elastic_stress_substep(
     sxx_pre_fs = sxx
     szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
     sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
-    if free_surface and not has_topo and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
+    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
         # Robertsson free-surface fix: surface-row sigma_xx uses the modified
         # coefficient 4 mu (lam+mu)/(lam+2mu) * d vx/dx  (from sigma_zz=0).
+        # Applies at the FLAT top row and, per-column, along irregular topography
+        # (the image-method mirror alone leaves the surface sigma_xx ~mu/lambda
+        # times too large — same error the flat path had before this fix).
         _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
-        sxx = overwrite_top_row(sxx, sxx_pre_fs + dt * _coef * vx_x, top_halo, axis=-2)
+        _sxx_surf = sxx_pre_fs + dt * _coef * vx_x
+        if has_topo:
+            sxx = overwrite_at_topo(sxx, _sxx_surf, topo_rows, axis=-2)
+        else:
+            sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-2)
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
