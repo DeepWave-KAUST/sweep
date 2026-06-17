@@ -278,6 +278,11 @@ __global__ void elastic_stress_kernel(
         mu_ * (dvx_dz + dvz_dx);
 
     if (elastic_is_top_free_surface_row(solver, ix, iz)) {
+        // Robertsson free-surface fix: surface-row sigma_xx uses the modified
+        // coefficient 4 mu (lam+mu)/(lam+2mu) * dvx_dx (from sigma_zz=0).
+        // Flat surface only — eager gates this on ``not has_topo``.
+        if (!solver.has_topo)
+            f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvx_dx + dvz_dz);
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
     }
@@ -435,20 +440,34 @@ __global__ void elastic_stress_adjoint_prepare(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
+    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
-    if (elastic_is_top_free_surface_row(solver, ix, iz)) {
+    if (is_fs) {
         bar_szz = 0.f;
         bar_sxz = 0.f;
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
     }
 
-    float bar_dvx_dx = solver.dt * ((lam + 2.f * mu_) * bar_sxx + lam * bar_szz);
-    float bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * bar_szz + lam * bar_sxx);
-    float bar_dvx_dz = solver.dt * mu_ * bar_sxz;
-    float bar_dvz_dx = solver.dt * mu_ * bar_sxz;
+    float bar_dvx_dx, bar_dvz_dz, bar_dvx_dz, bar_dvz_dx;
+    if (is_fs && !solver.has_topo) {
+        // Transpose of the Robertsson FS sigma_xx fix (flat only — eager gates on
+        // not has_topo): at the surface row the forward sets
+        // sxx = old_sxx + dt * C_surf * dvx_dx  with C_surf = 4 mu (lam+mu)/(lam+2mu);
+        // the dvz_dz dependence cancels and szz/sxz are zeroed.
+        float c_surf = 4.f * mu_ * (lam + mu_) / (lam + 2.f * mu_);
+        bar_dvx_dx = solver.dt * c_surf * bar_sxx;
+        bar_dvz_dz = 0.f;
+        bar_dvx_dz = 0.f;   // bar_sxz == 0 at FS
+        bar_dvz_dx = 0.f;
+    } else {
+        bar_dvx_dx = solver.dt * ((lam + 2.f * mu_) * bar_sxx + lam * bar_szz);
+        bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * bar_szz + lam * bar_sxx);
+        bar_dvx_dz = solver.dt * mu_ * bar_sxz;
+        bar_dvz_dx = solver.dt * mu_ * bar_sxz;
+    }
 
     // Position-based PML / interior split. Outside the PML band all
     // ax/az/bx/bz coefficients vanish, m_v* aux fields stay 0, so the four
@@ -725,11 +744,27 @@ __global__ void calculate_grad_elastic_bs(
     float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float fvz_x = sgradient<2, Order, X, DIFF_FORWARD> (f.vz, ix, 0, iz, grad_ctx);
 
-    float bar_szz = elastic_is_top_free_surface_row(solver, ix, iz) ? 0.f : a.szz[idx];
-    float bar_sxz = elastic_is_top_free_surface_row(solver, ix, iz) ? 0.f : a.sxz[idx];
-    float grad_lambda = (a.sxx[idx] + bar_szz) * (fvx_x + fvz_z);
-    float grad_mu = 2*(a.sxx[idx] * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
-    
+    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    float bar_szz = is_fs ? 0.f : a.szz[idx];
+    float bar_sxz = is_fs ? 0.f : a.sxz[idx];
+    float grad_lambda, grad_mu;
+    if (is_fs && !solver.has_topo) {
+        // Material derivative of the Robertsson FS sigma_xx fix (flat only — eager
+        // gates on not has_topo): surface sxx = old + dt * C_surf * dvx_dx,
+        // C_surf = 4 mu (lam+mu)/(lam+2mu), szz/sxz zeroed.  With
+        // lam=rho(vp^2-2vs^2), mu=rho vs^2, lam+2mu=rho vp^2:
+        // dC/dlam = 4 vs^4/vp^4,  dC/dmu = 4 (vp^4 - 2 vp^2 vs^2 + 2 vs^4)/vp^4.
+        float vp2 = vp_b[idx] * vp_b[idx];
+        float vs2 = vs_b[idx] * vs_b[idx];
+        float vp4 = vp2 * vp2;
+        float a_sxx_fvx = a.sxx[idx] * fvx_x;
+        grad_lambda = a_sxx_fvx * 4.f * vs2 * vs2 / vp4;
+        grad_mu     = a_sxx_fvx * 4.f * (vp4 - 2.f * vp2 * vs2 + 2.f * vs2 * vs2) / vp4;
+    } else {
+        grad_lambda = (a.sxx[idx] + bar_szz) * (fvx_x + fvz_z);
+        grad_mu = 2*(a.sxx[idx] * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
+    }
+
     gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
     gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
                    2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
@@ -807,11 +842,25 @@ __global__ void calculate_grad_elastic_nobs(
     float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
     float fvz_x = sgradient<2, Order, X, DIFF_FORWARD>  (fvz_b, ix, 0, iz, grad_ctx);
 
-    float bar_szz = elastic_is_top_free_surface_row(solver, ix, iz) ? 0.f : a.szz[idx];
-    float bar_sxz = elastic_is_top_free_surface_row(solver, ix, iz) ? 0.f : a.sxz[idx];
-    float grad_lambda = (a.sxx[idx] + bar_szz) * (fvx_x + fvz_z);
-    float grad_mu = 2*(a.sxx[idx] * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
-    
+    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    float bar_szz = is_fs ? 0.f : a.szz[idx];
+    float bar_sxz = is_fs ? 0.f : a.sxz[idx];
+    float grad_lambda, grad_mu;
+    if (is_fs && !solver.has_topo) {
+        // Material derivative of the Robertsson FS sigma_xx fix (flat only; see
+        // calculate_grad_elastic_bs): surface sxx = old + dt * C_surf * dvx_dx,
+        // C_surf = 4 mu (lam+mu)/(lam+2mu); szz/sxz zeroed.
+        float vp2 = vp_b[idx] * vp_b[idx];
+        float vs2 = vs_b[idx] * vs_b[idx];
+        float vp4 = vp2 * vp2;
+        float a_sxx_fvx = a.sxx[idx] * fvx_x;
+        grad_lambda = a_sxx_fvx * 4.f * vs2 * vs2 / vp4;
+        grad_mu     = a_sxx_fvx * 4.f * (vp4 - 2.f * vp2 * vs2 + 2.f * vs2 * vs2) / vp4;
+    } else {
+        grad_lambda = (a.sxx[idx] + bar_szz) * (fvx_x + fvz_z);
+        grad_mu = 2*(a.sxx[idx] * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
+    }
+
     grad_vp_b[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
     grad_vs_b[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
                          2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;

@@ -30,9 +30,15 @@ no extra memory.
 
 from __future__ import annotations
 
+import os as _os
+
 from ._free_surface import (
     top_free_surface_derivative,
     top_free_surface_derivative_topo,
+    overwrite_top_row,
+    get_o2_pd as _get_o2_pd,
+    fs_deriv as _fs_deriv,
+    near_surface_o2_count as _near_surface_o2_count,
 )
 
 
@@ -58,6 +64,11 @@ def elastic_velocity_substep(
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
     has_topo = free_surface and topo_rows is not None
+    # Near-surface order reduction (flat FS only): order-2 image derivative in
+    # the top band tames the high-order FS-∩-CPML-corner instability.
+    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
+        if (free_surface and not has_topo) else 0
+    _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     # ---- Stress gradients ------------------------------------------------
     txx_x = pd.x_forward(sxx)
@@ -70,12 +81,8 @@ def elastic_velocity_substep(
                 szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows
             )
         else:
-            txz_z = top_free_surface_derivative(
-                sxz, pd.z_backward, top_halo, odd=True, axis=-2
-            )
-            tzz_z = top_free_surface_derivative(
-                szz, pd.z_forward, top_halo, odd=True, axis=-2
-            )
+            txz_z = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+            tzz_z = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
     else:
         txz_z = pd.z_backward(sxz)
         tzz_z = pd.z_forward(szz)
@@ -126,6 +133,9 @@ def elastic_stress_substep(
     top_halo = pd.coes.shape[0]
     has_topo = free_surface and topo_rows is not None
     lame_lambda_2mu = (lame_lambda + 2 * lame_mu) if lame_lambda_2mu is None else lame_lambda_2mu
+    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
+        if (free_surface and not has_topo) else 0
+    _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     # ---- Velocity gradients ----------------------------------------------
     vx_x = pd.x_backward(vx)
@@ -138,12 +148,8 @@ def elastic_stress_substep(
                 vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows
             )
         else:
-            vz_z = top_free_surface_derivative(
-                vz, pd.z_backward, top_halo, odd=True, axis=-2
-            )
-            vx_z = top_free_surface_derivative(
-                vx, pd.z_forward, top_halo, odd=False, axis=-2
-            )
+            vz_z = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+            vx_z = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
     else:
         vz_z = pd.z_backward(vz)
         vx_z = pd.z_forward(vx)
@@ -155,8 +161,14 @@ def elastic_stress_substep(
     m_vxx = ax * m_vxx + bx * vx_x
     vx_x = vx_x + m_vxx
 
+    sxx_pre_fs = sxx
     szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
     sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
+    if free_surface and not has_topo and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
+        # Robertsson free-surface fix: surface-row sigma_xx uses the modified
+        # coefficient 4 mu (lam+mu)/(lam+2mu) * d vx/dx  (from sigma_zz=0).
+        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
+        sxx = overwrite_top_row(sxx, sxx_pre_fs + dt * _coef * vx_x, top_halo, axis=-2)
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
