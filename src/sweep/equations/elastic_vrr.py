@@ -52,6 +52,7 @@ from ._free_surface import (
     fs_deriv as _fs_deriv,
     get_o2_pd as _get_o2_pd,
     near_surface_o2_count as _near_surface_o2_count,
+    fs_sxx_correction as _fs_sxx_correction,
 )
 import os as _os
 from sweep.scalars import fd_coefficients
@@ -280,11 +281,18 @@ def elastic_vr_step_core(
     # lambda * eps_kk = lambda (eps_xx + eps_zz), and -2 mu eps_zz is
     # the deviatoric S contribution. See module docstring.
     gamma_P_kk = gamma_P_xx + gamma_P_zz
+    sxx_pre = sxx
     sxx = sxx + dt * (gamma_P_kk - 2.0 * gamma_S_zz)
     szz = szz + dt * (gamma_P_kk - 2.0 * gamma_S_xx)
     sxz = sxz + dt * (gamma_S_xz + gamma_S_zx)
 
     if free_surface:
+        # Robertsson surface sigma_xx -- same shared correction as Elastic/DASMu.
+        # VR-native form: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx becomes
+        # 4 vs^2 (vp^2-vs^2)/vp^2 * d px/dx (px = rho*vx cancels the rho).
+        sxx = _fs_sxx_correction(
+            sxx, sxx_pre, dt, 4.0 * vs2 * (vp2 - vs2) / vp2, dpx_dx, top_halo, axis=-2
+        )
         sxz = zero_top_row(sxz, top_halo, axis=-2)
         szz = zero_top_row(szz, top_halo, axis=-2)
 
