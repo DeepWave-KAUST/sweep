@@ -117,6 +117,13 @@ __global__ void das_mu2d_stress_strain_kernel(
     f.exz[idx] += 0.5f * solver.dt * (dvx_dz + dvz_dx);
 
     if (elastic_is_top_free_surface_row(solver, iz)) {
+        // Robertsson free-surface fix: surface-row sigma_xx uses the modified
+        // coefficient 4 mu (lam+mu)/(lam+2mu) * dvx_dx (from sigma_zz=0).
+        // Applied as a correction on top of the bulk update above (the
+        // lam*dvz_dz term cancels, the dvx_dx coefficient is replaced).
+        // Flat surface only — eager gates this on ``not has_topo``.
+        if (!solver.has_topo)
+            f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f * mu_) * dvx_dx + dvz_dz);
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
     }
@@ -165,10 +172,11 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
+    bool is_fs = elastic_is_top_free_surface_row(solver, iz);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
-    if (elastic_is_top_free_surface_row(solver, iz)) {
+    if (is_fs) {
         bar_szz = 0.f;
         bar_sxz = 0.f;
         f.szz[idx] = 0.f;
@@ -179,10 +187,23 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float bar_ezz = -f.ezz[idx];
     float bar_exz = -f.exz[idx];
 
-    float bar_dvx_dx = solver.dt * (((lam + 2.f * mu_) * bar_sxx + lam * bar_szz) + bar_exx);
-    float bar_dvz_dz = solver.dt * (((lam + 2.f * mu_) * bar_szz + lam * bar_sxx) + bar_ezz);
-    float bar_dvx_dz = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
-    float bar_dvz_dx = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
+    float bar_dvx_dx, bar_dvz_dz, bar_dvx_dz, bar_dvz_dx;
+    if (is_fs && !solver.has_topo) {
+        // Transpose of the Robertsson FS sigma_xx fix (flat only — eager gates on
+        // not has_topo; strain terms unchanged, the free surface BC is on stress,
+        // not strain): surface sxx = old_sxx + dt * C_surf * dvx_dx,
+        // C_surf = 4 mu (lam+mu)/(lam+2mu); the dvz_dz dependence cancels.
+        float c_surf = 4.f * mu_ * (lam + mu_) / (lam + 2.f * mu_);
+        bar_dvx_dx = solver.dt * (c_surf * bar_sxx + bar_exx);
+        bar_dvz_dz = solver.dt * (bar_ezz);
+        bar_dvx_dz = solver.dt * (0.5f * bar_exz);   // bar_sxz == 0 at FS
+        bar_dvz_dx = solver.dt * (0.5f * bar_exz);
+    } else {
+        bar_dvx_dx = solver.dt * (((lam + 2.f * mu_) * bar_sxx + lam * bar_szz) + bar_exx);
+        bar_dvz_dz = solver.dt * (((lam + 2.f * mu_) * bar_szz + lam * bar_sxx) + bar_ezz);
+        bar_dvx_dz = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
+        bar_dvz_dx = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
+    }
 
     // Position-based PML / interior split — same logic as elastic2d's
     // adjoint prepare: ax/az/bx/bz vanish outside the PML band, m_v* aux

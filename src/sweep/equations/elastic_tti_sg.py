@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from ._free_surface import top_free_surface_derivative, zero_top_row
+from ._free_surface import (
+    top_free_surface_derivative,
+    zero_top_row,
+    fs_deriv as _fs_deriv,
+    get_o2_pd as _get_o2_pd,
+    near_surface_o2_count as _near_surface_o2_count,
+)
+import os as _os
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
@@ -158,6 +165,10 @@ def step(
         raise ValueError("ElasticTTISG requires pml_type='cpmls', which provides eight staggered CPML profiles.")
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
+    # Near-surface order reduction (matches the shared CUDA helper, which reduces
+    # these same six FS z-derivatives): order-2 image stencil in the top band.
+    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) if free_surface else 0
+    _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     dsxx_dx = pd.x_forward(sxx)
     dsxz_dz = pd.z_backward(sxz)
@@ -167,9 +178,9 @@ def step(
     dszz_dz = pd.z_forward(szz)
 
     if free_surface:
-        dsxz_dz = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
-        dsyz_dz = top_free_surface_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-2)
-        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
+        dsxz_dz = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dsyz_dz = _fs_deriv(syz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dszz_dz = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
 
     m_txxx = axh * m_txxx + bxh * dsxx_dx
     m_txzz = az * m_txzz + bz * dsxz_dz
@@ -194,9 +205,9 @@ def step(
     dvz_dx = pd.x_forward(vz)
 
     if free_surface:
-        dvz_dz = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-2)
-        dvx_dz = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-2)
-        dvy_dz = top_free_surface_derivative(vy, pd.z_forward, top_halo, odd=False, axis=-2)
+        dvz_dz = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dvx_dz = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
+        dvy_dz = _fs_deriv(vy, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
     else:
         dvz_dz = pd.z_backward(vz)
         dvx_dz = pd.z_forward(vx)
