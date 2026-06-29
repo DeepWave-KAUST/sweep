@@ -6,6 +6,34 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 
+// Accessor returning (a · psi) at a stencil tap: a is a 1-D profile (neighbour
+// stride 1 along the differencing axis), psi a 2-D field at linear index idx
+// with the given stride.  Feeding this to centered_gradient_stencil computes the
+// FUSED product derivative  d(a·psi)/dx  in a single stencil — matching the
+// eager reference grad_op(a*psi) (and deepwave's DIFFX1(AX_PSIX)).  Replaces the
+// product-rule split  a·d(psi) + d(a)·psi, which needs d(psi) AND d(a) held live
+// at once -> higher register pressure.
+struct AProductAccessor {
+    const float* __restrict__ a;
+    const float* __restrict__ psi;
+    int a_pos;
+    int idx;
+    int psi_stride;
+    __device__ __forceinline__ float operator()(int offset) const {
+        return a[a_pos + offset] * psi[idx + offset * psi_stride];
+    }
+};
+
+template<int Order>
+__device__ __forceinline__
+float fused_d_aPsi(const float* __restrict__ a, const float* __restrict__ psi,
+                   int a_pos, int idx, int psi_stride,
+                   int M, const float* __restrict__ coeff, float h)
+{
+    return centered_gradient_stencil<Order>(
+        AProductAccessor{a, psi, a_pos, idx, psi_stride}, M, coeff, h);
+}
+
 #define ACOUSTIC2D(order, grid, block, ...)                                  \
     do {                                                        \
         if      ((order) == 2) acoustic2nd<2><<<grid, block>>>(__VA_ARGS__); \
@@ -149,12 +177,11 @@ __global__ void acoustic2nd(
 
     float dudz     = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
     float dudx     = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-    float dpsizdz  = gradient<2, Order, Z>(f.psiz, ix, 0, iz, grad_ctx);
-    float dpsixdx  = gradient<2, Order, X>(f.psix, ix, 0, iz, grad_ctx);
-    float daxdx    = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
-    float dazdz    = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
-    float daipsiz_dz = az_ * dpsizdz + dazdz * f.psiz[idx];
-    float daipxix_dx = ax_ * dpsixdx + daxdx * f.psix[idx];
+    // FUSED d(a·psi) (single stencil) instead of the product-rule split
+    // a·d(psi) + d(a)·psi.  Bit-matches the eager reference grad_op(a*psi);
+    // drops d(psi) and d(a) from the live set -> fewer registers (deepwave-style).
+    float daipsiz_dz = fused_d_aPsi<Order>(cpml.az, f.psiz, iz, idx, grad_ctx.sz, halo, grad_ctx.coeff, grad_ctx.dz);
+    float daipxix_dx = fused_d_aPsi<Order>(cpml.ax, f.psix, ix, idx, grad_ctx.sx, halo, grad_ctx.coeff, grad_ctx.dx);
 
     // X direction.  Race-free: read psix at neighbours (above), write the NEXT
     // psix to a separate buffer (psixn) when double-buffering; fall back to
@@ -277,8 +304,11 @@ __global__ void acoustic2nd_adjoint_fused(
 
     float ax_ = cpml.ax[ix], az_ = cpml.az[iz];
     float bx_ = cpml.bx[ix], bz_ = cpml.bz[iz];
-    float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
-    float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
+    // Transpose of the FUSED forward term daipxix = d(ax·psix)/dx.  Its exact
+    // transpose w.r.t. psix is  -ax·d(gtmp)/dx  (single antisymmetric stencil of
+    // gtmp, ax pulled to the centre) — NOT the product-rule pair
+    // -d(ax·gtmp)/dx + daxdx·gtmp the old split forward needed.  So daxdx/dazdz
+    // are no longer required, and Dx_gqx/Dz_gqz below carry d(gtmp) (un-scaled).
 
     float gtmpx0 = bx_ * f.zetax[idx] + (1.0f + bx_) * gw;
     float gtmpz0 = bz_ * f.zetaz[idx] + (1.0f + bz_) * gw;
@@ -298,7 +328,7 @@ __global__ void acoustic2nd_adjoint_fused(
         Lx_glx += lc[k] * ((1.0f + bxp) * tp + (1.0f + bxm) * tm);
         Dx_ggx += gc[k] * ((bxp * f.psix[np] + cpml.dbxdx[nixp] * tp)
                          - (bxm * f.psix[nm] + cpml.dbxdx[nixm] * tm));
-        Dx_gqx += gc[k] * (cpml.ax[nixp] * tp - cpml.ax[nixm] * tm);
+        Dx_gqx += gc[k] * (tp - tm);   // d(gtmp)/dx (ax applied at psix_out)
     }
     Lx_glx *= invdx2; Dx_ggx *= invdx; Dx_gqx *= invdx;
 
@@ -313,14 +343,14 @@ __global__ void acoustic2nd_adjoint_fused(
         Lz_glz += lc[k] * ((1.0f + bzp) * tp + (1.0f + bzm) * tm);
         Dz_ggz += gc[k] * ((bzp * f.psiz[np] + cpml.dbzdz[nizp] * tp)
                          - (bzm * f.psiz[nm] + cpml.dbzdz[nizm] * tm));
-        Dz_gqz += gc[k] * (cpml.az[nizp] * tp - cpml.az[nizm] * tm);
+        Dz_gqz += gc[k] * (tp - tm);   // d(gtmp)/dz (az applied at psiz_out)
     }
     Lz_glz *= invdz2; Dz_ggz *= invdz; Dz_gqz *= invdz;
 
     f.u_next[idx] = 2.0f * gun - f.u_prev[idx]
                   + (Lx_glx + Lz_glz - Dx_ggx - Dz_ggz);
-    psix_out[oidx]  = ax_ * f.psix[idx] + daxdx * gtmpx0 - Dx_gqx;
-    psiz_out[oidx]  = az_ * f.psiz[idx] + dazdz * gtmpz0 - Dz_gqz;
+    psix_out[oidx]  = ax_ * (f.psix[idx] - Dx_gqx);
+    psiz_out[oidx]  = az_ * (f.psiz[idx] - Dz_gqz);
     zetax_out[oidx] = ax_ * (f.zetax[idx] + gw);
     zetaz_out[oidx] = az_ * (f.zetaz[idx] + gw);
     #undef GW_AT
