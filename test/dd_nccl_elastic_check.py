@@ -152,13 +152,30 @@ def global_runtime_padded(m_phys, full, top):
     return np.pad(m_phys, pw, mode="edge")
 
 
-def fill_global_pad(p, models_padded, x0):
+def fill_global_pad(p, models_padded, x0, pad, prop):
     """Overwrite the tile's runtime-padded models with the global edge-padded
     model sliced at this tile's x-range (true neighbour material in the pad).
     Runtime models carry leading (B, channel) dims; the padded global model is
-    bare spatial, so reshape the slice (numel matches) before copy."""
+    bare spatial, so reshape the slice (numel matches) before copy.
+
+    P-series compact pad: a tile's runtime x-pad is asymmetric (cut faces 0
+    PML, edge faces abcn), so its physical region starts at ``padding[0]+M``,
+    NOT the symmetric ``pad``.  ``models_padded`` is the GLOBAL physical model
+    symmetric-padded by ``pad`` per x-side, so global physical index ``g`` lives
+    at ``models_padded[pad+g]``; the tile buffer's physical region begins at the
+    column ``lo = padding[0]+M`` which must map to global physical ``x0``.  Hence
+    the source slice starts at ``(pad + x0) - lo`` and spans the tile buffer's
+    REAL x-width (read off ``mt.size(-1)``, = nxp + padding[0] + padding[1] +
+    2*M).  The old ``mp[..., x0:x0+width]`` was right only for the edge tile
+    (rank 0, where padding[0]==abcn so the offset cancels) and mis-aligned every
+    interior tile.  y/z stay symmetric (no y-split here), so only x is shifted.
+    M = SO // 2."""
+    xlo = prop._backend_impl.padding[0]   # this tile's real x-low PML width
+    lo = xlo + SO // 2                     # tile buffer physical-region start
+    src0 = (pad + x0) - lo                  # global-padded x index aligned to lo
     for mt, mp in zip(p.models, models_padded):
-        sl = torch.as_tensor(mp[..., x0:x0 + mt.size(-1)], device=mt.device)
+        w = mt.size(-1)                     # tile buffer real x-width
+        sl = torch.as_tensor(mp[..., src0:src0 + w], device=mt.device)
         mt.copy_(sl.reshape(mt.shape))
 
 
@@ -244,19 +261,30 @@ def main():
     shape_tile = (nz, nxp) if ndim == 2 else (nz, ny, nxp)
     prop = make_prop(ndim, shape_tile, abcn, nt, dt, fs, dev, topo=topo)
     runner, record = make_runner(prop, t_wav, t_src, t_rec, tile_models, ndim, dev)
-    fill_global_pad(runner.p, models_padded, x0)
+    fill_global_pad(runner.p, models_padded, x0, pad, prop)
 
     cut_mask = ((X_LO_BIT if rank > 0 else 0)
                 | (X_HI_BIT if rank < world - 1 else 0))
-    if ndim == 3:
-        runner.p.cut_face_mask = cut_mask  # elastic3d forward is cut-aware
+    # elastic2d AND elastic3d forward in_pml are cut-aware (kernels.cuh:152
+    # reads solver.cut_x_lo) — set the forward cut_face_mask for BOTH dims, else
+    # an asymmetric (compact-pad) tile takes the wrong PML branch (P6, ~1e-4
+    # drift; the old 3D-only guard left 2D wavefields off by rel~1e-4).
+    runner.p.cut_face_mask = cut_mask
 
     fast_set = None
     if args.fast:
         from sweep.parallel.fast_halo import FastHaloSet
         fast_set = FastHaloSet(mesh, M, ("x",))
 
-    lo, hi = pad, pad + nxp
+    # Physical-region start in THIS tile's runtime buffer = x_lo PML width +
+    # halo M.  The P-series compact pad gives cut (neighbour-facing) faces 0
+    # PML width, so an interior tile starts at M, not the symmetric pad=abcn+M
+    # — read the real per-rank pad off the prop instead of assuming the edge
+    # tile's value (the old ``lo = pad`` mis-indexed every non-edge tile).  Both
+    # the halo-exchange view [lo-M:hi+M] and the gather crop [lo:hi] below ride
+    # on these lo/hi, so they correct automatically.
+    xlo_pml = prop._backend_impl.padding[0]
+    lo, hi = xlo_pml + M, xlo_pml + M + nxp
 
     def exchange(slots):
         for f in slots:

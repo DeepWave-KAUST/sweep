@@ -175,7 +175,20 @@ def main():
         from sweep.parallel.fast_halo import FastHaloSet
         fast_set = FastHaloSet(mesh, M, ("x",))
 
-    lo, hi = pad, pad + nxp
+    # Physical-region start in THIS tile's runtime buffer = x_lo PML width +
+    # halo M.  The P-series compact pad gives cut (neighbour-facing) faces 0
+    # PML width, so an interior tile starts at M, not the symmetric abcn+M —
+    # read the real per-rank pad off the prop instead of assuming the edge
+    # tile's value (the old ``lo = abcn + M`` mis-indexed every non-edge tile).
+    xlo_pml = prop._backend_impl.padding[0]
+    lo, hi = xlo_pml + M, xlo_pml + M + nxp
+
+    # The acoustic forward in_pml split is cut-aware (phys_x0 = cut? M : abcn+M),
+    # so the stepped forward params must carry this tile's cut_face_mask — else an
+    # asymmetric (compact-pad) interior tile takes the wrong PML branch and the
+    # near-zero far field drifts ~3e-3 over the sweep (the P6 root cause). Mirrors
+    # ModelParallel setting fp.cut_face_mask on the real DD path.
+    runner.p.cut_face_mask = prop._backend_impl._dd_cut_mask
     torch.cuda.synchronize()
     dist.barrier()
     t_comp = t_comm = 0.0
