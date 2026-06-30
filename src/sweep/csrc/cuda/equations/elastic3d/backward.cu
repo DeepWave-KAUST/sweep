@@ -304,13 +304,107 @@ void apply_adjoint_step_3d(
     ElasticCPMLPointer cpml_view,
     SGradParam grad_ctx,
     SolverContext solver,
-    ElasticAdjointWorkspaceTensor& workspace
+    ElasticAdjointWorkspaceTensor& workspace,
+    // Optional fused per-step gradient imaging (full-mode only).  When the
+    // grad_*_out accumulators are non-null, the stress-adjoint-prepare kernel
+    // folds in the calculate_grad_elastic3d_bs correlation for this reverse
+    // step (operands are the un-mutated post-source adjoint at kernel entry).
+    // Default null => behaviour byte-for-byte identical for bs/ckpt callers.
+    const float* grad_fvx       = nullptr,
+    const float* grad_fvy       = nullptr,
+    const float* grad_fvz       = nullptr,
+    const float* grad_fvx_prev  = nullptr,
+    const float* grad_fvy_prev  = nullptr,
+    const float* grad_fvz_prev  = nullptr,
+    const float* grad_vp_model  = nullptr,
+    const float* grad_vs_model  = nullptr,
+    const float* grad_rho_model = nullptr,
+    float* grad_vp_out          = nullptr,
+    float* grad_vs_out          = nullptr,
+    float* grad_rho_out         = nullptr
 )
 {
-    apply_stress_adjoint_3d(order, launch_config, adjoint, lambda, mu,
-                            cpml_view, grad_ctx, solver, workspace);
-    apply_velocity_adjoint_3d(order, launch_config, adjoint, rho,
-                              cpml_view, grad_ctx, solver, workspace);
+    auto adj_view = adjoint.view();
+
+    LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        adj_view,
+        lambda.data_ptr<float>(),
+        mu.data_ptr<float>(),
+        cpml_view,
+        solver,
+        workspace.qxx_t.data_ptr<float>(),
+        workspace.qxy_t.data_ptr<float>(),
+        workspace.qxz_t.data_ptr<float>(),
+        workspace.qyx_t.data_ptr<float>(),
+        workspace.qyy_t.data_ptr<float>(),
+        workspace.qyz_t.data_ptr<float>(),
+        workspace.qzx_t.data_ptr<float>(),
+        workspace.qzy_t.data_ptr<float>(),
+        workspace.qzz_t.data_ptr<float>(),
+        grad_ctx,
+        grad_fvx, grad_fvy, grad_fvz,
+        grad_fvx_prev, grad_fvy_prev, grad_fvz_prev,
+        grad_vp_model, grad_vs_model, grad_rho_model,
+        grad_vp_out, grad_vs_out, grad_rho_out
+    );
+
+    LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        adj_view,
+        workspace.qxx_t.data_ptr<float>(),
+        workspace.qxy_t.data_ptr<float>(),
+        workspace.qxz_t.data_ptr<float>(),
+        workspace.qyx_t.data_ptr<float>(),
+        workspace.qyy_t.data_ptr<float>(),
+        workspace.qyz_t.data_ptr<float>(),
+        workspace.qzx_t.data_ptr<float>(),
+        workspace.qzy_t.data_ptr<float>(),
+        workspace.qzz_t.data_ptr<float>(),
+        grad_ctx,
+        solver
+    );
+
+    LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        adj_view,
+        rho.data_ptr<float>(),
+        cpml_view,
+        solver,
+        workspace.pxx_t.data_ptr<float>(),
+        workspace.pxy_t.data_ptr<float>(),
+        workspace.pxz_t.data_ptr<float>(),
+        workspace.pyx_t.data_ptr<float>(),
+        workspace.pyy_t.data_ptr<float>(),
+        workspace.pyz_t.data_ptr<float>(),
+        workspace.pzx_t.data_ptr<float>(),
+        workspace.pzy_t.data_ptr<float>(),
+        workspace.pzz_t.data_ptr<float>()
+    );
+
+    LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        adj_view,
+        workspace.pxx_t.data_ptr<float>(),
+        workspace.pxy_t.data_ptr<float>(),
+        workspace.pxz_t.data_ptr<float>(),
+        workspace.pyx_t.data_ptr<float>(),
+        workspace.pyy_t.data_ptr<float>(),
+        workspace.pyz_t.data_ptr<float>(),
+        workspace.pzx_t.data_ptr<float>(),
+        workspace.pzy_t.data_ptr<float>(),
+        workspace.pzz_t.data_ptr<float>(),
+        grad_ctx,
+        solver
+    );
 }
 
 // Validate the stepped-backward segment fields (bw_it_begin/bw_it_end),
