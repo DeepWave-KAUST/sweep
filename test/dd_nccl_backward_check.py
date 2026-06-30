@@ -117,10 +117,26 @@ def main():
     else:
         tile.cut_face_mask = 0
 
+    # Physical-region start in THIS tile's runtime buffer = x_lo PML width +
+    # halo M.  The P-series compact pad gives cut (neighbour-facing) faces 0
+    # PML width, so an interior tile starts at M, not the symmetric PAD=abcn+M
+    # — read the real per-rank pad off the prop instead of assuming the edge
+    # tile's value (the old ``lo = PAD`` mis-indexed every non-edge tile).
+    xlo_pml = prop._backend_impl.padding[0]
+    lo, hi = xlo_pml + M, xlo_pml + M + nxp
+
     # spec sharp edge: the fused adjoint reads vp at stencil taps — the
     # tile model's pad must carry the GLOBAL model, not edge replication.
+    # vp_padded is the global model symmetric-padded by PAD per side, so
+    # global physical column g lives at vp_padded[:, PAD + g].  The tile
+    # buffer's physical region begins at ``lo`` (= xlo_pml + M), so tile
+    # runtime ix=0 maps to global padded column (PAD + x0) - lo.  The copy
+    # must fill the tile buffer's REAL runtime width (asymmetric under the
+    # compact pad), read off the actual buffer .shape rather than nxp+2*PAD.
+    w = tile.fp.models[0].shape[-1]
+    start = (PAD + x0) - lo
     gsl = torch.tensor(
-        vp_padded[:, x0:x0 + nxp + 2 * PAD], device=dev
+        vp_padded[:, start:start + w], device=dev
     )
     tile.fp.models[0].copy_(gsl)
     tile.bp.models[0].copy_(gsl)
@@ -150,7 +166,12 @@ def main():
     tile.bp.adjoint_source = adj
 
     # ---------------- DD forward (NCCL u_now exchange) ----------------
-    lo, hi = PAD, PAD + nxp
+    # lo/hi are the cut-aware tile interior bounds computed above (lo = real
+    # x_lo PML + M); they drive the halo views and the gather crops below.
+    # The acoustic forward in_pml split is cut-aware (phys_x0 = cut? M : abcn+M),
+    # so the forward params need this tile's cut_face_mask too — else the
+    # asymmetric (compact-pad) interior tile takes the wrong PML branch (P6).
+    tile.fp.cut_face_mask = tile.cut_face_mask
     fwd_halo = FastHaloSet(mesh, M, ("x",)) if world > 1 else None
     fr = tile.fwd_runner()
     with torch.no_grad():

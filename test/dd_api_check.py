@@ -128,6 +128,11 @@ def main():
     ap.add_argument("--ny", type=int, default=20,
                     help="3-D global Ny (must be a multiple of py; bump for py>=3)")
     ap.add_argument("--free-surface", action="store_true")
+    ap.add_argument("--src-x", type=int, default=-1,
+                    help="global source x (default nx//2); place near a cut "
+                         "(x=r*nxp, nxp=28) to probe within/outside the M=so//2 stencil")
+    ap.add_argument("--src-y", type=int, default=-1, help="global source y, 3-D (default ny//2)")
+    ap.add_argument("--src-z", type=int, default=-1, help="global source z (default nz//4)")
     args = ap.parse_args()
     fam, ndim, so, abcn, nt, fs = (args.family, args.ndim, args.so, args.abcn,
                                    args.nt, args.free_surface)
@@ -154,12 +159,19 @@ def main():
     else:
         models_np = [2200.0 + 400.0 * grid, 1200.0 + 200.0 * grid, 2000.0 + 100.0 * grid]
     wav = ricker(nt, DT, scale=scale)
+    sx = args.src_x if args.src_x >= 0 else nx // 2
+    sz = args.src_z if args.src_z >= 0 else nz // 4
+    sy = args.src_y if args.src_y >= 0 else ny // 2
     if ndim == 2:
-        src = np.array([[[nx // 2, nz // 4]]], dtype=np.int32)
+        src = np.array([[[sx, sz]]], dtype=np.int32)
         rec = np.array([[[ix, 2] for ix in range(2, nx - 2, 5)]], dtype=np.int32)
     else:
-        src = np.array([[[nx // 2, ny // 2, nz // 4]]], dtype=np.int32)
+        src = np.array([[[sx, sy, sz]]], dtype=np.int32)
         rec = np.array([[[ix, ny // 2, 2] for ix in range(2, nx - 2, 5)]], dtype=np.int32)
+    # distance from the source to the nearest x-cut line (r*nxp): < M = the
+    # source stencil straddles a tile boundary (the edge case being probed).
+    _cuts = [r * nxp for r in range(1, px)]
+    d2cut = min((abs(sx - c) for c in _cuts), default=-1)
 
     topo = MeshTopology(py=py, px=px, shot_groups=1, world_size=world, rank=rank)
     st, rt = types(fam, ndim)
@@ -215,8 +227,10 @@ def main():
                 # reference slice to match (same numel, leading B/C dims dropped)
                 worst = min(worst, grade(f"tile{r} grad[{k}]", g,
                                          want.cpu().reshape(g.shape), g_scale[k]))
+        _loc = ("far" if d2cut < 0 or d2cut > M else
+                "ON-cut" if d2cut == 0 else "INSIDE-half" if d2cut < M else "AT-half")
         print(f"[rank0] family={fam} ndim={ndim} grid={shape} px={px} py={py} "
-              f"so={so} fs={fs} nt={nt}")
+              f"so={so} M={M} fs={fs} nt={nt} src_x={sx} d2cut={d2cut} [{_loc}]")
         print("DD_API_CHECK:", {2: "PASS", 1: "PASS_TOL", 0: "FAIL"}[worst])
         if worst == 0:
             sys.exit(1)

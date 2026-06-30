@@ -156,12 +156,27 @@ def main():
     # global edge-padded material in the pad columns (true neighbour values);
     # runtime models carry leading (B, channel) dims so reshape the bare
     # spatial slice (numel matches) before copy.
+    #
+    # P-series cut-aware pad: this tile's physical region no longer starts at
+    # the symmetric PAD — it starts at (padding[0] + M) in the tile buffer (a
+    # cut face has 0 PML, only the M halo).  ``models_padded`` is the GLOBAL
+    # model symmetric-padded by PAD per side, so global phys index g lives at
+    # column PAD+g.  Align the source so the tile's physical cell (lo = the
+    # padding[0]+M offset) maps to global phys x0 (= PAD+x0).  Source start is
+    # therefore (PAD + x0) - (padding[0] + M); copy the tile buffer's REAL
+    # x-width read off the buffer (.size(-1)), not nxp+2*PAD.  (Old
+    # ``mp[x0 : x0 + width]`` assumed a symmetric pad and mis-mapped every
+    # tile; e.g. rank0 fed global cols [0:w] instead of the correct edge-
+    # aligned window, and the cut tile pulled the wrong neighbour material.)
+    src_start = (PAD + x0) - (prop._backend_impl.padding[0] + M)
     for mt in (tile.fp.models, tile.bp.models):
         for m, mp in zip(mt, models_padded):
-            sl = mp[..., x0:x0 + m.size(-1)]
+            sl = mp[..., src_start:src_start + m.size(-1)]
             m.copy_(sl.reshape(m.shape))
-    if ndim == 3:
-        tile.fp.cut_face_mask = tile.cut_face_mask  # elastic3d fwd cut-aware
+    # elastic2d AND elastic3d forward/recon in_pml are cut-aware — set the
+    # forward cut_face_mask for BOTH dims (was 3D-only; the 2D omission left the
+    # recon forward on the wrong PML branch -> per-tile gradient drift).
+    tile.fp.cut_face_mask = tile.cut_face_mask
 
     # this tile's receivers' traces of the shared synthetic residual
     adj = torch.zeros_like(tile.bp.adjoint_source)
@@ -169,7 +184,15 @@ def main():
         adj[:, :, j] = residual_raw[:, :, gi]
     tile.bp.adjoint_source = adj
 
-    lo, hi = PAD, PAD + nxp
+    # Physical-region crop in THIS tile's runtime buffers.  Under the P-series
+    # cut-aware compact pad a cut (neighbour-facing) face carries 0 PML width,
+    # only the stencil halo M, so the interior no longer starts at the
+    # symmetric PAD.  Read the real per-rank x_lo pad off the prop: the
+    # physical region starts at padding[0] + M (was the wrong ``lo = PAD``,
+    # which mis-cropped every cut tile — e.g. rank1 whose x_lo pad is 0).
+    # The halo view [lo-M:hi+M] and the owned-grad crop [lo:hi] inherit this.
+    lo = prop._backend_impl.padding[0] + M
+    hi = lo + nxp
 
     def exchange(fast, lists_slots):
         for L, slots in lists_slots:
