@@ -325,6 +325,15 @@ class Warpper(torch.autograd.Function):
         params.boundary_ring_buffers = ctx.boundary_ring_buffers
         params.checkpoint_interval = ctx.checkpoint_interval
         params.checkpoint_count = ctx.checkpoint_count
+        # Compute source/receiver illumination only if the caller requested it
+        # (solver.compute_illumination=True allocates a real, non-empty buffer in
+        # forward).  It is a ~1/3-of-backward extra grid pass; vp grad unaffected.
+        def _wants_illum(b):
+            return isinstance(b, torch.Tensor) and b.numel() > 0
+        params.compute_illumination = (
+            _wants_illum(getattr(ctx, "source_illumination_buffer", None))
+            or _wants_illum(getattr(ctx, "receiver_illumination_buffer", None))
+        )
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.adjoint_workspace = list(ctx.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
@@ -586,6 +595,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._workspace_cache_nt = None
         self.source_illumination = None
         self.receiver_illumination = None
+        # Source/receiver illumination (RTM image) is a ~1/3-of-backward extra
+        # grid pass.  Default OFF for speed; set ``solver.compute_illumination =
+        # True`` to compute it (then read it back from ``solver.source_illumination``
+        # / ``solver.receiver_illumination`` after backward).
+        self.compute_illumination = False
 
     def _cuda_spacing(self):
         # PropBase stores spacing in model-axis order: (dz, dx) or (dz, dy, dx).
@@ -1220,7 +1234,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         requires_model_grad = any(m.requires_grad for m in models)
         requires_wavelet_grad = wavelet.requires_grad
         requires_backward = bool(requires_model_grad or requires_wavelet_grad)
-        if requires_backward:
+        if requires_backward and self.compute_illumination:
             self.source_illumination = torch.zeros_like(unpadded_models[0])
             self.receiver_illumination = torch.zeros_like(unpadded_models[0])
         else:
