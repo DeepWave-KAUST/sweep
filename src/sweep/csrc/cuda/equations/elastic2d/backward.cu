@@ -28,7 +28,22 @@ void apply_adjoint_step_2d(
     ElasticCPMLPointer cpml_view,
     SGradParam grad_ctx,
     SolverContext solver,
-    ElasticAdjointWorkspaceTensor& workspace
+    ElasticAdjointWorkspaceTensor& workspace,
+    // Optional fused per-step gradient imaging (full-mode only).  When the
+    // grad_*_out accumulators are non-null, the stress-adjoint-prepare kernel
+    // folds in the calculate_grad_elastic_nobs correlation for this reverse
+    // step (operands are the un-mutated post-source adjoint at kernel entry).
+    // Default null => behaviour byte-for-byte identical for bs/ckpt callers.
+    const float* grad_fvx       = nullptr,
+    const float* grad_fvz       = nullptr,
+    const float* grad_fvx_prev  = nullptr,
+    const float* grad_fvz_prev  = nullptr,
+    const float* grad_vp_model  = nullptr,
+    const float* grad_vs_model  = nullptr,
+    const float* grad_rho_model = nullptr,
+    float* grad_vp_out          = nullptr,
+    float* grad_vs_out          = nullptr,
+    float* grad_rho_out         = nullptr
 )
 {
     auto adj_view = adjoint.view();
@@ -45,7 +60,11 @@ void apply_adjoint_step_2d(
         workspace.qxx_t.data_ptr<float>(),
         workspace.qzz_t.data_ptr<float>(),
         workspace.qxz_t.data_ptr<float>(),
-        workspace.qzx_t.data_ptr<float>()
+        workspace.qzx_t.data_ptr<float>(),
+        grad_ctx,
+        grad_fvx, grad_fvz, grad_fvx_prev, grad_fvz_prev,
+        grad_vp_model, grad_vs_model, grad_rho_model,
+        grad_vp_out, grad_vs_out, grad_rho_out
     );
 
     LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
@@ -439,29 +458,36 @@ BackwardOutput backward(const BackwardInput& in)
         const float* vx_next = (it + 1 < p.nt) ? p.u_forward.select(0, it + 1).select(0, 0).data_ptr<float>() : zero_velocity.data_ptr<float>();
         const float* vz_next = (it + 1 < p.nt) ? p.u_forward.select(0, it + 1).select(0, 1).data_ptr<float>() : zero_velocity.data_ptr<float>();
 
-        LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            vx_now,
-            vz_now,
-            vx_next,
-            vz_next,
-            vp.data_ptr<float>(),
-            vs.data_ptr<float>(),
-            rho.data_ptr<float>(),
-            grad_vp.data_ptr<float>(),
-            grad_vs.data_ptr<float>(),
-            grad_rho.data_ptr<float>(),
-            grad_ctx,
-            solver
-        );
-
+        // Reverse step 0 has no adjoint apply kernel (the loop `continue`s
+        // below), so its gradient imaging cannot be folded — emit it as a
+        // standalone calculate_grad pass (mirrors the acoustic trailing call).
         if (it == 0) {
+            LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                adj_view,
+                vx_now,
+                vz_now,
+                vx_next,
+                vz_next,
+                vp.data_ptr<float>(),
+                vs.data_ptr<float>(),
+                rho.data_ptr<float>(),
+                grad_vp.data_ptr<float>(),
+                grad_vs.data_ptr<float>(),
+                grad_rho.data_ptr<float>(),
+                grad_ctx,
+                solver
+            );
             continue;
         }
 
+        // FULL-mode fusion: fold this reverse step's vp/vs/rho-gradient imaging
+        // into the stress-adjoint-prepare kernel (it reads the un-mutated
+        // post-source adjoint[it] stress+velocity at entry, exactly what
+        // calculate_grad_elastic_nobs(it) would correlate), eliminating the
+        // separate full-grid calculate_grad launch for steps it >= 1.
         apply_adjoint_step_2d(
             order,
             launch_config,
@@ -472,7 +498,14 @@ BackwardOutput backward(const BackwardInput& in)
             cpml_view,
             grad_ctx,
             solver,
-            workspace
+            workspace,
+            vx_now, vz_now, vx_next, vz_next,
+            vp.data_ptr<float>(),
+            vs.data_ptr<float>(),
+            rho.data_ptr<float>(),
+            grad_vp.data_ptr<float>(),
+            grad_vs.data_ptr<float>(),
+            grad_rho.data_ptr<float>()
         );
 
     }
