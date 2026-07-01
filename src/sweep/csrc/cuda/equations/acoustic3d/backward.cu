@@ -856,7 +856,13 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_bs_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Gate illumination on compute_illumination (mirror the FULL path). When
+    // off, accumulate_imaging_utt_3d skips the per-step RTM kernel because
+    // rtm_out==nullptr; the buffer stays zero. Previously this BS path passed
+    // &illumination unconditionally, so the RTM pass ran every step and the
+    // flag was ignored (no time saved, illumination computed then discarded).
+    run_bs_imaging(p, &grad, &grad_wavelet,
+                   p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
@@ -1039,7 +1045,9 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_ckpt_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Gate illumination on compute_illumination (see BS path above).
+    run_ckpt_imaging(p, &grad, &grad_wavelet,
+                     p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
@@ -1200,7 +1208,9 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_recursive_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Gate illumination on compute_illumination (see BS path above).
+    run_recursive_imaging(p, &grad, &grad_wavelet,
+                          p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
