@@ -470,14 +470,20 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
 
-        accumulate_rtm_image_2d<<<launch_config.grid, launch_config.block>>>(
-            forward.u_now_t.data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            illumination.image.data_ptr<float>(),
-            illumination.source_illumination.data_ptr<float>(),
-            illumination.receiver_illumination.data_ptr<float>(),
-            nx, nz
-        );
+        // Gate illumination on compute_illumination (mirror FULL path). When off,
+        // skip the per-step RTM pass entirely; the FWI vp-gradient is produced by
+        // calculate_grad_utt above and is unaffected. Previously this BS path ran
+        // it every step regardless, so the flag was ignored (no time saved).
+        if (in.compute_illumination) {
+            accumulate_rtm_image_2d<<<launch_config.grid, launch_config.block>>>(
+                forward.u_now_t.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                illumination.image.data_ptr<float>(),
+                illumination.source_illumination.data_ptr<float>(),
+                illumination.receiver_illumination.data_ptr<float>(),
+                nx, nz
+            );
+        }
 
     }
 
@@ -947,7 +953,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 adjoint.u_now_t.data_ptr<float>(),
                 vp,
                 &grad,
-                &illumination,
+                // Gate illumination on compute_illumination (mirror FULL path);
+                // accumulate_imaging_2d skips the RTM kernel when rtm_out==nullptr.
+                in.compute_illumination ? &illumination : nullptr,
                 nx,
                 nz,
                 dt
@@ -1079,7 +1087,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             vp,
             &grad,
             &grad_wavelet,
-            &illumination,
+            // Gate illumination on compute_illumination (see BS path above).
+            in.compute_illumination ? &illumination : nullptr,
             order,
             launch_config.grid,
             launch_config.block,
