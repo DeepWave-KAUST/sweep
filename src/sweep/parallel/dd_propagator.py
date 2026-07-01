@@ -35,9 +35,12 @@ What it does internally (x-cut decomposition, v1):
     tile's INTERIOR model gradient (cut-side pad gradients belong to the
     neighbour and are dropped — proven correct in test_dd_*_backward_two_tile).
 
-v1 scope: x-cut (``py == 1``), acoustic2d/3d + elastic2d/3d, boundary saving
-on gpu-direct storage, fixed acquisition geometry per instance (capture once;
-later ``forward`` calls rebind models + wavelet).  Free surface supported.
+v1 scope: x-cut (``py == 1``), acoustic2d/3d + elastic2d/3d, fixed acquisition
+geometry per instance (capture once; later ``forward`` calls rebind models +
+wavelet).  Free surface supported.  Boundary-saving storage/dtype are inherited
+from the wrapped prop's memory config (``PropTorch(memory=MemoryOptions(
+boundary=BoundaryOptions(storage=..., storage_dtype=...)))``) — e.g. int8 to
+shrink the boundary ring for finer grids; defaults to gpu/fp32.
 """
 
 from __future__ import annotations
@@ -175,6 +178,15 @@ class ModelParallel:
         free_surface, pml_type = prop.free_surface, prop.pml_type
         dev = prop.dev
         model_parallel = mesh
+        # Boundary-saving storage/dtype are inherited from the wrapped prop's
+        # memory config (set the normal way via
+        # ``PropTorch(memory=MemoryOptions(boundary=BoundaryOptions(...)))``), so
+        # compressing (fp16/bf16/int8) or offloading the DD boundary ring to fit
+        # finer grids is a first-class API choice. Defaults (gpu/fp32) reproduce
+        # the original v1 behaviour.
+        _bcfg = getattr(prop, "boundary_saving_config", None) or {}
+        self._bstorage = _bcfg.get("storage", "gpu")
+        self._bdtype = _bcfg.get("storage_dtype", "fp32")
 
         self.topo = model_parallel
         self.global_shape = tuple(int(s) for s in global_shape)
@@ -230,8 +242,13 @@ class ModelParallel:
             receiver_type=list(receiver_type), abcn=abcn,
             free_surface=self.free_surface, pml_type=pml, nt=nt, B=B,
             use_ckpt=False,
-            boundary_saving_config={"enabled": True, "storage": "gpu",
-                                    "transfer_interval": 1, "pinned_memory": False},
+            boundary_saving_config={
+                "enabled": True,
+                # inherited from the wrapped prop (PropTorch memory= API);
+                # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
+                "storage": self._bstorage,
+                "storage_dtype": self._bdtype,
+                "transfer_interval": 1, "pinned_memory": False},
             model_parallel=self.topo,
         )
 
@@ -597,7 +614,24 @@ class ModelParallel:
         dummy = [1, 1] if self.ndim == 2 else [1, 1, 1]
         if self._owns_src:
             ls = loc_s[mask_s].reshape(1, -1, self.ndim).to(torch.int32).numpy()
-            wav = np.asarray(wavelet, dtype=np.float32)
+            # Wavelet handling for the ENCODED SUPERSHOT case. A shared (nt,)
+            # wavelet broadcasts to every owned source (unchanged). A PER-SOURCE
+            # encoded wavelet (nsrc, nt) — B virtual sources each with its own
+            # signed wavelet — must be subset to THIS tile's owned sources so it
+            # aligns with `ls` (already subset by mask_s). Subset BEFORE the host
+            # copy to avoid materialising the full (B, nt) array on CPU.
+            if torch.is_tensor(wavelet):
+                wsel = (wavelet[mask_s[0].to(wavelet.device)]
+                        if wavelet.ndim == 2 else wavelet)
+                wav = wsel.detach().cpu().numpy().astype(np.float32)
+            else:
+                wav = np.asarray(wavelet, dtype=np.float32)
+                if wav.ndim == 2:
+                    wav = wav[mask_s[0].cpu().numpy()]
+            if wav.ndim == 2 and wav.shape[0] != ls.shape[1]:
+                raise ValueError(
+                    "ModelParallel encoded supershot: per-tile wavelet rows "
+                    f"{wav.shape[0]} != owned sources {ls.shape[1]}")
         else:
             ls = np.array([[dummy]], dtype=np.int32)
             wav = np.zeros(self.nt, dtype=np.float32)
