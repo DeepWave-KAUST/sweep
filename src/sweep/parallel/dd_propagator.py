@@ -504,23 +504,49 @@ class ModelParallel:
     def _set_geometry(self, ls, lr, wav):
         """Re-apply this call's source/receiver/wavelet onto the captured params
         WITHOUT a full re-capture. The C++ params store geometry as plain coord
-        arrays plus the wavelet, so multi-shot only needs those fields swapped;
-        the wavefield/record/grad buffers are reused untouched. ``ls``/``lr``
-        already encode per-tile ownership (dummy + zero wavelet off-tile).
-        Forward and backward params use different field NAMES for the same
-        quantities (see probe): fp.source/sources_loc/receivers_loc vs
-        bp.forward_source/forward_sources_loc/adjoint_sources_loc."""
-        # The captured fp/bp coord arrays + record buffers are sized for the FIRST
-        # shot's per-tile source/receiver counts; a later shot with a different
-        # count would silently mis-shape the wavelet reshape or overrun the record.
-        # Require a fixed per-tile (#sources, #receivers) across shots — fail loud.
-        if ls.shape != self._cap_ls_shape or lr.shape != self._cap_lr_shape:
-            raise ValueError(
-                f"ModelParallel multi-shot: per-tile source/receiver count changed "
-                f"since capture (src {self._cap_ls_shape}->{tuple(ls.shape)}, "
-                f"rec {self._cap_lr_shape}->{tuple(lr.shape)}). Re-geometry needs a "
-                f"fixed per-tile layout (same #sources/shot and a fixed receiver "
-                f"spread); the captured buffers are sized for the first shot.")
+        arrays plus the wavelet, so multi-shot only needs those fields swapped
+        plus the two COUNT-sized buffers (record ~ nrec, grad-wavelet ~ nsrc)
+        refreshed; every model-sized buffer (wavefields, recon, model grads,
+        illum) AND the boundary ring are reused untouched. ``ls``/``lr`` already
+        encode per-tile ownership (dummy + zero wavelet off-tile). Forward and
+        backward params use different field NAMES for the same quantities (see
+        probe): fp.source/sources_loc/receivers_loc vs
+        bp.forward_source/forward_sources_loc/adjoint_sources_loc.
+
+        Per-tile source/receiver COUNTS change every iter in the encoded OBN
+        path (re-seeded shared shots partition differently across tiles), so we
+        reallocate ONLY the two small count-sized buffers here rather than
+        forcing a full re-capture. The forced-recapture path reallocated every
+        model-sized buffer + the boundary ring each iter and leaked ~one
+        adjoint-wavefield set per iter (the old buffers stayed pinned through
+        the transient capture graph); reusing them in place is both leak-free
+        and ~1 fwd+bwd cheaper per iter."""
+        # Receiver count changed -> reallocate the (N, nrec, nt) record buffer
+        # (nrec is axis -2 for single- AND multi-channel records) and rebind it
+        # as the stepped forward's output. Cheap: nrec*nt floats.
+        if lr.shape != self._cap_lr_shape:
+            new_rec_shape = list(self.record.shape)
+            new_rec_shape[-2] = int(lr.shape[1])
+            self.record = torch.zeros(
+                new_rec_shape, dtype=self.record.dtype,
+                device=self.record.device)
+            self.fp.record_out = self.record
+            self._cap_lr_shape = tuple(lr.shape)
+        # Source count changed -> forward_source is (B, nsrc, nt), so the
+        # grad-wavelet buffer grads_out[0] (== zeros_like(forward_source)) must
+        # be resized to match, else the C adjoint's per-source write to
+        # grad_wavelet overruns. Model grads (grads_out[1:]) stay model-sized.
+        # Elastic has no grad-wavelet slot / no forward_source (_fs_shape None).
+        if ls.shape != self._cap_ls_shape:
+            if self._fs_shape is not None:
+                self._fs_shape = (self._fs_shape[0], int(ls.shape[1]),
+                                  self._fs_shape[2])
+                if self.family == "acoustic":
+                    self.gbufs[0] = torch.zeros(
+                        self._fs_shape, dtype=self.gbufs[0].dtype,
+                        device=self.gbufs[0].device)
+                    self.bp.grads_out = self.gbufs
+            self._cap_ls_shape = tuple(ls.shape)
         src_rt = self._runtime_coords(ls)        # (1, npts, ndim)
         rec_rt = self._runtime_coords(lr)        # (1, nrec, ndim)
         fs = None
