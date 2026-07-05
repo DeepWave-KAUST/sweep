@@ -208,15 +208,27 @@ linked at the bottom of this page.
 
 -   ![ADCIG](../figures/gallery/16_adcig.png){ loading=lazy }
 
-    **ADCIG · angle-domain image gathers**
+    **ADCIG · Poynting (custom backward)**
 
     ---
 
-    Angle-domain common-image gathers — decompose the migrated image by
-    reflection angle; flat gathers indicate a correct migration velocity,
-    curved ones reveal the error.
+    Angle-domain common-image gathers via a *custom imaging condition* plugged
+    into the eager backward with `register_gradient` — Poynting-vector recipe.
+    For the space-lag ADCIG (2D + 3D, CUDA `compute_adcig`) see the next card.
 
     [:material-notebook-outline: Open notebook](../notebooks/16_adcig.ipynb)
+
+-   ![Space-lag ADCIG](../figures/gallery/22_adcig_space_lag.png){ loading=lazy }
+
+    **ADCIG · space-lag (2D & 3D)**
+
+    ---
+
+    Subsurface-offset extended imaging condition (Sava & Fomel) via the built-in
+    CUDA `compute_adcig` toggle, then slant-stack to angle. Boundary-saving path,
+    acoustic 2D & 3D.
+
+    [:material-notebook-outline: Open notebook](../notebooks/22_adcig_space_lag.ipynb)
 
 -   ![Elastic vector reflectivity](../figures/gallery/16_elastic_vector_reflectivity.png){ loading=lazy }
 
