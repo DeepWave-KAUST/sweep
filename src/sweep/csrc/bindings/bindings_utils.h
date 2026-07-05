@@ -27,7 +27,8 @@ auto wrap_backward(Func f)
             out.checkpoints,
             out.grads,
             out.source_illumination,
-            out.receiver_illumination
+            out.receiver_illumination,
+            out.adcig
         );
     };
 }
@@ -40,7 +41,8 @@ auto wrap_rtm(Func f)
         return std::make_tuple(
             out.image,
             out.source_illumination,
-            out.receiver_illumination
+            out.receiver_illumination,
+            out.adcig
         );
     };
 }

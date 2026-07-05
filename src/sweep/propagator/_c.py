@@ -133,6 +133,8 @@ class Warpper(torch.autograd.Function):
         source_illumination_buffer: torch.Tensor=None,
         receiver_illumination_buffer: torch.Tensor=None,
         illumination_padding: tuple=(),
+        adcig_buffer: torch.Tensor=None,      # (nlag, nz, nx[, ny]) model-shaped
+        adcig_max_lag: int=0,
         topo_rows_param: torch.Tensor=None,   # runtime padded surface row per col
         has_topo_param: bool=False,
         topo_category_param: torch.Tensor=None,  # runtime padded APM category int32
@@ -294,6 +296,8 @@ class Warpper(torch.autograd.Function):
             ctx.source_illumination_buffer = source_illumination_buffer
             ctx.receiver_illumination_buffer = receiver_illumination_buffer
             ctx.illumination_padding = tuple(illumination_padding)
+            ctx.adcig_buffer = adcig_buffer
+            ctx.adcig_max_lag = int(adcig_max_lag)
 
         return syn
     
@@ -334,6 +338,18 @@ class Warpper(torch.autograd.Function):
             _wants_illum(getattr(ctx, "source_illumination_buffer", None))
             or _wants_illum(getattr(ctx, "receiver_illumination_buffer", None))
         )
+        # Space-lag ADCIG: a real, non-empty buffer allocated in forward is the
+        # ON signal (mirrors illumination).  ``adcig_max_lag`` sizes the lag axis.
+        params.compute_adcig = _wants_illum(getattr(ctx, "adcig_buffer", None))
+        params.adcig_max_lag = int(getattr(ctx, "adcig_max_lag", 0))
+        if params.compute_adcig and not ctx.use_boundary_saving:
+            raise RuntimeError(
+                "compute_adcig=True currently requires boundary-saving mode. The "
+                "full/checkpoint forward stores vp^2*Lap(u) for the vp gradient, "
+                "not the raw pressure the space-lag ADCIG imaging condition needs. "
+                "Enable boundary saving via boundary_saving_config={'enabled': True} "
+                "or memory=MemoryOptions(strategy='boundary')."
+            )
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.adjoint_workspace = list(ctx.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
@@ -457,6 +473,36 @@ class Warpper(torch.autograd.Function):
             except RuntimeError:
                 pass
 
+        # Space-lag ADCIG cube (gradients[4]): (nlag, N, C, nz, nx[, ny]) on the
+        # runtime-padded grid.  Sum over the batch (N, C) — keeping the leading
+        # lag axis — then crop the PML/halo padding, and copy into the
+        # model-shaped buffer the user reads back as ``solver.adcig``.
+        adcig_buffer = getattr(ctx, "adcig_buffer", None)
+        if len(gradients) >= 5 and _wants_illum(adcig_buffer):
+            adcig_returned = gradients[4]
+            if isinstance(adcig_returned, torch.Tensor) and adcig_returned.numel() > 0:
+                def fit_adcig_to_model(adcig, target):
+                    # collapse batch dims (dim 1 == N, then C); keep lag at dim 0
+                    while adcig.dim() > target.dim():
+                        adcig = adcig.sum(dim=1)
+                    slices = [slice(None)] * adcig.dim()
+                    pad = getattr(ctx, "illumination_padding", ())
+                    # never crop the leading lag axis (dim 0)
+                    pad_pairs = min(len(pad) // 2, adcig.dim() - 1)
+                    for i in range(pad_pairs):
+                        left = int(pad[2 * i])
+                        right = int(pad[2 * i + 1])
+                        end = -right if right > 0 else None
+                        slices[-(i + 1)] = slice(left, end)
+                    adcig = adcig[tuple(slices)]
+                    if adcig.shape != target.shape:
+                        adcig = adcig[tuple(slice(0, s) for s in target.shape)]
+                    return adcig
+                try:
+                    adcig_buffer.copy_(fit_adcig_to_model(adcig_returned, adcig_buffer))
+                except RuntimeError:
+                    pass
+
         wavelet_grad = None
         model_grads = returned_grads
         if len(returned_grads) == len(ctx.models) + 1:
@@ -469,6 +515,7 @@ class Warpper(torch.autograd.Function):
         del ctx.adjoint_workspace
         del ctx.source_illumination_buffer, ctx.receiver_illumination_buffer
         del ctx.illumination_padding
+        del ctx.adcig_buffer, ctx.adcig_max_lag
         del ctx.models
         return (
             None, None, None, None, None, # functions
@@ -508,6 +555,8 @@ class Warpper(torch.autograd.Function):
             None,      # source illumination buffer
             None,      # receiver illumination buffer
             None,      # illumination padding
+            None,      # adcig buffer
+            None,      # adcig_max_lag
             None,      # topo_rows_param
             None,      # has_topo_param
             None,      # topo_category_param
@@ -600,6 +649,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # True`` to compute it (then read it back from ``solver.source_illumination``
         # / ``solver.receiver_illumination`` after backward).
         self.compute_illumination = False
+        # Space-lag ADCIG (angle-domain common-image gathers via the horizontal
+        # subsurface-offset extended imaging condition).  Default OFF; set
+        # ``solver.compute_adcig = True`` and ``solver.adcig_max_lag = L`` (lag in
+        # cells), then read the ``(2L+1, nz, nx[, ny])`` cube from
+        # ``solver.adcig`` after backward.  Like illumination it is an extra
+        # per-timestep grid pass and only runs when requested.
+        self.compute_adcig = False
+        self.adcig_max_lag = 0
+        self.adcig = None
 
     def _cuda_spacing(self):
         # PropBase stores spacing in model-axis order: (dz, dx) or (dz, dy, dx).
@@ -1240,6 +1298,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.source_illumination = None
             self.receiver_illumination = None
+        if requires_backward and self.compute_adcig:
+            nlag = 2 * int(self.adcig_max_lag) + 1
+            self.adcig = torch.zeros(
+                (nlag, *unpadded_models[0].shape),
+                dtype=unpadded_models[0].dtype,
+                device=unpadded_models[0].device,
+            )
+        else:
+            self.adcig = None
         use_checkpoint = bool(self.use_ckpt and requires_backward)
         if not requires_backward:
             use_boundary_saving = False
@@ -1396,6 +1463,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
                 self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
                 tuple(padding),
+                self.adcig if self.adcig is not None else torch.empty(0, device=self.dev),
+                int(self.adcig_max_lag),
                 # Topography plumbing — both image-method (1-D row) and
                 # APM (per-cell category + extended models) are routed
                 # through ``Warpper.forward`` via these positional args.
@@ -1713,7 +1782,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.checkpoint_interval = self.ckpt_chunks
         bwd.checkpoint_count = int(checkpoint_steps.numel()) if use_recursive_checkpoint else self.ckpt_num
 
-        image, source_illumination, receiver_illumination = self.rtm_func(bwd)
+        image, source_illumination, receiver_illumination, adcig = self.rtm_func(bwd)
+        if isinstance(adcig, torch.Tensor) and adcig.numel() > 0:
+            self.adcig = adcig
         return syn, image, source_illumination, receiver_illumination
 
     def _build_recursive_checkpoint_steps(self, nt, checkpoint_count):
