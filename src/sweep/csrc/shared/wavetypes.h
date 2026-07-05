@@ -86,6 +86,11 @@ struct BackwardOutput {
     torch::Tensor source_illumination;
 
     torch::Tensor receiver_illumination;
+
+    // Angle-domain common-image gather cube (space-lag extended imaging
+    // condition).  Shape (nlag, N, C, nz, nx[, ny]) on the runtime-padded grid;
+    // undefined unless compute_adcig was requested.  See BackwardInput below.
+    torch::Tensor adcig;
 };
 
 struct RTMOutput {
@@ -95,6 +100,9 @@ struct RTMOutput {
     torch::Tensor source_illumination;
 
     torch::Tensor receiver_illumination;
+
+    // Space-lag ADCIG cube; see BackwardOutput::adcig.
+    torch::Tensor adcig;
 };
 
 struct BackwardInput {
@@ -170,5 +178,14 @@ struct BackwardInput {
     // and costs ~1/3 of the backward.  The vp gradient (calculate_grad) is
     // unaffected.  Default true = unchanged behaviour.
     bool compute_illumination = true;
+
+    // Space-lag ADCIG (Sava & Fomel 2003): accumulate the horizontal
+    // subsurface-offset extended imaging condition
+    //   E(z,x,h) = sum_t u_s(x-h,t) * u_r(x+h,t),  h in [-adcig_max_lag, +adcig_max_lag]
+    // into a (nlag=2*adcig_max_lag+1, N, C, nz, nx[, ny]) cube.  Off by default;
+    // like compute_illumination it is an extra per-timestep grid pass and only
+    // runs when requested.  The lag is along the contiguous x axis.
+    bool compute_adcig = false;
+    int adcig_max_lag = 0;
 
 };

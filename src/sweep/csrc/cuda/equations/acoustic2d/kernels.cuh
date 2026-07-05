@@ -436,6 +436,14 @@ __global__ void accumulate_rtm_image_2d(
     int nx, int nz
 );
 
+__global__ void accumulate_adcig_2d(
+    const float* __restrict__ u_forward,
+    const float* __restrict__ u_backward,
+    float* __restrict__ adcig,           // (nlag, B, nz, nx) runtime-padded
+    int nlag, int max_lag,
+    int B, int nx, int nz
+);
+
 __global__ void accumulate_source_grad_2d(
     const float* __restrict__ u_backward,   // (B, nz, nx)
     float* __restrict__ grad_source,        // (B, nsrc, nt)
