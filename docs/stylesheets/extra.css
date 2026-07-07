@@ -143,17 +143,16 @@
   -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
 }
 
-/* Bump up code-block typography across the docs. Material's default
-   ``.md-typeset pre > code`` size combined with our Inter Tight body
-   font reads too small on API pages and in notebook cells; this
-   restores parity with surrounding prose without affecting inline
-   ``<code>`` spans. */
+/* Code-block typography across the docs. Sized in px (not rem) so it is
+   immune to Material's 125% root font-size, and matches the notebook code
+   cells (`.jp-CodeMirrorEditor` is 13px) instead of being ~20% larger.
+   Does not affect inline ``<code>`` spans. */
 [data-sweep-d] .md-typeset pre > code,
 [data-sweep-d] .md-typeset .highlight pre code,
 [data-sweep-d] .md-typeset .doc-signature,
 [data-sweep-d] .md-typeset .doc-signature pre,
 [data-sweep-d] .md-typeset .doc-signature code {
-  font-size: 0.78rem;
+  font-size: 13px;
 }
 
 [data-sweep-d] .md-typeset h2 {
@@ -797,10 +796,12 @@
   font-size: 0.86em;
   padding: 0.08em 0.35em;
 }
-/* Also tighten the Parameter table cell defaults so the row height
-   matches the smaller description text. */
+/* Table cell text: match the table's own 13.5px base (line ~730) in px so
+   it is immune to Material's 125% root font-size. The previous 0.82rem
+   (= 16.4px) overrode the base and made every table — data tables and
+   mkdocstrings Parameter tables alike — read oversized. */
 [data-sweep-d] .md-typeset table:not([class]) td {
-  font-size: 0.82rem;
+  font-size: 13.5px;
 }
 [data-sweep-d] .md-typeset table:not([class]) td > code {
   font-size: 0.86em;

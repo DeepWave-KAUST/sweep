@@ -36,6 +36,10 @@ cuda  = ["torch"]
 torch = ["torch"]
 jax   = ["jax", "jaxlib"]
 all   = ["torch", "jax", "jaxlib"]
+# Benchmark dataset loaders (sweep.datasets). Embedded demo models need
+# nothing extra; parsing is numpy-only. This extra only adds the HTTP client
+# used to fetch the downloadable full-size benchmarks.
+datasets = ["requests>=2.25", "tqdm>=4.60"]
 
 [project.urls]
 Homepage = "https://github.com/DeepWave-KAUST/sweep"
@@ -43,6 +47,7 @@ Issues   = "https://github.com/DeepWave-KAUST/sweep/issues"
 
 [project.scripts]
 sweep = "sweep.cli:main"
+sweep-datasets = "sweep.datasets.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
