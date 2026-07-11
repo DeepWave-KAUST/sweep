@@ -270,7 +270,7 @@ class ModelParallel:
         self._fwd_halo = None
         self._bwd_halo = None
         self._model_halo = None
-        self._halo_sl_cache = {}     # field.ndim -> cut-axis crop slice tuple
+        self._halo_sl_cache = {}     # (field.ndim, axis) -> crop slice tuple
 
         # comm/compute overlap (acoustic forward): a dedicated comm stream runs
         # step's halo exchange while step's interior computes. Eligible
@@ -291,43 +291,55 @@ class ModelParallel:
 
     # ------------------------------------------------------------------ utils
     def _halo(self, attr):
+        """One FastHaloSet PER CUT AXIS (dict keyed by axis, in self.axes
+        order). Each axis exchanges its own view (see :meth:`_halo_view`), so
+        the sets stay per-axis; a shared multi-axis set would key exchangers
+        by a single view's data_ptr and cross-wire the axis strips."""
         if self.world == 1:
             return None
         from sweep.parallel.fast_halo import FastHaloSet
         cur = getattr(self, attr)
         if cur is None:
-            cur = FastHaloSet(self.mesh, self.M, self.axes)
+            cur = {ax: FastHaloSet(self.mesh, self.M, (ax,))
+                   for ax in self.axes}
             setattr(self, attr, cur)
         return cur
 
-    def _halo_view(self, field):
-        """Crop the field to owned±M in each CUT axis (plus-stencil: corners
-        unread, so x and y halos exchange independently). The slice tuple is
-        loop-invariant (lo/hi/M fixed once captured), so build it once per
-        field ndim and reuse it for every step's exchange."""
-        sl = self._halo_sl_cache.get(field.ndim)
+    def _halo_view(self, field, ax):
+        """Crop the field to owned±M along the EXCHANGE axis only; every other
+        axis keeps its FULL runtime extent. The perpendicular global-PML pad
+        cells are live (the in_pml branch updates them every step and their
+        stencil reads the cut halo), so the exchange strips must cover them.
+        Cropping the non-exchange axis to owned±M (the old single-view code)
+        left the (cut face x perpendicular PML band) halo cells permanently
+        zero — a hard reflecting wall at each cut/model-edge corner. Only
+        2-axis meshes (2x2+) ever cropped a perpendicular axis, which is why
+        every single-axis split was bit-exact while PYxPX>1 diverged."""
+        sl = self._halo_sl_cache.get((field.ndim, ax))
         if sl is None:
             s = [slice(None)] * field.ndim
-            if self.topo.px > 1:
+            if ax == "x":
                 s[-1] = slice(self.lo - self.M, self.hi + self.M)
-            if self.ndim == 3 and self.topo.py > 1:
+            else:
                 s[-2] = slice(self.lo_y - self.M, self.hi_y + self.M)
             sl = tuple(s)
-            self._halo_sl_cache[field.ndim] = sl
+            self._halo_sl_cache[(field.ndim, ax)] = sl
         return field[sl]
 
     def _exchange(self, halo, tensor):
         if halo is not None:
-            halo.exchange(self._halo_view(tensor))
+            for ax, hs in halo.items():
+                hs.exchange(self._halo_view(tensor, ax))
 
     def _exchange_group(self, halo, tensors):
-        """Halo-exchange a group of fields in ONE batched P2P (elastic velocity
-        / stress groups). Collapses ``len(tensors)`` separate NCCL rounds into a
-        single isend/irecv+wait — the per-step latency win for the multi-field
-        elastic protocol (acoustic exchanges a single field, so it uses
-        :meth:`_exchange`/the overlap path instead)."""
+        """Halo-exchange a group of fields in ONE batched P2P per cut axis
+        (elastic velocity / stress groups). Collapses ``len(tensors)`` separate
+        NCCL rounds into one isend/irecv+wait per axis — the per-step latency
+        win for the multi-field elastic protocol (acoustic exchanges a single
+        field, so it uses :meth:`_exchange`/the overlap path instead)."""
         if halo is not None:
-            halo.exchange_group([self._halo_view(t) for t in tensors])
+            for ax, hs in halo.items():
+                hs.exchange_group([self._halo_view(t, ax) for t in tensors])
 
     def _src_away_from_cuts(self, sg) -> bool:
         """True when no source sits within M of an x-cut line (k*nxp). The
@@ -703,16 +715,17 @@ class ModelParallel:
                 self._comm_evt = torch.cuda.Event()
             comm, evt = self._comm_stream, self._comm_evt
             compute = torch.cuda.current_stream()
+            fx = fhalo["x"]                # _overlap_ok => axes == ("x",)
             for it in range(self.nt):
                 runner.run_phase(it + 1, 1)
                 evt.record()
-                un = self._halo_view(runner.u_next)
+                un = self._halo_view(runner.u_next, "x")
                 with torch.cuda.stream(comm):
                     comm.wait_event(evt)
-                    fhalo.exchange_start(un)        # copy-send + P2P (no wait)
+                    fx.exchange_start(un)           # copy-send + P2P (no wait)
                 runner.run_phase(it + 1, 2)         # interior, overlaps P2P
                 with torch.cuda.stream(comm):
-                    fhalo.exchange_finish(un)       # wait P2P + copy-recv
+                    fx.exchange_finish(un)          # wait P2P + copy-recv
                 compute.wait_stream(comm)
         else:
             for it in range(self.nt):
