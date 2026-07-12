@@ -1146,9 +1146,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             topo_cat_arg = cat_t
             use_apm_arg = True
 
+        # CPML profiles are built on ``equation.device`` (default 'cpu'); pin
+        # them to the propagator's compute device so an equation created
+        # without ``device=`` (e.g. ``Acoustic()`` + ``PropTorch(dev='cuda')``)
+        # doesn't feed host pointers to the CUDA kernel -> illegal address.
+        # ``.to`` is a no-op when the tensors already live on ``self.dev``.
+        pml_vals = [b.to(self.dev) for b in self.equation.b]
         syn = Warpper.apply(
                 self.forward_func,
-                self.backward_func, 
+                self.backward_func,
                 self.backward_bs_func,
                 self.backward_ckpt_func,
                 self.backward_recursive_ckpt_func,
@@ -1162,7 +1168,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self.abcn,
                 spacing,
                 self._dt,
-                self.equation.b,
+                pml_vals,
                 use_checkpoint,
                 self.ckpt_chunks,
                 use_recursive_checkpoint,
@@ -1416,7 +1422,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.receivers_loc = receivers_t.contiguous()
         fwd.source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         fwd.receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
-        fwd.pml_vals = [p.contiguous() for p in self.equation.b]
+        fwd.pml_vals = [p.to(self.dev).contiguous() for p in self.equation.b]
         fwd.save_all_wavefields = save_all_wavefields
         fwd.use_boundary_saving = use_boundary_saving
         fwd.use_checkpoint = use_ckpt
@@ -1476,7 +1482,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.forward_sources_loc = sources_t.contiguous()
         bwd.source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         bwd.receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
-        bwd.pml_vals = [p.contiguous() for p in self.equation.b]
+        bwd.pml_vals = [p.to(self.dev).contiguous() for p in self.equation.b]
         bwd.nt = self.nt
         bwd.dt = self._dt
         bwd.spacing = spacing
