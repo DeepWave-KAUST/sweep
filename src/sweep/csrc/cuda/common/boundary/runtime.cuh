@@ -177,10 +177,15 @@ public:
         int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
-        launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
-        launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
-        launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
-        launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
+        // A DD cut face has a numel-0 persistent buffer (gpu_full_shapes drops
+        // it): the FP32 boundary kernel gates the face on ctx.cut_* so nothing
+        // is ever written there, and its halo is reconstructed in the backward.
+        // Skip the (de)quantize -- otherwise stride(0) (clamped nonzero for a
+        // 0-size dim) would drive a launch that writes into the empty buffer.
+        if (saver_.top_t.numel()    > 0) launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
+        if (saver_.bottom_t.numel() > 0) launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
+        if (saver_.left_t.numel()   > 0) launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
+        if (saver_.right_t.numel()  > 0) launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
     }
     inline void dequantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -192,10 +197,11 @@ public:
         int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
-        launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
-        launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
-        launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
-        launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
+        // Skip numel-0 (DD cut) faces -- see quantize_step_2d.
+        if (saver_.top_t.numel()    > 0) launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
+        if (saver_.bottom_t.numel() > 0) launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
+        if (saver_.left_t.numel()   > 0) launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
+        if (saver_.right_t.numel()  > 0) launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
     }
     inline void quantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -211,12 +217,13 @@ public:
         int64_t s_bac = saver_.back_scale_t.stride(0);
         int64_t s_lef = saver_.left_scale_t.stride(0);
         int64_t s_rig = saver_.right_scale_t.stride(0);
-        launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
-        launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
-        launch_quantize_int8(b.front, b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, c_fro, compute_stream_);
-        launch_quantize_int8(b.back,  b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, c_bac, compute_stream_);
-        launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
-        launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
+        // Skip numel-0 (DD cut) faces -- see quantize_step_2d.
+        if (saver_.top_t.numel()    > 0) launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
+        if (saver_.bottom_t.numel() > 0) launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
+        if (saver_.front_t.numel()  > 0) launch_quantize_int8(b.front, b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, c_fro, compute_stream_);
+        if (saver_.back_t.numel()   > 0) launch_quantize_int8(b.back,  b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, c_bac, compute_stream_);
+        if (saver_.left_t.numel()   > 0) launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
+        if (saver_.right_t.numel()  > 0) launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
     }
     inline void dequantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -232,12 +239,13 @@ public:
         int64_t s_bac = saver_.back_scale_t.stride(0);
         int64_t s_lef = saver_.left_scale_t.stride(0);
         int64_t s_rig = saver_.right_scale_t.stride(0);
-        launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
-        launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
-        launch_dequantize_int8(b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, b.front,  c_fro, compute_stream_);
-        launch_dequantize_int8(b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, b.back,   c_bac, compute_stream_);
-        launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
-        launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
+        // Skip numel-0 (DD cut) faces -- see quantize_step_2d.
+        if (saver_.top_t.numel()    > 0) launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
+        if (saver_.bottom_t.numel() > 0) launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
+        if (saver_.front_t.numel()  > 0) launch_dequantize_int8(b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, b.front,  c_fro, compute_stream_);
+        if (saver_.back_t.numel()   > 0) launch_dequantize_int8(b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, b.back,   c_bac, compute_stream_);
+        if (saver_.left_t.numel()   > 0) launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
+        if (saver_.right_t.numel()  > 0) launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
     }
 
     inline void wait_before_forward_save(const BoundaryChunk& chunk)
