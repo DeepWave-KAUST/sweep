@@ -43,6 +43,21 @@ class Layout:
         cz_lo = bool(cut_mask & 4);  cz_hi = bool(cut_mask & 8)
         cy_lo = bool(cut_mask & 16); cy_hi = bool(cut_mask & 32)
 
+        # Per-face cut flags (same bit convention as SolverContext::cut_mask).
+        # A cut face carries a halo strip that the DD backward reconstructs via
+        # reverse-leapfrog + NCCL halo exchange instead of restoring from a
+        # saved boundary buffer -- so nothing is ever written to / read from its
+        # boundary buffer (every save/restore kernel gates the face on
+        # ctx.cut_*).  gpu_full_shapes() uses these to drop cut faces to numel 0
+        # on the gpu-direct path.  Face->flag: top=z_lo, bottom=z_hi,
+        # front=y_lo, back=y_hi, left=x_lo, right=x_hi.
+        self._cut_top = cz_lo
+        self._cut_bottom = cz_hi
+        self._cut_front = cy_lo
+        self._cut_back = cy_hi
+        self._cut_left = cx_lo
+        self._cut_right = cx_hi
+
         self.phys_x0 = M if cx_lo else abcn + M
         self.phys_x1 = self.nx - (M if cx_hi else abcn + M)
 
@@ -262,6 +277,53 @@ class Layout:
         )
         return tuple(shape for shape in shapes if shape is not None)
 
+    @staticmethod
+    def _cut_face_shape(shape):
+        """Collapse a cut face's boundary shape to numel 0.
+
+        Zeroing the LAST axis (never the batch axis, which
+        ``_slice_boundary_buffers`` narrows) makes numel 0 -- so the buffer
+        costs no GPU memory -- while keeping the tensor rank intact so the C++
+        saver's ``stride(0)``/``stride(1)`` and ``narrow`` calls stay valid.
+
+        Nothing on the gpu-direct path ever dereferences a cut face's data:
+        the FP32/FP16/BF16 save & restore kernels gate every face on
+        ctx.cut_* (so the null data_ptr of the empty tensor is never read),
+        and the INT8 quantize_step/dequantize_step in runtime.cuh skip any
+        face whose persistent buffer has ``numel() == 0`` (needed because
+        PyTorch clamps a 0-size dim's stride to a nonzero value, so stride
+        alone would NOT make the launch a no-op).
+        """
+        s = list(shape)
+        s[-1] = 0
+        return tuple(s)
+
     @property
     def gpu_full_shapes(self):
-        return self.cpu_shapes
+        """Per-face persistent boundary shapes for the gpu-direct store
+        (store_on_gpu).  Identical to ``cpu_shapes`` except DD cut faces are
+        returned at numel 0 -- their boundary data is never saved (it is
+        reconstructed by the DD backward), so allocating them full-size is
+        pure wasted GPU memory (up to ~4/6 of the ring on interior PY*x*PX*
+        tiles).  With ``cut_mask == 0`` (single domain / non-DD) no face is
+        cut, so this is byte-for-byte identical to ``cpu_shapes``.
+
+        Only the gpu-direct path uses this: the cpu/disk staged ring
+        (``cpu_shapes``/``gpu_shapes``) is left full-size because its flush
+        copies a face pair with a single shared per-step block size, which an
+        asymmetric single-face cut would violate.
+        """
+        faces = (
+            (self.top_shape, self._cut_top),
+            (self.bottom_shape, self._cut_bottom),
+            (self.front_shape, self._cut_front),
+            (self.back_shape, self._cut_back),
+            (self.left_shape, self._cut_left),
+            (self.right_shape, self._cut_right),
+        )
+        out = []
+        for shape, is_cut in faces:
+            if shape is None:
+                continue
+            out.append(self._cut_face_shape(shape) if is_cut else shape)
+        return tuple(out)
