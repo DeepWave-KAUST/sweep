@@ -77,11 +77,11 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto aq0 = torch::zeros_like(vp);   // adjoint transpose buffers (b·κ·λ, (∂b·κ)λ)
-    auto aqx = torch::zeros_like(vp);
-    auto aqy = torch::zeros_like(vp);
-    auto aqz = torch::zeros_like(vp);
-    auto c_x = torch::zeros_like(vp);   // gradient assembly buffers (λ·vp·∂p, λ·vp²z·∂p)
+    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
+    auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
+    auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
+    auto Cz = torch::zeros_like(vp);    // ∂_z b·κ
+    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
     auto c_y = torch::zeros_like(vp);
     auto c_z = torch::zeros_like(vp);
     auto e_x = torch::zeros_like(vp);
@@ -100,25 +100,26 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     GradParam grad_ctx_y{1, 0, 0, in.M, in.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, in.M, in.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
+    // Time-invariant adjoint transpose coefficients, computed once.
+    BUILD_VRZ_ADJOINT_COEFFS_3D(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        vp.data_ptr<float>(),
+        z.data_ptr<float>(),
+        inv_z.data_ptr<float>(),
+        C0.data_ptr<float>(),
+        Cx.data_ptr<float>(),
+        Cy.data_ptr<float>(),
+        Cz.data_ptr<float>(),
+        grad_ctx,
+        ctx
+    );
+
     for (int it = in.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
-        BUILD_VRZ_ADJOINT_FIELDS_3D(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view.u_now,
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
-            aq0.data_ptr<float>(),
-            aqx.data_ptr<float>(),
-            aqy.data_ptr<float>(),
-            aqz.data_ptr<float>(),
-            grad_ctx,
-            ctx
-        );
 
-        ACOUSTIC_VRZ3D_ADJOINT(
+        ACOUSTIC_VRZ3D_ADJOINT_FUSED(
             order,
             launch_config.grid,
             launch_config.block,
@@ -126,10 +127,10 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
-            aq0.data_ptr<float>(),
-            aqx.data_ptr<float>(),
-            aqy.data_ptr<float>(),
-            aqz.data_ptr<float>(),
+            C0.data_ptr<float>(),
+            Cx.data_ptr<float>(),
+            Cy.data_ptr<float>(),
+            Cz.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -150,39 +151,21 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
         adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
-        BUILD_VRZ_GRAD_FIELDS_3D(
+        CALCULATE_GRAD_VRZ3D_AUTO(
             order,
             launch_config.grid,
             launch_config.block,
             in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            c_x.data_ptr<float>(),
-            c_y.data_ptr<float>(),
-            c_z.data_ptr<float>(),
-            e_x.data_ptr<float>(),
-            e_y.data_ptr<float>(),
-            e_z.data_ptr<float>(),
-            grad_ctx,
-            ctx
-        );
-
-        CALCULATE_GRAD_VRZ3D(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            c_x.data_ptr<float>(),
-            c_y.data_ptr<float>(),
-            c_z.data_ptr<float>(),
-            e_x.data_ptr<float>(),
-            e_y.data_ptr<float>(),
-            e_z.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_y.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_y.data_ptr<float>(),
+            e_z.data_ptr<float>(),
             grad_vp.data_ptr<float>(),
             grad_z.data_ptr<float>(),
             grad_ctx,
@@ -266,11 +249,11 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto aq0 = torch::zeros_like(vp);   // adjoint transpose buffers (b·κ·λ, (∂b·κ)λ)
-    auto aqx = torch::zeros_like(vp);
-    auto aqy = torch::zeros_like(vp);
-    auto aqz = torch::zeros_like(vp);
-    auto c_x = torch::zeros_like(vp);   // gradient assembly buffers (λ·vp·∂p, λ·vp²z·∂p)
+    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
+    auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
+    auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
+    auto Cz = torch::zeros_like(vp);    // ∂_z b·κ
+    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
     auto c_y = torch::zeros_like(vp);
     auto c_z = torch::zeros_like(vp);
     auto e_x = torch::zeros_like(vp);
@@ -327,26 +310,26 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
+    // Time-invariant adjoint transpose coefficients, computed once.
+    BUILD_VRZ_ADJOINT_COEFFS_3D(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        vp.data_ptr<float>(),
+        z.data_ptr<float>(),
+        inv_z.data_ptr<float>(),
+        C0.data_ptr<float>(),
+        Cx.data_ptr<float>(),
+        Cy.data_ptr<float>(),
+        Cz.data_ptr<float>(),
+        grad_ctx,
+        ctx
+    );
+
     for (int it = p.nt - 1; it >= 1; --it) {
         auto adj_view = adjoint.view();
 
-        BUILD_VRZ_ADJOINT_FIELDS_3D(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view.u_now,
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
-            aq0.data_ptr<float>(),
-            aqx.data_ptr<float>(),
-            aqy.data_ptr<float>(),
-            aqz.data_ptr<float>(),
-            grad_ctx,
-            ctx
-        );
-
-        ACOUSTIC_VRZ3D_ADJOINT(
+        ACOUSTIC_VRZ3D_ADJOINT_FUSED(
             order,
             launch_config.grid,
             launch_config.block,
@@ -354,10 +337,10 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
-            aq0.data_ptr<float>(),
-            aqx.data_ptr<float>(),
-            aqy.data_ptr<float>(),
-            aqz.data_ptr<float>(),
+            C0.data_ptr<float>(),
+            Cx.data_ptr<float>(),
+            Cy.data_ptr<float>(),
+            Cz.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
@@ -415,39 +398,21 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
         forward.swap();
 
-        BUILD_VRZ_GRAD_FIELDS_3D(
+        CALCULATE_GRAD_VRZ3D_AUTO(
             order,
             launch_config.grid,
             launch_config.block,
             forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            c_x.data_ptr<float>(),
-            c_y.data_ptr<float>(),
-            c_z.data_ptr<float>(),
-            e_x.data_ptr<float>(),
-            e_y.data_ptr<float>(),
-            e_z.data_ptr<float>(),
-            grad_ctx,
-            ctx
-        );
-
-        CALCULATE_GRAD_VRZ3D(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            forward.u_now_t.data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            c_x.data_ptr<float>(),
-            c_y.data_ptr<float>(),
-            c_z.data_ptr<float>(),
-            e_x.data_ptr<float>(),
-            e_y.data_ptr<float>(),
-            e_z.data_ptr<float>(),
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
+            c_x.data_ptr<float>(),
+            c_y.data_ptr<float>(),
+            c_z.data_ptr<float>(),
+            e_x.data_ptr<float>(),
+            e_y.data_ptr<float>(),
+            e_z.data_ptr<float>(),
             grad_vp.data_ptr<float>(),
             grad_z.data_ptr<float>(),
             grad_ctx,
@@ -526,11 +491,11 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
     auto grad_vp = torch::zeros_like(vp);
     auto grad_z = torch::zeros_like(z);
-    auto aq0 = torch::zeros_like(vp);   // adjoint transpose buffers (b·κ·λ, (∂b·κ)λ)
-    auto aqx = torch::zeros_like(vp);
-    auto aqy = torch::zeros_like(vp);
-    auto aqz = torch::zeros_like(vp);
-    auto c_x = torch::zeros_like(vp);   // gradient assembly buffers (λ·vp·∂p, λ·vp²z·∂p)
+    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
+    auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
+    auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
+    auto Cz = torch::zeros_like(vp);    // ∂_z b·κ
+    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
     auto c_y = torch::zeros_like(vp);
     auto c_z = torch::zeros_like(vp);
     auto e_x = torch::zeros_like(vp);
@@ -597,6 +562,22 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
     auto chunk_forward = torch::zeros({max_segment_length, N, C, nz, ny, nx}, vp.options());
 
+    // Time-invariant adjoint transpose coefficients, computed once for all segments.
+    BUILD_VRZ_ADJOINT_COEFFS_3D(
+        order,
+        launch_config.grid,
+        launch_config.block,
+        vp.data_ptr<float>(),
+        z.data_ptr<float>(),
+        inv_z.data_ptr<float>(),
+        C0.data_ptr<float>(),
+        Cx.data_ptr<float>(),
+        Cy.data_ptr<float>(),
+        Cz.data_ptr<float>(),
+        grad_ctx,
+        ctx
+    );
+
     for (int segment_id = num_segments - 1; segment_id >= 0; --segment_id) {
         int start;
         int end;
@@ -651,23 +632,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            BUILD_VRZ_ADJOINT_FIELDS_3D(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                adj_view.u_now,
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                inv_z.data_ptr<float>(),
-                aq0.data_ptr<float>(),
-                aqx.data_ptr<float>(),
-                aqy.data_ptr<float>(),
-                aqz.data_ptr<float>(),
-                grad_ctx,
-                ctx
-            );
-
-            ACOUSTIC_VRZ3D_ADJOINT(
+            ACOUSTIC_VRZ3D_ADJOINT_FUSED(
                 order,
                 launch_config.grid,
                 launch_config.block,
@@ -675,10 +640,10 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
-                aq0.data_ptr<float>(),
-                aqx.data_ptr<float>(),
-                aqy.data_ptr<float>(),
-                aqz.data_ptr<float>(),
+                C0.data_ptr<float>(),
+                Cx.data_ptr<float>(),
+                Cy.data_ptr<float>(),
+                Cz.data_ptr<float>(),
                 lap_ctx,
                 grad_ctx,
                 grad_ctx_x,
@@ -699,39 +664,21 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
             adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
-            BUILD_VRZ_GRAD_FIELDS_3D(
+            CALCULATE_GRAD_VRZ3D_AUTO(
                 order,
                 launch_config.grid,
                 launch_config.block,
                 chunk_forward[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                c_x.data_ptr<float>(),
-                c_y.data_ptr<float>(),
-                c_z.data_ptr<float>(),
-                e_x.data_ptr<float>(),
-                e_y.data_ptr<float>(),
-                e_z.data_ptr<float>(),
-                grad_ctx,
-                ctx
-            );
-
-            CALCULATE_GRAD_VRZ3D(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                chunk_forward[it - start].data_ptr<float>(),
-                adjoint.u_now_t.data_ptr<float>(),
-                c_x.data_ptr<float>(),
-                c_y.data_ptr<float>(),
-                c_z.data_ptr<float>(),
-                e_x.data_ptr<float>(),
-                e_y.data_ptr<float>(),
-                e_z.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_y.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_y.data_ptr<float>(),
+                e_z.data_ptr<float>(),
                 grad_vp.data_ptr<float>(),
                 grad_z.data_ptr<float>(),
                 grad_ctx,
