@@ -290,6 +290,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
         ctx
     );
 
+    // Zero the boundary/PML band of the initial reconstruction state so stale
+    // PML values carried in u_last_two don't leak inward during reverse
+    // propagation.  acoustic2d backward_bs does this; its absence was the main
+    // cause of the VRZ bs accuracy gap (acoustic bs is bit-exact, VRZ was not).
+    {
+        auto for_init = forward.view();
+        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
+            for_init.u_prev, ctx.abcn + ctx.M, nx, nz, p.free_surface);
+        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
+            for_init.u_now, ctx.abcn + ctx.M, nx, nz, p.free_surface);
+    }
+
     for (int it = p.nt - 1; it >= 1; --it) {
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
