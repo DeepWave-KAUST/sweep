@@ -1,55 +1,8 @@
-import jax, torch
 import numpy as np
-import jax.numpy as jnp
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
 from .utils import to_backend
-
-def cond_torch(pred, true_fn, false_fn, args):
-    # Make sure args is a tuple
-    if not isinstance(args, tuple):
-        args = (args,)
-    return torch.cond(pred, true_fn, false_fn, args)
-
-def step(u_now, u_pre, # Wavefields
-         vp, Q, omega,# Model parameters 
-         dt, h, b,  # Auxiliary parameters
-         k, # Wavenumbers
-         laplace_u_now, # Partial derivatives
-         phase_shift=True, # Phase shift
-         amplitude_damping=True, # Amplitude damping
-         op=None,  # Operator (jax or torch)
-         cond_op = None, # Operator (jax.lax.cond or torch.cond)
-         ):
-    
-    a = 1 / (1 + b * dt)
-
-    t_sigma = omega**-1*(op.sqrt(1+(Q**-2))-Q**-1)
-    t_epslion = (omega**2 * t_sigma)**-1.
-    t = t_epslion/(t_sigma-1e-8) - 1.
-
-    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * laplace_u_now
-
-    def linear(u_next):
-        return u_next
-
-    def phase(u_next):
-        u_next = u_next - ((1-op.sqrt(Q**2+1))*Q**-2)*vp**2*laplace_u_now*dt**2
-        return u_next
-    
-    def amplitude(u_next):
-        dudt = (u_now-u_pre)/dt
-        fft_dudt = op.fft.fft2(dudt, u_next.shape[-2:], (-2, -1))
-        temp = op.fft.ifft2(k*fft_dudt, u_next.shape[-2:], (-2, -1)).real
-        u_next = u_next - (dt**2*t*vp/2)*temp        
-        return u_next
-
-    u_next = cond_op(phase_shift, phase, linear, u_next)
-    u_next = cond_op(amplitude_damping, amplitude, linear, u_next)
-
-    u_next = a * u_next + (1 - a) * u_now
-
-    return u_next, u_now
+from .acoustic import step_cpml
 
 class ViscoAcoustic(SecondOrderEquation):
     """Parameter order: vp, Q, omega.
@@ -66,35 +19,91 @@ class ViscoAcoustic(SecondOrderEquation):
     FIELD_SPECS = (
         FieldSpec("h1", aliases=("pressure", "p"), description="Primary visco-acoustic pressure-like wavefield.", supports_source=True, supports_receiver=True),
         FieldSpec("h2", aliases=("pressure_prev",), description="Previous-step pressure-like wavefield.", internal=True),
+        FieldSpec("psix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("psiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
+        FieldSpec("zetax", description="CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
+        FieldSpec("zetaz", description="CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
     )
-    def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2, phase_shift=True, amplitude_damping=True):
-        """Acoustic wave equation solver.
+    default_pml_type = "cpmlr"
+    
+    def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2,
+                 phase_shift=True, amplitude_damping=True):
+        """Visco-acoustic wave equation solver.
 
         Args:
             spatial_order (int, optional): The order of the taylor expansion(Must be even). Defaults to 4.
+            phase_shift (bool, optional): Apply the (non-dissipative) dispersion
+                term that shifts the wavefront. Defaults to True.
+            amplitude_damping (bool, optional): Apply the dissipative attenuation
+                term that decays the wavefront. Defaults to True.
+                Both off = acoustic; both on = full visco-acoustic.
         """
-        
+
         super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
 
-        self.backend = backend
+        if backend == 'torch' and 'cuda' in str(device):
+            super().init_grad_kernels()
 
+        self.backend = backend
         self.phase_shift = phase_shift
         self.amplitude_damping = amplitude_damping
 
         if backend == 'torch':
-            self.phase_shift = torch.tensor(phase_shift, dtype=torch.bool, device=device)
-            self.amplitude_damping = torch.tensor(amplitude_damping, dtype=torch.bool, device=device)
+            import torch
+            self.op = torch
+        elif backend == 'jax':
+            import jax
+            import jax.numpy as jnp
+            self.op = jnp
+        else:
+            raise ValueError(f"Unknown backend: {backend}")
 
-        self.op = {'torch': torch, 'jax': jnp}[backend]
-        self.cond_op = {'torch': cond_torch, 'jax': jax.lax.cond}[backend]
+        
 
     @property
     def need_init(self):
         return True
     
     def func(self, wavefields, models, dt, h, b, **kwargs):
+        u_now, u_pre = wavefields[0], wavefields[1]
+        vp, Q, omega = models
         hz, hx = self._spacings_2d(h)
-        laplace_u_now_z, laplace_u_now_x = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
-        laplace_u_now = laplace_u_now_x + laplace_u_now_z
-        return step(*wavefields, *models, dt, h, b, self.k, laplace_u_now, self.phase_shift, self.amplitude_damping, self.op, self.cond_op, **kwargs)
+
+        # Rebuild the FFT wavenumber grid to match the wavefield the FFT sees
+        # (PML pad + stencil halo), once, then cache it. self.k as built by
+        # need_init is sized for the un-padded grid and mismatches under CPML.
+        fft_shape = tuple(int(s) for s in u_now.shape[-2:])
+        if getattr(self, "_k_fft_shape", None) != fft_shape:
+            from .base import init_wavenumbers
+            h_scalar = float(np.asarray(hz).reshape(-1)[0])
+            k_np, _, _ = init_wavenumbers(fft_shape, h_scalar)
+            self.k = to_backend(k_np, self.backend, str(vp.device))
+            self._k_fft_shape = fft_shape
+        lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
+        laplace_u_now = lap_u_now_x + lap_u_now_z
+
+
+        # CPML base step
+
+        out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+        u_next = out[0]
+
+        # visco-acoustic attenuation corrections (each independently toggleable)
+        op = self.op
+
+        # phase shift (dispersion: moves the wavefront, non-dissipative)
+        if self.phase_shift:
+            u_next = u_next - ((1 - op.sqrt(Q**2 + 1)) * Q**-2) * vp**2 * laplace_u_now * dt**2
+
+        # amplitude damping (attenuation: decays the wavefront, dissipative)
+        if self.amplitude_damping:
+            t_sigma = omega**-1 * (op.sqrt(1 + Q**-2) - Q**-1)
+            t_eps   = (omega**2 * t_sigma)**-1
+            tt      = t_eps / (t_sigma - 1e-8) - 1.
+            dudt    = (u_now - u_pre) / dt
+            fft_dudt = op.fft.fft2(dudt, u_next.shape[-2:], (-2, -1))
+            temp    = op.fft.ifft2(self.k * fft_dudt, u_next.shape[-2:], (-2, -1)).real
+            u_next  = u_next - (dt**2 * tt * vp / 2) * temp
+
+        return (u_next, out[1], out[2], out[3], out[4], out[5])
