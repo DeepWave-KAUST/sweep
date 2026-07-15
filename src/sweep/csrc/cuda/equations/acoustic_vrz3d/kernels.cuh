@@ -438,12 +438,18 @@ __global__ void acoustic_vrz3nd_nopml(
     if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
         return;
 
-    int x_start = solver.phys_x0() + 1;
-    int x_end = solver.phys_x1() - 1;
-    int y_start = solver.phys_y0() + 1;
-    int y_end = solver.phys_y1() - 1;
-    int z_start = solver.phys_z0() + 1;
-    int z_end = solver.phys_z1() - 1;
+    // Reconstruction exclusion band.  A non-cut (PML/free-surface) side skips its
+    // first physical cell (phys_*0()) because the boundary save seeds it; a DD
+    // cut side has NO saved boundary -- the cut-adjacent cells are reconstructed
+    // by plain reverse leapfrog from the per-step exchanged M-halo, so the band
+    // must collapse to phys_*() (the +1/-1 offset would leave cell M stale and
+    // corrupt the gradient near the seam).  cut_mask == 0 keeps the legacy +1/-1.
+    int x_start = solver.phys_x0() + (solver.cut_x_lo() ? 0 : 1);
+    int x_end   = solver.phys_x1() - (solver.cut_x_hi() ? 0 : 1);
+    int y_start = solver.phys_y0() + (solver.cut_y_lo() ? 0 : 1);
+    int y_end   = solver.phys_y1() - (solver.cut_y_hi() ? 0 : 1);
+    int z_start = solver.phys_z0() + (solver.cut_z_lo() ? 0 : 1);
+    int z_end   = solver.phys_z1() - (solver.cut_z_hi() ? 0 : 1);
 
     if (ix < x_start || ix >= x_end ||
         iy < y_start || iy >= y_end ||
@@ -885,6 +891,11 @@ __global__ void acoustic_vrz3nd_adjoint_fused(
 
     auto f = wf.offset(b, spatial_size);
 
+    // NOTE: the adjoint's interior fast-path is NOT made cut-aware.  Unlike the
+    // forward (whose CPML aux is 0 where coeffs vanish), the fused adjoint's aux
+    // does not vanish at a cut seam, so forcing cut-adjacent cells onto the
+    // aux-free fast-path drifts the gradient badly (measured); the PML path with
+    // the (correctly zero-coefficient) profiles is the right branch there.
     bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
                   (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
                   (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||

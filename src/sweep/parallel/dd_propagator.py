@@ -195,6 +195,10 @@ class ModelParallel:
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
         self.family = _family_of(equation)
+        # VRZ is an "acoustic"-family variant (variable density) but its CUDA
+        # kernels do not implement the phased (comm/compute overlap) forward, so
+        # it must always take the serial step-then-exchange path.
+        self._is_vrz = "vrz" in type(equation).__name__.lower()
         self.dev = dev
         self.nt = int(nt)
         self.abcn = int(abcn)
@@ -279,7 +283,8 @@ class ModelParallel:
         self._comm_stream = None
         self._comm_evt = None
         self._overlap_ok = (self.world > 1 and self.cut_mask != 0
-                            and (self.cut_mask & ~0x3) == 0)
+                            and (self.cut_mask & ~0x3) == 0
+                            and not self._is_vrz)
 
         self._captured = False
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
@@ -765,9 +770,21 @@ class ModelParallel:
 
         with torch.no_grad():
             if self.family == "acoustic":
+                # Plain acoustic doubles psi AND zeta in the fused adjoint
+                # (swap_aux), needing the wider adj-pairs over a 15-field list.
+                # VRZ (variable density) doubles only psi in the adjoint
+                # (swap_pml), so its 12-field adjoint rotates just the psi pairs
+                # -- exactly like the forward recon.  adjoint_extra_nvar (the
+                # zeta double-buffer) is the discriminator: acoustic sets it to
+                # 3, VRZ leaves it 0.  Using adj_pairs for VRZ indexes past the
+                # 12-field list -> IndexError in rotate_wavefield_roles.
+                _adj_extra = getattr(getattr(self.equation, "cuda_layout", None),
+                                     "adjoint_extra_nvar", 0)
+                _adj_pairs = (acoustic_adj_pairs(self.ndim) if _adj_extra
+                              else acoustic_psi_pairs(self.ndim))
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=acoustic_adj_pairs(self.ndim))
+                    adj_pairs=_adj_pairs)
                 for it in range(self.nt - 1, -1, -1):
                     br.run_segment(it + 1, it)
                     if it == 0:

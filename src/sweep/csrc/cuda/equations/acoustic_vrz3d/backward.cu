@@ -67,6 +67,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, in.dt, in.nt, in.M, in.abcn, in.free_surface,
                       in.lap_coes.data_ptr<float>(), in.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
+    ctx.cut_mask = in.cut_face_mask;   // DD cut-aware: skip cut faces in bs reconstruction
 
     AcousticWavefieldTensor adjoint;
     if (!in.adjoint_wavefields.empty())
@@ -227,13 +228,39 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
+    ctx.cut_mask = p.cut_face_mask;   // DD cut-aware: skip cut faces in boundary reconstruction
+
+    // Stepped backward: process [bw_it_end, bw_begin()) in descending order so a
+    // DD driver can halo-exchange the adjoint + reconstruction fields between
+    // single reverse steps.  Defaults (bw_it_begin=-1 => nt, bw_it_end=0)
+    // reproduce the monolithic call.  Phased (overlap) backward is not ported;
+    // ModelParallel drives VRZ with the serial step-then-exchange loop.
+    const int it_hi = p.bw_begin();
+    const int it_lo = p.bw_it_end;
+    const bool first_segment = (it_hi == static_cast<int>(p.nt));
+    TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+                "AcousticVRZ3D stepped backward: require 0 <= bw_it_end < "
+                "bw_it_begin <= nt, got [", it_lo, ", ", it_hi, ") with nt=", p.nt);
+    TORCH_CHECK(p.step_phase == 0,
+                "AcousticVRZ3D backward does not support phased execution.");
+    if (p.bw_stepped()) {
+        TORCH_CHECK(!p.adjoint_wavefields.empty() && !p.forward_wavefields.empty(),
+                    "AcousticVRZ3D stepped backward requires Python-bound adjoint "
+                    "and forward (reconstruction) wavefields");
+        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
+                    "AcousticVRZ3D stepped backward supports gpu-direct boundary "
+                    "storage only");
+    }
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
         adjoint.bind(p.adjoint_wavefields, 3, true);
     else
         adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
-    zero_wavefield_state_vrz3d(adjoint);
+    // FIRST segment only: Python zeroes the bound adjoint once before segment 1;
+    // continuation segments must carry the propagated adjoint state.
+    if (first_segment)
+        zero_wavefield_state_vrz3d(adjoint);
 
     AcousticWavefieldTensor forward;
     // Recon steps with the NOPML kernel — u triple buffer only; psi/zeta
@@ -243,12 +270,28 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     else
         forward.allocate(vp, 3, false);
 
-    forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
-    forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
-    forward.u_next_t.zero_();
+    // Seed the reverse reconstruction from the saved last two snapshots — FIRST
+    // segment only; continuation segments carry the reconstruction state.
+    if (first_segment) {
+        forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
+        forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
+        forward.u_next_t.zero_();
+    }
 
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_z = torch::zeros_like(z);
+    // Stepped/DD accumulate the gradient into Python-bound buffers across
+    // segments (calculate_grad does +=; Python zeroes them once before segment
+    // 1).  A monolithic call with no grads_out uses fresh per-call buffers.
+    torch::Tensor grad_vp, grad_z;
+    if (!p.grads_out.empty()) {
+        TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                    "AcousticVRZ3D grads_out must hold models.size()+1 tensors "
+                    "(slot 0 = grad_wavelet, then one per model)");
+        grad_vp = p.grads_out[1];
+        grad_z = p.grads_out[2];
+    } else {
+        grad_vp = torch::zeros_like(vp);
+        grad_z = torch::zeros_like(z);
+    }
     auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
     auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
     auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
@@ -268,16 +311,20 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+    // Must match Python boundary_tangent_pad (= so//2 = M for VRZ) so the FP32
+    // staging matches the persistent int8 buffers' per-step stride; see the
+    // forward.cu note.  Restore reads top_t.stride(0) cells from staging.
+    const int boundary_tangent_pad = p.M;
     if (staged_boundary) {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            {}, p.use_pinned_memory
+            {}, p.use_pinned_memory, boundary_tangent_pad
         );
     } else {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, {}, p.use_pinned_memory
+            true, true, 1, {}, p.boundary_gpu, {}, p.use_pinned_memory, boundary_tangent_pad
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
@@ -326,7 +373,10 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         ctx
     );
 
-    for (int it = p.nt - 1; it >= 1; --it) {
+    // Main loop covers [max(bw_it_end, 1), bw_begin()) in descending order; step 0
+    // contributes no gradient (matches the single-GPU VRZ backward, which also
+    // stops at it == 1), so the last segment (bw_it_end == 0) simply ends there.
+    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
         auto adj_view = adjoint.view();
 
         ACOUSTIC_VRZ3D_ADJOINT_FUSED(
@@ -475,6 +525,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
+    ctx.cut_mask = p.cut_face_mask;   // DD cut-aware: skip cut faces in boundary reconstruction
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
