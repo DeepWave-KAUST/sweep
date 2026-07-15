@@ -49,8 +49,36 @@ ForwardOutput forward(const ForwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
+    // DD cut-aware boundary: a cut face's boundary buffer is numel-0 (cut-aware
+    // gpu_full_shapes) and its halo is reconstructed via NCCL exchange, so the
+    // boundary save/restore must SKIP it.  The FP/int8 boundary kernels gate each
+    // face on ctx.cut_* — but only if cut_mask is propagated here (acoustic3d does
+    // the same).  Missing this makes VRZ write cut faces' null buffers => illegal
+    // memory access under DD (PY*/PX* tiles with cut faces).
+    ctx.cut_mask = p.cut_face_mask;
+
+    // Stepped execution: run [it_begin, it_end) instead of [0, nt) so a DD
+    // driver can halo-exchange between single steps.  All per-step indexing
+    // stays absolute, so consecutive segments reproduce one full run.  Phased
+    // (comm/compute overlap) execution is NOT ported to VRZ; ModelParallel
+    // disables the overlap path for VRZ and always drives the serial
+    // step-then-exchange loop, so step_phase must be 0.
+    const int it0 = p.it_begin;
+    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                "AcousticVRZ3D stepped forward: require 0 <= it_begin <= it_end "
+                "<= nt, got [", it0, ", ", it1, ") with nt=", p.nt);
+    TORCH_CHECK(p.step_phase == 0,
+                "AcousticVRZ3D forward does not support phased execution "
+                "(step_phase must be 0); ModelParallel disables overlap for VRZ.");
+    const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
 
     AcousticWavefieldTensor wavefield;
+    // A continuation segment (it_begin>0) must keep the same wavefield tensors;
+    // the internal allocate() would zero the propagation state mid-run.
+    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
+                "AcousticVRZ3D stepped continuation (it_begin>0) requires "
+                "Python-bound wavefields");
     if (!p.wavefields.empty())
         wavefield.bind(p.wavefields, 3, true);
     else
@@ -60,8 +88,23 @@ ForwardOutput forward(const ForwardInput& in)
     cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
-    auto record = torch::zeros({N, nrec, p.nt}, vp.options());
+    // Stepped runs accumulate absolute-it writes into a Python-bound record;
+    // a per-call allocation would lose every prior segment.
+    TORCH_CHECK(!stepped || p.record_out.defined(),
+                "AcousticVRZ3D stepped forward requires record_out bound from Python");
+    auto record = p.record_out.defined()
+        ? p.record_out
+        : torch::zeros({N, nrec, p.nt}, vp.options());
+    if (p.record_out.defined())
+        TORCH_CHECK(record.is_contiguous() &&
+                    record.size(-1) == static_cast<long>(p.nt),
+                    "record_out must be contiguous with trailing dim nt");
 
+    // save_all_wavefields keeps a fresh per-call buffer; it is a full-run-only
+    // debug path (DD uses boundary saving), so forbid it under stepped where
+    // segments would clobber each other.
+    TORCH_CHECK(!stepped || !p.save_all_wavefields,
+                "AcousticVRZ3D stepped forward does not support save_all_wavefields");
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
         u_allt = torch::zeros({p.nt, 7, B, nz, ny, nx}, vp.options());
@@ -77,12 +120,29 @@ ForwardOutput forward(const ForwardInput& in)
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+    // The internal full-storage fallback ring is per-call; segments after the
+    // first would lose everything saved before them, so stepped runs need the
+    // Python-bound persistent boundary buffers.
+    if (stepped && p.use_boundary_saving)
+        TORCH_CHECK(!p.boundary_gpu.empty(),
+                    "AcousticVRZ3D stepped forward with boundary saving requires "
+                    "Python-bound boundary_gpu");
+    // tangent_pad MUST match the Python boundary layout (equations/acoustic_vrz.py
+    // sets boundary_tangent_pad = so // 2 = M for VRZ; acoustic leaves it 0).  The
+    // Python-owned persistent int8 buffers are sized with this pad, so the FP32
+    // staging (allocated internally by the saver) must use the same pad or its
+    // per-step size falls short of top_t.stride(0) and quantize_step reads past it
+    // => illegal memory access (surfaced under DD / large grids; harmless-looking
+    // over-read into adjacent allocations on small single-GPU runs).
+    const int boundary_tangent_pad = p.M;
     if (staged_boundary) {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, false,
-                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory,
+                                boundary_tangent_pad);
     } else {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true,
-                                1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+                                1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory,
+                                boundary_tangent_pad);
     }
     auto bs = boundary_saver.view();
 
@@ -119,10 +179,11 @@ ForwardOutput forward(const ForwardInput& in)
         p.checkpoint_steps,
         p.checkpoint_on_cpu,
         "forward",
-        "acoustic_vrz3d"
+        "acoustic_vrz3d",
+        it0
     );
 
-    for (int it = 0; it < p.nt; ++it) {
+    for (int it = it0; it < it1; ++it) {
         auto view = wavefield.view();
 
         ACOUSTIC_VRZ3D(
@@ -189,7 +250,9 @@ ForwardOutput forward(const ForwardInput& in)
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), wavefield.checkpoint_tensors());
     }
 
-    if (p.use_boundary_saving) {
+    // last_two seeds the backward; only meaningful once the final segment has
+    // produced u at nt-1/nt.  Mid-run segments leave it untouched.
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
         boundary_saver.last_two_t.select(1, 0).copy_(wavefield.u_prev_t);
         boundary_saver.last_two_t.select(1, 1).copy_(wavefield.u_now_t);
     }

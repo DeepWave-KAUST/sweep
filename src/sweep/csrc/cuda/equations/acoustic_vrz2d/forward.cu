@@ -76,12 +76,19 @@ ForwardOutput forward(const ForwardInput& in) {
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+    // tangent_pad = M to match Python boundary_tangent_pad (= so//2 for VRZ);
+    // otherwise the internal FP32 staging is smaller than the persistent int8
+    // buffers' per-step stride and quantize_step reads past it.  See the 3-D
+    // forward.cu note.
+    const int boundary_tangent_pad = p.M;
     if (staged_boundary)
         boundary_saver.allocate(p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, false,
-                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory,
+                                boundary_tangent_pad);
     else
         boundary_saver.allocate(p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, true,
-                                1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+                                1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory,
+                                boundary_tangent_pad);
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);

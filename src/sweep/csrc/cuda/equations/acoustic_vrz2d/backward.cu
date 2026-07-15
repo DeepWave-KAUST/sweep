@@ -240,12 +240,17 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+    // tangent_pad = M to match Python boundary_tangent_pad (= so//2 for VRZ);
+    // keeps the FP32 staging in step with the persistent int8 buffers.
+    const int boundary_tangent_pad = p.M;
     if (staged_boundary) {
         boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, false,
-                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, p.use_pinned_memory);
+                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu, {}, p.use_pinned_memory,
+                                boundary_tangent_pad);
     } else {
         boundary_saver.allocate(true, 2, 1, ctx, vp, save_width, 2, true, true,
-                                1, {}, p.boundary_gpu, {}, p.use_pinned_memory);
+                                1, {}, p.boundary_gpu, {}, p.use_pinned_memory,
+                                boundary_tangent_pad);
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
     }
