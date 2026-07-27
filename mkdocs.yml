@@ -158,7 +158,8 @@ nav:
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
               - Custom gradient: notebooks/14_custom_gradient.ipynb
-              - ADCIG: notebooks/16_adcig.ipynb
+              - ADCIG · Poynting (custom backward): notebooks/16_adcig.ipynb
+              - ADCIG · space-lag (2D & 3D): notebooks/22_adcig_space_lag.ipynb
           - HPC:
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb

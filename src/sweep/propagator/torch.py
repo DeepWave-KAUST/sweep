@@ -348,7 +348,8 @@ class PropTorch(torch.nn.Module):
     # Illumination controls/outputs live on the backend; delegate writes so that
     # ``solver.compute_illumination = True`` (and the source/receiver illumination
     # buffers) reach it.  Reads already delegate via __getattr__.
-    _BACKEND_DELEGATED = ("compute_illumination", "source_illumination", "receiver_illumination")
+    _BACKEND_DELEGATED = ("compute_illumination", "source_illumination", "receiver_illumination",
+                          "compute_adcig", "adcig_max_lag", "adcig")
 
     def __setattr__(self, name, value):
         if name in PropTorch._BACKEND_DELEGATED:
