@@ -99,8 +99,14 @@
     } while (0)
 
 
+// Forward velocity stencil launches with block(32,8)=256 threads.  Baseline
+// ~48 regs / ~53% occupancy on V100 (Volta) — register/occupancy-bound, not
+// spill-bound.  Capping at 256 threads/block with minBlocks=8 forces the
+// compiler to <=32 regs, lifting occupancy to ~90% (a measured forward win,
+// elastic2d 1.19->1.03 vs deepwave on V100).  Math-identical: no effect on
+// the adjoint or gradient.
 template<int Order>
-__global__ void elastic_velocity_kernel(
+__global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
 
@@ -177,8 +183,11 @@ __global__ void elastic_velocity_kernel(
         (dsxz_dx + dszz_dz);
 }
 
+// Forward stress stencil: same block(32,8)=256, same register/occupancy
+// regime as elastic_velocity_kernel above.  Cap at 256/block, minBlocks=8
+// (<=32 regs) to lift occupancy.  Math-identical (forward-only change).
 template<int Order>
-__global__ void elastic_stress_kernel(
+__global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     ElasticWavefieldPointer wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
@@ -412,7 +421,29 @@ __global__ void elastic_stress_adjoint_prepare(
     float* __restrict__ qxx,
     float* __restrict__ qzz,
     float* __restrict__ qxz,
-    float* __restrict__ qzx
+    float* __restrict__ qzx,
+    // grad_ctx is always forwarded (used only when imaging pointers below are
+    // non-null); harmless for bs/ckpt/apm callers that pass null imaging args.
+    SGradParam grad_ctx,
+    // FUSED vp/vs/rho-gradient imaging (full-mode only).  When non-null, this
+    // kernel folds in the per-step gradient correlation that the standalone
+    // calculate_grad_elastic_nobs would otherwise compute in a separate
+    // full-grid pass.  At this kernel's entry the adjoint stress AND velocity
+    // are the un-mutated post-source adjoint[it] fields (velocity is only
+    // touched later by elastic_stress_adjoint_apply), so the operands match
+    // calculate_grad_elastic_nobs exactly.  No lag: in the full backward loop
+    // calculate_grad(it) ran immediately before apply_adjoint_step(it), and
+    // both consume the same post-source adjoint[it].  All-null (bs/ckpt/apm).
+    const float* __restrict__ grad_fvx      = nullptr,  // u_forward[it]   vx
+    const float* __restrict__ grad_fvz      = nullptr,  // u_forward[it]   vz
+    const float* __restrict__ grad_fvx_prev = nullptr,  // u_forward[it+1] vx
+    const float* __restrict__ grad_fvz_prev = nullptr,  // u_forward[it+1] vz
+    const float* __restrict__ grad_vp_model = nullptr,  // vp    (B,nz,nx)
+    const float* __restrict__ grad_vs_model = nullptr,  // vs    (B,nz,nx)
+    const float* __restrict__ grad_rho_model= nullptr,  // rho   (B,nz,nx)
+    float* __restrict__ grad_vp_out         = nullptr,  // grad_vp accumulator
+    float* __restrict__ grad_vs_out         = nullptr,  // grad_vs accumulator
+    float* __restrict__ grad_rho_out        = nullptr   // grad_rho accumulator
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -450,6 +481,62 @@ __global__ void elastic_stress_adjoint_prepare(
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
     }
+
+    // --- FUSED gradient imaging (full-mode only) -----------------------------
+    // Equivalent to a calculate_grad_elastic_nobs launch for this reverse step.
+    // calculate_grad skips the halo entirely (ix/iz in [halo, n-halo)); replicate
+    // that so the folded contribution is bit-identical (halo adjoint cells carry
+    // no gradient there).  bar_sxx/bar_szz/bar_sxz above already equal
+    // calculate_grad's a.sxx[idx] / bar_szz / bar_sxz (same FS-row zeroing), and
+    // f.vx[idx]/f.vz[idx] are the un-mutated post-source adjoint velocities.
+    if (grad_vp_out != nullptr &&
+        ix >= halo && ix < solver.nx - halo &&
+        iz >= halo && iz < solver.nz - halo) {
+        const float* fvx_b      = grad_fvx      + b * spatial_size;
+        const float* fvz_b      = grad_fvz      + b * spatial_size;
+        const float* fvx_prev_b = grad_fvx_prev + b * spatial_size;
+        const float* fvz_prev_b = grad_fvz_prev + b * spatial_size;
+        const float* vp_b       = grad_vp_model + b * spatial_size;
+        const float* vs_b       = grad_vs_model + b * spatial_size;
+        const float* rho_b      = grad_rho_model+ b * spatial_size;
+        float* grad_vp_b        = grad_vp_out   + b * spatial_size;
+        float* grad_vs_b        = grad_vs_out   + b * spatial_size;
+        float* grad_rho_b       = grad_rho_out  + b * spatial_size;
+
+        float fvx_x = sgradient<2, Order, X, DIFF_BACKWARD> (fvx_b, ix, 0, iz, grad_ctx);
+        float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true);
+        float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
+        float fvz_x = sgradient<2, Order, X, DIFF_FORWARD>  (fvz_b, ix, 0, iz, grad_ctx);
+
+        float grad_lambda, grad_mu;
+        if (is_fs) {
+            // Material derivative of the Robertsson FS sigma_xx fix (matches
+            // calculate_grad_elastic_nobs/bs): surface sxx = old + dt * C_surf * dvx_dx,
+            // C_surf = 4 mu (lam+mu)/(lam+2mu), szz/sxz zeroed.  With
+            // lam=rho(vp^2-2vs^2), mu=rho vs^2, lam+2mu=rho vp^2:
+            // dC/dlam = 4 vs^4/vp^4,  dC/dmu = 4 (vp^4 - 2 vp^2 vs^2 + 2 vs^4)/vp^4.
+            // bar_sxx here == calculate_grad's a.sxx[idx] (same FS-row zeroing above).
+            float vp2 = vp_b[idx] * vp_b[idx];
+            float vs2 = vs_b[idx] * vs_b[idx];
+            float vp4 = vp2 * vp2;
+            float a_sxx_fvx = bar_sxx * fvx_x;
+            grad_lambda = a_sxx_fvx * 4.f * vs2 * vs2 / vp4;
+            grad_mu     = a_sxx_fvx * 4.f * (vp4 - 2.f * vp2 * vs2 + 2.f * vs2 * vs2) / vp4;
+        } else {
+            grad_lambda = (bar_sxx + bar_szz) * (fvx_x + fvz_z);
+            grad_mu = 2*(bar_sxx * fvx_x + bar_szz * fvz_z) + bar_sxz * (fvx_z + fvz_x);
+        }
+
+        grad_vp_b[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+        grad_vs_b[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
+                             2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
+
+        grad_rho_b[idx] += (f.vx[idx] * (fvx_b[idx]-fvx_prev_b[idx]) +
+                            f.vz[idx] * (fvz_b[idx]-fvz_prev_b[idx])) / rho_b[idx];
+        grad_rho_b[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                           grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+    }
+    // -------------------------------------------------------------------------
 
     float bar_dvx_dx, bar_dvz_dz, bar_dvx_dz, bar_dvz_dx;
     if (is_fs) {

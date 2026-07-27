@@ -54,7 +54,8 @@ static inline void run_acoustic3d_adjoint_step(
     const float* vp_ptr,
     LaplaceParam lap_ctx, GradParam grad_ctx,
     GradParam grad_ctx_x, GradParam grad_ctx_y, GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml, SolverContext ctx)
+    AcousticCPMLPointer cpml, SolverContext ctx,
+    const float* grad_forward_img = nullptr, float* grad_out = nullptr)
 {
     // FUSED single-kernel exact 3D adjoint: recompute the per-cell g_* inline at
     // each stencil tap and write next-step psi/zeta into the wavefield's
@@ -68,7 +69,8 @@ static inline void run_acoustic3d_adjoint_step(
     ACOUSTIC3D_ADJOINT_FUSED(order, grid, block,
         adj_view, vp_ptr, lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx,
         adj_view.psixn, adj_view.psiyn, adj_view.psizn,
-        adj_view.zetaxn, adj_view.zetayn, adj_view.zetazn);
+        adj_view.zetaxn, adj_view.zetayn, adj_view.zetazn,
+        grad_forward_img, grad_out);
 }
 
 void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp)
@@ -527,14 +529,24 @@ void run_full_imaging(
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
+    float* grad_ptr = (grad != nullptr) ? grad->data_ptr<float>() : nullptr;
+
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
+
+        // Fold the vp-gradient imaging of step it+1 into the adjoint kernel: at
+        // kernel entry u_now == post-source adjoint[it+1], the exact field
+        // calculate_grad_3d would correlate.  Skip on the first reverse step
+        // (it+1 == nt has no forward wavefield); step 0 is imaged after the loop.
+        const float* img_fwd = (grad_ptr != nullptr && it + 1 < p.nt)
+                             ? p.u_forward[it + 1].data_ptr<float>() : nullptr;
 
         run_acoustic3d_adjoint_step(
             order, launch_config.grid, launch_config.block,
             adj_view, vp.data_ptr<float>(),
             lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
-            cpml, ctx);
+            cpml, ctx,
+            img_fwd, img_fwd ? grad_ptr : nullptr);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -558,14 +570,37 @@ void run_full_imaging(
             forward_nsrc
         );
 
+        // Illumination still needs the per-step pass over the post-source
+        // adjoint[it]; the vp gradient is folded above, so pass grad=nullptr here.
+        if (rtm_out != nullptr) {
+            accumulate_imaging_3d(
+                launch_config.grid,
+                launch_config.block,
+                p.u_forward[it].data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                vp,
+                nullptr,
+                rtm_out,
+                B,
+                nx,
+                ny,
+                nz,
+                ctx.dt
+            );
+        }
+    }
+
+    // Trailing: image step 0, the one reverse step never folded into an adjoint
+    // kernel.  adjoint.u_now_t now holds the post-source adjoint[0].
+    if (grad_ptr != nullptr) {
         accumulate_imaging_3d(
             launch_config.grid,
             launch_config.block,
-            p.u_forward[it].data_ptr<float>(),
+            p.u_forward[0].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp,
             grad,
-            rtm_out,
+            nullptr,
             B,
             nx,
             ny,
@@ -583,7 +618,10 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_full_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Skip the per-timestep illumination pass for a plain FWI gradient that does
+    // not request it; the vp gradient (calculate_grad) is unaffected.
+    run_full_imaging(p, &grad, &grad_wavelet,
+                     p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
@@ -818,7 +856,13 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_bs_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Gate illumination on compute_illumination (mirror the FULL path). When
+    // off, accumulate_imaging_utt_3d skips the per-step RTM kernel because
+    // rtm_out==nullptr; the buffer stays zero. Previously this BS path passed
+    // &illumination unconditionally, so the RTM pass ran every step and the
+    // flag was ignored (no time saved, illumination computed then discarded).
+    run_bs_imaging(p, &grad, &grad_wavelet,
+                   p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
@@ -1001,7 +1045,9 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_ckpt_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Gate illumination on compute_illumination (see BS path above).
+    run_ckpt_imaging(p, &grad, &grad_wavelet,
+                     p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
@@ -1162,7 +1208,9 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_3d(illumination, p.models[0]);
-    run_recursive_imaging(p, &grad, &grad_wavelet, &illumination);
+    // Gate illumination on compute_illumination (see BS path above).
+    run_recursive_imaging(p, &grad, &grad_wavelet,
+                          p.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;

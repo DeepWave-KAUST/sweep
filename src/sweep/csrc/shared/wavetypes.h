@@ -165,4 +165,10 @@ struct BackwardInput {
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
+    // When false, skip the per-timestep source/receiver illumination (RTM-image)
+    // accumulation in backward(): it is not needed for a plain FWI vp gradient
+    // and costs ~1/3 of the backward.  The vp gradient (calculate_grad) is
+    // unaffected.  Default true = unchanged behaviour.
+    bool compute_illumination = true;
+
 };
