@@ -118,6 +118,48 @@ __global__ void accumulate_rtm_image_3d(
     rec_b[idx] += ub * ub;
 }
 
+// Space-lag (horizontal subsurface-offset) extended imaging condition, per step:
+//   E(z,y,x,h) += u_forward(z,y,x-h) * u_backward(z,y,x+h),  h in [-max_lag,max_lag]
+// Lag is along the contiguous x axis (stride 1).  Each thread writes only its
+// own (l, b, idx) cells; reads are on read-only inputs -> no intra-launch race.
+// adcig layout: (nlag, B, nz, ny, nx).
+__global__ void accumulate_adcig_3d(
+    const float* __restrict__ u_forward,
+    const float* __restrict__ u_backward,
+    float* __restrict__ adcig,
+    int nlag, int max_lag,
+    int B, int nx, int ny, int nz
+) {
+
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    int b  = iz_global / nz;
+    int iz = iz_global % nz;
+
+    if (b >= B || ix >= nx || iy >= ny || iz >= nz)
+        return;
+
+    int stride_y = nx;
+    int stride_z = nx * ny;
+    long spatial_size = (long)nx * ny * nz;
+
+    const float* u_forward_b  = u_forward  + b * spatial_size;
+    const float* u_backward_b = u_backward + b * spatial_size;
+    long base = (long)iz * stride_z + (long)iy * stride_y;   // + ix
+
+    for (int l = -max_lag; l <= max_lag; ++l) {
+        int xs = ix - l;   // u_s(x - h)
+        int xr = ix + l;   // u_r(x + h)
+        if (xs < 0 || xs >= nx || xr < 0 || xr >= nx)
+            continue;
+        float prod = u_forward_b[base + xs] * u_backward_b[base + xr];
+        int lbin = l + max_lag;
+        adcig[((long)lbin * B + b) * spatial_size + base + ix] += prod;
+    }
+}
+
 __global__ void accumulate_source_grad_3d(
     const float* __restrict__ u_backward,
     float* __restrict__ grad_source,

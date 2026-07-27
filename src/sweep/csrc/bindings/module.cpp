@@ -246,7 +246,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu)
         .def_readwrite("boundary_disk_files", &BackwardInput::boundary_disk_files)
         .def_readwrite("checkpoint_steps", &BackwardInput::checkpoint_steps)
-        .def_readwrite("compute_illumination", &BackwardInput::compute_illumination);
+        .def_readwrite("compute_illumination", &BackwardInput::compute_illumination)
+        .def_readwrite("compute_adcig", &BackwardInput::compute_adcig)
+        .def_readwrite("adcig_max_lag", &BackwardInput::adcig_max_lag);
 
 
 }
