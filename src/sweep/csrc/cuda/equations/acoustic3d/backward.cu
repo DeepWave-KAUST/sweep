@@ -73,11 +73,18 @@ static inline void run_acoustic3d_adjoint_step(
         grad_forward_img, grad_out);
 }
 
-void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp)
+void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp,
+                        bool want_adcig = false, int nlag = 1)
 {
     out.image = torch::zeros_like(vp);
     out.source_illumination = torch::zeros_like(vp);
     out.receiver_illumination = torch::zeros_like(vp);
+    if (want_adcig) {
+        // vp is (N, C, nz, ny, nx); ADCIG cube (nlag, N, C, nz, ny, nx),
+        // runtime-padded, cropped + summed over batch Python-side.
+        out.adcig = torch::zeros({(long)nlag, vp.size(0), vp.size(1),
+                                  vp.size(2), vp.size(3), vp.size(4)}, vp.options());
+    }
 }
 
 void accumulate_rtm_3d(
@@ -163,6 +170,18 @@ void accumulate_imaging_utt_3d(
 
     if (rtm_out != nullptr) {
         accumulate_rtm_3d(wave_grid, wave_block, u_now_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
+    }
+    // Space-lag ADCIG on the reconstructed raw pressure ``u_now_ptr`` (this
+    // BS-only helper is the one imaging site that has the raw pressure; the
+    // full/ckpt helpers correlate vp^2*Lap(u), so ADCIG is not launched there).
+    if (rtm_out != nullptr && rtm_out->adcig.defined() && rtm_out->adcig.numel() > 0) {
+        int nlag = rtm_out->adcig.size(0);
+        int Bloc = rtm_out->adcig.size(1) * rtm_out->adcig.size(2);  // N*C
+        int max_lag = (nlag - 1) / 2;
+        accumulate_adcig_3d<<<wave_grid, wave_block>>>(
+            u_now_ptr, adjoint_ptr, rtm_out->adcig.data_ptr<float>(),
+            nlag, max_lag, Bloc, nx, ny, nz
+        );
     }
 }
 
@@ -855,17 +874,21 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     auto grad = torch::zeros_like(p.models[0]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
-    init_rtm_output_3d(illumination, p.models[0]);
+    init_rtm_output_3d(illumination, p.models[0],
+                       p.compute_adcig, 2 * p.adcig_max_lag + 1);
     // Gate illumination on compute_illumination (mirror the FULL path). When
     // off, accumulate_imaging_utt_3d skips the per-step RTM kernel because
     // rtm_out==nullptr; the buffer stays zero. Previously this BS path passed
     // &illumination unconditionally, so the RTM pass ran every step and the
     // flag was ignored (no time saved, illumination computed then discarded).
+    // ADCIG (space-lag) rides the same imaging pass, so pass the RTMOutput when
+    // either is requested.
     run_bs_imaging(p, &grad, &grad_wavelet,
-                   p.compute_illumination ? &illumination : nullptr);
+                   (p.compute_illumination || p.compute_adcig) ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
     return out;
 }
 
