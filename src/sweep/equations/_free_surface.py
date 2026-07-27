@@ -105,6 +105,63 @@ def zero_top_row(u, halo, axis):
     )
 
 
+def blend_top_n(top, bottom, n, axis):
+    """Use ``top`` for the first ``n`` rows along ``axis``, ``bottom`` for the rest.
+    Used for near-surface order reduction (low-order z-derivative in the top band)."""
+    if n <= 0:
+        return bottom
+    return _concat([_slice_axis(top, axis, None, n), _slice_axis(bottom, axis, n, None)], axis=axis)
+
+
+def overwrite_top_row(base, repl, halo, axis):
+    """Return ``base`` with its free-surface row (index ``halo``) replaced by the
+    corresponding row of ``repl`` (same shape). Backend-agnostic (slice+concat)."""
+    row = 0 if halo <= 0 else halo
+    pre = _slice_axis(base, axis, None, row) if row > 0 else None
+    surf = _slice_axis(repl, axis, row, row + 1)
+    post = _slice_axis(base, axis, row + 1, None)
+    parts = ([pre] if pre is not None else []) + [surf, post]
+    return _concat(parts, axis=axis)
+
+
+def get_o2_pd(pd):
+    """Cached order-2 staggered-derivative twin of ``pd`` (near-surface order
+    reduction). The order-2 image derivative is unconditionally stable at the
+    free surface; blending it into the top band tames the high-order
+    FS-∩-CPML-corner instability without disturbing the interior accuracy."""
+    p2 = getattr(pd, "_o2", None)
+    if p2 is None:
+        from sweep.operators.general import StaggeredDerivative
+        from .utils import to_backend as _tb
+
+        p2 = StaggeredDerivative(2, pd.device, pd.backend, ndim=pd.ndim)
+        p2.to_backend(_tb)
+        p2._spacing = pd._spacing
+        pd._o2 = p2
+    return p2
+
+
+def fs_deriv(field, full_op, o2_op, halo, odd, axis, n_o2):
+    """Free-surface z-derivative with optional near-surface order reduction:
+    order-2 image-derivative for the top ``n_o2`` rows, full-order below."""
+    full = top_free_surface_derivative(field, full_op, halo, odd=odd, axis=axis)
+    if n_o2 <= 0:
+        return full
+    o2 = top_free_surface_derivative(field, o2_op, halo, odd=odd, axis=axis)
+    return blend_top_n(o2, full, n_o2, axis)
+
+
+def near_surface_o2_count(top_halo, env_value):
+    """Map the ``SWEEP_FS_NEARSURF_O2`` env string to a top-band row count.
+    ``"0"`` disables; ``"1"`` (default) uses ``2*top_halo`` rows; any other
+    integer string is taken literally."""
+    if env_value == "0":
+        return 0
+    if env_value == "1":
+        return 2 * top_halo
+    return int(env_value)
+
+
 # -----------------------------------------------------------------------------
 # Per-column (irregular topography) image-method helpers.
 #
@@ -211,6 +268,43 @@ def zero_above_topo(u, iz_surf, axis):
     z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
     mask = (z < surf).expand_as(u)
     return u.masked_fill(mask, 0.0)
+
+
+def overwrite_at_topo(base, repl, iz_surf, axis):
+    """Per-column version of :func:`overwrite_top_row`: set the surface row
+    (``z == iz_surf[ix]``) of ``base`` to the corresponding entry of ``repl``;
+    all other cells are left untouched.  Used for the Robertsson surface-sigma_xx
+    modified coefficient under irregular topography."""
+    import torch
+
+    z, surf, ax, nz = _broadcast_topo(base, iz_surf, axis)
+    mask = (z == surf).expand_as(base)
+    return torch.where(mask, repl, base)
+
+
+def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2, topo_rows=None):
+    """Robertsson free-surface sigma_xx correction, shared across the staggered
+    elastic equations (Elastic, DASMu, ElasticVR).
+
+    At a free surface sigma_zz = 0 forces the surface-row sigma_xx to
+    ``sxx_pre + dt * c_surf * vx_x`` -- the image-method mirror alone leaves it
+    ~mu/lambda too large.  ``c_surf`` is the modified coefficient and ``vx_x`` the
+    matching x velocity-gradient, both expressed in each caller's own variables:
+      * Elastic / DASMu : c_surf = 4 mu (lam+mu)/(lam+2mu),  vx_x = d vx/dx
+      * ElasticVR (native, momentum px = rho*vx, no explicit rho needed):
+                          c_surf = 4 vs^2 (vp^2 - vs^2)/vp^2,  vx_x = d px/dx
+    Overwrites the flat top row (``overwrite_top_row``) or, when ``topo_rows`` is
+    given, the per-column surface row along topography (``overwrite_at_topo``).
+    Env-gated by ``SWEEP_FS_MOD_SXX`` (default on); returns ``sxx`` unchanged off.
+    """
+    import os as _os
+
+    if _os.environ.get("SWEEP_FS_MOD_SXX", "1") != "1":
+        return sxx
+    sxx_surf = sxx_pre + dt * c_surf * vx_x
+    if topo_rows is not None:
+        return overwrite_at_topo(sxx, sxx_surf, topo_rows, axis=axis)
+    return overwrite_top_row(sxx, sxx_surf, top_halo, axis=axis)
 
 
 def zero_at_topo(u, iz_surf, axis):
