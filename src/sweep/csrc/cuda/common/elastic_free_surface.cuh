@@ -48,6 +48,27 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     }
 
     const int M = elastic_stencil_half_order<Order>(solver);
+
+    // Near-surface order reduction (Kristek AFDA): use a 2nd-order z-stencil for
+    // the top M physical rows below the free surface to suppress the high-order
+    // free-surface instability; the interior keeps the full order. Matches the
+    // eager blend (order-2 for rows [surface, surface+M)).  FLAT surface only —
+    // the eager topography path (top_free_surface_derivative_topo) is full-order,
+    // so we gate the reduction on ``!has_topo`` to stay eager-consistent.
+    const int fs_surf = solver.surface_row(ix);
+    if (!solver.has_topo && iz - fs_surf >= 0 && iz - fs_surf < M) {
+        float gz2 = 0.f;
+        if constexpr (Type & DIFF_FORWARD) {
+            gz2 += elastic_top_fs_value_2d(u, ix, iz + 1, grad_ctx, solver, odd)
+                 - elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            gz2 += elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd)
+                 - elastic_top_fs_value_2d(u, ix, iz - 1, grad_ctx, solver, odd);
+        }
+        return gz2 / grad_ctx.dz;
+    }
+
     float gz = 0.f;
 
     #pragma unroll
@@ -66,6 +87,74 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     }
 
     return gz / grad_ctx.dz;
+}
+
+// Plain (no-mirror) transpose of the near-surface-reduced forward z-derivative
+// ``elastic_top_fs_sgradient_z_2d``, evaluated at output row ``m``, in the SAME
+// sign convention as ``sgradient<2,Order,Z, opposite(ForwardType)>(q, m)``
+// (i.e. the negated true transpose — the calling kernel's sign expects this).
+//
+// The forward applied a 2nd-order stencil to output rows in the band
+// ``[top, top+M)`` (Kristek near-surface order reduction) and the full M-th
+// order stencil below.  Operator-split form:  D' = P_band·D2 + P_below·D_full
+// with diagonal output-row projectors P, so  D'^T = D2^T·P_band + D_full^T·P_below.
+// Concretely: a forward output row ``j`` contributes to input row ``m`` with the
+// FULL coefficient if ``j`` is below the band, or the order-2 coefficient (=1) if
+// ``j`` is in the band — and never both.  Bounds are checked per read so this
+// also serves the air-row (mirror) evaluations where the stencil dips below 0.
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_z_2d(
+    const float* __restrict__ q,
+    int ix,
+    int m,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M       = elastic_stencil_half_order<Order>(solver);
+    const int top     = solver.surface_row(ix);
+    // FLAT surface only — gate the reduction band to empty under topography so
+    // this collapses to the original full-order transpose (eager topo is full).
+    const int band_hi = top + (solver.has_topo ? 0 : M);   // band [top, top+M) flat; empty topo
+    const int sz = grad_ctx.sz;
+    const int sx = grad_ctx.sx;
+    float acc = 0.f;
+
+    if constexpr (ForwardType & DIFF_FORWARD) {
+        // full part (matches sgradient<DIFF_BACKWARD>), excluding band output rows
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i;
+            const int jm = m - i - 1;
+            if (jp >= 0 && jp < solver.nz && !(jp >= top && jp < band_hi))
+                acc += c * q[jp * sz + ix * sx];
+            if (jm >= 0 && jm < solver.nz && !(jm >= top && jm < band_hi))
+                acc -= c * q[jm * sz + ix * sx];
+        }
+        // order-2 part: band output rows j use forward g[j]=(u[j+1]-u[j])/dz,
+        // contributing +q[m] (j=m) and -q[m-1] (j=m-1) in sgradient<BACKWARD> sign.
+        if (m >= top && m < band_hi)       acc += q[m * sz + ix * sx];
+        if (m - 1 >= top && m - 1 < band_hi) acc -= q[(m - 1) * sz + ix * sx];
+    } else {
+        // full part (matches sgradient<DIFF_FORWARD>), excluding band output rows
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i + 1;
+            const int jm = m - i;
+            if (jp >= 0 && jp < solver.nz && !(jp >= top && jp < band_hi))
+                acc += c * q[jp * sz + ix * sx];
+            if (jm >= 0 && jm < solver.nz && !(jm >= top && jm < band_hi))
+                acc -= c * q[jm * sz + ix * sx];
+        }
+        // order-2 part: band output rows j use forward g[j]=(u[j]-u[j-1])/dz,
+        // contributing +q[m+1] (j=m+1) and -q[m] (j=m) in sgradient<FORWARD> sign.
+        if (m + 1 >= top && m + 1 < band_hi) acc += q[(m + 1) * sz + ix * sx];
+        if (m >= top && m < band_hi)         acc -= q[m * sz + ix * sx];
+    }
+
+    return acc / grad_ctx.dz;
 }
 
 template<int Order, int ForwardType>
@@ -96,62 +185,22 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     // plain x-derivative — it does NOT contribute here.
     if (iz < top) return 0.f;
 
-    // The adjoint of D_plain ∘ extend is M^T ∘ D_plain^T.  Per-element form:
+    // The adjoint of D' ∘ extend is M^T ∘ D'^T.  Per-element form:
     //
     //   M^T(h)[iz]  =  h[iz]                              if iz == top
     //              =  h[iz] + parity * h[2*top - iz]       if iz > top
     //
-    // where h = D_plain^T(q).  Under per-column topography q[iz_out<top]
-    // is NOT zero (cross-column x-coupling carries energy into air rows in
-    // neighbouring solid columns), so we cannot use the flat-FS shortcut of
-    // gating reads on ``>= top``.  We compute D_plain^T at iz directly via
-    // sgradient (full stencil), then add the parity-weighted mirror copy.
-    float gz;
-    if constexpr (ForwardType & DIFF_FORWARD) {
-        gz = sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
-    } else {
-        gz = sgradient<2, Order, Z, DIFF_FORWARD>(q, ix, 0, iz, grad_ctx);
-    }
+    // where h = D'^T(q) is the near-surface-reduced plain transpose (the band
+    // makes it differ from a single full-order sgradient).  We evaluate it at iz
+    // and at the mirror row; the helper checks bounds so the mirror (air) row is
+    // safe even when its stencil dips below row 0.
+    float gz = elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver);
 
     if (iz == top) return gz;
 
-    // Mirror contribution at row mirror_iz = 2*top - iz.  The stencil there
-    // may extend below row 0 if mirror_iz is too small — fall back to a
-    // safe per-element loop in that case.  Otherwise use sgradient.
     const int mirror_iz = 2 * top - iz;
-    const int M = elastic_stencil_half_order<Order>(solver);
     const float parity = odd ? -1.f : 1.f;
-
-    float gz_mirror;
-    if (mirror_iz - M >= 0 && mirror_iz + M < solver.nz) {
-        if constexpr (ForwardType & DIFF_FORWARD) {
-            gz_mirror = sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, mirror_iz, grad_ctx);
-        } else {
-            gz_mirror = sgradient<2, Order, Z, DIFF_FORWARD>(q, ix, 0, mirror_iz, grad_ctx);
-        }
-    } else {
-        float acc = 0.f;
-        #pragma unroll
-        for (int m = 0; m < M; ++m) {
-            const float c = grad_ctx.coeff[m];
-            if constexpr (ForwardType & DIFF_FORWARD) {
-                const int jp = mirror_iz + m;
-                const int jm = mirror_iz - m - 1;
-                if (jp >= 0 && jp < solver.nz)
-                    acc += c * q[jp * grad_ctx.sz + ix * grad_ctx.sx];
-                if (jm >= 0 && jm < solver.nz)
-                    acc -= c * q[jm * grad_ctx.sz + ix * grad_ctx.sx];
-            } else {
-                const int jp = mirror_iz + m + 1;
-                const int jm = mirror_iz - m;
-                if (jp >= 0 && jp < solver.nz)
-                    acc += c * q[jp * grad_ctx.sz + ix * grad_ctx.sx];
-                if (jm >= 0 && jm < solver.nz)
-                    acc -= c * q[jm * grad_ctx.sz + ix * grad_ctx.sx];
-            }
-        }
-        gz_mirror = acc / grad_ctx.dz;
-    }
+    float gz_mirror = elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, mirror_iz, grad_ctx, solver);
 
     return gz + parity * gz_mirror;
 }
