@@ -137,9 +137,13 @@ def main():
 
     list_parser = subparsers.add_parser('list', help='List components')
     show_parser = subparsers.add_parser('show', help='Show details for a wave equation class')
+    datasets_parser = subparsers.add_parser(
+        'datasets', help='Benchmark velocity models (list/info/download/where)')
 
     list_parser.add_argument('component', choices=['equations'], help='Component type to list')
     show_parser.add_argument('component', help='Wave equation class name to show wavefields for')
+    datasets_parser.add_argument('args', nargs=argparse.REMAINDER,
+                                 help='subcommand + args (see `sweep datasets -h`)')
 
     args = parser.parse_args()
 
@@ -149,6 +153,9 @@ def main():
     if args.command == 'show':
         list_wavefields(args.component)
         return 0
+    if args.command == 'datasets':
+        from sweep.datasets.cli import main as datasets_main
+        return datasets_main(args.args)
     parser.print_help()
     return 0
 

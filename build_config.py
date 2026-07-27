@@ -218,6 +218,10 @@ def build_ext_kwargs(build_cuda=None):
     omp_flags = openmp_flags()
     configure_cuda_arch_list()
 
+    # Optional extra nvcc flags (e.g. -DELASTIC3D_LB_MINBLOCKS=6 to retune a
+    # forward launch_bounds without editing kernel source).  Space-separated.
+    extra_nvcc = os.environ.get("SWEEP_EXTRA_NVCC", "").split()
+
     kwargs["ext_modules"] = [
         CUDAExtension(
             name="sweep._C",
@@ -237,6 +241,7 @@ def build_ext_kwargs(build_cuda=None):
                     "--use_fast_math",
                     "--threads=16",
                     "-Xcompiler=-Wno-deprecated-declarations",
+                    *extra_nvcc,
                 ],
             },
             extra_link_args=omp_flags,

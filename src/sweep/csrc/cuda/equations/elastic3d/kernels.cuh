@@ -6,6 +6,21 @@
 #include "../../common/elastic_free_surface.cuh"
 #include "../../operators/staggered.cuh"
 
+// Forward 3D stencil kernels launch with block(32,4,2)=256 threads.  Like the
+// 2D kernels they are register/occupancy-bound on V100; capping threads/block
+// at 256 and asking for minBlocks resident blocks forces lower register use
+// and lifts occupancy.  The 3D velocity/stress kernels are heavier than 2D (9
+// derivative reads + 9 CPML aux fields), so an aggressive minBlocks=8 can spill
+// — ELASTIC3D_LB_MINBLOCKS lets the build pick a milder bound (6/7) without a
+// source edit.  Math-identical: forward-only, adjoint/gradient unaffected.
+// 3D kernels are heavy (9 fields + CPML aux); minBlocks=8 forced 32 regs but
+// SPILLED (STACK:88) and regressed elastic3d forward 1.1x->0.6x on V100.  3D
+// already beats deepwave unbounded, so disable the bound for 3D (minBlocks=1 =>
+// 256-reg cap => no constraint => natural ~48 regs).  2D keeps (256,8) (a win).
+#ifndef ELASTIC3D_LB_MINBLOCKS
+#define ELASTIC3D_LB_MINBLOCKS 1
+#endif
+
 #define LAUNCH_3DELASTIC_VELOCITY(order, grid, block, ...)                     \
     do {                                                        \
         if      ((order) == 2) elastic_velocity_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
@@ -108,7 +123,7 @@
     } while (0)
 
 template<int Order>
-__global__ void elastic_velocity_kernel_3d(
+__global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_kernel_3d(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
     SGradParam grad_ctx,
@@ -237,7 +252,7 @@ __global__ void elastic_velocity_kernel_3d(
 
 
 template<int Order>
-__global__ void elastic_stress_kernel_3d(
+__global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_kernel_3d(
     ElasticWavefieldPointer wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
@@ -1079,7 +1094,27 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float* __restrict__ qyz,
     float* __restrict__ qzx,
     float* __restrict__ qzy,
-    float* __restrict__ qzz
+    float* __restrict__ qzz,
+    // grad_ctx always forwarded (used only when imaging pointers below are
+    // non-null); harmless for bs/ckpt/apm callers that pass null imaging args.
+    SGradParam grad_ctx,
+    // FUSED vp/vs/rho-gradient imaging (full-mode only).  Mirrors the 2-D fold:
+    // at this kernel's entry the adjoint stress AND velocity are the un-mutated
+    // post-source adjoint[it] fields, so the operands match
+    // calculate_grad_elastic3d_bs exactly (same kernel the full loop launched
+    // separately, fed the forward velocity view).  No lag.  All-null otherwise.
+    const float* __restrict__ grad_fvx      = nullptr,  // u_forward[it]   vx
+    const float* __restrict__ grad_fvy      = nullptr,  // u_forward[it]   vy
+    const float* __restrict__ grad_fvz      = nullptr,  // u_forward[it]   vz
+    const float* __restrict__ grad_fvx_prev = nullptr,  // u_forward[it+1] vx
+    const float* __restrict__ grad_fvy_prev = nullptr,  // u_forward[it+1] vy
+    const float* __restrict__ grad_fvz_prev = nullptr,  // u_forward[it+1] vz
+    const float* __restrict__ grad_vp_model = nullptr,
+    const float* __restrict__ grad_vs_model = nullptr,
+    const float* __restrict__ grad_rho_model= nullptr,
+    float* __restrict__ grad_vp_out         = nullptr,
+    float* __restrict__ grad_vs_out         = nullptr,
+    float* __restrict__ grad_rho_out        = nullptr
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1123,6 +1158,66 @@ __global__ void elastic_stress_adjoint_prepare_3d(
         f.sxz[idx] = 0.f;
         f.syz[idx] = 0.f;
     }
+
+    // --- FUSED gradient imaging (full-mode only) -----------------------------
+    // Equivalent to a calculate_grad_elastic3d_bs launch for this reverse step.
+    // calculate_grad skips the halo entirely; replicate so the folded
+    // contribution is bit-identical.  bar_s* above already match
+    // calculate_grad's a.sxx[idx]/a.syy[idx]/bar_szz/a.sxy[idx]/bar_sxz/bar_syz,
+    // and f.vx/vy/vz[idx] are the un-mutated post-source adjoint velocities.
+    {
+        constexpr bool is_runtime_g = (Order == -1);
+        constexpr int  M_static_g   = is_runtime_g ? 0 : (Order / 2);
+        int halo_g = is_runtime_g ? solver.M : M_static_g;
+        if (grad_vp_out != nullptr &&
+            ix >= halo_g && ix < solver.nx - halo_g &&
+            iy >= halo_g && iy < solver.ny - halo_g &&
+            iz >= halo_g && iz < solver.nz - halo_g) {
+            const float* fvx_b      = grad_fvx      + b * spatial_size;
+            const float* fvy_b      = grad_fvy      + b * spatial_size;
+            const float* fvz_b      = grad_fvz      + b * spatial_size;
+            const float* fvx_prev_b = grad_fvx_prev + b * spatial_size;
+            const float* fvy_prev_b = grad_fvy_prev + b * spatial_size;
+            const float* fvz_prev_b = grad_fvz_prev + b * spatial_size;
+            const float* vp_b       = grad_vp_model + b * spatial_size;
+            const float* vs_b       = grad_vs_model + b * spatial_size;
+            const float* rho_b      = grad_rho_model+ b * spatial_size;
+            float* gvp  = grad_vp_out  + b * spatial_size;
+            float* gvs  = grad_vs_out  + b * spatial_size;
+            float* grho = grad_rho_out + b * spatial_size;
+
+            float fvx_x = sgradient<3, Order, X, DIFF_BACKWARD>(fvx_b, ix, iy, iz, grad_ctx);
+            float fvx_y = sgradient<3, Order, Y, DIFF_FORWARD >(fvx_b, ix, iy, iz, grad_ctx);
+            float fvx_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(fvx_b, ix, iy, iz, grad_ctx, solver, false);
+
+            float fvy_x = sgradient<3, Order, X, DIFF_FORWARD >(fvy_b, ix, iy, iz, grad_ctx);
+            float fvy_y = sgradient<3, Order, Y, DIFF_BACKWARD>(fvy_b, ix, iy, iz, grad_ctx);
+            float fvy_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(fvy_b, ix, iy, iz, grad_ctx, solver, false);
+
+            float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(fvz_b, ix, iy, iz, grad_ctx);
+            float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(fvz_b, ix, iy, iz, grad_ctx);
+            float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(fvz_b, ix, iy, iz, grad_ctx, solver, true);
+
+            float grad_lambda = (bar_sxx + bar_syy + bar_szz) * (fvx_x + fvy_y + fvz_z);
+            float grad_mu = 2*(bar_sxx * fvx_x +
+                               bar_syy * fvy_y +
+                               bar_szz * fvz_z) +
+                               bar_sxz * (fvx_z + fvz_x) +
+                               bar_sxy * (fvx_y + fvy_x) +
+                               bar_syz * (fvy_z + fvz_y);
+
+            gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+            gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
+                           2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
+
+            grho[idx] += (f.vx[idx] * (fvx_b[idx]-fvx_prev_b[idx]) +
+                          f.vy[idx] * (fvy_b[idx]-fvy_prev_b[idx]) +
+                          f.vz[idx] * (fvz_b[idx]-fvz_prev_b[idx])) / rho_b[idx];
+            grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                         grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+        }
+    }
+    // -------------------------------------------------------------------------
 
     float bar_dvx_dx = solver.dt * (l2m * bar_sxx + lam * bar_syy + lam * bar_szz);
     float bar_dvx_dy = solver.dt * mu_ * bar_sxy;

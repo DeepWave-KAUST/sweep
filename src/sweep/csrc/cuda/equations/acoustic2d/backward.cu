@@ -32,7 +32,8 @@ static inline void run_acoustic2d_adjoint_step(
     const float* vp_ptr,
     LaplaceParam lap_ctx, GradParam grad_ctx,
     GradParam grad_ctx_x, GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml, SolverContext ctx)
+    AcousticCPMLPointer cpml, SolverContext ctx,
+    const float* grad_forward_img = nullptr, float* grad_out = nullptr)
 {
     // FUSED single-kernel exact adjoint: recompute the per-cell g_* inline at
     // each stencil tap and write next-step psi/zeta into the wavefield's
@@ -45,7 +46,8 @@ static inline void run_acoustic2d_adjoint_step(
     (void)grad_ctx;
     ACOUSTIC2D_ADJOINT_FUSED(order, grid, block,
         adj_view, vp_ptr, lap_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx,
-        adj_view.psixn, adj_view.psizn, adj_view.zetaxn, adj_view.zetazn);
+        adj_view.psixn, adj_view.psizn, adj_view.zetaxn, adj_view.zetazn,
+        grad_forward_img, grad_out);
 }
 
 void init_rtm_output_2d(RTMOutput& out, const torch::Tensor& vp)
@@ -167,16 +169,27 @@ void run_full_imaging(
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
+    float* grad_ptr = (grad != nullptr) ? grad->data_ptr<float>() : nullptr;
+
     for (int it = p.nt - 1; it >= 0; --it) {
 
         auto adj_view = adjoint.view();
 
-        // Exact discrete adjoint of the CPML forward step (interior + PML).
+        // Fold the vp-gradient imaging of step it+1 into the adjoint kernel: at
+        // kernel entry u_now == post-source adjoint[it+1], the exact field
+        // calculate_grad would correlate.  Skip on the first reverse step
+        // (it+1 == nt has no forward wavefield); step 0 is imaged after the loop.
+        const float* img_fwd = (grad_ptr != nullptr && it + 1 < p.nt)
+                             ? p.u_forward[it + 1].data_ptr<float>() : nullptr;
+
+        // Exact discrete adjoint of the CPML forward step (interior + PML),
+        // optionally accumulating the lagged vp-gradient imaging.
         run_acoustic2d_adjoint_step(
             order, launch_config.grid, launch_config.block,
             adj_view, vp.data_ptr<float>(),
             lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
-            cpml, ctx);
+            cpml, ctx,
+            img_fwd, img_fwd ? grad_ptr : nullptr);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -200,14 +213,36 @@ void run_full_imaging(
             forward_nsrc
         );
 
+        // Illumination (RTM image + src/rec) still needs the per-step pass over
+        // the post-source adjoint[it]; the vp gradient is folded above, so pass
+        // grad=nullptr here to avoid double-counting.
+        if (rtm_out != nullptr) {
+            accumulate_imaging_2d(
+                launch_config.grid,
+                launch_config.block,
+                p.u_forward[it].data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                vp,
+                nullptr,
+                rtm_out,
+                nx,
+                nz,
+                dt
+            );
+        }
+    }
+
+    // Trailing: image step 0, the one reverse step never folded into an adjoint
+    // kernel.  adjoint.u_now_t now holds the post-source adjoint[0].
+    if (grad_ptr != nullptr) {
         accumulate_imaging_2d(
             launch_config.grid,
             launch_config.block,
-            p.u_forward[it].data_ptr<float>(),
+            p.u_forward[0].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp,
             grad,
-            rtm_out,
+            nullptr,
             nx,
             nz,
             dt
@@ -225,7 +260,11 @@ BackwardOutput backward(const BackwardInput& in)
     auto grad_wavelet = torch::zeros_like(in.forward_source);
     RTMOutput illumination;
     init_rtm_output_2d(illumination, in.models[0]);
-    run_full_imaging(in, &grad, &grad_wavelet, &illumination);
+    // Illumination (RTM image + source/receiver illumination) is a per-timestep
+    // extra grid pass; skip it for a plain FWI gradient that does not request it.
+    // The vp gradient (calculate_grad) is unaffected.
+    run_full_imaging(in, &grad, &grad_wavelet,
+                     in.compute_illumination ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
@@ -431,14 +470,20 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
 
-        accumulate_rtm_image_2d<<<launch_config.grid, launch_config.block>>>(
-            forward.u_now_t.data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            illumination.image.data_ptr<float>(),
-            illumination.source_illumination.data_ptr<float>(),
-            illumination.receiver_illumination.data_ptr<float>(),
-            nx, nz
-        );
+        // Gate illumination on compute_illumination (mirror FULL path). When off,
+        // skip the per-step RTM pass entirely; the FWI vp-gradient is produced by
+        // calculate_grad_utt above and is unaffected. Previously this BS path ran
+        // it every step regardless, so the flag was ignored (no time saved).
+        if (in.compute_illumination) {
+            accumulate_rtm_image_2d<<<launch_config.grid, launch_config.block>>>(
+                forward.u_now_t.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                illumination.image.data_ptr<float>(),
+                illumination.source_illumination.data_ptr<float>(),
+                illumination.receiver_illumination.data_ptr<float>(),
+                nx, nz
+            );
+        }
 
     }
 
@@ -908,7 +953,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 adjoint.u_now_t.data_ptr<float>(),
                 vp,
                 &grad,
-                &illumination,
+                // Gate illumination on compute_illumination (mirror FULL path);
+                // accumulate_imaging_2d skips the RTM kernel when rtm_out==nullptr.
+                in.compute_illumination ? &illumination : nullptr,
                 nx,
                 nz,
                 dt
@@ -1040,7 +1087,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             vp,
             &grad,
             &grad_wavelet,
-            &illumination,
+            // Gate illumination on compute_illumination (see BS path above).
+            in.compute_illumination ? &illumination : nullptr,
             order,
             launch_config.grid,
             launch_config.block,

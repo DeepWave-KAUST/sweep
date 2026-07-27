@@ -131,6 +131,7 @@ nav:
       - Equations: user-guide/equations.md
       - Operators: user-guide/operators.md
       - Propagators: user-guide/propagators.md
+      - Datasets: user-guide/datasets.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
   - Examples:

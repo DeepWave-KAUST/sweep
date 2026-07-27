@@ -325,6 +325,15 @@ class Warpper(torch.autograd.Function):
         params.boundary_ring_buffers = ctx.boundary_ring_buffers
         params.checkpoint_interval = ctx.checkpoint_interval
         params.checkpoint_count = ctx.checkpoint_count
+        # Compute source/receiver illumination only if the caller requested it
+        # (solver.compute_illumination=True allocates a real, non-empty buffer in
+        # forward).  It is a ~1/3-of-backward extra grid pass; vp grad unaffected.
+        def _wants_illum(b):
+            return isinstance(b, torch.Tensor) and b.numel() > 0
+        params.compute_illumination = (
+            _wants_illum(getattr(ctx, "source_illumination_buffer", None))
+            or _wants_illum(getattr(ctx, "receiver_illumination_buffer", None))
+        )
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.adjoint_workspace = list(ctx.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
@@ -586,6 +595,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._workspace_cache_nt = None
         self.source_illumination = None
         self.receiver_illumination = None
+        # Source/receiver illumination (RTM image) is a ~1/3-of-backward extra
+        # grid pass.  Default OFF for speed; set ``solver.compute_illumination =
+        # True`` to compute it (then read it back from ``solver.source_illumination``
+        # / ``solver.receiver_illumination`` after backward).
+        self.compute_illumination = False
 
     def _cuda_spacing(self):
         # PropBase stores spacing in model-axis order: (dz, dx) or (dz, dy, dx).
@@ -1220,7 +1234,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         requires_model_grad = any(m.requires_grad for m in models)
         requires_wavelet_grad = wavelet.requires_grad
         requires_backward = bool(requires_model_grad or requires_wavelet_grad)
-        if requires_backward:
+        if requires_backward and self.compute_illumination:
             self.source_illumination = torch.zeros_like(unpadded_models[0])
             self.receiver_illumination = torch.zeros_like(unpadded_models[0])
         else:
@@ -1340,9 +1354,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             topo_cat_arg = cat_t
             use_apm_arg = True
 
+        # CPML profiles are built on ``equation.device`` (default 'cpu'); pin
+        # them to the propagator's compute device so an equation created
+        # without ``device=`` (e.g. ``Acoustic()`` + ``PropTorch(dev='cuda')``)
+        # doesn't feed host pointers to the CUDA kernel -> illegal address.
+        # ``.to`` is a no-op when the tensors already live on ``self.dev``.
+        pml_vals = [b.to(self.dev) for b in self.equation.b]
         syn = Warpper.apply(
                 self.forward_func,
-                self.backward_func, 
+                self.backward_func,
                 self.backward_bs_func,
                 self.backward_ckpt_func,
                 self.backward_recursive_ckpt_func,
@@ -1356,7 +1376,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self.abcn,
                 spacing,
                 self._dt,
-                self.equation.b,
+                pml_vals,
                 use_checkpoint,
                 self.ckpt_chunks,
                 use_recursive_checkpoint,
@@ -1613,7 +1633,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.receivers_loc = receivers_t.contiguous()
         fwd.source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         fwd.receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
-        fwd.pml_vals = [p.contiguous() for p in self.equation.b]
+        fwd.pml_vals = [p.to(self.dev).contiguous() for p in self.equation.b]
         fwd.save_all_wavefields = save_all_wavefields
         fwd.use_boundary_saving = use_boundary_saving
         fwd.use_checkpoint = use_ckpt
@@ -1674,7 +1694,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.forward_sources_loc = sources_t.contiguous()
         bwd.source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         bwd.receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
-        bwd.pml_vals = [p.contiguous() for p in self.equation.b]
+        bwd.pml_vals = [p.to(self.dev).contiguous() for p in self.equation.b]
         bwd.nt = self.nt
         bwd.dt = self._dt
         bwd.spacing = spacing
