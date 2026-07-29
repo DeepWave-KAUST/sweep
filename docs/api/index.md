@@ -95,7 +95,7 @@
     </a>
     <a class="sweep-api__card" href="equations/elastic_tti_sg/">
       <div class="sweep-api__card-hd"><code>ElasticTTISG</code><div class="sweep-api__card-tags"><span>2D</span><span>staggered</span></div></div>
-      <p>Axis-aligned staggered-grid TTI elastic; faster than RSG.</p>
+      <p>Axis-aligned staggered-grid TTI elastic.</p>
       <div class="sweep-api__card-models">models: <span class="sweep-api__chip amber">vp0</span> <span class="sweep-api__chip amber">vs0</span> <span class="sweep-api__chip amber">rho</span> <span class="sweep-api__chip amber">ε</span> <span class="sweep-api__chip amber">δ</span> <span class="sweep-api__chip amber">γ</span> <span class="sweep-api__chip amber">θ</span> <span class="sweep-api__chip amber">φ</span></div>
     </a>
   </div>

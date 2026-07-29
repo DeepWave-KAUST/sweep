@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Numerical dispersion & PPW</title>
+<style>
+  :root{ --fg:#1f2429; --muted:#5c6672; --line:#dfe3e8; --panel:#f6f7f9; --accent:#3b6ea5; --accent-fg:#fff;
+         --ok:#2e8b57; --warn:#c98a00; --bad:#c0392b; }
+  @media (prefers-color-scheme:dark){
+    :root{ --fg:#e6e9ec; --muted:#98a2ad; --line:#333a42; --panel:#1b1f24; --accent:#5b8cc4;
+           --ok:#4caf7d; --warn:#e0a92e; --bad:#e0685c; } }
+  .wavelab{ font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--fg); max-width:880px; }
+  .wavelab .bar{ display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; padding:10px 12px;
+                 background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-bottom:9px; }
+  .wavelab .grp{ display:flex; align-items:center; gap:6px; }
+  .wavelab label{ color:var(--muted); white-space:nowrap; font-size:13px; }
+  .wavelab .seg{ display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .wavelab .seg button{ border:0; background:transparent; color:var(--fg); padding:5px 10px; cursor:pointer; font-size:13px; }
+  .wavelab .seg button.on{ background:var(--accent); color:var(--accent-fg); }
+  .wavelab button.btn{ border:1px solid var(--line); background:transparent; color:var(--fg); border-radius:7px; padding:5px 11px; cursor:pointer; font-size:13px; }
+  .wavelab button.btn:hover{ border-color:var(--accent); }
+  .wavelab button.btn.primary{ background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
+  .wavelab input[type=range]{ width:104px; accent-color:var(--accent); }
+  .wavelab .ppw{ font-weight:600; padding:3px 9px; border-radius:20px; font-size:13px; font-variant-numeric:tabular-nums; }
+  .wavelab .cap{ font-size:12px; color:var(--muted); margin:2px 2px 3px; }
+  .wavelab canvas{ width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:10px; background:#000; }
+  .wavelab #trace{ background:#fafafa; }
+  @media (prefers-color-scheme:dark){ .wavelab #trace{ background:#0f1216; } }
+  .wavelab .val{ font-variant-numeric:tabular-nums; min-width:30px; color:var(--fg); }
+</style>
+</head>
+<body>
+<div class="wavelab">
+  <div class="bar">
+    <div class="grp"><label>Frequency</label>
+      <input id="f0" type="range" min="8" max="48" step="1" value="14"><span class="val" id="f0v">14</span><span style="color:var(--muted);font-size:12px">Hz</span></div>
+    <div class="grp"><label>Order</label>
+      <span class="seg" id="ord"><button data-o="2">2nd</button><button data-o="4" class="on">4th</button></span></div>
+    <div class="grp"><label>Velocity</label>
+      <input id="vel" type="range" min="1500" max="4000" step="50" value="2500"><span class="val" id="velv">2500</span></div>
+    <span class="ppw" id="ppw">PPW —</span>
+    <button class="btn primary" id="fire">Fire</button>
+    <button class="btn" id="pause">Pause</button>
+  </div>
+
+  <div class="cap">Wavefield — homogeneous medium; numerical dispersion shows as ripples trailing the wavefront</div>
+  <canvas id="cv" width="840" height="430"></canvas>
+  <div class="cap">Recorded trace at the receiver ▽ — clean pulse vs. dispersive tail; dashed line = exact arrival time</div>
+  <canvas id="trace" width="840" height="170"></canvas>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const NX=280, NZ=140, DH=10.0, VMIN=1500, VMAX=4500, SUBSTEPS=4, N=NX*NZ;
+  const SRCX=(NX*0.20)|0, SRCZ=(NZ>>1), RECX=(NX*0.82)|0, RECZ=(NZ>>1);
+  const OFFSET=(RECX-SRCX)*DH;
+
+  function makeAcoustic(order){
+    let pp=new Float32Array(N), pc=new Float32Array(N), pn=new Float32Array(N), c2=new Float32Array(N);
+    const cour = order===4 ? 0.40 : 0.50;
+    return { dt:()=>cour*DH/VMAX,
+      setModel:(vel,dt)=>{ const k=dt/DH; for(let i=0;i<N;i++){const v=vel[i]*k; c2[i]=v*v;} },
+      reset:()=>{ pp.fill(0); pc.fill(0); pn.fill(0); },
+      step:()=>{ if(order===2){
+          for(let iz=1;iz<NZ-1;iz++){ const r=iz*NX; for(let ix=1;ix<NX-1;ix++){ const k=r+ix;
+            const lap=pc[k-1]+pc[k+1]+pc[k-NX]+pc[k+NX]-4*pc[k]; pn[k]=2*pc[k]-pp[k]+c2[k]*lap; } }
+        } else {
+          for(let iz=2;iz<NZ-2;iz++){ const r=iz*NX; for(let ix=2;ix<NX-2;ix++){ const k=r+ix;
+            const lap=(-(pc[k-2]+pc[k+2]+pc[k-2*NX]+pc[k+2*NX])+16*(pc[k-1]+pc[k+1]+pc[k-NX]+pc[k+NX])-60*pc[k])/12;
+            pn[k]=2*pc[k]-pp[k]+c2[k]*lap; } } } },
+      source:(idx,s)=>{ pn[idx]+=s; },
+      damp:(d)=>{ for(let i=0;i<N;i++){ pn[i]*=d[i]; pc[i]*=d[i]; } },
+      swap:()=>{ const t=pp; pp=pc; pc=pn; pn=t; }, field:()=>pc };
+  }
+
+  const damp=new Float32Array(N), PAD=20;
+  for(let iz=0;iz<NZ;iz++)for(let ix=0;ix<NX;ix++){ const d=Math.min(ix,NX-1-ix,iz,NZ-1-iz); let f=1;
+    if(d<PAD){ const a=(PAD-d)/PAD; f=Math.exp(-(0.09*a)*(0.09*a)*30); } damp[iz*NX+ix]=f; }
+  const vel=new Float32Array(N);
+
+  let F0=14, order=4, V=2500, eng, dt, srcActive=false, srcT=0, disp=0;
+  let T0=1/F0, SRC_DUR=2.4/F0;
+  function ricker(tt){ const a=Math.PI*Math.PI*F0*F0, td=tt-T0, e=a*td*td; return (1-2*e)*Math.exp(-e); }
+
+  const NT=1700, trace=new Float32Array(NT); let ti=0;
+  function build(){ eng=makeAcoustic(order); dt=eng.dt(); vel.fill(V); eng.setModel(vel,dt); }
+  function fire(){ eng.reset(); trace.fill(0); ti=0; disp=0; srcActive=true; srcT=0; playing=true; pauseBtn.textContent='Pause'; }
+  function advance(){ eng.step();
+    if(srcActive){ eng.source(SRCZ*NX+SRCX, ricker(srcT)); srcT+=dt; if(srcT>SRC_DUR)srcActive=false; }
+    eng.damp(damp); eng.swap();
+    if(ti<NT){ trace[ti++]=eng.field()[RECZ*NX+RECX]; } }
+
+  const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+  const off=document.createElement('canvas'); off.width=NX; off.height=NZ;
+  const offctx=off.getContext('2d'), img=offctx.createImageData(NX,NZ), data=img.data;
+  const tc=document.getElementById('trace'), tctx=tc.getContext('2d');
+
+  function renderWave(){
+    const fld=eng.field(); let mx=0;
+    for(let i=0;i<N;i++){ const a=fld[i]<0?-fld[i]:fld[i]; if(a>mx)mx=a; }
+    if(mx>1e-9){ disp+=(0.9/mx-disp)*0.15; }
+    for(let i=0;i<N;i++){ const g0=170; let val=fld[i]*disp; if(val>1)val=1; else if(val<-1)val=-1;
+      let r,g,b; if(val>=0){ r=g0+val*(255-g0); g=g0*(1-val); b=g0*(1-val); } else { const a=-val; b=g0+a*(255-g0); r=g0*(1-a); g=g0*(1-a); }
+      const j=i<<2; data[j]=r; data[j+1]=g; data[j+2]=b; data[j+3]=255; }
+    offctx.putImageData(img,0,0); ctx.imageSmoothingEnabled=true; ctx.drawImage(off,0,0,cv.width,cv.height);
+    const sx=SRCX/NX*cv.width, sz=SRCZ/NZ*cv.height, rx=RECX/NX*cv.width, rz=RECZ/NZ*cv.height;
+    ctx.strokeStyle='#00e5ff'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(sx,sz,6,0,7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx-9,sz); ctx.lineTo(sx+9,sz); ctx.moveTo(sx,sz-9); ctx.lineTo(sx,sz+9); ctx.stroke();
+    ctx.fillStyle='#ffd23f'; ctx.beginPath(); ctx.moveTo(rx-6,rz-8); ctx.lineTo(rx+6,rz-8); ctx.lineTo(rx,rz+2); ctx.closePath(); ctx.fill();
+  }
+  const root=document.querySelector('.wavelab');
+  function css(v){ return getComputedStyle(root).getPropertyValue(v).trim(); }
+  function renderTrace(){
+    const W=tc.width, H=tc.height, mid=H*0.5;
+    tctx.clearRect(0,0,W,H);
+    tctx.strokeStyle=css('--line'); tctx.lineWidth=1; tctx.beginPath(); tctx.moveTo(0,mid); tctx.lineTo(W,mid); tctx.stroke();
+    const tArr=OFFSET/V, xArr=(tArr/(NT*dt))*W;
+    tctx.strokeStyle=css('--muted'); tctx.setLineDash([4,4]); tctx.beginPath(); tctx.moveTo(xArr,6); tctx.lineTo(xArr,H-6); tctx.stroke(); tctx.setLineDash([]);
+    let mx=1e-9; for(let n=0;n<ti;n++){ const a=Math.abs(trace[n]); if(a>mx)mx=a; }
+    tctx.strokeStyle=css('--accent'); tctx.lineWidth=1.6; tctx.beginPath();
+    for(let n=0;n<ti;n++){ const x=n/NT*W, y=mid-(trace[n]/mx)*(mid-8); if(n===0)tctx.moveTo(x,y); else tctx.lineTo(x,y); }
+    tctx.stroke();
+  }
+  let playing=true;
+  function frame(){ if(playing){ for(let s=0;s<SUBSTEPS;s++) advance(); } renderWave(); renderTrace(); requestAnimationFrame(frame); }
+
+  const f0El=document.getElementById('f0'), f0v=document.getElementById('f0v'), velEl=document.getElementById('vel'), velv=document.getElementById('velv');
+  const ppwEl=document.getElementById('ppw'), pauseBtn=document.getElementById('pause');
+  function updatePPW(){ const ppw=V/(F0*DH);
+    let col='--ok', tag='clean'; if(ppw<5){ col='--bad'; tag='dispersive'; } else if(ppw<8){ col='--warn'; tag='marginal'; }
+    ppwEl.textContent='PPW ≈ '+ppw.toFixed(1)+' ('+tag+')';
+    ppwEl.style.color=css(col); ppwEl.style.background=css(col)+'22'; }
+  function apply(){ T0=1/F0; SRC_DUR=2.4/F0; vel.fill(V); eng.setModel(vel,dt); updatePPW(); fire(); }
+
+  f0El.addEventListener('input',()=>{ F0=+f0El.value; f0v.textContent=F0; apply(); });
+  velEl.addEventListener('input',()=>{ V=+velEl.value; velv.textContent=V; apply(); });
+  document.getElementById('ord').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+    order=+b.dataset.o; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); build(); apply(); });
+  document.getElementById('fire').addEventListener('click',fire);
+  pauseBtn.addEventListener('click',()=>{ playing=!playing; pauseBtn.textContent=playing?'Pause':'Play'; });
+
+  build(); updatePPW(); fire(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
