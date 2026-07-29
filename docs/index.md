@@ -104,7 +104,7 @@ loss.backward()            # vp.grad ready for any torch.optim step
         <h4>Marmousi FWI</h4>
         <p>3.5 km × 17 km Marmousi at 25 m grid. 20 shots, 200 receivers, 4 s record. Adam (lr=25, eps=1e-16) on the compiled CUDA backend.</p>
         <div class="sweep-nb__stats">
-          <div><span>RUNTIME</span><strong>6.7 s</strong></div>
+          <div><span>RUNTIME</span><strong>6.8 s</strong></div>
           <div><span>ITERS</span><strong>30</strong></div>
           <div><span>LOSS</span><strong>17× drop</strong></div>
         </div>
@@ -154,7 +154,7 @@ loss.backward()            # vp.grad ready for any torch.optim step
     <div class="sweep-stack__head"><span class="sweep-stack__dot sweep-stack__dot--sq" style="background:#ED8B2E"></span><span class="sweep-stack__role">GPU</span></div>
     <div class="sweep-stack__name">CUDA</div>
     <div class="sweep-stack__version">11 / 12</div>
-    <div class="sweep-stack__desc">NVIDIA H100, A100, L40S, RTX 6000 Ada.</div>
+    <div class="sweep-stack__desc">NVIDIA V100, A100, L40S, RTX 6000 Ada.</div>
   </div>
   <div class="sweep-stack__card">
     <div class="sweep-stack__head"><span class="sweep-stack__dot" style="background:#1AA690"></span><span class="sweep-stack__role">ALWAYS-ON</span></div>
