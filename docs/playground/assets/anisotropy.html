@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anisotropic qP wavefront</title>
+<style>
+  :root{ --fg:#1f2429; --muted:#5c6672; --line:#dfe3e8; --panel:#f6f7f9; --accent:#3b6ea5; --accent-fg:#fff; --iso:#9aa4ad; --axis:#c98a1f; }
+  @media (prefers-color-scheme:dark){
+    :root{ --fg:#e6e9ec; --muted:#98a2ad; --line:#333a42; --panel:#1b1f24; --accent:#6ea0e0; --iso:#7a828b; --axis:#e0a92e; } }
+  .wavelab{ font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--fg); max-width:760px; }
+  .wavelab .bar{ display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; padding:10px 12px;
+                 background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-bottom:9px; }
+  .wavelab .grp{ display:flex; align-items:center; gap:6px; }
+  .wavelab label{ color:var(--muted); white-space:nowrap; font-size:13px; }
+  .wavelab button.btn{ border:1px solid var(--line); background:transparent; color:var(--fg); border-radius:7px; padding:5px 11px; cursor:pointer; font-size:13px; }
+  .wavelab button.btn:hover{ border-color:var(--accent); }
+  .wavelab button.btn.primary{ background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
+  .wavelab input[type=range]{ width:96px; accent-color:var(--accent); }
+  .wavelab .eta{ font-weight:600; padding:3px 9px; border-radius:20px; font-size:13px; font-variant-numeric:tabular-nums;
+                 color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); }
+  .wavelab canvas{ width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:10px; background:#0b0d10; }
+  @media (prefers-color-scheme:light){ .wavelab canvas{ background:#fbfbfc; } }
+  .wavelab .legend{ display:flex; flex-wrap:wrap; gap:6px 18px; align-items:center; color:var(--muted); font-size:12px; margin:8px 2px 0; }
+  .wavelab .val{ font-variant-numeric:tabular-nums; min-width:34px; color:var(--fg); }
+  .wavelab .k{ display:inline-block; width:22px; height:0; border-top-width:2px; vertical-align:middle; margin-right:5px; }
+</style>
+</head>
+<body>
+<div class="wavelab">
+  <div class="bar">
+    <div class="grp"><label>ε (epsilon)</label><input id="eps" type="range" min="-0.1" max="0.4" step="0.02" value="0.20"><span class="val" id="epsv">0.20</span></div>
+    <div class="grp"><label>δ (delta)</label><input id="del" type="range" min="-0.1" max="0.4" step="0.02" value="0.10"><span class="val" id="delv">0.10</span></div>
+    <div class="grp"><label>Tilt</label><input id="tilt" type="range" min="0" max="90" step="5" value="0"><span class="val" id="tiltv">0°</span></div>
+    <span class="eta" id="eta">η —</span>
+    <button class="btn primary" id="play">Pause</button>
+    <div class="grp"><label>Preset</label>
+      <button class="btn" data-p="iso">Isotropic</button>
+      <button class="btn" data-p="vti">Shale VTI</button>
+      <button class="btn" data-p="tti">Tilted TTI</button></div>
+  </div>
+
+  <canvas id="cv" width="760" height="520"></canvas>
+
+  <div class="legend">
+    <span><span class="k" style="border-top:2px solid var(--accent)"></span>qP wavefront (anisotropic)</span>
+    <span><span class="k" style="border-top:2px dashed var(--iso)"></span>isotropic reference</span>
+    <span><span class="k" style="border-top:2px dotted var(--axis)"></span>symmetry axis</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  // Thomsen weak-anisotropy qP phase velocity:  v(θ)/v0 = 1 + δ sin²θcos²θ + ε sin⁴θ
+  // Wavefront (group surface) point: x = R(g sinθ + g' cosθ),  z = R(g cosθ − g' sinθ)
+  let eps=0.20, del=0.10, tilt=0, playing=true, tAnim=0;
+  const NPT=200;
+
+  const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+  const root=document.querySelector('.wavelab');
+  const css=(v)=>getComputedStyle(root).getPropertyValue(v).trim();
+
+  function wavefront(R, th0){ // returns array of [x,y] screen offsets for base radius R, tilt th0 (rad)
+    const pts=[], ct=Math.cos(th0), st=Math.sin(th0);
+    for(let i=0;i<=NPT;i++){ const th=i/NPT*2*Math.PI, s=Math.sin(th), c=Math.cos(th);
+      const g = 1 + del*s*s*c*c + eps*s*s*s*s;
+      const gp = del*Math.sin(2*th)*Math.cos(2*th) + 4*eps*s*s*s*c;
+      const x = R*(g*s + gp*c), z = R*(g*c - gp*s);
+      pts.push([ x*ct + z*st, -x*st + z*ct ]); // rotate point by tilt; screen y = down
+    }
+    return pts;
+  }
+
+  function draw(){
+    const W=cv.width, H=cv.height, cx=W/2, cy=H/2, Rmax=Math.min(W,H)*0.40;
+    ctx.clearRect(0,0,W,H);
+    const th0=tilt*Math.PI/180;
+    // symmetry axis (dotted) — the VTI axis, tilted by th0 from vertical
+    ctx.strokeStyle=css('--axis'); ctx.lineWidth=1.4; ctx.setLineDash([2,4]);
+    const ax=Math.sin(th0), az=Math.cos(th0), L=Rmax*1.15;
+    ctx.beginPath(); ctx.moveTo(cx-ax*L, cy-az*L); ctx.lineTo(cx+ax*L, cy+az*L); ctx.stroke(); ctx.setLineDash([]);
+    // rippling concentric fronts
+    const K=4;
+    for(let k=0;k<K;k++){ let f=(tAnim + k/K)%1; if(f<0.04) continue;
+      const R=f*Rmax, alpha=Math.sin(Math.PI*f);
+      // isotropic reference circle (dashed)
+      ctx.globalAlpha=alpha*0.7; ctx.strokeStyle=css('--iso'); ctx.lineWidth=1.3; ctx.setLineDash([5,5]);
+      ctx.beginPath(); ctx.arc(cx,cy,R,0,7); ctx.stroke(); ctx.setLineDash([]);
+      // anisotropic qP wavefront (solid)
+      ctx.globalAlpha=alpha; ctx.strokeStyle=css('--accent'); ctx.lineWidth=2; ctx.beginPath();
+      const p=wavefront(R, th0);
+      ctx.moveTo(cx+p[0][0], cy+p[0][1]);
+      for(let i=1;i<p.length;i++) ctx.lineTo(cx+p[i][0], cy+p[i][1]);
+      ctx.stroke();
+    }
+    ctx.globalAlpha=1;
+    // source
+    ctx.fillStyle=css('--accent'); ctx.beginPath(); ctx.arc(cx,cy,3.5,0,7); ctx.fill();
+  }
+
+  function frame(){ if(playing){ tAnim=(tAnim+0.005)%1; } draw(); requestAnimationFrame(frame); }
+
+  const epsEl=document.getElementById('eps'), delEl=document.getElementById('del'), tiltEl=document.getElementById('tilt');
+  const epsv=document.getElementById('epsv'), delv=document.getElementById('delv'), tiltv=document.getElementById('tiltv');
+  const etaEl=document.getElementById('eta'), playBtn=document.getElementById('play');
+  function updateEta(){ const eta=(eps-del)/(1+2*del);
+    etaEl.textContent = 'η = '+eta.toFixed(3) + (Math.abs(eps-del)<1e-6?'  (elliptical)':''); }
+  function sync(){ epsv.textContent=eps.toFixed(2); delv.textContent=del.toFixed(2); tiltv.textContent=tilt+'°'; updateEta(); }
+
+  epsEl.addEventListener('input',()=>{ eps=+epsEl.value; sync(); });
+  delEl.addEventListener('input',()=>{ del=+delEl.value; sync(); });
+  tiltEl.addEventListener('input',()=>{ tilt=+tiltEl.value; sync(); });
+  playBtn.addEventListener('click',()=>{ playing=!playing; playBtn.textContent=playing?'Pause':'Play'; });
+  document.querySelectorAll('[data-p]').forEach(b=>b.addEventListener('click',()=>{
+    const p=b.dataset.p;
+    if(p==='iso'){ eps=0; del=0; tilt=0; } else if(p==='vti'){ eps=0.20; del=0.10; tilt=0; } else { eps=0.25; del=0.10; tilt=40; }
+    epsEl.value=eps; delEl.value=del; tiltEl.value=tilt; sync(); }));
+
+  sync(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
