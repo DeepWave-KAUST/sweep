@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 540" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="vel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3a8c"/><stop offset="0.35" stop-color="#2a9d8f"/>
+      <stop offset="0.7" stop-color="#e9c46a"/><stop offset="1" stop-color="#c0392b"/>
+    </linearGradient>
+    <linearGradient id="grd" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="0.5" stop-color="#b0c4de"/><stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#444"/></marker>
+    <marker id="ahb" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2a7de1"/></marker>
+    <marker id="ahg" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2e8b57"/></marker>
+  </defs>
+
+  <text x="580" y="38" text-anchor="middle" font-size="30" font-weight="700" fill="#1a1a1a">Batched per-shot local-window FWI</text>
+  <text x="580" y="66" text-anchor="middle" font-size="17" fill="#666">a towed streamer is translation-invariant → every shot's window has the same shape → they batch into one solver call</text>
+
+  <!-- ===== Stage 1 ===== -->
+  <rect x="30" y="100" width="300" height="155" fill="url(#vel)" opacity="0.9" stroke="#333" stroke-width="1.5"/>
+  <g fill="#fff" stroke="#000" stroke-width="0.6" font-size="19" text-anchor="middle">
+    <text x="120" y="112">★</text><text x="188" y="112">★</text><text x="256" y="112">★</text>
+  </g>
+  <g stroke="#00e5ff" stroke-width="2.4" opacity="0.9">
+    <line x1="58" y1="110" x2="120" y2="110"/><line x1="126" y1="110" x2="188" y2="110"/><line x1="194" y1="110" x2="256" y2="110"/>
+  </g>
+  <rect x="55"  y="106" width="95" height="147" fill="none" stroke="#ffd000" stroke-width="2.4" stroke-dasharray="6 3"/>
+  <rect x="123" y="106" width="95" height="147" fill="none" stroke="#ff7a00" stroke-width="2.4" stroke-dasharray="6 3"/>
+  <rect x="191" y="106" width="95" height="147" fill="none" stroke="#ff2d78" stroke-width="2.4" stroke-dasharray="6 3"/>
+  <text x="180" y="284" text-anchor="middle" font-size="18" font-weight="600" fill="#222">full model + streamer</text>
+  <text x="180" y="307" text-anchor="middle" font-size="15" fill="#666">each shot's window = its aperture</text>
+  <text x="180" y="326" text-anchor="middle" font-size="15" fill="#666">(same width W, only x shifts)</text>
+
+  <path d="M336,178 L384,178" stroke="#444" stroke-width="2.4" marker-end="url(#ah)"/>
+  <text x="360" y="168" text-anchor="middle" font-size="14" fill="#555">crop</text>
+
+  <!-- ===== Stage 2 ===== -->
+  <g stroke="#333" stroke-width="1.4">
+    <rect x="460" y="116" width="84" height="128" fill="url(#vel)" opacity="0.5"/>
+    <rect x="447" y="130" width="84" height="128" fill="url(#vel)" opacity="0.72"/>
+    <rect x="434" y="144" width="84" height="128" fill="url(#vel)" opacity="0.92"/>
+  </g>
+  <text x="476" y="298" text-anchor="middle" font-size="19" font-weight="700" fill="#1a1a1a">(B, nz, W)</text>
+  <text x="476" y="320" text-anchor="middle" font-size="15" fill="#666">one model per shot</text>
+
+  <path d="M548,192 L648,192" stroke="#2a7de1" stroke-width="3" marker-end="url(#ahb)"/>
+  <text x="598" y="180" text-anchor="middle" font-size="16" font-weight="700" fill="#2a7de1">ONE batched solver call</text>
+  <text x="598" y="212" text-anchor="middle" font-size="13.5" fill="#2a7de1">impl='c' + boundary saving · shot b runs in vp[b]</text>
+
+  <!-- ===== Stage 3 ===== -->
+  <g stroke="#333" stroke-width="1.4">
+    <rect x="686" y="116" width="84" height="128" fill="url(#grd)"/>
+    <rect x="673" y="130" width="84" height="128" fill="url(#grd)"/>
+    <rect x="660" y="144" width="84" height="128" fill="url(#grd)"/>
+  </g>
+  <path d="M668,190 q11,-16 22,0 t22,0 t22,0" fill="none" stroke="#c0392b" stroke-width="1.8" opacity="0.85"/>
+  <text x="702" y="298" text-anchor="middle" font-size="18" font-weight="600" fill="#222">per-shot gradients</text>
+  <text x="702" y="320" text-anchor="middle" font-size="15" fill="#666">∂L/∂vp  (B, nz, W)</text>
+
+  <path d="M774,192 L874,192" stroke="#2e8b57" stroke-width="3" marker-end="url(#ahg)"/>
+  <text x="824" y="180" text-anchor="middle" font-size="16" font-weight="700" fill="#2e8b57">scatter-add (autograd)</text>
+  <text x="824" y="212" text-anchor="middle" font-size="13.5" fill="#2e8b57">overlapping windows accumulate</text>
+
+  <!-- ===== Stage 4 ===== -->
+  <rect x="900" y="100" width="250" height="155" fill="#fafafa" stroke="#333" stroke-width="1.5"/>
+  <g fill="none" stroke="#c0392b" stroke-width="1.7" opacity="0.75">
+    <path d="M918,140 q30,50 60,0"/><path d="M968,140 q30,50 60,0"/><path d="M1018,140 q30,50 60,0"/><path d="M1068,140 q30,50 60,0"/>
+  </g>
+  <g fill="none" stroke="#2a7de1" stroke-width="1.4" opacity="0.6">
+    <path d="M918,162 q30,42 60,0"/><path d="M968,162 q30,42 60,0"/><path d="M1018,162 q30,42 60,0"/><path d="M1068,162 q30,42 60,0"/>
+  </g>
+  <text x="1025" y="284" text-anchor="middle" font-size="18" font-weight="600" fill="#222">full-model gradient</text>
+  <text x="1025" y="307" text-anchor="middle" font-size="15" fill="#666">windows summed back</text>
+
+  <!-- ===== banner ===== -->
+  <rect x="30" y="372" width="1120" height="152" rx="9" fill="#f3f6fb" stroke="#d4dcea" stroke-width="1"/>
+  <text x="52" y="404" font-size="21" font-weight="700" fill="#1a3d6e">Why it matters</text>
+  <text x="52" y="436" font-size="16" fill="#333"><tspan font-weight="700">GPU-parallel:</tspan> all shots advance together in one kernel launch, each in its own local model — no per-shot Python loop.</text>
+  <text x="52" y="466" font-size="16" fill="#333"><tspan font-weight="700">Memory ∝ one aperture:</tspan> the solver only ever holds the ~W-wide crop, not the full survey line — fine grids fit on a single GPU.</text>
+  <text x="52" y="496" font-size="16" fill="#333"><tspan font-weight="700">Bit-exact:</tspan> the batched gradient equals looping the shots one at a time (verified for impl='c' store-all / boundary-saving and eager).</text>
+</svg>

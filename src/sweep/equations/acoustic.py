@@ -64,6 +64,13 @@ class Acoustic(SecondOrderEquation):
 
     default_pml_type = "cpmlr"
 
+    # The 2-D Acoustic CUDA kernels (forward / adjoint / gradient) all stride
+    # the ``vp`` buffer per batch index ``b`` (``vp + b*nz*nx``) and write the
+    # model gradient into a per-shot ``zeros_like(vp)`` buffer, so a per-shot
+    # batched model ``(B, nz, nx)`` is supported directly by ``impl='c'``:
+    # shot ``b`` propagates in ``vp[b]`` and its gradient is kept per-shot.
+    supports_batched_models = True
+
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2):
         """Build the acoustic equation operator.
 

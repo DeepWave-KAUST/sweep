@@ -49,6 +49,16 @@ class WaveEquation:
     # override.
     supports_apm = False
 
+    # Whether the compiled (``impl='c'``) kernels accept a per-shot *batched*
+    # velocity model — one model per shot in the batch, shape ``(B, *spatial)``
+    # — in addition to a single shared ``(*spatial)`` model broadcast across
+    # the batch.  Requires every model-reading kernel (forward, adjoint and
+    # gradient) to stride the model buffer per batch index ``b`` (which the
+    # 2-D Acoustic and Elastic kernels already do).  Defaults to False;
+    # equations whose CUDA kernels are known to be per-batch-correct override
+    # to True.
+    supports_batched_models = False
+
     # Class-level spec tables. Subclasses that declare these tables drive
     # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``
     # properties below automatically; manual property overrides remain
