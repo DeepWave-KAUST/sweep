@@ -172,6 +172,12 @@ nav:
               - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
+  - Playground:
+      - Overview: playground/index.md
+      - Wave modeling: playground/modeling.md
+      - Seismogram & free surface: playground/seismogram.md
+      - Numerical dispersion: playground/dispersion.md
+      - Anisotropic wavefront: playground/anisotropy.md
   - API Reference:
       - api/index.md
       - Equations:
