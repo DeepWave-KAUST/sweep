@@ -60,6 +60,15 @@ class Elastic(FirstOrderEquation):
     # run with free_surface=True (the propagator's guard skips this equation).
     supports_bs_free_surface = True
 
+    # The 2-D elastic CUDA kernels (forward / adjoint / gradient) stride EVERY
+    # model buffer per batch index ``b`` (``rho + b*nz*nx``, ``lambda + b*nz*nx``,
+    # ``mu + b*nz*nx``) and the C wire derives ``lambda``/``mu`` from vp/vs/rho
+    # with element-wise ops that preserve a leading batch axis. A per-shot
+    # batched model ``(B, nz, nx)`` for each of vp/vs/rho is therefore supported
+    # directly by ``impl='c'``: shot ``b`` propagates in its own (vp,vs,rho)[b]
+    # and each parameter's gradient is kept per-shot. Same for the eager path.
+    supports_batched_models = True
+
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic equation operator.
 

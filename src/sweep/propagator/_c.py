@@ -1164,9 +1164,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
           inserted with **no** repeat, so the compiled kernels' per-batch model
           stride reads each shot's own model and autograd keeps the gradient
           per-shot ``(B, *spatial)``.  Only enabled for equations that advertise
-          ``supports_batched_models`` (currently the 2-D Acoustic solver); every
-          other equation keeps erroring on a batched model rather than silently
-          mis-striding it.
+          ``supports_batched_models`` (currently the 2-D Acoustic and Elastic
+          solvers); every other equation keeps erroring on a batched model
+          rather than silently mis-striding it.
         """
         if m.ndim == self.ndim:
             # Shared model — broadcast across the batch.  Kept identical to the
@@ -1176,8 +1176,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             if not (self.ndim == 2 and getattr(self.equation, "supports_batched_models", False)):
                 raise NotImplementedError(
                     "Per-shot batched velocity models (a leading batch dim) are "
-                    "only supported by the 2-D Acoustic impl='c' solver; got a "
-                    f"{m.ndim}-D model for {type(self.equation).__name__} "
+                    "only supported by 2-D impl='c' solvers whose kernels stride "
+                    "the model per batch index (currently Acoustic and Elastic); "
+                    f"got a {m.ndim}-D model for {type(self.equation).__name__} "
                     f"(ndim={self.ndim}). Pass a single shared {self.ndim}-D "
                     "model broadcast across the batch instead."
                 )

@@ -121,8 +121,8 @@ class _PropTorchEager(
           broadcast). Without the inserted axis the model's leading batch dim
           would collide with the wavefield's channel dim and broadcast to
           ``(B, B, *spatial)``. Only enabled for equations advertising
-          ``supports_batched_models`` (currently the 2-D Acoustic solver);
-          every other equation keeps raising rather than silently
+          ``supports_batched_models`` (currently the 2-D Acoustic and Elastic
+          solvers); every other equation keeps raising rather than silently
           mis-broadcasting.
         """
         laid_out = []
@@ -134,8 +134,9 @@ class _PropTorchEager(
                 if not (self.ndim == 2 and getattr(self.equation, "supports_batched_models", False)):
                     raise NotImplementedError(
                         "Per-shot batched velocity models (a leading batch dim) are "
-                        "only supported by the 2-D Acoustic solver; got a "
-                        f"{m.ndim}-D model for {type(self.equation).__name__} "
+                        "only supported by 2-D solvers whose kernels stride the "
+                        "model per batch index (currently Acoustic and Elastic); "
+                        f"got a {m.ndim}-D model for {type(self.equation).__name__} "
                         f"(ndim={self.ndim}). Pass a single shared {self.ndim}-D "
                         "model broadcast across the batch instead."
                     )
