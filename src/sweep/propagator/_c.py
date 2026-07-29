@@ -1149,6 +1149,53 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             return ()
         return tuple(self.checkpoints)
 
+    def _model_to_cuda_batch(self, m, batch_size):
+        """Shape a padded model tensor to the CUDA batch layout ``(B, 1, *spatial)``.
+
+        Two input forms are accepted:
+
+        * **shared** — ``m.ndim == self.ndim`` (e.g. ``(nz, nx)`` in 2-D): the
+          model is broadcast across the shot batch by repeating it
+          ``batch_size`` times.  PyTorch autograd therefore *sums* the per-shot
+          CUDA model gradient back into one shared-model gradient — the
+          historical ``impl='c'`` behaviour, preserved bit-for-bit.
+        * **per-shot** — ``m.ndim == self.ndim + 1`` (e.g. ``(B, nz, nx)`` in
+          2-D): shot ``b`` propagates in ``m[b]``.  A singleton channel axis is
+          inserted with **no** repeat, so the compiled kernels' per-batch model
+          stride reads each shot's own model and autograd keeps the gradient
+          per-shot ``(B, *spatial)``.  Only enabled for equations that advertise
+          ``supports_batched_models`` (currently the 2-D Acoustic and Elastic
+          solvers); every other equation keeps erroring on a batched model
+          rather than silently mis-striding it.
+        """
+        if m.ndim == self.ndim:
+            # Shared model — broadcast across the batch.  Kept identical to the
+            # original expression so the shared-model path stays bit-exact.
+            return m[None, None, ...].repeat(batch_size, *([1] * (m.ndim + 1)))
+        if m.ndim == self.ndim + 1:
+            if not (self.ndim == 2 and getattr(self.equation, "supports_batched_models", False)):
+                raise NotImplementedError(
+                    "Per-shot batched velocity models (a leading batch dim) are "
+                    "only supported by 2-D impl='c' solvers whose kernels stride "
+                    "the model per batch index (currently Acoustic and Elastic); "
+                    f"got a {m.ndim}-D model for {type(self.equation).__name__} "
+                    f"(ndim={self.ndim}). Pass a single shared {self.ndim}-D "
+                    "model broadcast across the batch instead."
+                )
+            if m.shape[0] != batch_size:
+                raise ValueError(
+                    f"Per-shot model batch ({int(m.shape[0])}) must equal the "
+                    f"shot batch size ({int(batch_size)}); provide exactly one "
+                    "model per shot as (B, nz, nx)."
+                )
+            # Per-shot model: (B, *spatial) -> (B, 1, *spatial).  No repeat, so
+            # the CUDA per-batch gradient flows back per-shot.
+            return m[:, None, ...]
+        raise ValueError(
+            f"Model tensor has {m.ndim} dims; expected {self.ndim} for a shared "
+            f"model or {self.ndim + 1} for a per-shot batched (B, ...) model."
+        )
+
     @torch._dynamo.disable
     def forward(self, wavelet, sources, receivers, models=None, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
         """Forward pass of the wave equation.
@@ -1280,7 +1327,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         lap_coes, grad_coes = self._build_fd_coefficients(M)
 
-        models = [m[None, None, ...].repeat(batch_size, *([1]*(m.ndim+1))) for m in self.models_padded]
+        models = [self._model_to_cuda_batch(m, batch_size) for m in self.models_padded]
         if getattr(self.equation, "prepare_models_for_c", False):
             prepare = getattr(self.equation, "prepare_models", None)
             if not callable(prepare):

@@ -105,6 +105,55 @@ class _PropTorchEager(
             return prepare(models)
         return models
 
+    def _runtime_batch_layout(self, models, batch_size):
+        """Shape padded models to the eager batch layout, per-shot or shared.
+
+        The eager wavefield is laid out as ``(B, 1, *spatial)`` (batch, singleton
+        channel, spatial). A model must broadcast against that:
+
+        * **shared** — ``m.ndim == self.ndim`` (e.g. ``(nz, nx)`` in 2-D): the
+          model is left untouched so it broadcasts over both the batch and
+          channel axes, exactly as before. The shared path is therefore
+          bit-identical to the pre-batched-model behaviour.
+        * **per-shot** — ``m.ndim == self.ndim + 1`` (e.g. ``(B, nz, nx)``): a
+          singleton channel axis is inserted -> ``(B, 1, *spatial)`` so shot
+          ``b`` multiplies wavefield ``b`` with model ``b`` (no cross-shot
+          broadcast). Without the inserted axis the model's leading batch dim
+          would collide with the wavefield's channel dim and broadcast to
+          ``(B, B, *spatial)``. Only enabled for equations advertising
+          ``supports_batched_models`` (currently the 2-D Acoustic and Elastic
+          solvers); every other equation keeps raising rather than silently
+          mis-broadcasting.
+        """
+        laid_out = []
+        for m in models:
+            if m.ndim == self.ndim:
+                laid_out.append(m)
+                continue
+            if m.ndim == self.ndim + 1:
+                if not (self.ndim == 2 and getattr(self.equation, "supports_batched_models", False)):
+                    raise NotImplementedError(
+                        "Per-shot batched velocity models (a leading batch dim) are "
+                        "only supported by 2-D solvers whose kernels stride the "
+                        "model per batch index (currently Acoustic and Elastic); "
+                        f"got a {m.ndim}-D model for {type(self.equation).__name__} "
+                        f"(ndim={self.ndim}). Pass a single shared {self.ndim}-D "
+                        "model broadcast across the batch instead."
+                    )
+                if m.shape[0] != batch_size:
+                    raise ValueError(
+                        f"Per-shot model batch ({int(m.shape[0])}) must equal the "
+                        f"shot batch size ({int(batch_size)}); provide exactly one "
+                        "model per shot as (B, nz, nx)."
+                    )
+                laid_out.append(m[:, None, ...])
+                continue
+            raise ValueError(
+                f"Model tensor has {m.ndim} dims; expected {self.ndim} for a shared "
+                f"model or {self.ndim + 1} for a per-shot batched (B, ...) model."
+            )
+        return laid_out
+
     def _resolve_snapshot_times(self, nt, return_wavefield, snapshot_times, snapshot_interval):
         if not return_wavefield:
             return []
@@ -327,6 +376,11 @@ class _PropTorchEager(
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
         self.models_padded = models
+        # Insert a singleton channel axis for per-shot batched models so each
+        # shot propagates in its own model; shared models pass through unchanged
+        # (keeping the shared path bit-exact). Done after storing models_padded
+        # so that attribute stays the raw padded model, matching the C backend.
+        models = self._runtime_batch_layout(models, batch_size)
         runtime_models = self._prepare_runtime_models(models)
         wavefield = [
             self._get_cached_tensor(f"wavefield:{index}", shape_wavefield, device=self.dev, dtype=torch.float32)
