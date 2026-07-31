@@ -1,3 +1,5 @@
 include LICENSE
 include README.md
+include build_config.py
+include setup_cuda.py
 recursive-include src/sweep/csrc *.cpp *.cu *.cuh *.h CMakeLists.txt
