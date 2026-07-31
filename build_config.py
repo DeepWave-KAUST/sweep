@@ -179,12 +179,14 @@ def make_build_extension(BuildExtension):
 
 
 def build_ext_kwargs(build_cuda=None):
-    """Return setup() kwargs for the C++/CUDA extension module.
+    """Return setup() kwargs for the optional AOT C++/CUDA extension.
 
-    All package metadata (name, version, dependencies, entry-points, packages,
-    classifiers, …) lives in ``pyproject.toml`` under PEP 621. This function
-    returns only the bits that PEP 621 can't express: ``ext_modules`` and
-    ``cmdclass`` for the optional CUDA build.
+    The default distribution is **JIT** (see ``sweep/_jit.py``): one ``py3-none``
+    wheel ships the C++/CUDA sources and compiles ``sweep._C`` against the user's
+    own torch on first use — so this returns NO ``ext_modules`` and every dep
+    comes from ``pyproject.toml``. The ``SWEEP_BUILD_CUDA=1`` path is kept only
+    for building optional pre-compiled fast-path wheels (e.g. a GitHub release),
+    never for the PyPI wheel.
     """
     if build_cuda is None:
         build_cuda = env_flag_enabled("SWEEP_BUILD_CUDA")
@@ -244,7 +246,10 @@ def build_ext_kwargs(build_cuda=None):
                     *extra_nvcc,
                 ],
             },
-            extra_link_args=omp_flags,
+            # RPATH so the shipped wheel resolves libtorch/libc10 against the
+            # USER's torch (auditwheel --exclude keeps those libs external).
+            # Belt-and-suspenders: sweep always imports torch before sweep._C.
+            extra_link_args=[*omp_flags, "-Wl,-rpath,$ORIGIN/../torch/lib"],
         )
     ]
     kwargs["cmdclass"] = {

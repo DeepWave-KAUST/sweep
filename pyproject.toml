@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sweep-solver"
-version = "0.0.0"
+version = "0.1.0"
 description = "Seismic Wave Equation Exploration Platform — equations, propagators, operators."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Shaowen Wang", email = "shaowen.wang@kaust.edu.sa"},
@@ -19,16 +19,24 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Physics",
 ]
+# JIT distribution: one py3-none wheel ships the C++/CUDA *sources* and compiles
+# sweep._C against the user's OWN torch on first use (see sweep/_jit.py), so a
+# single wheel works with any torch version + any Python 3. torch is unpinned.
+# The first-use compile needs nvcc from a CUDA toolkit (system / `module load
+# cuda` / `conda install -c nvidia cuda-nvcc`) — the pip `nvidia-cuda-nvcc-cu12`
+# wheel ships only ptxas, not the nvcc frontend, so it can't be relied on.
 dependencies = [
     "numpy>=1.20",
     "scipy>=1.7",
+    "torch",
+    "ninja",
 ]
 
 [project.optional-dependencies]
@@ -56,3 +64,11 @@ package-dir = {"" = "src"}
 where = ["src"]
 include = ["sweep*", "geophyai*"]
 exclude = ["sweep.csrc*"]
+
+# Ship the C++/CUDA sources inside the wheel — sweep._C is JIT-compiled from them
+# on first use (csrc is data, not an importable package, hence excluded above).
+[tool.setuptools.package-data]
+sweep = [
+    "csrc/**/*.cu", "csrc/**/*.cuh", "csrc/**/*.cpp",
+    "csrc/**/*.h", "csrc/**/*.hpp", "csrc/**/CMakeLists.txt",
+]
