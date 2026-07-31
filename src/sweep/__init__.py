@@ -81,23 +81,30 @@ _extend_package_path_with_build_outputs()
 
 
 def is_torch_binding_available() -> bool:
-    """Return True when PyTorch and the compiled ``sweep._C`` binding are usable."""
+    """Return True when PyTorch + a CUDA GPU + nvcc are present, so ``sweep._C``
+    can be JIT-compiled against your torch on first use. Does NOT trigger the
+    compile itself (see ``sweep._jit``)."""
     if find_spec("torch") is None:
         return False
-
     try:
-        import torch
+        from sweep import _jit
+        return _jit.can_build()[0]
     except Exception:
         return False
 
-    if not torch.cuda.is_available():
-        return False
 
-    try:
-        import_module("sweep._C")
-    except Exception:
-        return False
+def precompile() -> bool:
+    """Build the compiled CUDA backend (``sweep._C``) now.
 
+    Runs the one-time, per-GPU-arch JIT compile (~3-5 min) up front — e.g. right
+    after ``pip install`` — so it does NOT surprise you on first use of
+    ``impl='c'``. A no-op once cached. Raises a clear error if PyTorch, a CUDA
+    GPU, or a suitable ``nvcc`` (>=12.6) is missing::
+
+        python -c "import sweep; sweep.precompile()"
+    """
+    import sweep._C as _C
+    _C._load()
     return True
 
 
