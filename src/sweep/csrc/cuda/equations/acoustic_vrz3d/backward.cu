@@ -31,6 +31,25 @@ void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
     wf.zetaz_t.zero_();
 }
 
+// Per-backward reusable scratch for the DD (per-step) VRZ backward.  A domain-
+// decomposed backward drives ONE single-step backward_bs call per time step
+// (ModelParallel._run_adjoint), and the time-invariant adjoint coefficients
+// (inv_z, C0/Cx/Cy/Cz = vp², ∂b·κ) + the split-gradient scratch (c_*/e_*) were
+// being reallocated + recomputed on EVERY step — ~30 s/iter of pure waste at
+// production scale (nt≈9000).  These depend only on the model, which is fixed
+// within a backward, so they are computed ONCE (first segment) and reused.
+// Leaked singleton: never destroyed, so no torch-tensor teardown races with CUDA
+// context shutdown at process exit.
+struct VrzBwdScratch {
+    torch::Tensor inv_z, C0, Cx, Cy, Cz, c_x, c_y, c_z, e_x, e_y, e_z;
+    void* vp_ptr = nullptr;
+    void* z_ptr = nullptr;
+};
+static VrzBwdScratch& vrz_bwd_scratch() {
+    static VrzBwdScratch* s = new VrzBwdScratch();
+    return *s;
+}
+
 BackwardOutput backward_full_impl(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
@@ -292,16 +311,33 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         grad_vp = torch::zeros_like(vp);
         grad_z = torch::zeros_like(z);
     }
-    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
-    auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
-    auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
-    auto Cz = torch::zeros_like(vp);    // ∂_z b·κ
-    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
-    auto c_y = torch::zeros_like(vp);
-    auto c_z = torch::zeros_like(vp);
-    auto e_x = torch::zeros_like(vp);
-    auto e_y = torch::zeros_like(vp);
-    auto e_z = torch::zeros_like(vp);
+    // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*): allocate ONCE
+    // and, for a DD per-step backward, recompute/zero only on the FIRST segment
+    // (they depend only on the fixed-within-a-backward model).  See VrzBwdScratch.
+    // Bit-exact vs the old per-step alloc+zero: BUILD_VRZ_ADJOINT_COEFFS overwrites
+    // C0..Cz, and build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
+    // step while their halo stays at the once-zeroed 0 (the divergence reads a 0
+    // halo either way).  ``grads_out`` (grad_vp/grad_z) stays Python-bound.
+    auto& _sc = vrz_bwd_scratch();
+    const bool _sc_realloc = !_sc.C0.defined() || _sc.C0.sizes() != vp.sizes()
+                          || _sc.C0.device() != vp.device();
+    const bool _sc_recompute = first_segment || _sc_realloc
+                            || _sc.vp_ptr != vp.data_ptr() || _sc.z_ptr != z.data_ptr();
+    if (_sc_realloc) {
+        _sc.C0 = torch::empty_like(vp); _sc.Cx = torch::empty_like(vp);
+        _sc.Cy = torch::empty_like(vp); _sc.Cz = torch::empty_like(vp);
+        _sc.c_x = torch::zeros_like(vp); _sc.c_y = torch::zeros_like(vp);
+        _sc.c_z = torch::zeros_like(vp); _sc.e_x = torch::zeros_like(vp);
+        _sc.e_y = torch::zeros_like(vp); _sc.e_z = torch::zeros_like(vp);
+    } else if (_sc_recompute) {
+        _sc.c_x.zero_(); _sc.c_y.zero_(); _sc.c_z.zero_();
+        _sc.e_x.zero_(); _sc.e_y.zero_(); _sc.e_z.zero_();
+    }
+    _sc.vp_ptr = vp.data_ptr(); _sc.z_ptr = z.data_ptr();
+    torch::Tensor& C0 = _sc.C0; torch::Tensor& Cx = _sc.Cx;
+    torch::Tensor& Cy = _sc.Cy; torch::Tensor& Cz = _sc.Cz;
+    torch::Tensor& c_x = _sc.c_x; torch::Tensor& c_y = _sc.c_y; torch::Tensor& c_z = _sc.c_z;
+    torch::Tensor& e_x = _sc.e_x; torch::Tensor& e_y = _sc.e_y; torch::Tensor& e_z = _sc.e_z;
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -357,21 +393,33 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
-    // Time-invariant adjoint transpose coefficients, computed once.
-    BUILD_VRZ_ADJOINT_COEFFS_3D(
-        order,
-        launch_config.grid,
-        launch_config.block,
-        vp.data_ptr<float>(),
-        z.data_ptr<float>(),
-        inv_z.data_ptr<float>(),
-        C0.data_ptr<float>(),
-        Cx.data_ptr<float>(),
-        Cy.data_ptr<float>(),
-        Cz.data_ptr<float>(),
-        grad_ctx,
-        ctx
-    );
+    // Time-invariant adjoint transpose coefficients — computed ONCE per backward
+    // (first DD segment / model change) into the reused scratch, not on every
+    // single-step segment.
+    if (_sc_recompute) {
+        BUILD_VRZ_ADJOINT_COEFFS_3D(
+            order,
+            launch_config.grid,
+            launch_config.block,
+            vp.data_ptr<float>(),
+            z.data_ptr<float>(),
+            inv_z.data_ptr<float>(),
+            C0.data_ptr<float>(),
+            Cx.data_ptr<float>(),
+            Cy.data_ptr<float>(),
+            Cz.data_ptr<float>(),
+            grad_ctx,
+            ctx
+        );
+    }
+
+    // SWEEP_VRZ_GRAD_SPLIT=1 forces the O(M) split gradient (materialise c_d/e_d,
+    // then a single-level divergence) even for order<=4, where AUTO otherwise
+    // picks the fused O(M^2) nested-stencil kernel.  The fused/split crossover is
+    // GPU-dependent (fused wins on RTX 6000 Ada; V100 prefers split — measured
+    // ~12s/iter faster at production scale), so it stays a per-run toggle.
+    const int _gradSplit = [](){ const char* e = std::getenv("SWEEP_VRZ_GRAD_SPLIT");
+                                 return e ? std::atoi(e) : 0; }();
 
     // Main loop covers [max(bw_it_end, 1), bw_begin()) in descending order; step 0
     // contributes no gradient (matches the single-GPU VRZ backward, which also
@@ -448,28 +496,49 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
         forward.swap();
 
-        CALCULATE_GRAD_VRZ3D_AUTO(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            forward.u_now_t.data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
-            c_x.data_ptr<float>(),
-            c_y.data_ptr<float>(),
-            c_z.data_ptr<float>(),
-            e_x.data_ptr<float>(),
-            e_y.data_ptr<float>(),
-            e_z.data_ptr<float>(),
-            grad_vp.data_ptr<float>(),
-            grad_z.data_ptr<float>(),
-            grad_ctx,
-            lap_ctx,
-            ctx
-        );
-
+        if (_gradSplit && (order == 2 || order == 4)) {
+            // Forced SPLIT gradient: materialise c_d = λ·vp·∂_d p and
+            // e_d = λ·vp²z·∂_d p (O(M)), then a single-level divergence (O(M)) —
+            // vs the fused O(M²) nested stencils AUTO uses for order<=4.  Same
+            // operands/factors (FP reassociation only); c_*/e_* already allocated.
+            BUILD_VRZ_GRAD_FIELDS_3D(
+                order, launch_config.grid, launch_config.block,
+                forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                vp.data_ptr<float>(), z.data_ptr<float>(),
+                c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
+                grad_ctx, ctx);
+            CALCULATE_GRAD_VRZ3D(
+                order, launch_config.grid, launch_config.block,
+                forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
+                vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
+                grad_vp.data_ptr<float>(), grad_z.data_ptr<float>(),
+                grad_ctx, lap_ctx, ctx);
+        } else {
+            CALCULATE_GRAD_VRZ3D_AUTO(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                forward.u_now_t.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                vp.data_ptr<float>(),
+                z.data_ptr<float>(),
+                inv_z.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_y.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_y.data_ptr<float>(),
+                e_z.data_ptr<float>(),
+                grad_vp.data_ptr<float>(),
+                grad_z.data_ptr<float>(),
+                grad_ctx,
+                lap_ctx,
+                ctx
+            );
+        }
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
