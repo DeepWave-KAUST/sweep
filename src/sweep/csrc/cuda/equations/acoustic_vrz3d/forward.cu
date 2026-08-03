@@ -59,19 +59,42 @@ ForwardOutput forward(const ForwardInput& in)
 
     // Stepped execution: run [it_begin, it_end) instead of [0, nt) so a DD
     // driver can halo-exchange between single steps.  All per-step indexing
-    // stays absolute, so consecutive segments reproduce one full run.  Phased
-    // (comm/compute overlap) execution is NOT ported to VRZ; ModelParallel
-    // disables the overlap path for VRZ and always drives the serial
-    // step-then-exchange loop, so step_phase must be 0.
+    // stays absolute, so consecutive segments reproduce one full run.
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
     TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
                 "AcousticVRZ3D stepped forward: require 0 <= it_begin <= it_end "
                 "<= nt, got [", it0, ", ", it1, ") with nt=", p.nt);
-    TORCH_CHECK(p.step_phase == 0,
-                "AcousticVRZ3D forward does not support phased execution "
-                "(step_phase must be 0); ModelParallel disables overlap for VRZ.");
     const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
+
+    // ---- DD phase-split step (comm/compute overlap) ----
+    // Mirrors acoustic3d/forward.cu.  phase 0 = legacy full [0,nx) launch;
+    // phase 1 = ONLY the M-wide cut-boundary strips the halo exchange sends;
+    // phase 2 = the strict interior complement + source/record/save/swap.  The
+    // union of the phase-1 and phase-2 x-ranges equals the legacy [0,nx) launch
+    // with NO overlap, and each cell's per-cell physics is independent of the
+    // launch range (reads u_now/psi/zeta at its own + neighbour cells, writes
+    // u_next/psin at its own cell), so the split is a pure reordering =>
+    // bit-identical to phase 0.  Source injection happens in phase 2, hence the
+    // driver's ``_src_away_from_cuts`` guard.
+    const int phase = p.step_phase;
+    const bool cut_x_lo = (p.cut_face_mask & 1) != 0;
+    const bool cut_x_hi = (p.cut_face_mask & 2) != 0;
+    if (phase != 0) {
+        TORCH_CHECK(phase == 1 || phase == 2,
+                    "step_phase must be 0 (legacy), 1 (boundary strips) or 2 (interior)");
+        TORCH_CHECK(it1 == it0 + 1,
+                    "phased forward (step_phase != 0) drives a single step: "
+                    "require it_end == it_begin + 1, got [", it0, ", ", it1, ")");
+        TORCH_CHECK(p.cut_face_mask != 0,
+                    "phased forward requires cut_face_mask != 0");
+        TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
+                    "phased forward v1 supports x-face cuts only (bits 0/1), got ",
+                    p.cut_face_mask);
+        TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
+                    "tile too narrow for phase-split strips: nx_phys=",
+                    ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
+    }
 
     AcousticWavefieldTensor wavefield;
     // A continuation segment (it_begin>0) must keep the same wavefield tensors;
@@ -186,22 +209,51 @@ ForwardOutput forward(const ForwardInput& in)
     for (int it = it0; it < it1; ++it) {
         auto view = wavefield.view();
 
-        ACOUSTIC_VRZ3D(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            view,
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        // Ranged x stencil launch over [xb, xe); (0, nx) reproduces the legacy
+        // full launch bit-identically (same block dims, x_base = 0, x_end = nx).
+        // Only the launch RANGE changes per phase — each cell's in_pml branch,
+        // aux writes and time update are identical to the full launch.
+        auto launch_stencil = [&](int xb, int xe) {
+            if (xe <= xb) return;
+            SolverContext sctx = ctx;
+            sctx.x_base  = xb;
+            sctx.x_limit = xe;
+            auto lc = fdtd::Wave3D::make(xe - xb, ny, nz, B);
+            ACOUSTIC_VRZ3D(
+                order,
+                lc.grid,
+                lc.block,
+                view,
+                vp.data_ptr<float>(),
+                z.data_ptr<float>(),
+                inv_z.data_ptr<float>(),
+                lap_ctx,
+                grad_ctx,
+                grad_ctx_x,
+                grad_ctx_y,
+                grad_ctx_z,
+                cpml,
+                sctx
+            );
+        };
+
+        if (phase == 1) {
+            // Boundary phase: ONLY the cut-adjacent M-wide physical edge strips
+            // — exactly what the halo exchange sends to the neighbour.
+            if (cut_x_lo) launch_stencil(ctx.phys_x0(), ctx.phys_x0() + p.M);
+            if (cut_x_hi) launch_stencil(ctx.phys_x1() - p.M, ctx.phys_x1());
+        } else if (phase == 2) {
+            // Interior phase: strict complement of the phase-1 strips (no
+            // overlap — re-running a strip cell would double-write its psi
+            // double-buffer / advance zeta twice).
+            launch_stencil(cut_x_lo ? ctx.phys_x0() + p.M : 0,
+                           cut_x_hi ? ctx.phys_x1() - p.M : nx);
+        } else {
+            launch_stencil(0, nx);
+        }
+
+        if (phase == 1)
+            continue;   // no boundary saving / source / record / swap for phase 1
 
         if (p.use_boundary_saving) {
             boundary_runtime.save_forward_3d(
@@ -251,8 +303,10 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     // last_two seeds the backward; only meaningful once the final segment has
-    // produced u at nt-1/nt.  Mid-run segments leave it untouched.
-    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
+    // produced u at nt-1/nt.  Mid-run segments leave it untouched.  Phase 1 has
+    // not swapped yet (u_prev/u_now roles would be wrong) — phase 2 of the same
+    // step does this copy.
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
         boundary_saver.last_two_t.select(1, 0).copy_(wavefield.u_prev_t);
         boundary_saver.last_two_t.select(1, 1).copy_(wavefield.u_now_t);
     }

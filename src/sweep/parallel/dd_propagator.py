@@ -45,6 +45,7 @@ shrink the boundary ring for finer grids; defaults to gpu/fp32.
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -195,9 +196,12 @@ class ModelParallel:
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
         self.family = _family_of(equation)
-        # VRZ is an "acoustic"-family variant (variable density) but its CUDA
-        # kernels do not implement the phased (comm/compute overlap) forward, so
-        # it must always take the serial step-then-exchange path.
+        # VRZ is an "acoustic"-family variant (variable density).  Its CUDA
+        # forward kernels now implement the phased (comm/compute overlap) path
+        # (acoustic_vrz3d/forward.cu), so VRZ is eligible for the same forward
+        # overlap as acoustic3d.  The BACKWARD stays serial for the whole
+        # acoustic family (only elastic has a phased backward), so VRZ's
+        # backward still uses the step-then-exchange loop.
         self._is_vrz = "vrz" in type(equation).__name__.lower()
         self.dev = dev
         self.nt = int(nt)
@@ -276,15 +280,19 @@ class ModelParallel:
         self._model_halo = None
         self._halo_sl_cache = {}     # (field.ndim, axis) -> crop slice tuple
 
-        # comm/compute overlap (acoustic forward): a dedicated comm stream runs
-        # step's halo exchange while step's interior computes. Eligible
+        # comm/compute overlap (acoustic + VRZ forward): a dedicated comm stream
+        # runs step's halo exchange while step's interior computes. Eligible
         # only for x-face cuts (the phase-split forward emits x cut strips) AND
         # when no source sits in a cut strip (checked per-call in forward).
+        # SWEEP_DD_DISABLE_OVERLAP=1 forces the serial step-then-exchange path —
+        # the bit-exact reference for validating the overlap, and a production
+        # safety escape hatch.
         self._comm_stream = None
         self._comm_evt = None
+        _disable_overlap = os.environ.get("SWEEP_DD_DISABLE_OVERLAP", "") not in ("", "0")
         self._overlap_ok = (self.world > 1 and self.cut_mask != 0
                             and (self.cut_mask & ~0x3) == 0
-                            and not self._is_vrz)
+                            and not _disable_overlap)
 
         self._captured = False
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry

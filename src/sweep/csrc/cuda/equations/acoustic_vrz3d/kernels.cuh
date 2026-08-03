@@ -163,7 +163,11 @@ __device__ inline void vrz3d_index(
     int& iz,
     int& b
 ) {
-    ix = blockIdx.x * blockDim.x + threadIdx.x;
+    // ``solver.x_base`` (default 0) offsets the ranged phase-split launch used
+    // by the DD comm/compute overlap forward; every legacy launch leaves it 0,
+    // so ix is unchanged there.  Paired with ``solver.x_end()`` in
+    // vrz3d_interior (the ranged upper bound).
+    ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     iy = blockIdx.y * blockDim.y + threadIdx.y;
     int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
     b = iz_global / solver.nz;
@@ -173,7 +177,9 @@ __device__ inline void vrz3d_index(
 template<int Order>
 __device__ inline bool vrz3d_interior(SolverContext solver, int ix, int iy, int iz, int b)
 {
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
+    // ``solver.x_end()`` (default nx) bounds the ranged phase-split launch; the
+    // stencil-halo / physical-extent check below still uses the true nx-halo.
+    if (b >= solver.B || ix >= solver.x_end() || iy >= solver.ny || iz >= solver.nz)
         return false;
 
     constexpr bool is_runtime = (Order == -1);
