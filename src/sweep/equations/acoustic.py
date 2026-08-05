@@ -2,7 +2,8 @@ from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
-from .utils import zero_top_halo_fields
+from ._edges import face_axis_side, field_z_like_axis
+from .utils import zero_top_halo_fields, zero_edge_halo_fields
 
 
 def step_cpml(
@@ -63,6 +64,15 @@ class Acoustic(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+
+    # Eager ``func`` honours a per-edge free surface (any subset of the 4 faces,
+    # each pressure-release) via ``self.fs_faces``; see ``_apply_free_surface``.
+    supports_per_edge_free_surface = True
+    # The 2-D Acoustic CUDA kernels honour ``fs_faces`` per edge via the
+    # SolverContext per-face pad (region tests + set_boundary_zeros).  The CPU-C
+    # kernels are not migrated yet — the propagator guards per-edge impl='c' to
+    # CUDA (see _CompiledPropagator.__init__).
+    supports_per_edge_free_surface_c = True
 
     # The 2-D Acoustic CUDA kernels (forward / adjoint / gradient) all stride
     # the ``vp`` buffer per batch index ``b`` (``vp + b*nz*nx``) and write the
@@ -127,8 +137,27 @@ class Acoustic(SecondOrderEquation):
                 # matches ``zero_top_halo_fields`` bit-for-bit.
                 out = tuple(zero_above_topo(field, topo_rows, axis=-2) for field in out)
             else:
-                out = zero_top_halo_fields(out, self.so // 2, axis=-2)
+                out = self._apply_free_surface(out)
         return out
+
+    def _apply_free_surface(self, fields):
+        """Enforce ``p = 0`` (pressure release) at every active free-surface face
+        by zeroing that face's ``so//2`` halo band.  ``self.fs_faces`` (set by the
+        propagator) selects the faces; for the top-only default the single
+        iteration is bit-identical to ``zero_top_halo_fields(..., axis=-2)``."""
+        halo = self.so // 2
+        fs_faces = getattr(self, "fs_faces", None)
+        if not fs_faces:
+            return zero_top_halo_fields(fields, halo, axis=-2)
+        for face, active in enumerate(fs_faces):
+            if not active:
+                continue
+            shape_axis, side = face_axis_side(face, self.ndim)
+            field_axis = field_z_like_axis(shape_axis, self.ndim)
+            fields = zero_edge_halo_fields(
+                fields, halo, axis=field_axis, side=("low" if side == 0 else "high")
+            )
+        return fields
 
     def _C(self, ):
         # CUDA IMPLEMENTATION

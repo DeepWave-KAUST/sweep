@@ -154,9 +154,8 @@ __global__ void acoustic2nd(
     // avoids ~8 aux-field loads/stores per cell. The check is warp-coherent
     // (same outcome for 32 consecutive ix values), so warps diverge only at
     // the abcn boundary.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < solver.padLo(0) + halo) || (iz >= solver.nz - solver.padHi(0) - halo);
 
     if (!in_pml) {
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
@@ -283,9 +282,9 @@ __global__ void acoustic2nd_adjoint_fused(
 
     // Interior fast-path: aux all 0, g_lx=g_lz=gw -> 2L - L_prev + Lap(gw).
     bool pure_interior =
-        (ix >= solver.abcn + 2 * halo) && (ix < solver.nx - solver.abcn - 2 * halo) &&
-        (iz >= (solver.free_surface ? 0 : solver.abcn) + 2 * halo) &&
-        (iz < solver.nz - solver.abcn - 2 * halo);
+        (ix >= solver.padLo(2) + 2 * halo) && (ix < solver.nx - solver.padHi(2) - 2 * halo) &&
+        (iz >= solver.padLo(0) + 2 * halo) &&
+        (iz < solver.nz - solver.padHi(0) - 2 * halo);
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll
@@ -378,12 +377,14 @@ __global__ void acoustic2nd_nopml(
         M = Order / 2;
     }
 
-    // int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
-    int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
-
-    int top_halo = solver.free_surface ? 2*M: halo;
-    // top_halo = (solver.free_surface && solver.abcn > 0) ? 2*M : top_halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    // Per-face boundary band: a free-surface (0-pad) face keeps only the 2*M
+    // image halo; a PML face keeps abcn+2*M+1.  Reproduces the old halo/top_halo
+    // for the legacy z-min-only free surface.
+    int bx_lo = solver.padLo(2) > 0 ? solver.padLo(2) + 2*M + 1 : 2*M;
+    int bx_hi = solver.padHi(2) > 0 ? solver.padHi(2) + 2*M + 1 : 2*M;
+    int bz_lo = solver.padLo(0) > 0 ? solver.padLo(0) + 2*M + 1 : 2*M;
+    int bz_hi = solver.padHi(0) > 0 ? solver.padHi(0) + 2*M + 1 : 2*M;
+    if (ix < bx_lo || ix >= solver.nx - bx_hi || iz < bz_lo || iz >= solver.nz - bz_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;

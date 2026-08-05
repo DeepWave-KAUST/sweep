@@ -163,6 +163,151 @@ def near_surface_o2_count(top_halo, env_value):
 
 
 # -----------------------------------------------------------------------------
+# Per-edge (axis, side) generalisation of the flat top-only image method.
+#
+# ``side='low'`` is the historical top-of-axis surface (reflect about index
+# ``halo``); ``side='high'`` is the far end (reflect about ``n-1-halo``).  The
+# high side is obtained by flipping the axis, applying the low-side operation,
+# and flipping back — geometrically exact and reusing the audited low-side code.
+# Parities (``odd``) and the forward/backward derivative operator are unchanged
+# between the two ends of an axis (the free-surface BC is the same at both);
+# only the mirror location moves.  ``sides`` lists let a single axis carry a
+# free surface at both ends (a closed / waveguide box) with one derivative call.
+# -----------------------------------------------------------------------------
+
+
+def sides_from_fs_faces_2d(fs_faces):
+    """Split a 2-D ``fs_faces`` tuple ``(z_lo, z_hi, x_lo, x_hi)`` = (top,
+    bottom, left, right) into ``(z_sides, x_sides)`` lists of ``'low'``/``'high'``."""
+    z_sides = []
+    if fs_faces[0]:
+        z_sides.append("low")
+    if fs_faces[1]:
+        z_sides.append("high")
+    x_sides = []
+    if fs_faces[2]:
+        x_sides.append("low")
+    if fs_faces[3]:
+        x_sides.append("high")
+    return z_sides, x_sides
+
+
+def extend_free_surface(u, halo, odd, axis, side="low"):
+    """Image-method mirror at one end of ``axis``.  ``side='low'`` is the
+    historical :func:`extend_top_free_surface`; ``side='high'`` mirrors about
+    ``n-1-halo`` via flip-apply-flip (exact, reuses the low-side code)."""
+    if halo <= 0:
+        return u
+    if side == "low":
+        return extend_top_free_surface(u, halo, odd, axis)
+    uf = _flip(u, axis)
+    ef = extend_top_free_surface(uf, halo, odd, axis)
+    return _flip(ef, axis)
+
+
+def blend_side_n(near, far, n, axis, side="low"):
+    """Use ``near`` for the ``n`` cells nearest the ``side`` surface, ``far`` for
+    the rest (near-surface order reduction at either end of the axis)."""
+    if n <= 0:
+        return far
+    if side == "low":
+        return blend_top_n(near, far, n, axis)
+    ax = axis if axis >= 0 else far.ndim + axis
+    nsz = far.shape[ax]
+    return _concat(
+        [_slice_axis(far, ax, None, nsz - n), _slice_axis(near, ax, nsz - n, None)],
+        axis=ax,
+    )
+
+
+def fs_deriv_1side(field, op, op_swapped, halo, odd, axis, side):
+    """Free-surface staggered derivative near ONE surface.
+
+    ``side='low'`` mirrors about index ``halo`` and applies ``op`` (the
+    historical top path).  ``side='high'`` uses the flip identity so the
+    STAGGERED operator direction is correct at the far surface::
+
+        high = -flip( op_swapped( extend_top(flip(field)) ) )
+
+    because flipping the axis turns a forward staggered difference into a
+    (negated) backward one — ``F∘op_swapped∘F = -op`` — so this reproduces
+    ``op(field)`` in the interior while enforcing the free surface at the high
+    end.  ``op_swapped`` is the opposite-direction operator (z_forward↔z_backward)."""
+    if side == "low":
+        return op(extend_top_free_surface(field, halo, odd, axis))
+    ff = _flip(field, axis)
+    d = op_swapped(extend_top_free_surface(ff, halo, odd, axis))
+    return -_flip(d, axis)
+
+
+def fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides):
+    """Full-order FS derivative honouring every surface in ``sides``.  Each
+    single-side derivative equals the plain derivative away from its own
+    surface, so a two-sided (closed / waveguide) axis is stitched from the low
+    result (correct at the low end) with the high end's band overwritten by the
+    high result (correct at the high end)."""
+    if not sides:
+        return op(field)
+    if sides == ["low"] or sides == ["high"]:
+        return fs_deriv_1side(field, op, op_swapped, halo, odd, axis, sides[0])
+    d_low = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "low")
+    d_high = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "high")
+    ax = axis if axis >= 0 else field.ndim + axis
+    n = d_low.shape[ax]
+    band = 2 * halo
+    return _concat(
+        [_slice_axis(d_low, ax, None, n - band), _slice_axis(d_high, ax, n - band, None)],
+        axis=ax,
+    )
+
+
+def fs_deriv_edges(field, op, op_swapped, o2, o2_swapped, halo, odd, axis, sides, n_o2):
+    """FS derivative honouring every surface in ``sides`` with optional
+    near-surface order-2 reduction blended in at each side.  With
+    ``sides=['low']`` this is bit-for-bit :func:`fs_deriv`."""
+    full = fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides)
+    if n_o2 <= 0 or o2 is None:
+        return full
+    o2full = fs_deriv_axis(field, o2, o2_swapped, halo, odd, axis, sides)
+    out = full
+    for side in sides:
+        out = blend_side_n(o2full, out, n_o2, axis, side)
+    return out
+
+
+def zero_surface_row(u, halo, axis, side="low"):
+    """Zero the single surface row/column: index ``halo`` for ``side='low'``
+    (== :func:`zero_top_row`), ``n-1-halo`` for ``side='high'``."""
+    if side == "low":
+        return zero_top_row(u, halo, axis)
+    ax = axis if axis >= 0 else u.ndim + axis
+    n = u.shape[ax]
+    row = n - 1 - (halo if halo > 0 else 0)
+    out = _zero_axis_index(u, ax, row)
+    if out is not None:
+        return out
+    parts = [_slice_axis(u, ax, None, row), _slice_axis(u, ax, row, row + 1) * 0]
+    if row + 1 < n:
+        parts.append(_slice_axis(u, ax, row + 1, None))
+    return _concat(parts, axis=ax)
+
+
+def overwrite_surface_row(base, repl, halo, axis, side="low"):
+    """Replace the surface row/column of ``base`` with that of ``repl``: index
+    ``halo`` for ``side='low'`` (== :func:`overwrite_top_row`), ``n-1-halo`` for
+    ``side='high'``."""
+    if side == "low":
+        return overwrite_top_row(base, repl, halo, axis)
+    ax = axis if axis >= 0 else base.ndim + axis
+    n = base.shape[ax]
+    row = n - 1 - (halo if halo > 0 else 0)
+    parts = [_slice_axis(base, ax, None, row), _slice_axis(repl, ax, row, row + 1)]
+    if row + 1 < n:
+        parts.append(_slice_axis(base, ax, row + 1, None))
+    return _concat(parts, axis=ax)
+
+
+# -----------------------------------------------------------------------------
 # Per-column (irregular topography) image-method helpers.
 #
 # These generalise the flat-surface mirror to a column-dependent surface row

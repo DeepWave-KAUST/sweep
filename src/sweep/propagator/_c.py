@@ -9,6 +9,7 @@ import numpy as np
 from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.propagator.base import PropBase
+from sweep.equations._edges import is_top_only_or_none
 from sweep.utils.torch import EdgePadding
 from sweep.scalars import fd_coefficients, staggered_grid_coes
 from sweep.equations.base import FirstOrderEquation
@@ -139,6 +140,7 @@ class Warpper(torch.autograd.Function):
         has_topo_param: bool=False,
         topo_category_param: torch.Tensor=None,  # runtime padded APM category int32
         use_apm_param: bool=False,
+        fs_faces: int=-1,   # per-edge free-surface bitmask (-1 => legacy z-min)
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -203,6 +205,7 @@ class Warpper(torch.autograd.Function):
         params.boundary_disk_async_read = boundary_disk_async_read
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
+        params.fs_faces = fs_faces
         # Topography plumbing (image method) — empty tensor + has_topo=False
         # for flat. topo_rows_param is passed in via the autograd Function
         # call site (see Warpper.apply below).
@@ -269,6 +272,7 @@ class Warpper(torch.autograd.Function):
             ctx.spacing = spacing
             ctx.dt = dt
             ctx.free_surface = free_surface
+            ctx.fs_faces = fs_faces
             # Topography (image method): preserve runtime row-index tensor so
             # the autograd backward can plumb it without referencing ``self``.
             ctx.topo_rows_param = topo_rows_param
@@ -321,6 +325,7 @@ class Warpper(torch.autograd.Function):
         M  = ctx.M
         nt = ctx.nt
         dt = ctx.dt
+        fs_faces = getattr(ctx, "fs_faces", -1)
 
         _C = _get_C()
         params = _C.BackwardInput()
@@ -375,6 +380,7 @@ class Warpper(torch.autograd.Function):
         params.dt = dt
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
+        params.fs_faces = fs_faces
         # Topography plumbing (image method) — mirrors forward path.
         # ``ctx`` carries the runtime row tensor saved at forward time;
         # ``self`` doesn't exist here (Warpper.backward is a staticmethod).
@@ -561,6 +567,7 @@ class Warpper(torch.autograd.Function):
             None,      # has_topo_param
             None,      # topo_category_param
             None,      # use_apm_param
+            None,      # fs_faces
             *model_grads # models
         )
 
@@ -573,6 +580,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = None
         self._boundary_disk_files = ()
         super().__init__(*args, **kwargs)
+
+        # impl='c' does not support per-edge PML *thickness* (a non-scalar abcn):
+        # the C side derives every non-free-surface face's pad from the single
+        # scalar abcn, so a per-edge abcn list would be silently wrong.  (A
+        # per-edge free_surface with a scalar abcn is fine.)
+        if not isinstance(self._abcn_arg, int) or isinstance(self._abcn_arg, bool):
+            raise NotImplementedError(
+                "per-edge PML thickness (abcn as a list) is not supported on "
+                "impl='c' yet; pass a scalar abcn (a per-edge free_surface is "
+                "fine) or use impl='eager'."
+            )
+        # Per-edge free surface on impl='c' is staged separately from eager: it
+        # needs the migrated CUDA kernels and (for now) runs on CUDA only.
+        if not is_top_only_or_none(self.fs_faces):
+            if not getattr(self.equation, "supports_per_edge_free_surface_c", False):
+                raise NotImplementedError(
+                    f"per-edge free surface on impl='c' is not implemented for "
+                    f"{type(self.equation).__name__} yet; use impl='eager'."
+                )
+            if 'cuda' not in str(self.dev):
+                raise NotImplementedError(
+                    "per-edge free surface on impl='c' currently requires CUDA; "
+                    "use impl='eager' on CPU."
+                )
 
         # Topography is supported on CUDA via two paths:
         #   * topo_method='image' — per-column staircase (vacuum for Acoustic,
@@ -1274,20 +1305,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         sources = sources.copy()
         receivers = receivers.copy()
 
-        if self._image_method_active:
-            sources[..., 0] += base_shift
-            receivers[..., 0] += base_shift
-
-            if self.ndim == 3:
-                sources[..., 1] += base_shift
-                receivers[..., 1] += base_shift
-
-            # For cuda implementation, we pad in z-direction for free surface with width M
-            sources[..., -1] += M
-            receivers[..., -1] += M
-        else:
-            sources += base_shift
-            receivers += base_shift
+        # Shift physical (x,[y,]z) coords into the padded runtime grid by each
+        # axis' LOW-side pad + M.  Per-edge aware (free-surface faces have 0 pad,
+        # so e.g. a top free surface shifts z by only M, a left free surface x by
+        # only M).  For the top-only / no-FS defaults this reproduces the old
+        # ``base_shift`` (x/y) + ``M`` (z) behaviour bit-for-bit.
+        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
+        for _i in range(self.ndim):
+            sources[..., _i] += coord_offset[_i]
+            receivers[..., _i] += coord_offset[_i]
 
         # Canonicalize wavelet/sources to (B, nsrc_per_shot, nt) / (B, nsrc_per_shot, ndim).
         # `mode` was validated by _normalize_io above.
@@ -1525,6 +1551,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 has_topo_arg,
                 topo_cat_arg,
                 use_apm_arg,
+                self._fs_faces_c,
                 *models_arg,
             )
         
@@ -1632,17 +1659,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         sources = sources.copy()
         receivers = receivers.copy()
-        if self._image_method_active:
-            sources[..., 0] += base_shift
-            receivers[..., 0] += base_shift
-            if self.ndim == 3:
-                sources[..., 1] += base_shift
-                receivers[..., 1] += base_shift
-            sources[..., -1] += M
-            receivers[..., -1] += M
-        else:
-            sources += base_shift
-            receivers += base_shift
+        # Per-edge coord shift (see the forward path): each axis' low-side pad + M.
+        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
+        for _i in range(self.ndim):
+            sources[..., _i] += coord_offset[_i]
+            receivers[..., _i] += coord_offset[_i]
 
         if isinstance(wavelet, torch.Tensor):
             wavelet_t = wavelet.to(self.dev, dtype=torch.float32)
@@ -1760,6 +1781,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.boundary_disk_async_read = boundary_disk_async_read
         fwd.use_pinned_memory = use_pinned_memory
         fwd.free_surface = self._image_method_active
+        fwd.fs_faces = self._fs_faces_c
         # Topography plumbing (image method).  Empty + has_topo=False for flat.
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
@@ -1815,6 +1837,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.dt = self._dt
         bwd.spacing = spacing
         bwd.free_surface = self._image_method_active
+        bwd.fs_faces = self._fs_faces_c
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
             bwd.topo_rows = topo_rows_rt.to(torch.int32).contiguous()

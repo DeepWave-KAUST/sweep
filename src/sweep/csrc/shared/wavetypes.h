@@ -42,6 +42,15 @@ struct ForwardInput {
     bool use_pinned_memory = false;
     bool free_surface;
 
+    // Per-edge free surface / PML thickness (see SolverContext).  ``fs_faces``
+    // is a bitmask (bit 2*axis = low face, 2*axis+1 = high; axis 0=z,1=y,2=x);
+    // ``pad_lo``/``pad_hi`` are per-axis PML widths in C axis order [z,(y,)x]
+    // (free-surface faces = 0).  Defaults (-1 / empty) => legacy single
+    // ``free_surface`` (z-min only) + uniform ``abcn``.
+    int fs_faces = -1;
+    std::vector<int> pad_lo;
+    std::vector<int> pad_hi;
+
     // Irregular free-surface topography (image method / vacuum staircase).
     // ``topo_rows`` is a 1-D ``int32`` tensor of length nx_runtime giving
     // the surface row index per column in runtime (PML-padded) coords; any
@@ -158,6 +167,10 @@ struct BackwardInput {
 
     // options
     bool free_surface;
+    // Per-edge free surface / PML thickness (see SolverContext / ForwardInput).
+    int fs_faces = -1;
+    std::vector<int> pad_lo;
+    std::vector<int> pad_hi;
     // See ForwardInput for semantics.  Mirrored by the propagator.
     torch::Tensor topo_rows;
     bool has_topo = false;

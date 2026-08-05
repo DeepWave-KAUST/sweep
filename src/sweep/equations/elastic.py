@@ -6,7 +6,12 @@ from ._elastic_step_core import (
     elastic_velocity_substep,
     elastic_stress_substep,
 )
-from ._free_surface import zero_at_topo, zero_top_row
+from ._free_surface import (
+    zero_at_topo,
+    zero_top_row,
+    zero_surface_row,
+    sides_from_fs_faces_2d,
+)
 from ._topography import (
     classify_topography,
     enforce_apm_traction_bc,
@@ -56,6 +61,10 @@ class Elastic(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 8 profiles
     supports_apm = True          # APM (Cao & Chen 2018) dispatch in ``func``
+    # Eager ``func`` honours a per-edge free surface (``self.fs_faces``): the
+    # staggered image method on any subset of the 4 faces, with the z<->x
+    # Robertsson analogue and traction zeroing per face.  See ``_fs_zero_traction``.
+    supports_per_edge_free_surface = True
     # interior_substeps carry the free-surface BC, so eager boundary saving may
     # run with free_surface=True (the propagator's guard skips this equation).
     supports_bs_free_surface = True
@@ -176,6 +185,7 @@ class Elastic(FirstOrderEquation):
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
             free_surface=free_surface,
             topo_rows=topo_rows,
+            fs_faces=getattr(self, "fs_faces", None),
             lame_lambda_2mu=lame_lambda_2mu,
         )
         (vx, vz, sxx, szz, sxz,
@@ -183,15 +193,9 @@ class Elastic(FirstOrderEquation):
          m_txxx, m_txxz, m_tzzx, m_tzzz,
          m_txzx, m_txzz) = out
 
-        # Image-method post-step zeroing (top-row / staircase surface).
+        # Image-method post-step traction zeroing (per active free-surface face).
         if free_surface:
-            top_halo = self.pd.coes.shape[0]
-            if topo_rows is not None:
-                szz = zero_at_topo(szz, topo_rows, axis=-2)
-                sxz = zero_at_topo(sxz, topo_rows, axis=-2)
-            else:
-                szz = zero_top_row(szz, top_halo, axis=-2)
-                sxz = zero_top_row(sxz, top_halo, axis=-2)
+            szz, sxz, sxx = self._fs_zero_traction(szz, sxz, sxx, topo_rows)
 
         return (
             vx, vz, sxx, szz, sxz,
@@ -199,6 +203,30 @@ class Elastic(FirstOrderEquation):
             m_txxx, m_txxz, m_tzzx, m_tzzz,
             m_txzx, m_txzz,
         )
+
+    def _fs_zero_traction(self, szz, sxz, sxx, topo_rows):
+        """Zero the traction components at each active free-surface face: the
+        shear ``sxz`` at every face; the normal ``szz`` at z-faces (top/bottom);
+        the normal ``sxx`` at x-faces (left/right).  For the top-only default the
+        z-low branch is bit-identical to ``zero_top_row(szz/sxz, ...)``."""
+        top_halo = self.pd.coes.shape[0]
+        if topo_rows is not None:
+            szz = zero_at_topo(szz, topo_rows, axis=-2)
+            sxz = zero_at_topo(sxz, topo_rows, axis=-2)
+            return szz, sxz, sxx
+        fs_faces = getattr(self, "fs_faces", None)
+        if fs_faces is None:
+            szz = zero_top_row(szz, top_halo, axis=-2)
+            sxz = zero_top_row(sxz, top_halo, axis=-2)
+            return szz, sxz, sxx
+        z_sides, x_sides = sides_from_fs_faces_2d(fs_faces)
+        for side in z_sides:
+            szz = zero_surface_row(szz, top_halo, axis=-2, side=side)
+            sxz = zero_surface_row(sxz, top_halo, axis=-2, side=side)
+        for side in x_sides:
+            sxx = zero_surface_row(sxx, top_halo, axis=-1, side=side)
+            sxz = zero_surface_row(sxz, top_halo, axis=-1, side=side)
+        return szz, sxz, sxx
 
     def interior_substeps(self):
         """The Virieux leapfrog as reversible sub-steps, REUSING the shared
@@ -214,12 +242,15 @@ class Elastic(FirstOrderEquation):
         top_halo = pd.coes.shape[0]
         pml_zero = (0.0,) * 8
 
+        fs_faces = getattr(self, "fs_faces", None)
+
         def _kw(models, dt, h):
             _, _, rho, lam, mu, lam2mu = self._lame(models)
             return dict(
                 lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
                 dt=dt, h=h, b=None, pd=pd, pml=pml_zero,
-                free_surface=fs, topo_rows=topo, lame_lambda_2mu=lam2mu,
+                free_surface=fs, topo_rows=topo, fs_faces=fs_faces,
+                lame_lambda_2mu=lam2mu,
             )
 
         def sub_v(wf, models, dt, h):
@@ -227,13 +258,9 @@ class Elastic(FirstOrderEquation):
 
         def sub_s(wf, models, dt, h):
             out = list(elastic_stress_substep(*wf, **_kw(models, dt, h)))
-            if fs:  # post-step free-surface stress zeroing (mirrors ``func``)
-                if topo is not None:
-                    out[3] = zero_at_topo(out[3], topo, axis=-2)   # szz
-                    out[4] = zero_at_topo(out[4], topo, axis=-2)   # sxz
-                else:
-                    out[3] = zero_top_row(out[3], top_halo, axis=-2)
-                    out[4] = zero_top_row(out[4], top_halo, axis=-2)
+            if fs:  # post-step free-surface traction zeroing (mirrors ``func``)
+                # out order (vx, vz, sxx, szz, sxz, ...): [2]=sxx [3]=szz [4]=sxz
+                out[3], out[4], out[2] = self._fs_zero_traction(out[3], out[4], out[2], topo)
             return out
 
         return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt

@@ -138,7 +138,10 @@ __global__ void set_boundary_zeros(
     int width,
     int nx,
     int nz,
-    bool free_surface
+    bool fs_top,       // per-face free-surface flags: a free-surface face is
+    bool fs_bottom,    // NOT zeroed (its boundary band holds the image mirror).
+    bool fs_left,
+    bool fs_right
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -157,22 +160,13 @@ __global__ void set_boundary_zeros(
     bool bottom = iz >= nz - halo;
     bool top    = iz < halo;
 
-    if (free_surface)
+    // Zero a boundary cell unless every face it belongs to is a free surface.
+    bool zero = (left && !fs_left) || (right && !fs_right) ||
+                (top && !fs_top) || (bottom && !fs_bottom);
+    if (zero)
     {
-        // 不清零 top
-        if (left || right || bottom)
-        {
-            int idx = iz * nx + ix;
-            u_b[idx] = 0.f;
-        }
-    }
-    else
-    {
-        if (left || right || top || bottom)
-        {
-            int idx = iz * nx + ix;
-            u_b[idx] = 0.f;
-        }
+        int idx = iz * nx + ix;
+        u_b[idx] = 0.f;
     }
 }
 
