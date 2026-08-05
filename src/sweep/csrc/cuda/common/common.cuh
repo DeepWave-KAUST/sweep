@@ -43,7 +43,10 @@ __global__ void set_boundary_zeros(
     int width,
     int nx,
     int nz,
-    bool free_surface
+    bool fs_top,
+    bool fs_bottom,
+    bool fs_left,
+    bool fs_right
 );
 
 __global__ void set_boundary_zeros_3d(

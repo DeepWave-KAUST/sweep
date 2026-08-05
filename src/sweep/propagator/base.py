@@ -3,6 +3,13 @@ import inspect
 
 import numpy as np
 from sweep.equations.fields import build_field_index, format_field_specs
+from sweep.equations._edges import (
+    normalize_free_surface,
+    normalize_pad,
+    is_top_only_or_none,
+    torch_pad_order,
+    fs_faces_to_c_bitmask,
+)
 from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFAULTS
 
 class PropBase:
@@ -133,7 +140,41 @@ class PropBase:
             # operators (laplace kernels etc.) were already built on this device.
             resolved_device = getattr(equation, 'device', None)
         self.dev = resolved_device
-        self.abcn = abcn
+        # ---- Per-edge boundary spec (free surface + PML thickness) ----------
+        # ``free_surface`` and ``abcn`` accept the historical scalar/bool forms
+        # as well as per-edge specs; both normalise to canonical axis-major
+        # tuples ``(z_lo, z_hi, [y_lo, y_hi,] x_lo, x_hi)``.  ``free_surface=True``
+        # with a scalar ``abcn`` reproduces the old top-only layout bit-for-bit.
+        self.fs_faces = normalize_free_surface(free_surface, self.ndim)
+        self._abcn_arg = abcn
+        self.pad = normalize_pad(abcn, self.fs_faces, self.ndim)
+        # ``self.abcn`` stays a representative uniform PML width for the legacy
+        # readers (topography / curvilinear) that assume one — those paths are
+        # guarded to the top-only configuration just below.
+        self.abcn = abcn if isinstance(abcn, int) and not isinstance(abcn, bool) else max(self.pad + (0,))
+        # Per-edge free surface (anything other than top-only or none), and
+        # per-edge PML thickness, are a staged feature: only equations that opt
+        # in (``supports_per_edge_free_surface``) handle them, 2-D only, and not
+        # with topography.  Fail loud rather than silently degrade to top-only.
+        _extended_boundary = (not is_top_only_or_none(self.fs_faces)) or not isinstance(abcn, int)
+        if _extended_boundary:
+            if self.ndim != 2:
+                raise NotImplementedError(
+                    "per-edge free surface / per-edge PML thickness is currently "
+                    f"2-D only; got a {self.ndim}-D propagator (free_surface="
+                    f"{free_surface!r}, abcn={abcn!r})."
+                )
+            if not getattr(equation, "supports_per_edge_free_surface", False):
+                raise NotImplementedError(
+                    f"{type(equation).__name__} does not support a per-edge free "
+                    "surface or per-edge PML thickness yet (only top-only "
+                    "free_surface=True/False with a scalar abcn). Supported: "
+                    "Acoustic, Elastic (2-D)."
+                )
+            if topography is not None:
+                raise NotImplementedError(
+                    "per-edge free surface cannot be combined with topography= yet."
+                )
         # Resolve topo_method + free_surface BEFORE PML padding is
         # computed.  Two separate flags come out:
         #   ``self.free_surface``           — physical: model has a free
@@ -151,9 +192,18 @@ class PropBase:
             self._resolve_topo_method(
                 topography=topography,
                 topo_method=topo_method,
-                free_surface=free_surface,
+                free_surface=any(self.fs_faces),
             )
         )
+        # ``_resolve_topo_method`` can turn the TOP free surface on implicitly
+        # (topography= implies an image-method free surface even with
+        # free_surface=False).  Fold that back into the canonical fs_faces/pad so
+        # the per-edge padding layout suppresses the top PML accordingly.  (APM
+        # topography returns _image_method_active=False and keeps full PML, so
+        # this correctly does not fire.)
+        if self._image_method_active and not self.fs_faces[0]:
+            self.fs_faces = (True,) + tuple(self.fs_faces[1:])
+            self.pad = normalize_pad(self._abcn_arg, self.fs_faces, self.ndim)
         if np.isscalar(dh):
             self._dh = float(dh)
             self._grid_spacing = tuple([self._dh] * self.ndim)
@@ -212,6 +262,12 @@ class PropBase:
         # internally because their kernels don't engage the image mirror;
         # the per-cell category handles the FS BC.
         self.equation.free_surface = self._image_method_active
+        # Per-edge free-surface faces (canonical axis-major bool tuple).  Migrated
+        # equations (Acoustic / Elastic 2-D) read this; legacy equations ignore it
+        # and keep using the top-only ``free_surface`` bool above.
+        self.equation.fs_faces = self.fs_faces
+        # C-side bitmask (SolverContext axis order 0=z,1=y,2=x) for impl='c'.
+        self._fs_faces_c = fs_faces_to_c_bitmask(self.fs_faces, self.ndim)
         self.equation.abcn = self.abcn
         if getattr(self.equation, "pd", None) is not None and hasattr(self.equation.pd, "set_spacing"):
             self.equation.pd.set_spacing(self._grid_spacing)
@@ -219,18 +275,19 @@ class PropBase:
         self.source_type = self._resolve_field_types(source_type, role="source")
         self.receiver_type = self._resolve_field_types(receiver_type, role="receiver")
 
-        # PML layout: image method suppresses top PML (top halo holds the
-        # mirror); APM and no-FS use full PML on all sides.
-        if self._image_method_active:
-            self.padding_z = (0, self.abcn)
-            shape_z = self.shape[0] + self.abcn
-        else:
-            self.padding_z = (self.abcn, self.abcn)
-            shape_z = self.shape[0] + 2*self.abcn
-
-        self.padding = (self.abcn,) * 2*(self.ndim-1) + self.padding_z
+        # PML / free-surface layout, PER EDGE.  Each face's pad is its PML width
+        # (``self.pad``, axis-major, with free-surface faces forced to 0 — their
+        # halo holds the image mirror); the stencil halo is added later in
+        # ``_runtime_padding``.  ``self.padding`` is in torch pad order (last
+        # spatial axis first), as every consumer has always assumed.  For the
+        # top-only default this reproduces ``padding_z=(0, abcn)`` bit-for-bit.
+        self.padding_z = (self.pad[0], self.pad[1])
+        self.padding = torch_pad_order(self.pad, self.ndim)
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
-        self.shape = (shape_z,) + tuple(s+2*self.abcn for s in self.shape[1:])
+        self.shape = tuple(
+            self.shape[ax] + self.pad[2*ax] + self.pad[2*ax + 1]
+            for ax in range(self.ndim)
+        )
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
 
         # Topography is processed AFTER self.shape is PML-padded so the
@@ -908,7 +965,7 @@ class PropBase:
         shape = tuple(kwargs.get('shape', self.shape))
         abc_key = (
             self.pml_type,
-            tuple([self.abcn if not self._image_method_active else 0] + (2**self.ndim-1) * [self.abcn]),
+            tuple(self.pad),  # per-edge PML widths, axis-major (FS faces = 0)
             self.equation.so,
             fd_pad,
             self._dt,
@@ -945,11 +1002,15 @@ class PropBase:
         Returns:
             np.ndarray: The cropped data
         """
-        if self._image_method_active:
-            return data[..., 0:-self.abcn, self.abcn:-self.abcn]
-        else:
-            s = slice(self.abcn, -self.abcn)
-            return data[(...,) + (s,) * self.ndim]
+        # Remove each face's PML pad, recovering the physical model.  Free-surface
+        # faces have pad 0 (their halo is handled elsewhere), so nothing is cropped
+        # there — reproducing the old image ``data[..., 0:-abcn, abcn:-abcn]``.
+        slices = [Ellipsis]
+        for ax in range(self.ndim):
+            lo = self.pad[2*ax]
+            hi = self.pad[2*ax + 1]
+            slices.append(slice(lo, -hi if hi > 0 else None))
+        return data[tuple(slices)]
 
     def get_parameters(self, key):
         assert key in self.model_names, f'Key must be in {self.model_names}, got {key}'
@@ -979,16 +1040,11 @@ class PropBase:
 
     def _runtime_coord_offset(self):
         halo = self._runtime_fd_halo()
-        if halo <= 0:
-            offset = [self.abcn] * self.ndim
-            if self._image_method_active:
-                offset[-1] = 0
-            return tuple(offset)
-
-        offset = [self.abcn + halo] * self.ndim
-        if self._image_method_active:
-            offset[-1] = halo
-        return tuple(offset)
+        # Physical origin -> padded-grid origin: each axis' LOW-side pad plus the
+        # stencil halo, in torch/reverse-axis order (last entry is z) to match
+        # ``self.padding``.  Free-surface low faces have pad 0, so e.g. a top FS
+        # gives z-offset ``halo`` — reproducing the old image-method rule.
+        return tuple(self.pad[2*ax] + halo for ax in reversed(range(self.ndim)))
 
     def _runtime_crop_slices(self):
         halo = self._runtime_fd_halo()

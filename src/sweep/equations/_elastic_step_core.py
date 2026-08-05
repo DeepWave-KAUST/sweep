@@ -37,10 +37,42 @@ from ._free_surface import (
     top_free_surface_derivative_topo,
     overwrite_top_row,
     overwrite_at_topo,
+    overwrite_surface_row,
     get_o2_pd as _get_o2_pd,
     fs_deriv as _fs_deriv,
+    fs_deriv_edges as _fs_deriv_edges,
+    sides_from_fs_faces_2d as _sides_from_fs_faces_2d,
     near_surface_o2_count as _near_surface_o2_count,
 )
+
+
+def _fs_sides(fs_faces, free_surface):
+    """Resolve (z_sides, x_sides) lists of 'low'/'high' from either the per-edge
+    ``fs_faces`` tuple or the legacy top-only ``free_surface`` bool."""
+    if fs_faces is not None:
+        return _sides_from_fs_faces_2d(fs_faces)
+    return (["low"] if free_surface else []), []
+
+
+# Opposite staggered operator (used by the high-side flip identity in
+# ``fs_deriv_edges``): flipping the axis swaps forward <-> backward differences.
+_OP_SWAP = {
+    "z_forward": "z_backward", "z_backward": "z_forward",
+    "x_forward": "x_backward", "x_backward": "x_forward",
+}
+
+
+def _fsd(pd, pd2, name, field, odd, axis, sides, halo, n_o2):
+    """FS derivative of ``field`` using ``pd.<name>`` (e.g. ``'z_forward'``),
+    honouring every surface in ``sides`` with near-surface order-2 blending from
+    ``pd2``.  Supplies the opposite operator for the high-side flip identity."""
+    swap = _OP_SWAP[name]
+    o2 = getattr(pd2, name) if pd2 is not None else None
+    o2_sw = getattr(pd2, swap) if pd2 is not None else None
+    return _fs_deriv_edges(
+        field, getattr(pd, name), getattr(pd, swap), o2, o2_sw,
+        halo, odd, axis, sides, n_o2,
+    )
 
 
 def elastic_velocity_substep(
@@ -54,6 +86,7 @@ def elastic_velocity_substep(
     dt, h, b, pd, pml,
     free_surface=False,
     topo_rows=None,
+    fs_faces=None,
     lame_lambda_2mu=None,
 ):
     """Velocity sub-step: update ``(vx, vz)`` from the stress gradients (a pure
@@ -65,29 +98,34 @@ def elastic_velocity_substep(
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
     has_topo = free_surface and topo_rows is not None
+    z_sides, x_sides = _fs_sides(fs_faces, free_surface)
     # Near-surface order reduction (flat FS only): order-2 image derivative in
-    # the top band tames the high-order FS-∩-CPML-corner instability.
+    # the near-surface band tames the high-order FS-∩-CPML-corner instability.
     _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
-        if (free_surface and not has_topo) else 0
+        if ((z_sides or x_sides) and not has_topo) else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     # ---- Stress gradients ------------------------------------------------
     txx_x = pd.x_forward(sxx)
-    if free_surface:
-        if has_topo:
-            txz_z = top_free_surface_derivative_topo(
-                sxz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows
-            )
-            tzz_z = top_free_surface_derivative_topo(
-                szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows
-            )
-        else:
-            txz_z = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
-            tzz_z = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
+    if has_topo:
+        txz_z = top_free_surface_derivative_topo(
+            sxz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows
+        )
+        tzz_z = top_free_surface_derivative_topo(
+            szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows
+        )
+    elif z_sides:
+        txz_z = _fsd(pd, _pd2, "z_backward", sxz, True, -2, z_sides, top_halo, _n_o2)
+        tzz_z = _fsd(pd, _pd2, "z_forward", szz, True, -2, z_sides, top_halo, _n_o2)
     else:
         txz_z = pd.z_backward(sxz)
         tzz_z = pd.z_forward(szz)
     txz_x = pd.x_backward(sxz)
+    # x-normal free surface: mirror the x-derivatives of sxx (odd) and sxz (odd)
+    # — same operators as the plain x-derivatives above, plus the image mirror.
+    if x_sides:
+        txx_x = _fsd(pd, _pd2, "x_forward", sxx, True, -1, x_sides, top_halo, _n_o2)
+        txz_x = _fsd(pd, _pd2, "x_backward", sxz, True, -1, x_sides, top_halo, _n_o2)
 
     # ---- CPML accumulation + velocity update -----------------------------
     m_tzzz = azh * m_tzzz + bzh * tzz_z
@@ -121,6 +159,7 @@ def elastic_stress_substep(
     dt, h, b, pd, pml,
     free_surface=False,
     topo_rows=None,
+    fs_faces=None,
     lame_lambda_2mu=None,
 ):
     """Stress sub-step: update ``(sxx, szz, sxz)`` from the velocity gradients (a
@@ -133,28 +172,33 @@ def elastic_stress_substep(
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
     has_topo = free_surface and topo_rows is not None
+    z_sides, x_sides = _fs_sides(fs_faces, free_surface)
     lame_lambda_2mu = (lame_lambda + 2 * lame_mu) if lame_lambda_2mu is None else lame_lambda_2mu
     _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
-        if (free_surface and not has_topo) else 0
+        if ((z_sides or x_sides) and not has_topo) else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     # ---- Velocity gradients ----------------------------------------------
     vx_x = pd.x_backward(vx)
-    if free_surface:
-        if has_topo:
-            vz_z = top_free_surface_derivative_topo(
-                vz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows
-            )
-            vx_z = top_free_surface_derivative_topo(
-                vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows
-            )
-        else:
-            vz_z = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
-            vx_z = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
+    if has_topo:
+        vz_z = top_free_surface_derivative_topo(
+            vz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows
+        )
+        vx_z = top_free_surface_derivative_topo(
+            vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows
+        )
+    elif z_sides:
+        vz_z = _fsd(pd, _pd2, "z_backward", vz, True, -2, z_sides, top_halo, _n_o2)
+        vx_z = _fsd(pd, _pd2, "z_forward", vx, False, -2, z_sides, top_halo, _n_o2)
     else:
         vz_z = pd.z_backward(vz)
         vx_z = pd.z_forward(vx)
     vz_x = pd.x_forward(vz)
+    # x-normal free surface: mirror the x-derivatives of vx (normal, odd) and vz
+    # (tangential, even) — same operators as the plain x-derivatives above.
+    if x_sides:
+        vx_x = _fsd(pd, _pd2, "x_backward", vx, True, -1, x_sides, top_halo, _n_o2)
+        vz_x = _fsd(pd, _pd2, "x_forward", vz, False, -1, x_sides, top_halo, _n_o2)
 
     # ---- CPML accumulation + stress update -------------------------------
     m_vzz = az * m_vzz + bz * vz_z
@@ -163,20 +207,29 @@ def elastic_stress_substep(
     vx_x = vx_x + m_vxx
 
     sxx_pre_fs = sxx
+    szz_pre_fs = szz
     szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
     sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
-    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
-        # Robertsson free-surface fix: surface-row sigma_xx uses the modified
-        # coefficient 4 mu (lam+mu)/(lam+2mu) * d vx/dx  (from sigma_zz=0).
-        # Applies at the FLAT top row and, per-column, along irregular topography
-        # (the image-method mirror alone leaves the surface sigma_xx ~mu/lambda
-        # times too large — same error the flat path had before this fix).
+    _mod_sxx = _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1"
+    if _mod_sxx and (has_topo or z_sides):
+        # Robertsson free-surface fix at a z-normal surface: surface-row sigma_xx
+        # uses the modified coefficient 4 mu (lam+mu)/(lam+2mu) * d vx/dx  (from
+        # sigma_zz=0).  Flat top row, per-column topography, or z-bottom row (the
+        # image-method mirror alone leaves the surface sigma_xx ~mu/lambda too big).
         _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
         _sxx_surf = sxx_pre_fs + dt * _coef * vx_x
         if has_topo:
             sxx = overwrite_at_topo(sxx, _sxx_surf, topo_rows, axis=-2)
         else:
-            sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-2)
+            for side in z_sides:
+                sxx = overwrite_surface_row(sxx, _sxx_surf, top_halo, axis=-2, side=side)
+    if _mod_sxx and x_sides:
+        # x-normal analogue (x<->z swap): at sigma_xx=0 the surface sigma_zz uses
+        # the modified coefficient times d vz/dz.
+        _coef_x = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
+        _szz_surf = szz_pre_fs + dt * _coef_x * vz_z
+        for side in x_sides:
+            szz = overwrite_surface_row(szz, _szz_surf, top_halo, axis=-1, side=side)
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
@@ -203,6 +256,7 @@ def elastic_step_core(
     dt, h, b, pd, pml,
     free_surface=False,
     topo_rows=None,
+    fs_faces=None,
     lame_lambda_2mu=None,
 ):
     """One leapfrog step on the 2-D first-order velocity-stress elastic
@@ -222,7 +276,7 @@ def elastic_step_core(
     kw = dict(
         lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=mu_xz,
         rho_x=rho_x, rho_z=rho_z, dt=dt, h=h, b=b, pd=pd, pml=pml,
-        free_surface=free_surface, topo_rows=topo_rows,
+        free_surface=free_surface, topo_rows=topo_rows, fs_faces=fs_faces,
         lame_lambda_2mu=lame_lambda_2mu,
     )
     state = elastic_velocity_substep(

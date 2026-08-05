@@ -59,6 +59,19 @@ class WaveEquation:
     # to True.
     supports_batched_models = False
 
+    # Whether this equation's eager ``func`` honours a *per-edge* free surface
+    # (``self.fs_faces``: a free surface on any subset of the 2*ndim faces, each
+    # with its own PML thickness) rather than only the historical top-only
+    # ``free_surface`` bool.  The propagator raises ``NotImplementedError`` for a
+    # per-edge request unless the equation opts in here.  Defaults to False;
+    # Acoustic and Elastic (2-D) override to True.
+    supports_per_edge_free_surface = False
+
+    # Same, but for the compiled ``impl='c'`` (CUDA) backend, which is migrated
+    # separately from the eager path.  Defaults to False; set True by an equation
+    # only once its CUDA forward + adjoint honour ``fs_faces`` per edge.
+    supports_per_edge_free_surface_c = False
+
     # Class-level spec tables. Subclasses that declare these tables drive
     # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``
     # properties below automatically; manual property overrides remain

@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 struct SolverContext {
 
     int ndim;
@@ -42,28 +43,72 @@ struct SolverContext {
     const int* topo_category = nullptr;
     bool use_apm = false;
 
+    // ---- Per-edge free surface / PML thickness --------------------------
+    // ``fs_faces`` bitmask: bit (2*axis) = the LOW face of that axis is a free
+    // surface, (2*axis+1) = the HIGH face; axis 0=z, 1=y, 2=x.  ``pad_lo`` /
+    // ``pad_hi`` are per-axis PML pad widths (free-surface faces = 0).
+    // ``fs_faces = -1`` and ``pad_* < 0`` (the defaults) reproduce the legacy
+    // single ``free_surface`` (z-min only) + uniform ``abcn`` layout, so every
+    // untouched brace-init / call site is bit-exact.
+    int fs_faces = -1;
+    int pad_lo[3] = {-1, -1, -1};   // [z, y, x]
+    int pad_hi[3] = {-1, -1, -1};
+
+    __host__ __device__
+    inline bool fsLo(int axis) const {
+        return fs_faces < 0 ? (axis == 0 && free_surface) : ((fs_faces >> (2 * axis)) & 1);
+    }
+    __host__ __device__
+    inline bool fsHi(int axis) const {
+        return fs_faces < 0 ? false : ((fs_faces >> (2 * axis + 1)) & 1);
+    }
+    // Per-face PML pad.  An explicit ``pad_lo``/``pad_hi`` (>= 0, per-edge
+    // thickness) wins; otherwise a free-surface face has 0 pad and every other
+    // face the uniform ``abcn``.  With ``fs_faces = -1`` this is exactly the
+    // legacy ``free_surface ? 0 : abcn`` on z-min and ``abcn`` elsewhere.
+    __host__ __device__
+    inline int padLo(int axis) const {
+        return pad_lo[axis] >= 0 ? pad_lo[axis] : (fsLo(axis) ? 0 : abcn);
+    }
+    __host__ __device__
+    inline int padHi(int axis) const {
+        return pad_hi[axis] >= 0 ? pad_hi[axis] : (fsHi(axis) ? 0 : abcn);
+    }
+
+    // Host-only: copy per-edge fields from a bound input's ``fs_faces`` +
+    // ``pad_lo``/``pad_hi`` vectors (in C axis order [z,(y,)x]).  Empty vectors
+    // leave the -1 sentinels => legacy layout.  Call right after the positional
+    // brace-init of a SolverContext at every driver.
+    inline void set_per_edge(int fs, const std::vector<int>& plo, const std::vector<int>& phi) {
+        fs_faces = fs;
+        for (int a = 0; a < 3; ++a) {
+            pad_lo[a] = (a < (int)plo.size()) ? plo[a] : -1;
+            pad_hi[a] = (a < (int)phi.size()) ? phi[a] : -1;
+        }
+    }
+
 
     // ===============================
     // Physical domain (computed)
     // ===============================
 
     __host__ __device__
-    inline int phys_x0() const { return abcn + M; }
+    inline int phys_x0() const { return padLo(2) + M; }
 
     __host__ __device__
-    inline int phys_x1() const { return nx - abcn - M; }
+    inline int phys_x1() const { return nx - padHi(2) - M; }
 
     __host__ __device__
-    inline int phys_y0() const { return abcn + M; }
+    inline int phys_y0() const { return padLo(1) + M; }
 
     __host__ __device__
-    inline int phys_y1() const { return ny - abcn - M; }
+    inline int phys_y1() const { return ny - padHi(1) - M; }
 
     __host__ __device__
-    inline int phys_z0() const { return free_surface ? M : abcn + M; }
+    inline int phys_z0() const { return padLo(0) + M; }
 
     __host__ __device__
-    inline int phys_z1() const { return nz - abcn - M; }
+    inline int phys_z1() const { return nz - padHi(0) - M; }
 
     __host__ __device__
     inline int nx_phys() const { return phys_x1() - phys_x0(); }
