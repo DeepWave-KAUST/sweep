@@ -259,6 +259,201 @@ __device__ __forceinline__ bool elastic_is_top_free_surface_row(
         || (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver));
 }
 
+// =====================================================================
+// X-normal free surface (left / right columns).  Mirror of the z helpers
+// above with x<->z swapped: reflect the x-derivative about the left column
+// ``phys_x0()`` (air ``ix < left``) and/or the right column ``phys_x1()-1``
+// (air ``ix > right``).  Parities/operators come from the eager x path
+// (sxx x_forward odd, sxz x_backward odd; vx x_backward odd, vz x_forward
+// even); the x-normal Robertsson corrects szz (not sxx).
+// =====================================================================
+
+__device__ __forceinline__ int elastic_x_left_surface_col(const SolverContext& solver)
+{
+    return solver.phys_x0();
+}
+__device__ __forceinline__ int elastic_x_right_surface_col(const SolverContext& solver)
+{
+    return solver.phys_x1() - 1;
+}
+
+__device__ __forceinline__ float elastic_fs_value_x_2d(
+    const float* __restrict__ u,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd
+)
+{
+    if (solver.fsLo(2)) {
+        const int left = elastic_x_left_surface_col(solver);
+        if (ix < left) {
+            int m = 2 * left - ix;
+            float v = u[iz * grad_ctx.sz + m * grad_ctx.sx];
+            return odd ? -v : v;
+        }
+    }
+    if (solver.fsHi(2)) {
+        const int right = elastic_x_right_surface_col(solver);
+        if (ix > right) {
+            int m = 2 * right - ix;
+            float v = u[iz * grad_ctx.sz + m * grad_ctx.sx];
+            return odd ? -v : v;
+        }
+    }
+    return u[iz * grad_ctx.sz + ix * grad_ctx.sx];
+}
+
+template<int Order, int Type>
+__device__ __forceinline__ float elastic_fs_sgradient_x_2d(
+    const float* __restrict__ u,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd
+)
+{
+    if (!solver.fsLo(2) && !solver.fsHi(2)) {
+        return sgradient<2, Order, X, Type>(u, ix, 0, iz, grad_ctx);
+    }
+    const int M = elastic_stencil_half_order<Order>(solver);
+    bool in_o2_band = false;
+    if (solver.fsLo(2)) {
+        const int left = elastic_x_left_surface_col(solver);
+        if (ix - left >= 0 && ix - left < M) in_o2_band = true;
+    }
+    if (solver.fsHi(2)) {
+        const int right = elastic_x_right_surface_col(solver);
+        if (right - ix >= 0 && right - ix < M) in_o2_band = true;
+    }
+    if (in_o2_band) {
+        float gx2 = 0.f;
+        if constexpr (Type & DIFF_FORWARD) {
+            gx2 += elastic_fs_value_x_2d(u, ix + 1, iz, grad_ctx, solver, odd)
+                 - elastic_fs_value_x_2d(u, ix,     iz, grad_ctx, solver, odd);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            gx2 += elastic_fs_value_x_2d(u, ix,     iz, grad_ctx, solver, odd)
+                 - elastic_fs_value_x_2d(u, ix - 1, iz, grad_ctx, solver, odd);
+        }
+        return gx2 / grad_ctx.dx;
+    }
+    float gx = 0.f;
+    #pragma unroll
+    for (int m = 0; m < M; ++m) {
+        const float c = grad_ctx.coeff[m];
+        if constexpr (Type & DIFF_FORWARD) {
+            const float up = elastic_fs_value_x_2d(u, ix + m + 1, iz, grad_ctx, solver, odd);
+            const float um = elastic_fs_value_x_2d(u, ix - m,     iz, grad_ctx, solver, odd);
+            gx += c * (up - um);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            const float up = elastic_fs_value_x_2d(u, ix + m,     iz, grad_ctx, solver, odd);
+            const float um = elastic_fs_value_x_2d(u, ix - m - 1, iz, grad_ctx, solver, odd);
+            gx += c * (up - um);
+        }
+    }
+    return gx / grad_ctx.dx;
+}
+
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_x_2d(
+    const float* __restrict__ q,
+    int m,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M     = elastic_stencil_half_order<Order>(solver);
+    const int left  = elastic_x_left_surface_col(solver);
+    const int right = elastic_x_right_surface_col(solver);
+    const bool band_left  = solver.fsLo(2);
+    const bool band_right = solver.fsHi(2);
+    #define ELASTIC_FS_IN_XBAND(j) \
+        ((band_left && (j) >= left && (j) < left + M) || (band_right && (j) > right - M && (j) <= right))
+    const int sz = grad_ctx.sz;
+    const int sx = grad_ctx.sx;
+    float acc = 0.f;
+
+    if constexpr (ForwardType & DIFF_FORWARD) {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i;
+            const int jm = m - i - 1;
+            if (jp >= 0 && jp < solver.nx && !ELASTIC_FS_IN_XBAND(jp))
+                acc += c * q[iz * sz + jp * sx];
+            if (jm >= 0 && jm < solver.nx && !ELASTIC_FS_IN_XBAND(jm))
+                acc -= c * q[iz * sz + jm * sx];
+        }
+        if (ELASTIC_FS_IN_XBAND(m))     acc += q[iz * sz + m * sx];
+        if (ELASTIC_FS_IN_XBAND(m - 1)) acc -= q[iz * sz + (m - 1) * sx];
+    } else {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i + 1;
+            const int jm = m - i;
+            if (jp >= 0 && jp < solver.nx && !ELASTIC_FS_IN_XBAND(jp))
+                acc += c * q[iz * sz + jp * sx];
+            if (jm >= 0 && jm < solver.nx && !ELASTIC_FS_IN_XBAND(jm))
+                acc -= c * q[iz * sz + jm * sx];
+        }
+        if (ELASTIC_FS_IN_XBAND(m + 1)) acc += q[iz * sz + (m + 1) * sx];
+        if (ELASTIC_FS_IN_XBAND(m))     acc -= q[iz * sz + m * sx];
+    }
+    #undef ELASTIC_FS_IN_XBAND
+
+    return acc / grad_ctx.dx;
+}
+
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_adjoint_sgradient_x_2d(
+    const float* __restrict__ q,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd
+)
+{
+    if (!solver.fsLo(2) && !solver.fsHi(2)) {
+        if constexpr (ForwardType & DIFF_FORWARD) {
+            return sgradient<2, Order, X, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
+        } else {
+            return sgradient<2, Order, X, DIFF_FORWARD>(q, ix, 0, iz, grad_ctx);
+        }
+    }
+    const int left  = elastic_x_left_surface_col(solver);
+    const int right = elastic_x_right_surface_col(solver);
+    if (solver.fsLo(2) && ix < left)  return 0.f;
+    if (solver.fsHi(2) && ix > right) return 0.f;
+
+    const float parity = odd ? -1.f : 1.f;
+    float gx = elastic_fs_plain_reduced_adjoint_x_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver);
+    if (solver.fsLo(2) && ix > left) {
+        const int mix = 2 * left - ix;
+        gx += parity * elastic_fs_plain_reduced_adjoint_x_2d<Order, ForwardType>(q, mix, iz, grad_ctx, solver);
+    }
+    if (solver.fsHi(2) && ix < right) {
+        const int mix = 2 * right - ix;
+        gx += parity * elastic_fs_plain_reduced_adjoint_x_2d<Order, ForwardType>(q, mix, iz, grad_ctx, solver);
+    }
+    return gx;
+}
+
+__device__ __forceinline__ bool elastic_is_x_free_surface_col(
+    const SolverContext& solver,
+    int ix
+)
+{
+    return (solver.fsLo(2) && ix == elastic_x_left_surface_col(solver))
+        || (solver.fsHi(2) && ix == elastic_x_right_surface_col(solver));
+}
+
 template<int Order>
 __device__ __forceinline__ int elastic3d_stencil_half_order(const SolverContext& solver)
 {

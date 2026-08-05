@@ -17,14 +17,12 @@ and this project adheres to
   faces.  `abcn` likewise accepts a per-edge list for an independent PML
   thickness per face.  The **eager** backend supports it for **Acoustic and
   Elastic 2-D** (all four edges, gradient-consistent); the compiled `impl='c'`
-  backend supports it for **Acoustic 2-D on CUDA** (all four edges) and
-  **Elastic 2-D on CUDA** (the top/bottom z faces) — bit-exact vs eager forward,
-  adjoint-gradient cosine ~1.  `free_surface=True` / a scalar `abcn` stay
-  bit-for-bit unchanged.  Requests not yet implemented raise a clear
-  `NotImplementedError` pointing at `impl='eager'`: per-edge on 3-D or on
-  non-migrated equations, per-edge on the CPU `impl='c'` backend, per-edge PML
-  *thickness* on `impl='c'`, and Elastic **left/right** free surface on
-  `impl='c'` (the CUDA x-face image method is not migrated yet).
+  backend supports it for **Acoustic and Elastic 2-D on CUDA** (all four edges,
+  including z∩x corners) — bit-exact vs eager forward, adjoint-gradient cosine
+  ~1.  `free_surface=True` / a scalar `abcn` stay bit-for-bit unchanged.
+  Requests not yet implemented raise a clear `NotImplementedError` pointing at
+  `impl='eager'`: per-edge on 3-D or on non-migrated equations, per-edge on the
+  CPU `impl='c'` backend, and per-edge PML *thickness* on `impl='c'`.
 - Documentation overhaul (Phase 1, facade): rewritten landing page with
   capability cards and audience-routed navigation; README and README.zh-CN
   gained badges and a tagline block.
