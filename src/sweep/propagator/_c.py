@@ -599,6 +599,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     f"per-edge free surface on impl='c' is not implemented for "
                     f"{type(self.equation).__name__} yet; use impl='eager'."
                 )
+            if (getattr(self.equation, "supports_per_edge_free_surface_c_z_only", False)
+                    and (self.fs_faces[2] or self.fs_faces[3])):
+                raise NotImplementedError(
+                    f"per-edge free surface on impl='c' for "
+                    f"{type(self.equation).__name__} currently supports only the z "
+                    "faces (top/bottom); x faces (left/right) need impl='eager'."
+                )
             if 'cuda' not in str(self.dev):
                 raise NotImplementedError(
                     "per-edge free surface on impl='c' currently requires CUDA; "

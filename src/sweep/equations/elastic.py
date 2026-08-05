@@ -65,6 +65,12 @@ class Elastic(FirstOrderEquation):
     # staggered image method on any subset of the 4 faces, with the z<->x
     # Robertsson analogue and traction zeroing per face.  See ``_fs_zero_traction``.
     supports_per_edge_free_surface = True
+    # The 2-D Elastic CUDA kernels honour a per-edge free surface on the Z faces
+    # (top + bottom) via the generalized image mirror + adjoint in
+    # ``elastic_free_surface.cuh``.  The X faces (left/right) are not migrated to
+    # CUDA yet, so the propagator guards them to impl='eager' (z_only flag below).
+    supports_per_edge_free_surface_c = True
+    supports_per_edge_free_surface_c_z_only = True
     # interior_substeps carry the free-surface BC, so eager boundary saving may
     # run with free_surface=True (the propagator's guard skips this equation).
     supports_bs_free_surface = True
