@@ -146,9 +146,9 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     // Position-based PML / interior split. All ax/bx CPML coefficients vanish
     // outside the PML band, so the auxiliary fields m_szzz/m_sxzx/m_sxzz/m_sxxx
     // become 0 → 0 in the interior. Skip the four reads + four writes.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < solver.padLo(0) + halo) ||
+                  (iz >= solver.nz - solver.padHi(0) - halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho * (dsxx_dx + dsxz_dz);
@@ -237,11 +237,13 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     // PML update.  Under irregular topography the surface row varies per
     // column — ``solver.surface_row(ix)`` returns the runtime row index
     // (falls back to ``phys_z0()`` in flat mode → ``halo`` for free_surface).
-    int top_pml = solver.free_surface
-        ? (solver.surface_row(ix) + 1)
-        : (solver.abcn + halo);
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+    // Keep each active z free-surface row INSIDE the in_pml (full-path) zone so
+    // the traction BC (σzz=σxz=0, Robertsson σxx) fires after the PML update.
+    int z_lo = solver.fsLo(0) ? (solver.surface_row(ix) + 1) : (solver.padLo(0) + halo);
+    int z_hi = solver.fsHi(0) ? elastic_z_bottom_surface_row(solver)
+                              : (solver.nz - solver.padHi(0) - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < z_lo) || (iz >= z_hi);
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
@@ -327,8 +329,11 @@ __global__ void elastic_velocity_kernel_nopml(
 
     int halo = solver.abcn + M+1;
 
-    int top_halo = solver.free_surface ? M: halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    int z_lo = solver.fsLo(0) ? M : halo;
+    int z_hi = solver.fsHi(0) ? M : halo;
+    int x_lo = solver.fsLo(2) ? M : halo;
+    int x_hi = solver.fsHi(2) ? M : halo;
+    if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -378,8 +383,11 @@ __global__ void elastic_stress_kernel_nopml(
 
     int halo = solver.abcn + M+1;
 
-    int top_halo = solver.free_surface ? M: halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    int z_lo = solver.fsLo(0) ? M : halo;
+    int z_hi = solver.fsHi(0) ? M : halo;
+    int x_lo = solver.fsLo(2) ? M : halo;
+    int x_hi = solver.fsHi(2) ? M : halo;
+    if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -561,9 +569,9 @@ __global__ void elastic_stress_adjoint_prepare(
     // q* outputs collapse to bar_dv*_d* and the four m_v* writes become
     // 0 -> 0. Skip them — saves 4 reads + 4 writes per interior cell.
     // Matches the forward elastic_stress_kernel fast-path (line 230).
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < solver.padLo(0) + halo) ||
+                  (iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -683,9 +691,9 @@ __global__ void elastic_velocity_adjoint_prepare(
     // elastic_stress_adjoint_prepare above: ax/az/bx/bz vanish outside the
     // PML band, m_s* aux fields stay 0, so the four p* outputs collapse to
     // the bar_ds*_d* values and the four m_s* writes become 0 -> 0.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < solver.padLo(0) + halo) ||
+                  (iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;
@@ -1424,9 +1432,9 @@ __global__ void elastic_stress_adjoint_prepare_apm(
     float bar_dvx_dz = solver.dt * muxz * bar_sxz;
     float bar_dvz_dx = solver.dt * muxz * bar_sxz;
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < solver.padLo(0) + halo) ||
+                  (iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -1510,9 +1518,9 @@ __global__ void elastic_velocity_adjoint_prepare_apm(
     float bar_dsxz_dx = solver.dt * inv_rho_z * bar_vz;
     float bar_dszz_dz = solver.dt * inv_rho_z * bar_vz;
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (iz < solver.padLo(0) + halo) ||
+                  (iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;
