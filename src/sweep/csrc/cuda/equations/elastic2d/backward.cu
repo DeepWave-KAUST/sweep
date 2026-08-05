@@ -408,6 +408,7 @@ BackwardOutput backward(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    solver.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
 
     ElasticWavefieldTensor adjoint;
@@ -550,6 +551,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    solver.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
@@ -667,6 +669,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    solver.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
@@ -828,6 +831,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    solver.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 

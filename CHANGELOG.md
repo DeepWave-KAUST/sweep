@@ -20,14 +20,13 @@ and this project adheres to
   backend supports it for **Acoustic and Elastic 2-D on CUDA** (all four edges,
   including z∩x corners) — bit-exact vs eager forward, adjoint-gradient cosine
   ~1.  `free_surface=True` / a scalar `abcn` stay bit-for-bit unchanged.
-  On `impl='c'` the CUDA backward modes **full** (`use_ckpt=False`) and
-  **checkpointing** (`use_ckpt=True`) are gradient-consistent for every edge;
-  **boundary saving** is supported only for the top-only free surface, so a
-  per-edge (bottom/left/right) request under boundary saving raises and points
-  at full/ckpt.  Other unimplemented requests raise a clear `NotImplementedError`
-  pointing at `impl='eager'`: per-edge on 3-D or on non-migrated equations,
-  per-edge on the CPU `impl='c'` backend, and per-edge PML *thickness* on
-  `impl='c'`.
+  On `impl='c'` all three CUDA backward memory modes — **full**
+  (`use_ckpt=False`), **checkpointing** (`use_ckpt=True`), and **boundary
+  saving** — are gradient-consistent for every edge and z∩x corner
+  (adjoint cosine ~1 vs eager).  Other unimplemented requests raise a clear
+  `NotImplementedError` pointing at `impl='eager'`: per-edge on 3-D or on
+  non-migrated equations, per-edge on the CPU `impl='c'` backend, and per-edge
+  PML *thickness* on `impl='c'`.
 - Documentation overhaul (Phase 1, facade): rewritten landing page with
   capability cards and audience-routed navigation; README and README.zh-CN
   gained badges and a tagline block.

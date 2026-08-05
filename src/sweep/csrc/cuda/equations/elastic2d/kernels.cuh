@@ -242,7 +242,15 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     int z_lo = solver.fsLo(0) ? (solver.surface_row(ix) + 1) : (solver.padLo(0) + halo);
     int z_hi = solver.fsHi(0) ? elastic_z_bottom_surface_row(solver)
                               : (solver.nz - solver.padHi(0) - halo);
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
+    // Same treatment for the x (left/right) free-surface columns: keep the
+    // surface column INSIDE the in_pml (full-path) zone so the x-face traction
+    // BC (σxx=σxz=0, Robertsson σzz) fires.  Bit-identical to the old
+    // ``padLo(2)+halo`` / ``nx-padHi(2)-halo`` bounds when no x face is free.
+    int x_lo = solver.fsLo(2) ? (elastic_x_left_surface_col(solver) + 1)
+                              : (solver.padLo(2) + halo);
+    int x_hi = solver.fsHi(2) ? elastic_x_right_surface_col(solver)
+                              : (solver.nx - solver.padHi(2) - halo);
+    bool in_pml = (ix < x_lo) || (ix >= x_hi) ||
                   (iz < z_lo) || (iz >= z_hi);
 
     if (!in_pml) {

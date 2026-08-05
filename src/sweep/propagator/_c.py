@@ -611,16 +611,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     "per-edge free surface on impl='c' currently requires CUDA; "
                     "use impl='eager' on CPU."
                 )
-            # The boundary-saving reverse reconstruction assumes a top-only free
-            # surface, so per-edge (bottom/left/right) FS gradients are wrong under
-            # bs.  Full and checkpointing modes are correct (adjoint cos=1.0).
-            if self.boundary_saving_config.get("enabled", False):
-                raise NotImplementedError(
-                    "per-edge free surface (beyond top-only) on impl='c' does not "
-                    "support boundary saving yet. Use full mode (use_ckpt=False) or "
-                    "checkpointing (use_ckpt=True) — checkpointing is memory-efficient "
-                    "and gradient-consistent (cos=1.0 vs eager)."
-                )
+            # All three CUDA backward memory modes — full, checkpointing, and
+            # boundary saving — are gradient-consistent for every per-edge free
+            # surface (cos=1.0 vs eager, all four faces + z∩x corners).  The bs
+            # reverse reconstruction re-runs the (now per-edge-correct) forward
+            # kernels, so no separate handling is needed.
 
         # Topography is supported on CUDA via two paths:
         #   * topo_method='image' — per-column staircase (vacuum for Acoustic,
