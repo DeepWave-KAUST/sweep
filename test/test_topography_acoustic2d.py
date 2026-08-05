@@ -18,8 +18,8 @@ Tests
    — length != ``nx_phys`` raises.
 5. topography_out_of_range_raises
    — values outside ``[0, nz_phys)`` raise.
-6. topography_with_impl_c_raises_not_implemented
-   — ``impl='c'`` rejects topography (Stage 1 is eager-only).
+6. topography_impl_c_matches_eager
+   — ``impl='c'`` (CUDA image-method topography) matches the eager forward.
 7. constant_shift_topography_is_translation_invariant
    — A globally-shifted topo + source + receiver depth should produce a
      receiver record approximately equal to the flat-surface baseline.
@@ -230,19 +230,37 @@ def test_topography_out_of_range_raises():
 
 
 # ---------------------------------------------------------------------------
-# impl='c' guard
+# impl='c' topography (CUDA image method — Stage 2)
 # ---------------------------------------------------------------------------
 
 
-def test_topography_with_impl_c_raises_not_implemented():
-    """impl='c' must reject topography (Stage 2 hasn't landed)."""
+def test_topography_impl_c_matches_eager():
+    """Topography on ``impl='c'`` (CUDA image method) is supported — Stage 2 has
+    landed — and its forward matches the eager reference.  (This guard historically
+    *raised*: Stage 1 was eager-only.)"""
     from sweep import is_torch_binding_available
 
-    if not is_torch_binding_available():
-        pytest.skip("compiled binding not available; impl='c' would fall back to eager")
+    if not is_torch_binding_available() or DEVICE != "cuda":
+        pytest.skip("compiled CUDA binding unavailable; impl='c' would fall back to eager")
 
-    with pytest.raises(NotImplementedError, match="impl='python'"):
-        _make_prop(topography=np.zeros(NX, dtype=np.int64), impl="c")
+    x = np.arange(NX, dtype=np.float32)
+    hill = (5.0 * np.exp(-((x - NX / 2) ** 2) / (2.0 * 10.0**2))).round().astype(np.int64)
+    src_x = NX // 2
+    sources, receivers = _geometry(src_xz=(src_x, int(hill[src_x]) + 2))
+    # The compiled backend takes numpy source/receiver coordinates.
+    sources = sources.detach().cpu().numpy().astype(np.int64)
+    receivers = receivers.detach().cpu().numpy().astype(np.int64)
+    wavelet = _wavelet()
+    vp = _vp_model()
+
+    re = _make_prop(topography=hill, impl="eager")(
+        wavelet, sources.copy(), receivers.copy(), models=[vp]).detach()
+    rc = _make_prop(topography=hill, impl="c")(
+        wavelet, sources.copy(), receivers.copy(), models=[vp]).detach()
+
+    assert re.abs().max().item() > 0.0, "forward produced an all-zero record"
+    rel = (rc - re).norm().item() / max(re.norm().item(), 1e-30)
+    assert rel < 5e-3, f"impl='c' topography forward vs eager rel_l2={rel:.2e}"
 
 
 # ---------------------------------------------------------------------------
