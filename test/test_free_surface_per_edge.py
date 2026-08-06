@@ -84,6 +84,24 @@ def test_default_layout_bit_exact():
     assert p0.shape == (48 + 60, 56 + 60)
 
 
+def test_non_top_per_edge_keeps_top_pml():
+    """A per-edge free surface on a NON-top face must not silently add a top free
+    surface / drop the top PML.
+
+    Regression: a fold-in meant for topography (which physically implies a top
+    free surface) was gated only on ``_image_method_active`` — True for *any*
+    per-edge FS — so ``free_surface=['left']`` became ``{top, left}`` with
+    ``pad[0]=0``.  The top then reflected (spurious free surface) instead of
+    absorbing, injecting boundary reflections.  fs_faces axis order is
+    (z_lo=top, z_hi=bottom, x_lo=left, x_hi=right)."""
+    for face, idx in [("left", 2), ("right", 3), ("bottom", 1)]:
+        p = _ac_prop([face])
+        assert not p.fs_faces[0], f"{face}: spurious top free surface (fs_faces={p.fs_faces})"
+        assert sum(p.fs_faces) == 1 and p.fs_faces[idx], f"{face}: fs_faces={p.fs_faces}"
+        assert p.pad[0] == 30, f"{face}: top lost its PML (pad={p.pad})"
+        assert p.pad[idx] == 0, f"{face}: free face should have 0 pad (pad={p.pad})"
+
+
 def test_per_edge_guard_on_unmigrated_and_3d():
     # Acoustic (migrated) accepts per-edge:
     _ac_prop(["top", "left"])
