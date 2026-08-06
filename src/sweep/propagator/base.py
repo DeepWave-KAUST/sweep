@@ -200,8 +200,11 @@ class PropBase:
         # free_surface=False).  Fold that back into the canonical fs_faces/pad so
         # the per-edge padding layout suppresses the top PML accordingly.  (APM
         # topography returns _image_method_active=False and keeps full PML, so
-        # this correctly does not fire.)
-        if self._image_method_active and not self.fs_faces[0]:
+        # this correctly does not fire.)  Gate on ``topography is not None``:
+        # topography is the ONLY reason to add a top free surface the user didn't
+        # ask for — a plain per-edge request like ``free_surface=['left']`` must
+        # NOT get a spurious top free surface (which would drop the top PML).
+        if topography is not None and self._image_method_active and not self.fs_faces[0]:
             self.fs_faces = (True,) + tuple(self.fs_faces[1:])
             self.pad = normalize_pad(self._abcn_arg, self.fs_faces, self.ndim)
         if np.isscalar(dh):
