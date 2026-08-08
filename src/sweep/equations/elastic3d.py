@@ -1,11 +1,16 @@
+import os as _os
+
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
     top_free_surface_derivative,
+    top_free_surface_cell_derivative,
     top_free_surface_derivative_topo,
     zero_top_row,
     zero_at_topo,
+    overwrite_top_row,
+    overwrite_at_topo,
 )
 from ._topography import (
     classify_topography_3d,
@@ -15,11 +20,20 @@ from ._topography import (
 )
 
 
-def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows):
+def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
     """3-D free-surface z-derivative: flat ``top_halo`` row when
-    ``topo_rows`` is None, per-(iy,ix) ``topo_rows[iy, ix]`` row otherwise."""
+    ``topo_rows`` is None, per-(iy,ix) ``topo_rows[iy, ix]`` row otherwise.
+
+    ``half=True`` marks the staggered fields at ``z=+h/2`` (``sxz``, ``syz``,
+    ``vz``): their image reflects about ``top_halo-1/2``, giving
+    ``tau_zx(-h/2) = -tau_zx(+h/2)`` (Kristek, Moczo & Archuleta 2002, Table 1).
+    The integer-grid mirror would instead pair ``-h/2`` with ``+3h/2`` — masked
+    while the surface row is force-zeroed, destabilising once it is not.
+    (Irregular topography keeps the integer-grid mirror for now.)"""
     if topo_rows is None:
-        return top_free_surface_derivative(field, deriv, top_halo, odd=odd, axis=-3)
+        deriv_fn = (top_free_surface_cell_derivative if half
+                    else top_free_surface_derivative)
+        return deriv_fn(field, deriv, top_halo, odd=odd, axis=-3)
     return top_free_surface_derivative_topo(
         field, deriv, top_halo, odd=odd, axis=-3, iz_surf=topo_rows
     )
@@ -47,14 +61,14 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dsxx_dx = pd.x_forward(sxx)
     dsxy_dy = pd.y_backward(sxy)
     if free_surface:
-        dsxz_dz = _fs_z_deriv(sxz, pd.z_backward, top_halo, True, topo_rows)
+        dsxz_dz = _fs_z_deriv(sxz, pd.z_backward, top_halo, True, topo_rows, half=True)
     else:
         dsxz_dz = pd.z_backward(sxz)
 
     dsxy_dx = pd.x_backward(sxy)
     dsyy_dy = pd.y_forward(syy)
     if free_surface:
-        dsyz_dz = _fs_z_deriv(syz, pd.z_backward, top_halo, True, topo_rows)
+        dsyz_dz = _fs_z_deriv(syz, pd.z_backward, top_halo, True, topo_rows, half=True)
     else:
         dsyz_dz = pd.z_backward(syz)
 
@@ -110,7 +124,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dvz_dx = pd.x_forward(vz)
     dvz_dy = pd.y_forward(vz)
     if free_surface:
-        dvz_dz = _fs_z_deriv(vz, pd.z_backward, top_halo, True, topo_rows)
+        dvz_dz = _fs_z_deriv(vz, pd.z_backward, top_halo, True, topo_rows, half=True)
     else:
         dvz_dz = pd.z_backward(vz)
 
@@ -136,6 +150,8 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
 
     div_v = dvx_dx + dvy_dy + dvz_dz
 
+    sxx_pre_fs = sxx
+    syy_pre_fs = syy
     sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx)
     syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy)
     szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz)
@@ -144,18 +160,34 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
 
     if free_surface:
+        if _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
+            # Robertsson tangential FS correction (3-D): at a z-low free surface
+            # sigma_zz=0 => dvz_dz = -lambda/(lam+2mu) (dvx_dx + dvy_dy), so the
+            # surface-row tangential normal stresses reduce to
+            #   sigma_xx = coef*dvx_dx + coef2*dvy_dy   (x<->y for sigma_yy),
+            # coef = 4 mu (lam+mu)/(lam+2mu), coef2 = 2 lam mu/(lam+2mu).  Without
+            # it the image-method mirror alone leaves surface sigma_xx/yy too
+            # large -> Rayleigh ~15% slow (2-D analogue: _elastic_step_core /
+            # das.py DASMu-2D).
+            _l2m = lame_lambda + 2.0 * lame_mu
+            _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / _l2m
+            _coef2 = 2.0 * lame_lambda * lame_mu / _l2m
+            _sxx_surf = sxx_pre_fs + dt * (_coef * dvx_dx + _coef2 * dvy_dy)
+            _syy_surf = syy_pre_fs + dt * (_coef2 * dvx_dx + _coef * dvy_dy)
+            if topo_rows is not None:
+                sxx = overwrite_at_topo(sxx, _sxx_surf, topo_rows, axis=-3)
+                syy = overwrite_at_topo(syy, _syy_surf, topo_rows, axis=-3)
+            else:
+                sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
+                syy = overwrite_top_row(syy, _syy_surf, top_halo, axis=-3)
         if topo_rows is not None:
-            # Irregular surface: zero exactly the surface row per (iy, ix)
-            # column (σ_zz = σ_xz = σ_yz = 0).  Cells above are zeroed by
-            # the mirror in the next step's z-derivative read; here only
-            # the surface row needs explicit BC enforcement.
+            # z-low free surface: zero ONLY the normal stress szz (its node is
+            # on the surface).  sxz/syz live +h/2 inside the medium, so zeroing
+            # them is a spurious over-constraint that adds ~6% Rayleigh grid
+            # dispersion (Kristek 2002 Table 1; cf. Elastic._fs_zero_traction).
             szz = zero_at_topo(szz, topo_rows, axis=-3)
-            sxz = zero_at_topo(sxz, topo_rows, axis=-3)
-            syz = zero_at_topo(syz, topo_rows, axis=-3)
         else:
             szz = zero_top_row(szz, top_halo, axis=-3)
-            sxz = zero_top_row(sxz, top_halo, axis=-3)
-            syz = zero_top_row(syz, top_halo, axis=-3)
     
     return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
            m_vxx, m_vxy, m_vxz, \

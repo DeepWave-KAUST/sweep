@@ -18,13 +18,22 @@ __device__ __forceinline__ int elastic_z_bottom_surface_row(const SolverContext&
     return solver.phys_z1() - 1;
 }
 
+// ``half`` marks a field whose nodes sit half a cell BELOW the surface plane
+// (sxz / vz on the Virieux grid live at z=+h/2 while the surface is on the szz
+// plane).  Its image must reflect about ``top - 1/2`` so that
+// tau_zx(-h/2) = -tau_zx(+h/2) (Kristek, Moczo & Archuleta 2002, Table 1);
+// reflecting about ``top`` would pair -h/2 with +3h/2 instead.  That error is
+// masked while the surface row is force-zeroed and destabilises once it is not.
+// Mirrors the eager ``extend_top_free_surface_cell_centered``.  Low side only:
+// the high side keeps the integer-grid mirror (see the eager note).
 __device__ __forceinline__ float elastic_top_fs_value_2d(
     const float* __restrict__ u,
     int ix,
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     // z-low (top) free surface.  Surface row is per-column under irregular
@@ -33,7 +42,8 @@ __device__ __forceinline__ float elastic_top_fs_value_2d(
     if (solver.fsLo(0)) {
         const int top = solver.surface_row(ix);
         if (iz < top) {
-            int m = 2 * top - iz;
+            int m = (half && !solver.has_topo) ? (2 * top - 1 - iz)
+                                               : (2 * top - iz);
             float v = u[m * grad_ctx.sz + ix * grad_ctx.sx];
             return odd ? -v : v;
         }
@@ -57,7 +67,8 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     if (!solver.fsLo(0) && !solver.fsHi(0)) {
@@ -85,12 +96,12 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     if (in_o2_band) {
         float gz2 = 0.f;
         if constexpr (Type & DIFF_FORWARD) {
-            gz2 += elastic_top_fs_value_2d(u, ix, iz + 1, grad_ctx, solver, odd)
-                 - elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd);
+            gz2 += elastic_top_fs_value_2d(u, ix, iz + 1, grad_ctx, solver, odd, half)
+                 - elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd, half);
         }
         if constexpr (Type & DIFF_BACKWARD) {
-            gz2 += elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd)
-                 - elastic_top_fs_value_2d(u, ix, iz - 1, grad_ctx, solver, odd);
+            gz2 += elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd, half)
+                 - elastic_top_fs_value_2d(u, ix, iz - 1, grad_ctx, solver, odd, half);
         }
         return gz2 / grad_ctx.dz;
     }
@@ -101,13 +112,13 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     for (int m = 0; m < M; ++m) {
         const float c = grad_ctx.coeff[m];
         if constexpr (Type & DIFF_FORWARD) {
-            const float up = elastic_top_fs_value_2d(u, ix, iz + m + 1, grad_ctx, solver, odd);
-            const float um = elastic_top_fs_value_2d(u, ix, iz - m,     grad_ctx, solver, odd);
+            const float up = elastic_top_fs_value_2d(u, ix, iz + m + 1, grad_ctx, solver, odd, half);
+            const float um = elastic_top_fs_value_2d(u, ix, iz - m,     grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
         if constexpr (Type & DIFF_BACKWARD) {
-            const float up = elastic_top_fs_value_2d(u, ix, iz + m,     grad_ctx, solver, odd);
-            const float um = elastic_top_fs_value_2d(u, ix, iz - m - 1, grad_ctx, solver, odd);
+            const float up = elastic_top_fs_value_2d(u, ix, iz + m,     grad_ctx, solver, odd, half);
+            const float um = elastic_top_fs_value_2d(u, ix, iz - m - 1, grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
     }
@@ -195,7 +206,8 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false   // must match the forward mirror of the SAME field
 )
 {
     if (!solver.fsLo(0) && !solver.fsHi(0)) {
@@ -215,18 +227,25 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     if (solver.fsHi(0) && iz > bot) return 0.f;
 
     // Adjoint of D' ∘ extend is M^T ∘ D'^T.  M^T folds each air region back onto
-    // its mirror-image interior row:
-    //   gz[iz] = D'^T[iz] + parity*D'^T[2*top-iz]  (iz>top, from the top air)
-    //                     + parity*D'^T[2*bot-iz]  (iz<bot, from the bottom air)
+    // the interior row the forward mirror READ from, so the fold must use the
+    // SAME index map as the forward:
+    //   integer-grid mirror  m = 2*top - iz        (szz, vx)
+    //   half-cell mirror     m = 2*top - 1 - iz    (sxz, vz;  see
+    //                        ``elastic_top_fs_value_2d``)
+    // Testing ``miz < top`` (rather than a hard-coded ``iz > top``) keeps the
+    // condition correct for both maps — under the half-cell map the surface row
+    // ``iz == top`` is itself the mirror source of the first air row.
     const float parity = odd ? -1.f : 1.f;
     float gz = elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver);
 
-    if (solver.fsLo(0) && iz > top) {
-        const int miz = 2 * top - iz;   // top-air mirror row
-        gz += parity * elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, miz, grad_ctx, solver);
+    if (solver.fsLo(0)) {
+        const int miz = (half && !solver.has_topo) ? (2 * top - 1 - iz)
+                                                   : (2 * top - iz);
+        if (miz < top)                  // the mirror source is a top-air row
+            gz += parity * elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, miz, grad_ctx, solver);
     }
     if (solver.fsHi(0) && iz < bot) {
-        const int miz = 2 * bot - iz;   // bottom-air mirror row
+        const int miz = 2 * bot - iz;   // bottom-air mirror row (integer-grid)
         gz += parity * elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, miz, grad_ctx, solver);
     }
 
@@ -275,6 +294,19 @@ __device__ __forceinline__ int elastic_x_left_surface_col(const SolverContext& s
 __device__ __forceinline__ int elastic_x_right_surface_col(const SolverContext& solver)
 {
     return solver.phys_x1() - 1;
+}
+
+// True where the shear stress ``sxz`` must be zeroed at a free-surface row: ONLY
+// on a HIGH-side face (z-high / x-high), where the surface-row ``sxz`` node lies
+// outside the medium.  On a LOW-side face the surface-row ``sxz`` node sits +h/2
+// INSIDE the medium — a real shear value that must NOT be zeroed (zeroing it is
+// the spurious over-constraint that slowed the top/left Rayleigh wave ~6%; cf.
+// Kristek, Moczo & Archuleta 2002 Table 1, and ``Elastic._fs_zero_traction``).
+__device__ __forceinline__ bool elastic_fs_zero_shear(
+    const SolverContext& solver, int ix, int iz)
+{
+    return (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver))
+        || (solver.fsHi(2) && ix == elastic_x_right_surface_col(solver));
 }
 
 __device__ __forceinline__ float elastic_fs_value_x_2d(
@@ -474,6 +506,9 @@ __device__ __forceinline__ int elastic3d_index(
     return ix * grad_ctx.sx + iy * grad_ctx.sy + iz * grad_ctx.sz;
 }
 
+// ``half``: sxz / syz / vz sit at z=+h/2, so their image reflects about
+// ``top - 1/2`` (tau_zx(-h/2) = -tau_zx(+h/2), Kristek et al. 2002 Table 1),
+// not about ``top``.  See the 2-D note on ``elastic_top_fs_value_2d``.
 __device__ __forceinline__ float elastic3d_top_fs_value(
     const float* __restrict__ u,
     int ix,
@@ -481,12 +516,13 @@ __device__ __forceinline__ float elastic3d_top_fs_value(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     const int top = solver.phys_z0();
     if (solver.free_surface && iz < top) {
-        iz = 2 * top - iz;
+        iz = half ? (2 * top - 1 - iz) : (2 * top - iz);
         float v = u[elastic3d_index(ix, iy, iz, grad_ctx)];
         return odd ? -v : v;
     }
@@ -501,7 +537,8 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     if (!solver.free_surface) {
@@ -515,13 +552,13 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     for (int m = 0; m < M; ++m) {
         const float c = grad_ctx.coeff[m];
         if constexpr (Type & DIFF_FORWARD) {
-            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m + 1, grad_ctx, solver, odd);
-            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m,     grad_ctx, solver, odd);
+            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m + 1, grad_ctx, solver, odd, half);
+            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m,     grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
         if constexpr (Type & DIFF_BACKWARD) {
-            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m,     grad_ctx, solver, odd);
-            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m - 1, grad_ctx, solver, odd);
+            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m,     grad_ctx, solver, odd, half);
+            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m - 1, grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
     }
@@ -529,6 +566,11 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     return gz / grad_ctx.dz;
 }
 
+// ``half`` must match the forward mirror of the SAME field: sxz / syz / vz live
+// at z=+h/2 and their image reflects about ``top-1/2`` (index map
+// ``2*top-1-j``), so the adjoint fold and its validity range shift by one cell
+// relative to the integer-grid case (``2*top-j``).  See
+// ``elastic3d_top_fs_value``.
 template<int Order, int ForwardType>
 __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     const float* __restrict__ q,
@@ -537,7 +579,8 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     if (!solver.free_surface) {
@@ -565,8 +608,12 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
             if (jm >= top)
                 gz -= c * q[elastic3d_index(ix, iy, jm, grad_ctx)];
 
-            const int jg = 2 * top + m - iz;
-            if (iz > top && iz <= top + m && jg >= top)
+            // fold of the forward mirror: integer grid reads 2*top-j, the
+            // half-cell grid reads 2*top-1-j, so the ghost index (and the range
+            // of output rows that can reach it) shifts by one.
+            const int jg = (half ? 2 * top - 1 + m - iz : 2 * top + m - iz);
+            const int lo = half ? top - 1 : top;
+            if (iz > lo && iz <= lo + m && jg >= top)
                 gz += c * parity * q[elastic3d_index(ix, iy, jg, grad_ctx)];
         } else {
             const int jp = iz + m + 1;
@@ -577,8 +624,9 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
             if (jm >= top)
                 gz -= c * q[elastic3d_index(ix, iy, jm, grad_ctx)];
 
-            const int jg = 2 * top + m + 1 - iz;
-            if (iz > top && iz <= top + m + 1 && jg >= top)
+            const int jg = (half ? 2 * top + m - iz : 2 * top + m + 1 - iz);
+            const int lo = half ? top - 1 : top;
+            if (iz > lo && iz <= lo + m + 1 && jg >= top)
                 gz += c * parity * q[elastic3d_index(ix, iy, jg, grad_ctx)];
         }
     }
