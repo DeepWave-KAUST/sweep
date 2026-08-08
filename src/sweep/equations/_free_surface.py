@@ -141,13 +141,17 @@ def get_o2_pd(pd):
     return p2
 
 
-def fs_deriv(field, full_op, o2_op, halo, odd, axis, n_o2):
+def fs_deriv(field, full_op, o2_op, halo, odd, axis, n_o2, half=False):
     """Free-surface z-derivative with optional near-surface order reduction:
-    order-2 image-derivative for the top ``n_o2`` rows, full-order below."""
-    full = top_free_surface_derivative(field, full_op, halo, odd=odd, axis=axis)
+    order-2 image-derivative for the top ``n_o2`` rows, full-order below.
+    ``half=True`` for fields sitting at ``z=+h/2`` (``sxz``/``syz``/``vz``) —
+    they mirror about ``halo-1/2``; see :func:`fs_deriv_1side`."""
+    deriv = (top_free_surface_cell_derivative if half
+             else top_free_surface_derivative)
+    full = deriv(field, full_op, halo, odd=odd, axis=axis)
     if n_o2 <= 0:
         return full
-    o2 = top_free_surface_derivative(field, o2_op, halo, odd=odd, axis=axis)
+    o2 = deriv(field, o2_op, halo, odd=odd, axis=axis)
     return blend_top_n(o2, full, n_o2, axis)
 
 
@@ -220,7 +224,7 @@ def blend_side_n(near, far, n, axis, side="low"):
     )
 
 
-def fs_deriv_1side(field, op, op_swapped, halo, odd, axis, side):
+def fs_deriv_1side(field, op, op_swapped, halo, odd, axis, side, half=False):
     """Free-surface staggered derivative near ONE surface.
 
     ``side='low'`` mirrors about index ``halo`` and applies ``op`` (the
@@ -232,26 +236,43 @@ def fs_deriv_1side(field, op, op_swapped, halo, odd, axis, side):
     because flipping the axis turns a forward staggered difference into a
     (negated) backward one — ``F∘op_swapped∘F = -op`` — so this reproduces
     ``op(field)`` in the interior while enforcing the free surface at the high
-    end.  ``op_swapped`` is the opposite-direction operator (z_forward↔z_backward)."""
+    end.  ``op_swapped`` is the opposite-direction operator (z_forward↔z_backward).
+
+    ``half=True`` marks a field whose nodes sit half a cell BELOW the surface
+    plane (``sxz``/``syz``/``vz`` on the Virieux grid live at ``z=+h/2`` while
+    the surface is on the ``szz`` plane).  Their image must then reflect about
+    ``halo-1/2`` — i.e. ``tau_zx(-h/2) = -tau_zx(+h/2)`` (Kristek, Moczo &
+    Archuleta 2002, Table 1) — not about ``halo``, which would wrongly pair
+    ``-h/2`` with ``+3h/2``.  Getting this wrong is masked while the surface row
+    is force-zeroed, but destabilises the scheme once it is not.
+
+    NOTE: the ``half`` correction is applied on the low side only.  Flipping the
+    axis for the high side reverses the half-cell offset (the node landing on the
+    ghost boundary changes), so a correct high-side treatment needs its own
+    shift; until then a high-side surface keeps the historical integer-grid
+    mirror."""
     if side == "low":
-        return op(extend_top_free_surface(field, halo, odd, axis))
+        ext = (extend_top_free_surface_cell_centered if half
+               else extend_top_free_surface)
+        return op(ext(field, halo, odd, axis))
     ff = _flip(field, axis)
     d = op_swapped(extend_top_free_surface(ff, halo, odd, axis))
     return -_flip(d, axis)
 
 
-def fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides):
+def fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides, half=False):
     """Full-order FS derivative honouring every surface in ``sides``.  Each
     single-side derivative equals the plain derivative away from its own
     surface, so a two-sided (closed / waveguide) axis is stitched from the low
     result (correct at the low end) with the high end's band overwritten by the
-    high result (correct at the high end)."""
+    high result (correct at the high end).  ``half`` -> see
+    :func:`fs_deriv_1side` (low side only)."""
     if not sides:
         return op(field)
     if sides == ["low"] or sides == ["high"]:
-        return fs_deriv_1side(field, op, op_swapped, halo, odd, axis, sides[0])
-    d_low = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "low")
-    d_high = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "high")
+        return fs_deriv_1side(field, op, op_swapped, halo, odd, axis, sides[0], half)
+    d_low = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "low", half)
+    d_high = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "high", half)
     ax = axis if axis >= 0 else field.ndim + axis
     n = d_low.shape[ax]
     band = 2 * halo
@@ -261,14 +282,16 @@ def fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides):
     )
 
 
-def fs_deriv_edges(field, op, op_swapped, o2, o2_swapped, halo, odd, axis, sides, n_o2):
+def fs_deriv_edges(field, op, op_swapped, o2, o2_swapped, halo, odd, axis, sides,
+                   n_o2, half=False):
     """FS derivative honouring every surface in ``sides`` with optional
     near-surface order-2 reduction blended in at each side.  With
-    ``sides=['low']`` this is bit-for-bit :func:`fs_deriv`."""
-    full = fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides)
+    ``sides=['low']`` this is bit-for-bit :func:`fs_deriv`.  ``half`` -> see
+    :func:`fs_deriv_1side`."""
+    full = fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides, half)
     if n_o2 <= 0 or o2 is None:
         return full
-    o2full = fs_deriv_axis(field, o2, o2_swapped, halo, odd, axis, sides)
+    o2full = fs_deriv_axis(field, o2, o2_swapped, halo, odd, axis, sides, half)
     out = full
     for side in sides:
         out = blend_side_n(o2full, out, n_o2, axis, side)

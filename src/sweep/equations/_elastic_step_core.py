@@ -62,16 +62,18 @@ _OP_SWAP = {
 }
 
 
-def _fsd(pd, pd2, name, field, odd, axis, sides, halo, n_o2):
+def _fsd(pd, pd2, name, field, odd, axis, sides, halo, n_o2, half=False):
     """FS derivative of ``field`` using ``pd.<name>`` (e.g. ``'z_forward'``),
     honouring every surface in ``sides`` with near-surface order-2 blending from
-    ``pd2``.  Supplies the opposite operator for the high-side flip identity."""
+    ``pd2``.  Supplies the opposite operator for the high-side flip identity.
+    ``half=True`` for staggered fields half a cell off the surface plane
+    (``sxz``, ``vz``) — they mirror about ``halo-1/2``."""
     swap = _OP_SWAP[name]
     o2 = getattr(pd2, name) if pd2 is not None else None
     o2_sw = getattr(pd2, swap) if pd2 is not None else None
     return _fs_deriv_edges(
         field, getattr(pd, name), getattr(pd, swap), o2, o2_sw,
-        halo, odd, axis, sides, n_o2,
+        halo, odd, axis, sides, n_o2, half,
     )
 
 
@@ -115,7 +117,10 @@ def elastic_velocity_substep(
             szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows
         )
     elif z_sides:
-        txz_z = _fsd(pd, _pd2, "z_backward", sxz, True, -2, z_sides, top_halo, _n_o2)
+        # sxz sits at z=+h/2 -> half-cell mirror (about halo-1/2); szz is on the
+        # surface plane -> integer-grid mirror.  See ``fs_deriv_1side``.
+        txz_z = _fsd(pd, _pd2, "z_backward", sxz, True, -2, z_sides, top_halo, _n_o2,
+                     half=True)
         tzz_z = _fsd(pd, _pd2, "z_forward", szz, True, -2, z_sides, top_halo, _n_o2)
     else:
         txz_z = pd.z_backward(sxz)
@@ -188,7 +193,9 @@ def elastic_stress_substep(
             vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows
         )
     elif z_sides:
-        vz_z = _fsd(pd, _pd2, "z_backward", vz, True, -2, z_sides, top_halo, _n_o2)
+        # vz sits at z=+h/2 -> half-cell mirror; vx is on the surface plane.
+        vz_z = _fsd(pd, _pd2, "z_backward", vz, True, -2, z_sides, top_halo, _n_o2,
+                    half=True)
         vx_z = _fsd(pd, _pd2, "z_forward", vx, False, -2, z_sides, top_halo, _n_o2)
     else:
         vz_z = pd.z_backward(vz)

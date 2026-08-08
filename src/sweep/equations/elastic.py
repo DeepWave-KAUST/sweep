@@ -209,27 +209,37 @@ class Elastic(FirstOrderEquation):
         )
 
     def _fs_zero_traction(self, szz, sxz, sxx, topo_rows):
-        """Zero the traction components at each active free-surface face: the
-        shear ``sxz`` at every face; the normal ``szz`` at z-faces (top/bottom);
-        the normal ``sxx`` at x-faces (left/right).  For the top-only default the
-        z-low branch is bit-identical to ``zero_top_row(szz/sxz, ...)``."""
+        """Zero the traction that lies exactly ON each active free-surface node:
+        the normal stress -- ``szz`` at z-faces (top/bottom), ``sxx`` at x-faces
+        (left/right).
+
+        The shear ``sxz`` is deliberately NOT zeroed at a **low-side** face.  On
+        the staggered grid ``sxz`` lives half a cell off the normal-stress plane,
+        so at a low-side surface its surface-row node sits +h/2 *inside* the
+        medium: forcing it to zero is a spurious over-constraint (the traction-
+        free ``sxz = 0`` lives on the surface itself and is already enforced by
+        the image antisymmetry -- cf. Kristek, Moczo & Archuleta 2002, Table 1,
+        which prescribes only the normal stress).  That extra zeroing slowed the
+        top/left Rayleigh wave by ~6% (grid dispersion).  At a **high-side** face
+        the surface-row ``sxz`` node lies outside the medium and its zeroing is
+        retained (removing it pollutes the reconstruction)."""
         top_halo = self.pd.coes.shape[0]
-        if topo_rows is not None:
+        if topo_rows is not None:                       # irregular top = z-low surface
             szz = zero_at_topo(szz, topo_rows, axis=-2)
-            sxz = zero_at_topo(sxz, topo_rows, axis=-2)
             return szz, sxz, sxx
         fs_faces = getattr(self, "fs_faces", None)
-        if fs_faces is None:
+        if fs_faces is None:                            # legacy top-only = z-low surface
             szz = zero_top_row(szz, top_halo, axis=-2)
-            sxz = zero_top_row(sxz, top_halo, axis=-2)
             return szz, sxz, sxx
         z_sides, x_sides = sides_from_fs_faces_2d(fs_faces)
         for side in z_sides:
             szz = zero_surface_row(szz, top_halo, axis=-2, side=side)
-            sxz = zero_surface_row(sxz, top_halo, axis=-2, side=side)
+            if side != "low":
+                sxz = zero_surface_row(sxz, top_halo, axis=-2, side=side)
         for side in x_sides:
             sxx = zero_surface_row(sxx, top_halo, axis=-1, side=side)
-            sxz = zero_surface_row(sxz, top_halo, axis=-1, side=side)
+            if side != "low":
+                sxz = zero_surface_row(sxz, top_halo, axis=-1, side=side)
         return szz, sxz, sxx
 
     def interior_substeps(self):
