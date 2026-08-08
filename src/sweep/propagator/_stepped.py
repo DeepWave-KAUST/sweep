@@ -354,6 +354,46 @@ class SteppedBackwardRunner:
             self.k_f += 1 if e >= 1 else 0
         return out
 
+    def run_vrz_phase(self, bw_it_begin: int, bw_it_end: int, phase: int):
+        """Phase-split single VRZ backward_bs step (domain-decomposition only).
+
+        The variable-density gradient is a spatial divergence of the coupling
+        field c/e = lambda*vp*grad(p), so unlike acoustic's pointwise u_tt*lambda
+        it needs the NEIGHBOUR's c/e at a cut seam.  Three phases let the DD
+        driver exchange lambda,p (after phase 1) AND c/e (after phase 2) before
+        the divergence:
+
+        * ``phase == 1`` -- advance the adjoint + reconstruct the forward
+          (swap_pml + forward.swap happen in C++ here); the buffer-role counters
+          advance so :attr:`lambda_now` / :attr:`recon_u_now` point at the
+          just-produced fields for the driver to halo-exchange.
+        * ``phase == 2`` -- build c/e from the POST-exchange lambda,p.  Bound at
+          the advanced counters, so ``u_now`` IS the tensor the exchange filled.
+        * ``phase == 3`` -- divergence of the POST-exchange c/e -> gradient.
+
+        Counters advance ONLY after phase 1 (phases 2/3 re-read the same step's
+        fields).  ``step_phase`` is reset to 0 after every call so plain
+        ``run_segment`` paths stay clean.
+        """
+        if phase not in (1, 2, 3, 4):
+            raise ValueError(f"phase must be 1, 2, 3 or 4, got {phase}")
+        b, e = int(bw_it_begin), int(bw_it_end)
+        if b != e + 1:
+            raise ValueError(
+                f"run_vrz_phase drives exactly one step: got segment [{e}, {b})")
+        p = self.p
+        p.bw_it_begin, p.bw_it_end = b, e
+        p.step_phase = int(phase)
+        self._bind_lists()
+        try:
+            out = self.func(p)
+        finally:
+            p.step_phase = 0
+        if phase == 1:
+            self.k_adj += 1
+            self.k_f += 1 if e >= 1 else 0
+        return out
+
     @property
     def lambda_now(self) -> torch.Tensor:
         """Tensor holding the adjoint u_now after the segments run so far

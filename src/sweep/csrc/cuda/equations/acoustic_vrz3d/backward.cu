@@ -260,8 +260,32 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
                 "AcousticVRZ3D stepped backward: require 0 <= bw_it_end < "
                 "bw_it_begin <= nt, got [", it_lo, ", ", it_hi, ") with nt=", p.nt);
-    TORCH_CHECK(p.step_phase == 0,
-                "AcousticVRZ3D backward does not support phased execution.");
+    // Phased DD backward (Fix A). The variable-density gradient is a spatial
+    // divergence of the coupling field c/e = lambda*vp*grad(p), so unlike acoustic's
+    // pointwise u_tt*lambda it needs the NEIGHBOUR's c/e at a cut seam. Split the
+    // per-step backward into three driver-visible phases so ModelParallel can
+    // halo-exchange lambda,p (after phase 1) AND c/e (after phase 2) before the
+    // divergence (phase 3):
+    //   phase 1 = adjoint advance + forward reconstruction (+restore, swaps)
+    //   phase 2 = build c/e from the POST-exchange lambda,p (split kernel)
+    //   phase 3 = divergence of the POST-exchange c/e -> gradient accumulate
+    // step_phase 0 stays the monolithic single-GPU path (AUTO/fused; unchanged).
+    TORCH_CHECK(p.step_phase >= 0 && p.step_phase <= 4,
+                "AcousticVRZ3D backward step_phase must be 0, 1, 2, 3 or 4");
+    const bool phased     = (p.step_phase != 0);
+    const bool do_advance = (p.step_phase == 0 || p.step_phase == 1);
+    const bool do_build   = (p.step_phase == 0 || p.step_phase == 2);
+    const bool do_grad    = (p.step_phase == 0 || p.step_phase == 3);
+    const bool do_coeff   = (p.step_phase == 0 || p.step_phase == 4);   // 4 = build adjoint coeffs only
+    if (phased) {
+        TORCH_CHECK(it_hi == it_lo + 1,
+                    "AcousticVRZ3D phased backward requires a single-step segment "
+                    "(bw_it_begin == bw_it_end + 1)");
+        TORCH_CHECK(p.adjoint_workspace.size() == 10,
+                    "AcousticVRZ3D phased/DD backward requires 10 adjoint_workspace "
+                    "tensors ([0-5]=c_x..e_z coupling, [6-9]=C0,Cx,Cy,Cz adjoint coeffs); "
+                    "bind them from Python (see ModelParallel._capture)");
+    }
     if (p.bw_stepped()) {
         TORCH_CHECK(!p.adjoint_wavefields.empty() && !p.forward_wavefields.empty(),
                     "AcousticVRZ3D stepped backward requires Python-bound adjoint "
@@ -278,7 +302,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     // FIRST segment only: Python zeroes the bound adjoint once before segment 1;
     // continuation segments must carry the propagated adjoint state.
-    if (first_segment)
+    if (first_segment && do_advance)
         zero_wavefield_state_vrz3d(adjoint);
 
     AcousticWavefieldTensor forward;
@@ -291,7 +315,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
     // Seed the reverse reconstruction from the saved last two snapshots — FIRST
     // segment only; continuation segments carry the reconstruction state.
-    if (first_segment) {
+    if (first_segment && do_advance) {
         forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
         forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
         forward.u_next_t.zero_();
@@ -334,10 +358,28 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         _sc.e_x.zero_(); _sc.e_y.zero_(); _sc.e_z.zero_();
     }
     _sc.vp_ptr = vp.data_ptr(); _sc.z_ptr = z.data_ptr();
-    torch::Tensor& C0 = _sc.C0; torch::Tensor& Cx = _sc.Cx;
-    torch::Tensor& Cy = _sc.Cy; torch::Tensor& Cz = _sc.Cz;
-    torch::Tensor& c_x = _sc.c_x; torch::Tensor& c_y = _sc.c_y; torch::Tensor& c_z = _sc.c_z;
-    torch::Tensor& e_x = _sc.e_x; torch::Tensor& e_y = _sc.e_y; torch::Tensor& e_z = _sc.e_z;
+    // C0/Cx/Cy/Cz adjoint coeffs: DD (phased) uses the Python-bound adjoint_workspace
+    // [6-9] so the driver halo-exchanges them ONCE (model-only, constant within a
+    // backward) before the reverse loop; single-GPU reuses the persistent scratch.
+    torch::Tensor C0, Cx, Cy, Cz;
+    if (phased) {
+        C0 = p.adjoint_workspace[6]; Cx = p.adjoint_workspace[7];
+        Cy = p.adjoint_workspace[8]; Cz = p.adjoint_workspace[9];
+    } else {
+        C0 = _sc.C0; Cx = _sc.Cx; Cy = _sc.Cy; Cz = _sc.Cz;
+    }
+    // c/e coupling buffers: DD (phased) uses the Python-bound adjoint_workspace so
+    // the driver can halo-exchange them between build (phase 2) and divergence
+    // (phase 3); single-GPU (monolithic) reuses the persistent VrzBwdScratch.
+    // (torch::Tensor copies share storage, so .data_ptr() hits the right buffer.)
+    torch::Tensor c_x, c_y, c_z, e_x, e_y, e_z;
+    if (phased) {
+        c_x = p.adjoint_workspace[0]; c_y = p.adjoint_workspace[1]; c_z = p.adjoint_workspace[2];
+        e_x = p.adjoint_workspace[3]; e_y = p.adjoint_workspace[4]; e_z = p.adjoint_workspace[5];
+    } else {
+        c_x = _sc.c_x; c_y = _sc.c_y; c_z = _sc.c_z;
+        e_x = _sc.e_x; e_y = _sc.e_y; e_z = _sc.e_z;
+    }
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -391,12 +433,16 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
+    if (do_advance)
+        boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
     // Time-invariant adjoint transpose coefficients — computed ONCE per backward
     // (first DD segment / model change) into the reused scratch, not on every
     // single-step segment.
-    if (_sc_recompute) {
+    // Adjoint coeffs: monolithic builds on the first segment; phased builds ONLY in the
+    // pre-loop coeff phase (step_phase 4 -> do_coeff), after which the driver exchanges
+    // their cut halo once and phases 1/2/3 reuse them (do_coeff false there).
+    if (do_coeff && _sc_recompute) {
         BUILD_VRZ_ADJOINT_COEFFS_3D(
             order,
             launch_config.grid,
@@ -425,121 +471,150 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // contributes no gradient (matches the single-GPU VRZ backward, which also
     // stops at it == 1), so the last segment (bw_it_end == 0) simply ends there.
     for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
-        auto adj_view = adjoint.view();
+        if (do_advance) {
+            auto adj_view = adjoint.view();
 
-        ACOUSTIC_VRZ3D_ADJOINT_FUSED(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            adj_view,
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
-            C0.data_ptr<float>(),
-            Cx.data_ptr<float>(),
-            Cy.data_ptr<float>(),
-            Cz.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_y,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
-
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-            adj_view.u_next,
-            neg_adjoint_source.data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            it,
-            adjoint_nsrc,
-            ctx
-        );
-
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
-
-        auto for_view = forward.view();
-
-        ACOUSTIC_VRZ3D_NOPML(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            for_view,
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            ctx
-        );
-
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-            for_view.u_next,
-            p.forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            forward_nsrc,
-            ctx
-        );
-
-        boundary_runtime.restore_backward_3d(
-            it,
-            for_view.u_next,
-            launch_config.grid,
-            launch_config.block,
-            bs,
-            save_width,
-            boundary_offset,
-            ctx
-        );
-
-        forward.swap();
-
-        if (_gradSplit && (order == 2 || order == 4)) {
-            // Forced SPLIT gradient: materialise c_d = λ·vp·∂_d p and
-            // e_d = λ·vp²z·∂_d p (O(M)), then a single-level divergence (O(M)) —
-            // vs the fused O(M²) nested stencils AUTO uses for order<=4.  Same
-            // operands/factors (FP reassociation only); c_*/e_* already allocated.
-            BUILD_VRZ_GRAD_FIELDS_3D(
-                order, launch_config.grid, launch_config.block,
-                forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
-                vp.data_ptr<float>(), z.data_ptr<float>(),
-                c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
-                e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
-                grad_ctx, ctx);
-            CALCULATE_GRAD_VRZ3D(
-                order, launch_config.grid, launch_config.block,
-                forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
-                c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
-                e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
-                vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
-                grad_vp.data_ptr<float>(), grad_z.data_ptr<float>(),
-                grad_ctx, lap_ctx, ctx);
-        } else {
-            CALCULATE_GRAD_VRZ3D_AUTO(
+            ACOUSTIC_VRZ3D_ADJOINT_FUSED(
                 order,
                 launch_config.grid,
                 launch_config.block,
-                forward.u_now_t.data_ptr<float>(),
-                adjoint.u_now_t.data_ptr<float>(),
+                adj_view,
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
-                c_x.data_ptr<float>(),
-                c_y.data_ptr<float>(),
-                c_z.data_ptr<float>(),
-                e_x.data_ptr<float>(),
-                e_y.data_ptr<float>(),
-                e_z.data_ptr<float>(),
-                grad_vp.data_ptr<float>(),
-                grad_z.data_ptr<float>(),
-                grad_ctx,
+                C0.data_ptr<float>(),
+                Cx.data_ptr<float>(),
+                Cy.data_ptr<float>(),
+                Cz.data_ptr<float>(),
                 lap_ctx,
+                grad_ctx,
+                grad_ctx_x,
+                grad_ctx_y,
+                grad_ctx_z,
+                cpml,
                 ctx
             );
+
+            add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+                adj_view.u_next,
+                neg_adjoint_source.data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(),
+                it,
+                adjoint_nsrc,
+                ctx
+            );
+
+            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+
+            auto for_view = forward.view();
+
+            ACOUSTIC_VRZ3D_NOPML(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                for_view,
+                vp.data_ptr<float>(),
+                z.data_ptr<float>(),
+                inv_z.data_ptr<float>(),
+                lap_ctx,
+                grad_ctx,
+                ctx
+            );
+
+            add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                for_view.u_next,
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                ctx
+            );
+
+            boundary_runtime.restore_backward_3d(
+                it,
+                for_view.u_next,
+                launch_config.grid,
+                launch_config.block,
+                bs,
+                save_width,
+                boundary_offset,
+                ctx
+            );
+
+            forward.swap();
         }
-        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
+
+        // Gradient. step_phase 0 = monolithic single-GPU (AUTO/fused; unchanged).
+        // Phased DD: build c/e (phase 2) and take their divergence (phase 3) as
+        // SEPARATE launches so the driver halo-exchanges c/e in between -- the
+        // divergence then reads the neighbour's c/e at the cut seam (not zero).
+        // The split CALCULATE_GRAD_VRZ3D reads c_x..e_z with a raw (guard-free)
+        // stencil, so a filled halo makes the seam correct; the fused AUTO kernel
+        // must NOT be used here (its accessor zeroes cut-side taps).
+        if (!phased) {
+            if (_gradSplit && (order == 2 || order == 4)) {
+                BUILD_VRZ_GRAD_FIELDS_3D(
+                    order, launch_config.grid, launch_config.block,
+                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    vp.data_ptr<float>(), z.data_ptr<float>(),
+                    c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
+                    e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
+                    grad_ctx, ctx);
+                CALCULATE_GRAD_VRZ3D(
+                    order, launch_config.grid, launch_config.block,
+                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
+                    e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
+                    vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
+                    grad_vp.data_ptr<float>(), grad_z.data_ptr<float>(),
+                    grad_ctx, lap_ctx, ctx);
+            } else {
+                CALCULATE_GRAD_VRZ3D_AUTO(
+                    order,
+                    launch_config.grid,
+                    launch_config.block,
+                    forward.u_now_t.data_ptr<float>(),
+                    adjoint.u_now_t.data_ptr<float>(),
+                    vp.data_ptr<float>(),
+                    z.data_ptr<float>(),
+                    inv_z.data_ptr<float>(),
+                    c_x.data_ptr<float>(),
+                    c_y.data_ptr<float>(),
+                    c_z.data_ptr<float>(),
+                    e_x.data_ptr<float>(),
+                    e_y.data_ptr<float>(),
+                    e_z.data_ptr<float>(),
+                    grad_vp.data_ptr<float>(),
+                    grad_z.data_ptr<float>(),
+                    grad_ctx,
+                    lap_ctx,
+                    ctx
+                );
+            }
+        } else {
+            if (do_build) {
+                BUILD_VRZ_GRAD_FIELDS_3D(
+                    order, launch_config.grid, launch_config.block,
+                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    vp.data_ptr<float>(), z.data_ptr<float>(),
+                    c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
+                    e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
+                    grad_ctx, ctx);
+            }
+            if (do_grad) {
+                CALCULATE_GRAD_VRZ3D(
+                    order, launch_config.grid, launch_config.block,
+                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
+                    e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
+                    vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
+                    grad_vp.data_ptr<float>(), grad_z.data_ptr<float>(),
+                    grad_ctx, lap_ctx, ctx);
+            }
+        }
+
+        if (do_advance)
+            boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
     const auto normalize_grad = [](const torch::Tensor& model_grad, const torch::Tensor& model) {
