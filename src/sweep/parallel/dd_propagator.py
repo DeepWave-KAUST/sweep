@@ -466,6 +466,26 @@ class ModelParallel:
         if not self.L_adj:
             self.L_adj = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nwf)]
         self.recon = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nrecon)]
+        # VRZ variable-density gradient is a spatial divergence of the coupling
+        # field c/e = lambda*vp*grad(p), so under DD the divergence at a cut seam
+        # needs the neighbour's c/e.  Materialise the six coupling buffers and bind
+        # them to bp.adjoint_workspace (the phased VRZ backward reads c/e from
+        # there) so _run_adjoint can halo-exchange them between the build and
+        # divergence sub-steps.  Plain acoustic's pointwise u_tt*lambda gradient
+        # needs no such exchange, so it keeps self.coupling empty.
+        if self._is_vrz:
+            self.coupling = [torch.zeros_like(self.bp.models[0]) for _ in range(6)]
+            # C0/Cx/Cy/Cz: the fused adjoint's transpose fast-path reads these coeffs
+            # over [ix-M,ix+M] -> into the cut halo.  They are model-only (constant
+            # within a backward), so build once + halo-exchange once (before the reverse
+            # loop) rather than per step.  Without their exchanged halo, cut-adjacent
+            # physical cells (now on the cut-aware fast-path) read a 0 coeff halo -> the
+            # adjoint (hence gradient) drifts at the source.
+            self.adj_coeffs = [torch.zeros_like(self.bp.models[0]) for _ in range(4)]
+            self.bp.adjoint_workspace = self.coupling + self.adj_coeffs  # [0-5]=c/e, [6-9]=C0,Cx,Cy,Cz
+        else:
+            self.coupling = []
+            self.adj_coeffs = []
         # acoustic grads_out = [grad_wavelet, *model_grads] (size = models + 1);
         # elastic has no wavelet grad (size = models).
         if self.family == "acoustic":
@@ -770,14 +790,37 @@ class ModelParallel:
             raise RuntimeError("forward() must run before the adjoint")
         self.bp.adjoint_source = torch.as_tensor(
             adjoint_source_tile, device=self.dev, dtype=torch.float32)
-        for t in self.L_adj + self.recon + self.gbufs + self.illum:
+        for t in self.L_adj + self.recon + self.gbufs + self.illum + self.coupling + self.adj_coeffs:
             t.zero_()
         self.bp.cut_face_mask = self.cut_mask
         bhalo = self._halo("_bwd_halo")
         nv = self._nv if self.family == "elastic" else None
 
         with torch.no_grad():
-            if self.family == "acoustic":
+            if self._is_vrz:
+                # VRZ phased backward (Fix A): advance+recon -> exchange lambda,p
+                # -> build coupling c/e from the POST-exchange lambda,p -> exchange
+                # c/e -> divergence/accumulate.  The c/e exchange gives the gradient
+                # divergence the neighbour's coupling values at the cut seam
+                # (acoustic's pointwise gradient needs no such exchange).  VRZ
+                # rotates the psi pairs only (swap_pml), like the forward recon.
+                br = SteppedBackwardRunner(
+                    self.b_func, self.bp, self.L_adj, self.recon,
+                    adj_pairs=acoustic_psi_pairs(self.ndim))
+                # Pre-loop: build the adjoint coeffs C0/Cx/Cy/Cz once (model-only,
+                # constant within a backward) and halo-exchange them once, so the fused
+                # adjoint's transpose fast-path reads valid coeffs in the cut halo at
+                # every reverse step (phase 1).  step_phase 4 = coeff build only.
+                br.run_vrz_phase(self.nt, self.nt - 1, 4)
+                self._exchange_group(bhalo, self.adj_coeffs)
+                for it in range(self.nt - 1, 0, -1):    # step 0 contributes no grad
+                    br.run_vrz_phase(it + 1, it, 1)     # advance adjoint + recon
+                    self._exchange(bhalo, br.lambda_now)
+                    self._exchange(bhalo, br.recon_u_now)
+                    br.run_vrz_phase(it + 1, it, 2)     # build c/e (POST-exchange lambda,p)
+                    self._exchange_group(bhalo, self.coupling)
+                    br.run_vrz_phase(it + 1, it, 3)     # divergence -> grad += (once)
+            elif self.family == "acoustic":
                 # Plain acoustic doubles psi AND zeta in the fused adjoint
                 # (swap_aux), needing the wider adj-pairs over a 15-field list.
                 # VRZ (variable density) doubles only psi in the adjoint
