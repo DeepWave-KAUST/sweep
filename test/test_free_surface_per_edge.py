@@ -235,3 +235,58 @@ def test_elastic_edge_reflects(fs, src_xz, rec_xz, rc):
     e_pml = late(False)
     e_fs = late(fs)
     assert e_fs > 15 * max(e_pml, 1e-30), f"{fs}: E_fs/E_pml={e_fs / max(e_pml, 1e-30):.1f}"
+
+
+# --- half-cell image for the staggered +h/2 fields -------------------------
+# sxz/syz/vz sit half a cell off the plane the free surface lives on, so their
+# image must reflect about ``halo-1/2``:  tau_zx(-h/2) = -tau_zx(+h/2)
+# (Kristek, Moczo & Archuleta 2002, Table 1, Eq. 7).  Reflecting about ``halo``
+# instead pairs -h/2 with +3h/2.  That mistake is INVISIBLE while the surface row
+# is force-zeroed -- the zero absorbs it -- and only shows up as a slow
+# instability once the (spurious) zeroing is removed, which is why an end-to-end
+# stability test needs a large, long, low-velocity model to catch it.  Asserting
+# the image relation directly is exact, instant, and cannot be masked.
+
+def _mirror_rows(fn, halo, odd, n=12):
+    """Apply an image-extension to a ramp and return the ghost rows it produced."""
+    u = torch.arange(1.0, n + 1.0).reshape(n, 1)
+    out = fn(u, halo, odd, -2)
+    return out[:halo, 0], u[:, 0]
+
+
+def test_half_cell_image_pairs_minus_h_over_2_with_plus_h_over_2():
+    """Low side: ghost[halo-1] must mirror the FIRST INTERIOR node u[halo]."""
+    from sweep.equations._free_surface import (
+        extend_top_free_surface,
+        extend_top_free_surface_cell_centered,
+    )
+    halo = 2
+    ghost_half, u = _mirror_rows(extend_top_free_surface_cell_centered, halo, True)
+    # tau_zx(-h/2) = -tau_zx(+h/2):  the node just above the surface mirrors the
+    # node just below it, which for a +h/2 field is u[halo] itself.
+    assert ghost_half[-1] == -u[halo], (
+        f"half-cell image maps -h/2 to {-ghost_half[-1].item()} but the +h/2 node "
+        f"is {u[halo].item()}; the mirror is reflecting about the wrong point")
+    # the integer-grid image is the one that gets it wrong for these fields
+    ghost_int, _ = _mirror_rows(extend_top_free_surface, halo, True)
+    assert ghost_int[-1] == -u[halo + 1], "integer-grid image should pair -h/2 with +3h/2"
+    assert not torch.equal(ghost_half, ghost_int), "the two images must differ"
+
+
+def test_half_cell_image_high_side_starts_one_cell_earlier():
+    """High side: flipping the axis reverses the half-cell offset, so the node at
+    the surface index is already outside the medium and the ghost block covers one
+    more row, reflecting about ``halo+1/2``."""
+    from sweep.equations._free_surface import (
+        extend_top_free_surface_cell_centered_flipped,
+    )
+    halo, n = 2, 12
+    u = torch.arange(1.0, n + 1.0).reshape(n, 1)
+    out = extend_top_free_surface_cell_centered_flipped(u, halo, True, -2)
+    assert out.shape == u.shape, "image extension must preserve the shape"
+    # u[halo] is air on this side and mirrors the first interior node u[halo+1]
+    assert out[halo, 0] == -u[halo + 1, 0], (
+        f"high-side image gives {out[halo, 0].item()} at the surface index; "
+        f"expected -{u[halo + 1, 0].item()} (mirror of the first interior node)")
+    # interior is untouched
+    assert torch.equal(out[halo + 1:, 0], u[halo + 1:, 0])
