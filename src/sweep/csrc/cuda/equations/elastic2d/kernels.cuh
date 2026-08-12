@@ -138,7 +138,7 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
 
     float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
     float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
@@ -221,7 +221,7 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
     float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
@@ -356,7 +356,7 @@ __global__ void elastic_velocity_kernel_nopml(
 
     float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
     float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
@@ -409,7 +409,7 @@ __global__ void elastic_stress_kernel_nopml(
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
     float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
@@ -519,7 +519,7 @@ __global__ void elastic_stress_adjoint_prepare(
         float* grad_vs_b        = grad_vs_out   + b * spatial_size;
         float* grad_rho_b       = grad_rho_out  + b * spatial_size;
 
-        float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true);
+        float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true, true);
         float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true, true);
         float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
         float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(fvz_b, ix, iz, grad_ctx, solver, false);
@@ -656,7 +656,7 @@ __global__ void elastic_stress_adjoint_apply(
     const float* qxz_b = qxz + b * spatial_size;
     const float* qzx_b = qzx + b * spatial_size;
 
-    float dqxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD>(qxx_b, ix, iz, grad_ctx, solver, true);
+    float dqxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD>(qxx_b, ix, iz, grad_ctx, solver, true, true);
     float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD> (qxz_b, ix, iz, grad_ctx, solver, false);
     float dqzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_FORWARD>(qzx_b, ix, iz, grad_ctx, solver, false);
     float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true, true);
@@ -781,7 +781,7 @@ __global__ void elastic_velocity_adjoint_apply(
     float dpxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_FORWARD>(pxx_b, ix, iz, grad_ctx, solver, true);
     float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD> (pzz_b, ix, iz, grad_ctx, solver, true);
     float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true, true);
-    float dpzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD>(pzx_b, ix, iz, grad_ctx, solver, true);
+    float dpzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD>(pzx_b, ix, iz, grad_ctx, solver, true, true);
 
     int idx = iz * solver.nx + ix;
     f.sxx[idx] += dpxx_dx;
@@ -852,7 +852,7 @@ __global__ void calculate_grad_elastic_bs(
     float* gvs = grad_vs + b * spatial_size;
     float* grho = grad_rho + b * spatial_size;
 
-    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.vx, ix, iz, grad_ctx, solver, true);
+    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.vx, ix, iz, grad_ctx, solver, true, true);
     float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(f.vz, ix, iz, grad_ctx, solver, false);
@@ -951,7 +951,7 @@ __global__ void calculate_grad_elastic_nobs(
 
     auto a = adjoint.offset(b, spatial_size);
 
-    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true);
+    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true, true);
     float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true, true);
     float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
     float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(fvz_b, ix, iz, grad_ctx, solver, false);
@@ -1065,7 +1065,7 @@ __global__ void elastic_velocity_kernel_apm(
     // false in APM mode, so these helpers route to the plain sgradient.
     float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
     float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho_x = 1.f / rho_x_b[idx];
@@ -1159,7 +1159,7 @@ __global__ void elastic_stress_kernel_apm(
     const float* mu_b    = mu_eff     + b * spatial_size;
     const float* muxz_b  = mu_xz_node + b * spatial_size;
 
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
     float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
@@ -1296,7 +1296,7 @@ __global__ void elastic_velocity_kernel_nopml_apm(
 
     float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
     float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho_x = 1.f / rho_x_b[idx];
@@ -1345,7 +1345,7 @@ __global__ void elastic_stress_kernel_nopml_apm(
     const float* mu_b   = mu_eff     + b * spatial_size;
     const float* muxz_b = mu_xz_node + b * spatial_size;
 
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
     float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);

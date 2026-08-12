@@ -130,7 +130,10 @@ def elastic_velocity_substep(
     # — same operators as the plain x-derivatives above, plus the image mirror.
     if x_sides:
         txx_x = _fsd(pd, _pd2, "x_forward", sxx, True, -1, x_sides, top_halo, _n_o2)
-        txz_x = _fsd(pd, _pd2, "x_backward", sxz, True, -1, x_sides, top_halo, _n_o2)
+        # sxz sits at x=+h/2 -> half-cell mirror (same argument as the z faces);
+        # sxx is on the surface plane -> integer-grid mirror.
+        txz_x = _fsd(pd, _pd2, "x_backward", sxz, True, -1, x_sides, top_halo, _n_o2,
+                     half=True)
 
     # ---- CPML accumulation + velocity update -----------------------------
     m_tzzz = azh * m_tzzz + bzh * tzz_z
@@ -204,7 +207,9 @@ def elastic_stress_substep(
     # x-normal free surface: mirror the x-derivatives of vx (normal, odd) and vz
     # (tangential, even) — same operators as the plain x-derivatives above.
     if x_sides:
-        vx_x = _fsd(pd, _pd2, "x_backward", vx, True, -1, x_sides, top_halo, _n_o2)
+        # vx sits at x=+h/2 on an x-normal surface; vz is on the surface plane.
+        vx_x = _fsd(pd, _pd2, "x_backward", vx, True, -1, x_sides, top_halo, _n_o2,
+                    half=True)
         vz_x = _fsd(pd, _pd2, "x_forward", vz, False, -1, x_sides, top_halo, _n_o2)
 
     # ---- CPML accumulation + stress update -------------------------------

@@ -88,6 +88,24 @@ def top_free_surface_cell_derivative(u, deriv, halo, odd, axis):
     return deriv(extend_top_free_surface_cell_centered(u, halo, odd, axis))
 
 
+def extend_top_free_surface_cell_centered_flipped(u, halo, odd, axis):
+    """Half-cell mirror for a FLIPPED axis (the high-side path).
+
+    Flipping reverses the half-cell offset: a field that sat at ``+h/2`` below
+    the surface now sits at ``-h/2``, so the node at index ``halo`` is already
+    outside the medium and the first interior one is ``halo+1``.  The ghost
+    block therefore covers ``0..halo`` (one more row than the low-side variant)
+    and reflects about ``halo+1/2``:  ghost[j] = u[2*halo+1-j], giving
+    ``u[halo] = -u[halo+1]`` — i.e. tau_zx(+h/2) = -tau_zx(-h/2) measured from
+    the high-side surface."""
+    if halo <= 0:
+        return u
+    ghost = _flip(_slice_axis(u, axis, halo + 1, 2 * halo + 2), axis=axis)
+    if odd:
+        ghost = -ghost
+    return _concat([ghost, _slice_axis(u, axis, halo + 1, None)], axis=axis)
+
+
 def zero_top_row(u, halo, axis):
     row = 0 if halo <= 0 else halo
     out = _zero_axis_index(u, axis, row)
@@ -246,17 +264,17 @@ def fs_deriv_1side(field, op, op_swapped, halo, odd, axis, side, half=False):
     ``-h/2`` with ``+3h/2``.  Getting this wrong is masked while the surface row
     is force-zeroed, but destabilises the scheme once it is not.
 
-    NOTE: the ``half`` correction is applied on the low side only.  Flipping the
-    axis for the high side reverses the half-cell offset (the node landing on the
-    ghost boundary changes), so a correct high-side treatment needs its own
-    shift; until then a high-side surface keeps the historical integer-grid
-    mirror."""
+    Flipping the axis for the high side reverses the half-cell offset, so the
+    high side needs its own variant (``..._cell_centered_flipped``) whose ghost
+    block is one row larger; see that function."""
     if side == "low":
         ext = (extend_top_free_surface_cell_centered if half
                else extend_top_free_surface)
         return op(ext(field, halo, odd, axis))
     ff = _flip(field, axis)
-    d = op_swapped(extend_top_free_surface(ff, halo, odd, axis))
+    ext_hi = (extend_top_free_surface_cell_centered_flipped if half
+              else extend_top_free_surface)
+    d = op_swapped(ext_hi(ff, halo, odd, axis))
     return -_flip(d, axis)
 
 
