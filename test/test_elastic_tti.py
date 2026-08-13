@@ -156,7 +156,15 @@ def _elastic_tti_problem(equation_cls=ElasticTTI, *, free_surface=False):
 
 
 @pytest.mark.parametrize("equation_cls", [ElasticTTI, ElasticTTISG])
-@pytest.mark.parametrize("free_surface", [False, True])
+def test_elastic_tti_free_surface_raises(equation_cls):
+    """The isotropic image method is wrong for an anisotropic medium; the
+    propagator refuses free_surface on TTI (see test_aniso_free_surface_guard)."""
+    with pytest.raises(NotImplementedError, match="anisotropic"):
+        _elastic_tti_problem(equation_cls, free_surface=True)
+
+
+@pytest.mark.parametrize("equation_cls", [ElasticTTI, ElasticTTISG])
+@pytest.mark.parametrize("free_surface", [False])
 def test_elastic_tti_short_forward_and_gradient_are_finite(equation_cls, free_surface):
     solver, wavelet, sources, receivers, models = _elastic_tti_problem(equation_cls, free_surface=free_surface)
 
