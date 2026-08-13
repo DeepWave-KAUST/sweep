@@ -68,6 +68,27 @@ def _dequantize_int8(codes, scale, n):
     return blocks.reshape(-1)[:n]
 
 
+def _quantize_fp16(flat):
+    """Per-block scaled FP16, mirroring the CUDA quantize_fp16_kernel: one FP32
+    scale (= block max |val|) per ``_INT8_BLOCK`` cells, payload normalized to
+    [-1, 1] before the fp16 cast.  A bare fp16 cast would flush everything
+    below 2^-24 to zero — which wipes the velocity faces of elastic wavefields
+    (values sit ~rho·vp below the stresses) and corrupts the gradient."""
+    n = flat.numel()
+    pad = (-n) % _INT8_BLOCK
+    if pad:
+        flat = torch.cat([flat, flat.new_zeros(pad)])
+    blocks = flat.view(-1, _INT8_BLOCK)
+    scale = blocks.abs().amax(dim=1, keepdim=True).clamp_min(1e-30)
+    codes = (blocks / scale).to(torch.float16)
+    return codes.reshape(-1), scale.squeeze(1)
+
+
+def _dequantize_fp16(codes, scale, n):
+    blocks = codes.view(-1, _INT8_BLOCK).to(torch.float32) * scale.unsqueeze(1)
+    return blocks.reshape(-1)[:n]
+
+
 def save_step(state, step, pos, field):
     """Consolidate this field's ring slices into one flat buffer and write it into
     the PRE-ALLOCATED per-rollout storage at ``[step, pos]`` (down-cast / int8
@@ -80,6 +101,10 @@ def save_step(state, step, pos, field):
         codes, scale = _quantize_int8(flat)
         state.codes[step, pos].copy_(codes)
         state.scale[step, pos].copy_(scale)
+    elif state.store_dtype == "fp16":
+        codes, scale = _quantize_fp16(flat)
+        state.codes[step, pos].copy_(codes)
+        state.scale[step, pos].copy_(scale)
     else:
         state.buf[step, pos].copy_(flat)             # copy_ casts fp32 -> store dtype
 
@@ -89,6 +114,8 @@ def restore_step(state, step, pos, field):
     field's FP32 dtype, and split it back across ``field``'s ring slices."""
     if state.store_dtype == "int8":
         flat = _dequantize_int8(state.codes[step, pos], state.scale[step, pos], state.total_cells)
+    elif state.store_dtype == "fp16":
+        flat = _dequantize_fp16(state.codes[step, pos], state.scale[step, pos], state.total_cells)
     else:
         flat = state.buf[step, pos]
     if flat.device != field.device:                  # offloaded ring (cpu) -> compute device
@@ -165,9 +192,12 @@ class ReconState:
         self.total_cells = sum(self.ring_sizes)
         T, F = nt + 1, n_ring_fields
         self.buf = self.codes = self.scale = None
-        if store_dtype == "int8":
+        if store_dtype in ("int8", "fp16"):
+            # Scaled storage: per-block-normalized payload + FP32 scales
+            # (fp16 shares int8's layout — see _quantize_fp16).
+            payload = torch.int8 if store_dtype == "int8" else torch.float16
             padded = ((self.total_cells + _INT8_BLOCK - 1) // _INT8_BLOCK) * _INT8_BLOCK
-            self.codes = torch.zeros((T, F, padded), dtype=torch.int8, device=storage_device)
+            self.codes = torch.zeros((T, F, padded), dtype=payload, device=storage_device)
             self.scale = torch.zeros((T, F, padded // _INT8_BLOCK), dtype=torch.float32, device=storage_device)
         else:
             self.buf = torch.zeros((T, F, self.total_cells),

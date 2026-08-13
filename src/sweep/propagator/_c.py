@@ -812,18 +812,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             scale_shapes.append(tuple(outer) + (n_blocks,))
         return tuple(scale_shapes)
 
-    def _allocate_boundary_disk_files_int8(self, main_shapes, scale_shapes, disk_dir):
-        """Disk files for staged INT8: N uint8 main files (es=1) followed by
-        N FP32 per-block scale files (es=4), full-nt sized.  The order
-        (main..., scale...) matches the concatenation the C++ saver expects
-        in ``boundary_disk_files``."""
+    def _allocate_boundary_disk_files_int8(self, main_shapes, scale_shapes, disk_dir,
+                                           main_element_size=1):
+        """Disk files for staged scaled storage (int8/fp16): N payload main
+        files (es=1 for uint8, 2 for fp16) followed by N FP32 per-block scale
+        files (es=4), full-nt sized.  The order (main..., scale...) matches
+        the concatenation the C++ saver expects in ``boundary_disk_files``."""
         root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
         files = []
         for idx, shape in enumerate(main_shapes):
             path = os.path.join(root, f"boundary_{idx}.bin")
             numel = int(torch.Size(shape).numel())
             with open(path, "wb") as handle:
-                handle.truncate(numel * 1)  # uint8 main
+                handle.truncate(numel * main_element_size)
             files.append(path)
         for idx, shape in enumerate(scale_shapes):
             path = os.path.join(root, f"boundary_scale_{idx}.bin")
@@ -908,14 +909,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             'bf16': torch.bfloat16,
         }.get(boundary_dtype, torch.float32)
 
-        if boundary_on_cpu and boundary_dtype == 'int8':
-            # Staged INT8: a persistent uint8 main + FP32 per-block scale on
-            # the cpu side (boundary_cpu = main..., scale...) AND a uint8 main
-            # ring + FP32 scale ring on the gpu (boundary_gpu = main..., scale
-            # ...), both concatenated main-then-scale to mirror the gpu-direct
-            # layout the saver already splits.  For storage='disk' the cpu side
-            # is staging-sized and the full-nt data lives in uint8 + FP32 files.
+        if boundary_on_cpu and boundary_dtype in ('int8', 'fp16'):
+            # Staged scaled storage (int8 / fp16): a persistent payload main
+            # (uint8 or fp16) + FP32 per-block scale on the cpu side
+            # (boundary_cpu = main..., scale...) AND a payload main ring +
+            # FP32 scale ring on the gpu (boundary_gpu = main..., scale...),
+            # both concatenated main-then-scale to mirror the gpu-direct
+            # layout the saver already splits.  For storage='disk' the cpu
+            # side is staging-sized and the full-nt data lives in payload +
+            # FP32 files.  fp16 shares int8's two-pass flow because a bare
+            # fp16 cast flushes values below 2^-24 to zero, which wipes the
+            # velocity faces of elastic wavefields (see quantize_fp16_kernel).
             _BLOCK = 256
+            main_dtype = torch.uint8 if boundary_dtype == 'int8' else torch.float16
             cpu_main_shapes = (layout.gpu_shapes if boundary_storage == "disk"
                                else layout.cpu_shapes)
             ring_main_shapes = layout.gpu_shapes
@@ -925,14 +931,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self._allocate_boundary_disk_files_int8(
                     layout.cpu_shapes,
                     self._int8_scale_shapes(layout.cpu_shapes, _BLOCK),
-                    disk_dir)
+                    disk_dir,
+                    main_element_size=torch.empty((), dtype=main_dtype).element_size())
             cpu_main = self.boundary_cpu_allocator.zeros(
-                cpu_main_shapes, dtype=torch.uint8, dev='cpu', pin_memory=staging_pinned)
+                cpu_main_shapes, dtype=main_dtype, dev='cpu', pin_memory=staging_pinned)
             cpu_scale = self.boundary_cpu_allocator.zeros(
                 cpu_scale_shapes, dtype=torch.float32, dev='cpu', pin_memory=staging_pinned)
             self.boundary_cpu = tuple(cpu_main) + tuple(cpu_scale)
             ring_main = self.boundary_gpu_allocator.zeros(
-                ring_main_shapes, dtype=torch.uint8)
+                ring_main_shapes, dtype=main_dtype)
             ring_scale = self.boundary_gpu_allocator.zeros(
                 ring_scale_shapes, dtype=torch.float32)
             self.boundary_gpu = tuple(ring_main) + tuple(ring_scale)
@@ -979,26 +986,29 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             # INT8 with per-block symmetric quantization (DeepWave-style,
             # see boundarysaver.cu: quantize_int8_kernel).  last_two stays
             # FP32 — it's a wavefield snapshot used to bootstrap backward.
-            if boundary_dtype == 'int8':
-                # INT8: Python owns persistent uint8 main + FP32 scale
-                # tensors so they survive across forward/backward calls
-                # (CUDA-side saver is recreated each call and would
-                # otherwise lose the data).  Layout: list of N main
-                # uint8 tensors followed by N scale FP32 tensors, where
-                # N = 4 (2D) or 6 (3D).  Saver detects this pattern via
-                # dtype and binds main + scale + allocates FP32 staging
-                # internally.  See saver.cuh allocate_int8_main_and_scale.
+            if boundary_dtype in ('int8', 'fp16'):
+                # Scaled storage (int8 / fp16): Python owns a persistent
+                # payload main (uint8 or fp16) + FP32 scale tensors so they
+                # survive across forward/backward calls (CUDA-side saver is
+                # recreated each call and would otherwise lose the data).
+                # Layout: list of N main payload tensors followed by N scale
+                # FP32 tensors, where N = 4 (2D) or 6 (3D).  Saver detects
+                # this pattern via dtype and binds main + scale + allocates
+                # FP32 staging internally.  fp16 shares int8's two-pass flow
+                # because a bare fp16 cast flushes values below 2^-24 to
+                # zero, wiping the velocity faces of elastic wavefields.
                 # Scale shapes preserve the batch dimension so that
                 # ``_slice_boundary_buffers`` narrows the same axis as the
                 # main tensors.  Spatial dims collapse to n_blocks (shared
-                # with the staged int8 path via ``_int8_scale_shapes``).
+                # with the staged path via ``_int8_scale_shapes``).
                 #   3D main  (nvar*nt, B, W, Ny_b, Nx_b)
                 #     scale  (nvar*nt, B, n_blocks_per_step)
                 #   2D main  (nvar, nt, B, W, Nx_b)
                 #     scale  (nvar, nt, B, n_blocks_per_step)
+                main_dtype = torch.uint8 if boundary_dtype == 'int8' else torch.float16
                 main_shapes = layout.gpu_full_shapes
                 main_tensors = self.boundary_gpu_allocator.zeros(
-                    main_shapes, dtype=torch.uint8)
+                    main_shapes, dtype=main_dtype)
                 scale_tensors = self.boundary_gpu_allocator.zeros(
                     self._int8_scale_shapes(main_shapes), dtype=torch.float32)
                 self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
