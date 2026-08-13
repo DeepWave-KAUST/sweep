@@ -33,6 +33,43 @@ __global__ void add_source(
 }
 
 
+__global__ void add_body_force_rho_grad_correction(
+    float* __restrict__ grad_rho,
+    const float* __restrict__ adj_field,
+    const float* __restrict__ rho,
+    const float* __restrict__ source,
+    const int* __restrict__ sources_loc,
+    int amp_it,
+    int nsrc,
+    int loc_dim,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nsrc) return;
+    if (amp_it < 0 || amp_it >= solver.nt) return;
+
+    int base = (b * nsrc + s) * loc_dim;
+    int ix = sources_loc[base + 0];
+    int iz = sources_loc[base + loc_dim - 1];
+    int iy = (loc_dim == 3) ? sources_loc[base + 1] : 0;
+
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
+        return;
+    if (loc_dim == 3 && (iy < 0 || iy >= solver.ny))
+        return;
+
+    int spatial_size = solver.nx * solver.nz * (loc_dim == 3 ? solver.ny : 1);
+    int row = (loc_dim == 3) ? (iz * solver.ny + iy) : iz;
+    int u_idx = b * spatial_size + row * solver.nx + ix;
+    int src_idx = (b * nsrc + s) * solver.nt + amp_it;
+
+    atomicAdd(&grad_rho[u_idx],
+              adj_field[u_idx] * source[src_idx] / rho[u_idx]);
+}
+
+
 __global__ void record_kernel(
     const float* __restrict__ u,        // (B, nz, nx)
     float* __restrict__ record,          // (B, nrec, nt)
