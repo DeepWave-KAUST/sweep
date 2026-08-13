@@ -45,9 +45,12 @@ struct GeneralBoundaryPointer {
 
     float* __restrict__ last_two = nullptr;
 
-    // FP16 storage (populated when dtype == FP16).  last_two stays FP32
-    // — it's a wavefield snapshot used to bootstrap backward, precision
-    // is critical there.
+    // FP16 storage (populated when dtype == FP16).  The payload is
+    // per-block NORMALIZED (same two-pass save/restore and scale layout
+    // as INT8, see quantize_fp16_kernel): a bare __half cast flushes
+    // everything below 2^-24 to zero, which wipes the velocity faces of
+    // elastic wavefields.  last_two stays FP32 — it's a wavefield
+    // snapshot used to bootstrap backward, precision is critical there.
     __half* __restrict__ left_h = nullptr;
     __half* __restrict__ right_h = nullptr;
 

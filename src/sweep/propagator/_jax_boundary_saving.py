@@ -40,6 +40,12 @@ import jax.numpy as jnp
 
 from sweep.propagator._ring_geometry import _ring_index_tuples, _ring_layout
 
+# NOTE: on this JAX path 'fp16' is still a BARE cast — values below 2^-24
+# flush to zero, so it is unsafe when the saved boundary values span a wide
+# dynamic range (e.g. elastic velocity faces sit ~rho*vp below the stresses).
+# The torch paths (CUDA + eager) store fp16 per-256-cell normalized instead
+# (see _eager_boundary_saving._quantize_fp16); prefer 'bf16' here until the
+# same treatment lands on JAX.
 _STORE_DTYPE = {"fp32": jnp.float32, "fp16": jnp.float16, "bf16": jnp.bfloat16}
 
 
