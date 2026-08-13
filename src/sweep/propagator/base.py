@@ -146,6 +146,19 @@ class PropBase:
         # tuples ``(z_lo, z_hi, [y_lo, y_hi,] x_lo, x_hi)``.  ``free_surface=True``
         # with a scalar ``abcn`` reproduces the old top-only layout bit-for-bit.
         self.fs_faces = normalize_free_surface(free_surface, self.ndim)
+        # Anisotropic equations have no correct free-surface implementation:
+        # the anisotropic stress-free condition is NOT the isotropic image
+        # condition these solvers implement.  Fail loud on ANY free-surface
+        # request (bool, per-edge list, topography-implied) rather than
+        # silently produce wrong surface physics.
+        if any(self.fs_faces) and not getattr(equation, "supports_free_surface", True):
+            raise NotImplementedError(
+                f"{type(equation).__name__} does not support a free surface: the "
+                "anisotropic stress-free boundary condition couples through the "
+                "stiffness tensor and is not the isotropic image method this "
+                "solver implements. Use free_surface=False (absorbing top) or an "
+                "isotropic equation."
+            )
         self._abcn_arg = abcn
         self.pad = normalize_pad(abcn, self.fs_faces, self.ndim)
         # ``self.abcn`` stays a representative uniform PML width for the legacy

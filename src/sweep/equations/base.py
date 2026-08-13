@@ -49,6 +49,16 @@ class WaveEquation:
     # override.
     supports_apm = False
 
+    # Whether this equation supports a free surface AT ALL.  The isotropic
+    # image method (odd mirror of the normal stresses about the surface) does
+    # NOT satisfy the stress-free condition of an anisotropic medium — there
+    # the traction couples through the stiffness tensor and needs a
+    # Mittet/Robertsson-style anisotropic treatment.  Anisotropic equations
+    # (VTI/TTI, acoustic and elastic) therefore override this to False and the
+    # propagator raises on any free_surface request instead of silently
+    # running the wrong surface physics.
+    supports_free_surface = True
+
     # Whether the compiled (``impl='c'``) kernels accept a per-shot *batched*
     # velocity model — one model per shot in the batch, shape ``(B, *spatial)``
     # — in addition to a single shared ``(*spatial)`` model broadcast across
