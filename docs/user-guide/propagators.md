@@ -64,18 +64,30 @@ wavefield tensor.
 ## Boundaries: free surface and PML
 
 Every propagator takes ``free_surface=`` and ``abcn=`` (PML thickness).
-``free_surface`` accepts a per-edge spec, not just a bool:
+``free_surface`` accepts several equivalent forms, all normalised to one
+canonical per-face boolean tuple (axis-major order — 2-D
+``(z_lo, z_hi, x_lo, x_hi)``, 3-D ``(z_lo, z_hi, y_lo, y_hi, x_lo, x_hi)``):
 
 ```python
-PropTorch(eq, ..., free_surface=False)              # absorbing everywhere (default)
-PropTorch(eq, ..., free_surface=True)               # historical top-only free surface
-PropTorch(eq, ..., free_surface=["top", "left"])    # any subset of the four faces
-PropTorch(eq, ..., free_surface=["top", "bottom", "left", "right"])   # closed box
+PropTorch(eq, ..., free_surface=False)                # absorbing everywhere (default)
+PropTorch(eq, ..., free_surface=True)                 # historical top-only free surface
+PropTorch(eq, ..., free_surface="top")                # single face name — same as True
+PropTorch(eq, ..., free_surface=["top", "left"])      # list/set of face names
+PropTorch(eq, ..., free_surface={"bottom": True,
+                                 "right": True})      # dict: face name -> on/off
+PropTorch(eq, ..., free_surface=(True, False,
+                                 True, False))        # canonical per-face tuple: top + left
+PropTorch(eq, ..., free_surface=(1, 1, 1, 1))         # same form with ints = closed box
 ```
 
+Face names (also the order of the canonical tuple): 2-D
+``top, bottom, left, right``; 3-D ``top, bottom, front, back, left, right``
+— ``top`` is the z-min face, matching the ``(nz, nx)`` depth-first array
+layout. An unknown name raises ``ValueError`` listing the valid names.
+
 Each free face replaces its PML pad with the image-method boundary
-condition; the remaining faces stay absorbing. ``abcn`` likewise accepts a
-per-edge tuple when the absorbing thickness should differ per face.
+condition; the remaining faces stay absorbing. ``abcn`` accepts the same
+per-edge forms (a scalar, or a canonical tuple of per-face PML widths).
 
 Support matrix:
 
