@@ -152,6 +152,7 @@ nav:
               - Elastic: notebooks/06_wavefield_elastic.ipynb
               - Elastic vector-reflectivity: notebooks/16_elastic_vector_reflectivity.ipynb
               - Topography (irregular FS): notebooks/15_wavefield_topography.ipynb
+              - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
               - AcousticVTI: notebooks/05_wavefield_vti.ipynb

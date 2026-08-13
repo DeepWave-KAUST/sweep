@@ -206,6 +206,19 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/15_wavefield_topography.ipynb)
 
+-   ![Per-edge free surface](../figures/gallery/24_wavefield_per_edge_free_surface.png){ loading=lazy }
+
+    **Wavefield · Per-edge free surface**
+
+    ---
+
+    ``free_surface`` takes a list of faces, not just a bool: free surface on
+    any subset of the four edges — top-only, two-face corners, or a fully
+    closed reverberant box (deepwave-style) — with gradients on every
+    backward memory mode.
+
+    [:material-notebook-outline: Open notebook](../notebooks/24_wavefield_per_edge_free_surface.ipynb)
+
 -   ![ADCIG](../figures/gallery/16_adcig.png){ loading=lazy }
 
     **ADCIG · Poynting (custom backward)**
