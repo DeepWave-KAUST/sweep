@@ -61,6 +61,39 @@ plotting with depth growing downward. The propagator reverses the user-supplied
 `(x, z)` / `(x, y, z)` coordinate tuples internally before indexing into the
 wavefield tensor.
 
+## Boundaries: free surface and PML
+
+Every propagator takes ``free_surface=`` and ``abcn=`` (PML thickness).
+``free_surface`` accepts a per-edge spec, not just a bool:
+
+```python
+PropTorch(eq, ..., free_surface=False)              # absorbing everywhere (default)
+PropTorch(eq, ..., free_surface=True)               # historical top-only free surface
+PropTorch(eq, ..., free_surface=["top", "left"])    # any subset of the four faces
+PropTorch(eq, ..., free_surface=["top", "bottom", "left", "right"])   # closed box
+```
+
+Each free face replaces its PML pad with the image-method boundary
+condition; the remaining faces stay absorbing. ``abcn`` likewise accepts a
+per-edge tuple when the absorbing thickness should differ per face.
+
+Support matrix:
+
+- **2-D ``Acoustic`` / ``Elastic``** — full per-edge support on the eager
+  and compiled CUDA backends, with adjoint gradients across every backward
+  memory mode (full / boundary-saving / checkpointing).
+- **3-D** — top face only (``free_surface=True``); per-edge lists raise.
+- **Topography** (irregular surface) — a separate top-only feature; it
+  cannot be combined with per-edge faces.
+- **Anisotropic equations** (``AcousticVTI1st``, ``AcousticVTI``,
+  ``AcousticTTI``, ``ElasticTTI(SG)``, …) raise ``NotImplementedError`` for
+  any free surface: the anisotropic stress-free condition couples through
+  the stiffness tensor and is not the isotropic image method these solvers
+  implement. Run with ``free_surface=False`` or use an isotropic equation.
+
+See the [per-edge free surface notebook](../examples/index.md) for
+snapshots of each configuration and a closed-box energy check.
+
 ## Implementation-specific options
 
 Every option block lives in `sweep.propagator.options` and is documented in
