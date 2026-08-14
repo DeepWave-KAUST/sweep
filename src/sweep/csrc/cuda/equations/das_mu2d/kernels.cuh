@@ -60,7 +60,7 @@ __global__ void das_mu2d_stress_strain_kernel(
     const float* mu_b = mu + b * spatial_size;
 
     float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
@@ -124,8 +124,7 @@ __global__ void das_mu2d_stress_strain_kernel(
         // Flat surface only — eager gates this on ``not has_topo``.
         if (!solver.has_topo)
             f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f * mu_) * dvx_dx + dvz_dz);
-        f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
+        f.szz[idx] = 0.f;   // z-low FS: zero only szz; sxz is a +h/2 medium value (fix)
     }
 
     if (u_this_b) {
@@ -177,10 +176,8 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
     if (is_fs) {
-        bar_szz = 0.f;
-        bar_sxz = 0.f;
+        bar_szz = 0.f;              // z-low FS: zero only szz; keep sxz (+h/2 medium value, fix)
         f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
     }
 
     float bar_exx = -f.exx[idx];
@@ -196,8 +193,8 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
         float c_surf = 4.f * mu_ * (lam + mu_) / (lam + 2.f * mu_);
         bar_dvx_dx = solver.dt * (c_surf * bar_sxx + bar_exx);
         bar_dvz_dz = solver.dt * (bar_ezz);
-        bar_dvx_dz = solver.dt * (0.5f * bar_exz);   // bar_sxz == 0 at FS
-        bar_dvz_dx = solver.dt * (0.5f * bar_exz);
+        bar_dvx_dz = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);   // sxz live at low-side FS (fix)
+        bar_dvz_dx = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);
     } else {
         bar_dvx_dx = solver.dt * (((lam + 2.f * mu_) * bar_sxx + lam * bar_szz) + bar_exx);
         bar_dvz_dz = solver.dt * (((lam + 2.f * mu_) * bar_szz + lam * bar_sxx) + bar_ezz);

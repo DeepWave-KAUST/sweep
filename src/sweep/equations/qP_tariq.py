@@ -71,6 +71,10 @@ class AcousticTariq(SecondOrderEquation):
 
     
     """
+
+    # The isotropic image-method free surface is WRONG for an anisotropic
+    # medium (see EquationBase.supports_free_surface); fail loud instead.
+    supports_free_surface = False
     MODEL_SPECS = (
         ModelSpec("vv", description="Squared vertical velocity-like parameter for the Tariq qP formulation."),
         ModelSpec("v", aliases=("velocity",), description="Velocity-like parameter for the Tariq qP formulation.", unit="m/s"),

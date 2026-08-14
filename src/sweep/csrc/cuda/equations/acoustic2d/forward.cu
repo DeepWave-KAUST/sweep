@@ -62,6 +62,7 @@ ForwardOutput forward(const ForwardInput& in) {
     ctx.has_topo     = p.has_topo;
     ctx.topo_category = nullptr;
     ctx.use_apm      = false;
+    ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
 
     AcousticWavefieldTensor wavefield;
     if (!p.wavefields.empty())

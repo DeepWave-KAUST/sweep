@@ -2,6 +2,27 @@
 #include <cuda_runtime.h>
 #include "context.h"
 
+// Body-force (velocity-component) sources are injected RAW into the
+// velocity field (add_source above), but the rho-gradient imaging kernels
+// correlate the adjoint velocity with the STORED wavefield difference
+// v(it) - v(it+1), which at a source cell contains the injected amplitude
+// on top of the physical propagation update.  The true d(loss)/d(rho) has
+// no such term (the injection itself is rho-independent), so the imaging
+// over-counts by  -adj_v(it) * amp(it+1) / rho  at every source cell and
+// step.  This kernel adds the compensating term.  Launched once per
+// velocity-source field per reverse step, grid = (B, nsrc-blocks).
+__global__ void add_body_force_rho_grad_correction(
+    float* __restrict__ grad_rho,          // (B, nz, nx)
+    const float* __restrict__ adj_field,   // adjoint velocity comp (B, nz, nx)
+    const float* __restrict__ rho,         // (B, nz, nx)
+    const float* __restrict__ source,      // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,   // (B, nsrc, 2 or 3)
+    int amp_it,
+    int nsrc,
+    int loc_dim,
+    const SolverContext solver
+);
+
 __global__ void add_source(
     float* __restrict__ u,          // (B, nz, nx)
     const float* __restrict__ source, // (B, nsrc, nt)
@@ -43,7 +64,10 @@ __global__ void set_boundary_zeros(
     int width,
     int nx,
     int nz,
-    bool free_surface
+    bool fs_top,
+    bool fs_bottom,
+    bool fs_left,
+    bool fs_right
 );
 
 __global__ void set_boundary_zeros_3d(

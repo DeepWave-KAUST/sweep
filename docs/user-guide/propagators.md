@@ -61,6 +61,51 @@ plotting with depth growing downward. The propagator reverses the user-supplied
 `(x, z)` / `(x, y, z)` coordinate tuples internally before indexing into the
 wavefield tensor.
 
+## Boundaries: free surface and PML
+
+Every propagator takes ``free_surface=`` and ``abcn=`` (PML thickness).
+``free_surface`` accepts several equivalent forms, all normalised to one
+canonical per-face boolean tuple (axis-major order — 2-D
+``(z_lo, z_hi, x_lo, x_hi)``, 3-D ``(z_lo, z_hi, y_lo, y_hi, x_lo, x_hi)``):
+
+```python
+PropTorch(eq, ..., free_surface=False)                # absorbing everywhere (default)
+PropTorch(eq, ..., free_surface=True)                 # historical top-only free surface
+PropTorch(eq, ..., free_surface="top")                # single face name — same as True
+PropTorch(eq, ..., free_surface=["top", "left"])      # list/set of face names
+PropTorch(eq, ..., free_surface={"bottom": True,
+                                 "right": True})      # dict: face name -> on/off
+PropTorch(eq, ..., free_surface=(True, False,
+                                 True, False))        # canonical per-face tuple: top + left
+PropTorch(eq, ..., free_surface=(1, 1, 1, 1))         # same form with ints = closed box
+```
+
+Face names (also the order of the canonical tuple): 2-D
+``top, bottom, left, right``; 3-D ``top, bottom, front, back, left, right``
+— ``top`` is the z-min face, matching the ``(nz, nx)`` depth-first array
+layout. An unknown name raises ``ValueError`` listing the valid names.
+
+Each free face replaces its PML pad with the image-method boundary
+condition; the remaining faces stay absorbing. ``abcn`` accepts the same
+per-edge forms (a scalar, or a canonical tuple of per-face PML widths).
+
+Support matrix:
+
+- **2-D ``Acoustic`` / ``Elastic``** — full per-edge support on the eager
+  and compiled CUDA backends, with adjoint gradients across every backward
+  memory mode (full / boundary-saving / checkpointing).
+- **3-D** — top face only (``free_surface=True``); per-edge lists raise.
+- **Topography** (irregular surface) — a separate top-only feature; it
+  cannot be combined with per-edge faces.
+- **Anisotropic equations** (``AcousticVTI1st``, ``AcousticVTI``,
+  ``AcousticTTI``, ``ElasticTTI(SG)``, …) raise ``NotImplementedError`` for
+  any free surface: the anisotropic stress-free condition couples through
+  the stiffness tensor and is not the isotropic image method these solvers
+  implement. Run with ``free_surface=False`` or use an isotropic equation.
+
+See the [per-edge free surface notebook](../examples/index.md) for
+snapshots of each configuration and a closed-box energy check.
+
 ## Implementation-specific options
 
 Every option block lives in `sweep.propagator.options` and is documented in
