@@ -89,11 +89,14 @@ class BoundaryOptions:
     # stays FP32; this only changes how saved boundary values are
     # represented in memory:
     #   'fp32'  — 4 bytes/cell, baseline, no precision loss
-    #   'fp16'  — 2 bytes/cell, 10-bit mantissa (precision ~5e-4),
-    #             range [6e-5, 6.5e4] — best when wavefield amplitudes
-    #             are roughly O(1) and won't over- or under-flow
+    #   'fp16'  — 2 bytes/cell + ~1.6% FP32 scale metadata, 10-bit
+    #             mantissa (precision ~5e-4).  Stored per-256-cell
+    #             normalized (like int8), so it is amplitude-safe: the
+    #             raw fp16 range would otherwise flush the velocity
+    #             faces of elastic wavefields (values sit ~rho·vp below
+    #             the stresses) to zero and corrupt the gradient.
     #   'bf16'  — 2 bytes/cell, 7-bit mantissa (precision ~8e-3),
-    #             same dynamic range as FP32 — safest under arbitrary
+    #             same dynamic range as FP32 — safe under arbitrary
     #             source amplitude scaling, slightly noisier reconstruction
     #   'int8'  — ~1 byte/cell + ~0.4% FP32 scale metadata (≈4× compression),
     #             per-256-cell symmetric quantization (DeepWave-style).

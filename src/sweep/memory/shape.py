@@ -12,6 +12,8 @@ class Layout:
         free_surface=False,     # whether the top boundary is free surface (stress=0) or not (absorbing)
         width=-1,               # width of the boundary to be saved, default to M (the stencil radius)
         tangent_pad=0,           # extra saved cells in tangential directions
+        pad=None,               # per-edge PML pad, axis-major (z_lo,z_hi,[y_lo,y_hi,]x_lo,x_hi);
+                                # free-surface faces = 0.  None => legacy abcn/free_surface.
         **kwargs
     ):
 
@@ -37,18 +39,34 @@ class Layout:
         # physical domain (match SolverContext)
         # -------------------------
 
-        self.phys_x0 = abcn + M
-        self.phys_x1 = self.nx - abcn - M
-
-        if dim == 3:
-            self.phys_y0 = abcn + M
-            self.phys_y1 = self.ny - abcn - M
+        if pad is not None:
+            # Per-edge pad (axis-major, free-surface faces = 0).  Mirrors the
+            # SolverContext phys_* accessors.
+            self.phys_z0 = pad[0] + M
+            self.phys_z1 = self.nz - pad[1] - M
+            if dim == 3:
+                self.phys_y0 = pad[2] + M
+                self.phys_y1 = self.ny - pad[3] - M
+                self.phys_x0 = pad[4] + M
+                self.phys_x1 = self.nx - pad[5] - M
+            else:
+                self.phys_y0 = 0
+                self.phys_y1 = 1
+                self.phys_x0 = pad[2] + M
+                self.phys_x1 = self.nx - pad[3] - M
         else:
-            self.phys_y0 = 0
-            self.phys_y1 = 1
+            self.phys_x0 = abcn + M
+            self.phys_x1 = self.nx - abcn - M
 
-        self.phys_z0 = M if free_surface else abcn + M
-        self.phys_z1 = self.nz - abcn - M
+            if dim == 3:
+                self.phys_y0 = abcn + M
+                self.phys_y1 = self.ny - abcn - M
+            else:
+                self.phys_y0 = 0
+                self.phys_y1 = 1
+
+            self.phys_z0 = M if free_surface else abcn + M
+            self.phys_z1 = self.nz - abcn - M
 
         self.nx_phys = self.phys_x1 - self.phys_x0
         self.ny_phys = self.phys_y1 - self.phys_y0

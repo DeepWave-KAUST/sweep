@@ -231,6 +231,14 @@ SCENARIOS = {
     "interior": ScenarioSpec("interior", free_surface=False, edge_source=False),
     "fd_edge": ScenarioSpec("fd_edge", free_surface=False, edge_source=True),
     "free_surface": ScenarioSpec("free_surface", free_surface=True, edge_source=False),
+    # Per-edge free surface on ALL FOUR faces (closed box: every PML pad -> 0).
+    # Migrated 2-D solvers only (Acoustic/Elastic); a long nt lets the reflections
+    # off every face reach the receivers so the comparison is discriminating.
+    "free_surface_all4": ScenarioSpec(
+        "free_surface_all4",
+        free_surface=("top", "bottom", "left", "right"),
+        edge_source=False,
+    ),
 }
 
 DEFAULT_SOLVERS = "acoustic2d,acoustic3d,vrz2d,vrz3d,lsrtm2d"

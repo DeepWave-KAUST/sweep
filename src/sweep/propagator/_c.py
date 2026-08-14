@@ -9,6 +9,7 @@ import numpy as np
 from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.propagator.base import PropBase
+from sweep.equations._edges import is_top_only_or_none
 from sweep.utils.torch import EdgePadding
 from sweep.scalars import fd_coefficients, staggered_grid_coes
 from sweep.equations.base import FirstOrderEquation
@@ -139,6 +140,7 @@ class Warpper(torch.autograd.Function):
         has_topo_param: bool=False,
         topo_category_param: torch.Tensor=None,  # runtime padded APM category int32
         use_apm_param: bool=False,
+        fs_faces: int=-1,   # per-edge free-surface bitmask (-1 => legacy z-min)
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -203,6 +205,7 @@ class Warpper(torch.autograd.Function):
         params.boundary_disk_async_read = boundary_disk_async_read
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
+        params.fs_faces = fs_faces
         # Topography plumbing (image method) — empty tensor + has_topo=False
         # for flat. topo_rows_param is passed in via the autograd Function
         # call site (see Warpper.apply below).
@@ -269,6 +272,7 @@ class Warpper(torch.autograd.Function):
             ctx.spacing = spacing
             ctx.dt = dt
             ctx.free_surface = free_surface
+            ctx.fs_faces = fs_faces
             # Topography (image method): preserve runtime row-index tensor so
             # the autograd backward can plumb it without referencing ``self``.
             ctx.topo_rows_param = topo_rows_param
@@ -321,6 +325,7 @@ class Warpper(torch.autograd.Function):
         M  = ctx.M
         nt = ctx.nt
         dt = ctx.dt
+        fs_faces = getattr(ctx, "fs_faces", -1)
 
         _C = _get_C()
         params = _C.BackwardInput()
@@ -375,6 +380,7 @@ class Warpper(torch.autograd.Function):
         params.dt = dt
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
+        params.fs_faces = fs_faces
         # Topography plumbing (image method) — mirrors forward path.
         # ``ctx`` carries the runtime row tensor saved at forward time;
         # ``self`` doesn't exist here (Warpper.backward is a staticmethod).
@@ -561,6 +567,7 @@ class Warpper(torch.autograd.Function):
             None,      # has_topo_param
             None,      # topo_category_param
             None,      # use_apm_param
+            None,      # fs_faces
             *model_grads # models
         )
 
@@ -573,6 +580,42 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = None
         self._boundary_disk_files = ()
         super().__init__(*args, **kwargs)
+
+        # impl='c' does not support per-edge PML *thickness* (a non-scalar abcn):
+        # the C side derives every non-free-surface face's pad from the single
+        # scalar abcn, so a per-edge abcn list would be silently wrong.  (A
+        # per-edge free_surface with a scalar abcn is fine.)
+        if not isinstance(self._abcn_arg, int) or isinstance(self._abcn_arg, bool):
+            raise NotImplementedError(
+                "per-edge PML thickness (abcn as a list) is not supported on "
+                "impl='c' yet; pass a scalar abcn (a per-edge free_surface is "
+                "fine) or use impl='eager'."
+            )
+        # Per-edge free surface on impl='c' is staged separately from eager: it
+        # needs the migrated CUDA kernels and (for now) runs on CUDA only.
+        if not is_top_only_or_none(self.fs_faces):
+            if not getattr(self.equation, "supports_per_edge_free_surface_c", False):
+                raise NotImplementedError(
+                    f"per-edge free surface on impl='c' is not implemented for "
+                    f"{type(self.equation).__name__} yet; use impl='eager'."
+                )
+            if (getattr(self.equation, "supports_per_edge_free_surface_c_z_only", False)
+                    and (self.fs_faces[2] or self.fs_faces[3])):
+                raise NotImplementedError(
+                    f"per-edge free surface on impl='c' for "
+                    f"{type(self.equation).__name__} currently supports only the z "
+                    "faces (top/bottom); x faces (left/right) need impl='eager'."
+                )
+            if 'cuda' not in str(self.dev):
+                raise NotImplementedError(
+                    "per-edge free surface on impl='c' currently requires CUDA; "
+                    "use impl='eager' on CPU."
+                )
+            # All three CUDA backward memory modes — full, checkpointing, and
+            # boundary saving — are gradient-consistent for every per-edge free
+            # surface (cos=1.0 vs eager, all four faces + z∩x corners).  The bs
+            # reverse reconstruction re-runs the (now per-edge-correct) forward
+            # kernels, so no separate handling is needed.
 
         # Topography is supported on CUDA via two paths:
         #   * topo_method='image' — per-column staircase (vacuum for Acoustic,
@@ -769,18 +812,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             scale_shapes.append(tuple(outer) + (n_blocks,))
         return tuple(scale_shapes)
 
-    def _allocate_boundary_disk_files_int8(self, main_shapes, scale_shapes, disk_dir):
-        """Disk files for staged INT8: N uint8 main files (es=1) followed by
-        N FP32 per-block scale files (es=4), full-nt sized.  The order
-        (main..., scale...) matches the concatenation the C++ saver expects
-        in ``boundary_disk_files``."""
+    def _allocate_boundary_disk_files_int8(self, main_shapes, scale_shapes, disk_dir,
+                                           main_element_size=1):
+        """Disk files for staged scaled storage (int8/fp16): N payload main
+        files (es=1 for uint8, 2 for fp16) followed by N FP32 per-block scale
+        files (es=4), full-nt sized.  The order (main..., scale...) matches
+        the concatenation the C++ saver expects in ``boundary_disk_files``."""
         root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
         files = []
         for idx, shape in enumerate(main_shapes):
             path = os.path.join(root, f"boundary_{idx}.bin")
             numel = int(torch.Size(shape).numel())
             with open(path, "wb") as handle:
-                handle.truncate(numel * 1)  # uint8 main
+                handle.truncate(numel * main_element_size)
             files.append(path)
         for idx, shape in enumerate(scale_shapes):
             path = os.path.join(root, f"boundary_scale_{idx}.bin")
@@ -843,6 +887,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self._image_method_active,
             self.equation.so // 2 + 1,
             tangent_pad=cuda_layout.boundary_tangent_pad,
+            pad=self.pad,
         )
 
         self.boundary_cpu_allocator = Allocator('cpu')
@@ -864,14 +909,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             'bf16': torch.bfloat16,
         }.get(boundary_dtype, torch.float32)
 
-        if boundary_on_cpu and boundary_dtype == 'int8':
-            # Staged INT8: a persistent uint8 main + FP32 per-block scale on
-            # the cpu side (boundary_cpu = main..., scale...) AND a uint8 main
-            # ring + FP32 scale ring on the gpu (boundary_gpu = main..., scale
-            # ...), both concatenated main-then-scale to mirror the gpu-direct
-            # layout the saver already splits.  For storage='disk' the cpu side
-            # is staging-sized and the full-nt data lives in uint8 + FP32 files.
+        if boundary_on_cpu and boundary_dtype in ('int8', 'fp16'):
+            # Staged scaled storage (int8 / fp16): a persistent payload main
+            # (uint8 or fp16) + FP32 per-block scale on the cpu side
+            # (boundary_cpu = main..., scale...) AND a payload main ring +
+            # FP32 scale ring on the gpu (boundary_gpu = main..., scale...),
+            # both concatenated main-then-scale to mirror the gpu-direct
+            # layout the saver already splits.  For storage='disk' the cpu
+            # side is staging-sized and the full-nt data lives in payload +
+            # FP32 files.  fp16 shares int8's two-pass flow because a bare
+            # fp16 cast flushes values below 2^-24 to zero, which wipes the
+            # velocity faces of elastic wavefields (see quantize_fp16_kernel).
             _BLOCK = 256
+            main_dtype = torch.uint8 if boundary_dtype == 'int8' else torch.float16
             cpu_main_shapes = (layout.gpu_shapes if boundary_storage == "disk"
                                else layout.cpu_shapes)
             ring_main_shapes = layout.gpu_shapes
@@ -881,14 +931,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 self._allocate_boundary_disk_files_int8(
                     layout.cpu_shapes,
                     self._int8_scale_shapes(layout.cpu_shapes, _BLOCK),
-                    disk_dir)
+                    disk_dir,
+                    main_element_size=torch.empty((), dtype=main_dtype).element_size())
             cpu_main = self.boundary_cpu_allocator.zeros(
-                cpu_main_shapes, dtype=torch.uint8, dev='cpu', pin_memory=staging_pinned)
+                cpu_main_shapes, dtype=main_dtype, dev='cpu', pin_memory=staging_pinned)
             cpu_scale = self.boundary_cpu_allocator.zeros(
                 cpu_scale_shapes, dtype=torch.float32, dev='cpu', pin_memory=staging_pinned)
             self.boundary_cpu = tuple(cpu_main) + tuple(cpu_scale)
             ring_main = self.boundary_gpu_allocator.zeros(
-                ring_main_shapes, dtype=torch.uint8)
+                ring_main_shapes, dtype=main_dtype)
             ring_scale = self.boundary_gpu_allocator.zeros(
                 ring_scale_shapes, dtype=torch.float32)
             self.boundary_gpu = tuple(ring_main) + tuple(ring_scale)
@@ -935,26 +986,29 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             # INT8 with per-block symmetric quantization (DeepWave-style,
             # see boundarysaver.cu: quantize_int8_kernel).  last_two stays
             # FP32 — it's a wavefield snapshot used to bootstrap backward.
-            if boundary_dtype == 'int8':
-                # INT8: Python owns persistent uint8 main + FP32 scale
-                # tensors so they survive across forward/backward calls
-                # (CUDA-side saver is recreated each call and would
-                # otherwise lose the data).  Layout: list of N main
-                # uint8 tensors followed by N scale FP32 tensors, where
-                # N = 4 (2D) or 6 (3D).  Saver detects this pattern via
-                # dtype and binds main + scale + allocates FP32 staging
-                # internally.  See saver.cuh allocate_int8_main_and_scale.
+            if boundary_dtype in ('int8', 'fp16'):
+                # Scaled storage (int8 / fp16): Python owns a persistent
+                # payload main (uint8 or fp16) + FP32 scale tensors so they
+                # survive across forward/backward calls (CUDA-side saver is
+                # recreated each call and would otherwise lose the data).
+                # Layout: list of N main payload tensors followed by N scale
+                # FP32 tensors, where N = 4 (2D) or 6 (3D).  Saver detects
+                # this pattern via dtype and binds main + scale + allocates
+                # FP32 staging internally.  fp16 shares int8's two-pass flow
+                # because a bare fp16 cast flushes values below 2^-24 to
+                # zero, wiping the velocity faces of elastic wavefields.
                 # Scale shapes preserve the batch dimension so that
                 # ``_slice_boundary_buffers`` narrows the same axis as the
                 # main tensors.  Spatial dims collapse to n_blocks (shared
-                # with the staged int8 path via ``_int8_scale_shapes``).
+                # with the staged path via ``_int8_scale_shapes``).
                 #   3D main  (nvar*nt, B, W, Ny_b, Nx_b)
                 #     scale  (nvar*nt, B, n_blocks_per_step)
                 #   2D main  (nvar, nt, B, W, Nx_b)
                 #     scale  (nvar, nt, B, n_blocks_per_step)
+                main_dtype = torch.uint8 if boundary_dtype == 'int8' else torch.float16
                 main_shapes = layout.gpu_full_shapes
                 main_tensors = self.boundary_gpu_allocator.zeros(
-                    main_shapes, dtype=torch.uint8)
+                    main_shapes, dtype=main_dtype)
                 scale_tensors = self.boundary_gpu_allocator.zeros(
                     self._int8_scale_shapes(main_shapes), dtype=torch.float32)
                 self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
@@ -1274,20 +1328,15 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         sources = sources.copy()
         receivers = receivers.copy()
 
-        if self._image_method_active:
-            sources[..., 0] += base_shift
-            receivers[..., 0] += base_shift
-
-            if self.ndim == 3:
-                sources[..., 1] += base_shift
-                receivers[..., 1] += base_shift
-
-            # For cuda implementation, we pad in z-direction for free surface with width M
-            sources[..., -1] += M
-            receivers[..., -1] += M
-        else:
-            sources += base_shift
-            receivers += base_shift
+        # Shift physical (x,[y,]z) coords into the padded runtime grid by each
+        # axis' LOW-side pad + M.  Per-edge aware (free-surface faces have 0 pad,
+        # so e.g. a top free surface shifts z by only M, a left free surface x by
+        # only M).  For the top-only / no-FS defaults this reproduces the old
+        # ``base_shift`` (x/y) + ``M`` (z) behaviour bit-for-bit.
+        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
+        for _i in range(self.ndim):
+            sources[..., _i] += coord_offset[_i]
+            receivers[..., _i] += coord_offset[_i]
 
         # Canonicalize wavelet/sources to (B, nsrc_per_shot, nt) / (B, nsrc_per_shot, ndim).
         # `mode` was validated by _normalize_io above.
@@ -1525,6 +1574,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 has_topo_arg,
                 topo_cat_arg,
                 use_apm_arg,
+                self._fs_faces_c,
                 *models_arg,
             )
         
@@ -1632,17 +1682,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         sources = sources.copy()
         receivers = receivers.copy()
-        if self._image_method_active:
-            sources[..., 0] += base_shift
-            receivers[..., 0] += base_shift
-            if self.ndim == 3:
-                sources[..., 1] += base_shift
-                receivers[..., 1] += base_shift
-            sources[..., -1] += M
-            receivers[..., -1] += M
-        else:
-            sources += base_shift
-            receivers += base_shift
+        # Per-edge coord shift (see the forward path): each axis' low-side pad + M.
+        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
+        for _i in range(self.ndim):
+            sources[..., _i] += coord_offset[_i]
+            receivers[..., _i] += coord_offset[_i]
 
         if isinstance(wavelet, torch.Tensor):
             wavelet_t = wavelet.to(self.dev, dtype=torch.float32)
@@ -1760,6 +1804,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.boundary_disk_async_read = boundary_disk_async_read
         fwd.use_pinned_memory = use_pinned_memory
         fwd.free_surface = self._image_method_active
+        fwd.fs_faces = self._fs_faces_c
         # Topography plumbing (image method).  Empty + has_topo=False for flat.
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
@@ -1815,6 +1860,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.dt = self._dt
         bwd.spacing = spacing
         bwd.free_surface = self._image_method_active
+        bwd.fs_faces = self._fs_faces_c
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
             bwd.topo_rows = topo_rows_rt.to(torch.int32).contiguous()

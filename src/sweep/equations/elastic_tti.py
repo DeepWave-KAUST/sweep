@@ -203,6 +203,10 @@ class ElasticTTI(FirstOrderEquation):
     
     """
 
+    # The isotropic image-method free surface is WRONG for an anisotropic
+    # medium (see EquationBase.supports_free_surface); fail loud instead.
+    supports_free_surface = False
+
     MODEL_SPECS = (
         ModelSpec("vp0", description="VTI-frame vertical P velocity.", unit="m/s"),
         ModelSpec("vs0", description="VTI-frame vertical S velocity.", unit="m/s"),

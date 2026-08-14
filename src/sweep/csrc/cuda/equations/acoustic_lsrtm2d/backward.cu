@@ -421,8 +421,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     auto for_view = forward.view();
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn + ctx.M, nx, nz, p.free_surface);
-    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn + ctx.M, nx, nz, p.free_surface);
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn + ctx.M, nx, nz, ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
+    set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn + ctx.M, nx, nz, ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
 
     LaplaceParam lap_ctx{nx, 1, M, p.lap_coes.data_ptr<float>(), dx, 0.f, dz};
     GradParam grad_ctx{1, 0, nx, M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};

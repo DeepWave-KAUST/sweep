@@ -392,6 +392,30 @@ void backward_segment_3d(
             );
         }
 
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with stored v-differences that still contain the raw injected
+        // amplitude; the true derivative has no such term (the injection is
+        // rho-independent).  Compensate at the source cells (common.cu).
+        if (it + 1 < p.nt) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grad_rho.data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    3,
+                    solver
+                );
+            }
+        }
+
         const int offset = it - start;
         const int now_offset = offset + 1;
         const int next_offset = now_offset + 1;
@@ -597,6 +621,30 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 solver
             );
         }
+
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with stored v-differences that still contain the raw injected
+        // amplitude; the true derivative has no such term (the injection is
+        // rho-independent).  Compensate at the source cells (common.cu).
+        if (it + 1 < p.nt) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grad_rho.data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    3,
+                    solver
+                );
+            }
+        }
         // Wavefield reconstruction
         // Substract source term from forward wavefield
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
@@ -772,6 +820,8 @@ BackwardOutput backward(const BackwardInput& in)
     auto cpml_view = cpml.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
+    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
@@ -788,6 +838,30 @@ BackwardOutput backward(const BackwardInput& in)
                 adjoint_nsrc,
                 solver
             );
+        }
+
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with stored v-differences that still contain the raw injected
+        // amplitude; the true derivative has no such term (the injection is
+        // rho-independent).  Compensate at the source cells (common.cu).
+        if (it + 1 < p.nt) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grad_rho.data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    3,
+                    solver
+                );
+            }
         }
 
         const float* vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
@@ -1089,6 +1163,30 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
                 p.adjoint_sources_loc.size(1),
                 solver
             );
+        }
+
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with stored v-differences that still contain the raw injected
+        // amplitude; the true derivative has no such term (the injection is
+        // rho-independent).  Compensate at the source cells (common.cu).
+        if (it + 1 < p.nt) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grad_rho.data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    3,
+                    solver
+                );
+            }
         }
 
         replay_forward_to_time_3d(
