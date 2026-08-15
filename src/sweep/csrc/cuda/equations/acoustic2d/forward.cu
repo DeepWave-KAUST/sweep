@@ -63,7 +63,8 @@ ForwardOutput forward(const ForwardInput& in) {
     ctx.has_topo     = p.has_topo;
     ctx.topo_category = nullptr;
     ctx.use_apm      = false;
-    // Cut-aware physical bounds (0 = single domain → legacy abcn+M).
+    ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
+    // Cut-aware physical bounds (0 = single domain → legacy per-edge pad + M).
     ctx.cut_mask     = p.cut_face_mask;
 
     const int it0 = p.it_begin;

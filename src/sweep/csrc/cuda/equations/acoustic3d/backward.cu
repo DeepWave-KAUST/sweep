@@ -73,11 +73,18 @@ static inline void run_acoustic3d_adjoint_step(
         grad_forward_img, grad_out);
 }
 
-void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp)
+void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp,
+                        bool want_adcig = false, int nlag = 1)
 {
     out.image = torch::zeros_like(vp);
     out.source_illumination = torch::zeros_like(vp);
     out.receiver_illumination = torch::zeros_like(vp);
+    if (want_adcig) {
+        // vp is (N, C, nz, ny, nx); ADCIG cube (nlag, N, C, nz, ny, nx),
+        // runtime-padded, cropped + summed over batch Python-side.
+        out.adcig = torch::zeros({(long)nlag, vp.size(0), vp.size(1),
+                                  vp.size(2), vp.size(3), vp.size(4)}, vp.options());
+    }
 }
 
 // Validate the stepped-backward segment fields (bw_it_begin/bw_it_end).
@@ -131,11 +138,17 @@ void check_stepped_backward_3d(const BackwardInput& p, bool need_recon)
 // fall back to internal zero allocation (legacy monolithic behaviour).
 // Bound tensors are accumulated "+=" and NOT zeroed here — Python zeroes
 // them once before the first segment.
+// ``want_adcig``: only the boundary-saving path consumes an ADCIG cube in 3-D
+// (the full-storage / ckpt / recursive drivers neither accumulate into nor
+// return one), so it stays opt-in.  Allocating it unconditionally would cost a
+// (2*max_lag+1, N, C, nz, ny, nx) zero-fill per call — gigabytes — that is
+// never read.  2-D differs: every 2-D driver consumes ADCIG.
 void bind_backward_outputs_3d(
     const BackwardInput& p,
     torch::Tensor& grad_wavelet,
     torch::Tensor& grad,
-    RTMOutput& illumination)
+    RTMOutput& illumination,
+    bool want_adcig = false)
 {
     if (!p.grads_out.empty()) {
         TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
@@ -155,8 +168,23 @@ void bind_backward_outputs_3d(
         illumination.image = torch::zeros_like(p.models[0]);
         illumination.source_illumination = p.illum_out[0];
         illumination.receiver_illumination = p.illum_out[1];
+        // NO ADCIG here.  This is the segmented (stepped / domain-decomposed)
+        // path: source/receiver illumination survive across segments only
+        // because Python owns those buffers and they accumulate into them.
+        // ADCIG has no such carrier -- allocating a cube here would give every
+        // segment a fresh zeroed cube that is filled for that one step and then
+        // dropped (DD runs one segment per time step and discards the return),
+        // so the user would silently get no ADCIG plus a full-cube memset per
+        // step. Refuse the combination instead of computing a wrong answer.
+        TORCH_CHECK(!p.compute_adcig,
+                    "compute_adcig is not supported on the segmented "
+                    "(stepped / domain-decomposed) 3-D backward: the ADCIG cube "
+                    "has no cross-segment accumulator. Run ADCIG on the "
+                    "single-segment backward instead.");
     } else {
-        init_rtm_output_3d(illumination, p.models[0]);
+        init_rtm_output_3d(illumination, p.models[0],
+                           want_adcig && p.compute_adcig,
+                           2 * p.adcig_max_lag + 1);
     }
 }
 
@@ -243,6 +271,18 @@ void accumulate_imaging_utt_3d(
 
     if (rtm_out != nullptr) {
         accumulate_rtm_3d(wave_grid, wave_block, u_now_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
+    }
+    // Space-lag ADCIG on the reconstructed raw pressure ``u_now_ptr`` (this
+    // BS-only helper is the one imaging site that has the raw pressure; the
+    // full/ckpt helpers correlate vp^2*Lap(u), so ADCIG is not launched there).
+    if (rtm_out != nullptr && rtm_out->adcig.defined() && rtm_out->adcig.numel() > 0) {
+        int nlag = rtm_out->adcig.size(0);
+        int Bloc = rtm_out->adcig.size(1) * rtm_out->adcig.size(2);  // N*C
+        int max_lag = (nlag - 1) / 2;
+        accumulate_adcig_3d<<<wave_grid, wave_block>>>(
+            u_now_ptr, adjoint_ptr, rtm_out->adcig.data_ptr<float>(),
+            nlag, max_lag, Bloc, nx, ny, nz
+        );
     }
 }
 
@@ -966,16 +1006,22 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     torch::Tensor grad, grad_wavelet;
     RTMOutput illumination;
     // DD binds Python-owned grad/illum output buffers (the stepped backward
-    // needs them to survive segments). Gate illumination on compute_illumination
-    // (mirror the FULL path): when off, run_bs_imaging skips the per-step RTM
-    // kernel (rtm_out==nullptr) so the flag is honored — previously the BS path
-    // passed &illumination unconditionally and ran the RTM pass every step.
-    bind_backward_outputs_3d(p, grad_wavelet, grad, illumination);
+    // needs them to survive segments); this is the one 3-D path that consumes
+    // ADCIG, so it opts into the cube.
+    // Gate illumination on compute_illumination (mirror the FULL path). When
+    // off, run_bs_imaging / accumulate_imaging_utt_3d skips the per-step RTM
+    // kernel because rtm_out==nullptr; the buffer stays zero. Previously this
+    // BS path passed &illumination unconditionally, so the RTM pass ran every
+    // step and the flag was ignored (no time saved, illumination computed then
+    // discarded).  ADCIG (space-lag) rides the same imaging pass, so pass the
+    // RTMOutput when either is requested.
+    bind_backward_outputs_3d(p, grad_wavelet, grad, illumination, /*want_adcig=*/true);
     run_bs_imaging(p, &grad, &grad_wavelet,
-                   p.compute_illumination ? &illumination : nullptr);
+                   (p.compute_illumination || p.compute_adcig) ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
     return out;
 }
 

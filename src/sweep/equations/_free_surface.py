@@ -88,6 +88,24 @@ def top_free_surface_cell_derivative(u, deriv, halo, odd, axis):
     return deriv(extend_top_free_surface_cell_centered(u, halo, odd, axis))
 
 
+def extend_top_free_surface_cell_centered_flipped(u, halo, odd, axis):
+    """Half-cell mirror for a FLIPPED axis (the high-side path).
+
+    Flipping reverses the half-cell offset: a field that sat at ``+h/2`` below
+    the surface now sits at ``-h/2``, so the node at index ``halo`` is already
+    outside the medium and the first interior one is ``halo+1``.  The ghost
+    block therefore covers ``0..halo`` (one more row than the low-side variant)
+    and reflects about ``halo+1/2``:  ghost[j] = u[2*halo+1-j], giving
+    ``u[halo] = -u[halo+1]`` — i.e. tau_zx(+h/2) = -tau_zx(-h/2) measured from
+    the high-side surface."""
+    if halo <= 0:
+        return u
+    ghost = _flip(_slice_axis(u, axis, halo + 1, 2 * halo + 2), axis=axis)
+    if odd:
+        ghost = -ghost
+    return _concat([ghost, _slice_axis(u, axis, halo + 1, None)], axis=axis)
+
+
 def zero_top_row(u, halo, axis):
     row = 0 if halo <= 0 else halo
     out = _zero_axis_index(u, axis, row)
@@ -103,6 +121,231 @@ def zero_top_row(u, halo, axis):
         ],
         axis=axis,
     )
+
+
+def blend_top_n(top, bottom, n, axis):
+    """Use ``top`` for the first ``n`` rows along ``axis``, ``bottom`` for the rest.
+    Used for near-surface order reduction (low-order z-derivative in the top band)."""
+    if n <= 0:
+        return bottom
+    return _concat([_slice_axis(top, axis, None, n), _slice_axis(bottom, axis, n, None)], axis=axis)
+
+
+def overwrite_top_row(base, repl, halo, axis):
+    """Return ``base`` with its free-surface row (index ``halo``) replaced by the
+    corresponding row of ``repl`` (same shape). Backend-agnostic (slice+concat)."""
+    row = 0 if halo <= 0 else halo
+    pre = _slice_axis(base, axis, None, row) if row > 0 else None
+    surf = _slice_axis(repl, axis, row, row + 1)
+    post = _slice_axis(base, axis, row + 1, None)
+    parts = ([pre] if pre is not None else []) + [surf, post]
+    return _concat(parts, axis=axis)
+
+
+def get_o2_pd(pd):
+    """Cached order-2 staggered-derivative twin of ``pd`` (near-surface order
+    reduction). The order-2 image derivative is unconditionally stable at the
+    free surface; blending it into the top band tames the high-order
+    FS-∩-CPML-corner instability without disturbing the interior accuracy."""
+    p2 = getattr(pd, "_o2", None)
+    if p2 is None:
+        from sweep.operators.general import StaggeredDerivative
+        from .utils import to_backend as _tb
+
+        p2 = StaggeredDerivative(2, pd.device, pd.backend, ndim=pd.ndim)
+        p2.to_backend(_tb)
+        p2._spacing = pd._spacing
+        pd._o2 = p2
+    return p2
+
+
+def fs_deriv(field, full_op, o2_op, halo, odd, axis, n_o2, half=False):
+    """Free-surface z-derivative with optional near-surface order reduction:
+    order-2 image-derivative for the top ``n_o2`` rows, full-order below.
+    ``half=True`` for fields sitting at ``z=+h/2`` (``sxz``/``syz``/``vz``) —
+    they mirror about ``halo-1/2``; see :func:`fs_deriv_1side`."""
+    deriv = (top_free_surface_cell_derivative if half
+             else top_free_surface_derivative)
+    full = deriv(field, full_op, halo, odd=odd, axis=axis)
+    if n_o2 <= 0:
+        return full
+    o2 = deriv(field, o2_op, halo, odd=odd, axis=axis)
+    return blend_top_n(o2, full, n_o2, axis)
+
+
+def near_surface_o2_count(top_halo, env_value):
+    """Map the ``SWEEP_FS_NEARSURF_O2`` env string to a top-band row count.
+    ``"0"`` disables; ``"1"`` (default) uses ``2*top_halo`` rows; any other
+    integer string is taken literally."""
+    if env_value == "0":
+        return 0
+    if env_value == "1":
+        return 2 * top_halo
+    return int(env_value)
+
+
+# -----------------------------------------------------------------------------
+# Per-edge (axis, side) generalisation of the flat top-only image method.
+#
+# ``side='low'`` is the historical top-of-axis surface (reflect about index
+# ``halo``); ``side='high'`` is the far end (reflect about ``n-1-halo``).  The
+# high side is obtained by flipping the axis, applying the low-side operation,
+# and flipping back — geometrically exact and reusing the audited low-side code.
+# Parities (``odd``) and the forward/backward derivative operator are unchanged
+# between the two ends of an axis (the free-surface BC is the same at both);
+# only the mirror location moves.  ``sides`` lists let a single axis carry a
+# free surface at both ends (a closed / waveguide box) with one derivative call.
+# -----------------------------------------------------------------------------
+
+
+def sides_from_fs_faces_2d(fs_faces):
+    """Split a 2-D ``fs_faces`` tuple ``(z_lo, z_hi, x_lo, x_hi)`` = (top,
+    bottom, left, right) into ``(z_sides, x_sides)`` lists of ``'low'``/``'high'``."""
+    z_sides = []
+    if fs_faces[0]:
+        z_sides.append("low")
+    if fs_faces[1]:
+        z_sides.append("high")
+    x_sides = []
+    if fs_faces[2]:
+        x_sides.append("low")
+    if fs_faces[3]:
+        x_sides.append("high")
+    return z_sides, x_sides
+
+
+def extend_free_surface(u, halo, odd, axis, side="low"):
+    """Image-method mirror at one end of ``axis``.  ``side='low'`` is the
+    historical :func:`extend_top_free_surface`; ``side='high'`` mirrors about
+    ``n-1-halo`` via flip-apply-flip (exact, reuses the low-side code)."""
+    if halo <= 0:
+        return u
+    if side == "low":
+        return extend_top_free_surface(u, halo, odd, axis)
+    uf = _flip(u, axis)
+    ef = extend_top_free_surface(uf, halo, odd, axis)
+    return _flip(ef, axis)
+
+
+def blend_side_n(near, far, n, axis, side="low"):
+    """Use ``near`` for the ``n`` cells nearest the ``side`` surface, ``far`` for
+    the rest (near-surface order reduction at either end of the axis)."""
+    if n <= 0:
+        return far
+    if side == "low":
+        return blend_top_n(near, far, n, axis)
+    ax = axis if axis >= 0 else far.ndim + axis
+    nsz = far.shape[ax]
+    return _concat(
+        [_slice_axis(far, ax, None, nsz - n), _slice_axis(near, ax, nsz - n, None)],
+        axis=ax,
+    )
+
+
+def fs_deriv_1side(field, op, op_swapped, halo, odd, axis, side, half=False):
+    """Free-surface staggered derivative near ONE surface.
+
+    ``side='low'`` mirrors about index ``halo`` and applies ``op`` (the
+    historical top path).  ``side='high'`` uses the flip identity so the
+    STAGGERED operator direction is correct at the far surface::
+
+        high = -flip( op_swapped( extend_top(flip(field)) ) )
+
+    because flipping the axis turns a forward staggered difference into a
+    (negated) backward one — ``F∘op_swapped∘F = -op`` — so this reproduces
+    ``op(field)`` in the interior while enforcing the free surface at the high
+    end.  ``op_swapped`` is the opposite-direction operator (z_forward↔z_backward).
+
+    ``half=True`` marks a field whose nodes sit half a cell BELOW the surface
+    plane (``sxz``/``syz``/``vz`` on the Virieux grid live at ``z=+h/2`` while
+    the surface is on the ``szz`` plane).  Their image must then reflect about
+    ``halo-1/2`` — i.e. ``tau_zx(-h/2) = -tau_zx(+h/2)`` (Kristek, Moczo &
+    Archuleta 2002, Table 1) — not about ``halo``, which would wrongly pair
+    ``-h/2`` with ``+3h/2``.  Getting this wrong is masked while the surface row
+    is force-zeroed, but destabilises the scheme once it is not.
+
+    Flipping the axis for the high side reverses the half-cell offset, so the
+    high side needs its own variant (``..._cell_centered_flipped``) whose ghost
+    block is one row larger; see that function."""
+    if side == "low":
+        ext = (extend_top_free_surface_cell_centered if half
+               else extend_top_free_surface)
+        return op(ext(field, halo, odd, axis))
+    ff = _flip(field, axis)
+    ext_hi = (extend_top_free_surface_cell_centered_flipped if half
+              else extend_top_free_surface)
+    d = op_swapped(ext_hi(ff, halo, odd, axis))
+    return -_flip(d, axis)
+
+
+def fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides, half=False):
+    """Full-order FS derivative honouring every surface in ``sides``.  Each
+    single-side derivative equals the plain derivative away from its own
+    surface, so a two-sided (closed / waveguide) axis is stitched from the low
+    result (correct at the low end) with the high end's band overwritten by the
+    high result (correct at the high end).  ``half`` -> see
+    :func:`fs_deriv_1side` (low side only)."""
+    if not sides:
+        return op(field)
+    if sides == ["low"] or sides == ["high"]:
+        return fs_deriv_1side(field, op, op_swapped, halo, odd, axis, sides[0], half)
+    d_low = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "low", half)
+    d_high = fs_deriv_1side(field, op, op_swapped, halo, odd, axis, "high", half)
+    ax = axis if axis >= 0 else field.ndim + axis
+    n = d_low.shape[ax]
+    band = 2 * halo
+    return _concat(
+        [_slice_axis(d_low, ax, None, n - band), _slice_axis(d_high, ax, n - band, None)],
+        axis=ax,
+    )
+
+
+def fs_deriv_edges(field, op, op_swapped, o2, o2_swapped, halo, odd, axis, sides,
+                   n_o2, half=False):
+    """FS derivative honouring every surface in ``sides`` with optional
+    near-surface order-2 reduction blended in at each side.  With
+    ``sides=['low']`` this is bit-for-bit :func:`fs_deriv`.  ``half`` -> see
+    :func:`fs_deriv_1side`."""
+    full = fs_deriv_axis(field, op, op_swapped, halo, odd, axis, sides, half)
+    if n_o2 <= 0 or o2 is None:
+        return full
+    o2full = fs_deriv_axis(field, o2, o2_swapped, halo, odd, axis, sides, half)
+    out = full
+    for side in sides:
+        out = blend_side_n(o2full, out, n_o2, axis, side)
+    return out
+
+
+def zero_surface_row(u, halo, axis, side="low"):
+    """Zero the single surface row/column: index ``halo`` for ``side='low'``
+    (== :func:`zero_top_row`), ``n-1-halo`` for ``side='high'``."""
+    if side == "low":
+        return zero_top_row(u, halo, axis)
+    ax = axis if axis >= 0 else u.ndim + axis
+    n = u.shape[ax]
+    row = n - 1 - (halo if halo > 0 else 0)
+    out = _zero_axis_index(u, ax, row)
+    if out is not None:
+        return out
+    parts = [_slice_axis(u, ax, None, row), _slice_axis(u, ax, row, row + 1) * 0]
+    if row + 1 < n:
+        parts.append(_slice_axis(u, ax, row + 1, None))
+    return _concat(parts, axis=ax)
+
+
+def overwrite_surface_row(base, repl, halo, axis, side="low"):
+    """Replace the surface row/column of ``base`` with that of ``repl``: index
+    ``halo`` for ``side='low'`` (== :func:`overwrite_top_row`), ``n-1-halo`` for
+    ``side='high'``."""
+    if side == "low":
+        return overwrite_top_row(base, repl, halo, axis)
+    ax = axis if axis >= 0 else base.ndim + axis
+    n = base.shape[ax]
+    row = n - 1 - (halo if halo > 0 else 0)
+    parts = [_slice_axis(base, ax, None, row), _slice_axis(repl, ax, row, row + 1)]
+    if row + 1 < n:
+        parts.append(_slice_axis(base, ax, row + 1, None))
+    return _concat(parts, axis=ax)
 
 
 # -----------------------------------------------------------------------------
@@ -211,6 +454,43 @@ def zero_above_topo(u, iz_surf, axis):
     z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
     mask = (z < surf).expand_as(u)
     return u.masked_fill(mask, 0.0)
+
+
+def overwrite_at_topo(base, repl, iz_surf, axis):
+    """Per-column version of :func:`overwrite_top_row`: set the surface row
+    (``z == iz_surf[ix]``) of ``base`` to the corresponding entry of ``repl``;
+    all other cells are left untouched.  Used for the Robertsson surface-sigma_xx
+    modified coefficient under irregular topography."""
+    import torch
+
+    z, surf, ax, nz = _broadcast_topo(base, iz_surf, axis)
+    mask = (z == surf).expand_as(base)
+    return torch.where(mask, repl, base)
+
+
+def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2, topo_rows=None):
+    """Robertsson free-surface sigma_xx correction, shared across the staggered
+    elastic equations (Elastic, DASMu, ElasticVR).
+
+    At a free surface sigma_zz = 0 forces the surface-row sigma_xx to
+    ``sxx_pre + dt * c_surf * vx_x`` -- the image-method mirror alone leaves it
+    ~mu/lambda too large.  ``c_surf`` is the modified coefficient and ``vx_x`` the
+    matching x velocity-gradient, both expressed in each caller's own variables:
+      * Elastic / DASMu : c_surf = 4 mu (lam+mu)/(lam+2mu),  vx_x = d vx/dx
+      * ElasticVR (native, momentum px = rho*vx, no explicit rho needed):
+                          c_surf = 4 vs^2 (vp^2 - vs^2)/vp^2,  vx_x = d px/dx
+    Overwrites the flat top row (``overwrite_top_row``) or, when ``topo_rows`` is
+    given, the per-column surface row along topography (``overwrite_at_topo``).
+    Env-gated by ``SWEEP_FS_MOD_SXX`` (default on); returns ``sxx`` unchanged off.
+    """
+    import os as _os
+
+    if _os.environ.get("SWEEP_FS_MOD_SXX", "1") != "1":
+        return sxx
+    sxx_surf = sxx_pre + dt * c_surf * vx_x
+    if topo_rows is not None:
+        return overwrite_at_topo(sxx, sxx_surf, topo_rows, axis=axis)
+    return overwrite_top_row(sxx, sxx_surf, top_halo, axis=axis)
 
 
 def zero_at_topo(u, iz_surf, axis):

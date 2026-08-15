@@ -149,19 +149,26 @@ __global__ void acoustic2nd(
 
     // Position-based PML / interior split. ax/bx/dbxdx coefficient arrays are
     // exactly zero outside the PML band, and the centered gradient of those
-    // arrays vanishes once the stencil clears the band. Skipping the full PML
-    // update there is bit-equivalent and avoids ~8 aux-field loads/stores per
-    // cell. The check is warp-coherent (same outcome for 32 consecutive ix
-    // values), so warps diverge only at the abcn boundary.
+    // arrays vanishes once the stencil clears the band (>= pad + halo from
+    // the edge). Skipping the full PML update there is bit-equivalent and
+    // avoids ~8 aux-field loads/stores per cell. The check is warp-coherent
+    // (same outcome for 32 consecutive ix values), so warps diverge only at
+    // the band boundary.
     //
-    // Use the cut-aware physical bounds (phys_x0/x1/z0/z1): a DD cut face
-    // carries only the M halo with zero PML coefficients, so its interior must
-    // take the fast path too — otherwise the algebraically-equal zero-coeff
-    // PML branch reorders the FMAs and seeds ulp drift. For a single domain
-    // (cut_mask == 0) every bound collapses to the legacy abcn+M / free-surface
-    // form, bit-for-bit.
-    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
-                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
+    // These are the ``phys_*()`` bounds spelled out against ``halo`` rather
+    // than ``solver.M``, so the static-M specialisation keeps folding them
+    // into compile-time constants.  A DD cut face carries only the halo strip
+    // with zero PML coefficients, so its interior must take the fast path too
+    // — otherwise the algebraically-equal zero-coefficient PML branch reorders
+    // the FMAs and seeds ulp drift.  With cut_mask == 0 every bound collapses
+    // to the per-edge ``padLo/padHi + halo`` (and, with fs_faces == -1, to the
+    // legacy ``abcn + halo`` / free-surface form), bit-for-bit.
+    int pml_x0 = solver.cut_x_lo() ? halo : solver.padLo(2) + halo;
+    int pml_x1 = solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + halo);
+    int pml_z0 = solver.cut_z_lo() ? halo : solver.padLo(0) + halo;
+    int pml_z1 = solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + halo);
+    bool in_pml = (ix < pml_x0) || (ix >= pml_x1) ||
+                  (iz < pml_z0) || (iz >= pml_z1);
 
     if (!in_pml) {
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
@@ -293,11 +300,10 @@ __global__ void acoustic2nd_adjoint_fused(
     // as the matching single-domain cells — taps read lambda from the
     // exchanged M-halo and vp from the tile model's halo slice.
     bool pure_interior =
-        (ix >= (solver.cut_x_lo() ? halo : solver.abcn + 2 * halo)) &&
-        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.abcn + 2 * halo)) &&
-        (iz >= (solver.cut_z_lo() ? halo
-                : (solver.free_surface ? 0 : solver.abcn) + 2 * halo)) &&
-        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.abcn + 2 * halo));
+        (ix >= (solver.cut_x_lo() ? halo : solver.padLo(2) + 2 * halo)) &&
+        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + 2 * halo)) &&
+        (iz >= (solver.cut_z_lo() ? halo : solver.padLo(0) + 2 * halo)) &&
+        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + 2 * halo));
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll
@@ -390,18 +396,20 @@ __global__ void acoustic2nd_nopml(
         M = Order / 2;
     }
 
-    // Per-side exclusion bands.  On a non-cut side keep the legacy width
-    // (PML band + strip + halo, or 2M without PML); on a DD cut side the
-    // band collapses to the stencil halo M — the cut-adjacent cells are
-    // computed by plain reverse leapfrog reading the per-step exchanged
-    // M-halo of u_now (no PML there; restore skips the cut-face strip).
-    int wide = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
-    int hx_lo = solver.cut_x_lo() ? M : wide;
-    int hx_hi = solver.cut_x_hi() ? M : wide;
-    int hz_lo = solver.cut_z_lo() ? M : (solver.free_surface ? 2*M : wide);
-    int hz_hi = solver.cut_z_hi() ? M : wide;
-    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
-        iz < hz_lo || iz >= solver.nz - hz_hi)
+    // Per-face boundary band, from the two independent reasons a face can be
+    // narrow:
+    //   * DD cut face -> only the stencil halo M.  The cut-adjacent cells are
+    //     computed by plain reverse leapfrog reading the per-step exchanged
+    //     M-halo of u_now (no PML there; restore skips the cut-face strip).
+    //   * free surface (0 pad) -> only the 2*M image halo.
+    //   * PML face -> pad + 2*M + 1.
+    // Cut wins; with cut_mask == 0 this is exactly the dev per-edge band, and
+    // with fs_faces == -1 on top of that, the legacy halo/top_halo.
+    int bx_lo = solver.cut_x_lo() ? M : (solver.padLo(2) > 0 ? solver.padLo(2) + 2*M + 1 : 2*M);
+    int bx_hi = solver.cut_x_hi() ? M : (solver.padHi(2) > 0 ? solver.padHi(2) + 2*M + 1 : 2*M);
+    int bz_lo = solver.cut_z_lo() ? M : (solver.padLo(0) > 0 ? solver.padLo(0) + 2*M + 1 : 2*M);
+    int bz_hi = solver.cut_z_hi() ? M : (solver.padHi(0) > 0 ? solver.padHi(0) + 2*M + 1 : 2*M);
+    if (ix < bx_lo || ix >= solver.nx - bx_hi || iz < bz_lo || iz >= solver.nz - bz_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -452,6 +460,14 @@ __global__ void accumulate_rtm_image_2d(
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
     int nx, int nz
+);
+
+__global__ void accumulate_adcig_2d(
+    const float* __restrict__ u_forward,
+    const float* __restrict__ u_backward,
+    float* __restrict__ adcig,           // (nlag, B, nz, nx) runtime-padded
+    int nlag, int max_lag,
+    int B, int nx, int nz
 );
 
 __global__ void accumulate_source_grad_2d(

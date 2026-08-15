@@ -87,7 +87,7 @@ __global__ void das_mu3d_stress_strain_kernel(
 
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
     f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
     dvz_dz += f.m_vzz[idx];
@@ -129,9 +129,14 @@ __global__ void das_mu3d_stress_strain_kernel(
     f.eyz[idx] += 0.5f * solver.dt * (dvy_dz + dvz_dy);
 
     if (elastic3d_is_top_free_surface_row(solver, iz)) {
-        f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
-        f.syz[idx] = 0.f;
+        // Robertsson tangential FS correction (3-D): sxx/syy each get
+        // -dt*lam*(lam/(lam+2mu)*(dvx_dx+dvy_dy)+dvz_dz) added; matches eager
+        // das_mu3d.  Strains exx/eyy/ezz are unchanged.
+        float _rob = -solver.dt * lam *
+            (lam / (lam + 2.f * mu_) * (dvx_dx + dvy_dy) + dvz_dz);
+        f.sxx[idx] += _rob;
+        f.syy[idx] += _rob;
+        f.szz[idx] = 0.f;   // z-low FS: zero only szz; sxz/syz are +h/2 medium values (fix)
     }
 
     if (u_this_b) {
@@ -189,12 +194,8 @@ __global__ void das_mu3d_stress_strain_adjoint_prepare(
     float bar_sxz = f.sxz[idx];
     float bar_syz = f.syz[idx];
     if (elastic3d_is_top_free_surface_row(solver, iz)) {
-        bar_szz = 0.f;
-        bar_sxz = 0.f;
-        bar_syz = 0.f;
+        bar_szz = 0.f;   // z-low FS: zero only szz; keep sxz/syz (+h/2 medium values, fix)
         f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
-        f.syz[idx] = 0.f;
     }
 
     float bar_exx = -f.exx[idx];
@@ -204,9 +205,22 @@ __global__ void das_mu3d_stress_strain_adjoint_prepare(
     float bar_exz = -f.exz[idx];
     float bar_eyz = -f.eyz[idx];
 
-    float bar_dvx_dx = solver.dt * (l2m * bar_sxx + lam * bar_syy + lam * bar_szz + bar_exx);
-    float bar_dvy_dy = solver.dt * (lam * bar_sxx + l2m * bar_syy + lam * bar_szz + bar_eyy);
-    float bar_dvz_dz = solver.dt * (lam * bar_sxx + lam * bar_syy + l2m * bar_szz + bar_ezz);
+    // Transpose of the stress/strain-from-velocity update.  On a z-low free
+    // surface the Robertsson fix makes sxx=coef*dvx_dx+coef2*dvy_dy,
+    // syy=coef2*dvx_dx+coef*dvy_dy, szz=0 (bar_szz=0); strains exx/eyy/ezz are
+    // unchanged so their bar_e* remain, and dvz_dz keeps only bar_ezz.
+    float bar_dvx_dx, bar_dvy_dy, bar_dvz_dz;
+    if (elastic3d_is_top_free_surface_row(solver, iz)) {
+        float coef  = 4.f * mu_ * (lam + mu_) / l2m;
+        float coef2 = 2.f * lam * mu_ / l2m;
+        bar_dvx_dx = solver.dt * (coef  * bar_sxx + coef2 * bar_syy + bar_exx);
+        bar_dvy_dy = solver.dt * (coef2 * bar_sxx + coef  * bar_syy + bar_eyy);
+        bar_dvz_dz = solver.dt * (bar_ezz);
+    } else {
+        bar_dvx_dx = solver.dt * (l2m * bar_sxx + lam * bar_syy + lam * bar_szz + bar_exx);
+        bar_dvy_dy = solver.dt * (lam * bar_sxx + l2m * bar_syy + lam * bar_szz + bar_eyy);
+        bar_dvz_dz = solver.dt * (lam * bar_sxx + lam * bar_syy + l2m * bar_szz + bar_ezz);
+    }
     float bar_dvx_dy = solver.dt * (mu_ * bar_sxy + 0.5f * bar_exy);
     float bar_dvy_dx = solver.dt * (mu_ * bar_sxy + 0.5f * bar_exy);
     float bar_dvx_dz = solver.dt * (mu_ * bar_sxz + 0.5f * bar_exz);

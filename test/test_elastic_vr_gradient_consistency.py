@@ -52,6 +52,20 @@ def _geometry():
     return sources, receivers
 
 
+def _surface_geometry():
+    """Shallow source + receivers ON the free-surface row (z=0).
+
+    The Robertsson sigma_xx surface correction only modifies the surface-row
+    stress and does NOT propagate into the interior, so the interior (z=2)
+    receivers of :func:`_geometry` never exercise the sigma_xx adjoint/imaging
+    transpose -- only surface receivers do.
+    """
+    sources = np.array([[NX // 2, 4]], dtype=np.int64)
+    rec_x = np.arange(2, NX - 2, 3, dtype=np.int64)
+    receivers = np.stack([rec_x, np.zeros_like(rec_x)], axis=-1)[None, ...]
+    return sources, receivers
+
+
 def _make_prop(impl, free_surface=False, **ckpt_kwargs):
     eq = ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch")
     kw = dict(use_ckpt=False)
@@ -277,6 +291,54 @@ def test_gradient_consistency_free_surface(tag, prop_ckpt, fwd_kw):
             failed.append(f"{name}: rel_l2={rel:.4e}, cos={cos:.4f}")
     assert not failed, (f"[{tag}/fs] free-surface gradient consistency failed:\n  "
                         + "\n  ".join(failed))
+
+
+@pytest.mark.parametrize("tag,prop_ckpt,fwd_kw", [
+    ("full",           {},                                                          {}),
+    ("bs",             {},                                                          {"use_boundary_saving": True}),
+    ("ckpt_chunk",     {"use_ckpt": True, "ckpt_mode": "chunk", "ckpt_chunks": 16}, {}),
+    ("ckpt_recursive", {"use_ckpt": True, "ckpt_mode": "recursive", "ckpt_num": 5}, {}),
+])
+def test_gradient_consistency_free_surface_surface_receivers(tag, prop_ckpt, fwd_kw):
+    """Free-surface gradient consistency recorded ON the surface row (z=0).
+
+    Unlike :func:`test_gradient_consistency_free_surface` (interior z=2
+    receivers), this records on the free surface so the loss actually depends
+    on the Robertsson sigma_xx surface correction -- this is the geometry that
+    exercises the CUDA sigma_xx adjoint (``evr_stress_adjoint_prepare`` surface
+    branch) and imaging (``calculate_grad_evr_nobs`` surface material
+    derivative).  All four backward modes must match eager autograd.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    wavelet = _wavelet()
+    sources, receivers = _surface_geometry()
+    rt = {"receiver_type": ["sxx"]}   # record the corrected surface stress
+
+    target_models = _layered_models_with_grad()
+    with torch.no_grad():
+        target_models[0] += 30.0
+    with torch.no_grad():
+        target_syn = _make_prop("eager", free_surface=True, **rt)(
+            wavelet, sources, receivers, models=target_models)
+
+    eager_grads, _ = _compute_grads(
+        "eager", wavelet, sources, receivers, target_syn,
+        prop_ckpt={"free_surface": True, **rt})
+    c_grads, _ = _compute_grads(
+        "c", wavelet, sources, receivers, target_syn,
+        prop_ckpt={"free_surface": True, **rt, **prop_ckpt}, **fwd_kw)
+
+    failed = []
+    for name in ("vp", "vs", "Rp_x", "Rp_z", "Rs_x", "Rs_z"):
+        rel = _rel_l2(c_grads[name], eager_grads[name])
+        cos = _cosine(c_grads[name], eager_grads[name])
+        print(f"  [{tag}/fs-surf] grad_{name:5s}: rel_l2 = {rel:.4e}  cos = {cos:.4f}")
+        if not (rel < 1.5 and cos > 0.8):
+            failed.append(f"{name}: rel_l2={rel:.4e}, cos={cos:.4f}")
+    assert not failed, (f"[{tag}/fs-surf] surface-receiver gradient consistency "
+                        f"failed:\n  " + "\n  ".join(failed))
 
 
 if __name__ == "__main__":

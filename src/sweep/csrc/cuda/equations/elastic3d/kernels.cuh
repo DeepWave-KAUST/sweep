@@ -169,11 +169,11 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
 
     float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
     float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
     float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
     float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
@@ -317,7 +317,7 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
 
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
@@ -352,9 +352,14 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
             mu_ * (dvy_dz + dvz_dy);
 
         if (elastic3d_is_top_free_surface_row(solver, iz)) {
-            f.szz[idx] = 0.f;
-            f.sxz[idx] = 0.f;
-            f.syz[idx] = 0.f;
+            // Robertsson tangential FS correction (3-D): sigma_zz=0 => surface-row
+            // sxx/syy each get -dt*lam*(lam/(lam+2mu)*(dvx_dx+dvy_dy)+dvz_dz)
+            // added (equal for xx & yy); matches eager elastic3d/das_mu3d.
+            float _rob = -solver.dt * lam *
+                (lam / (lam + 2.f * mu_) * (dvx_dx + dvy_dy) + dvz_dz);
+            f.sxx[idx] += _rob;
+            f.syy[idx] += _rob;
+            f.szz[idx] = 0.f;   // z-low FS: zero only szz; sxz/syz are +h/2 medium values (fix)
         }
 
         if (u_this_t) {
@@ -425,9 +430,12 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
         mu_ * (dvy_dz + dvz_dy);
 
     if (elastic3d_is_top_free_surface_row(solver, iz)) {
-        f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
-        f.syz[idx] = 0.f;
+        // Robertsson tangential FS correction (3-D); see elastic_stress_kernel_3d.
+        float _rob = -solver.dt * lam *
+            (lam / (lam + 2.f * mu_) * (dvx_dx + dvy_dy) + dvz_dz);
+        f.sxx[idx] += _rob;
+        f.syy[idx] += _rob;
+        f.szz[idx] = 0.f;   // z-low FS: zero only szz; sxz/syz are +h/2 medium values (fix)
     }
 
     if (u_this_t) {
@@ -495,11 +503,11 @@ __global__ void elastic_velocity_kernel_3d_nopml(
 
     float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
     float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
     float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
     float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
@@ -585,7 +593,7 @@ __global__ void elastic_stress_kernel_3d_nopml(
 
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
 
     float lam = lam_b[idx];
@@ -977,11 +985,11 @@ __global__ void elastic_velocity_adjoint_apply_3d(
 
     float dpxx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(pxx_b, ix, iy, iz, grad_ctx);
     float dpxy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(pxy_b, ix, iy, iz, grad_ctx);
-    float dpxz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(pxz_b, ix, iy, iz, grad_ctx, solver, true);
+    float dpxz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(pxz_b, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dpyx_dx = sgradient<3, Order, X, DIFF_FORWARD>(pyx_b, ix, iy, iz, grad_ctx);
     float dpyy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(pyy_b, ix, iy, iz, grad_ctx);
-    float dpyz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(pyz_b, ix, iy, iz, grad_ctx, solver, true);
+    float dpyz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(pyz_b, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dpzx_dx = sgradient<3, Order, X, DIFF_FORWARD>(pzx_b, ix, iy, iz, grad_ctx);
     float dpzy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(pzy_b, ix, iy, iz, grad_ctx);
@@ -1196,12 +1204,8 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float bar_sxz = f.sxz[idx];
     float bar_syz = f.syz[idx];
     if (elastic3d_is_top_free_surface_row(solver, iz)) {
-        bar_szz = 0.f;
-        bar_sxz = 0.f;
-        bar_syz = 0.f;
+        bar_szz = 0.f;   // z-low FS: zero only szz; keep sxz/syz (+h/2 medium values, fix)
         f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
-        f.syz[idx] = 0.f;
     }
 
     // --- FUSED gradient imaging (full-mode only) -----------------------------
@@ -1241,15 +1245,30 @@ __global__ void elastic_stress_adjoint_prepare_3d(
 
             float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(fvz_b, ix, iy, iz, grad_ctx);
             float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(fvz_b, ix, iy, iz, grad_ctx);
-            float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(fvz_b, ix, iy, iz, grad_ctx, solver, true);
+            float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(fvz_b, ix, iy, iz, grad_ctx, solver, true, true);
 
-            float grad_lambda = (bar_sxx + bar_syy + bar_szz) * (fvx_x + fvy_y + fvz_z);
-            float grad_mu = 2*(bar_sxx * fvx_x +
-                               bar_syy * fvy_y +
-                               bar_szz * fvz_z) +
-                               bar_sxz * (fvx_z + fvz_x) +
-                               bar_sxy * (fvx_y + fvy_x) +
-                               bar_syz * (fvy_z + fvz_y);
+            float grad_lambda, grad_mu;
+            if (elastic3d_is_top_free_surface_row(solver, iz)) {
+                // Robertsson material derivative (3-D): FS-row sxx/syy depend on
+                // lam,mu through coef,coef2.  With lam=rho(vp^2-2vs^2), mu=rho vs^2:
+                // dC/dlam=dC2/dlam=4vs^4/vp^4; dC/dmu=4(vp^4-2vp^2vs^2+2vs^4)/vp^4;
+                // dC2/dmu=2(vp^2-2vs^2)^2/vp^4.  Shear terms unchanged.
+                float vp2 = vp_b[idx]*vp_b[idx], vs2 = vs_b[idx]*vs_b[idx], vp4 = vp2*vp2;
+                float dCl  = 4.f * vs2*vs2 / vp4;
+                float dCm  = 4.f * (vp4 - 2.f*vp2*vs2 + 2.f*vs2*vs2) / vp4;
+                float dC2m = 2.f * (vp2 - 2.f*vs2)*(vp2 - 2.f*vs2) / vp4;
+                grad_lambda = dCl * (bar_sxx + bar_syy) * (fvx_x + fvy_y);
+                grad_mu = bar_sxx*(dCm*fvx_x + dC2m*fvy_y) + bar_syy*(dC2m*fvx_x + dCm*fvy_y)
+                        + bar_sxz*(fvx_z + fvz_x) + bar_sxy*(fvx_y + fvy_x) + bar_syz*(fvy_z + fvz_y);
+            } else {
+                grad_lambda = (bar_sxx + bar_syy + bar_szz) * (fvx_x + fvy_y + fvz_z);
+                grad_mu = 2*(bar_sxx * fvx_x +
+                             bar_syy * fvy_y +
+                             bar_szz * fvz_z) +
+                             bar_sxz * (fvx_z + fvz_x) +
+                             bar_sxy * (fvx_y + fvy_x) +
+                             bar_syz * (fvy_z + fvz_y);
+            }
 
             gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
             gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
@@ -1264,17 +1283,27 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     }
     // -------------------------------------------------------------------------
 
-    float bar_dvx_dx = solver.dt * (l2m * bar_sxx + lam * bar_syy + lam * bar_szz);
+    // Transpose of the stress-from-velocity update.  On a z-low free-surface row
+    // the Robertsson fix makes sxx=coef*dvx_dx+coef2*dvy_dy, syy=coef2*dvx_dx+
+    // coef*dvy_dy, szz=0 (bar_szz already 0), so dvz_dz drops out of the row.
+    float bar_dvx_dx, bar_dvy_dy, bar_dvz_dz;
+    if (elastic3d_is_top_free_surface_row(solver, iz)) {
+        float coef  = 4.f * mu_ * (lam + mu_) / l2m;
+        float coef2 = 2.f * lam * mu_ / l2m;
+        bar_dvx_dx = solver.dt * (coef  * bar_sxx + coef2 * bar_syy);
+        bar_dvy_dy = solver.dt * (coef2 * bar_sxx + coef  * bar_syy);
+        bar_dvz_dz = 0.f;
+    } else {
+        bar_dvx_dx = solver.dt * (l2m * bar_sxx + lam * bar_syy + lam * bar_szz);
+        bar_dvy_dy = solver.dt * (lam * bar_sxx + l2m * bar_syy + lam * bar_szz);
+        bar_dvz_dz = solver.dt * (lam * bar_sxx + lam * bar_syy + l2m * bar_szz);
+    }
     float bar_dvx_dy = solver.dt * mu_ * bar_sxy;
     float bar_dvx_dz = solver.dt * mu_ * bar_sxz;
-
     float bar_dvy_dx = solver.dt * mu_ * bar_sxy;
-    float bar_dvy_dy = solver.dt * (lam * bar_sxx + l2m * bar_syy + lam * bar_szz);
     float bar_dvy_dz = solver.dt * mu_ * bar_syz;
-
     float bar_dvz_dx = solver.dt * mu_ * bar_sxz;
     float bar_dvz_dy = solver.dt * mu_ * bar_syz;
-    float bar_dvz_dz = solver.dt * (lam * bar_sxx + lam * bar_syy + l2m * bar_szz);
 
     float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
     float tmp_vxy = f.m_vxy[idx] + bar_dvx_dy;
@@ -1400,7 +1429,7 @@ __global__ void elastic_stress_adjoint_apply_3d(
 
     float dqzx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qzx_b, ix, iy, iz, grad_ctx);
     float dqzy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qzy_b, ix, iy, iz, grad_ctx);
-    float dqzz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(qzz_b, ix, iy, iz, grad_ctx, solver, true);
+    float dqzz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(qzz_b, ix, iy, iz, grad_ctx, solver, true, true);
 
     f.vx[idx] += dqxx_dx + dqxy_dy + dqxz_dz;
     f.vy[idx] += dqyx_dx + dqyy_dy + dqyz_dz;
@@ -1482,18 +1511,30 @@ __global__ void calculate_grad_elastic3d_bs(
 
     float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+    float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float bar_szz = elastic3d_is_top_free_surface_row(solver, iz) ? 0.f : a.szz[idx];
-    float bar_sxz = elastic3d_is_top_free_surface_row(solver, iz) ? 0.f : a.sxz[idx];
-    float bar_syz = elastic3d_is_top_free_surface_row(solver, iz) ? 0.f : a.syz[idx];
-    float grad_lambda = (a.sxx[idx] + a.syy[idx] + bar_szz) * (fvx_x + fvy_y + fvz_z);
-    float grad_mu = 2*(a.sxx[idx] * fvx_x +
-                       a.syy[idx] * fvy_y +
-                       bar_szz * fvz_z) +
-                       bar_sxz * (fvx_z + fvz_x) +
-                       a.sxy[idx] * (fvx_y + fvy_x) +
-                       bar_syz * (fvy_z + fvz_y);
+    float bar_sxz = a.sxz[idx];   // z-low FS: sxz is a +h/2 medium value, not zeroed (fix)
+    float bar_syz = a.syz[idx];   // z-low FS: syz is a +h/2 medium value, not zeroed (fix)
+    float grad_lambda, grad_mu;
+    if (elastic3d_is_top_free_surface_row(solver, iz)) {
+        // Robertsson material derivative (3-D); see elastic_stress_adjoint_prepare_3d.
+        float vp2 = vp_b[idx]*vp_b[idx], vs2 = vs_b[idx]*vs_b[idx], vp4 = vp2*vp2;
+        float dCl  = 4.f * vs2*vs2 / vp4;
+        float dCm  = 4.f * (vp4 - 2.f*vp2*vs2 + 2.f*vs2*vs2) / vp4;
+        float dC2m = 2.f * (vp2 - 2.f*vs2)*(vp2 - 2.f*vs2) / vp4;
+        grad_lambda = dCl * (a.sxx[idx] + a.syy[idx]) * (fvx_x + fvy_y);
+        grad_mu = a.sxx[idx]*(dCm*fvx_x + dC2m*fvy_y) + a.syy[idx]*(dC2m*fvx_x + dCm*fvy_y)
+                + bar_sxz*(fvx_z + fvz_x) + a.sxy[idx]*(fvx_y + fvy_x) + bar_syz*(fvy_z + fvz_y);
+    } else {
+        grad_lambda = (a.sxx[idx] + a.syy[idx] + bar_szz) * (fvx_x + fvy_y + fvz_z);
+        grad_mu = 2*(a.sxx[idx] * fvx_x +
+                     a.syy[idx] * fvy_y +
+                     bar_szz * fvz_z) +
+                     bar_sxz * (fvx_z + fvz_x) +
+                     a.sxy[idx] * (fvx_y + fvy_x) +
+                     bar_syz * (fvy_z + fvz_y);
+    }
 
     gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
     gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
@@ -1580,11 +1621,11 @@ __global__ void elastic3d_velocity_kernel_apm(
     // in APM mode → helpers fall through to plain sgradient.
     float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
     float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
     float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
     float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
@@ -1733,7 +1774,7 @@ __global__ void elastic3d_stress_kernel_apm(
     float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx, solver, false);
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float axx  = axx_b[idx],   ayy  = ayy_b[idx],   azz  = azz_b[idx];
     float lxy  = lxxyy_b[idx], lxz  = lxxzz_b[idx];
@@ -2015,10 +2056,10 @@ __global__ void elastic3d_velocity_kernel_nopml_apm(
 
     float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
     float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
     float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
     float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
     float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
     float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
     float dszz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx, solver, true);
@@ -2097,7 +2138,7 @@ __global__ void elastic3d_stress_kernel_nopml_apm(
     float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx, solver, false);
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float axx = axx_b[idx], ayy = ayy_b[idx], azz = azz_b[idx];
     float lxy = lxxyy_b[idx], lxz = lxxzz_b[idx];

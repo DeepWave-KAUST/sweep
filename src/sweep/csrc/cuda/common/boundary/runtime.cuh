@@ -47,6 +47,19 @@
         (PT) = (TRANS);                                                         \
     } while (0)
 
+// Dtype-aware variant shared by the INT8 and scaled-FP16 paths: binds
+// the persistent payload ring to the *_q (uint8) or *_h (__half) field
+// depending on DT; scale and staging handling is identical.
+#define BIND_STAGED_SCALED(DT, RING, OFF, RING_S, SOFF, TRANS, PQ, PH, PS, PT) \
+    do {                                                                       \
+        if ((DT) == BoundaryDtype::FP16)                                       \
+            (PH) = reinterpret_cast<__half*>((RING).data_ptr()) + (OFF);       \
+        else                                                                   \
+            (PQ) = reinterpret_cast<uint8_t*>((RING).data_ptr()) + (OFF);      \
+        (PS) = (RING_S).data_ptr<float>() + (SOFF);                            \
+        (PT) = (TRANS);                                                         \
+    } while (0)
+
 struct BoundaryChunk {
     int it = 0;
     int buf_idx = 0;
@@ -161,12 +174,47 @@ public:
         return chunk;
     }
 
-    // INT8 helpers: launch quantize / dequantize for one timestep's
-    // worth of data per face.  ``step_idx`` is the index along the
-    // outermost dimension of the persistent uint8 buffer (already
-    // includes any multi-field offset).  We look up the per-step cell
-    // count from the saver's tensor stride so this stays consistent
-    // with allocate_int8_main_and_scale.
+    // Scaled-storage helpers: launch quantize / dequantize for one
+    // timestep's worth of data per face.  ``step_idx`` is the index
+    // along the outermost dimension of the persistent payload buffer
+    // (already includes any multi-field offset).  We look up the
+    // per-step cell count from the saver's tensor stride.  The payload
+    // is uint8 (INT8, *_q) or __half (FP16, *_h); the FP32 per-block
+    // scale and the FP32 transient staging are shared by both.
+    // ``face_t`` is the face's persistent saver tensor, passed only so a DD cut
+    // face can be skipped: ``gpu_full_shapes`` drops such a face to numel 0
+    // because the boundary kernels gate it on ctx.cut_* (nothing is ever
+    // written there — its halo is reconstructed in the DD backward).  The test
+    // MUST be on numel, not on ``cells``: PyTorch clamps a 0-size dim's stride
+    // to a nonzero value, so the stride-derived ``cells`` would still drive a
+    // launch that writes into the empty buffer.  Guarding here covers the FP16
+    // and INT8 payloads in one place.
+    inline bool face_is_cut(const torch::Tensor& face_t) const
+    {
+        return face_t.numel() == 0;
+    }
+    inline void quantize_face(const torch::Tensor& face_t,
+                              float* stage, uint8_t* q, __half* h, float* scale,
+                              BoundaryDtype dt, int64_t step_idx,
+                              int64_t cells, int64_t blocks)
+    {
+        if (face_is_cut(face_t)) return;
+        if (dt == BoundaryDtype::FP16)
+            launch_quantize_fp16(stage, h + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
+        else
+            launch_quantize_int8(stage, q + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
+    }
+    inline void dequantize_face(const torch::Tensor& face_t,
+                                float* stage, uint8_t* q, __half* h, float* scale,
+                                BoundaryDtype dt, int64_t step_idx,
+                                int64_t cells, int64_t blocks)
+    {
+        if (face_is_cut(face_t)) return;
+        if (dt == BoundaryDtype::FP16)
+            launch_dequantize_fp16(h + step_idx * cells, scale + step_idx * blocks, stage, cells, compute_stream_);
+        else
+            launch_dequantize_int8(q + step_idx * cells, scale + step_idx * blocks, stage, cells, compute_stream_);
+    }
     inline void quantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
         int64_t c_top = saver_.top_t.stride(saver_.dim == 3 ? 0 : 1);
@@ -177,15 +225,10 @@ public:
         int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
-        // A DD cut face has a numel-0 persistent buffer (gpu_full_shapes drops
-        // it): the FP32 boundary kernel gates the face on ctx.cut_* so nothing
-        // is ever written there, and its halo is reconstructed in the backward.
-        // Skip the (de)quantize -- otherwise stride(0) (clamped nonzero for a
-        // 0-size dim) would drive a launch that writes into the empty buffer.
-        if (saver_.top_t.numel()    > 0) launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
-        if (saver_.bottom_t.numel() > 0) launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
-        if (saver_.left_t.numel()   > 0) launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
-        if (saver_.right_t.numel()  > 0) launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
+        quantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        quantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        quantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        quantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
     inline void dequantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -197,11 +240,10 @@ public:
         int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
-        // Skip numel-0 (DD cut) faces -- see quantize_step_2d.
-        if (saver_.top_t.numel()    > 0) launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
-        if (saver_.bottom_t.numel() > 0) launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
-        if (saver_.left_t.numel()   > 0) launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
-        if (saver_.right_t.numel()  > 0) launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
+        dequantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        dequantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        dequantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        dequantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
     inline void quantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -217,13 +259,12 @@ public:
         int64_t s_bac = saver_.back_scale_t.stride(0);
         int64_t s_lef = saver_.left_scale_t.stride(0);
         int64_t s_rig = saver_.right_scale_t.stride(0);
-        // Skip numel-0 (DD cut) faces -- see quantize_step_2d.
-        if (saver_.top_t.numel()    > 0) launch_quantize_int8(b.top,   b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, c_top, compute_stream_);
-        if (saver_.bottom_t.numel() > 0) launch_quantize_int8(b.bottom,b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, c_bot, compute_stream_);
-        if (saver_.front_t.numel()  > 0) launch_quantize_int8(b.front, b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, c_fro, compute_stream_);
-        if (saver_.back_t.numel()   > 0) launch_quantize_int8(b.back,  b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, c_bac, compute_stream_);
-        if (saver_.left_t.numel()   > 0) launch_quantize_int8(b.left,  b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, c_lef, compute_stream_);
-        if (saver_.right_t.numel()  > 0) launch_quantize_int8(b.right, b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, c_rig, compute_stream_);
+        quantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        quantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        quantize_face(saver_.front_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
+        quantize_face(saver_.back_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
+        quantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        quantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
     inline void dequantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -239,13 +280,12 @@ public:
         int64_t s_bac = saver_.back_scale_t.stride(0);
         int64_t s_lef = saver_.left_scale_t.stride(0);
         int64_t s_rig = saver_.right_scale_t.stride(0);
-        // Skip numel-0 (DD cut) faces -- see quantize_step_2d.
-        if (saver_.top_t.numel()    > 0) launch_dequantize_int8(b.top_q   + step_idx * c_top, b.top_scale   + step_idx * s_top, b.top,    c_top, compute_stream_);
-        if (saver_.bottom_t.numel() > 0) launch_dequantize_int8(b.bottom_q+ step_idx * c_bot, b.bottom_scale+ step_idx * s_bot, b.bottom, c_bot, compute_stream_);
-        if (saver_.front_t.numel()  > 0) launch_dequantize_int8(b.front_q + step_idx * c_fro, b.front_scale + step_idx * s_fro, b.front,  c_fro, compute_stream_);
-        if (saver_.back_t.numel()   > 0) launch_dequantize_int8(b.back_q  + step_idx * c_bac, b.back_scale  + step_idx * s_bac, b.back,   c_bac, compute_stream_);
-        if (saver_.left_t.numel()   > 0) launch_dequantize_int8(b.left_q  + step_idx * c_lef, b.left_scale  + step_idx * s_lef, b.left,   c_lef, compute_stream_);
-        if (saver_.right_t.numel()  > 0) launch_dequantize_int8(b.right_q + step_idx * c_rig, b.right_scale + step_idx * s_rig, b.right,  c_rig, compute_stream_);
+        dequantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        dequantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        dequantize_face(saver_.front_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
+        dequantize_face(saver_.back_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
+        dequantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        dequantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
 
     inline void wait_before_forward_save(const BoundaryChunk& chunk)
@@ -277,18 +317,18 @@ public:
         GeneralBoundaryPointer ptr{};
         ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
         ptr.last_two = direct.last_two;
-        if (ptr.dtype == BoundaryDtype::INT8) {
+        if (ptr.dtype == BoundaryDtype::INT8 || ptr.dtype == BoundaryDtype::FP16) {
             // Staged INT8: uint8 ring (cells/step) + scale ring (blocks/step)
             // + shared FP32 transient (direct.*).  Scale ring per-step stride
             // is its outer-time stride (dim 0 in 3D, dim 1 in 2D).
             const int sd = (dim_ == 3) ? 0 : 1;
-            BIND_STAGED_INT8(saver_.top_gpu,    gpu_idx * saver_.top_stride,    saver_.top_scale_gpu,    gpu_idx * saver_.top_scale_gpu.stride(sd),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
-            BIND_STAGED_INT8(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, gpu_idx * saver_.bottom_scale_gpu.stride(sd), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
-            BIND_STAGED_INT8(saver_.left_gpu,   gpu_idx * saver_.left_stride,   saver_.left_scale_gpu,   gpu_idx * saver_.left_scale_gpu.stride(sd),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
-            BIND_STAGED_INT8(saver_.right_gpu,  gpu_idx * saver_.right_stride,  saver_.right_scale_gpu,  gpu_idx * saver_.right_scale_gpu.stride(sd),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.top_gpu,    gpu_idx * saver_.top_stride,    saver_.top_scale_gpu,    gpu_idx * saver_.top_scale_gpu.stride(sd),    direct.top,    ptr.top_q,    ptr.top_h,    ptr.top_scale,    ptr.top);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, gpu_idx * saver_.bottom_scale_gpu.stride(sd), direct.bottom, ptr.bottom_q, ptr.bottom_h, ptr.bottom_scale, ptr.bottom);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.left_gpu,   gpu_idx * saver_.left_stride,   saver_.left_scale_gpu,   gpu_idx * saver_.left_scale_gpu.stride(sd),   direct.left,   ptr.left_q,   ptr.left_h,   ptr.left_scale,   ptr.left);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.right_gpu,  gpu_idx * saver_.right_stride,  saver_.right_scale_gpu,  gpu_idx * saver_.right_scale_gpu.stride(sd),  direct.right,  ptr.right_q,  ptr.right_h,  ptr.right_scale,  ptr.right);
             if (dim_ == 3) {
-                BIND_STAGED_INT8(saver_.front_gpu, gpu_idx * saver_.front_stride, saver_.front_scale_gpu, gpu_idx * saver_.front_scale_gpu.stride(sd), direct.front, ptr.front_q, ptr.front_scale, ptr.front);
-                BIND_STAGED_INT8(saver_.back_gpu,  gpu_idx * saver_.back_stride,  saver_.back_scale_gpu,  gpu_idx * saver_.back_scale_gpu.stride(sd),  direct.back,  ptr.back_q,  ptr.back_scale,  ptr.back);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.front_gpu, gpu_idx * saver_.front_stride, saver_.front_scale_gpu, gpu_idx * saver_.front_scale_gpu.stride(sd), direct.front, ptr.front_q, ptr.front_h, ptr.front_scale, ptr.front);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.back_gpu,  gpu_idx * saver_.back_stride,  saver_.back_scale_gpu,  gpu_idx * saver_.back_scale_gpu.stride(sd),  direct.back,  ptr.back_q,  ptr.back_h,  ptr.back_scale,  ptr.back);
             }
             return ptr;
         }
@@ -321,27 +361,27 @@ public:
             if (staged_) {
                 int gpu_idx = chunk.ring_start + chunk.buf_idx;
                 ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
-                if (ptr.dtype == BoundaryDtype::INT8) {
-                    BIND_STAGED_INT8(saver_.top_gpu,
+                if (ptr.dtype == BoundaryDtype::INT8 || ptr.dtype == BoundaryDtype::FP16) {
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.top_gpu,
                         field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
                         saver_.top_scale_gpu,
                         field_idx * saver_.top_scale_gpu.stride(0) + gpu_idx * saver_.top_scale_gpu.stride(1),
-                        direct.top, ptr.top_q, ptr.top_scale, ptr.top);
-                    BIND_STAGED_INT8(saver_.bottom_gpu,
+                        direct.top, ptr.top_q, ptr.top_h, ptr.top_scale, ptr.top);
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.bottom_gpu,
                         field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
                         saver_.bottom_scale_gpu,
                         field_idx * saver_.bottom_scale_gpu.stride(0) + gpu_idx * saver_.bottom_scale_gpu.stride(1),
-                        direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
-                    BIND_STAGED_INT8(saver_.left_gpu,
+                        direct.bottom, ptr.bottom_q, ptr.bottom_h, ptr.bottom_scale, ptr.bottom);
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.left_gpu,
                         field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
                         saver_.left_scale_gpu,
                         field_idx * saver_.left_scale_gpu.stride(0) + gpu_idx * saver_.left_scale_gpu.stride(1),
-                        direct.left, ptr.left_q, ptr.left_scale, ptr.left);
-                    BIND_STAGED_INT8(saver_.right_gpu,
+                        direct.left, ptr.left_q, ptr.left_h, ptr.left_scale, ptr.left);
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.right_gpu,
                         field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
                         saver_.right_scale_gpu,
                         field_idx * saver_.right_scale_gpu.stride(0) + gpu_idx * saver_.right_scale_gpu.stride(1),
-                        direct.right, ptr.right_q, ptr.right_scale, ptr.right);
+                        direct.right, ptr.right_q, ptr.right_h, ptr.right_scale, ptr.right);
                 } else {
                 BIND_STAGED_FACE(saver_.top_gpu,
                     field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
@@ -361,6 +401,14 @@ public:
                 ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
                 ptr.left_h   = direct.left_h   + field_idx * saver_.left_t.stride(0);
                 ptr.right_h  = direct.right_h  + field_idx * saver_.right_t.stride(0);
+                ptr.top_scale    = direct.top_scale    + field_idx * saver_.top_scale_t.stride(0);
+                ptr.bottom_scale = direct.bottom_scale + field_idx * saver_.bottom_scale_t.stride(0);
+                ptr.left_scale   = direct.left_scale   + field_idx * saver_.left_scale_t.stride(0);
+                ptr.right_scale  = direct.right_scale  + field_idx * saver_.right_scale_t.stride(0);
+                ptr.top    = direct.top;
+                ptr.bottom = direct.bottom;
+                ptr.left   = direct.left;
+                ptr.right  = direct.right;
             } else if (direct.dtype == BoundaryDtype::BF16) {
                 ptr.top_bf    = direct.top_bf    + field_idx * saver_.top_t.stride(0);
                 ptr.bottom_bf = direct.bottom_bf + field_idx * saver_.bottom_t.stride(0);
@@ -401,6 +449,18 @@ public:
             ptr.back_h   = direct.back_h   + flat_idx * saver_.back_stride;
             ptr.left_h   = direct.left_h   + flat_idx * saver_.left_stride;
             ptr.right_h  = direct.right_h  + flat_idx * saver_.right_stride;
+            ptr.top_scale    = direct.top_scale    + flat_idx * saver_.top_scale_t.stride(0);
+            ptr.bottom_scale = direct.bottom_scale + flat_idx * saver_.bottom_scale_t.stride(0);
+            ptr.front_scale  = direct.front_scale  + flat_idx * saver_.front_scale_t.stride(0);
+            ptr.back_scale   = direct.back_scale   + flat_idx * saver_.back_scale_t.stride(0);
+            ptr.left_scale   = direct.left_scale   + flat_idx * saver_.left_scale_t.stride(0);
+            ptr.right_scale  = direct.right_scale  + flat_idx * saver_.right_scale_t.stride(0);
+            ptr.top    = direct.top;
+            ptr.bottom = direct.bottom;
+            ptr.front  = direct.front;
+            ptr.back   = direct.back;
+            ptr.left   = direct.left;
+            ptr.right  = direct.right;
         } else if (!staged_ && direct.dtype == BoundaryDtype::BF16) {
             ptr.top_bf    = direct.top_bf    + flat_idx * saver_.top_stride;
             ptr.bottom_bf = direct.bottom_bf + flat_idx * saver_.bottom_stride;
@@ -434,15 +494,15 @@ public:
             ptr.right  = direct.right;
         } else if (staged_) {
             ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
-            if (ptr.dtype == BoundaryDtype::INT8) {
+            if (ptr.dtype == BoundaryDtype::INT8 || ptr.dtype == BoundaryDtype::FP16) {
                 // 3D staged INT8: uint8 ring + scale ring indexed by the same
                 // flat (gpu_time*nvar + field) index; shared FP32 transient.
-                BIND_STAGED_INT8(saver_.top_gpu,    flat_idx * saver_.top_stride,    saver_.top_scale_gpu,    flat_idx * saver_.top_scale_gpu.stride(0),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
-                BIND_STAGED_INT8(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, flat_idx * saver_.bottom_scale_gpu.stride(0), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
-                BIND_STAGED_INT8(saver_.front_gpu,  flat_idx * saver_.front_stride,  saver_.front_scale_gpu,  flat_idx * saver_.front_scale_gpu.stride(0),  direct.front,  ptr.front_q,  ptr.front_scale,  ptr.front);
-                BIND_STAGED_INT8(saver_.back_gpu,   flat_idx * saver_.back_stride,   saver_.back_scale_gpu,   flat_idx * saver_.back_scale_gpu.stride(0),   direct.back,   ptr.back_q,   ptr.back_scale,   ptr.back);
-                BIND_STAGED_INT8(saver_.left_gpu,   flat_idx * saver_.left_stride,   saver_.left_scale_gpu,   flat_idx * saver_.left_scale_gpu.stride(0),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
-                BIND_STAGED_INT8(saver_.right_gpu,  flat_idx * saver_.right_stride,  saver_.right_scale_gpu,  flat_idx * saver_.right_scale_gpu.stride(0),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.top_gpu,    flat_idx * saver_.top_stride,    saver_.top_scale_gpu,    flat_idx * saver_.top_scale_gpu.stride(0),    direct.top,    ptr.top_q,    ptr.top_h,    ptr.top_scale,    ptr.top);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.bottom_gpu, flat_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, flat_idx * saver_.bottom_scale_gpu.stride(0), direct.bottom, ptr.bottom_q, ptr.bottom_h, ptr.bottom_scale, ptr.bottom);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.front_gpu,  flat_idx * saver_.front_stride,  saver_.front_scale_gpu,  flat_idx * saver_.front_scale_gpu.stride(0),  direct.front,  ptr.front_q,  ptr.front_h,  ptr.front_scale,  ptr.front);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.back_gpu,   flat_idx * saver_.back_stride,   saver_.back_scale_gpu,   flat_idx * saver_.back_scale_gpu.stride(0),   direct.back,   ptr.back_q,   ptr.back_h,   ptr.back_scale,   ptr.back);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.left_gpu,   flat_idx * saver_.left_stride,   saver_.left_scale_gpu,   flat_idx * saver_.left_scale_gpu.stride(0),   direct.left,   ptr.left_q,   ptr.left_h,   ptr.left_scale,   ptr.left);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.right_gpu,  flat_idx * saver_.right_stride,  saver_.right_scale_gpu,  flat_idx * saver_.right_scale_gpu.stride(0),  direct.right,  ptr.right_q,  ptr.right_h,  ptr.right_scale,  ptr.right);
             } else {
             BIND_STAGED_FACE(saver_.top_gpu,    flat_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
             BIND_STAGED_FACE(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
@@ -525,15 +585,11 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs(chunk, direct);
 
-        if (b.dtype == BoundaryDtype::FP16) {
-            boundary_kernel2d_fp16<<<grid, block>>>(
-                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
-                boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
-        } else if (b.dtype == BoundaryDtype::BF16) {
+        if (b.dtype == BoundaryDtype::BF16) {
             boundary_kernel2d_bf16<<<grid, block>>>(
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
-        } else if (b.dtype == BoundaryDtype::INT8) {
+        } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             // INT8 2-pass save: FP32 kernel → staging (1-step), then
             // quantize → persistent uint8 + per-block FP32 scale.
             boundary_kernel2d<<<grid, block>>>(
@@ -570,15 +626,11 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
@@ -589,15 +641,11 @@ public:
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
             }
         } else {
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_fp16<<<grid, block>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_bf16<<<grid, block>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 boundary_kernel3d<<<grid, block>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
@@ -630,15 +678,11 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs_field(chunk, direct, field_idx);
 
-        if (b.dtype == BoundaryDtype::FP16) {
-            boundary_kernel2d_fp16<<<grid, block>>>(
-                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
-                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
-        } else if (b.dtype == BoundaryDtype::BF16) {
+        if (b.dtype == BoundaryDtype::BF16) {
             boundary_kernel2d_bf16<<<grid, block>>>(
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
-        } else if (b.dtype == BoundaryDtype::INT8) {
+        } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
@@ -675,15 +719,11 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
@@ -694,15 +734,11 @@ public:
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
             }
         } else {
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_fp16<<<grid, block>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_bf16<<<grid, block>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 boundary_kernel3d<<<grid, block>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
@@ -789,15 +825,15 @@ public:
         GeneralBoundaryPointer ptr{};
         ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
         ptr.last_two = direct.last_two;
-        if (ptr.dtype == BoundaryDtype::INT8) {
+        if (ptr.dtype == BoundaryDtype::INT8 || ptr.dtype == BoundaryDtype::FP16) {
             const int sd = (dim_ == 3) ? 0 : 1;
-            BIND_STAGED_INT8(saver_.top_gpu,    gpu_idx * saver_.top_stride,    saver_.top_scale_gpu,    gpu_idx * saver_.top_scale_gpu.stride(sd),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
-            BIND_STAGED_INT8(saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, gpu_idx * saver_.bottom_scale_gpu.stride(sd), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
-            BIND_STAGED_INT8(saver_.left_gpu,   gpu_idx * saver_.left_stride,   saver_.left_scale_gpu,   gpu_idx * saver_.left_scale_gpu.stride(sd),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
-            BIND_STAGED_INT8(saver_.right_gpu,  gpu_idx * saver_.right_stride,  saver_.right_scale_gpu,  gpu_idx * saver_.right_scale_gpu.stride(sd),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.top_gpu,    gpu_idx * saver_.top_stride,    saver_.top_scale_gpu,    gpu_idx * saver_.top_scale_gpu.stride(sd),    direct.top,    ptr.top_q,    ptr.top_h,    ptr.top_scale,    ptr.top);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.bottom_gpu, gpu_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, gpu_idx * saver_.bottom_scale_gpu.stride(sd), direct.bottom, ptr.bottom_q, ptr.bottom_h, ptr.bottom_scale, ptr.bottom);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.left_gpu,   gpu_idx * saver_.left_stride,   saver_.left_scale_gpu,   gpu_idx * saver_.left_scale_gpu.stride(sd),   direct.left,   ptr.left_q,   ptr.left_h,   ptr.left_scale,   ptr.left);
+            BIND_STAGED_SCALED(ptr.dtype, saver_.right_gpu,  gpu_idx * saver_.right_stride,  saver_.right_scale_gpu,  gpu_idx * saver_.right_scale_gpu.stride(sd),  direct.right,  ptr.right_q,  ptr.right_h,  ptr.right_scale,  ptr.right);
             if (dim_ == 3) {
-                BIND_STAGED_INT8(saver_.front_gpu, gpu_idx * saver_.front_stride, saver_.front_scale_gpu, gpu_idx * saver_.front_scale_gpu.stride(sd), direct.front, ptr.front_q, ptr.front_scale, ptr.front);
-                BIND_STAGED_INT8(saver_.back_gpu,  gpu_idx * saver_.back_stride,  saver_.back_scale_gpu,  gpu_idx * saver_.back_scale_gpu.stride(sd),  direct.back,  ptr.back_q,  ptr.back_scale,  ptr.back);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.front_gpu, gpu_idx * saver_.front_stride, saver_.front_scale_gpu, gpu_idx * saver_.front_scale_gpu.stride(sd), direct.front, ptr.front_q, ptr.front_h, ptr.front_scale, ptr.front);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.back_gpu,  gpu_idx * saver_.back_stride,  saver_.back_scale_gpu,  gpu_idx * saver_.back_scale_gpu.stride(sd),  direct.back,  ptr.back_q,  ptr.back_h,  ptr.back_scale,  ptr.back);
             }
             return ptr;
         }
@@ -836,27 +872,27 @@ public:
                     gpu_idx = buf_idx;
 
                 ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
-                if (ptr.dtype == BoundaryDtype::INT8) {
-                    BIND_STAGED_INT8(saver_.top_gpu,
+                if (ptr.dtype == BoundaryDtype::INT8 || ptr.dtype == BoundaryDtype::FP16) {
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.top_gpu,
                         field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
                         saver_.top_scale_gpu,
                         field_idx * saver_.top_scale_gpu.stride(0) + gpu_idx * saver_.top_scale_gpu.stride(1),
-                        direct.top, ptr.top_q, ptr.top_scale, ptr.top);
-                    BIND_STAGED_INT8(saver_.bottom_gpu,
+                        direct.top, ptr.top_q, ptr.top_h, ptr.top_scale, ptr.top);
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.bottom_gpu,
                         field_idx * saver_.bottom_gpu.stride(0) + gpu_idx * saver_.bottom_gpu.stride(1),
                         saver_.bottom_scale_gpu,
                         field_idx * saver_.bottom_scale_gpu.stride(0) + gpu_idx * saver_.bottom_scale_gpu.stride(1),
-                        direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
-                    BIND_STAGED_INT8(saver_.left_gpu,
+                        direct.bottom, ptr.bottom_q, ptr.bottom_h, ptr.bottom_scale, ptr.bottom);
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.left_gpu,
                         field_idx * saver_.left_gpu.stride(0) + gpu_idx * saver_.left_gpu.stride(1),
                         saver_.left_scale_gpu,
                         field_idx * saver_.left_scale_gpu.stride(0) + gpu_idx * saver_.left_scale_gpu.stride(1),
-                        direct.left, ptr.left_q, ptr.left_scale, ptr.left);
-                    BIND_STAGED_INT8(saver_.right_gpu,
+                        direct.left, ptr.left_q, ptr.left_h, ptr.left_scale, ptr.left);
+                    BIND_STAGED_SCALED(ptr.dtype, saver_.right_gpu,
                         field_idx * saver_.right_gpu.stride(0) + gpu_idx * saver_.right_gpu.stride(1),
                         saver_.right_scale_gpu,
                         field_idx * saver_.right_scale_gpu.stride(0) + gpu_idx * saver_.right_scale_gpu.stride(1),
-                        direct.right, ptr.right_q, ptr.right_scale, ptr.right);
+                        direct.right, ptr.right_q, ptr.right_h, ptr.right_scale, ptr.right);
                 } else {
                 BIND_STAGED_FACE(saver_.top_gpu,
                     field_idx * saver_.top_gpu.stride(0) + gpu_idx * saver_.top_gpu.stride(1),
@@ -876,6 +912,14 @@ public:
                 ptr.bottom_h = direct.bottom_h + field_idx * saver_.bottom_t.stride(0);
                 ptr.left_h   = direct.left_h   + field_idx * saver_.left_t.stride(0);
                 ptr.right_h  = direct.right_h  + field_idx * saver_.right_t.stride(0);
+                ptr.top_scale    = direct.top_scale    + field_idx * saver_.top_scale_t.stride(0);
+                ptr.bottom_scale = direct.bottom_scale + field_idx * saver_.bottom_scale_t.stride(0);
+                ptr.left_scale   = direct.left_scale   + field_idx * saver_.left_scale_t.stride(0);
+                ptr.right_scale  = direct.right_scale  + field_idx * saver_.right_scale_t.stride(0);
+                ptr.top    = direct.top;
+                ptr.bottom = direct.bottom;
+                ptr.left   = direct.left;
+                ptr.right  = direct.right;
             } else if (direct.dtype == BoundaryDtype::BF16) {
                 ptr.top_bf    = direct.top_bf    + field_idx * saver_.top_t.stride(0);
                 ptr.bottom_bf = direct.bottom_bf + field_idx * saver_.bottom_t.stride(0);
@@ -924,6 +968,18 @@ public:
             ptr.back_h   = direct.back_h   + flat_idx * saver_.back_stride;
             ptr.left_h   = direct.left_h   + flat_idx * saver_.left_stride;
             ptr.right_h  = direct.right_h  + flat_idx * saver_.right_stride;
+            ptr.top_scale    = direct.top_scale    + flat_idx * saver_.top_scale_t.stride(0);
+            ptr.bottom_scale = direct.bottom_scale + flat_idx * saver_.bottom_scale_t.stride(0);
+            ptr.front_scale  = direct.front_scale  + flat_idx * saver_.front_scale_t.stride(0);
+            ptr.back_scale   = direct.back_scale   + flat_idx * saver_.back_scale_t.stride(0);
+            ptr.left_scale   = direct.left_scale   + flat_idx * saver_.left_scale_t.stride(0);
+            ptr.right_scale  = direct.right_scale  + flat_idx * saver_.right_scale_t.stride(0);
+            ptr.top    = direct.top;
+            ptr.bottom = direct.bottom;
+            ptr.front  = direct.front;
+            ptr.back   = direct.back;
+            ptr.left   = direct.left;
+            ptr.right  = direct.right;
         } else if (!staged_ && direct.dtype == BoundaryDtype::BF16) {
             ptr.top_bf    = direct.top_bf    + flat_idx * saver_.top_stride;
             ptr.bottom_bf = direct.bottom_bf + flat_idx * saver_.bottom_stride;
@@ -957,13 +1013,13 @@ public:
             ptr.right  = direct.right;
         } else if (staged_) {
             ptr.dtype = boundary_dtype_from_tensor(saver_.top_gpu);
-            if (ptr.dtype == BoundaryDtype::INT8) {
-                BIND_STAGED_INT8(saver_.top_gpu,    flat_idx * saver_.top_stride,    saver_.top_scale_gpu,    flat_idx * saver_.top_scale_gpu.stride(0),    direct.top,    ptr.top_q,    ptr.top_scale,    ptr.top);
-                BIND_STAGED_INT8(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, flat_idx * saver_.bottom_scale_gpu.stride(0), direct.bottom, ptr.bottom_q, ptr.bottom_scale, ptr.bottom);
-                BIND_STAGED_INT8(saver_.front_gpu,  flat_idx * saver_.front_stride,  saver_.front_scale_gpu,  flat_idx * saver_.front_scale_gpu.stride(0),  direct.front,  ptr.front_q,  ptr.front_scale,  ptr.front);
-                BIND_STAGED_INT8(saver_.back_gpu,   flat_idx * saver_.back_stride,   saver_.back_scale_gpu,   flat_idx * saver_.back_scale_gpu.stride(0),   direct.back,   ptr.back_q,   ptr.back_scale,   ptr.back);
-                BIND_STAGED_INT8(saver_.left_gpu,   flat_idx * saver_.left_stride,   saver_.left_scale_gpu,   flat_idx * saver_.left_scale_gpu.stride(0),   direct.left,   ptr.left_q,   ptr.left_scale,   ptr.left);
-                BIND_STAGED_INT8(saver_.right_gpu,  flat_idx * saver_.right_stride,  saver_.right_scale_gpu,  flat_idx * saver_.right_scale_gpu.stride(0),  direct.right,  ptr.right_q,  ptr.right_scale,  ptr.right);
+            if (ptr.dtype == BoundaryDtype::INT8 || ptr.dtype == BoundaryDtype::FP16) {
+                BIND_STAGED_SCALED(ptr.dtype, saver_.top_gpu,    flat_idx * saver_.top_stride,    saver_.top_scale_gpu,    flat_idx * saver_.top_scale_gpu.stride(0),    direct.top,    ptr.top_q,    ptr.top_h,    ptr.top_scale,    ptr.top);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.bottom_gpu, flat_idx * saver_.bottom_stride, saver_.bottom_scale_gpu, flat_idx * saver_.bottom_scale_gpu.stride(0), direct.bottom, ptr.bottom_q, ptr.bottom_h, ptr.bottom_scale, ptr.bottom);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.front_gpu,  flat_idx * saver_.front_stride,  saver_.front_scale_gpu,  flat_idx * saver_.front_scale_gpu.stride(0),  direct.front,  ptr.front_q,  ptr.front_h,  ptr.front_scale,  ptr.front);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.back_gpu,   flat_idx * saver_.back_stride,   saver_.back_scale_gpu,   flat_idx * saver_.back_scale_gpu.stride(0),   direct.back,   ptr.back_q,   ptr.back_h,   ptr.back_scale,   ptr.back);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.left_gpu,   flat_idx * saver_.left_stride,   saver_.left_scale_gpu,   flat_idx * saver_.left_scale_gpu.stride(0),   direct.left,   ptr.left_q,   ptr.left_h,   ptr.left_scale,   ptr.left);
+                BIND_STAGED_SCALED(ptr.dtype, saver_.right_gpu,  flat_idx * saver_.right_stride,  saver_.right_scale_gpu,  flat_idx * saver_.right_scale_gpu.stride(0),  direct.right,  ptr.right_q,  ptr.right_h,  ptr.right_scale,  ptr.right);
             } else {
             BIND_STAGED_FACE(saver_.top_gpu,    flat_idx * saver_.top_stride,    ptr.top,    ptr.top_h,    ptr.top_bf);
             BIND_STAGED_FACE(saver_.bottom_gpu, flat_idx * saver_.bottom_stride, ptr.bottom, ptr.bottom_h, ptr.bottom_bf);
@@ -1007,15 +1063,11 @@ public:
     {
         wait_before_backward_restore(it);
         auto b = backward_restore_ptrs(it, direct);
-        if (b.dtype == BoundaryDtype::FP16) {
-            boundary_kernel2d_fp16<<<grid, block>>>(
-                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
-                backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
-        } else if (b.dtype == BoundaryDtype::BF16) {
+        if (b.dtype == BoundaryDtype::BF16) {
             boundary_kernel2d_bf16<<<grid, block>>>(
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
-        } else if (b.dtype == BoundaryDtype::INT8) {
+        } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             dequantize_step_2d(b, backward_time_index(it));
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
@@ -1045,15 +1097,11 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 dequantize_step_3d(b, backward_time_index(it));
                 boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
@@ -1064,15 +1112,11 @@ public:
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
             }
         } else {
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_fp16<<<grid, block>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_bf16<<<grid, block>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 dequantize_step_3d(b, backward_time_index(it));
                 boundary_kernel3d<<<grid, block>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
@@ -1103,15 +1147,11 @@ public:
         if (wait_chunk)
             wait_before_backward_restore(it);
         auto b = backward_restore_ptrs_field(it, direct, field_idx);
-        if (b.dtype == BoundaryDtype::FP16) {
-            boundary_kernel2d_fp16<<<grid, block>>>(
-                u, b.top_h, b.bottom_h, b.left_h, b.right_h,
-                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
-        } else if (b.dtype == BoundaryDtype::BF16) {
+        if (b.dtype == BoundaryDtype::BF16) {
             boundary_kernel2d_bf16<<<grid, block>>>(
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
-        } else if (b.dtype == BoundaryDtype::INT8) {
+        } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             dequantize_step_2d(b, backward_time_index_field(it));
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
@@ -1146,15 +1186,11 @@ public:
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_compact_fp16<<<compact_blocks, compact_threads>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 dequantize_step_3d(b, backward_time_index_field(it));
                 boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
@@ -1165,15 +1201,11 @@ public:
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
             }
         } else {
-            if (b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_fp16<<<grid, block>>>(
-                    u, b.top_h, b.bottom_h, b.front_h, b.back_h, b.left_h, b.right_h,
-                    backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::BF16) {
+            if (b.dtype == BoundaryDtype::BF16) {
                 boundary_kernel3d_bf16<<<grid, block>>>(
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
-            } else if (b.dtype == BoundaryDtype::INT8) {
+            } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 dequantize_step_3d(b, backward_time_index_field(it));
                 boundary_kernel3d<<<grid, block>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,

@@ -101,6 +101,44 @@ __global__ void accumulate_rtm_image_2d(
     rec_b[idx] += ub * ub;
 }
 
+// Space-lag (horizontal subsurface-offset) extended imaging condition, per step:
+//   E(z,x,h) += u_forward(z, x-h) * u_backward(z, x+h),  h in [-max_lag, max_lag]
+// The lag is along the contiguous x axis (stride 1).  Each thread writes only
+// its own (l, b, idx) cells and reads shifted neighbours of the read-only
+// wavefields, so there is no intra-launch race.  Out-of-grid shifts are skipped
+// (those halo/air cells carry 0 anyway).  adcig layout: (nlag, B, nz, nx).
+__global__ void accumulate_adcig_2d(
+    const float* __restrict__ u_forward,
+    const float* __restrict__ u_backward,
+    float* __restrict__ adcig,
+    int nlag, int max_lag,
+    int B, int nx, int nz
+) {
+
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= nx || iz >= nz)
+        return;
+
+    long spatial_size = (long)nx * nz;
+    int row = iz * nx;
+
+    const float* u_forward_b  = u_forward  + b * spatial_size;
+    const float* u_backward_b = u_backward + b * spatial_size;
+
+    for (int l = -max_lag; l <= max_lag; ++l) {
+        int xs = ix - l;   // u_s(x - h)
+        int xr = ix + l;   // u_r(x + h)
+        if (xs < 0 || xs >= nx || xr < 0 || xr >= nx)
+            continue;
+        float prod = u_forward_b[row + xs] * u_backward_b[row + xr];
+        int lbin = l + max_lag;
+        adcig[((long)lbin * B + b) * spatial_size + row + ix] += prod;
+    }
+}
+
 __global__ void accumulate_source_grad_2d(
     const float* __restrict__ u_backward,
     float* __restrict__ grad_source,

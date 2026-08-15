@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interactive wave propagation</title>
+<style>
+  :root{ --fg:#1f2429; --muted:#5c6672; --line:#dfe3e8; --panel:#f6f7f9; --accent:#3b6ea5; --accent-fg:#fff; }
+  @media (prefers-color-scheme:dark){
+    :root{ --fg:#e6e9ec; --muted:#98a2ad; --line:#333a42; --panel:#1b1f24; --accent:#5b8cc4; } }
+  .wavelab{ font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--fg); max-width:880px; }
+  .wavelab .bar{ display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; padding:10px 12px;
+                 background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-bottom:9px; }
+  .wavelab .grp{ display:flex; align-items:center; gap:6px; }
+  .wavelab label{ color:var(--muted); white-space:nowrap; font-size:13px; }
+  .wavelab select{ background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:5px 8px; font-size:13px; }
+  .wavelab .seg{ display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .wavelab .seg button{ border:0; background:transparent; color:var(--fg); padding:5px 10px; cursor:pointer; font-size:13px; }
+  .wavelab .seg button.on{ background:var(--accent); color:var(--accent-fg); }
+  .wavelab button.btn{ border:1px solid var(--line); background:transparent; color:var(--fg); border-radius:7px; padding:5px 11px; cursor:pointer; font-size:13px; }
+  .wavelab button.btn:hover{ border-color:var(--accent); }
+  .wavelab button.btn.primary{ background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
+  .wavelab input[type=range]{ width:104px; accent-color:var(--accent); }
+  .wavelab canvas{ width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:10px; background:#000; cursor:crosshair; touch-action:none; }
+  .wavelab .legend{ display:flex; flex-wrap:wrap; gap:6px 18px; align-items:center; color:var(--muted); font-size:12px; margin:8px 2px 0; }
+  .wavelab .sw{ display:inline-block; width:52px; height:11px; border-radius:3px; vertical-align:middle; margin:0 5px; border:1px solid var(--line); }
+  .wavelab .val{ font-variant-numeric:tabular-nums; min-width:32px; color:var(--fg); }
+</style>
+</head>
+<body>
+<div class="wavelab">
+  <div class="bar">
+    <div class="grp"><label>Equation</label><select id="eq"></select></div>
+    <div class="grp"><label>Tool</label>
+      <span class="seg" id="tool"><button data-tool="paint" class="on">Paint</button><button data-tool="source">Source</button></span></div>
+    <div class="grp"><label>Velocity</label>
+      <input id="vel" type="range" min="1500" max="4500" step="50" value="3200"><span class="val" id="velVal">3200</span></div>
+    <button class="btn primary" id="play">Play</button>
+    <button class="btn" id="reset">Reset</button>
+    <div class="grp"><label>Model</label>
+      <button class="btn" data-preset="layered">Layered</button><button class="btn" data-preset="clear">Clear</button></div>
+  </div>
+
+  <canvas id="cv" width="840" height="540"></canvas>
+
+  <div class="legend">
+    <span>Velocity<span class="sw" style="background:linear-gradient(90deg,#d9d9d9,#4a4a4a)"></span>slow → fast</span>
+    <span>Wavefield<span class="sw" style="background:linear-gradient(90deg,#2f6fd0,#f2f2f2,#d84a3a)"></span>− → +</span>
+    <span>Drag to paint · switch to Source and click to fire</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const NX=280, NZ=180, DH=10.0, VMIN=1500, VMAX=4500, F0=14.0, SUBSTEPS=4, BRUSH=11, N=NX*NZ;
+  const A1=9/8, A2=-1/24; // 4th-order staggered / centred coefficients
+
+  // ── Pluggable wave equations ──────────────────────────────────────────────
+  // Add one by pushing { label, make } into EQUATIONS. make() returns an engine:
+  //   dt()             stable timestep (s)
+  //   setModel(vel,dt) precompute coefficients from the painted velocity
+  //   reset()          zero the wavefield state
+  //   step()           advance one timestep
+  //   source(idx,val)  inject a source sample at cell `idx`
+  //   damp(mask)       apply the absorbing-boundary mask
+  //   swap()           rotate time buffers (no-op if updated in place)
+  //   field()          Float32Array(N) signed field to display
+  // Everything below the registry (UI, painting, rendering) stays unchanged.
+
+  function makeAcoustic(order){ // 2nd- or 4th-order-in-space acoustic
+    let pp=new Float32Array(N), pc=new Float32Array(N), pn=new Float32Array(N), c2=new Float32Array(N);
+    const cour = order===4 ? 0.40 : 0.50;
+    return {
+      dt:()=>cour*DH/VMAX,
+      setModel:(vel,dt)=>{ const k=dt/DH; for(let i=0;i<N;i++){const v=vel[i]*k; c2[i]=v*v;} },
+      reset:()=>{ pp.fill(0); pc.fill(0); pn.fill(0); },
+      step:()=>{
+        if(order===2){
+          for(let iz=1;iz<NZ-1;iz++){ const r=iz*NX;
+            for(let ix=1;ix<NX-1;ix++){ const k=r+ix;
+              const lap=pc[k-1]+pc[k+1]+pc[k-NX]+pc[k+NX]-4*pc[k];
+              pn[k]=2*pc[k]-pp[k]+c2[k]*lap; } }
+        } else {
+          for(let iz=2;iz<NZ-2;iz++){ const r=iz*NX;
+            for(let ix=2;ix<NX-2;ix++){ const k=r+ix;
+              const lap=(-(pc[k-2]+pc[k+2]+pc[k-2*NX]+pc[k+2*NX])
+                         +16*(pc[k-1]+pc[k+1]+pc[k-NX]+pc[k+NX])-60*pc[k])/12;
+              pn[k]=2*pc[k]-pp[k]+c2[k]*lap; } }
+        }
+      },
+      source:(idx,s)=>{ pn[idx]+=s; },
+      damp:(d)=>{ for(let i=0;i<N;i++){ pn[i]*=d[i]; pc[i]*=d[i]; } },
+      swap:()=>{ const t=pp; pp=pc; pc=pn; pn=t; },
+      field:()=>pc,
+    };
+  }
+
+  function makeVisco(ALPHA){ // acoustic with amplitude attenuation
+    let pp=new Float32Array(N), pc=new Float32Array(N), pn=new Float32Array(N), c2=new Float32Array(N);
+    let dtLoc=0;
+    return {
+      dt:()=>0.50*DH/VMAX,
+      setModel:(vel,dt)=>{ dtLoc=dt; const k=dt/DH; for(let i=0;i<N;i++){const v=vel[i]*k; c2[i]=v*v;} },
+      reset:()=>{ pp.fill(0); pc.fill(0); pn.fill(0); },
+      step:()=>{ const a=ALPHA*dtLoc;
+        for(let iz=1;iz<NZ-1;iz++){ const r=iz*NX;
+          for(let ix=1;ix<NX-1;ix++){ const k=r+ix;
+            const lap=pc[k-1]+pc[k+1]+pc[k-NX]+pc[k+NX]-4*pc[k];
+            pn[k]=((2-a)*pc[k]-(1-a)*pp[k]+c2[k]*lap)/(1+a); } } },
+      source:(idx,s)=>{ pn[idx]+=s; },
+      damp:(d)=>{ for(let i=0;i<N;i++){ pn[i]*=d[i]; pc[i]*=d[i]; } },
+      swap:()=>{ const t=pp; pp=pc; pc=pn; pn=t; },
+      field:()=>pc,
+    };
+  }
+
+  function makeElastic(){ // 4th-order staggered velocity-stress P-SV, vertical force source
+    let vx=new Float32Array(N), vz=new Float32Array(N);
+    let sxx=new Float32Array(N), szz=new Float32Array(N), sxz=new Float32Array(N);
+    let lam=new Float32Array(N), mu=new Float32Array(N);
+    const RHO=1000.0; let dtLoc=0;
+    return {
+      dt:()=>0.40*DH/VMAX,
+      setModel:(vel,dt)=>{ dtLoc=dt;
+        for(let i=0;i<N;i++){ const vp=vel[i], vs=vp/1.732; mu[i]=RHO*vs*vs; lam[i]=RHO*(vp*vp-2*vs*vs); } },
+      reset:()=>{ vx.fill(0); vz.fill(0); sxx.fill(0); szz.fill(0); sxz.fill(0); },
+      step:()=>{ const dtdh=dtLoc/DH, dtr=dtLoc/(RHO*DH);
+        for(let iz=2;iz<NZ-2;iz++){ const r=iz*NX;
+          for(let ix=2;ix<NX-2;ix++){ const k=r+ix;
+            const dvxdx=A1*(vx[k]-vx[k-1])+A2*(vx[k+1]-vx[k-2]);
+            const dvzdz=A1*(vz[k]-vz[k-NX])+A2*(vz[k+NX]-vz[k-2*NX]);
+            sxx[k]+=dtdh*((lam[k]+2*mu[k])*dvxdx+lam[k]*dvzdz);
+            szz[k]+=dtdh*(lam[k]*dvxdx+(lam[k]+2*mu[k])*dvzdz);
+            const dvxdz=A1*(vx[k+NX]-vx[k])+A2*(vx[k+2*NX]-vx[k-NX]);
+            const dvzdx=A1*(vz[k+1]-vz[k])+A2*(vz[k+2]-vz[k-1]);
+            sxz[k]+=dtdh*mu[k]*(dvxdz+dvzdx); } }
+        for(let iz=2;iz<NZ-2;iz++){ const r=iz*NX;
+          for(let ix=2;ix<NX-2;ix++){ const k=r+ix;
+            const dsxxdx=A1*(sxx[k+1]-sxx[k])+A2*(sxx[k+2]-sxx[k-1]);
+            const dsxzdz=A1*(sxz[k]-sxz[k-NX])+A2*(sxz[k+NX]-sxz[k-2*NX]);
+            vx[k]+=dtr*(dsxxdx+dsxzdz);
+            const dsxzdx=A1*(sxz[k]-sxz[k-1])+A2*(sxz[k+1]-sxz[k-2]);
+            const dszzdz=A1*(szz[k+NX]-szz[k])+A2*(szz[k+2*NX]-szz[k-NX]);
+            vz[k]+=dtr*(dsxzdx+dszzdz); } } },
+      source:(idx,s)=>{ vz[idx]+=s; },
+      damp:(d)=>{ for(let i=0;i<N;i++){ vx[i]*=d[i]; vz[i]*=d[i]; sxx[i]*=d[i]; szz[i]*=d[i]; sxz[i]*=d[i]; } },
+      swap:()=>{},
+      field:()=>vz,
+    };
+  }
+
+  const EQUATIONS=[
+    { label:'Acoustic',              make:()=>makeAcoustic(4) },
+    { label:'Visco-acoustic (lossy)',make:()=>makeVisco(2.5) },
+    { label:'Elastic P-SV',          make:()=>makeElastic() },
+  ];
+
+  // ── Scaffold: model, sponge, source wavelet ───────────────────────────────
+  const vel=new Float32Array(N), damp=new Float32Array(N);
+  const PAD=22;
+  for(let iz=0;iz<NZ;iz++)for(let ix=0;ix<NX;ix++){
+    const d=Math.min(ix,NX-1-ix,iz,NZ-1-iz); let f=1.0;
+    if(d<PAD){ const a=(PAD-d)/PAD; f=Math.exp(-(0.09*a)*(0.09*a)*30.0); }
+    damp[iz*NX+ix]=f;
+  }
+  function setClear(v){ vel.fill(v); modelDirty=true; }
+  function setLayered(){ for(let iz=0;iz<NZ;iz++){ const v=1700+(iz/(NZ-1))*2400;
+    for(let ix=0;ix<NX;ix++) vel[iz*NX+ix]=v; } modelDirty=true; }
+  const T0=1.0/F0, SRC_DUR=2.4*T0;
+  function ricker(tt){ const a=Math.PI*Math.PI*F0*F0, td=tt-T0, e=a*td*td; return (1-2*e)*Math.exp(-e); }
+
+  // ── Engine lifecycle ──────────────────────────────────────────────────────
+  let eng, dt, modelDirty=true, srcIdx=((NZ>>2)*NX+(NX>>1))|0, srcActive=false, srcT=0, disp=0;
+  function build(idx){ eng=EQUATIONS[idx].make(); dt=eng.dt(); eng.reset(); modelDirty=true; disp=0; }
+  function resetField(){ eng.reset(); srcActive=false; disp=0; }
+  function advance(){
+    if(modelDirty){ eng.setModel(vel,dt); modelDirty=false; }
+    eng.step();
+    if(srcActive){ eng.source(srcIdx,ricker(srcT)); srcT+=dt; if(srcT>SRC_DUR)srcActive=false; }
+    eng.damp(damp);
+    eng.swap();
+  }
+
+  // ── Rendering with auto-gain ───────────────────────────────────────────────
+  const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+  const off=document.createElement('canvas'); off.width=NX; off.height=NZ;
+  const offctx=off.getContext('2d'), img=offctx.createImageData(NX,NZ), data=img.data;
+  function render(){
+    const fld=eng.field(); let mx=0;
+    for(let i=0;i<N;i++){ const a=fld[i]<0?-fld[i]:fld[i]; if(a>mx)mx=a; }
+    if(mx>1e-9){ const target=0.9/mx; disp += (target-disp)*0.15; }
+    const gain=disp;
+    for(let i=0;i<N;i++){
+      const vnorm=(vel[i]-VMIN)/(VMAX-VMIN), g0=210-vnorm*115;
+      let val=fld[i]*gain; if(val>1)val=1; else if(val<-1)val=-1;
+      let r,g,b;
+      if(val>=0){ r=g0+val*(255-g0); g=g0*(1-val); b=g0*(1-val); }
+      else{ const a=-val; b=g0+a*(255-g0); r=g0*(1-a); g=g0*(1-a); }
+      const j=i<<2; data[j]=r; data[j+1]=g; data[j+2]=b; data[j+3]=255;
+    }
+    offctx.putImageData(img,0,0);
+    ctx.imageSmoothingEnabled=true; ctx.drawImage(off,0,0,cv.width,cv.height);
+    const sx=(srcIdx%NX)/NX*cv.width, sz=((srcIdx/NX)|0)/NZ*cv.height;
+    ctx.strokeStyle='#00e5ff'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(sx,sz,7,0,7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx-11,sz); ctx.lineTo(sx+11,sz); ctx.moveTo(sx,sz-11); ctx.lineTo(sx,sz+11); ctx.stroke();
+  }
+  let playing=false;
+  function frame(){ if(playing){ for(let s=0;s<SUBSTEPS;s++) advance(); } render(); requestAnimationFrame(frame); }
+
+  // ── Interaction ───────────────────────────────────────────────────────────
+  const eqEl=document.getElementById('eq'), velEl=document.getElementById('vel'), velVal=document.getElementById('velVal'), playBtn=document.getElementById('play');
+  let tool='paint', painting=false;
+  EQUATIONS.forEach((e,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=e.label; eqEl.appendChild(o); });
+  function cell(e){ const r=cv.getBoundingClientRect();
+    return [Math.floor((e.clientX-r.left)/r.width*NX), Math.floor((e.clientY-r.top)/r.height*NZ)]; }
+  function paintAt(ix,iz){ const v=+velEl.value, R2=BRUSH*BRUSH;
+    const x0=Math.max(1,ix-BRUSH),x1=Math.min(NX-2,ix+BRUSH),z0=Math.max(1,iz-BRUSH),z1=Math.min(NZ-2,iz+BRUSH);
+    for(let z=z0;z<=z1;z++)for(let x=x0;x<=x1;x++){ const dx=x-ix,dz=z-iz; if(dx*dx+dz*dz<=R2) vel[z*NX+x]=v; }
+    modelDirty=true; }
+  function fire(ix,iz){ srcIdx=Math.min(N-1,Math.max(0,iz*NX+ix)); srcActive=true; srcT=0;
+    if(!playing){ playing=true; playBtn.textContent='Pause'; } }
+  function act(e){ const c=cell(e); if(tool==='paint')paintAt(c[0],c[1]); else fire(c[0],c[1]); }
+  cv.addEventListener('pointerdown',e=>{ painting=true; cv.setPointerCapture(e.pointerId); act(e); });
+  cv.addEventListener('pointermove',e=>{ if(painting&&tool==='paint')act(e); });
+  cv.addEventListener('pointerup',()=>painting=false);
+
+  eqEl.addEventListener('change',()=>{ build(+eqEl.value); });
+  document.getElementById('tool').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+    tool=b.dataset.tool; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b));
+    cv.style.cursor=tool==='source'?'cell':'crosshair'; });
+  velEl.addEventListener('input',()=>velVal.textContent=velEl.value);
+  playBtn.addEventListener('click',()=>{ playing=!playing; playBtn.textContent=playing?'Pause':'Play'; });
+  document.getElementById('reset').addEventListener('click',resetField);
+  document.querySelectorAll('[data-preset]').forEach(b=>b.addEventListener('click',()=>{
+    (b.dataset.preset==='layered') ? setLayered() : setClear(2500); resetField(); }));
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  setLayered(); build(0); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

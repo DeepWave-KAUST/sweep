@@ -12,6 +12,8 @@ class Layout:
         free_surface=False,     # whether the top boundary is free surface (stress=0) or not (absorbing)
         width=-1,               # width of the boundary to be saved, default to M (the stencil radius)
         tangent_pad=0,           # extra saved cells in tangential directions
+        pad=None,               # per-edge PML pad, axis-major (z_lo,z_hi,[y_lo,y_hi,]x_lo,x_hi);
+                                # free-surface faces = 0.  None => legacy abcn/free_surface.
         cut_mask=0,             # DD cut-face bitmask (x_lo=1,x_hi=2,z_lo=4,z_hi=8,y_lo=16,y_hi=32)
         **kwargs
     ):
@@ -44,13 +46,15 @@ class Layout:
         cy_lo = bool(cut_mask & 16); cy_hi = bool(cut_mask & 32)
 
         # Per-face cut flags (same bit convention as SolverContext::cut_mask).
-        # A cut face carries a halo strip that the DD backward reconstructs via
-        # reverse-leapfrog + NCCL halo exchange instead of restoring from a
-        # saved boundary buffer -- so nothing is ever written to / read from its
-        # boundary buffer (every save/restore kernel gates the face on
-        # ctx.cut_*).  gpu_full_shapes() uses these to drop cut faces to numel 0
-        # on the gpu-direct path.  Face->flag: top=z_lo, bottom=z_hi,
-        # front=y_lo, back=y_hi, left=x_lo, right=x_hi.
+        # These stay SEPARATE from ``pad`` on purpose: a free-surface face also
+        # has pad 0, but its boundary band still has to be saved and restored,
+        # whereas a cut face carries a halo strip that the DD backward
+        # reconstructs via reverse-leapfrog + NCCL halo exchange -- so nothing
+        # is ever written to / read from its boundary buffer (every save/restore
+        # kernel gates the face on ctx.cut_*).  gpu_full_shapes() uses these to
+        # drop cut faces to numel 0 on the gpu-direct path, which a pad of 0
+        # must NOT trigger.  Face->flag: top=z_lo, bottom=z_hi, front=y_lo,
+        # back=y_hi, left=x_lo, right=x_hi.
         self._cut_top = cz_lo
         self._cut_bottom = cz_hi
         self._cut_front = cy_lo
@@ -58,18 +62,35 @@ class Layout:
         self._cut_left = cx_lo
         self._cut_right = cx_hi
 
-        self.phys_x0 = M if cx_lo else abcn + M
-        self.phys_x1 = self.nx - (M if cx_hi else abcn + M)
+        # Per-face PML pad, axis-major.  When given, ``pad`` already carries the
+        # per-edge free surfaces AND (under a model-parallel mesh) the cut
+        # faces; the fallback reproduces the legacy uniform abcn with a z-min
+        # free surface.
+        if pad is not None:
+            _pz_lo, _pz_hi = pad[0], pad[1]
+            if dim == 3:
+                _py_lo, _py_hi, _px_lo, _px_hi = pad[2], pad[3], pad[4], pad[5]
+            else:
+                _py_lo = _py_hi = abcn
+                _px_lo, _px_hi = pad[2], pad[3]
+        else:
+            _pz_lo = 0 if free_surface else abcn
+            _pz_hi = abcn
+            _py_lo = _py_hi = _px_lo = _px_hi = abcn
+
+        # Cut wins, exactly as SolverContext::phys_* does: a cut face is M.
+        self.phys_x0 = M if cx_lo else _px_lo + M
+        self.phys_x1 = self.nx - (M if cx_hi else _px_hi + M)
 
         if dim == 3:
-            self.phys_y0 = M if cy_lo else abcn + M
-            self.phys_y1 = self.ny - (M if cy_hi else abcn + M)
+            self.phys_y0 = M if cy_lo else _py_lo + M
+            self.phys_y1 = self.ny - (M if cy_hi else _py_hi + M)
         else:
             self.phys_y0 = 0
             self.phys_y1 = 1
 
-        self.phys_z0 = M if free_surface else (M if cz_lo else abcn + M)
-        self.phys_z1 = self.nz - (M if cz_hi else abcn + M)
+        self.phys_z0 = M if cz_lo else _pz_lo + M
+        self.phys_z1 = self.nz - (M if cz_hi else _pz_hi + M)
 
         self.nx_phys = self.phys_x1 - self.phys_x0
         self.ny_phys = self.phys_y1 - self.phys_y0

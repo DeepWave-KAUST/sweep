@@ -196,6 +196,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_disk_async_read", &ForwardInput::boundary_disk_async_read)
         .def_readwrite("use_pinned_memory", &ForwardInput::use_pinned_memory)
         .def_readwrite("free_surface", &ForwardInput::free_surface)
+        .def_readwrite("fs_faces", &ForwardInput::fs_faces)
+        .def_readwrite("pad_lo", &ForwardInput::pad_lo)
+        .def_readwrite("pad_hi", &ForwardInput::pad_hi)
         .def_readwrite("topo_rows", &ForwardInput::topo_rows)
         .def_readwrite("has_topo", &ForwardInput::has_topo)
         .def_readwrite("topo_category", &ForwardInput::topo_category)
@@ -242,6 +245,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("dt", &BackwardInput::dt)
         .def_readwrite("spacing", &BackwardInput::spacing)
         .def_readwrite("free_surface", &BackwardInput::free_surface)
+        .def_readwrite("fs_faces", &BackwardInput::fs_faces)
+        .def_readwrite("pad_lo", &BackwardInput::pad_lo)
+        .def_readwrite("pad_hi", &BackwardInput::pad_hi)
         .def_readwrite("topo_rows", &BackwardInput::topo_rows)
         .def_readwrite("has_topo", &BackwardInput::has_topo)
         .def_readwrite("topo_category", &BackwardInput::topo_category)
@@ -268,7 +274,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu)
         .def_readwrite("boundary_disk_files", &BackwardInput::boundary_disk_files)
         .def_readwrite("checkpoint_steps", &BackwardInput::checkpoint_steps)
-        .def_readwrite("compute_illumination", &BackwardInput::compute_illumination);
+        .def_readwrite("compute_illumination", &BackwardInput::compute_illumination)
+        .def_readwrite("compute_adcig", &BackwardInput::compute_adcig)
+        .def_readwrite("adcig_max_lag", &BackwardInput::adcig_max_lag);
 
 
 }

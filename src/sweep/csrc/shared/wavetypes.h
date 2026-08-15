@@ -42,6 +42,15 @@ struct ForwardInput {
     bool use_pinned_memory = false;
     bool free_surface;
 
+    // Per-edge free surface / PML thickness (see SolverContext).  ``fs_faces``
+    // is a bitmask (bit 2*axis = low face, 2*axis+1 = high; axis 0=z,1=y,2=x);
+    // ``pad_lo``/``pad_hi`` are per-axis PML widths in C axis order [z,(y,)x]
+    // (free-surface faces = 0).  Defaults (-1 / empty) => legacy single
+    // ``free_surface`` (z-min only) + uniform ``abcn``.
+    int fs_faces = -1;
+    std::vector<int> pad_lo;
+    std::vector<int> pad_hi;
+
     // Irregular free-surface topography (image method / vacuum staircase).
     // ``topo_rows`` is a 1-D ``int32`` tensor of length nx_runtime giving
     // the surface row index per column in runtime (PML-padded) coords; any
@@ -115,6 +124,11 @@ struct BackwardOutput {
     torch::Tensor source_illumination;
 
     torch::Tensor receiver_illumination;
+
+    // Angle-domain common-image gather cube (space-lag extended imaging
+    // condition).  Shape (nlag, N, C, nz, nx[, ny]) on the runtime-padded grid;
+    // undefined unless compute_adcig was requested.  See BackwardInput below.
+    torch::Tensor adcig;
 };
 
 struct RTMOutput {
@@ -124,6 +138,9 @@ struct RTMOutput {
     torch::Tensor source_illumination;
 
     torch::Tensor receiver_illumination;
+
+    // Space-lag ADCIG cube; see BackwardOutput::adcig.
+    torch::Tensor adcig;
 };
 
 struct BackwardInput {
@@ -179,6 +196,10 @@ struct BackwardInput {
 
     // options
     bool free_surface;
+    // Per-edge free surface / PML thickness (see SolverContext / ForwardInput).
+    int fs_faces = -1;
+    std::vector<int> pad_lo;
+    std::vector<int> pad_hi;
     // See ForwardInput for semantics.  Mirrored by the propagator.
     torch::Tensor topo_rows;
     bool has_topo = false;
@@ -256,5 +277,14 @@ struct BackwardInput {
 
     int bw_begin() const { return bw_it_begin < 0 ? static_cast<int>(nt) : bw_it_begin; }
     bool bw_stepped() const { return bw_begin() < static_cast<int>(nt) || bw_it_end > 0; }
+
+    // Space-lag ADCIG (Sava & Fomel 2003): accumulate the horizontal
+    // subsurface-offset extended imaging condition
+    //   E(z,x,h) = sum_t u_s(x-h,t) * u_r(x+h,t),  h in [-adcig_max_lag, +adcig_max_lag]
+    // into a (nlag=2*adcig_max_lag+1, N, C, nz, nx[, ny]) cube.  Off by default;
+    // like compute_illumination it is an extra per-timestep grid pass and only
+    // runs when requested.  The lag is along the contiguous x axis.
+    bool compute_adcig = false;
+    int adcig_max_lag = 0;
 
 };

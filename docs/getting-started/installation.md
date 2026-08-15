@@ -1,8 +1,30 @@
 # Installation
 
-This page explains how to install SWEEP depending on whether your working
-environment is based on JAX, plain PyTorch, or PyTorch with the compiled
-C++/CUDA Torch extension binding.
+## From PyPI (recommended)
+
+One wheel, any PyTorch version, any Python 3:
+
+```bash
+pip install sweepx
+python -c "import sweep; sweep.precompile()"   # build the CUDA backend now (one-time ~3–5 min)
+```
+
+`sweepx` ships the C++/CUDA *sources*; the compiled backend (`impl='c'`) is compiled
+against **your** torch — only for your GPU's architecture, then cached in
+`~/.cache/torch_extensions`, so there is no torch/CUDA version lock-in. The
+`precompile()` line does it up front; drop it and the compile happens automatically
+on first use of `impl='c'`. This needs a CUDA GPU and a CUDA toolkit with
+`nvcc >= 12.4` (a system install, `module load cuda`, or
+`conda install -c nvidia cuda-toolkit`). The pure-Python eager/JAX backends work
+without nvcc.
+
+!!! note
+    `sweepx` is the PyPI distribution name; you `import sweep` — the
+    `scikit-learn` → `import sklearn` pattern, because the bare name `sweep` is
+    already taken on PyPI. `pip install sweep-solver` is equivalent.
+
+The rest of this page covers installing **from a clone** — for development, or to
+pre-build the compiled extension and skip the one-time first-use compile.
 
 ## Get the Source Code
 
@@ -18,11 +40,13 @@ cd sweep
 
 === "PyTorch + Extension Binding"
 
-    Use this path when you want compiled C++/CUDA kernels in addition to the
-    regular PyTorch interface.
+    Use this from a clone to **pre-build** the compiled `sweep._C` now — the same
+    kernels the PyPI `sweepx` wheel builds on first use, but ahead of time so there
+    is no first-use compile wait. (A prebuilt `_C` extension takes precedence over
+    the JIT loader automatically.)
 
     1. Install a compatible PyTorch + CUDA environment first.
-    2. Make sure your CUDA toolkit and NVIDIA driver are available for builds.
+    2. Make sure `nvcc >= 12.4` and your NVIDIA driver are available for builds.
     3. Build and install SWEEP with the CUDA extra:
 
     ```bash
@@ -89,7 +113,10 @@ cd sweep
 - A working [PyTorch](https://pytorch.org/get-started/locally/) or
   [JAX](https://docs.jax.dev/en/latest/installation.html) environment depending
   on your backend
-- CUDA toolkit and compatible NVIDIA drivers if building the CUDA side of the extension binding
+- For the compiled `impl='c'` backend: a CUDA GPU and a CUDA toolkit with
+  `nvcc >= 12.4` (12.0–12.3 ship a broken `<cuda/std>` bf16 header; set
+  `SWEEP_JIT_ALLOW_OLD_CUDA=1` to try one anyway), plus compatible NVIDIA
+  drivers — used by both the PyPI JIT first-use compile and a source prebuild
 
 ## Verify the Installation
 
@@ -105,7 +132,8 @@ From Python, the simplest one-liner is:
 ```python
 import sweep
 
-# True when PyTorch + CUDA + the compiled sweep._C binding are all importable.
+# True when PyTorch + a CUDA GPU + nvcc are present, so sweep._C can be
+# JIT-compiled on first use (this check itself does NOT trigger the compile).
 print(sweep.is_torch_binding_available())
 ```
 
@@ -114,12 +142,21 @@ For finer-grained diagnostics:
 ```python
 import sweep
 
-print(sweep.backend.torch.is_available())          # PyTorch importable
-print(sweep.backend.torch.cuda.is_available())     # PyTorch sees a CUDA device
-print(sweep.backend.torch.binding.is_available())  # sweep._C extension importable
-print(sweep.backend.torch.binding.diagnostics())   # dict with the same details
-print(sweep.backend.jax.is_available())            # JAX importable
+print(sweep.backend.torch.is_available())            # PyTorch importable
+print(sweep.backend.torch.cuda.is_available())       # PyTorch sees a CUDA device
+print(sweep.backend.torch.binding.is_available())    # backend usable (torch + GPU + nvcc>=12.4)
+print(sweep.backend.torch.binding.is_compiled())     # backend already built (compiled/cached)
+print(sweep.backend.torch.binding.diagnostics())     # {'usable', 'reason', 'cuda_home', 'already_compiled'}
+print(sweep.backend.jax.is_available())              # JAX importable
 ```
+
+To build the compiled backend up front **and confirm it succeeds**, run:
+
+```bash
+python -c "import sweep; sweep.precompile()"   # exits 0 on success; raises a clear error if nvcc/GPU is missing
+```
+
+Afterwards `sweep.backend.torch.binding.is_compiled()` returns `True`.
 
 ## Notes
 

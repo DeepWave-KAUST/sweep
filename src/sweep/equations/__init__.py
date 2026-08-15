@@ -42,7 +42,7 @@ try:
 except ModuleNotFoundError:
     AcousticTTI = None
 # from .aec import AEC
-# from .visco_acoustic import ViscoAcoustic
+from .visco_acoustic import ViscoAcoustic
 from .qP_vti import AcousticVTI
 # from .elasticP import ElasticP
 from .acoustic import Acoustic

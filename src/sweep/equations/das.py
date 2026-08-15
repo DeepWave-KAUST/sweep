@@ -5,7 +5,17 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from ._free_surface import top_free_surface_derivative, zero_top_row
+from ._free_surface import (
+    top_free_surface_derivative,
+    top_free_surface_cell_derivative,
+    zero_top_row,
+    overwrite_top_row,
+    blend_top_n,
+    get_o2_pd as _get_o2_pd,
+    fs_deriv as _fs_deriv,
+    near_surface_o2_count as _near_surface_o2_count,
+)
+import os as _os
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
@@ -519,9 +529,13 @@ def step_das_mu_2d(
     top_halo = pd.coes.shape[0]
 
     sxx_x = pd.x_forward(sxx)
+    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1"))
+    _pd2 = _get_o2_pd(pd) if _n_o2 else None
     if free_surface:
-        sxz_z = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
-        szz_z = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
+        # sxz sits at z=+h/2 -> half-cell mirror (about halo-1/2); szz is on the
+        # surface plane -> integer-grid mirror.  See ``_free_surface.fs_deriv``.
+        sxz_z = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2, half=True)
+        szz_z = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
     else:
         sxz_z = pd.z_backward(sxz)
         szz_z = pd.z_forward(szz)
@@ -541,8 +555,9 @@ def step_das_mu_2d(
 
     vx_x = pd.x_backward(vx)
     if free_surface:
-        vz_z = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-2)
-        vx_z = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-2)
+        # vz sits at z=+h/2 -> half-cell mirror; vx is on the surface plane.
+        vz_z = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2, half=True)
+        vx_z = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
     else:
         vz_z = pd.z_backward(vz)
         vx_z = pd.z_forward(vx)
@@ -553,8 +568,16 @@ def step_das_mu_2d(
     m_vxx = ax * m_vxx + bx * vx_x
     vx_x = vx_x + m_vxx
 
+    sxx_pre = sxx
     szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
     sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
+    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
+        # Robertsson free-surface fix: at the surface row sigma_zz=0 implies
+        # d vz/dz = -lam/(lam+2mu) d vx/dx, so sigma_xx there reduces to the
+        # modified coefficient  4 mu (lam+mu)/(lam+2mu) * d vx/dx  (no vz-in-air).
+        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
+        sxx_surf = sxx_pre + dt * _coef * vx_x
+        sxx = overwrite_top_row(sxx, sxx_surf, top_halo, axis=-2)
 
     m_vxz = azh * m_vxz + bzh * vx_z
     vx_z = vx_z + m_vxz
@@ -567,8 +590,10 @@ def step_das_mu_2d(
     exz = exz + 0.5 * dt * (vx_z + vz_x)
 
     if free_surface:
+        # z-low FS: zero only szz (normal stress, on-surface node); sxz is a
+        # +h/2 medium value -- zeroing it adds ~6% Rayleigh dispersion (cf. the
+        # elastic sxz free-surface fix, Kristek 2002 Table 1).
         szz = zero_top_row(szz, top_halo, axis=-2)
-        sxz = zero_top_row(sxz, top_halo, axis=-2)
 
     return (
         vx,
@@ -646,14 +671,14 @@ def step_das_mu_3d(
     dsxx_dx = pd.x_forward(sxx)
     dsxy_dy = pd.y_backward(sxy)
     if free_surface:
-        dsxz_dz = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-3)
+        dsxz_dz = top_free_surface_cell_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-3)
     else:
         dsxz_dz = pd.z_backward(sxz)
 
     dsxy_dx = pd.x_backward(sxy)
     dsyy_dy = pd.y_forward(syy)
     if free_surface:
-        dsyz_dz = top_free_surface_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-3)
+        dsyz_dz = top_free_surface_cell_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-3)
     else:
         dsyz_dz = pd.z_backward(syz)
 
@@ -709,7 +734,7 @@ def step_das_mu_3d(
     dvz_dx = pd.x_forward(vz)
     dvz_dy = pd.y_forward(vz)
     if free_surface:
-        dvz_dz = top_free_surface_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-3)
+        dvz_dz = top_free_surface_cell_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-3)
     else:
         dvz_dz = pd.z_backward(vz)
 
@@ -735,12 +760,26 @@ def step_das_mu_3d(
 
     div_v = dvx_dx + dvy_dy + dvz_dz
 
+    sxx_pre_fs = sxx
+    syy_pre_fs = syy
     sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx)
     syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy)
     szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz)
     sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx)
     sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx)
     syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
+    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
+        # Robertsson tangential FS correction (3-D): at a z-low free surface
+        # sigma_zz=0 => surface-row sigma_xx = coef*dvx_dx + coef2*dvy_dy
+        # (x<->y for sigma_yy); coef = 4 mu (lam+mu)/(lam+2mu),
+        # coef2 = 2 lam mu/(lam+2mu).  Same fix as DASMu-2D above.
+        _l2m = lame_lambda + 2.0 * lame_mu
+        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / _l2m
+        _coef2 = 2.0 * lame_lambda * lame_mu / _l2m
+        _sxx_surf = sxx_pre_fs + dt * (_coef * dvx_dx + _coef2 * dvy_dy)
+        _syy_surf = syy_pre_fs + dt * (_coef2 * dvx_dx + _coef * dvy_dy)
+        sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
+        syy = overwrite_top_row(syy, _syy_surf, top_halo, axis=-3)
 
     exx = exx + dt * dvx_dx
     eyy = eyy + dt * dvy_dy
@@ -750,9 +789,10 @@ def step_das_mu_3d(
     eyz = eyz + 0.5 * dt * (dvy_dz + dvz_dy)
 
     if free_surface:
+        # z-low FS: zero only szz (normal stress, on-surface node); sxz/syz are
+        # +h/2 medium values -- zeroing them adds ~6% Rayleigh dispersion (cf.
+        # the elastic sxz free-surface fix, Kristek 2002 Table 1).
         szz = zero_top_row(szz, top_halo, axis=-3)
-        sxz = zero_top_row(sxz, top_halo, axis=-3)
-        syz = zero_top_row(syz, top_halo, axis=-3)
 
     return (
         vx,
