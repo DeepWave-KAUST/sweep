@@ -334,6 +334,22 @@ On top of Part 1's checks:
    `cosine_similarity > 0.8` per mode.
 4. `mkdocs build` still passes.
 
+## Equation capability flags
+
+`EquationBase` carries a small set of class attributes the propagator reads
+to decide what your equation is allowed to do. Override them on your class
+when the corresponding capability is implemented (or, for
+``supports_free_surface``, when it is *not* valid):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `supports_free_surface` | `True` | Whether a free surface is physically valid for this equation at all. **Set `False` for anisotropic media** — the isotropic image method does not satisfy the anisotropic stress-free condition, so the propagator raises `NotImplementedError` on any `free_surface=` request (see `AcousticVTI1st`, `ElasticTTI`). |
+| `supports_per_edge_free_surface` | `False` | Opt-in: the eager `func` honours `fs_faces` (a free surface on any subset of the faces, each with its own PML pad) rather than only the top-only bool. `Acoustic` and `Elastic` (2-D) opt in. |
+| `supports_per_edge_free_surface_c` | `False` | Same, for the compiled `impl='c'` CUDA path — set `True` only once the CUDA forward **and** adjoint honour `fs_faces`. |
+| `supports_apm` | `False` | Parameter-modified (APM) irregular topography path — see below. |
+| `supports_batched_models` | `False` | The CUDA kernels accept per-shot batched models `(B, *spatial)` in addition to a single shared model. |
+| `default_pml_type` | `"cpmlr"` | PML formulation used when the propagator is not given one explicitly. |
+
 ## Out of scope here
 
 A few features require touching the propagator base or `_c.py` rather than

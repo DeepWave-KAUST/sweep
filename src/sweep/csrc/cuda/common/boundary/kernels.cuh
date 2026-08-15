@@ -191,3 +191,15 @@ void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
 void launch_dequantize_int8(const uint8_t* src, const float* scale,
                             float* dst, int64_t total_cells,
                             cudaStream_t stream);
+
+// FP16 path: same two-pass design with a per-block-normalized __half
+// payload.  A bare fp16 cast flushes everything below 2^-24 to zero,
+// which wipes the velocity faces of elastic wavefields (values sit
+// ~rho·vp below the stresses); block normalization keeps the payload
+// in [-1, 1] where the full 10-bit mantissa applies.
+void launch_quantize_fp16(const float* src, __half* dst, float* scale,
+                          int64_t total_cells, cudaStream_t stream);
+
+void launch_dequantize_fp16(const __half* src, const float* scale,
+                            float* dst, int64_t total_cells,
+                            cudaStream_t stream);

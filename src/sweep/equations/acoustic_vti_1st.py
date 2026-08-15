@@ -241,6 +241,10 @@ class AcousticVTI1st(FirstOrderEquation):
     
     """
 
+    # The isotropic image-method free surface is WRONG for an anisotropic
+    # medium (see EquationBase.supports_free_surface); fail loud instead.
+    supports_free_surface = False
+
     # TODO_free_surface: Implement a Mittet/Robertsson-style anisotropic
     # free-surface BC for VTI.  The constraint σ_V = 0 at the surface forces
     # ∂v_z/∂z = -(c13/c33) ∂v_x/∂x, so the σ_H update at the surface row
@@ -466,6 +470,10 @@ class AcousticVTI1st3D(FirstOrderEquation):
 
     
     """
+
+    # The isotropic image-method free surface is WRONG for an anisotropic
+    # medium (see EquationBase.supports_free_surface); fail loud instead.
+    supports_free_surface = False
 
     MODEL_SPECS = AcousticVTI1st.MODEL_SPECS
 

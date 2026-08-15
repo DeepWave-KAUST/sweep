@@ -177,6 +177,25 @@ class ModelParallel:
         spatial_order = prop.equation.so
         source_type, receiver_type = prop.source_type, prop.receiver_type
         free_surface, pml_type = prop.free_surface, prop.pml_type
+        # ``prop.free_surface`` is only a bool.  It used to BE the whole boundary
+        # spec ("is the top face free?"), but with dev's per-edge free surface it
+        # is merely ``any(fs_faces)``, so passing it down would silently turn a
+        # bottom/left/right free surface into a TOP one on every tile -- wrong
+        # PML layout, wrong C-side fs bitmask, wrong image mirror, and a wrong
+        # ``ztop`` in this file's own slicing.  Per-edge free surfaces are not
+        # supported under domain decomposition (a cut face must never carry a
+        # free surface), so refuse rather than degrade the physics silently.
+        _fs_faces = getattr(prop, "fs_faces", None)
+        if _fs_faces is not None:
+            from sweep.equations._edges import edge_names, is_top_only_or_none
+            if not is_top_only_or_none(tuple(_fs_faces)):
+                _free = [n for n, on in zip(edge_names(prop.ndim), _fs_faces) if on]
+                raise NotImplementedError(
+                    "domain decomposition does not support a per-edge free "
+                    f"surface; got free faces {_free}. Only a top free surface "
+                    "(or none) can be decomposed -- any other face would have to "
+                    "be reconciled against the tile cut faces."
+                )
         dev = prop.dev
         model_parallel = mesh
         # Boundary-saving storage/dtype are inherited from the wrapped prop's

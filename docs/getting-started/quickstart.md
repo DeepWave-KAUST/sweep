@@ -144,7 +144,7 @@ obs.pow(2).sum().backward()
       <div class="sweep-qs__card-body">
         <div class="sweep-qs__card-tag">NOTEBOOK</div>
         <div class="sweep-qs__card-name">Marmousi FWI</div>
-        <div class="sweep-qs__card-desc">A real benchmark · 17 min on A100</div>
+        <div class="sweep-qs__card-desc">A real benchmark · 30 iters in 6.8 s</div>
       </div>
     </a>
 

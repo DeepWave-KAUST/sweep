@@ -21,15 +21,37 @@
 
 ## Install
 
+**From PyPI** — one wheel, any PyTorch version, any Python 3:
+
 ```bash
-# Python-only (PyTorch / JAX through the pure-Python path)
+pip install sweepx
+python -c "import sweep; sweep.precompile()"   # build the CUDA backend now (one-time ~3–5 min)
+```
+
+`sweepx` ships the C++/CUDA *sources*; the compiled backend (`impl='c'`) is compiled
+against **your** torch — only for your GPU's architecture, then cached in
+`~/.cache/torch_extensions`. The `precompile()` line does it up front; drop it and it
+happens automatically on first use of `impl='c'`. No torch/CUDA version lock-in. Needs
+a CUDA GPU + `nvcc >= 12.4` (a system install, your cluster's `module load cuda`, or
+`conda install -c nvidia cuda-toolkit`); the pure-Python **eager** / **JAX** backends
+work without nvcc.
+
+**From source** (a clone):
+
+```bash
+# pure-Python (PyTorch / JAX eager path); impl='c' JIT-compiles on first use
 pip install .
 
-# With the compiled C++ / CUDA extension (recommended for production)
+# prebuild the C++/CUDA extension now — skips the first-use compile (needs nvcc)
 SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 ```
 
-If the build can't auto-detect your GPU, set `TORCH_CUDA_ARCH_LIST` (e.g. `"7.0"` for V100, `"8.0"` for A100, `"8.9"` for RTX 6000 Ada) before the second command. Full install notes — including the GPU-only fast build and multi-CUDA setups — are in [the docs](https://deepwave-kaust.github.io/sweep/getting-started/installation/).
+If the prebuild can't auto-detect your GPU, set `TORCH_CUDA_ARCH_LIST` (e.g. `"7.0"`
+V100, `"8.0"` A100, `"8.9"` RTX 6000 Ada) before the second command.
+
+<sub>`sweepx` is the PyPI distribution name; you `import sweep` (the `scikit-learn` → `import sklearn`
+pattern, because the bare name `sweep` is taken on PyPI). `pip install sweep-solver` is equivalent.
+Full install notes are in [the docs](https://deepwave-kaust.github.io/sweep/getting-started/installation/).</sub>
 
 ## Hello SWEEP
 

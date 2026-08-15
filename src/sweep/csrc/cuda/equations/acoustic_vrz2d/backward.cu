@@ -302,9 +302,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     {
         auto for_init = forward.view();
         set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
-            for_init.u_prev, ctx.abcn + ctx.M, nx, nz, p.free_surface);
+            for_init.u_prev, ctx.abcn + ctx.M, nx, nz, ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
         set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
-            for_init.u_now, ctx.abcn + ctx.M, nx, nz, p.free_surface);
+            for_init.u_now, ctx.abcn + ctx.M, nx, nz, ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
     }
 
     for (int it = p.nt - 1; it >= 1; --it) {

@@ -50,11 +50,18 @@ static inline void run_acoustic2d_adjoint_step(
         grad_forward_img, grad_out);
 }
 
-void init_rtm_output_2d(RTMOutput& out, const torch::Tensor& vp)
+void init_rtm_output_2d(RTMOutput& out, const torch::Tensor& vp,
+                        bool want_adcig = false, int nlag = 1)
 {
     out.image = torch::zeros_like(vp);
     out.source_illumination = torch::zeros_like(vp);
     out.receiver_illumination = torch::zeros_like(vp);
+    if (want_adcig) {
+        // vp is (N, C, nz, nx); ADCIG cube is (nlag, N, C, nz, nx) on the
+        // runtime-padded grid, cropped + summed over batch Python-side.
+        out.adcig = torch::zeros({(long)nlag, vp.size(0), vp.size(1),
+                                  vp.size(2), vp.size(3)}, vp.options());
+    }
 }
 
 // Validate the stepped-backward segment fields (bw_it_begin/bw_it_end).
@@ -131,8 +138,19 @@ void bind_backward_outputs_2d(
         illumination.image = torch::zeros_like(p.models[0]);
         illumination.source_illumination = p.illum_out[0];
         illumination.receiver_illumination = p.illum_out[1];
+        // NO ADCIG here -- see the 3-D twin. This is the segmented (stepped /
+        // DD) path; source/receiver illumination survive across segments only
+        // because Python owns and accumulates into those buffers, and ADCIG has
+        // no such carrier. A per-segment cube would be filled for one step and
+        // dropped, silently losing the user's ADCIG.
+        TORCH_CHECK(!p.compute_adcig,
+                    "compute_adcig is not supported on the segmented "
+                    "(stepped / domain-decomposed) 2-D backward: the ADCIG cube "
+                    "has no cross-segment accumulator. Run ADCIG on the "
+                    "single-segment backward instead.");
     } else {
-        init_rtm_output_2d(illumination, p.models[0]);
+        init_rtm_output_2d(illumination, p.models[0],
+                           p.compute_adcig, 2 * p.adcig_max_lag + 1);
     }
 }
 
@@ -169,6 +187,11 @@ void accumulate_imaging_2d(
             nx, nz
         );
     }
+    // NOTE: ADCIG is NOT accumulated here.  This helper's ``forward_ptr`` is the
+    // full/checkpoint forward store, which for acoustic is vp^2*Lap(u) (kept for
+    // the vp gradient), NOT the raw pressure the space-lag imaging condition
+    // needs.  ADCIG is launched only from the boundary-saving reverse loop where
+    // ``forward.u_now_t`` is the reconstructed raw pressure (see backward_bs).
 }
 
 void accumulate_source_gradient_2d(
@@ -242,6 +265,7 @@ void run_full_imaging(
 
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
+    ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     ctx.cut_mask = 0;  // full-storage / RTM path is DD-free (DD is backward_bs only)
 
     LaplaceParam lap_ctx{nx, 1, M, p.lap_coes.data_ptr<float>(), dx, 0, dz};
@@ -350,17 +374,19 @@ BackwardOutput backward(const BackwardInput& in)
     RTMOutput illumination;
     // Bind Python-owned grad/illum accumulators when stepping, else allocate
     // zeros (monolithic).  Also allocates `illumination` (subsumes the old
-    // init_rtm_output_2d) and the grad/grad_wavelet tensors run_full_imaging
-    // accumulates into.
+    // init_rtm_output_2d, ADCIG cube included) and the grad/grad_wavelet
+    // tensors run_full_imaging accumulates into.
     bind_backward_outputs_2d(in, grad_wavelet, grad, illumination);
     // Illumination (RTM image + source/receiver illumination) is a per-timestep
     // extra grid pass; skip it for a plain FWI gradient that does not request it.
-    // The vp gradient (calculate_grad) is unaffected.
+    // The vp gradient (calculate_grad) is unaffected.  ADCIG (space-lag) rides
+    // the same imaging pass, so pass the RTMOutput when either is requested.
     run_full_imaging(in, &grad, &grad_wavelet,
-                     in.compute_illumination ? &illumination : nullptr);
+                     (in.compute_illumination || in.compute_adcig) ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
     return out;
 }
 
@@ -381,7 +407,8 @@ RTMOutput rtm(const BackwardInput& in)
     );
 
     RTMOutput out;
-    init_rtm_output_2d(out, in.models[0]);
+    init_rtm_output_2d(out, in.models[0],
+                       in.compute_adcig, 2 * in.adcig_max_lag + 1);
     run_full_imaging(in, nullptr, nullptr, &out);
     return out;
 }
@@ -421,6 +448,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
+    ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     // DD: skip cut faces in the strip restore, the seed rim-zeroing, the
     // NOPML exclusion band and the fused-adjoint pure_interior test.
     ctx.cut_mask = p.cut_face_mask;
@@ -474,11 +502,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
+    // FIRST segment only: re-running the rim-zeroing mid-stream would clobber
+    // the carried reconstruction state (DD/stepped runs re-enter here).
     if (first_segment) {
         auto for_view = forward.view();
-        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_prev, ctx.abcn+ctx.M, nx, nz, p.free_surface, ctx.cut_mask);
-        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(for_view.u_now, ctx.abcn+ctx.M, nx, nz, p.free_surface, ctx.cut_mask);
+        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
+            for_view.u_prev, ctx.abcn+ctx.M, nx, nz,
+            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask);
+        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
+            for_view.u_now, ctx.abcn+ctx.M, nx, nz,
+            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask);
     }
+
 
     LaplaceParam lap_ctx{nx, 1, M, p.lap_coes.data_ptr<float>(), dx, 0, dz};
     GradParam grad_ctx{1, 0, nx, M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
@@ -596,6 +631,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 nx, nz
             );
         }
+        // Space-lag ADCIG rides the same co-resident (u_s(t), u_r(t)) pair.
+        if (illumination.adcig.defined() && illumination.adcig.numel() > 0) {
+            int nlag = illumination.adcig.size(0);
+            int Bloc = illumination.adcig.size(1) * illumination.adcig.size(2);
+            int max_lag = (nlag - 1) / 2;
+            accumulate_adcig_2d<<<launch_config.grid, launch_config.block>>>(
+                forward.u_now_t.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                illumination.adcig.data_ptr<float>(),
+                nlag, max_lag, Bloc, nx, nz
+            );
+        }
 
     }
 
@@ -634,6 +681,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
     return out;
 
 }
@@ -954,6 +1002,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
+    ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -970,7 +1019,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
-    init_rtm_output_2d(illumination, vp);
+    init_rtm_output_2d(illumination, vp,
+                       in.compute_adcig, 2 * in.adcig_max_lag + 1);
 
     // Scratch for the exact discrete-adjoint step (prepare/apply).
 
@@ -1069,7 +1119,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 &grad,
                 // Gate illumination on compute_illumination (mirror FULL path);
                 // accumulate_imaging_2d skips the RTM kernel when rtm_out==nullptr.
-                in.compute_illumination ? &illumination : nullptr,
+                (in.compute_illumination || in.compute_adcig) ? &illumination : nullptr,
                 nx,
                 nz,
                 dt
@@ -1080,6 +1130,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
     return out;
 }
 
@@ -1131,6 +1182,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
+    ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -1142,7 +1194,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
-    init_rtm_output_2d(illumination, vp);
+    init_rtm_output_2d(illumination, vp,
+                       in.compute_adcig, 2 * in.adcig_max_lag + 1);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -1204,7 +1257,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             &grad,
             &grad_wavelet,
             // Gate illumination on compute_illumination (see BS path above).
-            in.compute_illumination ? &illumination : nullptr,
+            (in.compute_illumination || in.compute_adcig) ? &illumination : nullptr,
             order,
             launch_config.grid,
             launch_config.block,
@@ -1232,6 +1285,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     out.grads = {grad_wavelet, grad};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
     return out;
 }
 

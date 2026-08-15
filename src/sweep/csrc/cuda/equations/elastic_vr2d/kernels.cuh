@@ -377,13 +377,17 @@ __global__ void evr_stress_kernel(
 
     float gamma_P_kk = gamma_P_xx + gamma_P_zz;
 
+    float sxx_pre = f.sxx[idx];
     f.sxx[idx] += solver.dt * (gamma_P_kk - 2.f * gamma_S_zz);   // -2 gamma_S_zz, NOT gamma_S_xx
     f.szz[idx] += solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
     f.sxz[idx] += solver.dt * (gamma_S_xz + gamma_S_zx);
 
-    // Free-surface BC: zero the normal + shear stress at the surface row
-    // (matches the eager zero_top_row), applied after the stress update.
+    // Free-surface BC: zero szz/sxz, and apply the Robertsson surface sigma_xx
+    // correction (matches eager fs_sxx_correction).  VR-native coefficient on
+    // d px/dx: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx  ->  with px = rho*vx
+    // becomes  4 vs^2 (vp^2 - vs^2)/vp^2 * d px/dx (rho cancels).
     if (elastic_is_top_free_surface_row(solver, ix, iz)) {
+        f.sxx[idx] = sxx_pre + solver.dt * (4.f * Vs2 * (Vp2 - Vs2) / Vp2) * dpx_dx;
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
     }
@@ -593,16 +597,40 @@ __global__ void evr_stress_adjoint_prepare(
     float lam          = Vp2 - 2.f * Vs2;
     float mu_          = Vs2;          // V_S^2
 
+    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
+    if (is_fs) {
+        // Transpose of the forward FS projection (szz = sxz = 0): the adjoint
+        // szz/sxz vanish at the surface row.  (evr_adjoint_zero_top_fs already
+        // does this; repeated so the prepare is correct standalone.)
+        bar_szz = 0.f;
+        bar_sxz = 0.f;
+        f.szz[idx] = 0.f;
+        f.sxz[idx] = 0.f;
+    }
 
     // bar_d* = dt * (constitutive coeff * adj_sigma) -- mirrors elastic2d
     // pattern with lambda + 2 mu = V_P^2, lambda = V_P^2 - 2 V_S^2, mu = V_S^2.
-    float bar_dpx_dx = solver.dt * (lam_plus_2mu * bar_sxx + lam * bar_szz);
-    float bar_dpz_dz = solver.dt * (lam_plus_2mu * bar_szz + lam * bar_sxx);
-    float bar_dpx_dz = solver.dt * mu_ * bar_sxz;
-    float bar_dpz_dx = solver.dt * mu_ * bar_sxz;
+    float bar_dpx_dx, bar_dpz_dz, bar_dpx_dz, bar_dpz_dx;
+    if (is_fs) {
+        // Transpose of the VR Robertsson FS sigma_xx fix.  Forward surface row:
+        //   sxx = old + dt * C_surf * dpx_dx,  C_surf = 4 vs^2 (vp^2 - vs^2)/vp^2
+        // (the VR-native form of elastic 4 mu(lam+mu)/(lam+2mu); px = rho*vx so
+        // rho cancels).  Only dpx_dx feeds sxx; the dpz_dz term cancels and
+        // szz/sxz are zeroed -> bar_dpz_dz = bar_dpx_dz = bar_dpz_dx = 0.
+        float c_surf = 4.f * Vs2 * (Vp2 - Vs2) / Vp2;
+        bar_dpx_dx = solver.dt * c_surf * bar_sxx;
+        bar_dpz_dz = 0.f;
+        bar_dpx_dz = 0.f;
+        bar_dpz_dx = 0.f;
+    } else {
+        bar_dpx_dx = solver.dt * (lam_plus_2mu * bar_sxx + lam * bar_szz);
+        bar_dpz_dz = solver.dt * (lam_plus_2mu * bar_szz + lam * bar_sxx);
+        bar_dpx_dz = solver.dt * mu_ * bar_sxz;
+        bar_dpz_dx = solver.dt * mu_ * bar_sxz;
+    }
 
     // -- EVR-specific pointwise contributions to adj momentum (gamma's
     // multiplicative V*(dV)*p_j and -2 V^2 R p_j terms).
@@ -629,7 +657,10 @@ __global__ void evr_stress_adjoint_prepare(
     // in bounds at the grid edge.
     bool interior = (ix >= halo && ix < solver.nx - halo &&
                      iz >= halo && iz < solver.nz - halo);
-    if (interior) {
+    // At the free surface the forward sigma_xx has NO gamma multiplicative
+    // terms (it is the pure C_surf * dpx_dx form), so its pointwise adjoint
+    // momentum contribution is zero.
+    if (interior && !is_fs) {
         float dvp_dx = evr_model_grad_x<Order>(vp_b, ix, iz, grad_ctx);
         float dvp_dz = evr_model_grad_z<Order>(vp_b, ix, iz, grad_ctx);
         float dvs_dx = evr_model_grad_x<Order>(vs_b, ix, iz, grad_ctx);
@@ -988,6 +1019,24 @@ __global__ void calculate_grad_evr_nobs(
     float Rpx = Rpx_b[idx], Rpz = Rpz_b[idx];
     float Rsx = Rsx_b[idx], Rsz = Rsz_b[idx];
     float px = fpx_b[idx], pz = fpz_b[idx];
+
+    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    if (is_fs) {
+        // Material derivative of the VR FS sigma_xx fix.  Forward surface row:
+        //   sxx = old + dt * C_surf * dpx_dx,  C_surf = 4 vs^2 (vp^2 - vs^2)/vp^2.
+        //   dC/dVp = 8 vs^4 / vp^3,   dC/dVs = 8 vs - 16 vs^3 / vp^2.
+        // No gamma terms, no R dependence, no chain rule through (dV/dx):
+        // grad_R* keep their prior accumulation (+0) and the chain-source
+        // tensors are zeroed so evr_grad_chain_apply adds nothing at this row.
+        float a_sxx_fpx = a.sxx[idx] * fpx_x;
+        gvp_b[idx] += a_sxx_fpx * solver.dt * (8.f * Vs2 * Vs2 / (Vp2 * Vp));
+        gvs_b[idx] += a_sxx_fpx * solver.dt * (8.f * Vs - 16.f * Vs2 * Vs / Vp2);
+        lvpx_b[idx] = 0.f;
+        lvpz_b[idx] = 0.f;
+        lvsx_b[idx] = 0.f;
+        lvsz_b[idx] = 0.f;
+        return;
+    }
 
     // Aggregate gamma adjoints
     float L_gP_xx = solver.dt * (a.sxx[idx] + a.szz[idx]);

@@ -46,7 +46,15 @@ import numpy as np
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from ._free_surface import zero_top_row, top_free_surface_derivative
+from ._free_surface import (
+    zero_top_row,
+    top_free_surface_derivative,
+    fs_deriv as _fs_deriv,
+    get_o2_pd as _get_o2_pd,
+    near_surface_o2_count as _near_surface_o2_count,
+    fs_sxx_correction as _fs_sxx_correction,
+)
+import os as _os
 from sweep.scalars import fd_coefficients
 
 
@@ -184,6 +192,10 @@ def elastic_vr_step_core(
     """
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
+    # Near-surface order reduction (matches the shared CUDA helper, which reduces
+    # these same four FS z-derivatives): order-2 image stencil in the top band.
+    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) if free_surface else 0
+    _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     vp2 = vp * vp
     vs2 = vs * vs
@@ -204,8 +216,8 @@ def elastic_vr_step_core(
     # z-derivatives of stress: image-method mirror at the top free surface
     # (odd parity, mirroring _elastic_step_core txz_z/tzz_z), else plain FD.
     if free_surface:
-        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-2)
-        dsxz_dz = top_free_surface_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-2)
+        dszz_dz = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dsxz_dz = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
     else:
         dszz_dz = pd.z_forward(szz)    # szz (i, j)          -> (i, j+1/2)   feeds pz
         dsxz_dz = pd.z_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i+1/2, j)   feeds px
@@ -233,8 +245,8 @@ def elastic_vr_step_core(
     # z-derivatives of momentum: image-method mirror at the top free surface
     # (pz odd like vz, px even like vx; mirrors _elastic_step_core), else plain.
     if free_surface:
-        dpz_dz = top_free_surface_derivative(pz, pd.z_backward, top_halo, odd=True, axis=-2)
-        dpx_dz = top_free_surface_derivative(px, pd.z_forward, top_halo, odd=False, axis=-2)
+        dpz_dz = _fs_deriv(pz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dpx_dz = _fs_deriv(px, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
     else:
         dpz_dz = pd.z_backward(pz)     # pz (i, j+1/2)   -> (i, j)         feeds sigma_zz
         dpx_dz = pd.z_forward(px)      # px (i+1/2, j)   -> (i+1/2, j+1/2) feeds sigma_xz
@@ -269,11 +281,18 @@ def elastic_vr_step_core(
     # lambda * eps_kk = lambda (eps_xx + eps_zz), and -2 mu eps_zz is
     # the deviatoric S contribution. See module docstring.
     gamma_P_kk = gamma_P_xx + gamma_P_zz
+    sxx_pre = sxx
     sxx = sxx + dt * (gamma_P_kk - 2.0 * gamma_S_zz)
     szz = szz + dt * (gamma_P_kk - 2.0 * gamma_S_xx)
     sxz = sxz + dt * (gamma_S_xz + gamma_S_zx)
 
     if free_surface:
+        # Robertsson surface sigma_xx -- same shared correction as Elastic/DASMu.
+        # VR-native form: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx becomes
+        # 4 vs^2 (vp^2-vs^2)/vp^2 * d px/dx (px = rho*vx cancels the rho).
+        sxx = _fs_sxx_correction(
+            sxx, sxx_pre, dt, 4.0 * vs2 * (vp2 - vs2) / vp2, dpx_dx, top_halo, axis=-2
+        )
         sxz = zero_top_row(sxz, top_halo, axis=-2)
         szz = zero_top_row(szz, top_halo, axis=-2)
 

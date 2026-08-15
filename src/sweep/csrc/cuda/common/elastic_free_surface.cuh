@@ -12,23 +12,56 @@ __device__ __forceinline__ int elastic_stencil_half_order(const SolverContext& s
     }
 }
 
+// Bottom (z-high) free-surface row: the last physical row.  Air is ``iz > bot``.
+__device__ __forceinline__ int elastic_z_bottom_surface_row(const SolverContext& solver)
+{
+    return solver.phys_z1() - 1;
+}
+
+// ``half`` marks a field whose nodes sit half a cell BELOW the surface plane
+// (sxz / vz on the Virieux grid live at z=+h/2 while the surface is on the szz
+// plane).  Its image must reflect about ``top - 1/2`` so that
+// tau_zx(-h/2) = -tau_zx(+h/2) (Kristek, Moczo & Archuleta 2002, Table 1);
+// reflecting about ``top`` would pair -h/2 with +3h/2 instead.  That error is
+// masked while the surface row is force-zeroed and destabilises once it is not.
+// Mirrors the eager ``extend_top_free_surface_cell_centered``.  Low side only:
+// the high side keeps the integer-grid mirror (see the eager note).
 __device__ __forceinline__ float elastic_top_fs_value_2d(
     const float* __restrict__ u,
     int ix,
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
-    // Surface row is per-column under irregular topography, falls back to
-    // the constant ``phys_z0()`` in the flat case (no topo → ``surface_row``
-    // returns ``phys_z0()``).  See ``SolverContext::surface_row``.
-    const int top = solver.surface_row(ix);
-    if (solver.free_surface && iz < top) {
-        iz = 2 * top - iz;
-        float v = u[iz * grad_ctx.sz + ix * grad_ctx.sx];
-        return odd ? -v : v;
+    // z-low (top) free surface.  Surface row is per-column under irregular
+    // topography, falls back to the constant ``phys_z0()`` in the flat case
+    // (no topo → ``surface_row`` returns ``phys_z0()``).
+    if (solver.fsLo(0)) {
+        const int top = solver.surface_row(ix);
+        if (iz < top) {
+            int m = (half && !solver.has_topo) ? (2 * top - 1 - iz)
+                                               : (2 * top - iz);
+            float v = u[m * grad_ctx.sz + ix * grad_ctx.sx];
+            return odd ? -v : v;
+        }
+    }
+    // z-high (bottom) free surface.  The medium lies ABOVE ``bot`` here, so the
+    // half-cell offset flips sense: a +h/2 field's node at ``bot`` already sits
+    // OUTSIDE the medium (the last interior one is ``bot-1``).  Its air region
+    // therefore starts one cell earlier than the integer-grid case, and the
+    // mirror pairs arr[bot+j] with arr[bot-1-j]  ->  m = 2*bot - 1 - iz.
+    if (solver.fsHi(0)) {
+        const int bot = elastic_z_bottom_surface_row(solver);
+        const bool hz = half && !solver.has_topo;
+        const int air0 = hz ? bot : bot + 1;
+        if (iz >= air0) {
+            int m = hz ? (2 * bot - 1 - iz) : (2 * bot - iz);
+            float v = u[m * grad_ctx.sz + ix * grad_ctx.sx];
+            return odd ? -v : v;
+        }
     }
     return u[iz * grad_ctx.sz + ix * grad_ctx.sx];
 }
@@ -40,32 +73,136 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
-    if (!solver.free_surface) {
+    if (!solver.fsLo(0) && !solver.fsHi(0)) {
         return sgradient<2, Order, Z, Type>(u, ix, 0, iz, grad_ctx);
     }
 
     const int M = elastic_stencil_half_order<Order>(solver);
+
+    // Near-surface order reduction (Kristek AFDA): a 2nd-order z-stencil for the
+    // M physical rows adjacent to each active z free surface (top band
+    // [top, top+M) and/or bottom band (bot-M, bot]) suppresses the high-order FS
+    // instability; the interior keeps full order.  Matches the eager blend.
+    // FLAT surface only (topography path is full-order, gated on ``!has_topo``).
+    bool in_o2_band = false;
+    if (!solver.has_topo) {
+        if (solver.fsLo(0)) {
+            const int top = solver.surface_row(ix);
+            if (iz - top >= 0 && iz - top < M) in_o2_band = true;
+        }
+        if (solver.fsHi(0)) {
+            const int bot = elastic_z_bottom_surface_row(solver);
+            if (bot - iz >= 0 && bot - iz < M) in_o2_band = true;
+        }
+    }
+    if (in_o2_band) {
+        float gz2 = 0.f;
+        if constexpr (Type & DIFF_FORWARD) {
+            gz2 += elastic_top_fs_value_2d(u, ix, iz + 1, grad_ctx, solver, odd, half)
+                 - elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd, half);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            gz2 += elastic_top_fs_value_2d(u, ix, iz,     grad_ctx, solver, odd, half)
+                 - elastic_top_fs_value_2d(u, ix, iz - 1, grad_ctx, solver, odd, half);
+        }
+        return gz2 / grad_ctx.dz;
+    }
+
     float gz = 0.f;
 
     #pragma unroll
     for (int m = 0; m < M; ++m) {
         const float c = grad_ctx.coeff[m];
         if constexpr (Type & DIFF_FORWARD) {
-            const float up = elastic_top_fs_value_2d(u, ix, iz + m + 1, grad_ctx, solver, odd);
-            const float um = elastic_top_fs_value_2d(u, ix, iz - m,     grad_ctx, solver, odd);
+            const float up = elastic_top_fs_value_2d(u, ix, iz + m + 1, grad_ctx, solver, odd, half);
+            const float um = elastic_top_fs_value_2d(u, ix, iz - m,     grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
         if constexpr (Type & DIFF_BACKWARD) {
-            const float up = elastic_top_fs_value_2d(u, ix, iz + m,     grad_ctx, solver, odd);
-            const float um = elastic_top_fs_value_2d(u, ix, iz - m - 1, grad_ctx, solver, odd);
+            const float up = elastic_top_fs_value_2d(u, ix, iz + m,     grad_ctx, solver, odd, half);
+            const float um = elastic_top_fs_value_2d(u, ix, iz - m - 1, grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
     }
 
     return gz / grad_ctx.dz;
+}
+
+// Plain (no-mirror) transpose of the near-surface-reduced forward z-derivative
+// ``elastic_top_fs_sgradient_z_2d``, evaluated at output row ``m``, in the SAME
+// sign convention as ``sgradient<2,Order,Z, opposite(ForwardType)>(q, m)``
+// (i.e. the negated true transpose — the calling kernel's sign expects this).
+//
+// The forward applied a 2nd-order stencil to output rows in the band
+// ``[top, top+M)`` (Kristek near-surface order reduction) and the full M-th
+// order stencil below.  Operator-split form:  D' = P_band·D2 + P_below·D_full
+// with diagonal output-row projectors P, so  D'^T = D2^T·P_band + D_full^T·P_below.
+// Concretely: a forward output row ``j`` contributes to input row ``m`` with the
+// FULL coefficient if ``j`` is below the band, or the order-2 coefficient (=1) if
+// ``j`` is in the band — and never both.  Bounds are checked per read so this
+// also serves the air-row (mirror) evaluations where the stencil dips below 0.
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_z_2d(
+    const float* __restrict__ q,
+    int ix,
+    int m,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M   = elastic_stencil_half_order<Order>(solver);
+    const int top = solver.surface_row(ix);
+    const int bot = elastic_z_bottom_surface_row(solver);
+    // Order-2 reduction bands (FLAT surface only; topography path is full-order):
+    // top band [top, top+M) and/or bottom band (bot-M, bot].
+    const bool band_top = solver.fsLo(0) && !solver.has_topo;
+    const bool band_bot = solver.fsHi(0) && !solver.has_topo;
+    #define ELASTIC_FS_IN_BAND(j) \
+        ((band_top && (j) >= top && (j) < top + M) || (band_bot && (j) > bot - M && (j) <= bot))
+    const int sz = grad_ctx.sz;
+    const int sx = grad_ctx.sx;
+    float acc = 0.f;
+
+    if constexpr (ForwardType & DIFF_FORWARD) {
+        // full part (matches sgradient<DIFF_BACKWARD>), excluding band output rows
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i;
+            const int jm = m - i - 1;
+            if (jp >= 0 && jp < solver.nz && !ELASTIC_FS_IN_BAND(jp))
+                acc += c * q[jp * sz + ix * sx];
+            if (jm >= 0 && jm < solver.nz && !ELASTIC_FS_IN_BAND(jm))
+                acc -= c * q[jm * sz + ix * sx];
+        }
+        // order-2 part: band output rows j use forward g[j]=(u[j+1]-u[j])/dz,
+        // contributing +q[m] (j=m) and -q[m-1] (j=m-1) in sgradient<BACKWARD> sign.
+        if (ELASTIC_FS_IN_BAND(m))     acc += q[m * sz + ix * sx];
+        if (ELASTIC_FS_IN_BAND(m - 1)) acc -= q[(m - 1) * sz + ix * sx];
+    } else {
+        // full part (matches sgradient<DIFF_FORWARD>), excluding band output rows
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i + 1;
+            const int jm = m - i;
+            if (jp >= 0 && jp < solver.nz && !ELASTIC_FS_IN_BAND(jp))
+                acc += c * q[jp * sz + ix * sx];
+            if (jm >= 0 && jm < solver.nz && !ELASTIC_FS_IN_BAND(jm))
+                acc -= c * q[jm * sz + ix * sx];
+        }
+        // order-2 part: band output rows j use forward g[j]=(u[j]-u[j-1])/dz,
+        // contributing +q[m+1] (j=m+1) and -q[m] (j=m) in sgradient<FORWARD> sign.
+        if (ELASTIC_FS_IN_BAND(m + 1)) acc += q[(m + 1) * sz + ix * sx];
+        if (ELASTIC_FS_IN_BAND(m))     acc -= q[m * sz + ix * sx];
+    }
+    #undef ELASTIC_FS_IN_BAND
+
+    return acc / grad_ctx.dz;
 }
 
 template<int Order, int ForwardType>
@@ -75,10 +212,11 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false   // must match the forward mirror of the SAME field
 )
 {
-    if (!solver.free_surface) {
+    if (!solver.fsLo(0) && !solver.fsHi(0)) {
         if constexpr (ForwardType & DIFF_FORWARD) {
             return sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
         } else {
@@ -86,83 +224,55 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
         }
     }
 
-    // Per-column surface row under irregular topography; ``phys_z0()`` in flat.
-    const int top = solver.surface_row(ix);
+    const int top = solver.surface_row(ix);                 // z-low surface row
+    const int bot = elastic_z_bottom_surface_row(solver);   // z-high surface row
 
-    // Air cell:  ``extend_top_free_surface_topo`` does NOT read u[iz<top]
-    // (those rows are overwritten by mirror values from the solid), so
-    // ∂(D_plain(extend(u)))[iz_out]/∂u[iz<top] = 0 for ALL output positions
-    // iz_out.  Cross-column coupling at air cells goes through the separate
-    // plain x-derivative — it does NOT contribute here.
-    if (iz < top) return 0.f;
+    // Air cells are not independent solid dofs (the forward overwrites them by
+    // the mirror), so ∂/∂u[air] = 0.
+    if (solver.fsLo(0) && iz < top) return 0.f;
+    if (solver.fsHi(0) && iz > bot) return 0.f;
 
-    // The adjoint of D_plain ∘ extend is M^T ∘ D_plain^T.  Per-element form:
-    //
-    //   M^T(h)[iz]  =  h[iz]                              if iz == top
-    //              =  h[iz] + parity * h[2*top - iz]       if iz > top
-    //
-    // where h = D_plain^T(q).  Under per-column topography q[iz_out<top]
-    // is NOT zero (cross-column x-coupling carries energy into air rows in
-    // neighbouring solid columns), so we cannot use the flat-FS shortcut of
-    // gating reads on ``>= top``.  We compute D_plain^T at iz directly via
-    // sgradient (full stencil), then add the parity-weighted mirror copy.
-    float gz;
-    if constexpr (ForwardType & DIFF_FORWARD) {
-        gz = sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
-    } else {
-        gz = sgradient<2, Order, Z, DIFF_FORWARD>(q, ix, 0, iz, grad_ctx);
-    }
-
-    if (iz == top) return gz;
-
-    // Mirror contribution at row mirror_iz = 2*top - iz.  The stencil there
-    // may extend below row 0 if mirror_iz is too small — fall back to a
-    // safe per-element loop in that case.  Otherwise use sgradient.
-    const int mirror_iz = 2 * top - iz;
-    const int M = elastic_stencil_half_order<Order>(solver);
+    // Adjoint of D' ∘ extend is M^T ∘ D'^T.  M^T folds each air region back onto
+    // the interior row the forward mirror READ from, so the fold must use the
+    // SAME index map as the forward:
+    //   integer-grid mirror  m = 2*top - iz        (szz, vx)
+    //   half-cell mirror     m = 2*top - 1 - iz    (sxz, vz;  see
+    //                        ``elastic_top_fs_value_2d``)
+    // Testing ``miz < top`` (rather than a hard-coded ``iz > top``) keeps the
+    // condition correct for both maps — under the half-cell map the surface row
+    // ``iz == top`` is itself the mirror source of the first air row.
     const float parity = odd ? -1.f : 1.f;
+    float gz = elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver);
 
-    float gz_mirror;
-    if (mirror_iz - M >= 0 && mirror_iz + M < solver.nz) {
-        if constexpr (ForwardType & DIFF_FORWARD) {
-            gz_mirror = sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, mirror_iz, grad_ctx);
-        } else {
-            gz_mirror = sgradient<2, Order, Z, DIFF_FORWARD>(q, ix, 0, mirror_iz, grad_ctx);
-        }
-    } else {
-        float acc = 0.f;
-        #pragma unroll
-        for (int m = 0; m < M; ++m) {
-            const float c = grad_ctx.coeff[m];
-            if constexpr (ForwardType & DIFF_FORWARD) {
-                const int jp = mirror_iz + m;
-                const int jm = mirror_iz - m - 1;
-                if (jp >= 0 && jp < solver.nz)
-                    acc += c * q[jp * grad_ctx.sz + ix * grad_ctx.sx];
-                if (jm >= 0 && jm < solver.nz)
-                    acc -= c * q[jm * grad_ctx.sz + ix * grad_ctx.sx];
-            } else {
-                const int jp = mirror_iz + m + 1;
-                const int jm = mirror_iz - m;
-                if (jp >= 0 && jp < solver.nz)
-                    acc += c * q[jp * grad_ctx.sz + ix * grad_ctx.sx];
-                if (jm >= 0 && jm < solver.nz)
-                    acc -= c * q[jm * grad_ctx.sz + ix * grad_ctx.sx];
-            }
-        }
-        gz_mirror = acc / grad_ctx.dz;
+    if (solver.fsLo(0)) {
+        const int miz = (half && !solver.has_topo) ? (2 * top - 1 - iz)
+                                                   : (2 * top - iz);
+        if (miz < top)                  // the mirror source is a top-air row
+            gz += parity * elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, miz, grad_ctx, solver);
+    }
+    if (solver.fsHi(0)) {
+        const bool hz = half && !solver.has_topo;
+        const int miz  = hz ? (2 * bot - 1 - iz) : (2 * bot - iz);
+        const int air0 = hz ? bot : bot + 1;     // half-cell air starts one cell earlier
+        if (miz >= air0)
+            gz += parity * elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, miz, grad_ctx, solver);
     }
 
-    return gz + parity * gz_mirror;
+    return gz;
 }
 
+// True on a z-normal free-surface row: the top (z-low) surface row and/or the
+// bottom (z-high) surface row, whichever faces are active.  (Name kept for the
+// existing call sites; now covers both z faces.)  Legacy top-only reduces to
+// ``free_surface && iz == surface_row``.
 __device__ __forceinline__ bool elastic_is_top_free_surface_row(
     const SolverContext& solver,
     int ix,
     int iz
 )
 {
-    return solver.free_surface && iz == solver.surface_row(ix);
+    return (solver.fsLo(0) && iz == solver.surface_row(ix))
+        || (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver));
 }
 
 // Back-compat overload for callers that don't carry per-column ``ix``.
@@ -173,7 +283,231 @@ __device__ __forceinline__ bool elastic_is_top_free_surface_row(
     int iz
 )
 {
-    return solver.free_surface && iz == solver.phys_z0();
+    return (solver.fsLo(0) && iz == solver.phys_z0())
+        || (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver));
+}
+
+// =====================================================================
+// X-normal free surface (left / right columns).  Mirror of the z helpers
+// above with x<->z swapped: reflect the x-derivative about the left column
+// ``phys_x0()`` (air ``ix < left``) and/or the right column ``phys_x1()-1``
+// (air ``ix > right``).  Parities/operators come from the eager x path
+// (sxx x_forward odd, sxz x_backward odd; vx x_backward odd, vz x_forward
+// even); the x-normal Robertsson corrects szz (not sxx).
+// =====================================================================
+
+__device__ __forceinline__ int elastic_x_left_surface_col(const SolverContext& solver)
+{
+    return solver.phys_x0();
+}
+__device__ __forceinline__ int elastic_x_right_surface_col(const SolverContext& solver)
+{
+    return solver.phys_x1() - 1;
+}
+
+// True where the shear stress ``sxz`` must be zeroed at a free-surface row: ONLY
+// on a HIGH-side face (z-high / x-high), where the surface-row ``sxz`` node lies
+// outside the medium.  On a LOW-side face the surface-row ``sxz`` node sits +h/2
+// INSIDE the medium — a real shear value that must NOT be zeroed (zeroing it is
+// the spurious over-constraint that slowed the top/left Rayleigh wave ~6%; cf.
+// Kristek, Moczo & Archuleta 2002 Table 1, and ``Elastic._fs_zero_traction``).
+__device__ __forceinline__ bool elastic_fs_zero_shear(
+    const SolverContext& solver, int ix, int iz)
+{
+    return (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver))
+        || (solver.fsHi(2) && ix == elastic_x_right_surface_col(solver));
+}
+
+// x-normal analogue of ``elastic_top_fs_value_2d``: sxz and vx sit at x=+h/2,
+// so on an x face they need the half-cell mirror too (2*surf-1-ix), and on the
+// HIGH side their air region starts one column earlier -- exactly as for z.
+__device__ __forceinline__ float elastic_fs_value_x_2d(
+    const float* __restrict__ u,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd,
+    bool half = false
+)
+{
+    const bool hx = half && !solver.has_topo;
+    if (solver.fsLo(2)) {
+        const int left = elastic_x_left_surface_col(solver);
+        if (ix < left) {
+            int m = hx ? (2 * left - 1 - ix) : (2 * left - ix);
+            float v = u[iz * grad_ctx.sz + m * grad_ctx.sx];
+            return odd ? -v : v;
+        }
+    }
+    if (solver.fsHi(2)) {
+        const int right = elastic_x_right_surface_col(solver);
+        const int air0 = hx ? right : right + 1;
+        if (ix >= air0) {
+            int m = hx ? (2 * right - 1 - ix) : (2 * right - ix);
+            float v = u[iz * grad_ctx.sz + m * grad_ctx.sx];
+            return odd ? -v : v;
+        }
+    }
+    return u[iz * grad_ctx.sz + ix * grad_ctx.sx];
+}
+
+template<int Order, int Type>
+__device__ __forceinline__ float elastic_fs_sgradient_x_2d(
+    const float* __restrict__ u,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd,
+    bool half = false
+)
+{
+    if (!solver.fsLo(2) && !solver.fsHi(2)) {
+        return sgradient<2, Order, X, Type>(u, ix, 0, iz, grad_ctx);
+    }
+    const int M = elastic_stencil_half_order<Order>(solver);
+    bool in_o2_band = false;
+    if (solver.fsLo(2)) {
+        const int left = elastic_x_left_surface_col(solver);
+        if (ix - left >= 0 && ix - left < M) in_o2_band = true;
+    }
+    if (solver.fsHi(2)) {
+        const int right = elastic_x_right_surface_col(solver);
+        if (right - ix >= 0 && right - ix < M) in_o2_band = true;
+    }
+    if (in_o2_band) {
+        float gx2 = 0.f;
+        if constexpr (Type & DIFF_FORWARD) {
+            gx2 += elastic_fs_value_x_2d(u, ix + 1, iz, grad_ctx, solver, odd, half)
+                 - elastic_fs_value_x_2d(u, ix,     iz, grad_ctx, solver, odd, half);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            gx2 += elastic_fs_value_x_2d(u, ix,     iz, grad_ctx, solver, odd, half)
+                 - elastic_fs_value_x_2d(u, ix - 1, iz, grad_ctx, solver, odd, half);
+        }
+        return gx2 / grad_ctx.dx;
+    }
+    float gx = 0.f;
+    #pragma unroll
+    for (int m = 0; m < M; ++m) {
+        const float c = grad_ctx.coeff[m];
+        if constexpr (Type & DIFF_FORWARD) {
+            const float up = elastic_fs_value_x_2d(u, ix + m + 1, iz, grad_ctx, solver, odd, half);
+            const float um = elastic_fs_value_x_2d(u, ix - m,     iz, grad_ctx, solver, odd, half);
+            gx += c * (up - um);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            const float up = elastic_fs_value_x_2d(u, ix + m,     iz, grad_ctx, solver, odd, half);
+            const float um = elastic_fs_value_x_2d(u, ix - m - 1, iz, grad_ctx, solver, odd, half);
+            gx += c * (up - um);
+        }
+    }
+    return gx / grad_ctx.dx;
+}
+
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_x_2d(
+    const float* __restrict__ q,
+    int m,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M     = elastic_stencil_half_order<Order>(solver);
+    const int left  = elastic_x_left_surface_col(solver);
+    const int right = elastic_x_right_surface_col(solver);
+    const bool band_left  = solver.fsLo(2);
+    const bool band_right = solver.fsHi(2);
+    #define ELASTIC_FS_IN_XBAND(j) \
+        ((band_left && (j) >= left && (j) < left + M) || (band_right && (j) > right - M && (j) <= right))
+    const int sz = grad_ctx.sz;
+    const int sx = grad_ctx.sx;
+    float acc = 0.f;
+
+    if constexpr (ForwardType & DIFF_FORWARD) {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i;
+            const int jm = m - i - 1;
+            if (jp >= 0 && jp < solver.nx && !ELASTIC_FS_IN_XBAND(jp))
+                acc += c * q[iz * sz + jp * sx];
+            if (jm >= 0 && jm < solver.nx && !ELASTIC_FS_IN_XBAND(jm))
+                acc -= c * q[iz * sz + jm * sx];
+        }
+        if (ELASTIC_FS_IN_XBAND(m))     acc += q[iz * sz + m * sx];
+        if (ELASTIC_FS_IN_XBAND(m - 1)) acc -= q[iz * sz + (m - 1) * sx];
+    } else {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = m + i + 1;
+            const int jm = m - i;
+            if (jp >= 0 && jp < solver.nx && !ELASTIC_FS_IN_XBAND(jp))
+                acc += c * q[iz * sz + jp * sx];
+            if (jm >= 0 && jm < solver.nx && !ELASTIC_FS_IN_XBAND(jm))
+                acc -= c * q[iz * sz + jm * sx];
+        }
+        if (ELASTIC_FS_IN_XBAND(m + 1)) acc += q[iz * sz + (m + 1) * sx];
+        if (ELASTIC_FS_IN_XBAND(m))     acc -= q[iz * sz + m * sx];
+    }
+    #undef ELASTIC_FS_IN_XBAND
+
+    return acc / grad_ctx.dx;
+}
+
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_adjoint_sgradient_x_2d(
+    const float* __restrict__ q,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd,
+    bool half = false   // must match the forward mirror of the SAME field
+)
+{
+    if (!solver.fsLo(2) && !solver.fsHi(2)) {
+        if constexpr (ForwardType & DIFF_FORWARD) {
+            return sgradient<2, Order, X, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
+        } else {
+            return sgradient<2, Order, X, DIFF_FORWARD>(q, ix, 0, iz, grad_ctx);
+        }
+    }
+    const int left  = elastic_x_left_surface_col(solver);
+    const int right = elastic_x_right_surface_col(solver);
+    if (solver.fsLo(2) && ix < left)  return 0.f;
+    if (solver.fsHi(2) && ix > right) return 0.f;
+
+    const float parity = odd ? -1.f : 1.f;
+    float gx = elastic_fs_plain_reduced_adjoint_x_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver);
+    // Fold uses the SAME index map as the forward mirror (see
+    // ``elastic_fs_value_x_2d``); testing whether the mirror source lands in the
+    // air region keeps the condition right for both maps.
+    const bool hx = half && !solver.has_topo;
+    if (solver.fsLo(2)) {
+        const int mix = hx ? (2 * left - 1 - ix) : (2 * left - ix);
+        if (mix < left)
+        gx += parity * elastic_fs_plain_reduced_adjoint_x_2d<Order, ForwardType>(q, mix, iz, grad_ctx, solver);
+    }
+    if (solver.fsHi(2)) {
+        const int mix = hx ? (2 * right - 1 - ix) : (2 * right - ix);
+        const int air0 = hx ? right : right + 1;
+        if (mix >= air0)
+        gx += parity * elastic_fs_plain_reduced_adjoint_x_2d<Order, ForwardType>(q, mix, iz, grad_ctx, solver);
+    }
+    return gx;
+}
+
+__device__ __forceinline__ bool elastic_is_x_free_surface_col(
+    const SolverContext& solver,
+    int ix
+)
+{
+    return (solver.fsLo(2) && ix == elastic_x_left_surface_col(solver))
+        || (solver.fsHi(2) && ix == elastic_x_right_surface_col(solver));
 }
 
 template<int Order>
@@ -196,6 +530,9 @@ __device__ __forceinline__ int elastic3d_index(
     return ix * grad_ctx.sx + iy * grad_ctx.sy + iz * grad_ctx.sz;
 }
 
+// ``half``: sxz / syz / vz sit at z=+h/2, so their image reflects about
+// ``top - 1/2`` (tau_zx(-h/2) = -tau_zx(+h/2), Kristek et al. 2002 Table 1),
+// not about ``top``.  See the 2-D note on ``elastic_top_fs_value_2d``.
 __device__ __forceinline__ float elastic3d_top_fs_value(
     const float* __restrict__ u,
     int ix,
@@ -203,12 +540,13 @@ __device__ __forceinline__ float elastic3d_top_fs_value(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     const int top = solver.phys_z0();
     if (solver.free_surface && iz < top) {
-        iz = 2 * top - iz;
+        iz = half ? (2 * top - 1 - iz) : (2 * top - iz);
         float v = u[elastic3d_index(ix, iy, iz, grad_ctx)];
         return odd ? -v : v;
     }
@@ -223,7 +561,8 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     if (!solver.free_surface) {
@@ -237,13 +576,13 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     for (int m = 0; m < M; ++m) {
         const float c = grad_ctx.coeff[m];
         if constexpr (Type & DIFF_FORWARD) {
-            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m + 1, grad_ctx, solver, odd);
-            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m,     grad_ctx, solver, odd);
+            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m + 1, grad_ctx, solver, odd, half);
+            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m,     grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
         if constexpr (Type & DIFF_BACKWARD) {
-            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m,     grad_ctx, solver, odd);
-            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m - 1, grad_ctx, solver, odd);
+            const float up = elastic3d_top_fs_value(u, ix, iy, iz + m,     grad_ctx, solver, odd, half);
+            const float um = elastic3d_top_fs_value(u, ix, iy, iz - m - 1, grad_ctx, solver, odd, half);
             gz += c * (up - um);
         }
     }
@@ -251,6 +590,11 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     return gz / grad_ctx.dz;
 }
 
+// ``half`` must match the forward mirror of the SAME field: sxz / syz / vz live
+// at z=+h/2 and their image reflects about ``top-1/2`` (index map
+// ``2*top-1-j``), so the adjoint fold and its validity range shift by one cell
+// relative to the integer-grid case (``2*top-j``).  See
+// ``elastic3d_top_fs_value``.
 template<int Order, int ForwardType>
 __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     const float* __restrict__ q,
@@ -259,7 +603,8 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     int iz,
     const SGradParam& grad_ctx,
     const SolverContext& solver,
-    bool odd
+    bool odd,
+    bool half = false
 )
 {
     if (!solver.free_surface) {
@@ -287,8 +632,12 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
             if (jm >= top)
                 gz -= c * q[elastic3d_index(ix, iy, jm, grad_ctx)];
 
-            const int jg = 2 * top + m - iz;
-            if (iz > top && iz <= top + m && jg >= top)
+            // fold of the forward mirror: integer grid reads 2*top-j, the
+            // half-cell grid reads 2*top-1-j, so the ghost index (and the range
+            // of output rows that can reach it) shifts by one.
+            const int jg = (half ? 2 * top - 1 + m - iz : 2 * top + m - iz);
+            const int lo = half ? top - 1 : top;
+            if (iz > lo && iz <= lo + m && jg >= top)
                 gz += c * parity * q[elastic3d_index(ix, iy, jg, grad_ctx)];
         } else {
             const int jp = iz + m + 1;
@@ -299,8 +648,9 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
             if (jm >= top)
                 gz -= c * q[elastic3d_index(ix, iy, jm, grad_ctx)];
 
-            const int jg = 2 * top + m + 1 - iz;
-            if (iz > top && iz <= top + m + 1 && jg >= top)
+            const int jg = (half ? 2 * top + m - iz : 2 * top + m + 1 - iz);
+            const int lo = half ? top - 1 : top;
+            if (iz > lo && iz <= lo + m + 1 && jg >= top)
                 gz += c * parity * q[elastic3d_index(ix, iy, jg, grad_ctx)];
         }
     }

@@ -143,6 +143,7 @@ nav:
               - Acoustic VRZ · FWI imaging: notebooks/17_fwi_vrz_marmousi.ipynb
               - Elastic · Marmousi: notebooks/02_fwi_elastic_marmousi.ipynb
               - Multiscale: notebooks/03_fwi_multiscale.ipynb
+              - Batched local windows · streamer: notebooks/23_batched_local_window_fwi.ipynb
               - 3D Overthrust: notebooks/11_fwi_acoustic_overthrust_3d.ipynb
           - NN · FWI:
               - IFWI · SIREN: notebooks/13_ifwi_siren.ipynb
@@ -151,6 +152,7 @@ nav:
               - Elastic: notebooks/06_wavefield_elastic.ipynb
               - Elastic vector-reflectivity: notebooks/16_elastic_vector_reflectivity.ipynb
               - Topography (irregular FS): notebooks/15_wavefield_topography.ipynb
+              - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
               - AcousticVTI: notebooks/05_wavefield_vti.ipynb
@@ -158,7 +160,8 @@ nav:
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
               - Custom gradient: notebooks/14_custom_gradient.ipynb
-              - ADCIG: notebooks/16_adcig.ipynb
+              - ADCIG · Poynting (custom backward): notebooks/16_adcig.ipynb
+              - ADCIG · space-lag (2D & 3D): notebooks/22_adcig_space_lag.ipynb
           - HPC:
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
@@ -171,6 +174,12 @@ nav:
               - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
+  - Playground:
+      - Overview: playground/index.md
+      - Wave modeling: playground/modeling.md
+      - Seismogram & free surface: playground/seismogram.md
+      - Numerical dispersion: playground/dispersion.md
+      - Anisotropic wavefront: playground/anisotropy.md
   - API Reference:
       - api/index.md
       - Equations:

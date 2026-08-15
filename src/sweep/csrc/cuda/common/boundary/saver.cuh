@@ -417,7 +417,8 @@ struct EffectiveBoundarySaver {
         } else {
             runtime_dtype = sweep_boundary_dtype_env();
         }
-        const bool use_int8 = (runtime_dtype == BoundaryDtype::INT8);
+        const bool use_scaled = (runtime_dtype == BoundaryDtype::INT8 ||
+                                 runtime_dtype == BoundaryDtype::FP16);
         torch::Dtype dtype_storage;
         switch (runtime_dtype) {
             case BoundaryDtype::FP16: dtype_storage = torch::kHalf; break;
@@ -447,52 +448,54 @@ struct EffectiveBoundarySaver {
         int nz_boundary = nz_phys + 2 * tangent_pad;
         int ny_boundary = (dim == 3) ? ny_phys + 2 * tangent_pad : 1;
         
-        const size_t int8_faces = (dim == 3 ? 6 : 4);
-        if (use_int8 && store_on_gpu) {
-            // INT8 gpu-direct: Python owns persistent uint8 main + FP32
-            // scale tensors and passes them concatenated in ``boundary_gpu``
-            // (first half = main, second half = scale).  We bind those
-            // here and allocate FP32 staging buffers internally (single
-            // timestep, transient).
-            TORCH_CHECK(boundary_gpu.size() == 2 * int8_faces,
-                        "INT8 boundary_gpu expects ", 2 * int8_faces,
-                        " tensors (", int8_faces, " main + ", int8_faces,
+        const size_t scaled_faces = (dim == 3 ? 6 : 4);
+        if (use_scaled && store_on_gpu) {
+            // Scaled gpu-direct (INT8 / FP16): Python owns a persistent
+            // payload main (uint8 or fp16) + FP32 per-block scale tensors
+            // and passes them concatenated in ``boundary_gpu`` (first half
+            // = main, second half = scale).  We bind those here and
+            // allocate FP32 staging buffers internally (single timestep,
+            // transient).
+            TORCH_CHECK(boundary_gpu.size() == 2 * scaled_faces,
+                        "Scaled (int8/fp16) boundary_gpu expects ", 2 * scaled_faces,
+                        " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_gpu.size());
             std::vector<torch::Tensor> main_tensors(boundary_gpu.begin(),
-                                                    boundary_gpu.begin() + int8_faces);
-            std::vector<torch::Tensor> scale_tensors(boundary_gpu.begin() + int8_faces,
+                                                    boundary_gpu.begin() + scaled_faces);
+            std::vector<torch::Tensor> scale_tensors(boundary_gpu.begin() + scaled_faces,
                                                      boundary_gpu.end());
-            bind_storage_tensors(main_tensors, "boundary_gpu int8 main");
+            bind_storage_tensors(main_tensors, "boundary_gpu scaled main");
             bind_int8_scales(scale_tensors);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
                                   gpu_options.dtype(torch::kFloat32));
-        } else if (use_int8) {
-            // INT8 staged (cpu/disk): Python owns a persistent uint8 main +
-            // FP32 scale buffer (``boundary_cpu``; on disk these are the cpu
-            // staging buffers) AND a uint8 main + FP32 scale RING on the GPU
-            // (``boundary_gpu``).  Both are concatenated main-then-scale.  We
-            // bind the cpu side to top_t/top_scale_t, the gpu rings to
-            // top_gpu/top_scale_gpu, and allocate the shared FP32 transient
-            // staging internally (a single timestep, like gpu-direct).
-            TORCH_CHECK(boundary_cpu.size() == 2 * int8_faces,
-                        "INT8 staged boundary_cpu expects ", 2 * int8_faces,
-                        " tensors (", int8_faces, " main + ", int8_faces,
+        } else if (use_scaled) {
+            // Scaled staged (cpu/disk): Python owns a persistent payload
+            // main + FP32 scale buffer (``boundary_cpu``; on disk these are
+            // the cpu staging buffers) AND a payload main + FP32 scale RING
+            // on the GPU (``boundary_gpu``).  Both are concatenated
+            // main-then-scale.  We bind the cpu side to top_t/top_scale_t,
+            // the gpu rings to top_gpu/top_scale_gpu, and allocate the
+            // shared FP32 transient staging internally (a single timestep,
+            // like gpu-direct).
+            TORCH_CHECK(boundary_cpu.size() == 2 * scaled_faces,
+                        "Scaled (int8/fp16) staged boundary_cpu expects ", 2 * scaled_faces,
+                        " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_cpu.size());
-            TORCH_CHECK(boundary_gpu.size() == 2 * int8_faces,
-                        "INT8 staged boundary_gpu expects ", 2 * int8_faces,
-                        " tensors (", int8_faces, " main + ", int8_faces,
+            TORCH_CHECK(boundary_gpu.size() == 2 * scaled_faces,
+                        "Scaled (int8/fp16) staged boundary_gpu expects ", 2 * scaled_faces,
+                        " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_gpu.size());
             std::vector<torch::Tensor> cpu_main(boundary_cpu.begin(),
-                                                boundary_cpu.begin() + int8_faces);
-            std::vector<torch::Tensor> cpu_scale(boundary_cpu.begin() + int8_faces,
+                                                boundary_cpu.begin() + scaled_faces);
+            std::vector<torch::Tensor> cpu_scale(boundary_cpu.begin() + scaled_faces,
                                                  boundary_cpu.end());
             std::vector<torch::Tensor> gpu_main(boundary_gpu.begin(),
-                                                boundary_gpu.begin() + int8_faces);
-            std::vector<torch::Tensor> gpu_scale(boundary_gpu.begin() + int8_faces,
+                                                boundary_gpu.begin() + scaled_faces);
+            std::vector<torch::Tensor> gpu_scale(boundary_gpu.begin() + scaled_faces,
                                                  boundary_gpu.end());
-            bind_storage_tensors(cpu_main, "boundary_cpu int8 main");
+            bind_storage_tensors(cpu_main, "boundary_cpu scaled main");
             bind_int8_scales(cpu_scale);
-            bind_staging_tensors(gpu_main, "boundary_gpu int8 main ring");
+            bind_staging_tensors(gpu_main, "boundary_gpu scaled main ring");
             bind_int8_scale_rings(gpu_scale);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
                                   gpu_options.dtype(torch::kFloat32));
@@ -504,7 +507,7 @@ struct EffectiveBoundarySaver {
             allocate_full_storage(ctx, width, nx_boundary, ny_boundary, nz_boundary, storage_options);
         }
 
-        if (!use_int8 && !store_on_gpu) {
+        if (!use_scaled && !store_on_gpu) {
             if (!boundary_gpu.empty())
                 bind_staging_tensors(boundary_gpu, "boundary_gpu");
             else
@@ -533,16 +536,38 @@ struct EffectiveBoundarySaver {
         // decide which set of pointers to populate.
         auto dt = left_t.dtype();
         if (dt == torch::kHalf) {
+            // FP16 is per-block scaled storage (same two-pass flow as
+            // INT8): persistent __half payload + FP32 per-block scales +
+            // FP32 transient staging for the boundary kernels.
+            TORCH_CHECK(top_scale_t.defined(),
+                        "fp16 boundary storage requires per-block scale "
+                        "buffers (allocated by the Python wrapper).");
             v.dtype = BoundaryDtype::FP16;
             v.use_fp16 = true;
-            v.left_h  = reinterpret_cast<__half*>(left_t.data_ptr());
-            v.right_h = reinterpret_cast<__half*>(right_t.data_ptr());
+            v.top_h    = reinterpret_cast<__half*>(top_t.data_ptr());
+            v.bottom_h = reinterpret_cast<__half*>(bottom_t.data_ptr());
+            v.left_h   = reinterpret_cast<__half*>(left_t.data_ptr());
+            v.right_h  = reinterpret_cast<__half*>(right_t.data_ptr());
             if (dim == 3) {
                 v.front_h = reinterpret_cast<__half*>(front_t.data_ptr());
                 v.back_h  = reinterpret_cast<__half*>(back_t.data_ptr());
             }
-            v.bottom_h = reinterpret_cast<__half*>(bottom_t.data_ptr());
-            v.top_h    = reinterpret_cast<__half*>(top_t.data_ptr());
+            v.top_scale    = top_scale_t.data_ptr<float>();
+            v.bottom_scale = bottom_scale_t.data_ptr<float>();
+            v.left_scale   = left_scale_t.data_ptr<float>();
+            v.right_scale  = right_scale_t.data_ptr<float>();
+            if (dim == 3) {
+                v.front_scale = front_scale_t.data_ptr<float>();
+                v.back_scale  = back_scale_t.data_ptr<float>();
+            }
+            v.top    = top_staging_t.data_ptr<float>();
+            v.bottom = bottom_staging_t.data_ptr<float>();
+            v.left   = left_staging_t.data_ptr<float>();
+            v.right  = right_staging_t.data_ptr<float>();
+            if (dim == 3) {
+                v.front = front_staging_t.data_ptr<float>();
+                v.back  = back_staging_t.data_ptr<float>();
+            }
         } else if (dt == torch::kBFloat16) {
             v.dtype = BoundaryDtype::BF16;
             v.use_fp16 = false;
@@ -611,10 +636,12 @@ struct EffectiveBoundarySaver {
             if (!enabled)
                 throw std::runtime_error("Boundary saving not enabled.");
 
-            // INT8 path: saver allocates buffers internally, so an empty
-            // u_boundary from the equation backward.cu fallback is fine
-            // — bail before the size check.
-            if (left_t.defined() && left_t.dtype() == torch::kUInt8)
+            // Scaled paths (INT8 / FP16): the payload+scale layout cannot
+            // be seeded by a plain tensor copy, and an empty u_boundary
+            // from the equation backward.cu fallback is fine — bail
+            // before the size check.
+            if (left_t.defined() && (left_t.dtype() == torch::kUInt8 ||
+                                     left_t.dtype() == torch::kHalf))
                 return;
 
             auto copy_to = [&](torch::Tensor& dst, const torch::Tensor& src)
@@ -752,8 +779,10 @@ struct EffectiveBoundarySaver {
 
     inline void flush_gpu_to_cpu(int start, int len, cudaStream_t stream, int gpu_start = 0)
     {
-        // INT8 staged: flush the FP32 scale ring alongside the uint8 main.
-        if (top_t.defined() && top_t.dtype() == torch::kUInt8)
+        // Scaled staged (INT8/FP16): flush the FP32 scale ring alongside
+        // the payload main.
+        if (top_t.defined() && top_scale_t.defined() &&
+            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf))
             copy_int8_scales(start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
         if (dim == 2)
         {
@@ -890,9 +919,10 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 2)
             throw std::runtime_error("flush_gpu_to_disk_2d only supports 2D boundaries.");
-        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
-        if (paths.size() != (is_int8 ? 8u : 4u))
-            throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8) file paths.");
+        const bool is_scaled = top_t.defined() &&
+            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+        if (paths.size() != (is_scaled ? 8u : 4u))
+            throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8/fp16) file paths.");
 
         size_t top_var_block = top_t.stride(0);
         size_t top_time_block = top_t.stride(1);
@@ -966,8 +996,8 @@ struct EffectiveBoundarySaver {
         meta->right = boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block);
         cudaLaunchHostFunc(stream, write_boundary_disk_2d_callback, meta);
 
-        if (is_int8) {
-            // INT8: flush the FP32 scale ring -> cpu scale staging (D2H), then
+        if (is_scaled) {
+            // Scaled (int8/fp16): flush the FP32 scale ring -> cpu scale staging (D2H), then
             // write the scale to its own files (paths[4..7]) via a second meta
             // reusing the same dtype-agnostic disk-write callback (es=4).
             copy_int8_scales(stage_start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
@@ -1004,9 +1034,10 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 3)
             throw std::runtime_error("flush_gpu_to_disk_3d only supports 3D boundaries.");
-        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
-        if (paths.size() != (is_int8 ? 12u : 6u))
-            throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8) file paths.");
+        const bool is_scaled = top_t.defined() &&
+            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+        if (paths.size() != (is_scaled ? 12u : 6u))
+            throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8/fp16) file paths.");
 
         size_t top_block = top_t.stride(0);
         size_t front_block = front_t.stride(0);
@@ -1086,7 +1117,7 @@ struct EffectiveBoundarySaver {
         meta->right = boundary_byte_ptr(right_t, (int64_t)left_stage_offset);
         cudaLaunchHostFunc(stream, write_boundary_disk_3d_callback, meta);
 
-        if (is_int8) {
+        if (is_scaled) {
             // INT8: flush FP32 scale ring -> cpu scale staging (D2H), then
             // write scale to its own files (paths[6..11]) via a second meta
             // reusing the dtype-agnostic 3D disk-write callback (es=4).
@@ -1139,9 +1170,10 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 2)
             throw std::runtime_error("load_disk_to_cpu_2d only supports 2D boundaries.");
-        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
-        if (paths.size() != (is_int8 ? 8u : 4u))
-            throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8) file paths.");
+        const bool is_scaled = top_t.defined() &&
+            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+        if (paths.size() != (is_scaled ? 8u : 4u))
+            throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8/fp16) file paths.");
 
         size_t top_time_block = top_t.stride(1);
         size_t left_time_block = left_t.stride(1);
@@ -1191,8 +1223,8 @@ struct EffectiveBoundarySaver {
             );
         }
 
-        if (is_int8) {
-            // INT8: read the FP32 per-block scale files (paths[4..7]) into the
+        if (is_scaled) {
+            // Scaled (int8/fp16): read the FP32 per-block scale files (paths[4..7]) into the
             // cpu scale staging; load_cpu_to_gpu then copies it to the ring.
             size_t s_top_time = top_scale_t.stride(1);
             size_t s_left_time = left_scale_t.stride(1);
@@ -1226,9 +1258,10 @@ struct EffectiveBoundarySaver {
     {
         if (dim != 3)
             throw std::runtime_error("load_disk_to_cpu_3d only supports 3D boundaries.");
-        const bool is_int8 = top_t.defined() && top_t.dtype() == torch::kUInt8;
-        if (paths.size() != (is_int8 ? 12u : 6u))
-            throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8) file paths.");
+        const bool is_scaled = top_t.defined() &&
+            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+        if (paths.size() != (is_scaled ? 12u : 6u))
+            throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8/fp16) file paths.");
 
         size_t top_block = top_t.stride(0);
         size_t front_block = front_t.stride(0);
@@ -1267,9 +1300,9 @@ struct EffectiveBoundarySaver {
         readers.emplace_back(read_one, paths[4], left_offset, (void*)boundary_byte_ptr(left_t, (int64_t)left_stage_offset), left_elems);
         readers.emplace_back(read_one, paths[5], left_offset, (void*)boundary_byte_ptr(right_t, (int64_t)left_stage_offset), left_elems);
 
-        if (is_int8) {
-            // INT8: read the FP32 per-block scale files (paths[6..11]) into the
-            // cpu scale staging in parallel; es=4 (the main reads use es=1).
+        if (is_scaled) {
+            // Scaled (int8/fp16): read the FP32 per-block scale files (paths[6..11]) into the
+            // cpu scale staging in parallel; es=4 (main reads use the payload's element size).
             const size_t ses = sizeof(float);
             auto read_one_scale = [&](std::string path, size_t offset, void* dst, size_t elems) {
                 try {
@@ -1308,8 +1341,10 @@ struct EffectiveBoundarySaver {
 
     inline void load_cpu_to_gpu(int start, int len, cudaStream_t stream, int gpu_start = 0)
     {
-        // INT8 staged: load the FP32 scale ring alongside the uint8 main.
-        if (top_t.defined() && top_t.dtype() == torch::kUInt8)
+        // Scaled staged (INT8/FP16): load the FP32 scale ring alongside
+        // the payload main.
+        if (top_t.defined() && top_scale_t.defined() &&
+            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf))
             copy_int8_scales(start, len, gpu_start, cudaMemcpyHostToDevice, stream);
         if (dim == 2)
         {

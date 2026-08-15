@@ -974,3 +974,80 @@ void launch_dequantize_int8(const uint8_t* src, const float* scale,
     dequantize_int8_kernel<<<n_blocks, BOUNDARY_INT8_BLOCK, 0, stream>>>(
         src, scale, dst, total_cells);
 }
+
+// ====================================================================
+// FP16 per-block scaled storage — same two-pass flow and scale layout
+// as INT8, with a __half payload instead of uint8.
+//
+// A bare __float2half cast cannot store elastic boundary values: the
+// wavefield mixes stresses (O(1e-2) here) and velocities (O(1e-8),
+// stress / (rho·vp)), and everything below 2^-24 flushes to zero —
+// which wipes the velocity faces entirely and corrupts the
+// reconstructed gradient.  Normalizing each block by its max |val|
+// moves the payload into [-1, 1], where fp16 keeps its full 10-bit
+// mantissa (rel. ~2^-11, 16× finer than int8's 1/127) and only values
+// >2^24 below their block max can underflow.
+// ====================================================================
+
+__global__ __launch_bounds__(BOUNDARY_INT8_BLOCK) void
+quantize_fp16_kernel(const float* __restrict__ src,
+                     __half* __restrict__ dst,
+                     float* __restrict__ scale,
+                     int64_t total_cells)
+{
+    int tid = threadIdx.x;
+    int64_t block_idx = blockIdx.x;
+    int64_t cell_idx = block_idx * BOUNDARY_INT8_BLOCK + tid;
+
+    float val = (cell_idx < total_cells) ? src[cell_idx] : 0.0f;
+
+    __shared__ float s_max[BOUNDARY_INT8_BLOCK];
+    s_max[tid] = fabsf(val);
+    __syncthreads();
+
+    // Tree reduction.
+    for (int s = BOUNDARY_INT8_BLOCK / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            float other = s_max[tid + s];
+            if (other > s_max[tid]) s_max[tid] = other;
+        }
+        __syncthreads();
+    }
+    float max_abs = s_max[0];
+
+    if (tid == 0) scale[block_idx] = max_abs;
+
+    if (cell_idx < total_cells) {
+        float inv = (max_abs > 0.0f) ? (1.0f / max_abs) : 0.0f;
+        dst[cell_idx] = __float2half(val * inv);
+    }
+}
+
+__global__ __launch_bounds__(BOUNDARY_INT8_BLOCK) void
+dequantize_fp16_kernel(const __half* __restrict__ src,
+                       const float* __restrict__ scale,
+                       float* __restrict__ dst,
+                       int64_t total_cells)
+{
+    int64_t block_idx = blockIdx.x;
+    int64_t cell_idx = block_idx * BOUNDARY_INT8_BLOCK + threadIdx.x;
+    if (cell_idx >= total_cells) return;
+    dst[cell_idx] = __half2float(src[cell_idx]) * scale[block_idx];
+}
+
+void launch_quantize_fp16(const float* src, __half* dst, float* scale,
+                          int64_t total_cells, cudaStream_t stream)
+{
+    int64_t n_blocks = (total_cells + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
+    quantize_fp16_kernel<<<n_blocks, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+        src, dst, scale, total_cells);
+}
+
+void launch_dequantize_fp16(const __half* src, const float* scale,
+                            float* dst, int64_t total_cells,
+                            cudaStream_t stream)
+{
+    int64_t n_blocks = (total_cells + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
+    dequantize_fp16_kernel<<<n_blocks, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+        src, scale, dst, total_cells);
+}
