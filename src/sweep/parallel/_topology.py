@@ -193,7 +193,11 @@ class MeshTopology:
                 raise ValueError(
                     f"Nx={Nx} is not a multiple of px={self.px}; pad the model "
                     f"to a multiple of px (v1 supports uniform tiles only), "
-                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh)."
+                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh) — pad the "
+                    f"TENSOR you hand the solver, after any reparameterisation "
+                    f"has rendered it; padding the stored model instead changes "
+                    f"an INR's coordinate sampling and silently rewrites the "
+                    f"whole velocity field."
                 )
             nx_loc = Nx // self.px
             return (Nz, nx_loc), (0, self.xi * nx_loc)
@@ -203,13 +207,21 @@ class MeshTopology:
                 raise ValueError(
                     f"Ny={Ny} is not a multiple of py={self.py}; pad the model "
                     f"to a multiple of py (v1 supports uniform tiles only), "
-                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh)."
+                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh) — pad the "
+                    f"TENSOR you hand the solver, after any reparameterisation "
+                    f"has rendered it; padding the stored model instead changes "
+                    f"an INR's coordinate sampling and silently rewrites the "
+                    f"whole velocity field."
                 )
             if Nx % self.px != 0:
                 raise ValueError(
                     f"Nx={Nx} is not a multiple of px={self.px}; pad the model "
                     f"to a multiple of px (v1 supports uniform tiles only), "
-                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh)."
+                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh) — pad the "
+                    f"TENSOR you hand the solver, after any reparameterisation "
+                    f"has rendered it; padding the stored model instead changes "
+                    f"an INR's coordinate sampling and silently rewrites the "
+                    f"whole velocity field."
                 )
             ny_loc = Ny // self.py
             nx_loc = Nx // self.px

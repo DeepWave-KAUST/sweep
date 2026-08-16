@@ -108,6 +108,16 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
     **Prefer a rank count whose factors divide the grid** — ``balanced_grid``
     picks such a mesh when one exists and warns when it cannot.
 
+    WHERE in the chain you pad matters, and getting it wrong is silent. Pad the
+    TENSOR you hand the solver — i.e. after any reparameterisation has rendered
+    it. Padding the stored model instead (growing the ``.npy`` before it is
+    read) looks equivalent and is not: an INR renders velocity on normalised
+    coordinates, so changing ``nx`` moves every sample point and the network
+    paints a DIFFERENT model on the columns you already had. Measured on a
+    low-frequency field ``velocity_inr`` case, a one-column pad of the input
+    file changed 87 % of the shared cells by hundreds of m/s — swamping the ~1e-3
+    boundary effect it was meant to isolate.
+
     Two ways to use this differ in what happens to the pad's gradient, and they
     are NOT equivalent:
 
