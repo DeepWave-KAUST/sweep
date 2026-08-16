@@ -11,6 +11,7 @@ from .acoustic_vrz import AcousticVRZ, AcousticVRZ3D
 from .elastic import Elastic
 from .elastic_tti import ElasticTTI
 from .elastic_tti_sg import ElasticTTISG
+from .elastic_tti_sg3d import ElasticTTISG3D
 from .elastic3d import Elastic as Elastic3D
 # DAS family lives in `das.py` which imports torch at module top. Guard the
 # import so jax-only environments (no torch installed) can still

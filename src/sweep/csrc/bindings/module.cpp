@@ -12,6 +12,7 @@
 #include "cuda/equations/elastic2d/elastic2d.h"
 #include "cuda/equations/elastic3d/elastic3d.h"
 #include "cuda/equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
+#include "cuda/equations/elastic_tti_sg3d/elastic_tti_sg3d.h"
 #include "cuda/equations/elastic_vr2d/elastic_vr2d.h"
 #include "cuda/equations/acoustic_vti_1st_2d/acoustic_vti_1st_2d.h"
 #include "cuda/equations/acoustic_vti_1st_3d/acoustic_vti_1st_3d.h"
@@ -124,6 +125,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic_tti_sg2d_backward", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward, EK::ElasticTTISG2D, BM::Full)), "Elastic TTI staggered-grid backward 2D full mode (CUDA/CPU)");
     m.def("elastic_tti_sg2d_backward_bs", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward_bs, EK::ElasticTTISG2D, BM::BoundarySaving)), "Elastic TTI staggered-grid backward 2D boundary-saving mode (CUDA/CPU)");
     m.def("elastic_tti_sg2d_backward_ckpt", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward_ckpt, EK::ElasticTTISG2D, BM::Checkpoint)), "Elastic TTI staggered-grid backward 2D checkpoint mode (CUDA/CPU)");
+    m.def("elastic_tti_sg3d_forward", wrap_forward(elastic_tti_sg3d::forward), "Elastic TTI staggered-grid forward 3D (CUDA only)");
+    m.def("elastic_tti_sg3d_backward", wrap_backward(elastic_tti_sg3d::backward), "Elastic TTI staggered-grid backward 3D full mode (CUDA only)");
+    m.def("elastic_tti_sg3d_backward_bs", wrap_backward(elastic_tti_sg3d::backward_bs), "Elastic TTI staggered-grid backward 3D boundary-saving mode (CUDA only)");
+    m.def("elastic_tti_sg3d_backward_ckpt", wrap_backward(elastic_tti_sg3d::backward_ckpt), "Elastic TTI staggered-grid backward 3D checkpoint mode (CUDA only)");
     m.def("das2d_forward", wrap_forward(dispatch_forward(das2d::forward, EK::DAS2D)), "DAS forward 2D (CUDA/CPU)");
     m.def("das2d_backward", wrap_backward(dispatch_backward(das2d::backward, EK::DAS2D, BM::Full)), "DAS backward 2D (CUDA/CPU)");
     m.def("das2d_backward_bs", wrap_backward(dispatch_backward(das2d::backward_bs, EK::DAS2D, BM::BoundarySaving)), "DAS backward with boundary saving 2D (CUDA/CPU)");
