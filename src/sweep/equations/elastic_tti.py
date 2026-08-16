@@ -243,7 +243,8 @@ class ElasticTTI(FirstOrderEquation):
 
     default_pml_type = "cpmlr"
 
-    def __init__(self, spatial_order=8, device="cpu", backend="torch"):
+    def __init__(self, spatial_order=8, device="cpu", backend="torch",
+                 checkerboard_smoothing=True):
         """Build the 2-D-3C elastic TTI equation operator (RSG variant).
 
         Args:
@@ -261,11 +262,32 @@ class ElasticTTI(FirstOrderEquation):
                 Defaults to ``'cpu'``.
             backend: Array / programming backend, ``'torch'`` or
                 ``'jax'``. Defaults to ``'torch'``.
+            checkerboard_smoothing: The RSG diagonal stencils have a
+                checkerboard null space; a single-cell source excites it and
+                a single-cell receiver samples it (up to 10x the physical
+                signal in weak-radiation directions). When True (default)
+                source injection and receiver sampling are folded through a
+                3x3 binomial stencil, which has exactly zero response to the
+                checkerboard mode and does not move the source/receiver
+                position. Set False to recover the legacy raw point
+                injection/sampling.
         """
         super().__init__(spatial_order, device, backend, ndim=2)
         self.rsg = RSGDerivative(spatial_order, device, backend, ndim=2)
         self.rsg.to_backend(to_backend)
         self.pd = self.rsg
+        self.checkerboard_smoothing = checkerboard_smoothing
+
+    @property
+    def source_receiver_stencil(self):
+        """3x3 binomial stencil folded into source injection / receiver
+        sampling by the eager propagator (see ``checkerboard_smoothing``)."""
+        if not getattr(self, "checkerboard_smoothing", False):
+            return None
+        import torch
+
+        k = torch.tensor([1.0, 2.0, 1.0]) / 4.0
+        return torch.outer(k, k)
 
     @property
     def default_source_fields(self):

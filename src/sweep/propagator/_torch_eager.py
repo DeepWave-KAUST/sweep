@@ -350,8 +350,15 @@ class _PropTorchEager(
         sources = self._as_device_tensor(sources, dtype=torch.long) + self.coord_offset
         receivers = self._as_device_tensor(receivers, dtype=torch.long) + self.coord_offset
 
-        src = SourceTorch(sources, shape_wavefield, self.dev, source_encoding, adj)
-        rec = ReceiverTorch(receivers)
+        # Equations whose collocated stencils have a checkerboard null space
+        # (the rotated staggered grid) declare a small smoothing stencil that
+        # is folded into the source injection and the receiver gather so
+        # point sources/receivers neither excite nor sample the spurious
+        # mode. None (the default) keeps plain single-cell behaviour.
+        sr_stencil = getattr(self.equation, "source_receiver_stencil", None)
+        src = SourceTorch(sources, shape_wavefield, self.dev, source_encoding, adj,
+                          spread_kernel=sr_stencil)
+        rec = ReceiverTorch(receivers, gather_kernel=sr_stencil)
 
         has_aux = False
         if return_wavefield:

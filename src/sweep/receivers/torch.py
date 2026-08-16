@@ -4,11 +4,18 @@ import torch
 
 class ReceiverTorch(ReceiverBase, torch.nn.Module):
 
-    def __init__(self, coords):
+    def __init__(self, coords, gather_kernel=None):
         """Receiver class for the wave equation
 
         Args:
             coords (torch.Tensor): Receiver coordinates (nshots, nreceivers, 2)
+            gather_kernel (torch.Tensor, optional): Small 2-D stencil (e.g. a
+                3x3 binomial) applied as a weighted gather around each
+                receiver cell. Equations whose collocated stencils have a
+                checkerboard null space (the rotated staggered grid) declare
+                it via ``equation.source_receiver_stencil`` so point sampling
+                does not pick up the spurious mode. ``None`` keeps the plain
+                single-cell gather.
         """
         torch.nn.Module.__init__(self)
         super().__init__()
@@ -17,6 +24,28 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
         self.nreceivers = nreceivers
         self.coords_r = [c.flatten().to(torch.int64) for c in torch.split(torch.flip(coords, (-1,)), 1, dim=-1)]
         self.bidx = torch.arange(batch, device=coords.device, dtype=torch.int64).repeat_interleave(nreceivers)
+        self.gather_offsets = None
+        if gather_kernel is not None:
+            if len(self.coords_r) != 2:
+                raise NotImplementedError("receiver gather_kernel is only supported for 2-D wavefields")
+            half = gather_kernel.shape[-1] // 2
+            offsets = []
+            for dz in range(-half, half + 1):
+                for dx in range(-half, half + 1):
+                    w = float(gather_kernel[dz + half, dx + half])
+                    if w != 0.0:
+                        offsets.append((dz, dx, w))
+            self.gather_offsets = offsets
+
+    def _gather(self, wavefields):
+        if self.gather_offsets is None:
+            return wavefields[(self.bidx, slice(None), *self.coords_r)]
+        zc, xc = self.coords_r
+        out = None
+        for dz, dx, w in self.gather_offsets:
+            part = w * wavefields[(self.bidx, slice(None), zc + dz, xc + dx)]
+            out = part if out is None else out + part
+        return out
 
     def forward(self, wavefield):
         """Forward pass of the receiver
@@ -27,7 +56,9 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
         Returns:
             torch.Tensor: The wavefield at the receiver locations
         """
-        return super().forward(wavefield)
+        if self.gather_offsets is None:
+            return super().forward(wavefield)
+        return self._gather(wavefield)
 
     def sample_fields(self, wavefields):
         """Sample multiple receiver fields in one gather operation.
@@ -51,5 +82,5 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
                 f"sample_fields expects stacked wavefields with ndim 4 or 5, got {wavefields.ndim}"
             )
 
-        gathered = wavefields[(self.bidx, slice(None), *self.coords_r)]
+        gathered = self._gather(wavefields)
         return gathered.view(self.batch, self.nreceivers, wavefields.shape[1])
