@@ -65,7 +65,12 @@ def main():
     li = int(os.environ.get("LOCAL_RANK", rank)) % max(1, torch.cuda.device_count())
     torch.cuda.set_device(li)
     dev = torch.device(f"cuda:{li}")
-    assert args.py * args.px == world
+    assert args.py * args.px == world, (
+        f"this check needs nproc-per-node={args.py * args.px} "
+        f"(py={args.py} x px={args.px}), got world={world}. It exists to guard a "
+        f"TWO-AXIS mesh — the corner bug only appears where a cut face crosses "
+        f"the perpendicular PML band — so a 2-rank launch cannot exercise it at "
+        f"all. Launch with 4 ranks, or pass --py/--px matching your rank count.")
     nz, ny, nx, nt = 64, 96, 80, args.nt
     gshape = (nz, ny, nx)
 
