@@ -314,6 +314,15 @@ class ModelParallel:
                             and not _disable_overlap)
 
         self._captured = False
+        # Two-stage capture. ``bp`` -- and every adjoint-side buffer derived from
+        # it -- stays None until a gradient is actually asked for, so a caller's
+        # no_grad first call allocates NO adjoint wavefields and NO boundary
+        # ring (no_grad means no_grad). ``_need_adjoint`` is the sticky signal,
+        # set by forward() at the only point that still sees the caller's
+        # un-detached models; _prepare_call promotes the capture on it.
+        self.bp = None
+        self._need_adjoint = False
+        self._model_dtype = None  # pinned by the first capture; see _capture
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
         self._nwf = self._st["nwf"][0 if self.ndim == 2 else 1]
         self._nrecon = self._st["nrecon"][0 if self.ndim == 2 else 1]
@@ -436,15 +445,53 @@ class ModelParallel:
 
     def _set_models(self, model_tiles: List[np.ndarray]):
         """Rebind both forward and backward params' runtime models from physical
-        tiles: edge re-pad, then one NCCL model-halo exchange to fill cut pads."""
+        tiles: edge re-pad, then one NCCL model-halo exchange to fill cut pads.
+
+        Unconditionally off the tape, like the stepped loops: these are runtime
+        buffer writes and the DD gradient flows through ``_DDForward.backward``,
+        never through them. The no_grad also pins the grad MODE these buffers
+        are touched in, which matters because ``fast_halo`` caches an exchanger
+        (and the strip VIEWS it holds) per ``data_ptr``, built once on first
+        use. Let the views be built under one mode and copy_'d into under the
+        other and autograd refuses the mix: "a view was created in no_grad mode
+        and its base ... has been modified inplace with grad mode enabled".
+        """
         mhalo = self._halo("_model_halo")
-        for rt_f, rt_b, tile in zip(self.fp.models, self.bp.models, model_tiles):
-            self._repad_runtime_model(rt_f, tile)
-            self._exchange(mhalo, rt_f)
-            rt_b.copy_(rt_f)
+        # Before the adjoint capture there is no bp to mirror into. Build an
+        # explicit None-per-model list rather than zip()ing an empty one: zip
+        # would silently truncate to ZERO iterations, skipping the re-pad and
+        # the NCCL model halo entirely -- wrong physics, no error.
+        bmodels = (list(self.bp.models) if self.bp is not None
+                   else [None] * len(model_tiles))
+        with torch.no_grad():
+            for rt_f, rt_b, tile in zip(self.fp.models, bmodels, model_tiles):
+                self._repad_runtime_model(rt_f, tile)
+                self._exchange(mhalo, rt_f)
+                if rt_b is not None:
+                    rt_b.copy_(rt_f)
 
     # --------------------------------------------------------------- capture
-    def _capture(self, wavelet, loc_src, loc_rec, tiles):
+    def _capture(self, wavelet, loc_src, loc_rec, tiles, need_adjoint):
+        # ``need_adjoint`` False = FORWARD-ONLY capture: the probe runs under
+        # no_grad with non-grad models, so _c.py computes requires_backward
+        # False, forces use_boundary_saving off and allocates NEITHER the
+        # adjoint wavefields NOR the boundary ring. Only fp is captured; bp
+        # stays None until _prepare_call promotes (see there).
+        #
+        # torch.no_grad() around the first call is fine either way (forward-only
+        # never needs grad; the adjoint capture lifts it), but inference_mode is
+        # a one-way door: enable_grad does NOT lift it, and -- for BOTH capture
+        # kinds -- the params captured here would hold inference tensors that
+        # reject the in-place writes _set_models does on every later call. Say
+        # so now rather than let either failure surface far from the cause.
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError(
+                "ModelParallel's first call runs a one-time capture whose C "
+                "params must stay writable across later calls, which "
+                "torch.inference_mode() forbids (and the adjoint capture also "
+                "differentiates a probe forward). Make the first call outside "
+                "inference_mode (torch.no_grad() is fine), or warm the "
+                "propagator up with one call before entering inference_mode.")
         impl = self.prop._backend_impl
         cap = {}
         f_orig, b_orig = impl.forward_func, impl.backward_bs_func
@@ -466,14 +513,56 @@ class ModelParallel:
             p.cut_face_mask = self.cut_mask
             out = b_orig(p); cap["bp"] = p; return out
 
-        impl.forward_func, impl.backward_bs_func = fwrap, bwrap
-        models = [torch.tensor(t, device=self.dev, requires_grad=True) for t in tiles]
-        syn = self.prop(wavelet, loc_src, loc_rec, models=models)
-        rec = syn[0] if isinstance(syn, (tuple, list)) else syn
-        rec.sum().backward()
-        impl.forward_func, impl.backward_bs_func = f_orig, b_orig
+        # Allocate the probe's models BEFORE the try: this is the one full-tile
+        # allocation in _capture, i.e. where a real run OOMs, and nothing is
+        # installed yet when it does.
+        # Reuse the dtype the FIRST capture settled on. The steady-state path is
+        # dtype-tolerant (_repad_runtime_model casts each tile to the runtime
+        # buffer's dtype), so a caller may hand a float64 model to any call
+        # after the first; a promotion re-capture that inherited that dtype
+        # would build a float64 probe and the C kernel would reject it
+        # ("expected scalar type Float but found Double"). Pinning the dtype
+        # makes a promoted instance land in exactly the state it would have
+        # reached had it been gradient-capable from its first call. None on the
+        # first capture, so that one still infers from the tile as before.
+        models = [torch.tensor(t, device=self.dev, dtype=self._model_dtype,
+                               requires_grad=need_adjoint) for t in tiles]
+        self._model_dtype = models[0].dtype
+        # The ADJOINT probe is differentiated to grab the backward params, so it
+        # needs grad MODE even when the caller has switched it off — but it only
+        # ever runs once a gradient has actually been asked for, so the textbook
+        # first call ("generate observed data", which nobody wraps in grad) takes
+        # the forward-only branch instead and keeps the caller's no_grad intact.
+        # (_DDForward.forward re-enables grad for the same reason: an
+        # autograd.Function's forward also runs with grad disabled.) The probe's
+        # graph is local to this call; only the C param objects are kept.
+        #
+        # The kernel swap lives INSIDE the try so any raise — including a
+        # half-done swap — still restores. Left installed, fwrap/bwrap would
+        # route every later stepped call through these closures, and since
+        # _captured stays False a retry would read them back as its "originals"
+        # and nest one more layer per failure.
+        #
+        # Cost worth knowing: the ADJOINT probe allocates the adjoint wavefields
+        # and boundary ring, so the first GRADIENT call is heavier than a bare
+        # forward. One-time and inherent to capturing the backward params, not a
+        # leak. On the forward-only branch bwrap never fires (no backward runs),
+        # which is exactly why cap holds no "bp" there. b_func still comes from
+        # b_orig, which needs no probe at all.
+        try:
+            impl.forward_func, impl.backward_bs_func = fwrap, bwrap
+            if need_adjoint:
+                with torch.enable_grad():
+                    syn = self.prop(wavelet, loc_src, loc_rec, models=models)
+                    rec = syn[0] if isinstance(syn, (tuple, list)) else syn
+                    rec.sum().backward()
+            else:
+                with torch.no_grad():
+                    self.prop(wavelet, loc_src, loc_rec, models=models)
+        finally:
+            impl.forward_func, impl.backward_bs_func = f_orig, b_orig
 
-        self.fp, self.bp = cap["fp"], cap["bp"]
+        self.fp, self.bp = cap["fp"], cap.get("bp")
         self.f_func, self.b_func = f_orig, b_orig
         self._cuda_ndim = cap["fraw"][2].ndim
 
@@ -481,6 +570,54 @@ class ModelParallel:
         if not L:
             L = [torch.zeros_like(self.fp.models[0]) for _ in range(self._nwf)]
         self.L_fwd = L
+        if self.bp is not None:
+            self._bind_adjoint_buffers()
+        else:
+            # Forward-only capture: every adjoint-side buffer is exactly what a
+            # no_grad caller must NOT pay for. Empty lists (not absent
+            # attributes) so _run_adjoint's zero-loop and _set_geometry stay
+            # well-typed; _run_adjoint refuses outright until promotion.
+            self.L_adj, self.recon = [], []
+            self.coupling, self.adj_coeffs = [], []
+            self.gbufs, self.illum = [], []
+        self.record = torch.zeros_like(cap["fraw"][2])
+        self.fp.record_out = self.record
+        # Cache the canonical wavelet shape + the per-tile source/receiver counts
+        # so per-shot _set_geometry can validate and reshape. Read it off
+        # ``fp.source``, which a forward-only capture also has: the binding is
+        # ``def_readwrite`` (csrc/bindings/module.cpp), not write-only, and it is
+        # the SAME tensor object bp exposes as ``forward_source`` (_c.py assigns
+        # both from one ``wavelet`` local, and .contiguous() on an already
+        # contiguous tensor returns self), so the shape is identical either way.
+        fsrc = getattr(self.fp, "source", None)
+        self._fs_shape = tuple(fsrc.shape) if fsrc is not None else None
+        self._cap_ls_shape = tuple(np.asarray(loc_src).shape)
+        self._cap_lr_shape = tuple(np.asarray(loc_rec).shape)
+        # Fail loud NOW (on every path, not just multi-shot) if the C bindings
+        # ever rename a geometry field that _set_geometry writes.
+        for obj, who, fields in (
+            (self.fp, "ForwardInput", ("sources_loc", "receivers_loc", "source")),
+            (self.bp, "BackwardInput",
+             ("forward_sources_loc", "adjoint_sources_loc", "forward_source")),
+        ):
+            if obj is None:       # forward-only capture: no bp to validate yet
+                continue
+            missing = [f for f in fields if not hasattr(obj, f)]
+            if missing:
+                raise AttributeError(
+                    f"ModelParallel._set_geometry expects {who} fields {missing}, "
+                    f"absent on this build — the C param bindings changed; update "
+                    f"_set_geometry's field names.")
+        self._captured = True
+
+    def _bind_adjoint_buffers(self):
+        """Allocate + bind every adjoint-side buffer on the captured ``bp``.
+
+        Called from :meth:`_capture` ONLY when the backward params exist, i.e.
+        once a gradient has actually been asked for.  A forward-only capture
+        must leave all of this unallocated -- together with the C-side adjoint
+        wavefields and boundary ring that ``requires_backward=False`` already
+        suppresses, that is the whole memory win of the lazy split."""
         self.L_adj = list(self.bp.adjoint_wavefields)
         if not self.L_adj:
             self.L_adj = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nwf)]
@@ -520,30 +657,6 @@ class ModelParallel:
         else:
             self.illum = []
         self.bp.illum_out = self.illum
-        self.record = torch.zeros_like(cap["fraw"][2])
-        self.fp.record_out = self.record
-        # Cache the canonical wavelet shape + the per-tile source/receiver counts
-        # so per-shot _set_geometry can validate and reshape. The wavelet lives on
-        # the forward params as write-only ``fp.source``; the SAME wavelet is also
-        # exposed (readable) as ``bp.forward_source``, which is what we read here.
-        fsrc = getattr(self.bp, "forward_source", None)
-        self._fs_shape = tuple(fsrc.shape) if fsrc is not None else None
-        self._cap_ls_shape = tuple(np.asarray(loc_src).shape)
-        self._cap_lr_shape = tuple(np.asarray(loc_rec).shape)
-        # Fail loud NOW (on every path, not just multi-shot) if the C bindings
-        # ever rename a geometry field that _set_geometry writes.
-        for obj, who, fields in (
-            (self.fp, "ForwardInput", ("sources_loc", "receivers_loc", "source")),
-            (self.bp, "BackwardInput",
-             ("forward_sources_loc", "adjoint_sources_loc", "forward_source")),
-        ):
-            missing = [f for f in fields if not hasattr(obj, f)]
-            if missing:
-                raise AttributeError(
-                    f"ModelParallel._set_geometry expects {who} fields {missing}, "
-                    f"absent on this build — the C param bindings changed; update "
-                    f"_set_geometry's field names.")
-        self._captured = True
 
     def __call__(self, *args, **kwargs):
         """Alias for :meth:`forward` so a ``ModelParallel`` can be invoked like
@@ -605,7 +718,10 @@ class ModelParallel:
             if self._fs_shape is not None:
                 self._fs_shape = (self._fs_shape[0], int(ls.shape[1]),
                                   self._fs_shape[2])
-                if self.family == "acoustic":
+                # gbufs only exists once the adjoint has been captured; a
+                # forward-only instance still needs the _fs_shape update above
+                # (it reshapes this shot's wavelet into fp.source).
+                if self.family == "acoustic" and self.bp is not None:
                     self.gbufs[0] = torch.zeros(
                         self._fs_shape, dtype=self.gbufs[0].dtype,
                         device=self.gbufs[0].device)
@@ -622,11 +738,14 @@ class ModelParallel:
         if fs is not None:
             self.fp.source = fs
         # backward params (reconstruct forward from source; adjoint injected at
-        # the receivers -> adjoint_sources_loc carries the receiver coords)
-        self.bp.forward_sources_loc = src_rt
-        self.bp.adjoint_sources_loc = rec_rt
-        if fs is not None:
-            self.bp.forward_source = fs
+        # the receivers -> adjoint_sources_loc carries the receiver coords).
+        # Skipped before the adjoint capture: promotion re-captures with the
+        # LIVE geometry, so bp is born correct rather than patched up here.
+        if self.bp is not None:
+            self.bp.forward_sources_loc = src_rt
+            self.bp.adjoint_sources_loc = rec_rt
+            if fs is not None:
+                self.bp.forward_source = fs
 
     # --------------------------------------------------------------- forward
     def forward(self, wavelet, sources_global, receivers_global, models):
@@ -642,18 +761,46 @@ class ModelParallel:
         an in-place optimiser step changed the model, which would risk silently
         running on a stale model.)
 
-        AUTOGRAD: if any model tensor ``requires_grad``, the returned record is
-        differentiable — ``loss.backward()`` on a misfit populates each model's
-        ``.grad`` (== :meth:`gradient` of the residual), exactly like the
-        single-domain ``PropTorch`` autograd path. With no grad-requiring model
-        it stays on the fast ``torch.no_grad`` stepped path; the explicit
-        :meth:`gradient` adjoint API remains for manual control."""
-        if (models is not None
+        AUTOGRAD: if any model tensor ``requires_grad`` AND grad mode is on, the
+        returned record is differentiable — ``loss.backward()`` on a misfit
+        populates each model's ``.grad`` (== :meth:`gradient` of the residual),
+        exactly like the single-domain ``PropTorch`` autograd path. Otherwise it
+        stays on the forward-only stepped path; the explicit :meth:`gradient`
+        adjoint API remains for manual control.
+
+        MEMORY: the forward-only path allocates neither the adjoint wavefields
+        nor the nt-scaled boundary ring — the capture that binds them is
+        deferred until a gradient is first asked for. So wrapping a modelling /
+        observed-data / line-search forward in ``torch.no_grad()`` is not
+        cosmetic: it is how you avoid paying for gradient machinery you never
+        use. An instance promoted to gradient-capable keeps that machinery for
+        its lifetime (``use_boundary_saving`` is frozen at capture), so build a
+        separate ``ModelParallel`` for pure-forward work if you want it to stay
+        light."""
+        # ``torch.is_grad_enabled()`` is part of the predicate because
+        # ``requires_grad`` is a TENSOR property, blind to grad mode: without it
+        # a caller who writes ``with torch.no_grad(): ddp(..., models=[vp])``
+        # around the inversion leaf — a line-search trial, a QC forward on the
+        # current iterate, observed data through a model that happens to carry
+        # requires_grad — would still take the autograd path and pay for the
+        # whole nt-scaled boundary ring and the adjoint wavefields it explicitly
+        # opted out of. no_grad means no_grad, exactly as it does for every
+        # other torch op.
+        if (models is not None and torch.is_grad_enabled()
                 and any(torch.is_tensor(m) and m.requires_grad for m in models)):
             if not all(torch.is_tensor(m) for m in models):
                 raise TypeError(
                     "ModelParallel autograd forward needs every model as a tensor "
                     "when any requires grad (got a mix of tensor/non-tensor).")
+            # The ONLY frame that still sees the caller's UN-detached models:
+            # _DDForward.forward re-enters forward() with models detached and
+            # autograd.Function.forward runs with grad off, so one frame down
+            # this fact is unrecoverable. Must stay INSIDE this branch -- set at
+            # function top, the reentrant call would recompute False from the
+            # detached models and erase it. Sticky on purpose: once an instance
+            # has been asked for a gradient, a later no_grad forward must not
+            # downgrade it back to a forward-only capture.
+            self._need_adjoint = True
             return _DDForward.apply(
                 self, wavelet, sources_global, receivers_global, *models)
         sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
@@ -673,10 +820,19 @@ class ModelParallel:
         # it).
         if not self._own_rec_idx:
             self.record.zero_()
-        # hand the DD-consistent ring to the backward params
-        self.bp.boundary_gpu = list(self.fp.boundary_gpu)
-        self.bp.u_last_two = self.fp.last_two
-        return self.record
+        # hand the DD-consistent ring to the backward params (a forward-only
+        # capture has neither: fp.boundary_gpu is [] and fp.last_two is the
+        # empty placeholder, because use_boundary_saving was never on)
+        if self.bp is not None:
+            self.bp.boundary_gpu = list(self.fp.boundary_gpu)
+            self.bp.u_last_two = self.fp.last_two
+        # Clone: ``self.record`` is a live buffer that the NEXT call zeroes in
+        # _prepare_call, so handing it out aliases every shot of an observed-data
+        # loop to one tensor that goes to zero on the following iteration. Until
+        # now the autograd path masked this for grad-carrying models (it returns
+        # a detached clone), but no_grad calls are routed here on purpose, so the
+        # buffer must not escape. The record is small next to a wavefield.
+        return self.record.clone()
 
     def _prepare_call(self, wavelet, sources_global, receivers_global, models):
         """Per-call forward setup shared by every step loop: slice the model (or
@@ -732,7 +888,39 @@ class ModelParallel:
 
         geom_key = (ls.tobytes(), lr.tobytes(), wav.tobytes())
         if not self._captured:
-            self._capture(wav, ls, lr, tiles)
+            self._capture(wav, ls, lr, tiles, self._need_adjoint)
+            self._geom_key = geom_key
+        elif self._need_adjoint and self.bp is None:
+            # LAZY ADJOINT PROMOTION: the first capture was forward-only and a
+            # gradient is now wanted. It has to happen HERE -- before THIS
+            # call's forward -- not at backward time: the boundary ring is
+            # written BY the forward (see the save_forward_* calls in the CUDA
+            # forwards) and fp.use_boundary_saving was frozen False when the
+            # forward-only fp was captured, so a bp grafted on afterwards would
+            # reconstruct from a ring nobody ever wrote (and stepped+BS
+            # TORCH_CHECKs a non-empty boundary_gpu). Re-capture with THIS
+            # call's geometry so _geom_key stays honest and _set_geometry is
+            # not needed. Fires at most once per instance (bp is set after).
+            if tiles is None:
+                raise RuntimeError(
+                    "ModelParallel's first grad-requiring call must pass "
+                    "models=[...]: the forward-only first capture allocated no "
+                    "adjoint buffers, so models=None has nothing to reuse.")
+            # fast_halo keys exchangers by data_ptr and each one holds strip
+            # VIEWS of the tensor it was built on -- a strong ref to that base.
+            # The re-capture replaces fp.models and L_fwd, so a kept cache would
+            # pin the superseded buffers for the process lifetime. Rebuilding is
+            # rank-local (it only constructs P2POp objects, no collective) and
+            # numerically inert (a pure strip copy-send/copy-recv).
+            # _bwd_halo is still None -- no adjoint has run on this instance.
+            self._fwd_halo = self._model_halo = None
+            # Release the forward-only capture's forward state BEFORE the probe
+            # allocates its own, so promotion never holds two full forward sets
+            # at once. _captured goes False first so an OOM here leaves a clean
+            # "capture again next call" state rather than a half-built one.
+            self.fp, self.L_fwd, self.record = None, [], None
+            self._captured = False
+            self._capture(wav, ls, lr, tiles, True)
             self._geom_key = geom_key
         elif geom_key != self._geom_key:
             # source/receiver/wavelet changed since capture (multi-shot) — swap
@@ -807,6 +995,14 @@ class ModelParallel:
         not by calling this directly."""
         if not self._captured:
             raise RuntimeError("forward() must run before the adjoint")
+        if self.bp is None:
+            raise RuntimeError(
+                "ModelParallel has only a forward-only capture: the last "
+                "forward ran with no grad-requiring model, so no boundary ring "
+                "was saved and there is nothing to reconstruct the forward "
+                "wavefield from. Re-run that forward with a requires_grad "
+                "model (the autograd path promotes the capture automatically) "
+                "before asking for the adjoint.")
         self.bp.adjoint_source = torch.as_tensor(
             adjoint_source_tile, device=self.dev, dtype=torch.float32)
         for t in self.L_adj + self.recon + self.gbufs + self.illum + self.coupling + self.adj_coeffs:
