@@ -28,9 +28,8 @@ class SourceTorch(SourceBase, torch.nn.Module):
         if spread_kernel is not None:
             if len(shape) != 4:
                 raise NotImplementedError("source spread_kernel is only supported for 2-D wavefields")
-            self.spread_kernel = spread_kernel.to(device=dev, dtype=torch.float32).view(
-                1, 1, *spread_kernel.shape
-            )
+            k = torch.as_tensor(spread_kernel, dtype=torch.float32, device=dev)
+            self.spread_kernel = k.view(1, 1, *k.shape)
 
         flipped = torch.flip(coords, [-1])
         batch_idx = torch.zeros(coords.shape[0], dtype=torch.long, device=coords.device)

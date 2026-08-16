@@ -239,8 +239,12 @@ class PropJax(PropBase):
         sources = jnp.array(sources, dtype=jnp.int32) + coord_offset
         receivers = jnp.array(receivers, dtype=jnp.int32) + coord_offset
 
-        src = SourceJax(sources, shape_wavefield, source_encoding, adj)
-        rec = ReceiverJax(receivers)
+        # Same checkerboard-suppression stencil as the torch eager path (see
+        # ``equation.source_receiver_stencil``); None keeps point behaviour.
+        sr_stencil = getattr(self.equation, "source_receiver_stencil", None)
+        src = SourceJax(sources, shape_wavefield, source_encoding, adj,
+                        spread_kernel=sr_stencil)
+        rec = ReceiverJax(receivers, gather_kernel=sr_stencil)
 
         for name in self.wavefield_names:
             setattr(self, name, jnp.zeros(shape_wavefield, dtype=jnp.float32))
