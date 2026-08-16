@@ -70,6 +70,48 @@ __global__ void add_body_force_rho_grad_correction(
 }
 
 
+__global__ void sub_receiver_rho_grad_correction(
+    float* __restrict__ grad_rho,
+    const float* __restrict__ fv_now,
+    const float* __restrict__ fv_next,
+    const float* __restrict__ rho,
+    const float* __restrict__ adjoint_source,
+    const int* __restrict__ receivers_loc,
+    int it,
+    int nrec,
+    int loc_dim,
+    int halo,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nrec) return;
+    if (it < 0 || it >= solver.nt) return;
+
+    int base = (b * nrec + s) * loc_dim;
+    int ix = receivers_loc[base + 0];
+    int iz = receivers_loc[base + loc_dim - 1];
+    int iy = (loc_dim == 3) ? receivers_loc[base + 1] : 0;
+
+    // Same guards the imaging kernels apply: outside the grid, or inside the
+    // stencil halo they skip, nothing was imaged here so there is nothing to undo.
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+    if (loc_dim == 3 && (iy < halo || iy >= solver.ny - halo))
+        return;
+
+    int spatial_size = solver.nx * solver.nz * (loc_dim == 3 ? solver.ny : 1);
+    int row = (loc_dim == 3) ? (iz * solver.ny + iy) : iz;
+    int u_idx = b * spatial_size + row * solver.nx + ix;
+    int src_idx = (b * nrec + s) * solver.nt + it;
+
+    atomicAdd(&grad_rho[u_idx],
+              -adjoint_source[src_idx] * (fv_now[u_idx] - fv_next[u_idx]) / rho[u_idx]);
+}
+
+
 __global__ void record_kernel(
     const float* __restrict__ u,        // (B, nz, nx)
     float* __restrict__ record,          // (B, nrec, nt)
