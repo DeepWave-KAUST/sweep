@@ -114,6 +114,7 @@ void backward_segment_ckpt(
     SolverContext solver,
     StiffnessPointer model,
     StiffnessGradPointer grad_view,
+    torch::Tensor& grad_rho,
     const torch::Tensor& source_fields,
     const torch::Tensor& receiver_fields,
     const std::array<torch::Tensor, 6>& workspace,
@@ -207,6 +208,32 @@ void backward_segment_ckpt(
                 adjoint_nsrc,
                 solver
             );
+        }
+
+
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with v(it) - v(it+1), which at a source cell still contains
+        // the raw injected amplitude amp(it+1); the true derivative has no such
+        // term (the injection is rho-independent).  Compensate at the source
+        // cells (kernel in common.cu).  Fields: vx = 0, vy = 1, vz = 2.
+        if (it + 1 < static_cast<int>(p.nt)) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                const int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = field_ptr(adj_view, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grad_rho.data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    2,
+                    solver
+                );
+            }
         }
 
         const int offset = it - start;
@@ -319,9 +346,11 @@ BackwardOutput backward(const BackwardInput& in)
     const int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     const int nrec_fields = p.receiver_field_indices.numel();
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    auto source_fields = p.source_field_indices.to(torch::kCPU);
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
+    auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
         for (int irec = 0; irec < nrec_fields; ++irec) {
@@ -335,6 +364,32 @@ BackwardOutput backward(const BackwardInput& in)
                 adjoint_nsrc,
                 solver
             );
+        }
+
+
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with v(it) - v(it+1), which at a source cell still contains
+        // the raw injected amplitude amp(it+1); the true derivative has no such
+        // term (the injection is rho-independent).  Compensate at the source
+        // cells (kernel in common.cu).  Fields: vx = 0, vy = 1, vz = 2.
+        if (it + 1 < static_cast<int>(p.nt)) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                const int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = field_ptr(adj_view, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grads[0].data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    2,
+                    solver
+                );
+            }
         }
 
         const float* vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
@@ -535,6 +590,32 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 adjoint_nsrc,
                 solver
             );
+        }
+
+
+        // Body-force (velocity) sources: the rho imaging correlates the adjoint
+        // velocity with v(it) - v(it+1), which at a source cell still contains
+        // the raw injected amplitude amp(it+1); the true derivative has no such
+        // term (the injection is rho-independent).  Compensate at the source
+        // cells (kernel in common.cu).  Fields: vx = 0, vy = 1, vz = 2.
+        if (it + 1 < static_cast<int>(p.nt)) {
+            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
+                const int sfield_bf = source_fields[isrc_bf].item<int>();
+                if (sfield_bf > 2) continue;
+                float* adj_field_bf = field_ptr(adj_view, sfield_bf);
+                if (adj_field_bf == nullptr) continue;
+                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                    grads[0].data_ptr<float>(),
+                    adj_field_bf,
+                    rho.data_ptr<float>(),
+                    p.forward_source.data_ptr<float>(),
+                    p.forward_sources_loc.data_ptr<int>(),
+                    it + 1,
+                    (int)p.forward_sources_loc.size(1),
+                    2,
+                    solver
+                );
+            }
         }
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
@@ -761,6 +842,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             solver,
             model,
             grad_view,
+            grads[0],
             source_fields,
             receiver_fields,
             workspace,
