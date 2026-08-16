@@ -192,7 +192,8 @@ class MeshTopology:
             if Nx % self.px != 0:
                 raise ValueError(
                     f"Nx={Nx} is not a multiple of px={self.px}; pad the model "
-                    f"to a multiple of px (v1 supports uniform tiles only)."
+                    f"to a multiple of px (v1 supports uniform tiles only), "
+                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh)."
                 )
             nx_loc = Nx // self.px
             return (Nz, nx_loc), (0, self.xi * nx_loc)
@@ -201,12 +202,14 @@ class MeshTopology:
             if Ny % self.py != 0:
                 raise ValueError(
                     f"Ny={Ny} is not a multiple of py={self.py}; pad the model "
-                    f"to a multiple of py (v1 supports uniform tiles only)."
+                    f"to a multiple of py (v1 supports uniform tiles only), "
+                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh)."
                 )
             if Nx % self.px != 0:
                 raise ValueError(
                     f"Nx={Nx} is not a multiple of px={self.px}; pad the model "
-                    f"to a multiple of px (v1 supports uniform tiles only)."
+                    f"to a multiple of px (v1 supports uniform tiles only), "
+                    f"e.g. sweep.parallel.pad_to_mesh(model, mesh)."
                 )
             ny_loc = Ny // self.py
             nx_loc = Nx // self.px
