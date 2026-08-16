@@ -241,3 +241,66 @@ def test_tti_sg_rho_gradient_matches_eager_for_body_force(source_type, tag):
         a, b = eager[i].flatten(), cuda[i].flatten()
         cos = float(a @ b / max(float(a.norm() * b.norm()), 1e-30))
         assert cos > 0.99, f"{tag}: grad {name} cos={cos:.4f} (CUDA vs eager)"
+
+# ---------------------------------------------------------------------------
+# RSG checkerboard suppression (source/receiver binomial stencil)
+# ---------------------------------------------------------------------------
+
+def test_rsg_checkerboard_stencil_contract():
+    """ElasticTTI (RSG) exposes a 3x3 binomial source/receiver stencil by
+    default; the axis-aligned SG variant must NOT inherit it."""
+    eq = ElasticTTI(spatial_order=4)
+    k = eq.source_receiver_stencil
+    assert k is not None and tuple(k.shape) == (3, 3)
+    assert abs(float(k.sum()) - 1.0) < 1e-6
+    # exact zero response to the (-1)^(i+j) checkerboard mode
+    sign = torch.tensor([[1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [1.0, -1.0, 1.0]])
+    assert abs(float((k * sign).sum())) < 1e-7
+    assert ElasticTTI(spatial_order=4, checkerboard_smoothing=False).source_receiver_stencil is None
+    assert ElasticTTISG(spatial_order=4).source_receiver_stencil is None
+
+
+def test_rsg_traces_match_sg_with_smoothing():
+    """With the default smoothing the RSG receiver traces must agree with the
+    axis-aligned SG reference; the legacy raw sampling (smoothing off) is
+    dominated by the checkerboard mode away from the strong-radiation
+    direction and must NOT be this close."""
+    shape = (120, 120)
+    dh, dt, nt, abcn = 5.0, 5e-4, 240, 16
+    f0, delay = 20.0, 0.05
+    t = np.arange(nt, dtype=np.float32) * dt - delay
+    wavelet = (1e3 * (1 - 2 * (np.pi * f0 * t) ** 2)
+               * np.exp(-((np.pi * f0 * t) ** 2))).astype(np.float32)
+    nz, nx = shape
+    src = np.array([[nx // 2, nz // 2]], dtype=np.int64)
+    # receivers below (vz-strong) and horizontal (vz-weak, checkerboard-prone)
+    rec = np.array([[[nx // 2, nz // 2 + 25], [nx // 2 + 25, nz // 2]]], dtype=np.int64)
+
+    def _models():
+        vals = [2500.0, 1300.0, 2000.0, 0.20, 0.08, 0.0, 0.5236, 0.0]
+        return [torch.full(shape, v) for v in vals]
+
+    def _run(eq):
+        solver = PropTorch(
+            eq, shape, dh=dh, dt=dt, nt=nt, abcn=abcn, device="cpu",
+            impl="eager", eager_options=EagerOptions(use_compile=False),
+            use_ckpt=False, pml_type=eq.default_pml_type,
+            source_type=["vz"], receiver_type=["vz"], backend="torch",
+        )
+        with torch.no_grad():
+            out = solver(wavelet, src, rec, models=_models())
+        return out.detach().squeeze(0).squeeze(-1).T  # (nrec, nt)
+
+    ref = _run(ElasticTTISG(spatial_order=4, device="cpu", backend="torch"))
+    on = _run(ElasticTTI(spatial_order=4, device="cpu", backend="torch"))
+    off = _run(ElasticTTI(spatial_order=4, device="cpu", backend="torch",
+                          checkerboard_smoothing=False))
+
+    for k in range(ref.shape[0]):
+        a, b = ref[k], on[k]
+        cos_on = float((a * b).sum() / max(float(a.norm() * b.norm()), 1e-30))
+        assert cos_on > 0.98, f"receiver {k}: smoothed RSG vs SG cos={cos_on:.4f}"
+    # horizontal receiver: raw sampling must be visibly contaminated
+    a, b = ref[1], off[1]
+    rel_off = float((a - b).norm() / a.norm())
+    assert rel_off > 0.3, f"legacy raw sampling unexpectedly clean: rel={rel_off:.3f}"

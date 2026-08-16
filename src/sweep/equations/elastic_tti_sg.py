@@ -303,6 +303,9 @@ class ElasticTTISG(ElasticTTI):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"  # SG variant uses 8 staggered CPML profiles, not 6.
+    # Axis-aligned stencils have no checkerboard null space — keep plain
+    # point sources/receivers (overrides the RSG parent's smoothing stencil).
+    source_receiver_stencil = None
 
     def __init__(self, spatial_order=8, device="cpu", backend="torch"):
         """Build the 2-D-3C elastic TTI equation operator (axis-aligned SG).
