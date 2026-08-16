@@ -23,11 +23,17 @@ Top-level objects:
 
 :func:`exchange_halos`
     Convenience: call :class:`HaloExchange` for each field in a list.
+
+:func:`pad_to_mesh` / :func:`unpad_from_mesh`
+    Differentiable high-side edge-padding of a model up to the uniform-tile
+    multiple, and its loud inverse. Source / receiver indices survive
+    unchanged; optimise the unpadded tensor and pad inside the closure.
 """
 
 from sweep.parallel._topology import MeshTopology, balanced_grid
 from sweep.parallel.halo import HaloExchange, exchange_halos
 from sweep.parallel.mesh import ModelParallelMesh
+from sweep.parallel.padding import pad_to_mesh, unpad_from_mesh
 from sweep.parallel.pml import build_rank_pml_widths
 from sweep.parallel.routing import partition_global_coords
 
@@ -39,7 +45,9 @@ __all__ = [
     "balanced_grid",
     "build_rank_pml_widths",
     "exchange_halos",
+    "pad_to_mesh",
     "partition_global_coords",
+    "unpad_from_mesh",
 ]
 
 
