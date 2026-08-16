@@ -210,6 +210,7 @@ wavefields, and backend / binding behavior:
 - [ElasticTTI](elastic_tti.md)
 - [ElasticTTISG](elastic_tti_sg.md)
 - [ElasticTTISG3D](elastic_tti_sg3d.md)
+- [ElasticTTI2nd](elastic_tti_2nd.md)
 
 **DAS family**
 
