@@ -204,8 +204,13 @@ class _CustomGradientMixin:
                 fld_idx = [self.wavefield_names.index(n) for n in names]
                 regs.append((idx, fn, fld_idx, names))
 
-        src = SourceTorch(src_loc, shape_wf, self.dev, source_encoding, adj=False)
-        rec = ReceiverTorch(rec_loc)
+        # Same checkerboard-suppression stencil as the core eager path, so a
+        # custom imaging condition does not silently fall back to raw point
+        # injection/sampling on the rotated staggered grid.
+        sr_stencil = getattr(self.equation, "source_receiver_stencil", None)
+        src = SourceTorch(src_loc, shape_wf, self.dev, source_encoding, adj=False,
+                          spread_kernel=sr_stencil)
+        rec = ReceiverTorch(rec_loc, gather_kernel=sr_stencil)
 
         nt = wavelet.shape[-1]
         # Source-injection needs at least one require_grad leaf for autograd
