@@ -281,13 +281,16 @@ class ElasticTTI(FirstOrderEquation):
     @property
     def source_receiver_stencil(self):
         """3x3 binomial stencil folded into source injection / receiver
-        sampling by the eager propagator (see ``checkerboard_smoothing``)."""
+        sampling by the propagator (see ``checkerboard_smoothing``).
+
+        Returned as a plain NumPy array so both the torch and the jax
+        front-ends can consume it without importing the other backend."""
         if not getattr(self, "checkerboard_smoothing", False):
             return None
-        import torch
+        import numpy as np
 
-        k = torch.tensor([1.0, 2.0, 1.0]) / 4.0
-        return torch.outer(k, k)
+        k = np.array([1.0, 2.0, 1.0], dtype=np.float32) / 4.0
+        return np.outer(k, k)
 
     @property
     def default_source_fields(self):

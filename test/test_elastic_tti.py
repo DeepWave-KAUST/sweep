@@ -254,8 +254,8 @@ def test_rsg_checkerboard_stencil_contract():
     assert k is not None and tuple(k.shape) == (3, 3)
     assert abs(float(k.sum()) - 1.0) < 1e-6
     # exact zero response to the (-1)^(i+j) checkerboard mode
-    sign = torch.tensor([[1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [1.0, -1.0, 1.0]])
-    assert abs(float((k * sign).sum())) < 1e-7
+    sign = np.array([[1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [1.0, -1.0, 1.0]])
+    assert abs(float((np.asarray(k) * sign).sum())) < 1e-7
     assert ElasticTTI(spatial_order=4, checkerboard_smoothing=False).source_receiver_stencil is None
     assert ElasticTTISG(spatial_order=4).source_receiver_stencil is None
 
@@ -304,3 +304,10 @@ def test_rsg_traces_match_sg_with_smoothing():
     a, b = ref[1], off[1]
     rel_off = float((a - b).norm() / a.norm())
     assert rel_off > 0.3, f"legacy raw sampling unexpectedly clean: rel={rel_off:.3f}"
+
+
+def test_rsg_stencil_is_backend_neutral():
+    """The stencil must be a plain array (not a torch tensor): the jax
+    front-end consumes the same property in environments without torch."""
+    k = ElasticTTI(spatial_order=4).source_receiver_stencil
+    assert isinstance(k, np.ndarray), f"stencil must stay backend-neutral, got {type(k)}"
