@@ -106,7 +106,12 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
     the model. DD itself stays bit-exact against a single domain on the SAME
     padded problem; the numbers above are the pad's own cost, not DD's.
     **Prefer a rank count whose factors divide the grid** — ``balanced_grid``
-    picks such a mesh when one exists and warns when it cannot.
+    picks such a mesh when one exists and warns when it cannot. Do not expect
+    to always dodge it: real grids are not friendly numbers. On a seven-band
+    field cascade NO rank count divided all seven, and two bands admitted
+    none at all above one rank, their extents being prime. In a multi-band cascade the pad is therefore
+    unavoidable, which is why it is documented and warned about rather than
+    designed away.
 
     WHERE in the chain you pad matters, and getting it wrong is silent. Pad the
     TENSOR you hand the solver — i.e. after any reparameterisation has rendered
