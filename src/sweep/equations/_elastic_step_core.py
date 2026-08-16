@@ -110,8 +110,13 @@ def elastic_velocity_substep(
     # ---- Stress gradients ------------------------------------------------
     txx_x = pd.x_forward(sxx)
     if has_topo:
+        # Same staggering argument as the flat branch below: sxz sits at
+        # z=+h/2 and reflects about ``iz_surf-1/2`` (half=True); szz is on the
+        # surface plane and keeps the integer-grid mirror.  With a constant
+        # ``topo_rows == top_halo`` this reproduces the flat path exactly.
         txz_z = top_free_surface_derivative_topo(
-            sxz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows
+            sxz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows,
+            half=True,
         )
         tzz_z = top_free_surface_derivative_topo(
             szz, pd.z_forward, top_halo, True, axis=-2, iz_surf=topo_rows
@@ -189,8 +194,10 @@ def elastic_stress_substep(
     # ---- Velocity gradients ----------------------------------------------
     vx_x = pd.x_backward(vx)
     if has_topo:
+        # vz sits at z=+h/2 -> half-cell mirror; vx is on the surface plane.
         vz_z = top_free_surface_derivative_topo(
-            vz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows
+            vz, pd.z_backward, top_halo, True, axis=-2, iz_surf=topo_rows,
+            half=True,
         )
         vx_z = top_free_surface_derivative_topo(
             vx, pd.z_forward, top_halo, False, axis=-2, iz_surf=topo_rows

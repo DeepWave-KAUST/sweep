@@ -126,9 +126,17 @@ def test_flat_zeros_matches_no_topography_elastic():
 
 
 def test_surface_stresses_clean_under_hill():
-    """σ_zz and σ_xz at the per-column surface row must be exactly zero
-    throughout the simulation (Dirichlet BC enforcement at the image
-    method's surface)."""
+    """σ_zz at the per-column surface row must be exactly zero throughout the
+    simulation, and σ_xz must NOT be.
+
+    Kristek, Moczo & Archuleta (2002), Table 1 prescribes exactly one stress
+    component on a z-low free surface: ``tau_zz(0) = 0``.  ``tau_zx`` lives at
+    ``z = +h/2`` — half a cell *inside* the medium — and is set by the image
+    antisymmetry (their Eq. 7), so force-zeroing its surface row is a spurious
+    over-constraint; it cost ~6% in Rayleigh phase velocity until it was
+    removed for low-side faces.  This test therefore pins the *absence* of that
+    zeroing as well, so re-introducing it fails here instead of silently
+    slowing the surface wave."""
     wavelet = _wavelet()
     models = list(_models())
 
@@ -169,7 +177,13 @@ def test_surface_stresses_clean_under_hill():
     szz_max = szz_surface.abs().max().item()
     sxz_max = sxz_surface.abs().max().item()
     assert szz_max == 0.0, f"σ_zz not zero on surface: max |σ_zz| = {szz_max}"
-    assert sxz_max == 0.0, f"σ_xz not zero on surface: max |σ_xz| = {sxz_max}"
+    # σ_xz is a +h/2 medium value: finite, and deliberately not pinned to zero.
+    assert np.isfinite(sxz_max), f"σ_xz on surface is not finite: {sxz_max}"
+    assert sxz_max > 0.0, (
+        "σ_xz was force-zeroed on the low-side surface row — that is the "
+        "Kristek 2002 over-constraint removed in the image-method FS fix "
+        "(it slows the Rayleigh wave ~6%); only σ_zz belongs on the surface."
+    )
 
     # Sanity: the forward actually produced signal (receivers recorded vx, vz).
     assert syn.abs().max().item() > 0.0, "forward produced an all-zero record"
