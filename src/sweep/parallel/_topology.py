@@ -286,6 +286,25 @@ def balanced_grid(
         key = (min(ny, nx), nx)            # squarest tile, then fattest x
         if best is None or key > best[0]:
             best = (key, (py, px))
-    if best is None:                        # nothing divides evenly -> x-cut
+    if best is None:
+        # Nothing divides evenly. The x-cut fallback still needs the caller to
+        # pad, and padding is NOT free: it grows the domain in front of the
+        # high-side PML, so the run answers a slightly different problem than
+        # the unpadded one. Measured on acoustic 3-D: ~1.7e-5 relative gradient
+        # difference on a small 80x95x95 / 700-step case (localised at the
+        # padded faces), but ~1.3e-3 and spread over the WHOLE volume on a
+        # production 109x294x135 / 5258-step encoded run — the perturbation has
+        # time to traverse the model. DD itself stays bit-exact either way; this
+        # is the pad's own cost. Say so, because the alternative is that it
+        # quietly lands in a result someone later compares against history.
+        import warnings
+
+        warnings.warn(
+            f"balanced_grid: no (py, px) with py*px={tiles} divides "
+            f"global_shape={global_shape}, so the model must be padded up "
+            f"(sweep.parallel.pad_to_mesh) and the run will not match an "
+            f"unpadded one. Prefer a rank count whose factors divide the grid "
+            f"— or accept the pad knowingly.",
+            RuntimeWarning, stacklevel=2)
         return (1, tiles)
     return best[1]

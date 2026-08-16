@@ -87,6 +87,42 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
     the invented cells add no impedance contrast, and for torch tensors
     the operation is differentiable with the replicate adjoint (pad-cell
     gradients sum back onto the edge cells).
+
+    Notes
+    -----
+    THE PAD IS NOT FREE, and its cost grows with the run. It adds cells in
+    front of the high-side PML, so a padded run answers a slightly different
+    problem than the unpadded one. Measured, acoustic 3-D, gradient relL2
+    against the same problem run WITHOUT the pad:
+
+    * ``80x95x95``, 700 steps, 1-cell pad -> ``1.7e-5``, and 98 % of the
+      difference sits in the padded faces;
+    * ``109x294x135``, 5258 steps, 24 encoded sources, 1-cell pad ->
+      ``1.3e-3``, spread over the WHOLE volume (every cell differs; median
+      distance to the nearest tile face 9 cells).
+
+    So "the pad only perturbs the edge" holds for short runs and stops holding
+    for production ones — given enough steps the edge perturbation traverses
+    the model. DD itself stays bit-exact against a single domain on the SAME
+    padded problem; the numbers above are the pad's own cost, not DD's.
+    **Prefer a rank count whose factors divide the grid** — ``balanced_grid``
+    picks such a mesh when one exists and warns when it cannot.
+
+    Two ways to use this differ in what happens to the pad's gradient, and they
+    are NOT equivalent:
+
+    * RECOMMENDED — keep the UNPADDED tensor as the optimisation variable and
+      call this inside the loss closure. The pad cells stay tied to the edge
+      cell and their gradient folds back onto it through the replicate adjoint
+      (exact integer factors; see ``test_model_parallel_padding.py``).
+    * Pad once, optimise the PADDED array, strip it at the end with
+      :func:`unpad_from_mesh`. Now the pad cells are independent parameters:
+      they drift off the edge value as the inversion proceeds (so they stop
+      being a replicate), and ``unpad_from_mesh`` is a plain slice, so whatever
+      gradient they accumulated is discarded instead of returning to the edge
+      column. On a production run the pad column carried ~8 % of the peak
+      gradient magnitude, so this is not a rounding-level difference. Freeze
+      the pad region if you take this route.
     """
     py, px = _factors(mesh, py, px)
     dy, dx = _pad_amounts(model.shape, py, px)
