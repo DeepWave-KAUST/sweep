@@ -120,13 +120,28 @@ def main():
     live = float(r_ref.abs().max()) > 0.0
 
     # ---- the no_grad-captured instance must still do gradients ------------
-    grad_ok = False
+    # Compared BOTH ways on purpose: against another ModelParallel (same mesh,
+    # same partial-gradient convention) and against a genuine single-domain
+    # PropTorch. The DD-vs-DD half alone would leave the whole no_grad-first
+    # path resting on a transitive argument, since every pre-existing
+    # DD-vs-single-domain check enters with a grad-carrying model on call one.
+    grad_ok = single_ok = False
     if first_ok:
         v_a = torch.tensor(vp, device=dev, requires_grad=True)
         (ddp(wav, src, rec, models=[v_a]).double() ** 2).sum().backward()
         v_b = torch.tensor(vp, device=dev, requires_grad=True)
         (ref(wav, src, rec, models=[v_b]).double() ** 2).sum().backward()
         grad_ok = bool(torch.equal(v_a.grad, v_b.grad))
+
+        eq_s = Acoustic3D(spatial_order=args.so, device=dev, backend="torch")
+        prop_s = PropTorch(eq_s, backend="torch", impl="c", shape=shape, dh=DH,
+                           dt=DT, nt=nt, abcn=args.abcn, source_type=["h1"],
+                           receiver_type=["h1"], dev=dev, free_surface=True)
+        v_s = torch.tensor(vp, device=dev, requires_grad=True)
+        (prop_s(wav, src, rec, models=[v_s]).double() ** 2).sum().backward()
+        g_a = v_a.grad.clone()
+        dist.all_reduce(g_a)          # per-rank partials -> the global gradient
+        single_ok = bool(torch.equal(g_a, v_s.grad))
 
     # ---- inference_mode is NOT liftable: demand a legible error -----------
     # enable_grad() cannot re-enable autograd inside inference_mode, and the
@@ -141,7 +156,7 @@ def main():
         if rank == 0 and not inf_ok:
             print(f"  inference_mode raised, but unhelpfully: {str(e)[:120]}")
 
-    ok = first_ok and rec_bit and grad_ok and inf_ok and live
+    ok = first_ok and rec_bit and grad_ok and inf_ok and live and single_ok
     if rank == 0:
         print(f"mesh py{args.py}xpx{args.px}  shape={shape}  nt={nt}  so={args.so}")
         print(f"reference record carries signal:          {live}"
@@ -150,6 +165,7 @@ def main():
               f"{'' if first_ok else f'  <-- {type(crashed).__name__}: {crashed}'}")
         print(f"record bit-exact vs grad-enabled capture: {rec_bit}")
         print(f"gradient still bit-exact afterwards:      {grad_ok}")
+        print(f"no_grad-first DD == SINGLE DOMAIN:        {single_ok}")
         print(f"inference_mode gives a legible error:     {inf_ok}")
         print(f"-> {'PASS' if ok else 'FAIL'}")
 

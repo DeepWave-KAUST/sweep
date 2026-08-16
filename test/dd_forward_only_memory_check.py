@@ -158,7 +158,27 @@ def main():
     (fwd(wav, src, rec, models=[v_p]).double() ** 2).sum().backward()
     grad_bit = bool(torch.equal(v_p.grad, v_b.grad))
 
-    ok = live and rec_bit and no_adjoint and no_ring and lighter and grad_bit
+    # ---- ...and against a genuine SINGLE-DOMAIN run -----------------------
+    # The DD-vs-DD comparison above only proves the promoted instance matches
+    # another ModelParallel. Every existing DD-vs-single-domain check takes the
+    # grad-from-the-first-call path, so without this the promotion path would
+    # rest on a transitive argument (promoted == grad-first, grad-first ==
+    # single) chained across two different test setups rather than measured.
+    # Each rank's DD gradient is a partial over its owned receivers, so
+    # all_reduce assembles the global gradient the single domain computes.
+    eq_s = Acoustic3D(spatial_order=args.so, device=dev, backend="torch")
+    prop_single = PropTorch(eq_s, backend="torch", impl="c", shape=shape, dh=DH,
+                            dt=DT, nt=nt, abcn=args.abcn, source_type=["h1"],
+                            receiver_type=["h1"], dev=dev, free_surface=True)
+    v_s = torch.tensor(vp, device=dev, requires_grad=True)
+    (prop_single(wav, src, rec, models=[v_s]).double() ** 2).sum().backward()
+
+    g_dd = v_p.grad.clone()
+    dist.all_reduce(g_dd)
+    vs_single = bool(torch.equal(g_dd, v_s.grad))
+
+    ok = (live and rec_bit and no_adjoint and no_ring and lighter and grad_bit
+          and vs_single)
     if rank == 0:
         print(f"mesh py{args.py}xpx{args.px}  shape={shape}  nt={nt}  so={args.so}")
         print(f"reference record carries signal:      {live}"
@@ -171,6 +191,7 @@ def main():
         print(f"forward-only holds less memory:       {lighter}"
               f"  ({fwd_held / MiB:.1f} vs {ref_held / MiB:.1f} MiB)")
         print(f"gradient after promotion bit-exact:   {grad_bit}")
+        print(f"promoted DD == SINGLE DOMAIN:         {vs_single}")
         print(f"-> {'PASS' if ok else 'FAIL'}")
 
     fail = torch.tensor([0 if ok else 1], device=dev)
