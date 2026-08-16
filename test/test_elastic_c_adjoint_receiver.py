@@ -199,6 +199,85 @@ def test_elastic3d_receiver_cell_rho_gradient():
         assert rel < 1e-3, f"mode={mode}: receiver-cell rho rel={rel:.2e}"
 
 
+# --------------------------------------------------------------------------- #
+# 3. a receiver sitting ON the source cell
+# --------------------------------------------------------------------------- #
+def _grads_coincident(shape, impl, mode="full"):
+    """Body-force source with one of the receivers on the source cell — an
+    ordinary land geometry (shot on its own receiver line)."""
+    from sweep.propagator.options import CkptOptions, CUDAOptions, EagerOptions, MemoryOptions
+    from sweep.propagator.torch import PropTorch
+    if len(shape) == 2:
+        from sweep.equations import Elastic as EQ
+        src = np.array([[shape[1] // 2, shape[0] // 4]], np.int64)
+        rec = np.array([[[shape[1] // 2, shape[0] // 4], [shape[1] // 2 + 6, 3]]], np.int64)
+    else:
+        from sweep.equations import Elastic3D as EQ
+        src = np.array([[shape[2] // 2, shape[1] // 2, shape[0] // 4]], np.int64)
+        rec = np.array([[[shape[2] // 2, shape[1] // 2, shape[0] // 4],
+                         [shape[2] // 2 + 6, shape[1] // 2, 3]]], np.int64)
+
+    dev = "cuda"
+    eq = EQ(spatial_order=SO, device=dev, backend="torch")
+    kw = dict(backend="torch", shape=shape, abcn=16, dh=DH, dt=DT, dev=dev,
+              pml_type="cpmls", nt=NT, B=1, free_surface=False,
+              source_type=["vz"], receiver_type=["vz"])
+    if impl == "eager":
+        p = PropTorch(eq, impl="eager", use_ckpt=False,
+                      eager_options=EagerOptions(use_compile=False), **kw)
+    elif mode == "full":
+        p = PropTorch(eq, impl="c", use_ckpt=False,
+                      boundary_saving_config={"enabled": False}, **kw)
+    elif mode == "bs":
+        p = PropTorch(eq, impl="c", use_ckpt=False,
+                      boundary_saving_config={"enabled": True, "storage": "gpu"}, **kw)
+    else:
+        p = PropTorch(eq, impl="c", cuda_options=CUDAOptions(
+            memory=MemoryOptions(strategy="ckpt",
+                                 ckpt=CkptOptions(mode="chunk", chunks=20))), **kw)
+
+    t = np.arange(NT, dtype=np.float32) * DT - 0.12
+    x = np.pi * 8.0 * t
+    wav = torch.tensor((1e3 * (1 - 2 * x * x) * np.exp(-x * x)).astype(np.float32),
+                       device=dev)
+    models = [torch.tensor(a, device=dev, requires_grad=True) for a in _models(shape)]
+    p(wav, src.copy(), rec.copy(), models=models).pow(2).sum().backward()
+    cell = tuple(int(c) for c in (src[0][::-1] if len(shape) == 2
+                                  else (src[0][2], src[0][1], src[0][0])))
+    return [m.grad.detach().double().cpu() for m in models], cell
+
+
+@pytest.mark.parametrize("mode", ["full", "bs", "ckpt"])
+def test_elastic2d_receiver_on_source_cell_rho_gradient(mode):
+    """Body-force source with a velocity receiver on the SAME cell.
+
+    The rho imaging is corrected twice there — once for the source injection
+    contained in v(it) - v(it+1), once for the receiver residual sitting in the
+    adjoint velocity.  If the source-cell correction runs on the post-injection
+    adjoint velocity the two corrections double-count and impl='c' returns
+    ~2x (2-D) / ~3.4x (3-D) the true derivative at that one cell.
+    """
+    shape = (48, 56)
+    ref, cell = _grads_coincident(shape, "eager")
+    got, _ = _grads_coincident(shape, "c", mode=mode)
+    rel_cell = abs(float(got[2][cell] - ref[2][cell])) / max(abs(float(ref[2][cell])), 1e-30)
+    assert rel_cell < 1e-3, (
+        f"mode={mode}: rho gradient at the shared source/receiver cell {cell} "
+        f"is off by {rel_cell:.2e} (c={float(got[2][cell]):.6e}, "
+        f"eager={float(ref[2][cell]):.6e})")
+    assert _rel(got[2], ref[2]) < 1e-3
+
+
+def test_elastic3d_receiver_on_source_cell_rho_gradient():
+    shape = (24, 20, 24)
+    ref, cell = _grads_coincident(shape, "eager")
+    for mode in ("full", "bs"):
+        got, _ = _grads_coincident(shape, "c", mode=mode)
+        rel_cell = abs(float(got[2][cell] - ref[2][cell])) / max(abs(float(ref[2][cell])), 1e-30)
+        assert rel_cell < 1e-3, f"mode={mode}: shared-cell rho off by {rel_cell:.2e}"
+        assert _rel(got[2], ref[2]) < 1e-3
+
+
 @pytest.mark.parametrize("source_type", [["sxx", "szz"], ["sxz"], ["vx"]])
 def test_elastic2d_receiver_cell_rho_gradient_source_types(source_type):
     """The receiver-cell term is independent of how the source is loaded."""

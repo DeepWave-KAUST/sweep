@@ -83,6 +83,46 @@ void undo_receiver_rho_injection_3d(
     }
 }
 
+// Body-force (velocity) sources: the rho imaging correlates the adjoint
+// velocity with the stored v-difference, which at a source cell still contains
+// the raw injected amplitude; the true derivative has no such term.  Compensate
+// at the source cells.
+//
+// Must run BEFORE this step's receiver residuals are injected — at a cell that
+// is BOTH a source and a receiver the post-injection adjoint velocity carries
+// the residual too and the correction over-shoots by resid * amp / rho (that is
+// the case where impl='c' used to return ~3.4x the true d(loss)/d(rho) in 3-D).
+void undo_body_force_source_injection_3d(
+    const fdtd::LaunchConfig& fwd_source_config,
+    torch::Tensor& grad_rho,
+    ElasticWavefieldPointer& adj_view,
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& source_fields,
+    int it,
+    const SolverContext& solver
+)
+{
+    if (it < 0 || it >= p.nt) return;
+    for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+        const int sfield = source_fields[isrc].item<int>();
+        if (sfield > 2) continue;                       // vx = 0, vy = 1, vz = 2
+        float* adj_field = elastic_field_ptr(adj_view, 3, sfield);
+        if (adj_field == nullptr) continue;
+        add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            grad_rho.data_ptr<float>(),
+            adj_field,
+            rho.data_ptr<float>(),
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            (int)p.forward_sources_loc.size(1),
+            3,
+            solver
+        );
+    }
+}
+
 int find_previous_checkpoint_idx_3d(
     const int* checkpoint_steps,
     int num_saved_checkpoints,
@@ -422,6 +462,9 @@ void backward_segment_3d(
     for (int it = end - 1; it >= start; --it) {
         auto adj_view = adjoint.view();
 
+        undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -433,30 +476,6 @@ void backward_segment_3d(
                 adjoint_nsrc,
                 solver
             );
-        }
-
-        // Body-force (velocity) sources: the rho imaging correlates the adjoint
-        // velocity with stored v-differences that still contain the raw injected
-        // amplitude; the true derivative has no such term (the injection is
-        // rho-independent).  Compensate at the source cells (common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    3,
-                    solver
-                );
-            }
         }
 
         const int offset = it - start;
@@ -671,6 +690,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     for (int it = p.nt - 1; it >= 1; --it) {
 
+        undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -682,30 +704,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 adjoint_nsrc,
                 solver
             );
-        }
-
-        // Body-force (velocity) sources: the rho imaging correlates the adjoint
-        // velocity with stored v-differences that still contain the raw injected
-        // amplitude; the true derivative has no such term (the injection is
-        // rho-independent).  Compensate at the source cells (common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    3,
-                    solver
-                );
-            }
         }
         // Wavefield reconstruction
         // Substract source term from forward wavefield
@@ -905,6 +903,9 @@ BackwardOutput backward(const BackwardInput& in)
         elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
 
     for (int it = p.nt - 1; it >= 0; --it) {
+        undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -916,30 +917,6 @@ BackwardOutput backward(const BackwardInput& in)
                 adjoint_nsrc,
                 solver
             );
-        }
-
-        // Body-force (velocity) sources: the rho imaging correlates the adjoint
-        // velocity with stored v-differences that still contain the raw injected
-        // amplitude; the true derivative has no such term (the injection is
-        // rho-independent).  Compensate at the source cells (common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    3,
-                    solver
-                );
-            }
         }
 
         const float* vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
@@ -1249,6 +1226,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
 
+        undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
+
         for (int irec = 0; irec < static_cast<int>(p.receiver_field_indices.numel()); ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -1260,30 +1240,6 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
                 p.adjoint_sources_loc.size(1),
                 solver
             );
-        }
-
-        // Body-force (velocity) sources: the rho imaging correlates the adjoint
-        // velocity with stored v-differences that still contain the raw injected
-        // amplitude; the true derivative has no such term (the injection is
-        // rho-independent).  Compensate at the source cells (common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = elastic_field_ptr(adj_view, 3, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    3,
-                    solver
-                );
-            }
         }
 
         replay_forward_to_time_3d(
