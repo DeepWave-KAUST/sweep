@@ -146,8 +146,13 @@ class PropJax(PropBase):
         rec_seq = propagate(tuple(models), wavelet)    # [nt, B, nrec, ntype]
         return jnp.transpose(rec_seq, (1, 0, 2, 3))
 
-    def pad(self, d, padding=None):
+    def pad_model(self, d, padding=None):
         """Edge-replicate-pad a model to the runtime (PML + halo) shape.
+
+        Named ``pad_model`` rather than ``pad``: ``PropBase.__init__`` binds
+        the per-edge PML widths to ``self.pad`` (a tuple), which would shadow
+        a method of that name and make every ``__call__`` raise
+        ``TypeError: 'tuple' object is not callable``.
 
         Uses ``edge_pad`` (a custom-VJP pad whose backward slices the
         cotangent back out) — the differentiable-path default used by
@@ -467,7 +472,7 @@ class PropJax(PropBase):
         **kwargs,
     ):
         models = models if models is not None else self.parameters()
-        models = [self.pad(para, self._runtime_padding()) for para in models]
+        models = [self.pad_model(para, self._runtime_padding()) for para in models]
         return self.forward_base(
             wavelet,
             sources,
