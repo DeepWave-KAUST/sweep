@@ -103,7 +103,18 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
 
     So "the pad only perturbs the edge" holds for short runs and stops holding
     for production ones — given enough steps the edge perturbation traverses
-    the model. DD itself stays bit-exact against a single domain on the SAME
+    the model.
+
+    It also scales with how close the ACQUISITION sits to the padded face, and
+    that dependence is steep. Same 2-D setup, only the source/receiver
+    positions moved: with the shot a third of the way in, the gradient moves
+    1.7e-7; with the shot 2 cells from the padded edge and a receiver on the
+    last physical column, it moves 6.5e-2 — five orders of magnitude, because
+    the pad pushes the PML one cell further from a near-boundary source and the
+    gradient is near-source dominated. A survey that runs right up to the high
+    edge will feel the pad far more than the headline numbers suggest. The
+    indices themselves stay valid either way (see below); this is physics, not
+    bookkeeping. DD itself stays bit-exact against a single domain on the SAME
     padded problem; the numbers above are the pad's own cost, not DD's.
     **Prefer a rank count whose factors divide the grid** — ``balanced_grid``
     picks such a mesh when one exists and warns when it cannot. Do not expect
@@ -112,6 +123,21 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
     none at all above one rank, their extents being prime. In a multi-band cascade the pad is therefore
     unavoidable, which is why it is documented and warned about rather than
     designed away.
+
+    Sources and receivers need NO adjustment, which is the whole reason the pad
+    is high-side only and never touches z: cell ``(iz, iy, ix)`` of the original
+    model is still ``(iz, iy, ix)`` after padding, so every integer coordinate
+    still addresses the same physical cell, and the free surface / sea floor do
+    not move. Verified rather than asserted — with the same source/receiver
+    arrays used on a padded and an unpadded run, the trace furthest from the
+    padded face is bit-identical (``relL2 = 0``). Pad on the LOW side instead
+    and every coordinate would need remapping.
+
+    Anything else defined per cell must be padded the SAME way, though — water
+    masks, seabed depths, gradient masks. This function pads bool arrays too,
+    so ``pad_to_mesh(mask, mesh)`` is the answer; a mask left unpadded is a
+    shape mismatch, which is loud, but a mask padded with a different rule is
+    not.
 
     WHERE in the chain you pad matters, and getting it wrong is silent. Pad the
     TENSOR you hand the solver — i.e. after any reparameterisation has rendered
