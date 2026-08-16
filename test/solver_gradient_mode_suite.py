@@ -56,6 +56,7 @@ from sweep.equations import (  # noqa: E402
     Elastic,
     Elastic3D,
     ElasticTTISG,
+    ElasticTTISG3D,
 )
 from sweep.propagator.options import (  # noqa: E402
     BoundaryOptions,
@@ -225,6 +226,35 @@ SOLVERS = {
             "ckpt_chunk_cpu",
         ),
     ),
+    "elastic_tti_sg3d": SolverSpec(
+        "elastic_tti_sg3d",
+        ElasticTTISG3D, 3,
+        ("vp0", "vs0", "rho", "epsilon", "delta", "gamma", "theta", "phi"),
+        ("sxx", "syy", "szz"),
+        ("vx", "vy", "vz"),
+        "cpmls",
+        elastic=True,
+        # Same binding surface as the 2-D TTI SG: no ``ckpt_recursive``.
+        supported_modes=(
+            "full",
+            "bs_gpu",
+            "bs_gpu_fp16",
+            "bs_gpu_bf16",
+            "bs_gpu_int8",
+            "bs_cpu",
+            "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
+            "bs_disk",
+            "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
+            "ckpt_chunk",
+            "ckpt_chunk_cpu",
+        ),
+    ),
 }
 
 SCENARIOS = {
@@ -326,6 +356,7 @@ def require_cuda_bindings(solver_keys: list[str]):
         "elastic2d": "elastic2d",
         "elastic3d": "elastic3d",
         "elastic_tti_sg2d": "elastic_tti_sg2d",
+        "elastic_tti_sg3d": "elastic_tti_sg3d",
         "acoustic_vti_1st_2d": "acoustic_vti_1st_2d",
         "acoustic_vti_1st_3d": "acoustic_vti_1st_3d",
     }

@@ -164,6 +164,7 @@ nav:
           - Elastic3D: api/equations/elastic3d.md
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md
+          - ElasticTTISG3D: api/equations/elastic_tti_sg3d.md
           - DAS family: api/equations/das.md
       - Operators:
           - api/operators/index.md

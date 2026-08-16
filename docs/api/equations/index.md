@@ -167,7 +167,9 @@ through the equation class.
     First-order TTI elastic equation on a rotated staggered grid; supports the
     compiled C++ / CUDA binding.
 
-    See [ElasticTTISG](elastic_tti_sg.md) for parameter meanings.
+    See [ElasticTTISG](elastic_tti_sg.md) for parameter meanings; the 3-D
+    variant is [ElasticTTISG3D](elastic_tti_sg3d.md) (axis-aligned SG, 21
+    Bond-rotated stiffness entries, full/bs/ckpt CUDA backward).
 
 === "DAS family"
 
@@ -207,6 +209,7 @@ wavefields, and backend / binding behavior:
 - [Elastic3D](elastic3d.md)
 - [ElasticTTI](elastic_tti.md)
 - [ElasticTTISG](elastic_tti_sg.md)
+- [ElasticTTISG3D](elastic_tti_sg3d.md)
 
 **DAS family**
 
