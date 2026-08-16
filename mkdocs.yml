@@ -167,6 +167,7 @@ nav:
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
               - Domain decomposition · model-parallel: notebooks/22_domain_decomposition.ipynb
+              - Domain decomposition · Overthrust 3-D: notebooks/25_dd_overthrust_3d.ipynb
           - Extending:
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
           - Sensitivity & resolution:
