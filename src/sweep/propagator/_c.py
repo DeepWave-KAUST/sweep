@@ -636,9 +636,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.rtm_func = self.equation._C_rtm() if hasattr(self.equation, "_C_rtm") else None
 
         # APM CUDA path — only attached when the equation supports it AND the
-        # user selected ``topo_method='apm'``.  Replaces forward_func only;
-        # backward stays on the standard path (CUDA APM backward is a stub —
-        # gradients should be computed via eager autograd).
+        # user selected ``topo_method='apm'``.  Forward only: the APM backward
+        # kernels are attached so the dispatch stays uniform, but they return a
+        # wrong rho gradient at body-force source cells, so
+        # ``_guard_apm_backward`` refuses any backward through this path and
+        # sends gradients to eager autograd (see that method for the numbers).
         if (getattr(self, "_topo_method", None) == "apm"
                 and hasattr(self.equation, "_C_apm")):
             apm_funcs = self.equation._C_apm()
@@ -701,6 +703,53 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.compute_adcig = False
         self.adcig_max_lag = 0
         self.adcig = None
+
+    def _guard_apm_backward(self, requires_backward):
+        """The CUDA APM backward returns a WRONG rho gradient.
+
+        ``topo_method='apm'`` (Cao & Chen 2018 parameter-modified surface) is a
+        CUDA **forward** path; its backward was always meant to be taken through
+        eager autograd — see the note on the ``_C_apm()`` dispatch above — but
+        nothing enforced that, so it quietly handed back a gradient instead.
+
+        What it hands back, finite-difference arbitrated (elastic 2-D, source
+        ``['vz']``, d(loss)/d(rho) at the source cell z=8 x=28):
+
+            FD (truth)  +2.606052e-05
+            eager       +2.606044e-05   rel 3.2e-06   correct
+            impl='c'    +2.243012e-06   rel 9.1e-01   off by 11.6x
+
+        The error is confined to that one cell — masking it drops the whole-field
+        rel_l2 from 8.9e-01 to 2.4e-04, and single-cell FD at the four
+        neighbours confirms impl='c' is right there — and it needs a body-force
+        source: rho cos against eager is 0.54 for ``['vz']``, 0.29 for
+        ``['vx']``, but 1.0000000 for the pure-stress loadings.  It does not
+        need a hill (flat-zero APM topography reproduces it), it fires in all
+        four backward modes (full, boundary saving, both checkpoint flavours),
+        and it reproduces bit-identically on dev, so it is not a regression.
+        The signature is a missing body-force rho injection correction in the
+        APM rho backward — the non-APM path got exactly that fix in 46172fd.
+
+        vp and vs happen to agree with eager to ~1e-3 here, but that path has
+        never been validated against the truth either, so the whole APM backward
+        is gated rather than just the rho slot.
+        """
+        if not requires_backward or getattr(self, "_topo_method", None) != "apm":
+            return
+        raise NotImplementedError(
+            "topo_method='apm' has no gradient on impl='c': the CUDA APM path is "
+            "forward-only, and its backward returns a wrong rho gradient at "
+            "body-force source cells (off by ~11x, finite-difference arbitrated; "
+            "all backward modes, with or without a hill). Compute gradients "
+            "through impl='eager', which matches finite differences to 3e-6 under "
+            "APM:\n"
+            "  * impl='eager' for the whole run, or\n"
+            "  * keep impl='c' for forward-only modelling (that IS supported and "
+            "is unaffected) and run the gradient pass on impl='eager', or\n"
+            "  * topo_method='image' if you want the gradient on impl='c' — the "
+            "image-method topography backward is gradient-consistent with eager "
+            "(cos 1.0000000, rel 1e-6) in the full and checkpoint modes."
+        )
 
     def _guard_boundary_saving_topography(self, active):
         """Boundary saving + ``topography=`` produces a WRONG gradient on impl='c'.
@@ -1462,6 +1511,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         use_checkpoint = bool(self.use_ckpt and requires_backward)
         if not requires_backward:
             use_boundary_saving = False
+        # APM first: it is the more fundamental limitation of the two, so its
+        # message is the useful one when both would fire.
+        self._guard_apm_backward(requires_backward)
         self._guard_boundary_saving_topography(use_boundary_saving and requires_backward)
         use_recursive_checkpoint = bool(
             use_checkpoint and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None
@@ -1695,8 +1747,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if self.ndim == 2:
             use_boundary_saving = False
             use_ckpt = False
-        # RTM images through the same reverse reconstruction the gradient uses,
-        # so it inherits the boundary-saving-under-topography failure.
+        # RTM runs the same adjoint machinery as the gradient, so it inherits
+        # both limitations: the APM backward and, under topography, the
+        # boundary-saving reverse reconstruction.
+        self._guard_apm_backward(True)
         self._guard_boundary_saving_topography(use_boundary_saving)
 
         use_recursive_checkpoint = bool(use_ckpt and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None)

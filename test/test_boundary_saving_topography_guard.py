@@ -88,10 +88,9 @@ def _run(prop, topo=None, requires_grad=True):
     return out
 
 
-@pytest.mark.parametrize("topo_method", ["image", "apm"])
-def test_boundary_saving_with_topography_is_refused(topo_method):
+def test_boundary_saving_with_topography_is_refused():
     topo = _hill()
-    prop = _prop(topography=topo, boundary=True, topo_method=topo_method)
+    prop = _prop(topography=topo, boundary=True, topo_method="image")
     with pytest.raises(NotImplementedError, match="boundary saving cannot be combined"):
         _run(prop, topo)
 
