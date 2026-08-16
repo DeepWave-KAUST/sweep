@@ -262,7 +262,17 @@ class ModelParallel:
                 axes.append("y")
         self.axes = tuple(axes)
 
-        pml = pml_type or ("cpmls" if self.family == "elastic" else "cpmlr")
+        # Inherit the wrapped prop's formulation verbatim. There is deliberately
+        # no fallback: PropBase.__init__ already resolved a None pml_type to
+        # ``equation.default_pml_type`` before we read it, so ``pml_type`` here
+        # is always a concrete string. The old ``or ("cpmls" if elastic else
+        # "cpmlr")`` was therefore unreachable, and the rule it encoded was
+        # wrong anyway — it guessed the formulation from a substring of the
+        # class name (``_family_of``), which puts AcousticVTI1st in the
+        # "acoustic" family and would have handed it 'cpmlr' when its staggered
+        # step unpacks the 8 profiles of 'cpmls'. The equation's own
+        # ``default_pml_type`` is the only thing that knows.
+        pml = pml_type
         self.prop = PropTorch(
             equation, backend="torch", impl="c", shape=self.local_shape, dev=dev,
             dh=dh, dt=dt, source_type=list(source_type),
