@@ -817,54 +817,21 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     }
 
-    undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
-                                          rho, p, source_fields, 0, solver);
-
-    for (int irec = 0; irec < nrec_fields; ++irec) {
-        float* field = das_mu3d_field_ptr(adj_view, receiver_fields[irec].item<int>());
-        if (field == nullptr) continue;
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-            field,
-            adj_source_signed[irec].data_ptr<float>(),
-            p.adjoint_sources_loc.data_ptr<int>(),
-            0,
-            adjoint_nsrc,
-            solver
-        );
-    }
-
-    LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(
-        order,
-        launch_config.grid,
-        launch_config.block,
-        elastic_for_view,
-        elastic_adj_view,
-
-        fvx_prev.data_ptr<float>(),
-        fvy_prev.data_ptr<float>(),
-        fvz_prev.data_ptr<float>(),
-
-        vp.data_ptr<float>(),
-        vs.data_ptr<float>(),
-        rho.data_ptr<float>(),
-
-        grad_vp.data_ptr<float>(),
-        grad_vs.data_ptr<float>(),
-        grad_rho.data_ptr<float>(),
-
-        grad_ctx,
-        solver
-    );
-
-    {
-        const float* fv_now[3]  = {for_view.vx, for_view.vy, for_view.vz};
-        const float* fv_next[3] = {fvx_prev.data_ptr<float>(),
-                                   fvy_prev.data_ptr<float>(),
-                                   fvz_prev.data_ptr<float>()};
-        undo_receiver_rho_injection_3d(adj_source_config, grad_rho, fv_now, fv_next,
-                                       rho, p, receiver_fields, 0, adjoint_nsrc, solver);
-    }
-
+    // NOTE: no trailing it == 0 imaging pass here, deliberately.
+    //
+    // The reverse loop stops at it == 1, and this file used to add one more
+    // imaging pass for it == 0 afterwards.  By then the loop's last
+    // apply_adjoint_step has already advanced the adjoint state, so that pass
+    // correlated a one-step-stale adjoint with the reconstructed v(0) - v(1)
+    // and put the whole error at the source cell: rho was 1.5e-3 (2-D) /
+    // 3.9e-3 (3-D) off eager there, 96% of the whole-field difference, while
+    // full and both checkpoint modes were at 6e-7.  Deleting the pass makes bs
+    // agree with full to 6.1e-7 and with finite differences to 1.2e-5.
+    //
+    // Dropping it costs nothing measurable: elastic2d/3d's backward_bs has
+    // never had this pass, and it agrees with its own full path (which DOES
+    // image it == 0) to 2.0e-7 — the single step's contribution is at the
+    // rounding floor.
     out.grads = {grad_vp, grad_vs, grad_rho};
     return out;
 }
