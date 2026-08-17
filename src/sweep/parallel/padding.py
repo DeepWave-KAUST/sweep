@@ -156,6 +156,15 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
       call this inside the loss closure. The pad cells stay tied to the edge
       cell and their gradient folds back onto it through the replicate adjoint
       (exact integer factors; see ``test_model_parallel_padding.py``).
+      Know the side effect: folding ``dx`` copies back onto one column gives
+      that column a gradient weight of ``1 + dx`` — 2x for a 1-cell pad, but
+      12x for ``px=12`` at its worst case, and ``(1+dy)(1+dx)`` at the corner
+      (16x for py4 x px4). It is the true gradient of this parameterisation,
+      not an error, but it does mean the last physical column and corner update
+      faster than their neighbours. Detaching the copies would remove the
+      weighting and also make the gradient inconsistent with the loss actually
+      evaluated, so it is deliberately not done here; if the spike matters,
+      prefer a mesh with a smaller pad.
     * Pad once, optimise the PADDED array, strip it at the end with
       :func:`unpad_from_mesh`. Now the pad cells are independent parameters:
       they drift off the edge value as the inversion proceeds (so they stop
