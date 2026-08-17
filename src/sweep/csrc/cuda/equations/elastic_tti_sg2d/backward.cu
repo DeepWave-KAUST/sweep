@@ -10,7 +10,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
-#include "../../common/elastic.h"
+#include "../../common/elastic.h"   // elastic_signed_adjoint_sources
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
@@ -20,6 +20,48 @@
 namespace elastic_tti_sg2d {
 
 namespace {
+
+// Body-force (velocity) sources: the rho imaging correlates the adjoint velocity
+// with the stored difference v(it) - v(it+1), which at a source cell still
+// carries the raw injected amplitude; the true derivative has no such term.
+//
+// Two details, both established by finite-difference arbitration on the elastic
+// path (46172fd -> f59e833 / a23c701) and re-confirmed on DASMu (b591fbc):
+//   * the amplitude in u_forward[it] - u_forward[it+1] is amp(it), not amp(it+1);
+//   * this must run BEFORE the step's receiver residuals are injected, or at a
+//     cell that is both source and receiver the two corrections double-count.
+// The cherry-picked 52976be introduced this correction with both of those wrong;
+// this is the same shape as the elastic/DASMu helpers.
+void undo_body_force_source_injection_tti_sg2d(
+    const fdtd::LaunchConfig& fwd_source_config,
+    torch::Tensor& grad_rho,
+    WavefieldPointer& adj_view,
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& source_fields,
+    int it,
+    const SolverContext& solver
+)
+{
+    if (it < 0 || it >= static_cast<int>(p.nt)) return;
+    for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+        const int sfield = source_fields[isrc].item<int>();
+        if (sfield > 2) continue;                       // vx = 0, vy = 1, vz = 2
+        float* adj_field = field_ptr(adj_view, sfield);
+        if (adj_field == nullptr) continue;
+        add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            grad_rho.data_ptr<float>(),
+            adj_field,
+            rho.data_ptr<float>(),
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            (int)p.forward_sources_loc.size(1),
+            2,
+            solver
+        );
+    }
+}
 
 void apply_adjoint_step(
     int order,
@@ -194,46 +236,25 @@ void backward_segment_ckpt(
         }
     }
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = end - 1; it >= start; --it) {
         auto adj_view = adjoint.view();
 
+        undo_body_force_source_injection_tti_sg2d(fwd_source_config, grad_rho, adj_view,
+                                                  rho, p, source_fields, it, solver);
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = field_ptr(adj_view, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
                 solver
             );
-        }
-
-
-        // Body-force (velocity) sources: the rho imaging correlates the adjoint
-        // velocity with v(it) - v(it+1), which at a source cell still contains
-        // the raw injected amplitude amp(it+1); the true derivative has no such
-        // term (the injection is rho-independent).  Compensate at the source
-        // cells (kernel in common.cu).  Fields: vx = 0, vy = 1, vz = 2.
-        if (it + 1 < static_cast<int>(p.nt)) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                const int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = field_ptr(adj_view, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
         }
 
         const int offset = it - start;
@@ -346,6 +367,8 @@ BackwardOutput backward(const BackwardInput& in)
     const int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     const int nrec_fields = p.receiver_field_indices.numel();
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
     auto source_fields = p.source_field_indices.to(torch::kCPU);
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -353,12 +376,14 @@ BackwardOutput backward(const BackwardInput& in)
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
+        undo_body_force_source_injection_tti_sg2d(fwd_source_config, grads[0], adj_view,
+                                                  rho, p, source_fields, it, solver);
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = field_ptr(adj_view, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -372,25 +397,6 @@ BackwardOutput backward(const BackwardInput& in)
         // the raw injected amplitude amp(it+1); the true derivative has no such
         // term (the injection is rho-independent).  Compensate at the source
         // cells (kernel in common.cu).  Fields: vx = 0, vy = 1, vz = 2.
-        if (it + 1 < static_cast<int>(p.nt)) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                const int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = field_ptr(adj_view, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grads[0].data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
-        }
 
         const float* vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
         const float* vy_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
@@ -556,6 +562,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     const int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
     auto neg_forward_source = -p.forward_source;
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -579,12 +587,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 1; --it) {
+        undo_body_force_source_injection_tti_sg2d(fwd_source_config, grads[0], adj_view,
+                                                  rho, p, source_fields, it, solver);
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = field_ptr(adj_view, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -598,25 +608,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
         // the raw injected amplitude amp(it+1); the true derivative has no such
         // term (the injection is rho-independent).  Compensate at the source
         // cells (kernel in common.cu).  Fields: vx = 0, vy = 1, vz = 2.
-        if (it + 1 < static_cast<int>(p.nt)) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                const int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 2) continue;
-                float* adj_field_bf = field_ptr(adj_view, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grads[0].data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
-        }
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = field_ptr(for_view, source_fields[isrc].item<int>());
