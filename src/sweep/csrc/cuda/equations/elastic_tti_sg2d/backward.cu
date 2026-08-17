@@ -21,6 +21,35 @@ namespace elastic_tti_sg2d {
 
 namespace {
 
+// Undo the just-injected receiver residual from this step's rho imaging, at
+// every velocity-receiver cell (kernel and rationale in common.cuh).  Velocity
+// fields here are 0=vx, 1=vy, 2=vz; stress receivers have no rho term.
+void undo_receiver_rho_injection_tti_sg2d(
+    const fdtd::LaunchConfig& adj_source_config,
+    torch::Tensor& grad_rho,
+    const float* fv_now[3],
+    const float* fv_next[3],
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& receiver_fields,
+    int it,
+    int adjoint_nsrc,
+    const SolverContext& solver
+)
+{
+    const int nrec_fields = static_cast<int>(receiver_fields.numel());
+    for (int irec = 0; irec < nrec_fields; ++irec) {
+        const int field = receiver_fields[irec].item<int>();
+        if (field > 2) continue;
+        sub_receiver_rho_grad_correction<<<adj_source_config.grid, adj_source_config.block>>>(
+            grad_rho.data_ptr<float>(), fv_now[field], fv_next[field],
+            rho.data_ptr<float>(),
+            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it, adjoint_nsrc, 2, p.M, solver);
+    }
+}
+
 // Body-force (velocity) sources: the rho imaging correlates the adjoint velocity
 // with the stored difference v(it) - v(it+1), which at a source cell still
 // carries the raw injected amplitude; the true derivative has no such term.
@@ -287,6 +316,15 @@ void backward_segment_ckpt(
             solver
         );
 
+        {
+            const float* fv_now[3]  = {seg_vx.select(0, now_offset).data_ptr<float>(),
+                                       seg_vy.select(0, now_offset).data_ptr<float>(),
+                                       seg_vz.select(0, now_offset).data_ptr<float>()};
+            const float* fv_next[3] = {vx_next, vy_next, vz_next};
+            undo_receiver_rho_injection_tti_sg2d(adj_source_config, grad_rho, fv_now, fv_next,
+                                                 rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
+
         if (it == 0)
             continue;
 
@@ -427,6 +465,13 @@ BackwardOutput backward(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3]  = {vx_now, vy_now, vz_now};
+            const float* fv_next[3] = {vx_next, vy_next, vz_next};
+            undo_receiver_rho_injection_tti_sg2d(source_config, grads[0], fv_now, fv_next,
+                                                 rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
 
         if (it == 0)
             continue;
@@ -671,6 +716,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3]  = {for_view.vx, for_view.vy, for_view.vz};
+            const float* fv_next[3] = {fvx_next.data_ptr<float>(),
+                                       fvy_next.data_ptr<float>(),
+                                       fvz_next.data_ptr<float>()};
+            undo_receiver_rho_injection_tti_sg2d(adj_source_config, grads[0], fv_now, fv_next,
+                                                 rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
 
         apply_adjoint_step(
             order,
