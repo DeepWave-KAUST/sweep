@@ -8,7 +8,7 @@
 <h1 align="center">SWEEP</h1>
 
 <p align="center">
-  <a href="https://deepwave-kaust.github.io/sweep/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white"></a>
+  <a href="https://sweepx.deepwave.group/solver/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white"></a>
   <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
   <a href="https://pytorch.org"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white"></a>
 </p>
@@ -17,7 +17,7 @@
 
 **Seismic Wave Equation Exploration Platform** — a differentiable framework for seismic wave-equation modeling, migration, and full-waveform inversion. One API, 20+ equations (acoustic / elastic / VTI / TTI / DAS), PyTorch and JAX backends, eager and compiled CUDA paths.
 
-📖 **Documentation**: <https://deepwave-kaust.github.io/sweep/>
+📖 **Documentation**: <https://sweepx.deepwave.group/solver/>
 
 ## Install
 
@@ -51,7 +51,7 @@ V100, `"8.0"` A100, `"8.9"` RTX 6000 Ada) before the second command.
 
 <sub>`sweepx` is the PyPI distribution name; you `import sweep` (the `scikit-learn` → `import sklearn`
 pattern, because the bare name `sweep` is taken on PyPI). `pip install sweep-solver` is equivalent.
-Full install notes are in [the docs](https://deepwave-kaust.github.io/sweep/getting-started/installation/).</sub>
+Full install notes are in [the docs](https://sweepx.deepwave.group/solver/getting-started/installation/).</sub>
 
 ## Hello SWEEP
 
