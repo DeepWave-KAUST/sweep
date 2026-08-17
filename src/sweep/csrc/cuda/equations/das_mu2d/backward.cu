@@ -8,7 +8,7 @@
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/elastic.h"
+#include "../../common/elastic.h"   // elastic_signed_adjoint_sources
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../launch/config.h"
@@ -346,6 +346,9 @@ void backward_segment_2d(
         }
     }
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+
     for (int it = end - 1; it >= start; --it) {
         auto adj_view = adjoint.view();
         auto elastic_adj_view = adjoint.elastic_view();
@@ -358,7 +361,7 @@ void backward_segment_2d(
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -472,6 +475,9 @@ BackwardOutput backward(const BackwardInput& in)
 
     auto zero_velocity = torch::zeros_like(vp);
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
         auto elastic_adj_view = adjoint.elastic_view();
@@ -484,7 +490,7 @@ BackwardOutput backward(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -739,6 +745,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto next_vx = torch::zeros_like(vp);
     auto next_vz = torch::zeros_like(vp);
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
         auto elastic_adj_view = adjoint.elastic_view();
@@ -751,7 +760,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 p.adjoint_sources_loc.size(1),
@@ -950,6 +959,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // auto u_all_for = torch::zeros({nt, B, 1, nz, nx}, vp.options());
     // auto u_all_adj = torch::zeros({nt, B, 1, nz, nx}, vp.options());
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+
     for (int it = p.nt - 1; it >= 1; --it) {
 
         undo_body_force_source_injection_2d(fwd_source_config, grad_rho, adj_view,
@@ -960,7 +972,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -1093,7 +1105,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         if (field == nullptr) continue;
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             field,
-            p.adjoint_source[irec].data_ptr<float>(),
+            adj_source_signed[irec].data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
             0,
             adjoint_nsrc,

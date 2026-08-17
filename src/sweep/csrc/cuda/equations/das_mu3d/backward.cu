@@ -10,7 +10,7 @@
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/elastic.h"
+#include "../../common/elastic.h"   // elastic_signed_adjoint_sources
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
@@ -410,6 +410,9 @@ void backward_segment_3d(
         }
     }
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = end - 1; it >= start; --it) {
         auto adj_view = adjoint.view();
         auto elastic_adj_view = adjoint.elastic_view();
@@ -422,7 +425,7 @@ void backward_segment_3d(
             if (field == nullptr) continue;
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -623,6 +626,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = p.nt - 1; it >= 1; --it) {
 
         undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
@@ -633,7 +639,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -766,7 +772,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         if (field == nullptr) continue;
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             field,
-            p.adjoint_source[irec].data_ptr<float>(),
+            adj_source_signed[irec].data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
             0,
             adjoint_nsrc,
@@ -861,6 +867,9 @@ BackwardOutput backward(const BackwardInput& in)
 
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = p.nt - 1; it >= 0; --it) {
         undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
                                               rho, p, source_fields, it, solver);
@@ -870,7 +879,7 @@ BackwardOutput backward(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source_3d<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -1143,6 +1152,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto next_vy = torch::zeros_like(vp);
     auto next_vz = torch::zeros_like(vp);
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
         auto elastic_adj_view = adjoint.elastic_view();
@@ -1155,7 +1167,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 p.adjoint_sources_loc.size(1),
