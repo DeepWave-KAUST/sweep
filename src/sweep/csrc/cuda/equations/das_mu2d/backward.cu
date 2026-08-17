@@ -18,6 +18,40 @@ namespace das_mu2d {
 
 namespace {
 
+// Undo the just-injected receiver residual from this reverse step's rho imaging,
+// at every velocity-receiver cell (kernel and rationale in common.cuh).  The
+// imaging term is a.v * (v(it) - v(it+1)) / rho, and at a receiver cell a.v has
+// this step's residual already added, which the discrete adjoint does not have.
+// Stress and strain receivers have no rho term to correct.
+void undo_receiver_rho_injection_2d(
+    const fdtd::LaunchConfig& adj_source_config,
+    torch::Tensor& grad_rho,
+    const float* fvx_now,
+    const float* fvz_now,
+    const float* fvx_next,
+    const float* fvz_next,
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& receiver_fields,
+    int it,
+    int adjoint_nsrc,
+    const SolverContext& solver
+)
+{
+    const int nrec_fields = static_cast<int>(receiver_fields.numel());
+    for (int irec = 0; irec < nrec_fields; ++irec) {
+        const int field = receiver_fields[irec].item<int>();
+        const float* fv_now  = (field == 0) ? fvx_now  : (field == 1) ? fvz_now  : nullptr;
+        const float* fv_next = (field == 0) ? fvx_next : (field == 1) ? fvz_next : nullptr;
+        if (fv_now == nullptr) continue;
+        sub_receiver_rho_grad_correction<<<adj_source_config.grid, adj_source_config.block>>>(
+            grad_rho.data_ptr<float>(), fv_now, fv_next, rho.data_ptr<float>(),
+            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it, adjoint_nsrc, 2, p.M, solver);
+    }
+}
+
 // Body-force (velocity) sources: the rho imaging correlates the adjoint
 // velocity with the stored difference v(it) - v(it+1), which at a source cell
 // still carries the raw injected amplitude; the true derivative has no such
@@ -373,15 +407,18 @@ void backward_segment_2d(
         const int now_offset = offset + 1;
         const int next_offset = now_offset + 1;
 
+        const float* seg_now[2] = {seg_vx.select(0, now_offset).data_ptr<float>(),
+                                   seg_vz.select(0, now_offset).data_ptr<float>()};
+        const float* seg_next[2] = {
+            (next_offset <= segment_len) ? seg_vx.select(0, next_offset).data_ptr<float>() : next_segment_vx.data_ptr<float>(),
+            (next_offset <= segment_len) ? seg_vz.select(0, next_offset).data_ptr<float>() : next_segment_vz.data_ptr<float>()};
+
         LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
             order,
             launch_config.grid,
             launch_config.block,
             elastic_adj_view,
-            seg_vx.select(0, now_offset).data_ptr<float>(),
-            seg_vz.select(0, now_offset).data_ptr<float>(),
-            (next_offset <= segment_len) ? seg_vx.select(0, next_offset).data_ptr<float>() : next_segment_vx.data_ptr<float>(),
-            (next_offset <= segment_len) ? seg_vz.select(0, next_offset).data_ptr<float>() : next_segment_vz.data_ptr<float>(),
+            seg_now[0], seg_now[1], seg_next[0], seg_next[1],
             vp.data_ptr<float>(),
             vs.data_ptr<float>(),
             rho.data_ptr<float>(),
@@ -391,6 +428,10 @@ void backward_segment_2d(
             grad_ctx,
             solver
         );
+
+        undo_receiver_rho_injection_2d(
+            adj_source_config, grad_rho, seg_now[0], seg_now[1], seg_next[0], seg_next[1],
+            rho, p, receiver_fields, it, adjoint_nsrc, solver);
 
         if (it == 0) {
             continue;
@@ -521,6 +562,10 @@ BackwardOutput backward(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        undo_receiver_rho_injection_2d(
+            source_config, grad_rho, vx_now, vz_now, vx_next, vz_next,
+            rho, p, receiver_fields, it, adjoint_nsrc, solver);
 
         if (it == 0) {
             continue;
@@ -810,6 +855,12 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             solver
         );
 
+        undo_receiver_rho_injection_2d(
+            adj_source_config, grad_rho,
+            current_vx.data_ptr<float>(), current_vz.data_ptr<float>(),
+            next_vx.data_ptr<float>(), next_vz.data_ptr<float>(),
+            rho, p, receiver_fields, it, (int)p.adjoint_sources_loc.size(1), solver);
+
         if (it == 0)
             continue;
 
@@ -1046,6 +1097,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         );
 
+        undo_receiver_rho_injection_2d(
+            adj_source_config, grad_rho, for_view.vx, for_view.vz,
+            fvx_prev.data_ptr<float>(), fvz_prev.data_ptr<float>(),
+            rho, p, receiver_fields, it, adjoint_nsrc, solver);
+
         apply_adjoint_step_2d(
             order,
             launch_config,
@@ -1134,6 +1190,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
         grad_ctx,
         solver
     );
+
+    undo_receiver_rho_injection_2d(
+        adj_source_config, grad_rho, for_view.vx, for_view.vz,
+        fvx_prev.data_ptr<float>(), fvz_prev.data_ptr<float>(),
+        rho, p, receiver_fields, 0, adjoint_nsrc, solver);
 
     out.grads = {grad_vp, grad_vs, grad_rho};
     return out;

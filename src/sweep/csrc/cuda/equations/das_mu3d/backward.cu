@@ -21,6 +21,38 @@ namespace das_mu3d {
 
 namespace {
 
+// Undo the just-injected receiver residual from this reverse step's rho imaging,
+// at every velocity-receiver cell (kernel and rationale in common.cuh).  The
+// imaging term is a.v * (v(it) - v(it+1)) / rho, and at a receiver cell a.v has
+// this step's residual already added, which the discrete adjoint does not have.
+// Stress and strain receivers have no rho term to correct.
+void undo_receiver_rho_injection_3d(
+    const fdtd::LaunchConfig& adj_source_config,
+    torch::Tensor& grad_rho,
+    const float* fv_now_all[3],
+    const float* fv_next_all[3],
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& receiver_fields,
+    int it,
+    int adjoint_nsrc,
+    const SolverContext& solver
+)
+{
+    const int nrec_fields = static_cast<int>(receiver_fields.numel());
+    for (int irec = 0; irec < nrec_fields; ++irec) {
+        const int field = receiver_fields[irec].item<int>();
+        if (field > 2) continue;                        // stress/strain: no rho term
+        const float* fv_now  = fv_now_all[field];
+        const float* fv_next = fv_next_all[field];
+        sub_receiver_rho_grad_correction<<<adj_source_config.grid, adj_source_config.block>>>(
+            grad_rho.data_ptr<float>(), fv_now, fv_next, rho.data_ptr<float>(),
+            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it, adjoint_nsrc, 3, p.M, solver);
+    }
+}
+
 // Body-force (velocity) sources: the rho imaging correlates the adjoint
 // velocity with the stored difference v(it) - v(it+1), which at a source cell
 // still carries the raw injected amplitude; the true derivative has no such
@@ -461,6 +493,18 @@ void backward_segment_3d(
             solver
         );
 
+        {
+            const float* fv_now[3]  = {seg_vx.select(0, now_offset).data_ptr<float>(),
+                                       seg_vy.select(0, now_offset).data_ptr<float>(),
+                                       seg_vz.select(0, now_offset).data_ptr<float>()};
+            const float* fv_next[3] = {
+                (next_offset <= segment_len) ? seg_vx.select(0, next_offset).data_ptr<float>() : next_segment_vx.data_ptr<float>(),
+                (next_offset <= segment_len) ? seg_vy.select(0, next_offset).data_ptr<float>() : next_segment_vy.data_ptr<float>(),
+                (next_offset <= segment_len) ? seg_vz.select(0, next_offset).data_ptr<float>() : next_segment_vz.data_ptr<float>()};
+            undo_receiver_rho_injection_3d(adj_source_config, grad_rho, fv_now, fv_next,
+                                           rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
+
         if (it == 0) {
             continue;
         }
@@ -713,6 +757,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
             solver
         );
 
+        {
+            const float* fv_now[3]  = {for_view.vx, for_view.vy, for_view.vz};
+            const float* fv_next[3] = {fvx_prev.data_ptr<float>(),
+                                       fvy_prev.data_ptr<float>(),
+                                       fvz_prev.data_ptr<float>()};
+            undo_receiver_rho_injection_3d(adj_source_config, grad_rho, fv_now, fv_next,
+                                           rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
+
         apply_adjoint_step_3d(
             order,
             launch_config,
@@ -802,6 +855,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
         grad_ctx,
         solver
     );
+
+    {
+        const float* fv_now[3]  = {for_view.vx, for_view.vy, for_view.vz};
+        const float* fv_next[3] = {fvx_prev.data_ptr<float>(),
+                                   fvy_prev.data_ptr<float>(),
+                                   fvz_prev.data_ptr<float>()};
+        undo_receiver_rho_injection_3d(adj_source_config, grad_rho, fv_now, fv_next,
+                                       rho, p, receiver_fields, 0, adjoint_nsrc, solver);
+    }
 
     out.grads = {grad_vp, grad_vs, grad_rho};
     return out;
@@ -915,6 +977,15 @@ BackwardOutput backward(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3]  = {p.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
+                                       p.u_forward.select(0, it).select(0, 1).data_ptr<float>(),
+                                       p.u_forward.select(0, it).select(0, 2).data_ptr<float>()};
+            const float* fv_next[3] = {vx_prev, vy_prev, vz_prev};
+            undo_receiver_rho_injection_3d(source_config, grad_rho, fv_now, fv_next,
+                                           rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
 
         if (it == 0) {
             continue;
@@ -1220,6 +1291,18 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3]  = {current_vx.data_ptr<float>(),
+                                       current_vy.data_ptr<float>(),
+                                       current_vz.data_ptr<float>()};
+            const float* fv_next[3] = {next_vx.data_ptr<float>(),
+                                       next_vy.data_ptr<float>(),
+                                       next_vz.data_ptr<float>()};
+            undo_receiver_rho_injection_3d(adj_source_config, grad_rho, fv_now, fv_next,
+                                           rho, p, receiver_fields, it,
+                                           (int)p.adjoint_sources_loc.size(1), solver);
+        }
 
         if (it == 0)
             continue;
