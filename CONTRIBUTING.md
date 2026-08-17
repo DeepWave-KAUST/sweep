@@ -58,7 +58,7 @@ Two entry points:
 - The [Extending guide](docs/user-guide/extending.md) — reference: interface
   contract, `CUDALayoutSpec` field table, C++ registration pattern,
   out-of-scope boundary.
-- The [Add a new equation notebook](examples/notebooks/18_extending_add_new_equation.ipynb)
+- The [Add a new equation notebook](docs/notebooks/18_extending_add_new_equation.ipynb)
   — runnable walkthrough: builds a toy `MyScalar` from scratch, runs it
   end-to-end against `PropTorch`, plots the result.
 
