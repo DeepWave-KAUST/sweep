@@ -394,15 +394,82 @@ __global__ void stress_kernel_nopml(
 //   adjoint = adjoint(stress-update) → adjoint(velocity-update)
 // ---------------------------------------------------------------------------
 
-// Kernel A: λ_sH/λ_sV → contribute to λ_vx/λ_vz  (adjoint of stress update)
-//   λvx += -dt * (c11 * Df_x(λsH) + c13 * Df_x(λsV))
-//   λvz += -dt * (c13 * Df_z(λsH) + c33 * Df_z(λsV))
-template<int Order>
-__global__ void adjoint_stress_to_vel_kernel(
+// Pre-multiply for kernel A.  The forward stress update is
+//
+//     s += dt * (c11 * Db_x(v_x) + c13 * Db_z(v_z))
+//
+// so as an operator on v_x it is M_c11 o Db_x, whose adjoint is
+// Db_x^T o M_c11 = -Df_x( c11 * . ) — the stiffness multiplies the adjoint
+// stress AT THE STRESS LOCATION and only then is differentiated.  Applying it
+// after the derivative instead, as `c11[idx] * Df_x(λsH)`, is the same thing
+// only for a homogeneous model; for a heterogeneous one the two differ by a
+// grad(c) term that accumulates once per step.  Materialise the products here
+// so the stencil differentiates the right field.
+template<int Dummy>
+__global__ void adjoint_premultiply_stress_kernel(
     VTIWavefieldPointer adj,
     const float* __restrict__ c11,
     const float* __restrict__ c33,
     const float* __restrict__ c13,
+    float* __restrict__ px,          // c11*λsH + c13*λsV   (feeds λvx)
+    float* __restrict__ pz,          // c13*λsH + c33*λsV   (feeds λvz)
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    // No halo guard: the stencil in kernel A reads these cells, so they must be
+    // filled everywhere, not just where kernel A writes.
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int u_idx = b * spatial_size + idx;
+
+    auto a = adj.offset(b, spatial_size);
+    const float lSH = a.sH[idx];
+    const float lSV = a.sV[idx];
+    px[u_idx] = c11[u_idx] * lSH + c13[u_idx] * lSV;
+    pz[u_idx] = c13[u_idx] * lSH + c33[u_idx] * lSV;
+}
+
+
+// Pre-multiply for kernel B.  Forward: v += dt * inv_rho * Df_x(s), so the
+// adjoint w.r.t. s is -dt * Db_x( inv_rho * λv ) — inv_rho sits at the VELOCITY
+// location, inside the derivative.
+template<int Dummy>
+__global__ void adjoint_premultiply_vel_kernel(
+    VTIWavefieldPointer adj,
+    const float* __restrict__ inv_rho,
+    float* __restrict__ qx,          // inv_rho * λvx   (feeds λsH)
+    float* __restrict__ qz,          // inv_rho * λvz   (feeds λsV)
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int u_idx = b * spatial_size + idx;
+
+    auto a = adj.offset(b, spatial_size);
+    qx[u_idx] = inv_rho[u_idx] * a.vx[idx];
+    qz[u_idx] = inv_rho[u_idx] * a.vz[idx];
+}
+
+
+// Kernel A: λ_sH/λ_sV → contribute to λ_vx/λ_vz  (adjoint of stress update)
+//   λvx += -dt * Df_x(c11*λsH + c13*λsV)
+//   λvz += -dt * Df_z(c13*λsH + c33*λsV)
+template<int Order>
+__global__ void adjoint_stress_to_vel_kernel(
+    VTIWavefieldPointer adj,
+    const float* __restrict__ px,
+    const float* __restrict__ pz,
     SGradParam grad_ctx,
     SolverContext solver
 )
@@ -425,27 +492,25 @@ __global__ void adjoint_stress_to_vel_kernel(
     int idx = iz * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
-    const float* c11_b = c11 + b * spatial_size;
-    const float* c33_b = c33 + b * spatial_size;
-    const float* c13_b = c13 + b * spatial_size;
+    const float* px_b = px + b * spatial_size;
+    const float* pz_b = pz + b * spatial_size;
 
-    float dlSH_dx = sgradient<2, Order, X, DIFF_FORWARD>(a.sH, ix, 0, iz, grad_ctx);
-    float dlSV_dx = sgradient<2, Order, X, DIFF_FORWARD>(a.sV, ix, 0, iz, grad_ctx);
-    float dlSH_dz = sgradient<2, Order, Z, DIFF_FORWARD>(a.sH, ix, 0, iz, grad_ctx);
-    float dlSV_dz = sgradient<2, Order, Z, DIFF_FORWARD>(a.sV, ix, 0, iz, grad_ctx);
+    float dpx_dx = sgradient<2, Order, X, DIFF_FORWARD>(px_b, ix, 0, iz, grad_ctx);
+    float dpz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(pz_b, ix, 0, iz, grad_ctx);
 
-    a.vx[idx] += -solver.dt * (c11_b[idx] * dlSH_dx + c13_b[idx] * dlSV_dx);
-    a.vz[idx] += -solver.dt * (c13_b[idx] * dlSH_dz + c33_b[idx] * dlSV_dz);
+    a.vx[idx] += -solver.dt * dpx_dx;
+    a.vz[idx] += -solver.dt * dpz_dz;
 }
 
 
 // Kernel B: λ_vx/λ_vz → contribute to λ_sH/λ_sV  (adjoint of velocity update)
-//   λsH += -dt * inv_rho * Db_x(λvx)
-//   λsV += -dt * inv_rho * Db_z(λvz)
+//   λsH += -dt * Db_x(inv_rho * λvx)
+//   λsV += -dt * Db_z(inv_rho * λvz)
 template<int Order>
 __global__ void adjoint_vel_to_stress_kernel(
     VTIWavefieldPointer adj,
-    const float* __restrict__ inv_rho,
+    const float* __restrict__ qx,
+    const float* __restrict__ qz,
     SGradParam grad_ctx,
     SolverContext solver
 )
@@ -468,13 +533,14 @@ __global__ void adjoint_vel_to_stress_kernel(
     int idx = iz * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
-    const float* invr_b = inv_rho + b * spatial_size;
+    const float* qx_b = qx + b * spatial_size;
+    const float* qz_b = qz + b * spatial_size;
 
-    float dlvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(a.vx, ix, 0, iz, grad_ctx);
-    float dlvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(a.vz, ix, 0, iz, grad_ctx);
+    float dqx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qx_b, ix, 0, iz, grad_ctx);
+    float dqz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(qz_b, ix, 0, iz, grad_ctx);
 
-    a.sH[idx] += -solver.dt * invr_b[idx] * dlvx_dx;
-    a.sV[idx] += -solver.dt * invr_b[idx] * dlvz_dz;
+    a.sH[idx] += -solver.dt * dqx_dx;
+    a.sV[idx] += -solver.dt * dqz_dz;
 }
 
 
