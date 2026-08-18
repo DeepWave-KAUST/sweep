@@ -23,6 +23,33 @@ __global__ void add_body_force_rho_grad_correction(
     const SolverContext solver
 );
 
+// Mirror image of the kernel above, on the RECEIVER side.  The adjoint
+// residual for a velocity receiver is injected into the adjoint velocity
+// BEFORE the per-step rho imaging runs, so the imaging correlates the
+// just-injected residual with the same stored difference v(it) - v(it+1).
+// The discrete adjoint has no such term — the multiplier of d(step)/d(rho)
+// is the adjoint velocity carried in from the later steps only — so the
+// imaging over-counts by  resid(it) * (v(it) - v(it+1)) / rho  at every
+// receiver cell and step.  This kernel subtracts it.  Launched once per
+// velocity-receiver field per reverse step, grid = (B, nrec-blocks).
+//
+// ``fv_now`` / ``fv_next`` must be the very pointers the imaging kernel
+// correlated for this step, and ``halo`` its skipped border, so a receiver
+// that sits inside the halo (where no imaging ran) is left alone.
+__global__ void sub_receiver_rho_grad_correction(
+    float* __restrict__ grad_rho,            // (B, nz, nx)
+    const float* __restrict__ fv_now,        // forward velocity comp at it
+    const float* __restrict__ fv_next,       // forward velocity comp at it+1
+    const float* __restrict__ rho,           // (B, nz, nx)
+    const float* __restrict__ adjoint_source,// (B, nrec, nt)
+    const int* __restrict__ receivers_loc,   // (B, nrec, 2 or 3)
+    int it,
+    int nrec,
+    int loc_dim,
+    int halo,
+    const SolverContext solver
+);
+
 __global__ void add_source(
     float* __restrict__ u,          // (B, nz, nx)
     const float* __restrict__ source, // (B, nsrc, nt)

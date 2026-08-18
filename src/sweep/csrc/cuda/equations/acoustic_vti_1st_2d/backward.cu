@@ -102,6 +102,43 @@ struct AdjWavefieldTensor {
     }
 };
 
+// Adjoint half-step A (stress -> velocity), with the stiffness multiplied in at
+// the stress location before the derivative.  `sx` / `sz` are scratch buffers of
+// one wavefield component each; they are reused by half-step B.
+void vti_adjoint_A_2d(
+    int order,
+    const fdtd::LaunchConfig& lc,
+    VTIWavefieldPointer adj_view,
+    const torch::Tensor& c11, const torch::Tensor& c33, const torch::Tensor& c13,
+    torch::Tensor& sx, torch::Tensor& sz,
+    const SGradParam& grad_ctx, const SolverContext& solver)
+{
+    adjoint_premultiply_stress_kernel<0><<<lc.grid, lc.block>>>(
+        adj_view, c11.data_ptr<float>(), c33.data_ptr<float>(),
+        c13.data_ptr<float>(), sx.data_ptr<float>(), sz.data_ptr<float>(), solver);
+    LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(
+        order, lc.grid, lc.block,
+        adj_view, sx.data_ptr<float>(), sz.data_ptr<float>(), grad_ctx, solver);
+}
+
+// Adjoint half-step B (velocity -> stress), with inv_rho multiplied in at the
+// velocity location before the derivative.
+void vti_adjoint_B_2d(
+    int order,
+    const fdtd::LaunchConfig& lc,
+    VTIWavefieldPointer adj_view,
+    const torch::Tensor& inv_rho,
+    torch::Tensor& sx, torch::Tensor& sz,
+    const SGradParam& grad_ctx, const SolverContext& solver)
+{
+    adjoint_premultiply_vel_kernel<0><<<lc.grid, lc.block>>>(
+        adj_view, inv_rho.data_ptr<float>(),
+        sx.data_ptr<float>(), sz.data_ptr<float>(), solver);
+    LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(
+        order, lc.grid, lc.block,
+        adj_view, sx.data_ptr<float>(), sz.data_ptr<float>(), grad_ctx, solver);
+}
+
 }  // anonymous namespace
 
 
@@ -177,6 +214,11 @@ BackwardOutput backward(const BackwardInput& in)
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
 
+    // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
+    // wavefield component each; half-steps A and B reuse the same pair.
+    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
+    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+
     // Zero buffer the size of one wavefield component, used as the "previous"
     // stress at iter `it = 0` (no prior step exists; initial state is zero).
     auto zero_state = torch::zeros({B, nz, nx}, vp_t.options());
@@ -225,6 +267,22 @@ BackwardOutput backward(const BackwardInput& in)
             fsV_prev = zero_state.data_ptr<float>();
         }
 
+        // EXPERIMENT: image between the two adjoint half-steps.
+        //
+        // The forward does velocity-then-stress, so the adjoint must do
+        // stress-to-vel (kernel A) then vel-to-stress (kernel B).  The inv_rho
+        // gradient at step `it` needs the COMPLETE lambda_v(it), which only
+        // exists after kernel A applies this step's ds(it)/dv(it) coupling --
+        // imaging before A leaves that term out.  Kernel A writes lambda_vx /
+        // lambda_vz and only READS lambda_sH / lambda_sV, so moving the imaging
+        // between A and B hands the inv_rho term its correct operand while
+        // leaving the stiffness term's operand bit-identical.
+        if (it > 0) {
+            vti_adjoint_A_2d(order, launch_config, adj_view,
+                             c11_t, c33_t, c13_t, scratch_x, scratch_z,
+                             grad_ctx, solver);
+        }
+
         LAUNCH_VTI_CALC_GRAD(
             order,
             launch_config.grid,
@@ -243,31 +301,9 @@ BackwardOutput backward(const BackwardInput& in)
             solver
         );
 
-        // 3. Propagate adjoint state from time it+1 to it
-        //    (last step needs no propagation — λ is already at "time 0")
-        //    Split into two kernels to avoid the read-after-write race
-        //    that would corrupt sgradient() reads of just-updated neighbours.
         if (it > 0) {
-            LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                adj_view,
-                c11_t.data_ptr<float>(),
-                c33_t.data_ptr<float>(),
-                c13_t.data_ptr<float>(),
-                grad_ctx,
-                solver
-            );
-            LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                adj_view,
-                inv_rho_t.data_ptr<float>(),
-                grad_ctx,
-                solver
-            );
+            vti_adjoint_B_2d(order, launch_config, adj_view, inv_rho_t,
+                             scratch_x, scratch_z, grad_ctx, solver);
         }
     }
 
@@ -409,6 +445,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
+
+    // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
+    // wavefield component each; half-steps A and B reuse the same pair.
+    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
+    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
@@ -500,6 +541,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
         //       - fsH_prev / fsV_prev : approximated as for_view.sH / sV
         //         AFTER stress reverse but BEFORE velocity reverse.  This
         //         matches u_forward[it-1].sH used in the full-mode kernel.
+        // (e) half-step A first: the inv_rho gradient needs the COMPLETE
+        //     lambda_v(it), which only exists once this step's ds/dv coupling
+        //     has been applied.  A writes lambda_v and only reads lambda_s, so
+        //     imaging between A and B leaves the stiffness operand untouched.
+        vti_adjoint_A_2d(order, launch_config, adj_view,
+                         c11_t, c33_t, c13_t, scratch_x, scratch_z,
+                         grad_ctx, solver);
+
         LAUNCH_VTI_CALC_GRAD(
             order, launch_config.grid, launch_config.block,
             for_view.vx, for_view.vz, for_view.sH, for_view.sV,
@@ -514,19 +563,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
             grad_rho.data_ptr<float>(),
             grad_ctx, solver);
 
-        // (e) adjoint propagation (same kernels as Phase 1 full mode)
-        LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(
-            order, launch_config.grid, launch_config.block,
-            adj_view,
-            c11_t.data_ptr<float>(),
-            c33_t.data_ptr<float>(),
-            c13_t.data_ptr<float>(),
-            grad_ctx, solver);
-        LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(
-            order, launch_config.grid, launch_config.block,
-            adj_view,
-            inv_rho_t.data_ptr<float>(),
-            grad_ctx, solver);
+        vti_adjoint_B_2d(order, launch_config, adj_view, inv_rho_t,
+                         scratch_x, scratch_z, grad_ctx, solver);
 
         // (f) time-reverse the VELOCITY update — turns vx_new into vx_old
         LAUNCH_VTI_VELOCITY_NOPML(
@@ -653,6 +691,11 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
 
+    // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
+    // wavefield component each; half-steps A and B reuse the same pair.
+    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
+    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
@@ -674,6 +717,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto u_chunk = torch::zeros({chunk_size, 4, B, nz, nx}, vp_t.options());
 
     auto zero_prev = torch::zeros({B, nz, nx}, vp_t.options());
+    auto seed_sH   = torch::zeros({B, nz, nx}, vp_t.options());
+    auto seed_sV   = torch::zeros({B, nz, nx}, vp_t.options());
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;
@@ -685,6 +730,19 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             fwd_state.zero_state();
         } else {
             checkpoint_runtime.load(chunk_id, fwd_state.state_tensors());
+        }
+
+        // Snapshot the seed state's stress: this IS the forward state at step
+        // start-1, which the inv_rho gradient needs at the chunk's first
+        // backward step.  The old code substituted zero there and called it an
+        // O(chunk_size) bias; it showed up as a rho-only error in ckpt_chunk
+        // once the operator adjoint was fixed.
+        {
+            const size_t nbytes = (size_t)B * nz * nx * sizeof(float);
+            cudaMemcpyAsync(seed_sH.data_ptr<float>(), fwd_view.sH, nbytes,
+                            cudaMemcpyDeviceToDevice);
+            cudaMemcpyAsync(seed_sV.data_ptr<float>(), fwd_view.sV, nbytes,
+                            cudaMemcpyDeviceToDevice);
         }
 
         // (2) Replay forward across the chunk, capturing the 4 physical
@@ -763,16 +821,21 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                     fsH_prev = u_chunk[local_i - 1].select(0, 2).data_ptr<float>();
                     fsV_prev = u_chunk[local_i - 1].select(0, 3).data_ptr<float>();
                 } else {
-                    // Crossing chunk boundary: we don't have u_chunk[-1].
-                    // Fall back to loading the previous checkpoint's stress.
-                    // For simplicity, use zero — introduces O(chunk_size)
-                    // bias at chunk boundaries.  TODO: load proper sH/sV.
-                    fsH_prev = zero_prev.data_ptr<float>();
-                    fsV_prev = zero_prev.data_ptr<float>();
+                    // Crossing a chunk boundary: u_chunk[-1] does not exist,
+                    // but the state at step start-1 is exactly the checkpoint
+                    // this chunk was replayed from, snapshotted above.
+                    fsH_prev = seed_sH.data_ptr<float>();
+                    fsV_prev = seed_sV.data_ptr<float>();
                 }
             } else {
                 fsH_prev = zero_prev.data_ptr<float>();
                 fsV_prev = zero_prev.data_ptr<float>();
+            }
+
+            if (it > 0) {
+                vti_adjoint_A_2d(order, launch_config, adj_view,
+                                 c11_t, c33_t, c13_t, scratch_x, scratch_z,
+                                 grad_ctx, solver);
             }
 
             LAUNCH_VTI_CALC_GRAD(
@@ -790,18 +853,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 grad_ctx, solver);
 
             if (it > 0) {
-                LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(
-                    order, launch_config.grid, launch_config.block,
-                    adj_view,
-                    c11_t.data_ptr<float>(),
-                    c33_t.data_ptr<float>(),
-                    c13_t.data_ptr<float>(),
-                    grad_ctx, solver);
-                LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(
-                    order, launch_config.grid, launch_config.block,
-                    adj_view,
-                    inv_rho_t.data_ptr<float>(),
-                    grad_ctx, solver);
+                vti_adjoint_B_2d(order, launch_config, adj_view, inv_rho_t,
+                                 scratch_x, scratch_z, grad_ctx, solver);
             }
         }
     }

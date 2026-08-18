@@ -8,7 +8,7 @@
 <h1 align="center">SWEEP</h1>
 
 <p align="center">
-  <a href="https://deepwave-kaust.github.io/sweep/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white"></a>
+  <a href="https://sweepx.deepwave.group/solver/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-blue?logo=readthedocs&logoColor=white"></a>
   <a href="https://opensource.org/licenses/MIT"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
   <a href="https://pytorch.org"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white"></a>
 </p>
@@ -17,7 +17,7 @@
 
 **Seismic Wave Equation Exploration Platform** —— 一个可微分的地震波方程正演、偏移与全波形反演框架。一套 API,20+ 种波动方程(声波 / 弹性 / VTI / TTI / DAS),支持 PyTorch 与 JAX 后端,eager 与编译 CUDA 两条实现路径。
 
-📖 **文档**: <https://deepwave-kaust.github.io/sweep/>
+📖 **文档**: <https://sweepx.deepwave.group/solver/>
 
 ## 安装
 
@@ -42,7 +42,7 @@ SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 
 如果预编译无法自动检测 GPU 架构,在第二条命令前先设置 `TORCH_CUDA_ARCH_LIST`(如 V100 用 `"7.0"`、A100 用 `"8.0"`、RTX 6000 Ada 用 `"8.9"`)。
 
-<sub>`sweepx` 是 PyPI 发行名,导入用 `import sweep`(类似 `scikit-learn` → `import sklearn`,因为裸名 `sweep` 在 PyPI 已被占)。`pip install sweep-solver` 等价。完整说明见[文档](https://deepwave-kaust.github.io/sweep/getting-started/installation/)。</sub>
+<sub>`sweepx` 是 PyPI 发行名,导入用 `import sweep`(类似 `scikit-learn` → `import sklearn`,因为裸名 `sweep` 在 PyPI 已被占)。`pip install sweep-solver` 等价。完整说明见[文档](https://sweepx.deepwave.group/solver/getting-started/installation/)。</sub>
 
 ## Hello SWEEP
 
@@ -85,9 +85,9 @@ print("vp gradient shape:", tuple(vp_t.grad.shape))
 
 ## Notebooks 与示例
 
-- **Hello SWEEP** —— forward / backward / 5 行 FWI 循环: [`examples/notebooks/00_hello_fwi.ipynb`](examples/notebooks/00_hello_fwi.ipynb)
-- **Marmousi 上的 FWI**(声波 / 弹性 / 多尺度): 见 [`examples/notebooks/01_*`–`03_*`](examples/notebooks/)
-- **波场、DAS、各向异性、RTM**: [`examples/notebooks/04_*`–`08_*`](examples/notebooks/)
+- **Hello SWEEP** —— forward / backward / 5 行 FWI 循环: [`docs/notebooks/00_hello_fwi.ipynb`](docs/notebooks/00_hello_fwi.ipynb)
+- **Marmousi 上的 FWI**(声波 / 弹性 / 多尺度): 见 [`docs/notebooks/01_*`–`03_*`](docs/notebooks/)
+- **波场、DAS、各向异性、RTM**: [`docs/notebooks/04_*`–`08_*`](docs/notebooks/)
 - **生产脚本**(多 GPU、MPI 炮并行、多炮 batching): 在 [`examples/`](examples/) 目录下
 
 ## 引用

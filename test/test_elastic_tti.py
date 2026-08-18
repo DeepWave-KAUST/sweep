@@ -177,3 +177,67 @@ def test_elastic_tti_short_forward_and_gradient_are_finite(equation_cls, free_su
     assert models[0].grad is not None
     assert torch.isfinite(models[0].grad).all()
     assert models[0].grad.abs().max() > 0
+
+
+# ---------------------------------------------------------------------------
+# Body-force source: rho gradient (CUDA) must match the eager reference
+# ---------------------------------------------------------------------------
+
+def _cuda_tti_binding_ready():
+    if not torch.cuda.is_available():
+        return False
+    try:
+        import sweep._C as _C
+        return hasattr(_C, "elastic_tti_sg2d_backward")
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _cuda_tti_binding_ready(),
+                    reason="CUDA + compiled sweep._C required")
+@pytest.mark.parametrize("source_type,tag", [(["vz"], "body force"),
+                                             (["sxx", "szz"], "explosion")])
+def test_tti_sg_rho_gradient_matches_eager_for_body_force(source_type, tag):
+    """The rho imaging correlates the adjoint velocity with v(it)-v(it+1).  At a
+    body-force source cell that difference still carries the injected amplitude,
+    which is rho-independent, so the CUDA adjoint must subtract it back out
+    (``add_body_force_rho_grad_correction``).  Without the compensation the rho
+    gradient came out ANTI-correlated with the reference (cos ~ -0.28) for a vz
+    source, while vp0/vs0 stayed perfect — hence the per-parameter check."""
+    from sweep.propagator.options import EagerOptions
+
+    dev = "cuda"
+    nz, nx, dh, dt, nt, abcn = 60, 90, 20.0, 1.4e-3, 400, 20
+    t = np.arange(nt, dtype=np.float32) * dt - 0.5
+    wavelet = (1e4 * (1 - 2 * (np.pi * 3.0 * t) ** 2)
+               * np.exp(-((np.pi * 3.0 * t) ** 2))).astype(np.float32)
+    src = np.array([[nx // 2, 4]], dtype=np.int64)[None]
+    rx = np.arange(5, nx - 5, 2, dtype=np.int64)
+    rec = np.stack([rx, np.full_like(rx, 4)], axis=1)[None]
+    base = [2600.0, 1500.0, 2100.0, 0.12, 0.06, 0.05, 0.3, 0.0]
+
+    def _grads(impl, adjoint_weight=None):
+        eq = ElasticTTISG(spatial_order=4, device=dev, backend="torch")
+        kw = dict(shape=(nz, nx), dh=dh, dt=dt, nt=nt, abcn=abcn, device=dev,
+                  impl=impl, source_type=source_type,
+                  receiver_type=["vx", "vz"], pml_type="cpmls")
+        solver = (PropTorch(eq, use_ckpt=False,
+                            eager_options=EagerOptions(use_compile=False), **kw)
+                  if impl == "eager" else
+                  PropTorch(eq, use_ckpt=False,
+                            boundary_saving_config={"enabled": False}, **kw))
+        models = [torch.full((nz, nx), v, device=dev, requires_grad=True) for v in base]
+        out = solver(wavelet, src, rec, models=models)
+        if adjoint_weight is None:
+            torch.manual_seed(1)
+            adjoint_weight = torch.randn_like(out)
+        (out * adjoint_weight).sum().backward()
+        torch.cuda.synchronize()
+        return [m.grad.detach() for m in models], adjoint_weight
+
+    eager, aw = _grads("eager")
+    cuda, _ = _grads("c", aw)
+    for i, name in enumerate(["vp0", "vs0", "rho"]):
+        a, b = eager[i].flatten(), cuda[i].flatten()
+        cos = float(a @ b / max(float(a.norm() * b.norm()), 1e-30))
+        assert cos > 0.99, f"{tag}: grad {name} cos={cos:.4f} (CUDA vs eager)"

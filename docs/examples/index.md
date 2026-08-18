@@ -3,7 +3,7 @@
 > :material-github: **All examples on GitHub** &mdash; [`examples/`](https://github.com/DeepWave-KAUST/sweep/tree/dev/examples) (clone, run, modify)
 
 Runnable example scripts and notebooks live in the `examples/` directory of
-the repository. The **notebooks** under `examples/notebooks/` (cards below)
+the repository. The **notebooks** under `docs/notebooks/` (cards below)
 are cell-by-cell tutorials and the easiest entry point; for a flat overview
 of all of them see the [home page gallery](../index.md). Scripts for
 workflows that don't fit a notebook (e.g. multi-process multi-GPU FWI) are
