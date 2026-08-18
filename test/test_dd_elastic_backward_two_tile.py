@@ -164,6 +164,19 @@ def global_models(ndim):
     return [vp, vs, rho]
 
 
+# Source / receiver types are an AXIS here, not a constant.  The compiled
+# elastic backward treats the families differently, and two of its three
+# source/receiver-cell gradient corrections are unreachable from the default
+# combination below: the stress-receiver adjoint sign needs a stress RECEIVER,
+# and the body-force rho correction needs a body-force SOURCE.  An explosive
+# source with velocity receivers exercises neither, so a DD-vs-single check
+# pinned to that one cell cannot see a defect in either.
+# ``dd_nccl_elastic_backward_check.py --source-type/--receiver-type`` rebinds
+# these before building anything.
+SRC_TYPE = {2: ["sxx", "szz"], 3: ["sxx", "syy", "szz"]}
+REC_TYPE = {2: ["vx", "vz"], 3: ["vx", "vy", "vz"]}
+
+
 def make_prop(ndim, shape, free_surface, topo=None):
     eq_cls = Elastic if ndim == 2 else Elastic3D
     equation = eq_cls(spatial_order=SO, device=DEV, backend="torch")
@@ -174,8 +187,8 @@ def make_prop(ndim, shape, free_surface, topo=None):
         dev=DEV,
         dh=10.0,
         dt=DT,
-        source_type=["sxx", "szz"] if ndim == 2 else ["sxx", "syy", "szz"],
-        receiver_type=["vx", "vz"] if ndim == 2 else ["vx", "vy", "vz"],
+        source_type=list(SRC_TYPE[ndim]),
+        receiver_type=list(REC_TYPE[ndim]),
         abcn=ABCN,
         free_surface=free_surface,
         pml_type="cpmls",
@@ -390,6 +403,13 @@ def replay_dd_backward_2d(tiles):
 
     with torch.no_grad():
         for it in range(NT2 - 1, 0, -1):   # elastic BS floor: it == 1
+            # injections as their own sub-phase, then ship the ph2 fields
+            # they may have written (adj stress / recon velocity) BEFORE the
+            # phase-1 kernels read them; a no-op swap when they did not
+            b0.run_phase(it + 1, it, 3)
+            b1.run_phase(it + 1, it, 3)
+            _swap(adj_s)
+            _swap(rec_v)
             b0.run_phase(it + 1, it, 1)
             b1.run_phase(it + 1, it, 1)
             _swap(adj_v)
@@ -570,6 +590,13 @@ def replay_dd_backward_3d(tiles):
 
     with torch.no_grad():
         for it in range(NT3 - 1, 0, -1):
+            # injections as their own sub-phase, then ship the ph2 fields
+            # they may have written (adj stress / recon velocity) BEFORE the
+            # phase-1 kernels read them; a no-op swap when they did not
+            b0.run_phase(it + 1, it, 3)
+            b1.run_phase(it + 1, it, 3)
+            _swap(adj_s)
+            _swap(rec_v)
             b0.run_phase(it + 1, it, 1)
             b1.run_phase(it + 1, it, 1)
             _swap(adj_v)

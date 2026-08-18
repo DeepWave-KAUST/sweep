@@ -1114,7 +1114,24 @@ class ModelParallel:
                        + [self.recon[f] for f in range(nv, self._nphys)])
                 ph2 = ([self.L_adj[f] for f in range(nv, self._nphys)]
                        + [self.recon[f] for f in range(nv)])
+                # The injections run as their own sub-phase (step_phase 3),
+                # at the same op position monolithic runs them; the split
+                # exists purely so an exchange can sit between the injections
+                # and the phase-1 kernels. A body-force source writes recon
+                # VELOCITY and a stress receiver writes adjoint STRESS -- both
+                # are ph2 fields, which phase 1 READS across the cut, so
+                # without that exchange the neighbour's halo is one injection
+                # stale at every reverse step. When neither is in play the
+                # strips are untouched since the previous ph2 exchange and
+                # the ship is skipped: the default combination (stress
+                # source, velocity receivers) keeps the two-exchange step.
+                _vel = ("vx", "vy", "vz")
+                inj_cross = (any(t in _vel for t in self.prop.source_type)
+                             or any(t not in _vel for t in self.prop.receiver_type))
                 for it in range(self.nt - 1, 0, -1):     # elastic BS floor it==1
+                    br.run_phase(it + 1, it, 3)          # injections(it)
+                    if inj_cross:
+                        self._exchange_group(bhalo, ph2)
                     br.run_phase(it + 1, it, 1)
                     self._exchange_group(bhalo, ph1)
                     br.run_phase(it + 1, it, 2)

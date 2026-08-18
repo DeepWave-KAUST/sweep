@@ -502,8 +502,9 @@ void check_stepped_backward_elastic_3d(const BackwardInput& p, bool need_recon)
                 "elastic3d backward cut_face_mask supports x/y bits only "
                 "(bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi), got ",
                 p.cut_face_mask);
-    TORCH_CHECK(p.step_phase >= 0 && p.step_phase <= 2,
-                "elastic backward step_phase must be 0, 1 or 2");
+    TORCH_CHECK(p.step_phase >= 0 && p.step_phase <= 3,
+                "elastic backward step_phase must be 0, 1, 2 or 3 "
+                "(3 = residual/source injections only)");
     const bool phased = (p.step_phase != 0);
     if (phased) {
         TORCH_CHECK(need_recon,
@@ -780,8 +781,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // recon/restore.  The driver exchanges the adjoint-velocity and
     // recon-stress halos between phases, and the adjoint-stress and
     // recon-velocity halos after phase 2 (each M wide).
-    const bool do_p1 = (p.step_phase != 2);
-    const bool do_p2 = (p.step_phase != 1);
+    // In phased (DD) mode the injection block moves from the head of
+    // phase 1 to the TAIL of the previous step's phase 2, so the halo
+    // exchange the driver issues right after phase 2 ships the injected
+    // values before any phase-1 stencil reads them across a cut.
+    // step_phase 3 = injections only (driver prologue for the first
+    // reverse step, which has no preceding phase 2). Monolithic
+    // step_phase 0 keeps the original head-of-loop position; the executed
+    // op sequence is identical either way.
+    const bool inject_only = (p.step_phase == 3);
+    const bool phased = (p.step_phase != 0);
+    const bool do_p1 = !inject_only && (p.step_phase != 2);
+    const bool do_p2 = !inject_only && (p.step_phase != 1);
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -853,7 +864,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // Seed the reverse reconstruction from the saved last snapshot — FIRST
     // segment only (and not on a phase-2 re-entry); re-running this
     // mid-stream would clobber the carried reconstruction state.
-    if (first_segment && do_p1) {
+    // In phased mode the seed belongs to the INJECTION sub-phase (3): the
+    // driver runs 3 before 1, and the injections write recon fields the
+    // seed would otherwise overwrite -- seeding again in phase 1 would
+    // erase the first step's source un-injection (a ricker-tail-sized
+    // corruption that grows through the whole reverse sweep).
+    if (first_segment && (inject_only || (!phased && do_p1))) {
         forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
         forward.vy_t.copy_(p.u_last_two.select(0,1).select(0,0));
         forward.vz_t.copy_(p.u_last_two.select(0,2).select(0,0));
@@ -918,13 +934,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
     const auto adj_source_signed =
         elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
 
-    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
-
-        if (do_p1) {
-
+    // Residual / source injections for reverse index jt, one unit (the rho
+    // correction must read the adjoint velocity BEFORE jt's residuals land):
+    // body-force source-cell rho correction, signed receiver residuals,
+    // reconstruction un-injection of the forward source.
+    auto inject_step = [&](int jt) {
         undo_body_force_source_injection_3d(fwd_source_config, grad_rho, adj_view,
-                                            rho, p, source_fields, it, solver);
-
+                                            rho, p, source_fields, jt, solver);
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
@@ -932,13 +948,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 field,
                 adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
-                it,
+                jt,
                 adjoint_nsrc,
                 solver
             );
         }
-        // Wavefield reconstruction
-        // Substract source term from forward wavefield
+        // Wavefield reconstruction: subtract the forward source
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = elastic_field_ptr(for_view, 3, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
@@ -946,11 +961,31 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 field,
                 neg_forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
-                it,
+                jt,
                 forward_nsrc,
                 solver
             );
         }
+    };
+
+    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
+
+        // Monolithic runs the injections here, at the head of the loop. The
+        // DD phased path runs them as their own sub-phase (step_phase 3) at
+        // the SAME position -- the driver calls 3, then 1, then 2 -- so the
+        // op sequence is identical; the split exists so the driver can slip
+        // a halo exchange between the injections and the phase-1 kernels.
+        // A body-force source writes recon VELOCITY and a stress receiver
+        // writes adjoint STRESS; neither is in the post-phase-1 exchange
+        // group, so without that exchange the neighbour's halo is one
+        // injection stale at every reverse step for any source/receiver
+        // cell inside the read set of a cut face.
+        if (!phased || inject_only)
+            inject_step(it);
+        if (inject_only)
+            continue;
+
+        if (do_p1) {
 
         LAUNCH_3DELASTIC_STRESS_NOPML(
             order,

@@ -92,13 +92,22 @@ def global_models(shape):
     return [vp, vs, rho]
 
 
+# Source / receiver types are an axis: the source is injected in PHASE 2, after
+# phase 1 exchanged the velocity halos, so a body-force source (vx/vz) writes
+# into a field whose cut strips have already been sent.  Whether that is
+# visible at all depends on the type, which makes an explosive-source-only
+# forward check blind to it.
+SRC_TYPE = {2: ["sxx", "szz"], 3: ["sxx", "syy", "szz"]}
+REC_TYPE = {2: ["vx", "vz"], 3: ["vx", "vy", "vz"]}
+
+
 def make_prop(ndim, shape, abcn, nt, dt, fs, dev, topo=None):
     eq_cls = Elastic if ndim == 2 else Elastic3D
     eq = eq_cls(spatial_order=SO, device=dev, backend="torch")
     kw = dict(
         backend="torch", impl="c", shape=shape, dev=dev, dh=10.0, dt=dt,
-        source_type=["sxx", "szz"] if ndim == 2 else ["sxx", "syy", "szz"],
-        receiver_type=["vx", "vz"] if ndim == 2 else ["vx", "vy", "vz"],
+        source_type=list(SRC_TYPE[ndim]),
+        receiver_type=list(REC_TYPE[ndim]),
         abcn=abcn, free_surface=fs, pml_type="cpmls", nt=nt, B=1,
         use_ckpt=False, boundary_saving_config={"enabled": False},
     )
@@ -182,6 +191,8 @@ def fill_global_pad(p, models_padded, x0, pad, prop):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ndim", type=int, default=2, choices=(2, 3))
+    ap.add_argument("--source-type", type=str, default=None)
+    ap.add_argument("--receiver-type", type=str, default=None)
     ap.add_argument("--nz", type=int, default=48)
     ap.add_argument("--ny", type=int, default=20)
     ap.add_argument("--nxp", type=int, default=28, help="x cells PER RANK")
@@ -193,6 +204,10 @@ def main():
     ap.add_argument("--fast", action="store_true",
                     help="use FastHaloSet instead of exchange_halos")
     args = ap.parse_args()
+    if args.source_type:
+        SRC_TYPE[args.ndim] = args.source_type.split(",")
+    if args.receiver_type:
+        REC_TYPE[args.ndim] = args.receiver_type.split(",")
 
     global SO, M
     SO = args.so
@@ -372,7 +387,7 @@ def main():
               f"exchange={t_comm:.3f}s ({100 * t_comm / total:.1f}%) "
               f"nt={nt} grid={grid_str} px={px} so={SO} fs={fs}")
         verdict = {2: "PASS", 1: "PASS_TOL", 0: "FAIL"}[worst]
-        print(f"DD_NCCL_ELASTIC_CHECK: {verdict}")
+        print(f"DD_NCCL_ELASTIC_CHECK: {verdict}   [src={SRC_TYPE[ndim]} rec={REC_TYPE[ndim]}]")
         if worst == 0:
             sys.exit(1)
 
