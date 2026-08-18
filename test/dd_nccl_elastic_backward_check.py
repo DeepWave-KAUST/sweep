@@ -59,8 +59,36 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ndim", type=int, default=2, choices=(2, 3))
     ap.add_argument("--free-surface", action="store_true")
+    # The compiled elastic backward has source/receiver-cell gradient
+    # corrections that only some combinations reach: a body-force source
+    # (--source-type vz) is the only way into the source-cell rho correction,
+    # and a stress receiver (--receiver-type sxx,szz) the only way into the
+    # signed stress-receiver adjoint.  The defaults (explosive source,
+    # velocity receivers) exercise neither, so DD parity has to be checked
+    # along this axis too, not just at the default cell.
+    ap.add_argument("--source-type", type=str, default=None,
+                    help="comma-separated, e.g. vz or sxx,szz")
+    ap.add_argument("--receiver-type", type=str, default=None,
+                    help="comma-separated, e.g. sxx,szz or vz,sxx")
+    # Where the shot sits relative to the tile interface.  The default lands
+    # exactly ON the cut (NX//2 with px=2), which is the hard case: the DD
+    # forward injects in phase 2, after phase 1 exchanged the cut strips, so a
+    # source inside a strip would cross one step late.  Being able to move it
+    # off the cut is what makes "on the cut" a controlled comparison rather
+    # than the only thing ever measured.
+    ap.add_argument("--src-dx", type=int, default=0,
+                    help="shift the shot this many cells off the cut")
+    ap.add_argument("--rec-on-cut", action="store_true",
+                    help="put a receiver exactly on every tile interface")
     args = ap.parse_args()
     ndim, fs = args.ndim, args.free_surface
+
+    import test_dd_elastic_backward_two_tile as H
+    if args.source_type:
+        H.SRC_TYPE[ndim] = args.source_type.split(",")
+    if args.receiver_type:
+        H.REC_TYPE[ndim] = args.receiver_type.split(",")
+    label = f"src={H.SRC_TYPE[ndim]} rec={H.REC_TYPE[ndim]}"
 
     dist.init_process_group("nccl")
     rank, world = dist.get_rank(), dist.get_world_size()
@@ -71,15 +99,19 @@ def main():
 
     if ndim == 2:
         NZ, NX, NT = NZ2, NX2, NT2
-        rec_gx = REC_GX2
-        src_g = (NX // 2, SRC_Z2)
+        rec_gx = list(REC_GX2)
+        src_g = (NX // 2 + args.src_dx, SRC_Z2)
         shape_full = (NZ, NX)
     else:
         NZ, NX, NT = NZ3, NX3, NT3
-        rec_gx = REC_GX3
-        src_g = SRC3
+        rec_gx = list(REC_GX3)
+        src_g = (SRC3[0] + args.src_dx,) + tuple(SRC3[1:])
         shape_full = (NZ, NY3, NX)
     assert NX % world == 0, f"NX={NX} not divisible by world={world}"
+    if args.rec_on_cut:
+        cuts = [i * (NX // world) for i in range(1, world)]
+        rec_gx = sorted(set(rec_gx) | set(cuts))
+    label += f" src_x={src_g[0]} cuts={[i * (NX // world) for i in range(1, world)]}"
     nxp = NX // world
 
     topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
@@ -220,6 +252,13 @@ def main():
     br = tile.bwd_runner()
     with torch.no_grad():
         for it in range(NT - 1, 0, -1):   # elastic BS floor: it == 1
+            # injections as their own sub-phase, then ship the ph2 fields
+            # they may have written (adj stress / recon velocity) BEFORE the
+            # phase-1 kernels read them across the cut
+            br.run_phase(it + 1, it, 3)
+            if world > 1:
+                exchange(bwd_fast, [(br.L_adj, range(NV[ndim], NPHYS[ndim])),
+                                    (br.L_recon, range(NV[ndim]))])
             br.run_phase(it + 1, it, 1)
             if world > 1:
                 exchange(bwd_fast, [(br.L_adj, range(NV[ndim])),
@@ -267,7 +306,7 @@ def main():
         verdict = {2: "PASS", 1: "PASS_TOL", 0: "FAIL"}[worst]
         print(f"[rank0] ndim={ndim} grid={shape_full} px={world} "
               f"nt={NT} fs={fs}")
-        print(f"DD_NCCL_ELASTIC_BACKWARD_CHECK: {verdict}")
+        print(f"DD_NCCL_ELASTIC_BACKWARD_CHECK: {verdict}   [{label}]")
         if worst == 0:
             sys.exit(1)
 

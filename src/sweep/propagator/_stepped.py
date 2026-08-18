@@ -333,9 +333,15 @@ class SteppedBackwardRunner:
         driver then exchanges the adjoint-stress and recon-velocity halos.
         Counters advance only after phase 2.  ``step_phase`` is reset to 0
         after every call so plain ``run_segment`` paths stay clean.
+
+        ``phase == 3`` runs ONLY the residual/source injection block for the
+        segment's step -- the DD driver's prologue for the first reverse
+        step. In phased mode the compiled backward injects step it's terms at
+        the tail of step it+1's phase 2 (so the post-phase-2 halo exchange
+        ships them); the first reverse step has no preceding phase 2.
         """
-        if phase not in (1, 2):
-            raise ValueError(f"phase must be 1 or 2, got {phase}")
+        if phase not in (1, 2, 3):
+            raise ValueError(f"phase must be 1, 2 or 3, got {phase}")
         b, e = int(bw_it_begin), int(bw_it_end)
         if b != e + 1:
             raise ValueError(
