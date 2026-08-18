@@ -55,63 +55,63 @@ REL_TOL = 1e-5
 import argparse  # noqa: E402
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ndim", type=int, default=2, choices=(2, 3))
-    ap.add_argument("--free-surface", action="store_true")
-    # The compiled elastic backward has source/receiver-cell gradient
-    # corrections that only some combinations reach: a body-force source
-    # (--source-type vz) is the only way into the source-cell rho correction,
-    # and a stress receiver (--receiver-type sxx,szz) the only way into the
-    # signed stress-receiver adjoint.  The defaults (explosive source,
-    # velocity receivers) exercise neither, so DD parity has to be checked
-    # along this axis too, not just at the default cell.
-    ap.add_argument("--source-type", type=str, default=None,
-                    help="comma-separated, e.g. vz or sxx,szz")
-    ap.add_argument("--receiver-type", type=str, default=None,
-                    help="comma-separated, e.g. sxx,szz or vz,sxx")
-    # Where the shot sits relative to the tile interface.  The default lands
-    # exactly ON the cut (NX//2 with px=2), which is the hard case: the DD
-    # forward injects in phase 2, after phase 1 exchanged the cut strips, so a
-    # source inside a strip would cross one step late.  Being able to move it
-    # off the cut is what makes "on the cut" a controlled comparison rather
-    # than the only thing ever measured.
-    ap.add_argument("--src-dx", type=int, default=0,
-                    help="shift the shot this many cells off the cut")
-    ap.add_argument("--rec-on-cut", action="store_true",
-                    help="put a receiver exactly on every tile interface")
-    args = ap.parse_args()
-    ndim, fs = args.ndim, args.free_surface
+# Harness defaults for the type axes; every case sets BOTH dims explicitly so
+# no case inherits the previous one's binding.
+_DEFAULT_TYPES = {2: (["sxx", "szz"], ["vx", "vz"]),
+                  3: (["sxx", "syy", "szz"], ["vx", "vy", "vz"])}
 
+
+def run_case(case, rank, world, dev):
+    """One isolated DD-vs-monolithic comparison.
+
+    Isolation contract: everything a case touches is constructed here and
+    dies here -- tiles, runners, the reference, and the FastHaloSets (their
+    data_ptr-keyed exchanger caches are instance-level, so a fresh instance
+    per case is what makes allocator address reuse harmless).  The only
+    state shared between cases is the NCCL process group, which is
+    stateless between collectives.  The matrix driver additionally re-runs
+    the first case at the end and asserts bitwise-identical gradients: any
+    cross-case leakage fails that check.
+    """
     import test_dd_elastic_backward_two_tile as H
-    if args.source_type:
-        H.SRC_TYPE[ndim] = args.source_type.split(",")
-    if args.receiver_type:
-        H.REC_TYPE[ndim] = args.receiver_type.split(",")
+    ndim, fs = case.ndim, case.free_surface
+    if not hasattr(run_case, "_hdefaults"):
+        run_case._hdefaults = (list(H.REC_GX2), list(H.REC_GX3), tuple(H.SRC3))
+    H.REC_GX2 = list(run_case._hdefaults[0])
+    H.REC_GX3 = list(run_case._hdefaults[1])
+    H.SRC3 = tuple(run_case._hdefaults[2])
+    for d in (2, 3):
+        H.SRC_TYPE[d] = list(_DEFAULT_TYPES[d][0])
+        H.REC_TYPE[d] = list(_DEFAULT_TYPES[d][1])
+    if case.source_type:
+        H.SRC_TYPE[ndim] = list(case.source_type)
+    if case.receiver_type:
+        H.REC_TYPE[ndim] = list(case.receiver_type)
     label = f"src={H.SRC_TYPE[ndim]} rec={H.REC_TYPE[ndim]}"
-
-    dist.init_process_group("nccl")
-    rank, world = dist.get_rank(), dist.get_world_size()
-    local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    dev_idx = local_rank % max(1, torch.cuda.device_count())  # oversubscribe-safe
-    torch.cuda.set_device(dev_idx)
-    dev = torch.device(f"cuda:{dev_idx}")
 
     if ndim == 2:
         NZ, NX, NT = NZ2, NX2, NT2
         rec_gx = list(REC_GX2)
-        src_g = (NX // 2 + args.src_dx, SRC_Z2)
+        src_g = (NX // 2 + case.src_dx, SRC_Z2)
         shape_full = (NZ, NX)
     else:
         NZ, NX, NT = NZ3, NX3, NT3
         rec_gx = list(REC_GX3)
-        src_g = (SRC3[0] + args.src_dx,) + tuple(SRC3[1:])
+        src_g = (SRC3[0] + case.src_dx,) + tuple(SRC3[1:])
         shape_full = (NZ, NY3, NX)
     assert NX % world == 0, f"NX={NX} not divisible by world={world}"
-    if args.rec_on_cut:
+    if case.rec_on_cut:
         cuts = [i * (NX // world) for i in range(1, world)]
         rec_gx = sorted(set(rec_gx) | set(cuts))
     label += f" src_x={src_g[0]} cuts={[i * (NX // world) for i in range(1, world)]}"
+    # The reference must solve the SAME problem as the tiles: hand it this
+    # case's receiver list (rec-on-cut extends it) and, in 3-D, the shifted
+    # source (build_reference_3d reads H.SRC3; the 2-D builder takes src_x).
+    if ndim == 2:
+        H.REC_GX2 = list(rec_gx)
+    else:
+        H.REC_GX3 = list(rec_gx)
+        H.SRC3 = tuple(src_g)
     nxp = NX // world
 
     topo = MeshTopology(py=1, px=world, shot_groups=1, world_size=world, rank=rank)
@@ -119,15 +119,23 @@ def main():
 
     # ---------------- reference forward record -> shared residual ----------
     if rank == 0:
-        if ndim == 2:
-            ref = build_reference_2d(src_g[0], fs)
-        else:
-            ref = build_reference_3d(fs)
-        residual_raw = ref.fwd_record_raw.clone()
-        shape_obj = [list(residual_raw.shape)]
+        # A failure here (e.g. the library rejecting a receiver type) must
+        # not strand rank 1 inside the broadcast: ship the error as the
+        # payload so every rank raises the same thing.
+        try:
+            if ndim == 2:
+                ref = build_reference_2d(src_g[0], fs)
+            else:
+                ref = build_reference_3d(fs)
+            residual_raw = ref.fwd_record_raw.clone()
+            shape_obj = [list(residual_raw.shape)]
+        except Exception as e:
+            shape_obj = [("__ERROR__", type(e).__name__, str(e)[:300])]
     else:
         shape_obj = [None]
     dist.broadcast_object_list(shape_obj, src=0)
+    if isinstance(shape_obj[0], tuple) and shape_obj[0][0] == "__ERROR__":
+        raise RuntimeError(f"{shape_obj[0][1]}: {shape_obj[0][2]}")
     if rank != 0:
         residual_raw = torch.zeros(shape_obj[0], device=dev)
     dist.broadcast(residual_raw, src=0)
@@ -304,14 +312,145 @@ def main():
                 want = ref.gbufs[k][..., PAD + r * nxp: PAD + r * nxp + nxp].cpu()
                 worst = min(worst, grade(f"tile{r} {name}", gslices[k], want))
         verdict = {2: "PASS", 1: "PASS_TOL", 0: "FAIL"}[worst]
-        print(f"[rank0] ndim={ndim} grid={shape_full} px={world} "
-              f"nt={NT} fs={fs}")
         print(f"DD_NCCL_ELASTIC_BACKWARD_CHECK: {verdict}   [{label}]")
-        if worst == 0:
-            sys.exit(1)
+        blob = torch.cat([g.flatten() for _, gs in gathered for g in gs]).clone()
+    else:
+        verdict, blob = None, None
+    if world > 1:
+        vobj = [verdict]
+        dist.broadcast_object_list(vobj, src=0)
+        verdict = vobj[0]
+    return verdict, blob
 
+
+
+def _matrix_cases():
+    """The regression matrix (world=2). Mirrors the sbatch sweep, plus the
+    repeat-first isolation probe at the end."""
+    from types import SimpleNamespace as C
+
+    def mk(ndim, st=None, rt=None, fs=False, dx=0, roc=False, tag=""):
+        return C(ndim=ndim, source_type=st, receiver_type=rt,
+                 free_surface=fs, src_dx=dx, rec_on_cut=roc,
+                 expect_reject=False,
+                 tag=tag or f"{ndim}D src={st or 'def'} rec={rt or 'def'}"
+                            f"{' fs' if fs else ''}"
+                            f"{f' dx={dx}' if dx else ''}"
+                            f"{' rec-on-cut' if roc else ''}")
+
+    cases = []
+    t2s = ["vx", "vz", "sxx", "szz", "sxz"]     # all five are valid SOURCES
+    t2r = ["vx", "vz", "sxx", "szz"]            # sxz is not a valid receiver
+    for st in t2s:
+        for rt in t2r:
+            cases.append(mk(2, [st], [rt]))
+    # the library must REFUSE shear-stress receivers (half-half staggered
+    # node) loudly -- pin that instead of feeding the matrix invalid cases
+    rej2 = mk(2, None, ["sxz"], tag="2D rec=sxz (expect library reject)")
+    rej2.expect_reject = True
+    cases.append(rej2)
+    cases += [mk(2, None, ["sxx", "szz"]), mk(2, None, ["vz", "sxx"]),
+              mk(2, ["vx", "vz"], None), mk(2, ["vz", "sxx"], None)]
+    for dx in (0, 1, 2, 3, -1, -2, -3, 8):
+        cases += [mk(2, None, None, dx=dx), mk(2, ["vz"], None, dx=dx)]
+    cases += [mk(2, roc=True), mk(2, ["vz"], None, roc=True),
+              mk(2, None, ["sxx", "szz"], roc=True)]
+    cases += [mk(2, fs=True), mk(2, ["vz"], None, fs=True),
+              mk(2, None, ["sxx", "szz"], fs=True)]
+    t3s = ["vx", "vy", "vz", "sxx", "syy", "szz", "sxy", "sxz", "syz"]
+    t3r = ["vx", "vy", "vz", "sxx", "syy", "szz"]
+    cases += [mk(3, [st], None) for st in t3s]
+    cases += [mk(3, None, [rt]) for rt in t3r]
+    rej3 = mk(3, None, ["sxy"], tag="3D rec=sxy (expect library reject)")
+    rej3.expect_reject = True
+    cases.append(rej3)
+    cases += [mk(3, roc=True), mk(3, dx=1), mk(3, dx=8)]
+    first = cases[0]
+    cases.append(mk(first.ndim, first.source_type, first.receiver_type,
+                    tag="REPEAT-FIRST (isolation probe)"))
+    return cases
+
+
+def main():
+    import argparse
+    import gc
+    import time
+    from types import SimpleNamespace
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ndim", type=int, default=2, choices=(2, 3))
+    ap.add_argument("--free-surface", action="store_true")
+    ap.add_argument("--source-type", type=str, default=None)
+    ap.add_argument("--receiver-type", type=str, default=None)
+    ap.add_argument("--src-dx", type=int, default=0)
+    ap.add_argument("--rec-on-cut", action="store_true")
+    ap.add_argument("--matrix", action="store_true",
+                    help="run the whole regression matrix in-process: one "
+                         "NCCL bring-up, everything else per-case fresh")
+    args = ap.parse_args()
+
+    dist.init_process_group("nccl")
+    rank, world = dist.get_rank(), dist.get_world_size()
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    dev_idx = local_rank % max(1, torch.cuda.device_count())
+    torch.cuda.set_device(dev_idx)
+    dev = torch.device(f"cuda:{dev_idx}")
+
+    if not args.matrix:
+        case = SimpleNamespace(
+            ndim=args.ndim, free_surface=args.free_surface,
+            source_type=args.source_type.split(",") if args.source_type else None,
+            receiver_type=(args.receiver_type.split(",")
+                           if args.receiver_type else None),
+            src_dx=args.src_dx, rec_on_cut=args.rec_on_cut, tag="single")
+        verdict, _ = run_case(case, rank, world, dev)
+        if world > 1:
+            dist.destroy_process_group()
+        sys.exit(0 if verdict != "FAIL" else 1)
+
+    assert world == 2, "--matrix is defined for exactly 2 ranks"
+    cases = _matrix_cases()
+    results, blob0, t_all = [], None, time.time()
+    for i, case in enumerate(cases):
+        t0 = time.time()
+        try:
+            verdict, blob = run_case(case, rank, world, dev)
+            if case.expect_reject:
+                verdict = "FAIL(SHOULD-HAVE-REJECTED)"
+        except Exception as e:  # deterministic failures raise on both ranks
+            if case.expect_reject and "not valid for receiver_type" in str(e):
+                verdict, blob = "PASS", None
+            else:
+                verdict, blob = f"ERROR({type(e).__name__})", None
+        if i == 0:
+            blob0 = blob
+        if case.tag.startswith("REPEAT-FIRST") and rank == 0:
+            iso = (blob is not None and blob0 is not None
+                   and torch.equal(blob, blob0))
+            print(f"[matrix] isolation probe: "
+                  f"{'BITWISE-IDENTICAL' if iso else 'CONTAMINATED'}")
+            if not iso:
+                results.append(("isolation-probe", "FAIL"))
+        results.append((case.tag, verdict))
+        if rank == 0:
+            print(f"[matrix] {i + 1:3d}/{len(cases)}  {case.tag:44s} "
+                  f"{verdict}  ({time.time() - t0:4.1f}s)", flush=True)
+        del blob
+        gc.collect()
+        torch.cuda.synchronize()
+        if world > 1:
+            dist.barrier()
+
+    bad = [(t, v) for t, v in results if v not in ("PASS",)]
+    if rank == 0:
+        print(f"\n[matrix] {len(results)} cases in "
+              f"{(time.time() - t_all) / 60:.1f} min; "
+              f"{'ALL PASS' if not bad else f'{len(bad)} NOT PASS:'}")
+        for t, v in bad:
+            print(f"  {v:10s} {t}")
     if world > 1:
         dist.destroy_process_group()
+    sys.exit(0 if not bad else 1)
 
 
 if __name__ == "__main__":
