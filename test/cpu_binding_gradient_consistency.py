@@ -2,7 +2,11 @@
 
 Run from the repository root after installing the package, for example:
 
-    PYTHONPATH=src python test/cpu_binding_gradient_consistency.py
+    SWEEP_JIT_FULL=1 PYTHONPATH=src python test/cpu_binding_gradient_consistency.py
+
+``SWEEP_JIT_FULL=1`` is required: this script runs ``impl='c'`` on the CPU, and
+the default JIT build compiles only the CUDA tree plus a CPU stub, so without it
+every case dies with ``CUDAGuardImpl initialized with non-CUDA DeviceType: cpu``.
 
 The script intentionally keeps the grids small.  It compares the CPU path of
 ``backend="torch", impl="c"`` across full, boundary-saving,
@@ -12,11 +16,26 @@ available it also compares each C/CPU mode against the matching C/CUDA mode.
 Gradient checks report max absolute error, relative L2 error, and cosine
 similarity because small gradients can have tiny pointwise errors even when
 their direction is wrong.
+
+NOTE ON WHAT THIS FILE CAN AND CANNOT SEE.  Every comparison here is C-vs-C.
+That makes it a mode-consistency check, not a correctness check: a defect
+present in both C paths — which is what every elastic adjoint bug found so far
+turned out to be — is invisible from here.  ``backend_gradient_matrix.py``
+imports this module's ``Case``/``CASES``/``run_case`` and adds the eager leg;
+that is the file to run when the question is "is the compiled gradient right",
+as opposed to "do the memory modes agree".
+
+``Case`` carries the source and receiver loading as axes (``source_type``,
+``receiver_type``).  They are not decoration: with the elastic defaults alone
+(explosive stress source, velocity receivers) whole families of defect are
+unreachable — see the comments on ``Case.source_type`` and on the
+``*_src_*`` / ``*_rec_*`` entries in ``CASES``.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -55,6 +74,18 @@ class Case:
     shape: tuple[int, ...]
     pml_type: str
     receiver_type: list[str] | None = None
+    # How the shot is loaded.  ``None`` = the equation's default
+    # (``['sxx','szz']`` for Elastic — an explosive stress source), which is
+    # what every case used to get, silently and without a way to change it.
+    #
+    # It matters far more than a knob-for-completeness: the compiled elastic
+    # backward treats the two families differently.  A body-force source
+    # (``['vz']``, ``['vx']``) is injected raw into the velocity field, so the
+    # stored difference v(it) - v(it+1) that the rho imaging correlates carries
+    # the injected amplitude and needs a source-cell correction; a stress source
+    # does not go near that term.  Whole classes of defect therefore live only
+    # on one side of this axis and are unreachable from the other.
+    source_type: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +145,71 @@ CASES = (
     Case("das3d", DASZhao3D, (8, 8, 8), "cpmls", ["exx_t", "eyy_t", "ezz_t", "das35_t"]),
     Case("das_mu2d", DASMu, (14, 16), "cpmls", ["exx", "ezz", "exz"]),
     Case("das_mu3d", DASMu3D, (8, 8, 8), "cpmls", ["exx", "eyy", "ezz", "exy", "exz", "eyz"]),
+    # ---- source / receiver loading axes -------------------------------------
+    # Every case above rides on the equation defaults, which for Elastic means
+    # an explosive stress source recorded on velocities.  These add the corners
+    # that default can never reach.  They are deliberately a short list rather
+    # than a cross product: one case per mechanism.
+    #
+    #   *_src_vz / *_src_vx  body-force loading, the only family whose injection
+    #                        lands in the term the rho gradient is built from
+    #   *_src_sxz            shear-stress loading (off-diagonal, exercises the
+    #                        mu path with no normal-stress component)
+    #   *_rec_stress         a stress receiver: the adjoint residual is injected
+    #                        into an adjoint STRESS field, which the compiled
+    #                        elastic adjoint stores with the opposite sign of
+    #                        the true adjoint
+    #   *_rec_mixed          velocity and stress receivers together, so a
+    #                        per-field sign error cannot hide behind a global one
+    Case("elastic2d_src_vz", Elastic, (14, 16), "cpmls", None, ["vz"]),
+    Case("elastic2d_src_vx", Elastic, (14, 16), "cpmls", None, ["vx"]),
+    Case("elastic2d_src_sxz", Elastic, (14, 16), "cpmls", None, ["sxz"]),
+    Case("elastic2d_rec_stress", Elastic, (14, 16), "cpmls", ["sxx", "szz"], None),
+    Case("elastic2d_rec_mixed", Elastic, (14, 16), "cpmls", ["vz", "sxx"], ["vz"]),
+    Case("elastic3d_src_vz", Elastic3D, (8, 8, 8), "cpmls", None, ["vz"]),
+    Case("elastic3d_rec_stress", Elastic3D, (8, 8, 8), "cpmls", ["sxx", "syy", "szz"], None),
+    Case("das_mu2d_src_vz", DASMu, (14, 16), "cpmls", ["exx", "ezz", "exz"], ["vz"]),
 )
+
+# Gradients impl='c' is KNOWN not to produce, keyed by (case-name prefix, grad
+# name).  These are reported as MISSING rather than FAIL so the matrix keeps a
+# usable signal — but they are counted, printed, and cross-checked: if the
+# gradient ever shows up, the run FAILS with "prune the stale entry", so an
+# entry cannot outlive the gap it documents.
+#
+# Every one of these is a real hole, not a tolerance question: the candidate
+# returns exactly 0.0 while eager returns a finite gradient.  Only acoustic2d /
+# acoustic3d implement the source-wavelet gradient on the C side
+# (``accumulate_source_gradient_2d/3d``); every other equation's backward
+# returns model gradients only, and ``_c.py`` picks up a wavelet gradient only
+# when ``len(returned_grads) == len(models) + 1``, so the rest silently get None
+# -> zero, with no warning.
+KNOWN_MISSING_GRADIENTS = {
+    ("elastic", "wavelet"): "impl='c' elastic backward returns no source-wavelet gradient",
+    ("das", "wavelet"): "impl='c' DAS backward returns no source-wavelet gradient",
+    ("das_mu", "wavelet"): "impl='c' DAS-mu backward returns no source-wavelet gradient",
+    ("acoustic_vrz", "wavelet"): "impl='c' VRZ backward returns no source-wavelet gradient",
+    ("acoustic_lsrtm2d", "wavelet"): "impl='c' LSRTM2D backward returns no source-wavelet gradient",
+    # LSRTM inverts the reflectivity mp; vp comes back zero on the C side.
+    # NOTE lsrtm3d is deliberately absent from the wavelet list: it DOES return
+    # one, and it is wrong (cos -0.005, rel 4.0 vs eager) — that must stay a
+    # failure, not a declared gap.
+    ("acoustic_lsrtm2d", "vp"): "impl='c' LSRTM2D backward returns no vp gradient (mp only)",
+    ("acoustic_lsrtm3d", "vp"): "impl='c' LSRTM3D backward returns no vp gradient (mp only)",
+}
+
+
+def known_missing_gradient(case_name: str, grad_name: str) -> str | None:
+    """Longest matching prefix wins, so ``acoustic_lsrtm3d`` can declare a gap
+    that ``acoustic_lsrtm`` does not."""
+    best = None
+    for (prefix, name), reason in KNOWN_MISSING_GRADIENTS.items():
+        if name != grad_name or not case_name.startswith(prefix):
+            continue
+        if best is None or len(prefix) > best[0]:
+            best = (len(prefix), reason)
+    return None if best is None else best[1]
+
 
 MODES = ("full", "bs", "ckpt_chunk", "ckpt_recursive")
 CUDA_MODE_REFERENCE_ONLY = {
@@ -137,32 +232,38 @@ def scaled_cases(config: RunConfig, selected: tuple[Case, ...] = CASES) -> tuple
     out: list[Case] = []
     for case in selected:
         shape = config.shape2d if len(case.shape) == 2 else config.shape3d
-        out.append(
-            Case(
-                case.name,
-                case.equation_cls,
-                shape,
-                case.pml_type,
-                case.receiver_type,
-            )
-        )
+        out.append(dataclasses.replace(case, shape=shape))
     return tuple(out)
 
 
 def ricker(nt: int, dt: float, fm: float = 12.0, delay: float = 0.004) -> np.ndarray:
+    """Shape ``(nt,)`` — mode A1 of the source/receiver IO contract (one shared
+    wavelet, one point source per shot).
+
+    This used to return ``(1, 1, nt)``, which ``PropBase._normalize_io`` reads
+    as source-encoding mode (mode B) and rejects outright; that is what had this
+    harness raising ``ValueError: wavelet must have shape (nt,) or (nsrc, nt)``
+    on every single case.  The ``(1, 1, ndim)`` sources it was paired with were
+    the other half of the problem: still accepted, but silently routing a suite
+    meant to exercise the ordinary single-shot path through the encoded one.
+    """
     t = np.arange(nt, dtype=np.float32) * dt - delay
     arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-arg**2)).reshape(1, 1, nt).astype(np.float32)
+    return ((1.0 - 2.0 * arg**2) * np.exp(-arg**2)).astype(np.float32)
 
 
 def geometry(shape: tuple[int, ...], config: RunConfig = DEFAULT_CONFIG) -> tuple[np.ndarray, np.ndarray]:
+    """Mode A1 geometry: sources ``(nshots, ndim)``, receivers ``(nshots, nrec,
+    ndim)``.  ``sources`` used to be ``(1, 1, ndim)`` — accepted, but that is
+    the source-encoding shape, so the suite was exercising the encoded path
+    rather than the ordinary single-shot one it documents."""
     radius = max(1, config.spatial_order // 2)
     source_z = max(1, min(shape[0] - 1, shape[0] // 4))
     receiver_z = max(1, min(shape[0] - 1, radius))
     margin = max(2, radius)
     if len(shape) == 2:
         nz, nx = shape
-        source = np.array([[[nx // 2, source_z]]], dtype=np.int32)
+        source = np.array([[nx // 2, source_z]], dtype=np.int32)
         rec_x = np.arange(margin, max(margin + 1, nx - margin), config.receiver_stride2d, dtype=np.int32)
         if rec_x.size == 0:
             rec_x = np.array([nx // 2], dtype=np.int32)
@@ -171,7 +272,7 @@ def geometry(shape: tuple[int, ...], config: RunConfig = DEFAULT_CONFIG) -> tupl
         return source, receivers
 
     nz, ny, nx = shape
-    source = np.array([[[nx // 2, ny // 2, source_z]]], dtype=np.int32)
+    source = np.array([[nx // 2, ny // 2, source_z]], dtype=np.int32)
     rec_x = np.arange(margin, max(margin + 1, nx - margin), config.receiver_stride3d, dtype=np.int32)
     rec_y = np.arange(margin, max(margin + 1, ny - margin), config.receiver_stride3d, dtype=np.int32)
     if rec_x.size == 0:
@@ -220,6 +321,7 @@ def make_solver(case: Case, mode: str, device: torch.device | None = None, confi
         nt=config.nt,
         B=1,
         receiver_type=case.receiver_type,
+        source_type=case.source_type,
     )
     if mode == "full":
         return PropTorch(
@@ -344,6 +446,27 @@ def assert_gradient_cosine(
         )
 
 
+def effective_atol(reference: torch.Tensor, atol: float, atol_scale: float) -> float:
+    """Absolute tolerance measured in units of the reference's own peak.
+
+    A fixed ``atol`` cannot serve this case list: the compared tensors span
+    ~1e-9 to ~1e9 (a stress receiver moves the record scale by six orders of
+    magnitude on its own).  And it fails in the dangerous direction — the old
+    ``atol=1e-5`` floor was LARGER than an entire elastic rho gradient (peak
+    ~1e-6), so every element passed unconditionally and the comparison was
+    vacuous.  That is why adding the source_type axis alone did not turn the
+    body-force rho defects red; the axis was reaching the right configuration
+    and the tolerance was throwing the answer away.
+
+    Scale it to the reference peak, and keep the fixed value only as the
+    degenerate fallback for an all-zero reference.
+    """
+    if atol_scale <= 0:
+        return atol
+    peak = float(reference.detach().abs().max()) if reference.numel() else 0.0
+    return atol_scale * peak if peak > 0.0 else atol
+
+
 def assert_result_consistent(
     case_name: str,
     mode: str,
@@ -403,7 +526,17 @@ def compare_result_to_reference(
     cosine_threshold: float,
     cosine_eps: float,
     strict: bool,
-) -> tuple[bool, list[str], list[str]]:
+    atol_scale: float = 2e-4,
+    record_atol_scale: float = 1e-3,
+) -> tuple[bool, list[str], list[str], list[str]]:
+    """Returns ``(ok, summaries, errors, missing)``.
+
+    ``missing`` lists gradients this backend is DECLARED not to produce (see
+    ``KNOWN_MISSING_GRADIENTS``).  They are kept out of ``errors`` so the matrix
+    still has a usable pass/fail signal, and reported separately so they stay
+    visible — a silently-zero gradient is the failure mode that hid the elastic
+    source-wavelet gap for the whole life of the feature.
+    """
     reference_record, reference_grads = reference
     candidate_record, candidate_grads = candidate
     summaries: list[str] = []
@@ -415,22 +548,41 @@ def compare_result_to_reference(
             candidate_record,
             reference_record,
             rtol=rtol,
-            atol=atol,
+            atol=effective_atol(reference_record, atol, record_atol_scale),
             msg=lambda msg: f"{case_name}/{mode} record differs from {reference_label}\n{msg}",
         )
     except AssertionError as exc:
         errors.append(str(exc).splitlines()[0])
     summaries.append(f"record: {format_metrics(record_metrics)}")
 
+    missing: list[str] = []
     for name, reference_grad in reference_grads.items():
         candidate_grad = candidate_grads[name]
         metrics = tensor_metrics(candidate_grad, reference_grad, eps=cosine_eps)
+        gap = known_missing_gradient(case_name, name)
+        if gap is not None:
+            # Declared missing on this backend. Report it in its own category so
+            # the matrix keeps a usable pass/fail signal — but never drop it, and
+            # flag the entry as stale the moment the gradient shows up, so the
+            # list cannot quietly outlive the gap it documents.
+            absent = (metrics.candidate_norm <= cosine_eps
+                      and metrics.reference_norm > cosine_eps)
+            if absent:
+                missing.append(f"{case_name}/{mode} {name}: {gap}")
+                summaries.append(f"{name}: MISSING ({gap})")
+                continue
+            errors.append(
+                f"{case_name}/{mode} {name}: KNOWN_MISSING_GRADIENTS claims this "
+                f"gradient is absent ({gap}) but the candidate returned one "
+                f"({format_metrics(metrics)}) — prune the stale entry"
+            )
+            continue
         try:
             torch.testing.assert_close(
                 candidate_grad,
                 reference_grad,
                 rtol=rtol,
-                atol=atol,
+                atol=effective_atol(reference_grad, atol, atol_scale),
                 msg=lambda msg, name=name, metrics=metrics: (
                     f"{case_name}/{mode} {name} gradient differs from {reference_label}\n"
                     f"{format_metrics(metrics)}\n{msg}"
@@ -450,7 +602,7 @@ def compare_result_to_reference(
 
     if errors and strict:
         raise AssertionError("\n".join(errors))
-    return not errors, summaries, errors
+    return not errors, summaries, errors, missing
 
 
 def parse_args() -> argparse.Namespace:
@@ -581,7 +733,7 @@ def main() -> None:
 
             cuda_device = torch.device("cuda")
             cuda_reference = run_case(make_solver(case, mode, cuda_device, config), case, cuda_device, config)
-            ok, summaries, errors = compare_result_to_reference(
+            ok, summaries, errors, missing = compare_result_to_reference(
                 case.name,
                 f"{mode}/c-cuda",
                 cuda_reference,
