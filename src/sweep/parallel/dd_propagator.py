@@ -75,14 +75,51 @@ _FAMILIES = {
 }
 
 
+# Which equations ModelParallel can actually run, and their wavefield family.
+#
+# The criterion is NOT the class name. DD advances the solver one step at a
+# time and exchanges halos between steps, so the equation's CUDA forward AND
+# backward have to honour the stepped range (``p.it_begin`` / ``p.it_end``).
+# Only these do -- see csrc/cuda/equations/{acoustic2d, acoustic3d,
+# acoustic_vrz3d, elastic2d, elastic3d}/{forward,backward}.cu.
+#
+# This used to be a substring match on the class name, which accepted every
+# ``Acoustic*`` / ``Elastic*`` variant in the library. The ones without a
+# stepped forward do not fail on the way in: their time loop is a plain
+# ``for (it = 0; it < p.nt; ++it)``, so a "run one step" call runs the WHOLE
+# record and DD then exchanges halos of a wavefield that already reached nt.
+# Silently wrong, which is worse than unsupported. ``AcousticVRZ`` (2-D) is
+# the clearest case -- its 3-D sibling IS stepped, so the name gives no hint.
+#
+# Adding an equation here means all three of: its forward.cu and backward.cu
+# implement the stepped range; its wavefield list matches the family geometry
+# in ``_FAMILIES``; and a DD-vs-single parity test covers it (test/dd_corner_*).
+_DD_EQUATIONS = {
+    "Acoustic": "acoustic",             # csrc/cuda/equations/acoustic2d
+    "Acoustic3D": "acoustic",           # csrc/cuda/equations/acoustic3d
+    "AcousticVRZ3D": "acoustic",        # csrc/cuda/equations/acoustic_vrz3d
+    "Elastic": "elastic",               # elastic2d and elastic3d -- the 3-D
+                                        # class is also named ``Elastic``,
+                                        # exported as ``Elastic3D``
+}
+
+
 def _family_of(equation) -> str:
-    name = type(equation).__name__.lower()
-    if "elastic" in name:
-        return "elastic"
-    if "acoustic" in name:
-        return "acoustic"
-    raise ValueError(
-        f"ModelParallel v1 supports acoustic/elastic only, got {type(equation).__name__}"
+    # Walk the MRO so a subclass of a supported equation still works. Every
+    # equation in the library derives straight from First/SecondOrderEquation,
+    # never from a sibling, so this cannot smuggle in an unsupported one.
+    for klass in type(equation).__mro__:
+        family = _DD_EQUATIONS.get(klass.__name__)
+        if family is not None:
+            return family
+    raise NotImplementedError(
+        f"domain decomposition does not support {type(equation).__name__}. It "
+        f"needs an equation whose CUDA forward and backward implement the "
+        f"stepped range (it_begin/it_end): "
+        f"{', '.join(sorted(_DD_EQUATIONS))} -- Elastic covers 2-D and 3-D, "
+        f"and note AcousticVRZ3D is stepped while the 2-D AcousticVRZ is not. "
+        f"An equation without it would not raise, it would run the full record "
+        f"on every stepped call."
     )
 
 

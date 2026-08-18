@@ -43,23 +43,26 @@ def test_prop_pml_type_is_always_resolved():
         assert p.pml_type == cls.default_pml_type
 
 
-def test_family_guess_would_have_been_wrong_for_acoustic_vti1st():
+def test_acoustic_vti1st_is_refused_outright():
     """Pin the reason the fallback had to go, not just that it went.
 
-    If someone reintroduces a family-based default, this is the case that
-    breaks: an equation whose NAME says acoustic but whose STEP is staggered.
+    ``AcousticVTI1st`` is the case that broke the old family guess: its NAME
+    says acoustic but its STEP is staggered, so the guess handed it the 6
+    profiles of ``cpmlr`` where its step unpacks the 8 of ``cpmls`` -- bound
+    positionally, hence silently wrong physics rather than a crash.
+
+    It can no longer reach that code at all: ``_family_of`` is an explicit
+    whitelist now, and this equation has no stepped CUDA forward, so DD
+    refuses it. Keep the case pinned -- if someone ever adds it back to
+    ``_DD_EQUATIONS``, the pml_type it receives is what to check first.
     """
     from sweep.equations import AcousticVTI1st
     from sweep.parallel.dd_propagator import _family_of
 
     eq = AcousticVTI1st(device=DEV, backend="torch")
-    family = _family_of(eq)
-    would_have_guessed = "cpmls" if family == "elastic" else "cpmlr"
-    assert family == "acoustic"
     assert eq.default_pml_type == "cpmls"
-    assert would_have_guessed != eq.default_pml_type, (
-        "the class-name family guess happens to agree here; this test is only "
-        "meaningful while it disagrees")
+    with pytest.raises(NotImplementedError, match="stepped range"):
+        _family_of(eq)
 
 
 def test_source_has_no_family_based_pml_fallback():
