@@ -469,12 +469,81 @@ __global__ void stress_kernel_3d_nopml(
 //   λvx += -dt * (c11 * Df_x(λsH) + c13 * Df_x(λsV))
 //   λvy += -dt * (c11 * Df_y(λsH) + c13 * Df_y(λsV))
 //   λvz += -dt * (c13 * Df_z(λsH) + c33 * Df_z(λsV))
-template<int Order>
-__global__ void adjoint_stress_to_vel_kernel_3d(
+// Pre-multiply for kernel A.  Forward: s += dt*(c11*(Db_x v_x + Db_y v_y) +
+// c13*Db_z v_z), so as an operator on v the adjoint is -Df( c * lambda_s ) --
+// the stiffness multiplies the adjoint stress AT THE STRESS LOCATION and only
+// then is differentiated.  Applying it after the derivative is equivalent only
+// for a homogeneous model; otherwise the two differ by a grad(c) term that
+// accumulates once per step.  ph feeds the x and y derivatives, pv the z one.
+template<int Dummy>
+__global__ void adjoint_premultiply_stress_kernel_3d(
     VTIWavefieldPointer3D adj,
     const float* __restrict__ c11,
     const float* __restrict__ c33,
     const float* __restrict__ c13,
+    float* __restrict__ ph,          // c11*lSH + c13*lSV
+    float* __restrict__ pv,          // c13*lSH + c33*lSV
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    // No halo guard: kernel A's stencil reads these cells.
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    int u_idx = b * spatial_size + idx;
+
+    auto a = adj.offset(b, spatial_size);
+    const float lSH = a.sH[idx];
+    const float lSV = a.sV[idx];
+    ph[u_idx] = c11[u_idx] * lSH + c13[u_idx] * lSV;
+    pv[u_idx] = c13[u_idx] * lSH + c33[u_idx] * lSV;
+}
+
+
+// Pre-multiply for kernel B: inv_rho sits at the VELOCITY location, inside the
+// derivative -- lambda_s += -dt * Db( inv_rho * lambda_v ).
+template<int Dummy>
+__global__ void adjoint_premultiply_vel_kernel_3d(
+    VTIWavefieldPointer3D adj,
+    const float* __restrict__ inv_rho,
+    float* __restrict__ qx,
+    float* __restrict__ qy,
+    float* __restrict__ qz,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    int u_idx = b * spatial_size + idx;
+
+    auto a = adj.offset(b, spatial_size);
+    const float ir = inv_rho[u_idx];
+    qx[u_idx] = ir * a.vx[idx];
+    qy[u_idx] = ir * a.vy[idx];
+    qz[u_idx] = ir * a.vz[idx];
+}
+
+
+template<int Order>
+__global__ void adjoint_stress_to_vel_kernel_3d(
+    VTIWavefieldPointer3D adj,
+    const float* __restrict__ ph,
+    const float* __restrict__ pv,
     SGradParam grad_ctx,
     SolverContext solver
 )
@@ -502,24 +571,16 @@ __global__ void adjoint_stress_to_vel_kernel_3d(
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
-    const float* c11_b = c11 + b * spatial_size;
-    const float* c33_b = c33 + b * spatial_size;
-    const float* c13_b = c13 + b * spatial_size;
+    const float* ph_b = ph + b * spatial_size;
+    const float* pv_b = pv + b * spatial_size;
 
-    float dlSH_dx = sgradient<3, Order, X, DIFF_FORWARD>(a.sH, ix, iy, iz, grad_ctx);
-    float dlSV_dx = sgradient<3, Order, X, DIFF_FORWARD>(a.sV, ix, iy, iz, grad_ctx);
-    float dlSH_dy = sgradient<3, Order, Y, DIFF_FORWARD>(a.sH, ix, iy, iz, grad_ctx);
-    float dlSV_dy = sgradient<3, Order, Y, DIFF_FORWARD>(a.sV, ix, iy, iz, grad_ctx);
-    float dlSH_dz = sgradient<3, Order, Z, DIFF_FORWARD>(a.sH, ix, iy, iz, grad_ctx);
-    float dlSV_dz = sgradient<3, Order, Z, DIFF_FORWARD>(a.sV, ix, iy, iz, grad_ctx);
+    float dph_dx = sgradient<3, Order, X, DIFF_FORWARD>(ph_b, ix, iy, iz, grad_ctx);
+    float dph_dy = sgradient<3, Order, Y, DIFF_FORWARD>(ph_b, ix, iy, iz, grad_ctx);
+    float dpv_dz = sgradient<3, Order, Z, DIFF_FORWARD>(pv_b, ix, iy, iz, grad_ctx);
 
-    float C11 = c11_b[idx];
-    float C33 = c33_b[idx];
-    float C13 = c13_b[idx];
-
-    a.vx[idx] += -solver.dt * (C11 * dlSH_dx + C13 * dlSV_dx);
-    a.vy[idx] += -solver.dt * (C11 * dlSH_dy + C13 * dlSV_dy);
-    a.vz[idx] += -solver.dt * (C13 * dlSH_dz + C33 * dlSV_dz);
+    a.vx[idx] += -solver.dt * dph_dx;
+    a.vy[idx] += -solver.dt * dph_dy;
+    a.vz[idx] += -solver.dt * dpv_dz;
 }
 
 
@@ -529,7 +590,9 @@ __global__ void adjoint_stress_to_vel_kernel_3d(
 template<int Order>
 __global__ void adjoint_vel_to_stress_kernel_3d(
     VTIWavefieldPointer3D adj,
-    const float* __restrict__ inv_rho,
+    const float* __restrict__ qx,
+    const float* __restrict__ qy,
+    const float* __restrict__ qz,
     SGradParam grad_ctx,
     SolverContext solver
 )
@@ -557,15 +620,16 @@ __global__ void adjoint_vel_to_stress_kernel_3d(
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
-    const float* invr_b = inv_rho + b * spatial_size;
+    const float* qx_b = qx + b * spatial_size;
+    const float* qy_b = qy + b * spatial_size;
+    const float* qz_b = qz + b * spatial_size;
 
-    float dlvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(a.vx, ix, iy, iz, grad_ctx);
-    float dlvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(a.vy, ix, iy, iz, grad_ctx);
-    float dlvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(a.vz, ix, iy, iz, grad_ctx);
+    float dqx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qx_b, ix, iy, iz, grad_ctx);
+    float dqy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qy_b, ix, iy, iz, grad_ctx);
+    float dqz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(qz_b, ix, iy, iz, grad_ctx);
 
-    float ir = invr_b[idx];
-    a.sH[idx] += -solver.dt * ir * (dlvx_dx + dlvy_dy);
-    a.sV[idx] += -solver.dt * ir * dlvz_dz;
+    a.sH[idx] += -solver.dt * (dqx_dx + dqy_dy);
+    a.sV[idx] += -solver.dt * dqz_dz;
 }
 
 

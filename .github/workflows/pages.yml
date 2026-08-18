@@ -1,4 +1,18 @@
-name: Deploy docs to Pages
+name: Redirect docs to the sweepx site
+
+# This repo's docs are published as the Solver section of the sweepx umbrella
+# site, which owns the theme and builds every package's docs together. What
+# GitHub Pages serves from here is now only a redirect, so the old URLs — README
+# badges, paper links, bookmarks — keep working:
+#
+#   /sweep/                 → <TARGET>/
+#   /sweep/api/equations/…  → <TARGET>/api/equations/…   (via 404.html)
+#
+# The path layout matches one-to-one, because the umbrella imports this docs/
+# flat. Deep links are mapped by 404.html: Pages serves it for any unknown path,
+# and its script re-attaches the tail to the target.
+#
+# TARGET is the umbrella's Solver section.
 
 on:
   push:
@@ -14,45 +28,68 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  TARGET: https://sweepx.deepwave.group/solver
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: docs/requirements.txt
-
-      - name: Install dependencies
+      - name: Generate the redirect site
         run: |
-          pip install -r docs/requirements.txt
-          # CPU-only torch wheel — sweep's optional torch backend is
-          # imported at the top of several equation modules (das.py,
-          # elasticP.py, visco_acoustic.py); without it, mkdocstrings
-          # cannot resolve `sweep.equations.DAS` and the docs build
-          # fails.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          # Install sweep itself (without the CUDA extension) so
-          # mkdocstrings' force_inspection mode can import the
-          # package — its docstring section comes from the runtime
-          # `WaveEquation.__init_subclass__` admonition injection.
-          pip install --no-build-isolation -e .
+          mkdir -p _site
 
-      - name: Build site
-        run: mkdocs build
+          cat > _site/index.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>sweep-solver documentation moved</title>
+            <link rel="canonical" href="${TARGET}/">
+            <meta name="robots" content="noindex">
+            <meta http-equiv="refresh" content="0; url=${TARGET}/">
+            <script>location.replace("${TARGET}/" + location.hash);</script>
+          </head>
+          <body style="font:16px/1.6 system-ui,sans-serif;max-width:34rem;margin:15vh auto;padding:0 1rem">
+            <h1 style="font-size:1.35rem">The docs moved</h1>
+            <p>sweep-solver's documentation is now the <strong>Solver</strong> section of the
+               sweepx site.</p>
+            <p><a href="${TARGET}/">${TARGET}/</a></p>
+          </body>
+          </html>
+          HTML
+
+          # Pages serves 404.html for any path it doesn't have, which makes it a
+          # catch-all: strip this project's base path, re-attach the rest.
+          cat > _site/404.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Redirecting…</title>
+            <meta name="robots" content="noindex">
+            <script>
+              (function () {
+                var base = "/sweep/";
+                var p = location.pathname;
+                var rest = p.indexOf(base) === 0 ? p.slice(base.length) : "";
+                location.replace("${TARGET}/" + rest + location.search + location.hash);
+              })();
+            </script>
+          </head>
+          <body style="font:16px/1.6 system-ui,sans-serif;max-width:34rem;margin:15vh auto;padding:0 1rem">
+            <p>The docs moved to <a href="${TARGET}/">${TARGET}/</a>.</p>
+          </body>
+          </html>
+          HTML
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: _site
 
   deploy:
     environment:

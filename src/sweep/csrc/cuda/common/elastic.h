@@ -727,6 +727,42 @@ inline void zero_wavefield_state(ElasticWavefieldTensor& wf)
     }
 }
 
+// Field-index predicate matching ``elastic_field_ptr`` below: velocity
+// components come first (2-D: vx, vz; 3-D: vx, vy, vz), the stress components
+// right after them.
+inline bool elastic_field_is_stress(int dim, int idx)
+{
+    return (dim == 2) ? (idx >= 2 && idx <= 4) : (idx >= 3 && idx <= 8);
+}
+
+// The compiled elastic adjoint carries the STRESS multipliers with the opposite
+// sign of the true adjoint state — that is the -1 folded into the lambda/mu
+// imaging terms (``grad_vp += -2*rho*vp*grad_lambda*dt``), while the rho term,
+// which consumes the adjoint VELOCITY, carries none.  A receiver residual
+// therefore has to be injected negated when the recorded field is a stress
+// component; injecting it raw (as for a velocity receiver) negates every model
+// gradient.
+//
+// Returns the per-receiver-field adjoint sources with that sign applied, built
+// once per backward call so the reverse loop stays allocation-free.
+inline std::vector<torch::Tensor> elastic_signed_adjoint_sources(
+    const torch::Tensor& adjoint_source,     // (nfield, B, nrec, nt)
+    const torch::Tensor& receiver_fields,    // (nfield,) wavefield indices, CPU
+    int dim
+)
+{
+    const int64_t nfield = receiver_fields.numel();
+    std::vector<torch::Tensor> out;
+    out.reserve(static_cast<size_t>(nfield));
+    for (int64_t i = 0; i < nfield; ++i) {
+        const int field = receiver_fields[i].item<int>();
+        out.push_back(elastic_field_is_stress(dim, field)
+                          ? (-adjoint_source[i]).contiguous()
+                          : adjoint_source[i]);
+    }
+    return out;
+}
+
 inline float* elastic_field_ptr(ElasticWavefieldPointer& wf, int dim, int idx)
 {
     if (dim == 2) {

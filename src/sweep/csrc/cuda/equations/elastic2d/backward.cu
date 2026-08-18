@@ -15,6 +15,55 @@
 #include "../../launch/config.h"
 #include "../../common/wavetypes.h"
 
+// Receiver-side counterpart of sub_receiver_rho_grad_correction (common.cu) for
+// the APM path: same just-injected residual to undo, but the APM kinetic term
+// divides by the per-component EFFECTIVE density and chains through
+// d(rho_eff)/d(rho), so the correction has to carry both.  ``is_z_component``
+// picks rho_z / drho_z_drho for a vz receiver, rho_x / drho_x_drho for vx.
+// ``static`` because this is the only translation unit that launches it and a
+// non-template __global__ in a shared header would break the link (ODR).
+static __global__ void sub_receiver_rho_grad_correction_apm_2d(
+    float* __restrict__ grad_rho,
+    const float* __restrict__ fv_now,
+    const float* __restrict__ fv_next,
+    const float* __restrict__ rho_eff,
+    const int* __restrict__ category,
+    const float* __restrict__ adjoint_source,
+    const int* __restrict__ receivers_loc,
+    int it,
+    int nrec,
+    int halo,
+    int is_z_component,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nrec) return;
+    if (it < 0 || it >= solver.nt) return;
+
+    int base = (b * nrec + s) * 2;
+    int ix = receivers_loc[base + 0];
+    int iz = receivers_loc[base + 1];
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int u_idx = b * spatial_size + idx;
+    int src_idx = (b * nrec + s) * solver.nt + it;
+
+    float drho_x_drho, drho_z_drho;
+    apm_rho_jacobian(category[idx], &drho_x_drho, &drho_z_drho);
+    const float jac = is_z_component ? drho_z_drho : drho_x_drho;
+
+    atomicAdd(&grad_rho[u_idx],
+              -adjoint_source[src_idx] * (fv_now[u_idx] - fv_next[u_idx])
+                  / rho_eff[u_idx] * jac);
+}
+
 namespace elastic2d {
 
 namespace {
@@ -295,6 +344,131 @@ void bind_elastic_grads(
     }
 }
 
+// Undo the just-injected receiver residual from this reverse step's rho
+// imaging, at every velocity-receiver cell (see the kernel comment in
+// common.cuh).  Stress receivers have no rho term to correct.  Call it right
+// after the step's imaging launch, while ``fv*_now`` / ``fv*_next`` still point
+// at the operands the imaging correlated.
+void undo_receiver_rho_injection_2d(
+    const fdtd::LaunchConfig& adj_source_config,
+    torch::Tensor& grad_rho,
+    const float* fvx_now,
+    const float* fvz_now,
+    const float* fvx_next,
+    const float* fvz_next,
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& receiver_fields,
+    int it,
+    int adjoint_nsrc,
+    const SolverContext& solver
+)
+{
+    const int nrec_fields = static_cast<int>(receiver_fields.numel());
+    for (int irec = 0; irec < nrec_fields; ++irec) {
+        const int field = receiver_fields[irec].item<int>();
+        const float* fv_now  = (field == 0) ? fvx_now  : (field == 1) ? fvz_now  : nullptr;
+        const float* fv_next = (field == 0) ? fvx_next : (field == 1) ? fvz_next : nullptr;
+        if (fv_now == nullptr) continue;              // stress receiver: no rho term
+        sub_receiver_rho_grad_correction<<<adj_source_config.grid, adj_source_config.block>>>(
+            grad_rho.data_ptr<float>(),
+            fv_now,
+            fv_next,
+            rho.data_ptr<float>(),
+            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it,
+            adjoint_nsrc,
+            2,
+            p.M,                                      // imaging halo (order/2 == M)
+            solver
+        );
+    }
+}
+
+// Body-force (velocity) sources: the rho imaging correlates the adjoint
+// velocity with v(it) - v(it+1), which at a source cell still contains the raw
+// injected amplitude amp(it+1); the true derivative has no such term (the
+// injection is rho-independent).  Compensate at the source cells.
+//
+// Must run BEFORE this step's receiver residuals are injected.  At a cell that
+// is BOTH a source and a receiver the post-injection adjoint velocity carries
+// the residual as well, and the correction then over-shoots by
+// resid * amp / rho — which is exactly the case (body-force source with a
+// velocity receiver on the same cell) where impl='c' used to return ~2x the
+// true d(loss)/d(rho) in 2-D and ~3.4x in 3-D.
+void undo_body_force_source_injection_2d(
+    const fdtd::LaunchConfig& fwd_source_config,
+    torch::Tensor& grad_rho,
+    ElasticWavefieldPointer& adj_view,
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& source_fields,
+    int it,
+    const SolverContext& solver
+)
+{
+    if (it < 0 || it >= p.nt) return;
+    for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+        const int sfield = source_fields[isrc].item<int>();
+        if (sfield > 1) continue;                       // vx = 0, vz = 1
+        float* adj_field = elastic_field_ptr(adj_view, 2, sfield);
+        if (adj_field == nullptr) continue;
+        add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            grad_rho.data_ptr<float>(),
+            adj_field,
+            rho.data_ptr<float>(),
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            (int)p.forward_sources_loc.size(1),
+            2,
+            solver
+        );
+    }
+}
+
+// APM variant of the above: the APM kinetic rho term uses the per-component
+// effective density and its Jacobian, so it needs its own kernel.
+void undo_receiver_rho_injection_apm_2d(
+    const fdtd::LaunchConfig& adj_source_config,
+    torch::Tensor& grad_rho,
+    const float* fvx_now,
+    const float* fvz_now,
+    const float* fvx_next,
+    const float* fvz_next,
+    const torch::Tensor& rho_x_eff,
+    const torch::Tensor& rho_z_eff,
+    const torch::Tensor& category,
+    const BackwardInput& p,
+    const torch::Tensor& receiver_fields,
+    int it,
+    int adjoint_nsrc,
+    const SolverContext& solver
+)
+{
+    const int nrec_fields = static_cast<int>(receiver_fields.numel());
+    for (int irec = 0; irec < nrec_fields; ++irec) {
+        const int field = receiver_fields[irec].item<int>();
+        if (field > 1) continue;                      // stress receiver: no rho term
+        const bool is_z = (field == 1);
+        sub_receiver_rho_grad_correction_apm_2d<<<adj_source_config.grid, adj_source_config.block>>>(
+            grad_rho.data_ptr<float>(),
+            is_z ? fvz_now : fvx_now,
+            is_z ? fvz_next : fvx_next,
+            (is_z ? rho_z_eff : rho_x_eff).data_ptr<float>(),
+            category.data_ptr<int>(),
+            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it,
+            adjoint_nsrc,
+            p.M,
+            is_z ? 1 : 0,
+            solver
+        );
+    }
+}
+
 int find_previous_checkpoint_idx(
     const int* checkpoint_steps,
     int num_saved_checkpoints,
@@ -440,6 +614,8 @@ void backward_segment_2d(
     const int nsrc_fields = p.source_field_indices.numel();
     const int nrec_fields = p.receiver_field_indices.numel();
     const int segment_len = end - start;
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
 
     auto lambda = rho * (vp * vp - 2 * vs * vs);
     auto mu  = rho * vs * vs;
@@ -506,12 +682,15 @@ void backward_segment_2d(
     for (int it = end - 1; it >= start; --it) {
         auto adj_view = adjoint.view();
 
+        undo_body_force_source_injection_2d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -523,15 +702,22 @@ void backward_segment_2d(
         const int now_offset = offset + 1;
         const int next_offset = now_offset + 1;
 
+        const float* seg_vx_now  = seg_vx.select(0, now_offset).data_ptr<float>();
+        const float* seg_vz_now  = seg_vz.select(0, now_offset).data_ptr<float>();
+        const float* seg_vx_next = (next_offset <= segment_len)
+            ? seg_vx.select(0, next_offset).data_ptr<float>() : next_segment_vx.data_ptr<float>();
+        const float* seg_vz_next = (next_offset <= segment_len)
+            ? seg_vz.select(0, next_offset).data_ptr<float>() : next_segment_vz.data_ptr<float>();
+
         LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
             order,
             launch_config.grid,
             launch_config.block,
             adj_view,
-            seg_vx.select(0, now_offset).data_ptr<float>(),
-            seg_vz.select(0, now_offset).data_ptr<float>(),
-            (next_offset <= segment_len) ? seg_vx.select(0, next_offset).data_ptr<float>() : next_segment_vx.data_ptr<float>(),
-            (next_offset <= segment_len) ? seg_vz.select(0, next_offset).data_ptr<float>() : next_segment_vz.data_ptr<float>(),
+            seg_vx_now,
+            seg_vz_now,
+            seg_vx_next,
+            seg_vz_next,
             vp.data_ptr<float>(),
             vs.data_ptr<float>(),
             rho.data_ptr<float>(),
@@ -542,30 +728,11 @@ void backward_segment_2d(
             solver
         );
 
-        // Body-force (velocity) sources: the rho imaging correlates the
-        // adjoint velocity with v(it) - v(it+1), which at a source cell still
-        // contains the raw injected amplitude amp(it+1); the true derivative
-        // has no such term (the injection is rho-independent).  Compensate at
-        // the source cells (kernel in common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 1) continue;                    // vx = 0, vz = 1
-                float* adj_field_bf = elastic_field_ptr(adj_view, 2, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
-        }
+        undo_receiver_rho_injection_2d(
+            adj_source_config, grad_rho,
+            seg_vx_now, seg_vz_now, seg_vx_next, seg_vz_next,
+            rho, p, receiver_fields, it, adjoint_nsrc, solver
+        );
 
         if (it == 0) {
             continue;
@@ -662,45 +829,26 @@ BackwardOutput backward(const BackwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto zero_velocity = torch::zeros_like(vp);
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
 
+    // it_hi == nt and it_lo == 0 without DD, so this is dev's full
+    // reverse loop verbatim in the single-domain case.
     for (int it = it_hi - 1; it >= it_lo; --it) {
+        undo_body_force_source_injection_2d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
                 solver
             );
-        }
-
-
-        // Body-force (velocity) sources: the rho imaging correlates the
-        // adjoint velocity with v(it) - v(it+1), which at a source cell still
-        // contains the raw injected amplitude amp(it+1); the true derivative
-        // has no such term (the injection is rho-independent).  Compensate at
-        // the source cells (kernel in common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 1) continue;                    // vx = 0, vz = 1
-                float* adj_field_bf = elastic_field_ptr(adj_view, 2, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
         }
 
         const float* vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
@@ -730,6 +878,10 @@ BackwardOutput backward(const BackwardInput& in)
                 grad_ctx,
                 solver
             );
+            undo_receiver_rho_injection_2d(
+                source_config, grad_rho, vx_now, vz_now, vx_next, vz_next,
+                rho, p, receiver_fields, it, adjoint_nsrc, solver
+            );
             continue;
         }
 
@@ -756,6 +908,11 @@ BackwardOutput backward(const BackwardInput& in)
             grad_vp.data_ptr<float>(),
             grad_vs.data_ptr<float>(),
             grad_rho.data_ptr<float>()
+        );
+
+        undo_receiver_rho_injection_2d(
+            source_config, grad_rho, vx_now, vz_now, vx_next, vz_next,
+            rho, p, receiver_fields, it, adjoint_nsrc, solver
         );
 
     }
@@ -973,16 +1130,21 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto current_vz = torch::zeros_like(vp);
     auto next_vx = torch::zeros_like(vp);
     auto next_vz = torch::zeros_like(vp);
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
 
     for (int it = p.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
+
+        undo_body_force_source_injection_2d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
 
         for (int irec = 0; irec < static_cast<int>(p.receiver_field_indices.numel()); ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 p.adjoint_sources_loc.size(1),
@@ -1032,30 +1194,13 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             solver
         );
 
-        // Body-force (velocity) sources: the rho imaging correlates the
-        // adjoint velocity with v(it) - v(it+1), which at a source cell still
-        // contains the raw injected amplitude amp(it+1); the true derivative
-        // has no such term (the injection is rho-independent).  Compensate at
-        // the source cells (kernel in common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 1) continue;                    // vx = 0, vz = 1
-                float* adj_field_bf = elastic_field_ptr(adj_view, 2, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
-        }
+        undo_receiver_rho_injection_2d(
+            adj_source_config, grad_rho,
+            current_vx.data_ptr<float>(), current_vz.data_ptr<float>(),
+            next_vx.data_ptr<float>(), next_vz.data_ptr<float>(),
+            rho, p, receiver_fields, it,
+            (int)p.adjoint_sources_loc.size(1), solver
+        );
 
         if (it == 0)
             continue;
@@ -1225,47 +1370,27 @@ BackwardOutput backward_bs(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+
     for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
 
         if (do_p1) {
+
+        undo_body_force_source_injection_2d(fwd_source_config, grad_rho, adj_view,
+                                            rho, p, source_fields, it, solver);
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
                 solver
             );
-        }
-
-
-        // Body-force (velocity) sources: the rho imaging correlates the
-        // adjoint velocity with v(it) - v(it+1), which at a source cell still
-        // contains the raw injected amplitude amp(it+1); the true derivative
-        // has no such term (the injection is rho-independent).  Compensate at
-        // the source cells (kernel in common.cu).
-        if (it + 1 < p.nt) {
-            for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
-                int sfield_bf = source_fields[isrc_bf].item<int>();
-                if (sfield_bf > 1) continue;                    // vx = 0, vz = 1
-                float* adj_field_bf = elastic_field_ptr(adj_view, 2, sfield_bf);
-                if (adj_field_bf == nullptr) continue;
-                add_body_force_rho_grad_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                    grad_rho.data_ptr<float>(),
-                    adj_field_bf,
-                    rho.data_ptr<float>(),
-                    p.forward_source.data_ptr<float>(),
-                    p.forward_sources_loc.data_ptr<int>(),
-                    it + 1,
-                    (int)p.forward_sources_loc.size(1),
-                    2,
-                    solver
-                );
-            }
         }
 
         // Wavefield reconstruction
@@ -1332,6 +1457,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
             grad_ctx,
             solver
+        );
+
+        // Same operands the imaging just correlated: for_view.v* is v(it),
+        // fv*_prev is v(it+1) (overwritten a few lines below).
+        undo_receiver_rho_injection_2d(
+            adj_source_config, grad_rho,
+            for_view.vx, for_view.vz,
+            fvx_prev.data_ptr<float>(), fvz_prev.data_ptr<float>(),
+            rho, p, receiver_fields, it, adjoint_nsrc, solver
         );
 
         apply_stress_adjoint_2d(
@@ -1573,6 +1707,8 @@ BackwardOutput apm_backward(const BackwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto zero_velocity = torch::zeros_like(vp);
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
 
     for (int it = p.nt - 1; it >= 0; --it) {
         for (int irec = 0; irec < nrec_fields; ++irec) {
@@ -1580,7 +1716,7 @@ BackwardOutput apm_backward(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -1613,6 +1749,12 @@ BackwardOutput apm_backward(const BackwardInput& in)
             grad_rho.data_ptr<float>(),
             grad_ctx,
             solver
+        );
+
+        undo_receiver_rho_injection_apm_2d(
+            source_config, grad_rho, vx_now, vz_now, vx_next, vz_next,
+            rho_x_eff, rho_z_eff, p.topo_category,
+            p, receiver_fields, it, adjoint_nsrc, solver
         );
 
         if (it == 0) continue;
@@ -1742,6 +1884,9 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+
     for (int it = p.nt - 1; it >= 1; --it) {
         // Adjoint source injection
         for (int irec = 0; irec < nrec_fields; ++irec) {
@@ -1749,7 +1894,7 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it, adjoint_nsrc, solver
             );
@@ -1802,6 +1947,16 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
             grad_vs.data_ptr<float>(),
             grad_rho.data_ptr<float>(),
             grad_ctx, solver
+        );
+
+        // Same operands the imaging just correlated: for_view.v* is v(it),
+        // fv*_prev is v(it+1) (overwritten a few lines below).
+        undo_receiver_rho_injection_apm_2d(
+            adj_source_config, grad_rho,
+            for_view.vx, for_view.vz,
+            fvx_prev.data_ptr<float>(), fvz_prev.data_ptr<float>(),
+            rho_x_eff, rho_z_eff, p.topo_category,
+            p, receiver_fields, it, adjoint_nsrc, solver
         );
 
         apply_adjoint_step_apm_2d(

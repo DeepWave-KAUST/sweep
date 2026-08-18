@@ -1,88 +1,33 @@
-site_name: SWEEP Documentation
-site_description: Seismic Wave Equation Exploration Platform
+# ─────────────────────────────────────────────────────────────────────────
+# sweep-solver — documentation content
+#
+# The published site is the sweepx umbrella (https://sweepx.deepwave.group/):
+# mkdocs-multirepo imports this `docs/` and renders it with sweepx's theme, so
+# the LOOK is defined once, there — not here. This repo's own Pages deployment
+# now only redirects to that site (see .github/workflows/pages.yml).
+#
+# What stays here: the nav, and the plugins/extensions the content itself needs
+# (notebooks, API from docstrings, admonitions, math). Deliberately absent:
+# theme.custom_dir, extra_css/extra_javascript, palette/font tuning — those were
+# a second copy of sweepx's theme and drifted.
+#
+# `mkdocs serve` here still works for a quick content preview; it renders with
+# plain Material, without the sweepx skin.
+# ─────────────────────────────────────────────────────────────────────────
+site_name: sweep-solver
+site_description: The differentiable GPU wave-equation engine of the sweep ecosystem.
 repo_url: https://github.com/DeepWave-KAUST/sweep
 repo_name: DeepWave-KAUST/sweep
 edit_uri: edit/dev/docs/
-site_url: https://deepwave-kaust.github.io/sweep/
-docs_dir: docs
-watch:
-  - README.md
-  - examples
-  - src
 
 theme:
-  name: material
-  custom_dir: overrides
-  logo: assets/logo/sweep-icon-transparent.svg
-  favicon: assets/logo/sweep-icon-32.png
-  font:
-    text: Inter Tight
-    code: JetBrains Mono
+  name: material          # placeholder — sweepx supplies the published theme
   features:
-    - navigation.tabs
-    - navigation.tabs.sticky
-    # 'navigation.sections' removed — it expanded the left sidebar tree
-    # (no collapsing) and visually shrank the notebook content column.
     - navigation.indexes
-    - navigation.top
-    - navigation.footer
     - content.code.copy
-    - content.code.annotate
-    - content.action.edit
-    - content.action.view
-    - search.suggest
-    - search.highlight
-    - toc.follow
-  palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: white
-      accent: indigo
-      toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: black
-      accent: indigo
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to light mode
-
-extra:
-  generator: false
-  social:
-    - icon: fontawesome/brands/github
-      link: https://github.com/DeepWave-KAUST/sweep
-
-markdown_extensions:
-  - admonition
-  - attr_list
-  - md_in_html
-  - tables
-  - pymdownx.emoji:
-      emoji_index: !!python/name:material.extensions.emoji.twemoji
-      emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  - pymdownx.arithmatex:
-      generic: true
-  - pymdownx.details
-  - pymdownx.highlight:
-      anchor_linenums: true
-      line_spans: __span
-      pygments_lang_class: true
-  - pymdownx.inlinehilite
-  - pymdownx.snippets
-  - pymdownx.superfences
-  - pymdownx.tabbed:
-      alternate_style: true
-  - toc:
-      permalink: true
 
 plugins:
   - search
-  - git-revision-date-localized:
-      enable_creation_date: true
-      fallback_to_build_date: true
   - mkdocs-jupyter:
       include_source: true        # required for the per-notebook Download button
       execute: false
@@ -120,6 +65,29 @@ plugins:
               - "!^MODEL_SPECS$"
               - "!^default_pml_type$"
               - "!^supports_apm$"
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
 
 nav:
   - Home: index.md
@@ -166,8 +134,8 @@ nav:
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
-              - Domain decomposition · model-parallel: notebooks/22_domain_decomposition.ipynb
-              - Domain decomposition · Overthrust 3-D: notebooks/25_dd_overthrust_3d.ipynb
+              - Domain decomposition · model-parallel: notebooks/25_domain_decomposition.ipynb
+              - Domain decomposition · Overthrust 3-D: notebooks/26_dd_overthrust_3d.ipynb
           - Extending:
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
           - Sensitivity & resolution:
@@ -203,12 +171,3 @@ nav:
           - Propagator Options: api/propagators/options.md
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
-
-extra_css:
-  - stylesheets/extra.css
-  - https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css
-
-extra_javascript:
-  - https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js
-  - https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js
-  - javascripts/katex.js
