@@ -193,6 +193,44 @@ A runnable comparison of these options lives in the
 exercises full-wavefield, boundary saving, and checkpointing on the same
 Marmousi shot and prints the per-mode peak GPU / host memory.
 
+### Boundary tail truncation (`BoundaryOptions.tail_steps`)
+
+For **steady-state objectives** — frequency-selection / DFT-comb FWI, where the
+loss reads only the **last** `n_probe` samples of the record and the adjoint
+source is therefore zero everywhere earlier — the reverse sweep does not need
+to walk the whole record.  `tail_steps=K` makes the forward save only the last
+`K` steps' boundary strips and stops the backward after them:
+
+```python
+memory=MemoryOptions(
+    strategy="boundary",
+    boundary=BoundaryOptions(storage="gpu", tail_steps=n_probe + margin),
+)
+```
+
+- **The forward physics is unchanged** — the wavefield still runs the full
+  record so the steady state can ring up.  Only the saved/reconstructed step
+  range shrinks, so both the backward wall time and the one-shot boundary
+  buffer drop by roughly `1 - K / nt` (measured: 74 % backward time and 75 %
+  buffer at `K/nt = 25 %`).
+- The restore at reverse step `it` consumes the strip saved at forward step
+  `it - 1`, so one saved step is spent on alignment: the **effective reverse
+  depth is `K - 1`** — budget it inside `margin`.
+- **`margin` is physical**: the dropped gradient term is exactly the
+  adjoint × ring-up-transient correlation that steady-state methods discard,
+  and it decays as the adjoint field drains through the absorbing boundary.
+  Sweep the margin once per setup: on a ramped-sine test the truncated
+  gradient converges monotonically to the full one
+  (cos 0.992 → 1.000000 for margin 0 → 800 steps on a 140×160 grid).
+- **Do not use it with impulsive-source objectives**: there the early
+  adjoint–forward correlations are real gradient content and the truncated
+  gradient is genuinely different (cos ≈ 0.1 in the same test).
+- Scope: `impl="c"` Acoustic 2-D/3-D with the boundary-saving backward, any
+  `storage`/`storage_dtype`.  Checkpointing, elastic, `rtm()` and stepped/DD
+  segments raise `NotImplementedError`/`ValueError` rather than silently
+  ignoring the option.  Unset (`None`, the default) is bit-exact legacy
+  behaviour, and `tail_steps >= nt` degenerates to it bitwise.
+
 ## Consistency testing
 
 The C memory modes are exercised by `test/solver_gradient_mode_suite.py`. The
