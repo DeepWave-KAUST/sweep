@@ -115,6 +115,7 @@ ForwardOutput forward(const ForwardInput& in)
     solver.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     if (p.has_topo) { solver.topo_rows = p.topo_rows.data_ptr<int>(); solver.has_topo = true; }
     solver.cut_mask = p.cut_face_mask;   // cut-aware phys bounds (0 = single domain)
+    elastic_init_aux_slabs(solver, wavefield);
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
@@ -353,6 +354,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
     solver.topo_category = p.topo_category.data_ptr<int>();
     solver.use_apm = true;
     solver.cut_mask = p.cut_face_mask;   // cut-aware phys bounds (0 = single domain)
+    elastic_init_aux_slabs(solver, wavefield);
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
