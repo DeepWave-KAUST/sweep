@@ -172,8 +172,10 @@ ForwardOutput forward(const ForwardInput& in) {
     // last K steps' boundary strips are saved; the runtime and the Python
     // buffers work in shifted "saved-step" coordinates [0, K).  bs_it0 = 0
     // when disabled, making every shift below a no-op (bit-exact legacy).
-    TORCH_CHECK(p.boundary_tail_steps == 0 || !stepped,
-                "boundary_tail_steps does not compose with stepped/DD forward segments yet");
+    // Stepped/DD segments compose transparently: ``it`` is the GLOBAL step
+    // index, so the save guard and shift never look at the segment bounds;
+    // the Python-bound boundary_gpu ring (mandatory under stepped) is
+    // allocated tail-shrunk by _ensure_boundary_buffers(nt_saved=...).
     const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
         ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
     BoundaryRuntime boundary_runtime(

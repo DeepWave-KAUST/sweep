@@ -226,10 +226,19 @@ memory=MemoryOptions(
   adjoint–forward correlations are real gradient content and the truncated
   gradient is genuinely different (cos ≈ 0.1 in the same test).
 - Scope: `impl="c"` Acoustic 2-D/3-D with the boundary-saving backward, any
-  `storage`/`storage_dtype`.  Checkpointing, elastic, `rtm()` and stepped/DD
-  segments raise `NotImplementedError`/`ValueError` rather than silently
-  ignoring the option.  Unset (`None`, the default) is bit-exact legacy
-  behaviour, and `tail_steps >= nt` degenerates to it bitwise.
+  `storage`/`storage_dtype`.  Checkpointing, elastic and `rtm()` raise
+  `NotImplementedError`/`ValueError` rather than silently ignoring the
+  option.  Unset (`None`, the default) is bit-exact legacy behaviour, and
+  `tail_steps >= nt` degenerates to it bitwise.
+- **Domain decomposition composes**: `ModelParallel` inherits `tail_steps`
+  from the wrapped propagator's memory config exactly like
+  `storage`/`storage_dtype`, shrinks every tile's boundary ring to `K`
+  steps, and stops the lockstep reverse halo loop at the same global step
+  on every rank (the stop index is derived from `(nt, tail_steps)`, which
+  are identical across ranks by construction, so no rank can be left
+  waiting in an exchange).  The truncated DD gradient is bit-exact against
+  the truncated single-domain gradient on fp32 boundaries
+  (`test/test_dd_tail_two_tile.py`, `test/dd_tail_nccl_check.py`).
 
 ## Consistency testing
 

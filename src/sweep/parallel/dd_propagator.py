@@ -244,6 +244,11 @@ class ModelParallel:
         _bcfg = getattr(prop, "boundary_saving_config", None) or {}
         self._bstorage = _bcfg.get("storage", "gpu")
         self._bdtype = _bcfg.get("storage_dtype", "fp32")
+        # Boundary tail truncation (BoundaryOptions.tail_steps) is inherited
+        # like storage/dtype.  Every tile reads the SAME value off the wrapped
+        # prop's config, which is what keeps the truncated reverse loop's stop
+        # step globally consistent across ranks (see _run_adjoint).
+        self._btail = int(_bcfg.get("tail_steps") or 0)
 
         self.topo = model_parallel
         self.global_shape = tuple(int(s) for s in global_shape)
@@ -322,6 +327,10 @@ class ModelParallel:
                 # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
                 "storage": self._bstorage,
                 "storage_dtype": self._bdtype,
+                # tail truncation shrinks each tile's boundary ring to the
+                # last tail_steps steps (None = full length); the C++ side
+                # indexes it in shifted saved-step coordinates either way.
+                "tail_steps": self._btail or None,
                 "transfer_interval": 1, "pinned_memory": False},
             model_parallel=self.topo,
         )
@@ -1098,9 +1107,21 @@ class ModelParallel:
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
                     adj_pairs=_adj_pairs)
-                for it in range(self.nt - 1, -1, -1):
+                # Boundary tail truncation: with tail_steps = K the strips
+                # cover forward steps [nt-K, nt-1] and the restore at reverse
+                # step ``it`` consumes the strip of step ``it - 1``, so the
+                # reverse loop stops at bs_it0 + 1 (same bound as the C++
+                # monolithic driver).  ``stop`` is derived from nt and the
+                # captured tail — both identical on every rank — so all tiles
+                # cease their lockstep halo exchanges at the same step; no
+                # rank can be left waiting.  stop == 0 (tail off or >= nt)
+                # reproduces the historical loop verbatim.
+                _tail = int(getattr(self.bp, "boundary_tail_steps", 0) or 0)
+                _bs_it0 = max(0, self.nt - _tail) if _tail > 0 else 0
+                stop = _bs_it0 + 1 if _bs_it0 > 0 else 0
+                for it in range(self.nt - 1, stop - 1, -1):
                     br.run_segment(it + 1, it)
-                    if it == 0:
+                    if it == stop:
                         break
                     self._exchange(bhalo, br.lambda_now)
                     self._exchange(bhalo, br.recon_u_now)
