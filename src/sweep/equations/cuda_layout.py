@@ -22,6 +22,19 @@ class CUDALayoutSpec:
     adjoint_extra_nvar: int = 0
     boundary_tangent_pad: int = 0
     boundary_save_nvar: int | None = None
+    # CPML aux strip (slab) storage.  ``pml_slot_axes`` tags each of the
+    # pml_nvar FORWARD slots with its differencing axis ('x'/'y'/'z') in the
+    # C++ bind order; the runtime then allocates those slots as per-axis
+    # slabs (band + stencil reach) instead of full grids.  The kernels adapt
+    # per bound tensor, so ``None`` (default) keeps full-domain allocation.
+    # ``checkpoint_slot_axes`` does the same for the checkpoint snapshot
+    # slots (``None`` entries are physical, full-grid slots).  The ADJOINT
+    # aux stays full-domain unless ``adjoint_pml_slab`` is set (acoustic's
+    # fused adjoint stencil-taps psi/zeta and is kept on the legacy layout;
+    # elastic memory variables are own-cell only and can opt in).
+    pml_slot_axes: tuple | None = None
+    checkpoint_slot_axes: tuple | None = None
+    adjoint_pml_slab: bool = False
 
     def resolved_last_two_storage_nvar(self) -> int:
         return self.base_nvar if self.last_two_storage_nvar is None else self.last_two_storage_nvar
