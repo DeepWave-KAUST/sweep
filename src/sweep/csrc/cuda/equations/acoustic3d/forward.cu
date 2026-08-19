@@ -186,9 +186,8 @@ ForwardOutput forward(const ForwardInput& in)
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
-    // Boundary tail truncation -- see acoustic2d/forward.cu.
-    TORCH_CHECK(p.boundary_tail_steps == 0 || !stepped,
-                "boundary_tail_steps does not compose with stepped/DD forward segments yet");
+    // Boundary tail truncation -- see acoustic2d/forward.cu (stepped/DD
+    // segments compose: global ``it``, tail-shrunk Python-bound ring).
     const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
         ? std::max(0, (int)nt - p.boundary_tail_steps) : 0;
     BoundaryRuntime boundary_runtime(

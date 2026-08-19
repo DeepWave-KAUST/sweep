@@ -878,13 +878,10 @@ void run_bs_imaging(
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    // Boundary tail truncation -- see acoustic2d/backward.cu.
+    // Boundary tail truncation -- see acoustic2d/backward.cu (stepped/DD
+    // segments and cut faces compose; the driver must not issue segments
+    // entirely below bs_stop).
     TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
-    TORCH_CHECK(p.boundary_tail_steps == 0 ||
-                (it_hi == static_cast<int>(p.nt) && it_lo == 0),
-                "boundary_tail_steps does not compose with stepped backward segments yet");
-    TORCH_CHECK(p.boundary_tail_steps == 0 || p.cut_face_mask == 0,
-                "boundary_tail_steps does not compose with DD cut faces yet");
     const int bs_it0 = (p.boundary_tail_steps > 0)
         ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
     // The reverse loop's restore at step ``it`` consumes the boundary saved

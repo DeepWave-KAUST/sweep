@@ -542,11 +542,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // boundary_tail_steps steps.  Saved-step coordinates are shifted by
     // bs_it0; bs_it0 = 0 when disabled (bit-exact legacy behaviour).
     TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
-    TORCH_CHECK(p.boundary_tail_steps == 0 ||
-                (it_hi == static_cast<int>(p.nt) && it_lo == 0),
-                "boundary_tail_steps does not compose with stepped backward segments yet");
-    TORCH_CHECK(p.boundary_tail_steps == 0 || p.cut_face_mask == 0,
-                "boundary_tail_steps does not compose with DD cut faces yet");
+    // Stepped/DD segments compose: the main-loop bound below already clamps
+    // to max(it_lo, 1, bs_stop), so a segment straddling the stop truncates
+    // and one at/above it runs unchanged.  The driver (dd_propagator's
+    // _run_adjoint) must simply not issue segments entirely below bs_stop —
+    // it derives the SAME stop from (nt, tail) on every rank, keeping the
+    // lockstep halo exchanges aligned.  Cut faces are orthogonal: the strip
+    // save/restore is already cut-aware via ctx.cut_mask and the per-step
+    // strip layout does not depend on the step index, so the saved-step
+    // shift passes through untouched.
     const int bs_it0 = (p.boundary_tail_steps > 0)
         ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
     // The reverse loop's restore at step ``it`` consumes the boundary saved
