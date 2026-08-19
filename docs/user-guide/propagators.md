@@ -168,14 +168,25 @@ fail loudly at construction time rather than during a long FWI run.
 
 ## Memory-saving features
 
+The gradient-memory mode is a **three-way choice — `'full'`, `'boundary'`, or
+`'ckpt'` — identical for the eager and CUDA backends**, selected once via
+`memory=MemoryOptions(strategy=...)`.  Left unset, `impl="c"` defaults to
+`'boundary'` (GPU ring, fp32) and the eager backend to `'ckpt'`.  The modes
+are mutually exclusive: conflicting requests (e.g. the legacy `use_ckpt=True`
+together with an enabled `boundary_saving_config`) raise a `ValueError`
+instead of one path silently winning.  The legacy `use_ckpt` /
+`boundary_saving_config` knobs remain accepted and resolve into the same
+three-way choice.
+
 | Feature | Path | Configured by |
 | --- | --- | --- |
-| Eager activation checkpointing | `impl="eager"` | top-level `use_ckpt` / `ckpt_chunks` on `PropTorch` |
-| `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
-| Boundary saving (GPU / pinned CPU / disk) | `impl="c"` | `BoundaryOptions(storage="gpu" | "cpu" | "disk", ...)` |
+| Full storage (no reconstruction) | both | `MemoryOptions(strategy="full")` |
+| Boundary saving (GPU ring; + pinned CPU / disk on `impl="c"`) | both | `MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage=..., storage_dtype=..., ...))` |
 | Asynchronous disk prefetch | `impl="c"` | `BoundaryOptions(storage="disk", disk_async_read=True, ...)` |
-| Chunked checkpointing | `impl="c"` | `CkptOptions(mode="chunk", chunks=...)` |
+| Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundaryOptions(tail_steps=...)` |
+| Chunked checkpointing | both | `MemoryOptions(strategy="ckpt", ckpt=CkptOptions(mode="chunk", chunks=...))` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `CkptOptions(mode="recursive", count=...)` |
+| `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
 
 A runnable comparison of these options lives in the
 [Memory · strategies notebook](../notebooks/07_memory_strategies.ipynb), which
