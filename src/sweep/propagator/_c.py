@@ -1146,6 +1146,51 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
     def __del__(self):
         self._remove_boundary_disk_cache()
 
+    def _aux_slab_len(self, caxis):
+        """Slab length of one CPML aux axis (caxis: 0=z, 1=y, 2=x, C order).
+
+        Mirrors SolverContext::aux_slab_formula exactly: per non-cut side
+        ``pad + 3*M + 1`` (band + widest adjoint write band + stencil tap
+        reach + staggered half cell), a DD cut side carries nothing, an
+        all-cut axis keeps one dummy column for clamped reads, and when the
+        two slabs meet the axis degenerates to full coverage.  The C++ side
+        recomputes this from the same inputs and TORCH_CHECKs the bound
+        tensors, so drift between the two is loud.
+        """
+        M = self.equation.so // 2
+        dims = {0: 0, 1: 1, 2: self.ndim - 1}
+        n = self.shape_cuda[dims[caxis]]
+        pad_i = {0: 0, 1: 2, 2: (2 if self.ndim == 2 else 4)}[caxis]
+        cm = getattr(self, "_dd_cut_mask", 0) or 0
+        cut_lo, cut_hi = {0: (4, 8), 1: (16, 32), 2: (1, 2)}[caxis]
+        lo = 0 if cm & cut_lo else self.pad[pad_i] + 3 * M + 1
+        hi = 0 if cm & cut_hi else self.pad[pad_i + 1] + 3 * M + 1
+        if lo + hi == 0:
+            lo = 1
+        if lo + hi >= n:
+            return n
+        return lo + hi
+
+    def _aux_slab_shape(self, axis_char, lead):
+        """[B, 1, ...] shape of one slab-allocated aux slot (lead = [B, 1])."""
+        caxis = {"z": 0, "y": 1, "x": 2}[axis_char]
+        w = self._aux_slab_len(caxis)
+        sp = list(self.shape_cuda)
+        sp[{0: 0, 1: 1, 2: self.ndim - 1}[caxis]] = w
+        return lead + sp
+
+    def _forward_wavefield_shapes(self):
+        """Per-slot forward wavefield shapes: physical slots on the full grid,
+        CPML aux slots as per-axis slabs when the equation declares
+        ``pml_slot_axes`` (kernels adapt per bound tensor either way)."""
+        cuda_layout = self._cuda_layout()
+        base = [[self.B, 1, *self.shape_cuda]] * cuda_layout.base_nvar
+        axes = getattr(cuda_layout, "pml_slot_axes", None)
+        if not axes:
+            return base + [[self.B, 1, *self.shape_cuda]] * cuda_layout.pml_nvar
+        assert len(axes) == cuda_layout.pml_nvar, "pml_slot_axes/pml_nvar mismatch"
+        return base + [self._aux_slab_shape(a, [self.B, 1]) for a in axes]
+
     def _ensure_wavefield_buffers(self, batch_size, persist_forward_state=False, need_adjoint=True):
         # persist_forward_state: keep the forward propagation-state buffers
         # (u_prev/now/next + psi/zeta, shape [B,1,*spatial]) as persistent,
@@ -1176,11 +1221,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.B = target_capacity
         cuda_layout = self._cuda_layout()
         total_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
-        wavefield_shapes = total_wavefields * [[self.B, 1, *self.shape_cuda]]
+        wavefield_shapes = self._forward_wavefield_shapes()
         # The adjoint may need extra double-buffer tensors (fused single-kernel
-        # adjoint double-buffers zeta); the forward never does.
+        # adjoint double-buffers zeta); the forward never does.  Acoustic's
+        # fused adjoint stencil-taps psi/zeta, so its aux stays FULL-domain
+        # (adjoint_pml_slab=False); elastic memory variables are own-cell only
+        # and reuse the forward slab shapes.
         adjoint_wavefields_n = total_wavefields + int(getattr(cuda_layout, "adjoint_extra_nvar", 0))
-        adjoint_wavefield_shapes = adjoint_wavefields_n * [[self.B, 1, *self.shape_cuda]]
+        if getattr(cuda_layout, "adjoint_pml_slab", False):
+            extra = adjoint_wavefields_n - total_wavefields
+            adjoint_wavefield_shapes = list(wavefield_shapes) + \
+                [[self.B, 1, *self.shape_cuda]] * extra
+        else:
+            adjoint_wavefield_shapes = adjoint_wavefields_n * [[self.B, 1, *self.shape_cuda]]
         if batch_size > (current_capacity or 0):
             self.forward_allocator = Allocator(self.dev)
             self.adjoint_allocator = Allocator(self.dev)
@@ -1211,11 +1264,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         the C++ scratch it replaces, so boundary-saving backward peak memory
         is unchanged.
         """
-        cuda_layout = self._cuda_layout()
-        n_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
         return tuple(
-            torch.zeros([batch_size, 1, *self.shape_cuda], device=self.dev)
-            for _ in range(n_wavefields)
+            torch.zeros([batch_size, 1, *shape[2:]], device=self.dev)
+            for shape in self._forward_wavefield_shapes()
         )
 
     def _ensure_adjoint_workspace_buffers(self, batch_size):
@@ -1291,14 +1342,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         ):
             return
 
-        checkpoint_shape = [n_checkpoints, active_batch, 1, *self.shape_cuda]
         cuda_layout = self._cuda_layout()
         num_checkpoint_tensors = int(cuda_layout.resolved_checkpoint_nvar())
+        ckpt_axes = getattr(cuda_layout, "checkpoint_slot_axes", None)
+        if ckpt_axes:
+            # Per-slot shapes: physical slots on the full grid, CPML aux
+            # slots as per-axis slabs (mirrors the C++ checkpoint_tensors()
+            # slot order for this equation).
+            assert len(ckpt_axes) == num_checkpoint_tensors, \
+                "checkpoint_slot_axes/checkpoint_nvar mismatch"
+            checkpoint_shapes = [
+                [n_checkpoints, active_batch, 1, *self.shape_cuda] if a is None
+                else self._aux_slab_shape(a, [n_checkpoints, active_batch, 1])
+                for a in ckpt_axes
+            ]
+        else:
+            checkpoint_shapes = (
+                num_checkpoint_tensors
+                * [[n_checkpoints, active_batch, 1, *self.shape_cuda]]
+            )
         checkpoint_device = "cpu" if checkpoint_storage == "cpu" else self.dev
         self.checkpoint_allocator = Allocator(checkpoint_device)
         self.checkpoints = tuple(
             self.checkpoint_allocator.zeros(
-                [checkpoint_shape] * num_checkpoint_tensors,
+                checkpoint_shapes,
                 dtype=torch.float32,
                 dev=checkpoint_device,
                 pin_memory=checkpoint_pinned,

@@ -199,6 +199,10 @@ class Acoustic(SecondOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
+            # forward slots psix,psiz,zetax,zetaz,psixn,psizn live in per-axis
+            # slabs; checkpoints carry u_prev,u_now + the same aux slabs.
+            pml_slot_axes=("x", "z", "x", "z", "x", "z"),
+            checkpoint_slot_axes=(None, None, "x", "z", "x", "z"),
             boundary_save_nvar=1,
             backward_workspace_nvar=1,
         )

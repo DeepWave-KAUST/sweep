@@ -97,6 +97,7 @@ ForwardOutput forward(const ForwardInput& in)
         wavefield.bind(p.wavefields, 3, true);
     else
         wavefield.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+    acoustic_init_aux_slabs(ctx, wavefield);
 
     // ----------------------------
     // PML parameters

@@ -24,6 +24,34 @@ struct AProductAccessor {
     }
 };
 
+// Slab-aware variant of AProductAccessor: the tap's axis coordinate maps
+// through AuxSlab::rd(), so taps outside the stored slab read element 0 —
+// their profile weight a[...] is exactly zero there, so the value is
+// irrelevant and the FLOAT expression tree is unchanged (same contraction).
+struct AProductSlabAccessor {
+    const float* __restrict__ a;
+    const float* __restrict__ psi;
+    int a_pos;
+    long pre;    // index contribution of the non-differencing axes
+    long step;   // slab stride along the differencing axis
+    SolverContext::AuxSlab slab;
+    __device__ __forceinline__
+    float operator()(int offset) const {
+        return a[a_pos + offset] * psi[pre + (long)slab.rd(a_pos + offset) * step];
+    }
+};
+
+template<int Order>
+__device__ __forceinline__
+float fused_d_aPsi_slab(const float* __restrict__ a, const float* __restrict__ psi,
+                        int a_pos, long pre, long step,
+                        const SolverContext::AuxSlab& slab,
+                        int M, const float* __restrict__ coeff, float h)
+{
+    return centered_gradient_stencil<Order>(
+        AProductSlabAccessor{a, psi, a_pos, pre, step, slab}, M, coeff, h);
+}
+
 template<int Order>
 __device__ __forceinline__
 float fused_d_aPsi(const float* __restrict__ a, const float* __restrict__ psi,
@@ -78,8 +106,17 @@ static __global__ void acoustic2d_air_clear_kernel(
     int idx = iz * solver.nx + ix;
     auto f = wf.offset(b, spatial_size);
     f.u_next[idx] = 0.f;
-    f.psix[idx] = 0.f; f.psiz[idx] = 0.f;
-    f.zetax[idx] = 0.f; f.zetaz[idx] = 0.f;
+    // Aux fields live in per-axis slabs; air cells outside a slab hold an
+    // implicit zero (the FD kernel never writes them), so only clear the
+    // stored part.  Full-domain (legacy) tensors report stored() everywhere.
+    if (solver.aux_x.stored(ix)) {
+        long xi = solver.aux_idx_x2(iz, ix);
+        f.psix[xi] = 0.f; f.zetax[xi] = 0.f;
+    }
+    if (solver.aux_z.stored(iz)) {
+        long zi = solver.aux_idx_z2(iz, ix);
+        f.psiz[zi] = 0.f; f.zetaz[zi] = 0.f;
+    }
     if (u_this) u_this[b * spatial_size + idx] = 0.f;
 }
 
@@ -167,8 +204,9 @@ __global__ void acoustic2nd(
     int pml_x1 = solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + halo);
     int pml_z0 = solver.cut_z_lo() ? halo : solver.padLo(0) + halo;
     int pml_z1 = solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + halo);
-    bool in_pml = (ix < pml_x0) || (ix >= pml_x1) ||
-                  (iz < pml_z0) || (iz >= pml_z1);
+    bool in_x = (ix < pml_x0) || (ix >= pml_x1);
+    bool in_z = (iz < pml_z0) || (iz >= pml_z1);
+    bool in_pml = in_x || in_z;
 
     if (!in_pml) {
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
@@ -178,36 +216,53 @@ __global__ void acoustic2nd(
         return;
     }
 
-    float ax_ = cpml.ax[ix];
-    float az_ = cpml.az[iz];
-    float bx_ = cpml.bx[ix];
-    float bz_ = cpml.bz[iz];
-    float dbxdx_ = cpml.dbxdx[ix];
-    float dbzdz_ = cpml.dbzdz[iz];
-
     float w_sum = 0.0f;
 
-    float dudz     = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
-    float dudx     = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-    // FUSED d(a·psi) (single stencil) instead of the product-rule split
-    // a·d(psi) + d(a)·psi.  Bit-matches the eager reference grad_op(a*psi);
-    // drops d(psi) and d(a) from the live set -> fewer registers (deepwave-style).
-    float daipsiz_dz = fused_d_aPsi<Order>(cpml.az, f.psiz, iz, idx, grad_ctx.sz, halo, grad_ctx.coeff, grad_ctx.dz);
-    float daipxix_dx = fused_d_aPsi<Order>(cpml.ax, f.psix, ix, idx, grad_ctx.sx, halo, grad_ctx.coeff, grad_ctx.dx);
+    // Per-axis split of the PML update.  The legacy union gate ran BOTH
+    // axis expressions for every frame cell, so the compute band of an axis
+    // extends one halo past its coefficient band: a frame cell within halo
+    // of the band edge still picks up nonzero fused-tap terms (a·psi taps
+    // reach into the band; dbxdx has one extra cell of support).  Beyond
+    // that the axis expression collapses to the bare Laplacian term
+    // bit-for-bit and its aux fields stay untouched zeros -- which is what
+    // allows psi/zeta to live in per-axis slabs (width pad + 3*halo + 1;
+    // fused taps from compute-band cells reach at most pad + 3*halo - 1).
+    bool cx = (ix < pml_x0 + halo) || (ix >= pml_x1 - halo);
+    bool cz = (iz < pml_z0 + halo) || (iz >= pml_z1 - halo);
 
-    // X direction.  Race-free: read psix at neighbours (above), write the NEXT
+    // X direction.  Race-free: read psix at neighbours, write the NEXT
     // psix to a separate buffer (psixn) when double-buffering; fall back to
     // in-place when psixn is null (equations that have not opted in).
-    float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
-    w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[idx];
-    (f.psixn ? f.psixn : f.psix)[idx]  = bx_ * dudx + ax_ * f.psix[idx];
-    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+    if (cx) {
+        float ax_ = cpml.ax[ix];
+        float bx_ = cpml.bx[ix];
+        float dbxdx_ = cpml.dbxdx[ix];
+        float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
+        long xi = solver.aux_idx_x2(iz, ix);
+        float daipxix_dx = fused_d_aPsi<Order>(cpml.ax, f.psix, ix, (int)xi, grad_ctx.sx, halo, grad_ctx.coeff, grad_ctx.dx);
+        float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
+        w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[xi];
+        (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
+        f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+    } else {
+        w_sum += lap_x;
+    }
 
     // Z direction
-    float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
-    w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[idx];
-    (f.psizn ? f.psizn : f.psiz)[idx]  = bz_ * dudz + az_ * f.psiz[idx];
-    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+    if (cz) {
+        float az_ = cpml.az[iz];
+        float bz_ = cpml.bz[iz];
+        float dbzdz_ = cpml.dbzdz[iz];
+        float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
+        long zi = solver.aux_idx_z2(iz, ix);
+        float daipsiz_dz = fused_d_aPsi<Order>(cpml.az, f.psiz, iz, (int)zi, grad_ctx.sz, halo, grad_ctx.coeff, grad_ctx.dz);
+        float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
+        w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[zi];
+        (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
+        f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+    } else {
+        w_sum += lap_z;
+    }
 
     f.u_next[idx] =
         2.0f * f.u_now[idx] -

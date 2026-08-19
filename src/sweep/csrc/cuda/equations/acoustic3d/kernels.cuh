@@ -64,8 +64,21 @@ static __global__ void acoustic3d_air_clear_kernel(
     int idx = iz * stride_z + iy * stride_y + ix;
     auto f = wf.offset(b, spatial_size);
     f.u_next[idx] = 0.f;
-    f.psix[idx] = 0.f; f.psiy[idx] = 0.f; f.psiz[idx] = 0.f;
-    f.zetax[idx] = 0.f; f.zetay[idx] = 0.f; f.zetaz[idx] = 0.f;
+    // Aux fields live in per-axis slabs; air cells outside a slab hold an
+    // implicit zero (the FD kernel never writes them), so only clear the
+    // stored part.  Full-domain (legacy) tensors report stored() everywhere.
+    if (solver.aux_x.stored(ix)) {
+        long xi = solver.aux_idx_x3(iz, iy, ix);
+        f.psix[xi] = 0.f; f.zetax[xi] = 0.f;
+    }
+    if (solver.aux_y.stored(iy)) {
+        long yi = solver.aux_idx_y3(iz, iy, ix);
+        f.psiy[yi] = 0.f; f.zetay[yi] = 0.f;
+    }
+    if (solver.aux_z.stored(iz)) {
+        long zi = solver.aux_idx_z3(iz, iy, ix);
+        f.psiz[zi] = 0.f; f.zetaz[zi] = 0.f;
+    }
     if (u_this) u_this[b * spatial_size + idx] = 0.f;
 }
 
@@ -173,19 +186,21 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_x) {
         float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
-        float dpsixdx = gradient<3, Order, X>(f.psix, ix, iy, iz, grad_ctx);
+        long xi = solver.aux_idx_x3(iz, iy, ix);
+        float dpsixdx = gradient_at<Order>(f.psix, (int)xi, grad_ctx.sx,
+                                           grad_ctx.M, grad_ctx.coeff, grad_ctx.dx);
         float ax_ = cpml.ax[ix];
         float bx_ = cpml.bx[ix];
         float dbxdx_ = cpml.dbxdx[ix];
         float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
 
         float tmpx = ((1.f + bx_) * lap_x + dbxdx_ * dudx)
-                     + ax_ * dpsixdx + daxdx * f.psix[idx];
+                     + ax_ * dpsixdx + daxdx * f.psix[xi];
 
-        w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[idx];
+        w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[xi];
 
-        (f.psixn ? f.psixn : f.psix)[idx]  = bx_ * dudx + ax_ * f.psix[idx];
-        f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+        (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
+        f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
     } else {
         w_sum += lap_x;
     }
@@ -195,19 +210,21 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_y) {
         float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
-        float dpsiydy = gradient<3, Order, Y>(f.psiy, ix, iy, iz, grad_ctx);
+        long yi = solver.aux_idx_y3(iz, iy, ix);
+        float dpsiydy = gradient_at<Order>(f.psiy, (int)yi, grad_ctx.sy,
+                                           grad_ctx.M, grad_ctx.coeff, grad_ctx.dy);
         float ay_ = cpml.ay[iy];
         float by_ = cpml.by[iy];
         float dbydy_ = cpml.dbydy[iy];
         float daydy = gradient<2, Order, X>(cpml.ay, iy, 0, 0, grad_ctx_y);
 
         float tmpy = ((1.f + by_) * lap_y + dbydy_ * dudy)
-                     + ay_ * dpsiydy + daydy * f.psiy[idx];
+                     + ay_ * dpsiydy + daydy * f.psiy[yi];
 
-        w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[idx];
+        w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[yi];
 
-        (f.psiyn ? f.psiyn : f.psiy)[idx]  = by_ * dudy + ay_ * f.psiy[idx];
-        f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
+        (f.psiyn ? f.psiyn : f.psiy)[yi]  = by_ * dudy + ay_ * f.psiy[yi];
+        f.zetay[yi] = by_ * tmpy + ay_ * f.zetay[yi];
     } else {
         w_sum += lap_y;
     }
@@ -217,19 +234,21 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_z) {
         float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
-        float dpsizdz = gradient<3, Order, Z>(f.psiz, ix, iy, iz, grad_ctx);
+        long zi = solver.aux_idx_z3(iz, iy, ix);
+        float dpsizdz = gradient_at<Order>(f.psiz, (int)zi, grad_ctx.sz,
+                                           grad_ctx.M, grad_ctx.coeff, grad_ctx.dz);
         float az_ = cpml.az[iz];
         float bz_ = cpml.bz[iz];
         float dbzdz_ = cpml.dbzdz[iz];
         float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
 
         float tmpz = ((1.f + bz_) * lap_z + dbzdz_ * dudz)
-                     + az_ * dpsizdz + dazdz * f.psiz[idx];
+                     + az_ * dpsizdz + dazdz * f.psiz[zi];
 
-        w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[idx];
+        w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[zi];
 
-        (f.psizn ? f.psizn : f.psiz)[idx]  = bz_ * dudz + az_ * f.psiz[idx];
-        f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+        (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
+        f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
     } else {
         w_sum += lap_z;
     }

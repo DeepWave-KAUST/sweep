@@ -643,6 +643,7 @@ void run_full_imaging(
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
     ctx.cut_mask = 0;  // full-storage / RTM path is DD-free (DD is backward_bs only)
+    acoustic_init_aux_slabs(ctx, adjoint);
 
     LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
     GradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
@@ -817,6 +818,7 @@ void run_bs_imaging(
         forward.bind(p.forward_wavefields, 3, false);
     else
         forward.allocate(vp, 3, false);
+    acoustic_init_aux_slabs(ctx, adjoint);
     // Seed the reverse reconstruction from the saved last two snapshots —
     // FIRST segment only; re-running this mid-stream would clobber the
     // carried reconstruction state.
@@ -1070,7 +1072,14 @@ void run_ckpt_imaging(
     if (!p.forward_wavefields.empty())
         forward.bind(p.forward_wavefields, 3, true);
     else
-        forward.allocate(vp, 3, true);
+        // Aux shapes must follow the Python-allocated checkpoint slots
+        // (possibly per-axis slabs); a plain allocate() would build
+        // full-domain aux and break the snapshot copies.
+        forward.allocate_from_snapshots(vp, p.checkpoints, 3);
+    // Slab geometry follows the FORWARD-state aux layout (the recompute runs
+    // the forward kernel); the adjoint aux stays full-domain and its legacy
+    // kernels never consult the slab geometry.
+    acoustic_init_aux_slabs(ctx, forward);
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -1299,14 +1308,19 @@ void run_recursive_imaging(
         max_segment_length = std::max(max_segment_length, end - start);
     }
 
+    AcousticWavefieldTensor start_state;
+    start_state.allocate_from_snapshots(vp, p.checkpoints, 3);
+    // Slab geometry follows the forward-state layout carried by the psi
+    // slots of the Python-allocated checkpoint buffers (adjoint aux stays
+    // full-domain; its legacy kernels never consult the slab geometry).
+    acoustic_init_aux_slabs(ctx, start_state);
+
     std::vector<AcousticWavefieldTensor> scratch_states(recursive_checkpoint_scratch_depth(max_segment_length));
     for (auto& scratch_state : scratch_states)
-        scratch_state.allocate(vp, 3, true);
+        scratch_state.allocate_like(vp, start_state);
     auto u_this_scratch = torch::empty_like(vp);
     // Scratch for the exact discrete-adjoint step (prepare/apply).
 
-    AcousticWavefieldTensor start_state;
-    start_state.allocate(vp, 3, true);
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];

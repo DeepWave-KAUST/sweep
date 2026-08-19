@@ -87,6 +87,21 @@ float centered_gradient_stencil(
     }
 }
 
+// Same stencil as gradient<>, but at a caller-supplied linear base index —
+// for fields that do not share the physical grid's layout (CPML aux slabs).
+// Bit-identical to gradient<> when given the matching stride/M/coeff/h.
+template<int Order>
+__device__ __forceinline__
+float gradient_at(
+    const float* __restrict__ u,
+    int base, int stride,
+    int M, const float* __restrict__ coeff, float h
+)
+{
+    return centered_gradient_stencil<Order>(
+        GradientArrayAccessor{u, base, stride}, M, coeff, h);
+}
+
 template<int ND, int Order, int Direction>
 __device__ __forceinline__
 float gradient(
