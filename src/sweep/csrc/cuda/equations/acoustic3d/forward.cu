@@ -14,6 +14,7 @@
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include <algorithm>
 #include "../../launch/config.h"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
@@ -185,6 +186,11 @@ ForwardOutput forward(const ForwardInput& in)
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    // Boundary tail truncation -- see acoustic2d/forward.cu.
+    TORCH_CHECK(p.boundary_tail_steps == 0 || !stepped,
+                "boundary_tail_steps does not compose with stepped/DD forward segments yet");
+    const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
+        ? std::max(0, (int)nt - p.boundary_tail_steps) : 0;
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         3,
@@ -271,10 +277,10 @@ ForwardOutput forward(const ForwardInput& in)
         if (phase == 1)
             continue;   // no boundary saving / source / record / swap / ckpt
 
-        if (p.use_boundary_saving) {
+        if (p.use_boundary_saving && it >= bs_it0) {
             boundary_runtime.save_forward_3d(
-                it,
-                nt,
+                it - bs_it0,
+                (int)nt - bs_it0,
                 view.u_now,
                 launch_config.grid,
                 launch_config.block,

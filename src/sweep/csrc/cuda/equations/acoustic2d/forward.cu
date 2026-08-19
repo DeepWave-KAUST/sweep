@@ -13,6 +13,7 @@
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include <algorithm>
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/laplace.cuh"
@@ -167,6 +168,14 @@ ForwardOutput forward(const ForwardInput& in) {
     GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    // Boundary tail truncation: with boundary_tail_steps = K > 0 only the
+    // last K steps' boundary strips are saved; the runtime and the Python
+    // buffers work in shifted "saved-step" coordinates [0, K).  bs_it0 = 0
+    // when disabled, making every shift below a no-op (bit-exact legacy).
+    TORCH_CHECK(p.boundary_tail_steps == 0 || !stepped,
+                "boundary_tail_steps does not compose with stepped/DD forward segments yet");
+    const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
+        ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -248,10 +257,10 @@ ForwardOutput forward(const ForwardInput& in) {
         if (phase == 1)
             continue;   // no boundary saving / source / record / swap / ckpt
 
-        if (p.use_boundary_saving) {
+        if (p.use_boundary_saving && it >= bs_it0) {
             boundary_runtime.save_forward_2d(
-                it,
-                p.nt,
+                it - bs_it0,
+                (int)p.nt - bs_it0,
                 view.u_now,
                 launch_config.grid,
                 launch_config.block,

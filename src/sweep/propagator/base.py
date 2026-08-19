@@ -950,6 +950,7 @@ class PropBase:
             "disk_dir": BOUNDARY_DEFAULTS.disk_dir,
             "ring_buffers": BOUNDARY_DEFAULTS.ring_buffers,
             "disk_async_read": BOUNDARY_DEFAULTS.disk_async_read,
+            "tail_steps": None,
         }
 
         if config is None:
@@ -963,6 +964,11 @@ class PropBase:
 
         if merged["storage"] not in {"gpu", "cpu", "disk"}:
             raise ValueError("boundary_saving_config['storage'] must be 'gpu', 'cpu', or 'disk'")
+
+        if merged.get("tail_steps") is not None:
+            tail = merged["tail_steps"]
+            if not isinstance(tail, int) or isinstance(tail, bool) or tail < 1:
+                raise ValueError("boundary_saving_config['tail_steps'] must be a positive int or None")
 
         if merged["storage"] == "gpu":
             merged["transfer_interval"] = BOUNDARY_DEFAULTS.gpu_transfer_interval

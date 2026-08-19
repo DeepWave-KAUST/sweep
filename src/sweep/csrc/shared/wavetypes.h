@@ -73,6 +73,13 @@ struct ForwardInput {
 
     int transfer_interval = 1; // Transfer every time step by default
     int boundary_ring_buffers = 1;
+    // Boundary tail truncation (steady-state / frequency-selection FWI): when
+    // > 0, only the LAST boundary_tail_steps time steps have their boundary
+    // strips saved (forward) and back-propagated (backward).  The forward
+    // physics is unchanged -- only the range of saved/reconstructed steps
+    // shrinks.  0 = disabled (bit-exact legacy behaviour).  Both directions
+    // MUST share the same value or the reconstruction misaligns.
+    int boundary_tail_steps = 0;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
@@ -212,6 +219,7 @@ struct BackwardInput {
     bool use_pinned_memory = false;
     int transfer_interval = 1; // Transfer every time step by default
     int boundary_ring_buffers = 1;
+    int boundary_tail_steps = 0;   // see ForwardInput::boundary_tail_steps
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
