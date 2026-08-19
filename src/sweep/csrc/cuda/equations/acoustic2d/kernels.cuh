@@ -238,12 +238,23 @@ __global__ void acoustic2nd(
         float bx_ = cpml.bx[ix];
         float dbxdx_ = cpml.dbxdx[ix];
         float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-        long xi = solver.aux_idx_x2(iz, ix);
+        // rd(): on a DD cut tile the compute band reaches cut-side columns
+        // that have NO slab storage (slab width 0 on cut faces); map() would
+        // hand them a NEGATIVE offset, and the unguarded psix/zetax stores
+        // below then ALIASED into other rows' slab cells (racing their
+        // owners with +/-0 -- the coefficients are zero here) or ran off
+        // the front of the tensor.  rd() clamps the read base in-bounds
+        // (zero-weight reads, value irrelevant) and stored() skips the
+        // stores, whose written value is exactly the +/-0 they clobbered
+        // with.  Single-domain: every cx cell is stored, bit-identical.
+        long xi = solver.aux_rd_x2(iz, ix);
         float daipxix_dx = fused_d_aPsi<Order>(cpml.ax, f.psix, ix, (int)xi, grad_ctx.sx, halo, grad_ctx.coeff, grad_ctx.dx);
         float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
         w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[xi];
-        (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
-        f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+        if (solver.aux_x.stored(ix)) {
+            (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
+            f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+        }
     } else {
         w_sum += lap_x;
     }
@@ -254,12 +265,16 @@ __global__ void acoustic2nd(
         float bz_ = cpml.bz[iz];
         float dbzdz_ = cpml.dbzdz[iz];
         float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
-        long zi = solver.aux_idx_z2(iz, ix);
+        // See the cx branch: rd() + stored() gate (z cuts do not exist in
+        // 2-D DD v1, but the invariant is per-axis, not per-configuration).
+        long zi = solver.aux_rd_z2(iz, ix);
         float daipsiz_dz = fused_d_aPsi<Order>(cpml.az, f.psiz, iz, (int)zi, grad_ctx.sz, halo, grad_ctx.coeff, grad_ctx.dz);
         float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
         w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[zi];
-        (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
-        f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+        if (solver.aux_z.stored(iz)) {
+            (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
+            f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+        }
     } else {
         w_sum += lap_z;
     }

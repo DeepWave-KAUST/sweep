@@ -186,7 +186,14 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_x) {
         float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
-        long xi = solver.aux_idx_x3(iz, iy, ix);
+        // rd() + stored() gate: on a DD cut tile the in-band test reaches
+        // cut-side cells that have NO slab storage; map() would hand them a
+        // negative offset and the unguarded psix/zetax stores aliased other
+        // rows' slab cells (racing their owners with +/-0 -- coefficients
+        // are zero here) or ran off the front of the tensor.  Single
+        // domain: every in-band cell is stored, bit-identical.  See the
+        // acoustic2d twin for the full account.
+        long xi = solver.aux_rd_x3(iz, iy, ix);
         float dpsixdx = gradient_at<Order>(f.psix, (int)xi, grad_ctx.sx,
                                            grad_ctx.M, grad_ctx.coeff, grad_ctx.dx);
         float ax_ = cpml.ax[ix];
@@ -199,8 +206,10 @@ __global__ void acoustic_forward_kernel_3d(
 
         w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[xi];
 
-        (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
-        f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+        if (solver.aux_x.stored(ix)) {
+            (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
+            f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+        }
     } else {
         w_sum += lap_x;
     }
@@ -210,7 +219,8 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_y) {
         float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
-        long yi = solver.aux_idx_y3(iz, iy, ix);
+        // rd() + stored() gate -- see the X branch above.
+        long yi = solver.aux_rd_y3(iz, iy, ix);
         float dpsiydy = gradient_at<Order>(f.psiy, (int)yi, grad_ctx.sy,
                                            grad_ctx.M, grad_ctx.coeff, grad_ctx.dy);
         float ay_ = cpml.ay[iy];
@@ -223,8 +233,10 @@ __global__ void acoustic_forward_kernel_3d(
 
         w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[yi];
 
-        (f.psiyn ? f.psiyn : f.psiy)[yi]  = by_ * dudy + ay_ * f.psiy[yi];
-        f.zetay[yi] = by_ * tmpy + ay_ * f.zetay[yi];
+        if (solver.aux_y.stored(iy)) {
+            (f.psiyn ? f.psiyn : f.psiy)[yi]  = by_ * dudy + ay_ * f.psiy[yi];
+            f.zetay[yi] = by_ * tmpy + ay_ * f.zetay[yi];
+        }
     } else {
         w_sum += lap_y;
     }
@@ -234,7 +246,8 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_z) {
         float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
-        long zi = solver.aux_idx_z3(iz, iy, ix);
+        // rd() + stored() gate -- see the X branch above.
+        long zi = solver.aux_rd_z3(iz, iy, ix);
         float dpsizdz = gradient_at<Order>(f.psiz, (int)zi, grad_ctx.sz,
                                            grad_ctx.M, grad_ctx.coeff, grad_ctx.dz);
         float az_ = cpml.az[iz];
@@ -247,8 +260,10 @@ __global__ void acoustic_forward_kernel_3d(
 
         w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[zi];
 
-        (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
-        f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+        if (solver.aux_z.stored(iz)) {
+            (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
+            f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+        }
     } else {
         w_sum += lap_z;
     }
