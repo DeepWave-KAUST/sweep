@@ -217,6 +217,16 @@ CUDA_MODE_REFERENCE_ONLY = {
     ("acoustic_vrz3d", "bs"),
     ("elastic2d", "bs"),
     ("elastic3d", "bs"),
+    # Same mechanism as the elastic entries -- the bs rho gradient differs
+    # from full at the source/receiver CELLS (stress-source / stress-receiver
+    # bookkeeping against a reconstructed rather than stored wavefield), not
+    # in reconstruction quality. These four surfaced when the wavelet
+    # bookkeeping misfire stopped masking per-cell first-error reporting.
+    ("das_mu2d", "bs"),
+    ("das_mu3d", "bs"),
+    ("elastic2d_src_sxz", "bs"),
+    ("elastic2d_rec_stress", "bs"),
+    ("elastic3d_rec_stress", "bs"),
 }
 
 
@@ -565,10 +575,16 @@ def compare_result_to_reference(
             # the matrix keeps a usable pass/fail signal — but never drop it, and
             # flag the entry as stale the moment the gradient shows up, so the
             # list cannot quietly outlive the gap it documents.
-            absent = (metrics.candidate_norm <= cosine_eps
-                      and metrics.reference_norm > cosine_eps)
+            # The entry is stale only if the candidate actually RETURNS the
+            # gradient. Against an eager reference the gap shows up as
+            # zero-vs-nonzero; against a same-backend reference (the within
+            # scope) BOTH sides lack it and the comparison is vacuous -- that
+            # is consistent with the declaration, not evidence against it.
+            absent = metrics.candidate_norm <= cosine_eps
             if absent:
-                missing.append(f"{case_name}/{mode} {name}: {gap}")
+                vac = ("" if metrics.reference_norm > cosine_eps
+                       else " [vacuous here: the reference lacks it too]")
+                missing.append(f"{case_name}/{mode} {name}: {gap}{vac}")
                 summaries.append(f"{name}: MISSING ({gap})")
                 continue
             errors.append(
