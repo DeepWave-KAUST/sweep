@@ -536,11 +536,30 @@ BackwardOutput backward_bs(const BackwardInput& in)
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
+    // Boundary tail truncation (see ForwardInput::boundary_tail_steps): the
+    // adjoint source of steady-state / frequency-selection objectives is zero
+    // before the probe window, so the reverse sweep stops after the last
+    // boundary_tail_steps steps.  Saved-step coordinates are shifted by
+    // bs_it0; bs_it0 = 0 when disabled (bit-exact legacy behaviour).
+    TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
+    TORCH_CHECK(p.boundary_tail_steps == 0 ||
+                (it_hi == static_cast<int>(p.nt) && it_lo == 0),
+                "boundary_tail_steps does not compose with stepped backward segments yet");
+    TORCH_CHECK(p.boundary_tail_steps == 0 || p.cut_face_mask == 0,
+                "boundary_tail_steps does not compose with DD cut faces yet");
+    const int bs_it0 = (p.boundary_tail_steps > 0)
+        ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
+    // The reverse loop's restore at step ``it`` consumes the boundary saved
+    // at forward step ``it - 1`` (backward_time_index), so the truncated
+    // loop must stop at bs_it0 + 1: the saved slots cover forward steps
+    // [bs_it0, nt-1] and slot -1 does not exist.  One saved step is spent
+    // on this alignment -- the usable reverse depth is tail_steps - 1.
+    const int bs_stop = bs_it0 > 0 ? bs_it0 + 1 : 0;
+    boundary_runtime.prefetch_initial_backward_chunk((int)p.nt - bs_it0);
 
-    // Main loop covers [max(it_lo,1), it_hi); the it==0 adjoint-only tail
-    // below runs only in the segment whose bw_it_end == 0.
-    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
+    // Main loop covers [max(it_lo,1,bs_it0), it_hi); the it==0 adjoint-only
+    // tail below runs only in the segment whose bw_it_end == 0.
+    for (int it = it_hi - 1; it >= std::max(std::max(it_lo, 1), bs_stop); --it) {
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
@@ -586,7 +605,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         );
 
         boundary_runtime.restore_backward_2d(
-            it,
+            it - bs_it0,
             for_view.u_next,
             launch_config.grid,
             launch_config.block,
@@ -617,7 +636,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         forward.swap();
 
-        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it - bs_it0, (int)p.nt - bs_it0);
 
         // Gate illumination on compute_illumination (mirror FULL path). When off,
         // skip the per-step RTM pass entirely; the FWI vp-gradient is produced by
@@ -648,7 +667,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     }
 
-    if (it_lo == 0 && p.nt > 0) {
+    if (it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
         auto adj_view = adjoint.view();
 
         run_acoustic2d_adjoint_step(

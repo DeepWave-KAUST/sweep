@@ -104,6 +104,18 @@ class BoundaryOptions:
     #             3.94× compression beats BF16's 2× and the gradient drop
     #             is acceptable for the equation in question.
     storage_dtype: Literal["fp32", "fp16", "bf16", "int8"] = "fp32"
+    # Boundary tail truncation for steady-state / frequency-selection FWI:
+    # when set, only the LAST ``tail_steps`` time steps have their boundary
+    # strips saved and back-propagated.  The forward physics is unchanged
+    # (the wavefield must still ring up), but the reverse sweep stops after
+    # ``tail_steps`` steps -- valid when the objective reads only the last
+    # ``tail_steps`` record samples (the adjoint source is zero earlier), and
+    # the dropped gradient term is exactly the adjoint x ring-up-transient
+    # correlation that steady-state methods discard by construction.  Include
+    # a safety margin on top of the probe window.  Boundary buffers shrink
+    # accordingly.  None = full-length backward (bit-exact legacy).
+    # Currently impl='c' Acoustic/Acoustic3D with boundary saving only.
+    tail_steps: int | None = None
 
     def __post_init__(self):
         if self.storage not in {"gpu", "cpu", "disk"}:
@@ -117,6 +129,8 @@ class BoundaryOptions:
             raise ValueError("BoundaryOptions.transfer_interval must be >= 1.")
         if self.ring_buffers is not None and self.ring_buffers < 1:
             raise ValueError("BoundaryOptions.ring_buffers must be >= 1.")
+        if self.tail_steps is not None and self.tail_steps < 1:
+            raise ValueError("BoundaryOptions.tail_steps must be >= 1 (or None).")
         if self.storage == "gpu":
             if self.transfer_interval not in (None, 1):
                 raise ValueError(

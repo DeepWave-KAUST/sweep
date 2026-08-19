@@ -123,6 +123,7 @@ class Warpper(torch.autograd.Function):
         boundary_on_cpu: bool=False,
         boundary_on_disk: bool=False,
         boundary_disk_async_read: bool=False,
+        boundary_tail_steps: int=0,
         forward_wavefields: tuple=(),
         adjoint_wavefields: tuple=(),
         adjoint_workspace: tuple=(),
@@ -185,6 +186,7 @@ class Warpper(torch.autograd.Function):
         params.checkpoints = [c.zero_() for c in checkpoint_buffers] if use_checkpoint else []
         params.transfer_interval = transfer_interval
         params.boundary_ring_buffers = boundary_ring_buffers
+        params.boundary_tail_steps = boundary_tail_steps
         params.models = [m.contiguous() for m in models]
         params.source = wavelet.contiguous()
         params.lap_coes = lap_coes.contiguous()
@@ -263,6 +265,7 @@ class Warpper(torch.autograd.Function):
             )
             ctx.transfer_interval = transfer_interval
             ctx.boundary_ring_buffers = boundary_ring_buffers
+            ctx.boundary_tail_steps = boundary_tail_steps
             ctx.checkpoint_interval = checkpoint_interval
             ctx.checkpoint_count = checkpoint_count
             ctx.models = models
@@ -341,6 +344,7 @@ class Warpper(torch.autograd.Function):
         # common
         params.transfer_interval = ctx.transfer_interval
         params.boundary_ring_buffers = ctx.boundary_ring_buffers
+        params.boundary_tail_steps = ctx.boundary_tail_steps
         params.checkpoint_interval = ctx.checkpoint_interval
         params.checkpoint_count = ctx.checkpoint_count
         # Compute source/receiver illumination only if the caller requested it
@@ -560,6 +564,7 @@ class Warpper(torch.autograd.Function):
             None,      # boundary_on_cpu
             None,      # boundary_on_disk
             None,      # boundary_disk_async_read
+            None,      # boundary_tail_steps
             None,      # forward wavefields
             None,      # adjoint wavefields
             None,      # adjoint workspace
@@ -951,7 +956,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = root
         self._boundary_disk_files = tuple(files)
 
-    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None):
+    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None, nt_saved=None):
+        # nt_saved < self.nt when boundary tail truncation is active: buffers
+        # only hold the last nt_saved steps (the C++ side indexes them in
+        # shifted saved-step coordinates).
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
@@ -986,7 +994,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_ring_buffers == ring_buffers
             and self._boundary_cache_pinned == staging_pinned
             and self._boundary_cache_disk_dir == disk_dir
-            and self._boundary_cache_nt == self.nt
+            and self._boundary_cache_nt == (self.nt if nt_saved is None else nt_saved)
             and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
         ):
             return
@@ -995,7 +1003,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         layout = Layout(
             self.shape_cuda,
             cuda_layout.resolved_boundary_save_nvar(),
-            self.nt,
+            self.nt if nt_saved is None else nt_saved,
             self.abcn,
             self.equation.so // 2,
             self.B,
@@ -1140,7 +1148,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_cache_ring_buffers = ring_buffers
         self._boundary_cache_pinned = staging_pinned
         self._boundary_cache_disk_dir = disk_dir
-        self._boundary_cache_nt = self.nt
+        self._boundary_cache_nt = self.nt if nt_saved is None else nt_saved
         self._boundary_cache_batch = self.B
 
     def __del__(self):
@@ -1492,6 +1500,22 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         boundary_disk_dir = boundary_cfg.get("disk_dir")
 
         self.nt = wavelet.shape[-1]
+
+        # Boundary tail truncation (steady-state / frequency-selection FWI):
+        # save + back-propagate only the last ``tail_steps`` boundary steps.
+        # See BoundaryOptions.tail_steps for the validity argument.
+        boundary_tail_steps = boundary_cfg.get("tail_steps") or 0
+        if boundary_tail_steps:
+            if not use_boundary_saving:
+                raise ValueError(
+                    "boundary_saving_config['tail_steps'] requires boundary "
+                    "saving to be enabled.")
+            if type(self.equation).__name__ not in {"Acoustic", "Acoustic3D"}:
+                raise NotImplementedError(
+                    "tail_steps is currently implemented for the Acoustic / "
+                    "Acoustic3D impl='c' backends only.")
+            boundary_tail_steps = int(boundary_tail_steps)
+        nt_saved = min(self.nt, boundary_tail_steps) if boundary_tail_steps else self.nt
         if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
         checkpoint_steps = torch.empty(0, dtype=torch.int32)
@@ -1591,6 +1615,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.adcig = None
         use_checkpoint = bool(self.use_ckpt and requires_backward)
+        # NB: when both flags are set the Warpper picks the CHECKPOINT
+        # backward, which would silently ignore the truncation -- reject any
+        # checkpointing combination outright.
+        if boundary_tail_steps and use_checkpoint:
+            raise NotImplementedError(
+                "tail_steps requires the boundary-saving backward; pass "
+                "use_ckpt=False (or memory=MemoryOptions(strategy='boundary')).")
         if not requires_backward:
             use_boundary_saving = False
         # APM first: it is the more fundamental limitation of the two, so its
@@ -1626,7 +1657,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -1634,7 +1665,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
                 for t in self.boundary_gpu_full:
                     t.zero_()
             boundary_cpu = ()
@@ -1745,6 +1776,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 boundary_on_cpu,
                 boundary_on_disk,
                 boundary_disk_async_read,
+                boundary_tail_steps,
                 forward_wavefields,
                 adjoint_wavefields,
                 adjoint_workspace,
@@ -1809,6 +1841,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             override=boundary_saving_config,
             use_boundary_saving=use_boundary_saving,
         )
+        if boundary_cfg.get("tail_steps"):
+            raise NotImplementedError("tail_steps is not supported in rtm().")
         use_boundary_saving = boundary_cfg["enabled"]
         boundary_storage = boundary_cfg["storage"]
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
