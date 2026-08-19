@@ -170,6 +170,48 @@ Two things to know before you time this yourself:
   report a small difference. Keep `--boundary-dtype fp32` for the parity
   recipe above and use the lossy modes only when memory forces it.
 
+### 2D elastic — Marmousi, a body-force source ON the cut
+
+- `dd_fwi_marmousi_elastic_2d.py`
+
+The elastic version of the same idea: vp from Marmousi at downsample 8,
+vs = vp/1.73, rho = Gardner (held fixed), a vertical body-force source, 8
+shots, 3 s records, 30 Adam iterations on vp and vs. One shot is placed
+exactly on the tile cut on purpose — the elastic backward is the DD path with
+the most protocol traffic (velocity and stress halos exchanged separately,
+plus an injection sub-phase), and a body-force source on the cut exercises
+every leg of it.
+
+```bash
+torchrun --standalone --nproc-per-node=2 \
+  examples/multi-gpu/torch/dd_fwi_marmousi_elastic_2d.py --px 2 --tag dd2 --outdir out
+python3 examples/multi-gpu/torch/dd_fwi_marmousi_elastic_2d.py \
+  --px 1 --pad-px 2 --tag single --outdir out --check dd2
+```
+
+Measured on V100s: 21 s per iteration on one GPU (wall 639 s), 72 s on two
+(wall 2182 s), misfit down 94.2 % on both. `--check` reports
+`max|dvp| = max|dvs| = 0` after 30 iterations — the models are bit-identical —
+with the misfit scalar matching to the last bit on 14 of 30 iterations and
+sitting within 1–2 ulp otherwise (reduction order again, as in the acoustic
+example). At 0.6 M cells elastic DD is ~3.4× *slower* than one GPU: elastic
+exchanges two halo groups per step where acoustic exchanges one, and the
+phased backward adds two more, so its latency floor is higher and the
+break-even table above shifts right. Treat this example as a correctness
+fixture, not a speed demo.
+
+The first-iteration gradients of all three parameters (rho as a leaf too, for
+the check) are bit-identical between DD and single — the residual column is
+exactly zero:
+
+![elastic DD gradient check](../../../docs/figures/examples/dd_fwi_marmousi_elastic_2d_gradcmp.png)
+
+The same check on 3-D Overthrust (Elastic3D, vs and rho derived the same way,
+source on the x-cut) is also bit-exact for vp, vs and rho.
+
+Each run writes `ehist_<tag>.npz`, `evp_final_<tag>.npy` and
+`evs_final_<tag>.npy`.
+
 ### 3D — Overthrust, one model update
 
 - `dd_fwi_overthrust_update.py`
