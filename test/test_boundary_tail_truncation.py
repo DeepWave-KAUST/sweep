@@ -125,5 +125,7 @@ def test_guards():
     with pytest.raises(ValueError):
         run(mk(Acoustic, boundary_saving_config={"enabled": False, "tail_steps": 100},
                use_ckpt=False))
-    with pytest.raises(NotImplementedError):
-        run(mk(Acoustic, boundary_saving_config=cfg, use_ckpt=True))
+    # bs-enabled + use_ckpt=True is now a construction-time mode conflict
+    # (three-way selector); the ckpt path can never silently swallow tail_steps.
+    with pytest.raises(ValueError, match="Conflicting"):
+        mk(Acoustic, boundary_saving_config=cfg, use_ckpt=True)
