@@ -629,7 +629,9 @@ void backward_segment_2d(
     if (!p.forward_wavefields.empty())
         forward.bind(p.forward_wavefields, true);
     else
-        forward.allocate(vp, 2, true);
+        // Aux shapes must follow the Python-allocated checkpoint slots
+        // (possibly per-axis slabs).
+        forward.allocate_from_snapshots(vp, p.checkpoints, 2);
 
     checkpoint_runtime.copy_state(forward.state_tensors(), start_state.state_tensors());
 
@@ -806,6 +808,7 @@ BackwardOutput backward(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2);
+    elastic_init_aux_slabs(solver, adjoint);
 
     auto mu  = rho * vs * vs;
     auto lambda = rho * (vp * vp - 2 * vs * vs);
@@ -970,6 +973,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2, true);
+    elastic_init_aux_slabs(solver, adjoint);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ElasticCPMLTensor cpml;
@@ -989,7 +993,10 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
 
     ElasticWavefieldTensor start_state;
-    start_state.allocate(vp, 2, true);
+    start_state.allocate_from_snapshots(vp, p.checkpoints, 2);
+    TORCH_CHECK(!adjoint.m_vxx_t.defined() ||
+                start_state.m_vxx_t.sizes() == adjoint.m_vxx_t.sizes(),
+                "checkpoint aux layout differs from adjoint aux layout");
     auto next_segment_vx = torch::zeros_like(vp);
     auto next_segment_vz = torch::zeros_like(vp);
     auto prev_segment_next_vx = torch::zeros_like(vp);
@@ -1091,6 +1098,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2, true);
+    elastic_init_aux_slabs(solver, adjoint);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ElasticCPMLTensor cpml;
@@ -1126,7 +1134,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     if (!p.forward_wavefields.empty())
         forward.bind(p.forward_wavefields, true);
     else
-        forward.allocate(vp, 2, true);
+        // Aux shapes must follow the Python-allocated checkpoint slots
+        // (possibly per-axis slabs).
+        forward.allocate_from_snapshots(vp, p.checkpoints, 2);
     auto current_vx = torch::zeros_like(vp);
     auto current_vz = torch::zeros_like(vp);
     auto next_vx = torch::zeros_like(vp);
@@ -1296,6 +1306,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2);
+    elastic_init_aux_slabs(solver, adjoint);
 
     // Reconstruction state: 5 physical fields plus the carried fv*_prev
     // velocities (v at time it+1, consumed by the gradient kernel).  When
@@ -1725,6 +1736,7 @@ BackwardOutput apm_backward(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2);
+    elastic_init_aux_slabs(solver, adjoint);
     auto adj_view = adjoint.view();
 
     auto grad_vp  = torch::zeros_like(vp);
@@ -1867,6 +1879,7 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
         adjoint.bind(p.adjoint_wavefields, true);
     else
         adjoint.allocate(vp, 2);
+    elastic_init_aux_slabs(solver, adjoint);
     ElasticWavefieldTensor forward;
     forward.allocate(vp, 2, false);
     forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));

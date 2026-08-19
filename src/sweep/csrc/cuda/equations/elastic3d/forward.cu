@@ -126,6 +126,7 @@ ForwardOutput forward(const ForwardInput& in)
                 "(bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi), got ",
                 p.cut_face_mask);
     solver.cut_mask = p.cut_face_mask;
+    elastic_init_aux_slabs(solver, wavefield);
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
@@ -399,6 +400,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
                          dx, dy, dz};
     solver.topo_category = p.topo_category.data_ptr<int>();
     solver.use_apm = true;
+    elastic_init_aux_slabs(solver, wavefield);
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
