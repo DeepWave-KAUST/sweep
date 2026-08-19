@@ -84,7 +84,13 @@ class PropBase:
             dev (str, optional): Deprecated alias for ``device``. Defaults to None.
             device (str | torch.device, optional): The device to run the simulation on.
                 When None, the equation's device is used. Preferred over ``dev``.
-            use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
+            use_ckpt (bool | None, optional): Legacy request for / exclusion of
+                the checkpointing mode.  The gradient-memory mode is a
+                three-way choice (full / boundary / ckpt) resolved by
+                ``options.resolve_memory_strategy``; prefer
+                ``memory=MemoryOptions(strategy=...)``.  None (default) picks
+                the backend default: 'boundary' for impl='c', 'ckpt' for
+                eager/jax.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 100.
             ckpt_mode (str, optional): Checkpointing mode. "chunk" stores periodic checkpoints and
                 replays each chunk, while "recursive" stores a fixed number of checkpoints and
@@ -242,7 +248,10 @@ class PropBase:
             self._grid_spacing = tuple(float(v) for v in dh)
             self._dh = float(self._grid_spacing[-1])
         self._dt = float(dt)
-        self.use_ckpt = use_ckpt
+        # None = unspecified; the torch entry points always pass a resolved
+        # bool (see options.resolve_memory_strategy).  Direct PropBase / JAX
+        # construction keeps the historical checkpointing default.
+        self.use_ckpt = True if use_ckpt is None else bool(use_ckpt)
         self.ckpt_chunks = ckpt_chunks
         self.ckpt_mode = ckpt_mode
         self.ckpt_num = ckpt_num

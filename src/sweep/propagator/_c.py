@@ -1615,6 +1615,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.adcig = None
         use_checkpoint = bool(self.use_ckpt and requires_backward)
+        if use_checkpoint and use_boundary_saving:
+            # Never silently prefer one path (ckpt historically won): the
+            # gradient-memory mode is a three-way choice.
+            raise ValueError(
+                "boundary saving and checkpointing are both enabled; the "
+                "gradient-memory mode is a three-way choice (full/boundary/"
+                "ckpt) -- pass memory=MemoryOptions(strategy=...) or disable "
+                "one of use_ckpt/boundary_saving_config.")
         # NB: when both flags are set the Warpper picks the CHECKPOINT
         # backward, which would silently ignore the truncation -- reject any
         # checkpointing combination outright.

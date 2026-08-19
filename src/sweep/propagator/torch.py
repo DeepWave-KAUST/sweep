@@ -13,6 +13,7 @@ from sweep.propagator.options import (
     CKPT_DEFAULTS,
     MemoryOptions,
     options_to_dict,
+    resolve_memory_strategy,
 )
 
 
@@ -120,24 +121,42 @@ def _merge_option_dict(base, extra, *, label):
 
 def _normalize_cuda_memory_kwargs(merged):
     memory = merged.pop("memory", None)
-    if memory is None:
-        # impl='c' default: boundary saving with GPU storage.  Cheaper memory
-        # than full-wavefield mode and avoids the variable-batch
-        # non-contiguous slice that bites chunked checkpointing
-        # (cf. fix/ckpt-batch-shrink).  Only inject if the user hasn't
-        # already chosen a memory strategy at the top level.
-        if "use_ckpt" not in merged and "boundary_saving_config" not in merged:
-            merged["boundary_saving_config"] = {
-                "enabled": True,
-                "storage": "gpu",
-            }
-            merged["use_ckpt"] = False
+    legacy = [k for k in ("use_ckpt", "boundary_saving_config") if k in merged]
+    if memory is not None and legacy:
+        raise ValueError(
+            "Specify the gradient-memory mode via either memory= or the "
+            f"legacy {legacy} knobs, not both.")
+
+    # The gradient-memory mode is a three-way choice (full/boundary/ckpt),
+    # resolved once and identically for every backend; conflicting knob
+    # combinations raise instead of one path silently winning.
+    strategy = resolve_memory_strategy(
+        "c", options_to_dict(memory) if memory is not None else None,
+        merged.get("use_ckpt"), merged.get("boundary_saving_config"))
+
+    if strategy == "full":
+        merged["use_ckpt"] = False
+        cfg = dict(merged.get("boundary_saving_config") or {})
+        cfg["enabled"] = False
+        merged["boundary_saving_config"] = cfg
         return merged
 
-    memory = options_to_dict(memory)
-    strategy = memory.get("strategy")
-    if strategy is None:
-        raise ValueError("c memory options must set strategy to 'boundary' or 'ckpt'.")
+    memory = options_to_dict(memory) if memory is not None else None
+    if memory is None:
+        # Legacy-knob (or default) route: normalise the pair so exactly one
+        # mode is active downstream.
+        if strategy == "boundary":
+            cfg = dict(merged.get("boundary_saving_config") or {})
+            cfg.setdefault("storage", "gpu")
+            cfg["enabled"] = True
+            merged["boundary_saving_config"] = cfg
+            merged["use_ckpt"] = False
+        else:  # 'ckpt' -- chunk options ride the legacy ckpt_* kwargs
+            merged["use_ckpt"] = True
+            cfg = dict(merged.get("boundary_saving_config") or {})
+            cfg["enabled"] = False
+            merged["boundary_saving_config"] = cfg
+        return merged
 
     if strategy == "boundary":
         boundary = memory.get("boundary") or {}
@@ -195,7 +214,12 @@ def _apply_eager_memory(backend_impl, memory):
     md = options_to_dict(memory)
     strategy = md.get("strategy")
     if strategy is None:
-        raise ValueError("memory= must set strategy to 'boundary' or 'ckpt'.")
+        raise ValueError("memory= must set strategy to 'full', 'boundary' or 'ckpt'.")
+
+    if strategy == "full":
+        backend_impl.use_ckpt = False
+        backend_impl.enable_eager_boundary_saving(False)
+        return
 
     if strategy == "boundary":
         boundary = md.get("boundary") or {}
@@ -329,13 +353,37 @@ class PropTorch(torch.nn.Module):
             cuda_options=cuda_options,
         )
         if impl == "eager":
+            legacy = [k for k in ("use_ckpt", "boundary_saving_config")
+                      if init_kwargs.get(k) is not None]
+            if memory is not None and legacy:
+                raise ValueError(
+                    "Specify the gradient-memory mode via either memory= or "
+                    f"the legacy {legacy} knobs, not both.")
+            strategy = resolve_memory_strategy(
+                "eager", memory, init_kwargs.get("use_ckpt"),
+                init_kwargs.get("boundary_saving_config"))
+            init_kwargs["use_ckpt"] = (strategy == "ckpt")
             backend_impl = _PropTorchEager(*args, **init_kwargs)
+            backend_impl.memory_strategy = strategy
             if memory is not None:
                 _apply_eager_memory(backend_impl, memory)
+            elif strategy == "boundary":
+                # legacy dict route now reaches the eager backend too (it used
+                # to require memory= or enable_eager_boundary_saving()).
+                cfg = dict(init_kwargs.get("boundary_saving_config") or {})
+                backend_impl.enable_eager_boundary_saving(
+                    True,
+                    storage=cfg.get("storage", "gpu"),
+                    storage_dtype=cfg.get("storage_dtype", "fp32"),
+                )
         else:
             from sweep.propagator._c import _CompiledPropagator
 
             backend_impl = _CompiledPropagator(*args, **init_kwargs)
+            backend_impl.memory_strategy = (
+                "ckpt" if backend_impl.use_ckpt
+                else ("boundary" if backend_impl.boundary_saving_config.get("enabled")
+                      else "full"))
         self._backend_impl = backend_impl
         self.__signature__ = _public_forward_signature(type(self).forward)
 
