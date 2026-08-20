@@ -36,8 +36,7 @@ if str(REPO / "src") not in sys.path:
 
 from sweep.datasets import load                          # noqa: E402
 from sweep.equations import Elastic                      # noqa: E402
-from sweep.parallel import MeshTopology, pad_to_mesh     # noqa: E402
-from sweep.parallel.dd_propagator import ModelParallel   # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel, pad_to_mesh  # noqa: E402
 from sweep.propagator.torch import PropTorch             # noqa: E402
 
 
@@ -161,16 +160,20 @@ def main():
         return [pad_to_mesh(m, px=pad_px) for m in models]
 
     # ---- observed data through the true model -----------------------------
+    # models=None after the first shot reuses the already padded/exchanged
+    # model (DD only — plain PropTorch gives models=None another meaning).
     shots = []
+    reuse = isinstance(prop, ModelParallel)
     with torch.no_grad():
         mt = padded(vp_true, vs_true, rho_true)
-        for ix in sx:
+        for i, ix in enumerate(sx):
             src = np.array([[[int(ix), sz]]], dtype=np.int64)
-            shots.append((src, prop(wav, src, rec, models=mt).clone()))
+            m = None if (reuse and i > 0) else mt
+            shots.append((src, prop(wav, src, rec, models=m).clone()))
     log(f"[{a.tag}] obs ready ({time.time() - t0:.0f} s)")
 
     if a.px > 1:
-        own = np.asarray(prop._own_rec_idx, dtype=np.int64).ravel()
+        own = np.asarray(prop.own_receiver_indices, dtype=np.int64).ravel()
         cnt = torch.zeros(rec.shape[1], device=dev)
         cnt[torch.as_tensor(own, device=dev)] += 1.0
         dist.all_reduce(cnt)

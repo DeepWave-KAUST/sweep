@@ -193,7 +193,8 @@ def main():
     grads_tile = [t.grad for t in tiles]
 
     y0 = getattr(ddp, "y0", 0); nyp = getattr(ddp, "nyp", ny)
-    payload = (ddp._own_rec_idx, ddp.x0, ddp.nxp, y0, nyp, [g.cpu() for g in grads_tile])
+    payload = (ddp.own_receiver_indices, ddp.x0, ddp.nxp, y0, nyp,
+               [g.cpu() for g in grads_tile])
     gathered = [None] * world
     dist.gather_object(payload, gathered if rank == 0 else None, dst=0)
 
