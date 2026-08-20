@@ -55,8 +55,7 @@ if str(REPO / "src") not in sys.path:
 
 from sweep.datasets import load                          # noqa: E402
 from sweep.equations import Acoustic                     # noqa: E402
-from sweep.parallel import MeshTopology, pad_to_mesh     # noqa: E402
-from sweep.parallel.dd_propagator import ModelParallel   # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel, pad_to_mesh  # noqa: E402
 from sweep.propagator.torch import PropTorch             # noqa: E402
 
 
@@ -202,11 +201,18 @@ def main():
     # boundary ring while the observed data is generated. It is promoted on the
     # first backward below.
     shots = []
+    # models=None on every shot after the first reuses the model the first
+    # call already edge-padded and halo-exchanged — the model never changes
+    # inside this loop, so re-running the NCCL model-halo collective per shot
+    # would be pure waste.  DD only: the plain single-GPU PropTorch gives
+    # models=None a different meaning (the equation's own parameters).
+    reuse = isinstance(obs_prop, ModelParallel)
     with torch.no_grad():
         vt = pad_to_mesh(vp_true, px=obs_pad_px)
-        for ix in sx:
+        for i, ix in enumerate(sx):
             src = np.array([[[int(ix), sz]]], dtype=np.int64)
-            shots.append((src, obs_prop(wav, src, rec, models=[vt]).clone()))
+            m = None if (reuse and i > 0) else [vt]
+            shots.append((src, obs_prop(wav, src, rec, models=m).clone()))
     if obs_prop is not prop:
         del obs_prop
         torch.cuda.empty_cache()
@@ -216,8 +222,8 @@ def main():
     # Each rank returns only the receivers inside its own tile, so the summed
     # misfit equals the single-GPU one ONLY if ownership is a true partition.
     if a.px > 1:
-        own = getattr(prop, "_own_rec_idx", None)
-        assert own is not None, "no receiver ownership map to check"
+        own = prop.own_receiver_indices
+        assert own, "no receiver ownership map to check"
         idx = torch.as_tensor(np.asarray(own, dtype=np.int64).ravel(), device=dev)
         cnt = torch.zeros(rec.shape[1], device=dev)
         cnt[idx] += 1.0

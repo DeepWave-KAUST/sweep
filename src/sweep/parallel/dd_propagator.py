@@ -1184,6 +1184,15 @@ class ModelParallel:
                 dist.all_reduce(g, op=dist.ReduceOp.SUM, group=self.mesh.shot_pg)
         return out
 
+    @property
+    def own_receiver_indices(self):
+        """Global receiver indices (caller's receiver order) whose traces this
+        rank's tile record carries — set by the last forward's geometry, empty
+        before any call.  Ownership is a partition of the global receiver list
+        across the tile grid, so per-rank misfits over these traces sum to the
+        global misfit (see the dd_fwi examples' partition assert)."""
+        return tuple(getattr(self, "_own_rec_idx", ()) or ())
+
     # ---------------------------------------------------------------- gather
     def gather_record(self, tile_record):
         """Assemble the global record on rank 0 (returns None on other ranks)."""

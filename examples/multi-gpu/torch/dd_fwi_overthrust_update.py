@@ -41,8 +41,7 @@ if str(REPO / "src") not in sys.path:
 
 from sweep.datasets import load                          # noqa: E402
 from sweep.equations import Acoustic3D                   # noqa: E402
-from sweep.parallel import MeshTopology, pad_to_mesh     # noqa: E402
-from sweep.parallel.dd_propagator import ModelParallel   # noqa: E402
+from sweep.parallel import MeshTopology, ModelParallel, pad_to_mesh  # noqa: E402
 from sweep.propagator.torch import PropTorch             # noqa: E402
 
 
@@ -173,9 +172,12 @@ def main():
     shots = []
     vp_true_padded = pad_to_mesh(vp_true, mesh)
     with torch.no_grad():
-        for ix in sx:
+        for i, ix in enumerate(sx):
             src = np.array([[[int(ix), ny // 2, 4]]], dtype=np.int64)
-            shots.append((src, ddp(wav, src, rec, models=[vp_true_padded])))
+            # models=None after the first shot reuses the model the first call
+            # already padded and halo-exchanged (it never changes in this loop).
+            m = [vp_true_padded] if i == 0 else None
+            shots.append((src, ddp(wav, src, rec, models=m)))
     log(f"[dd-fwi] obs ready: {a.nshot} shots x {rec.shape[1]} receivers "
         f"({time.time() - t0:.0f} s)")
 
