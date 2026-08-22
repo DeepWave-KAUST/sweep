@@ -99,6 +99,7 @@ nav:
       - Equations: user-guide/equations.md
       - Operators: user-guide/operators.md
       - Propagators: user-guide/propagators.md
+      - Domain decomposition: user-guide/parallel.md
       - Datasets: user-guide/datasets.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
@@ -171,3 +172,4 @@ nav:
           - Propagator Options: api/propagators/options.md
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
+      - Parallel (DD): api/parallel.md
