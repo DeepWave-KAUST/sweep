@@ -178,6 +178,26 @@ instead of one path silently winning.  The legacy `use_ckpt` /
 `boundary_saving_config` knobs remain accepted and resolve into the same
 three-way choice.
 
+Three rules make that resolution predictable:
+
+* **An off-switch means `'full'`, not "the other trick".**  `use_ckpt=False`
+  (or `boundary_saving_config={'enabled': False}`) with nothing else selects
+  full-wavefield storage on both backends — the long-standing meaning of
+  `impl='c', use_ckpt=False`.  The implicit backend default applies only when
+  no gradient-memory knob is passed at all.
+* **A request is honoured, not out-voted.**
+  `boundary_saving_config={'enabled': True}` now really runs the boundary
+  backward; it used to lose silently to the `use_ckpt=True` default, so
+  scripts that thought they were measuring boundary saving were checkpointing.
+* **`memory=` may sit next to a legacy knob when they agree.**
+  `memory=MemoryOptions(strategy='boundary'), use_ckpt=False` states one
+  intent twice and is accepted; `..., use_ckpt=True` contradicts it and
+  raises.  Where both carry detail, `memory=` wins.
+
+Tail truncation has a dict spelling too — `boundary_saving_config={'enabled':
+True, 'tail_steps': K}` is equivalent to
+`BoundaryOptions(tail_steps=K)`.
+
 | Feature | Path | Configured by |
 | --- | --- | --- |
 | Full storage (no reconstruction) | both | `MemoryOptions(strategy="full")` |
@@ -239,6 +259,18 @@ memory=MemoryOptions(
   waiting in an exchange).  The truncated DD gradient is bit-exact against
   the truncated single-domain gradient on fp32 boundaries
   (`test/test_dd_tail_two_tile.py`, `test/dd_tail_nccl_check.py`).
+
+## Environment toggles
+
+A few knobs stay out of the API because the right value depends on the
+machine, not on the problem. All are read once per run; none changes results.
+
+| Variable | Effect |
+| --- | --- |
+| `SWEEP_VRZ_GRAD_SPLIT=1` | `AcousticVRZ3D` backward: force the O(M) split gradient (materialise `c_d`/`e_d`, then one divergence) instead of the fused nested-stencil kernel that `order<=4` picks by default. The crossover is GPU-dependent — fused wins on RTX 6000 Ada, split is ~12 s/iter faster on V100 at production scale. |
+| `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
+| `SWEEP_BOUNDARY_DTYPE` | Default `storage_dtype` for the boundary ring; an explicit `BoundaryOptions(storage_dtype=...)` wins. |
+| `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
 
 ## Consistency testing
 

@@ -20,3 +20,21 @@ Model-parallel / domain-decomposition entry points. Usage guide:
 ::: sweep.parallel.pad_to_mesh
 
 ::: sweep.parallel.unpad_from_mesh
+
+## Building blocks
+
+`ModelParallel` composes these; they are public so a caller can drive a mesh
+by hand (a custom halo pattern, a static partition computed ahead of time)
+without reimplementing the arithmetic.
+
+::: sweep.parallel.mesh.ModelParallelMesh
+
+::: sweep.parallel._topology.balanced_grid
+
+::: sweep.parallel.routing.partition_global_coords
+
+::: sweep.parallel.pml.build_rank_pml_widths
+
+::: sweep.parallel.halo.HaloExchange
+
+::: sweep.parallel.halo.exchange_halos

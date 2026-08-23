@@ -10,6 +10,30 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Domain decomposition (`sweep.parallel`).**  `ModelParallel` splits one
+  model into tiles — one GPU per tile — and exchanges a halo every time step,
+  so a single shot is solved cooperatively instead of replicated.
+  `MeshTopology(py, px, shot_groups=...)` describes the rank grid and composes
+  with shot parallelism; `pad_to_mesh` / `unpad_from_mesh` size a model to the
+  tile multiple.  Forward and backward are plain autograd, and the gradient is
+  **bit-identical** to the single-domain gradient on fp32 GPU boundaries.
+  Supported equations: `Acoustic` (2-D), `Acoustic3D`, `AcousticVRZ3D`,
+  `Elastic` (2-D), `Elastic3D`; anything without stepped kernels is refused at
+  construction.  See the [Domain decomposition](docs/user-guide/parallel.md)
+  guide and notebooks 25 / 26.
+- **`BoundaryOptions.tail_steps`** (dict spelling:
+  `boundary_saving_config={'tail_steps': K}`): keep only the last `K` steps of
+  the boundary ring and stop the reverse loop there.  For steady-state
+  objectives (frequency-selection / encoded FWI) whose adjoint source is zero
+  outside a probe window, the truncated gradient is the same gradient; the
+  reverse pass and the ring both shrink proportionally.  Acoustic 2-D/3-D,
+  boundary-saving backward only, and it composes with domain decomposition.
+- **CPML aux strip allocation.**  `psi`/`zeta` (acoustic) and the elastic
+  memory variables now live in per-axis slabs — the PML band plus stencil
+  reach — instead of full grids, for `Acoustic`, `Acoustic3D`, `Elastic` and
+  `Elastic3D` on `impl='c'`.  Gradients are bit-for-bit unchanged; only the
+  allocation shrinks.  Equation authors opt in via the new `CUDALayoutSpec`
+  fields `pml_slot_axes`, `checkpoint_slot_axes` and `adjoint_pml_slab`.
 - Per-edge free surface (deepwave-style).  `Propagator(free_surface=...)` now
   accepts a per-edge spec — an edge-name list (`['top', 'left']`), a
   length-`2*ndim` bool mask (`[z0, z1, x0, x1]`), or a dict — in addition to the
@@ -33,11 +57,44 @@ and this project adheres to
 - `CHANGELOG.md` and `CONTRIBUTING.md` scaffolding.
 
 ### Changed
+- **The gradient-memory mode is now one three-way choice** — `'full'`,
+  `'boundary'` or `'ckpt'` — resolved identically for the eager and CUDA
+  backends by `resolve_memory_strategy`, and selected in one place with
+  `memory=MemoryOptions(strategy=...)`.  The legacy `use_ckpt` /
+  `boundary_saving_config` knobs still work and resolve into the same choice.
+  Three behaviour changes come with it:
+  - `boundary_saving_config={'enabled': True}` now actually runs the boundary
+    backward on both backends.  It used to lose silently to the `use_ckpt=True`
+    default, so scripts that believed they were using boundary saving were
+    checkpointing (`impl='c'`) or ignoring the dict entirely (`impl='eager'`).
+  - Contradictory requests raise `ValueError` instead of one path winning
+    silently — `use_ckpt=True` together with an enabled `boundary_saving_config`,
+    or `memory=` contradicting a legacy knob.  Knobs that *agree*
+    (`memory=MemoryOptions(strategy='boundary')` with `use_ckpt=False`) are
+    accepted.
+  - A dict passed without `enabled=True` (e.g. `{'storage': 'cpu'}`) selects
+    `'full'`, not checkpointing.
+  Unchanged on purpose: no knobs at all still means boundary saving for
+  `impl='c'` and checkpointing for the eager backend, and an explicit
+  off-switch (`use_ckpt=False`) still means full-wavefield storage.
 - `docs/user-guide/equations.md`: summary table expanded from 3 rows to cover
   all 20+ exported equation classes, grouped by physics family. Template
   reminder at the bottom replaced with a "See Also" cross-reference block.
 - `mkdocs.yml`: enabled `attr_list` and `md_in_html` Markdown extensions to
   support Material grid-card layouts.
+
+### Fixed
+- **CPML aux writes on a domain-decomposition cut tile.**  With the strip
+  allocation, the per-axis PML compute band reaches columns on a cut face that
+  carry no slab storage; the unclamped index produced a negative offset and the
+  ungated store aliased `±0` into another row's slab cell, racing its owner.
+  Writes are now gated on `stored()` and read through the clamped accessor
+  (`aux_rd_*`).  Only reachable with `impl='c'` acoustic + multi-GPU DD, and
+  never on a released build; single-domain runs are bit-for-bit unchanged.
+- **`AcousticVRZ3D` boundary staging with `storage_dtype='fp16'`/`'int8'`.**
+  The 2-D and 3-D VRZ paths now pass `boundary_tangent_pad = M` into the
+  effective-boundary saver, fixing an out-of-bounds staging copy on the
+  low-precision ring.
 
 ## Earlier history
 
