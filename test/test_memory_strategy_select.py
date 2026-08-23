@@ -20,8 +20,13 @@ R = resolve_memory_strategy
 def test_resolver_matrix():
     assert R("c") == "boundary"
     assert R("eager") == "ckpt"
-    assert R("c", use_ckpt=False) == "boundary"
+    # An explicit off-switch selects 'full' on BOTH impls: it says "no memory
+    # trick", not "pick the other one".  impl='c', use_ckpt=False has meant
+    # full-wavefield storage since before the selector existed (README,
+    # notebooks 00/12/16), so the selector must not repurpose it.
+    assert R("c", use_ckpt=False) == "full"
     assert R("eager", use_ckpt=False) == "full"
+    assert R("c", boundary_saving_config={"storage": "cpu"}) == "full"
     assert R("c", boundary_saving_config={"enabled": True}) == "boundary"
     assert R("c", boundary_saving_config={"enabled": False}) == "full"
     assert R("c", use_ckpt=True) == "ckpt"
@@ -34,6 +39,28 @@ def test_resolver_matrix():
         R("c", memory=MemoryOptions(strategy="ckpt"), boundary_saving_config={"enabled": True})
     with pytest.raises(ValueError):
         R("c", memory=MemoryOptions(strategy="ckpt"), use_ckpt=False)
+
+
+def test_memory_with_agreeing_legacy_knob_is_accepted():
+    """memory= next to a legacy knob is an error only when they DISAGREE.
+
+    ``use_ckpt=False`` alongside ``memory=MemoryOptions(strategy='boundary')``
+    states the same intent twice; rejecting it broke every caller that spells
+    the legacy default explicitly (test_eager_boundary_saving.py builds every
+    propagator that way).  A presence check cannot tell agreement from
+    conflict -- only the resolver can.
+    """
+    bnd = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage="gpu"))
+    for impl in ("c", "eager"):
+        assert R(impl, memory=bnd, use_ckpt=False) == "boundary"
+        assert R(impl, memory=MemoryOptions(strategy="full"), use_ckpt=False) == "full"
+        assert R(impl, memory=bnd, boundary_saving_config={"enabled": True}) == "boundary"
+    # ... and a real disagreement still raises, on both impls
+    for impl in ("c", "eager"):
+        with pytest.raises(ValueError):
+            R(impl, memory=MemoryOptions(strategy="full"), use_ckpt=True)
+        with pytest.raises(ValueError):
+            R(impl, memory=bnd, boundary_saving_config={"enabled": False})
 
 
 def test_memory_options_full_takes_no_blocks():
@@ -95,8 +122,30 @@ def test_c_defaults_and_full_and_ckpt():
 def test_c_conflicts_raise():
     with pytest.raises(ValueError, match="Conflicting"):
         _mk("c", boundary_saving_config={"enabled": True}, use_ckpt=True)
-    with pytest.raises(ValueError, match="not both"):
-        _mk("c", memory=MemoryOptions(strategy="full"), use_ckpt=False)
+    with pytest.raises(ValueError):
+        _mk("c", memory=MemoryOptions(strategy="ckpt", ckpt=CkptOptions()), use_ckpt=False)
+
+
+@needs_cuda
+def test_c_memory_with_agreeing_legacy_knob_builds():
+    """The regression: memory= + an agreeing legacy knob must construct."""
+    p = _mk("c", memory=MemoryOptions(strategy="full"), use_ckpt=False)
+    assert p.memory_strategy == "full" and p.use_ckpt is False
+    _grad(p)
+    p_bs = _mk("c", memory=MemoryOptions(strategy="boundary",
+                                         boundary=BoundaryOptions(storage="gpu")),
+               use_ckpt=False)
+    assert p_bs.memory_strategy == "boundary"
+    _grad(p_bs)
+
+
+@needs_cuda
+def test_c_explicit_use_ckpt_false_is_full_storage():
+    """impl='c', use_ckpt=False keeps its pre-selector meaning: full storage."""
+    p = _mk("c", use_ckpt=False)
+    assert p.memory_strategy == "full"
+    assert p.use_ckpt is False
+    _grad(p)
 
 
 @needs_cuda
