@@ -91,6 +91,14 @@ and this project adheres to
   Writes are now gated on `stored()` and read through the clamped accessor
   (`aux_rd_*`).  Only reachable with `impl='c'` acoustic + multi-GPU DD, and
   never on a released build; single-domain runs are bit-for-bit unchanged.
+- **DAS Mu 2-D/3-D were non-deterministic on `impl='c'`.**  `das_mu*/kernels.cuh`
+  includes the elastic kernels, which address the CPML memory variables through
+  the solver's aux slabs, but the DAS drivers never installed them: the row
+  stride collapsed to zero and every row aliased the first, so the same input
+  gave a different answer each run (plain single-GPU forward, with or without a
+  free surface).  `AcousticLSRTM` and `AcousticVRZ3D` borrow the acoustic
+  kernels the same way but never launch the slab-addressed ones and were
+  unaffected.  `test/test_c_aux_slab_repeatability.py` now pins the class.
 - **`AcousticVRZ3D` boundary staging with `storage_dtype='fp16'`/`'int8'`.**
   The 2-D and 3-D VRZ paths now pass `boundary_tangent_pad = M` into the
   effective-boundary saver, fixing an out-of-bounds staging copy on the
