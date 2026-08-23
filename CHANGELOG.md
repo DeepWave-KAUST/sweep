@@ -91,6 +91,13 @@ and this project adheres to
   Writes are now gated on `stored()` and read through the clamped accessor
   (`aux_rd_*`).  Only reachable with `impl='c'` acoustic + multi-GPU DD, and
   never on a released build; single-domain runs are bit-for-bit unchanged.
+- **The boundary spec can no longer be changed after construction.**
+  `prop.free_surface = ...` (and `fs_faces`, `abcn`, `pad`, `pml_type`,
+  `topography`) used to land on the `PropTorch` wrapper, where it shadowed the
+  backend's value: the read-back reported the new setting while every kernel
+  kept the old one — a script could believe it had switched a free surface on
+  and quietly model without one.  The write now raises `AttributeError` and
+  points at the constructor.
 - **DAS Mu 2-D/3-D were non-deterministic on `impl='c'`.**  `das_mu*/kernels.cuh`
   includes the elastic kernels, which address the CPML memory variables through
   the solver's aux slabs, but the DAS drivers never installed them: the row
