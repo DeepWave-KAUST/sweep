@@ -572,6 +572,16 @@ BackwardOutput backward_bs(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic3d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz,iy) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
+                "DAS Mu 3D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
 
     DasMuWavefieldTensor3D adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -865,6 +875,16 @@ BackwardOutput backward(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic3d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz,iy) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
+                "DAS Mu 3D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
 
     DasMuWavefieldTensor3D adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -1014,6 +1034,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic3d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz,iy) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
+                "DAS Mu 3D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
     DasMuWavefieldTensor3D adjoint;
@@ -1140,6 +1170,16 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic3d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz,iy) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
+                "DAS Mu 3D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
     DasMuWavefieldTensor3D adjoint;
