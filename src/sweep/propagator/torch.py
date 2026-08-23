@@ -121,15 +121,13 @@ def _merge_option_dict(base, extra, *, label):
 
 def _normalize_cuda_memory_kwargs(merged):
     memory = merged.pop("memory", None)
-    legacy = [k for k in ("use_ckpt", "boundary_saving_config") if k in merged]
-    if memory is not None and legacy:
-        raise ValueError(
-            "Specify the gradient-memory mode via either memory= or the "
-            f"legacy {legacy} knobs, not both.")
 
     # The gradient-memory mode is a three-way choice (full/boundary/ckpt),
     # resolved once and identically for every backend; conflicting knob
-    # combinations raise instead of one path silently winning.
+    # combinations raise instead of one path silently winning.  Mixing
+    # memory= with a legacy knob is only an error when the two disagree --
+    # `memory=MemoryOptions(strategy='boundary'), use_ckpt=False` says one
+    # thing twice -- so the resolver, not a presence check, decides.
     strategy = resolve_memory_strategy(
         "c", options_to_dict(memory) if memory is not None else None,
         merged.get("use_ckpt"), merged.get("boundary_saving_config"))
@@ -353,12 +351,8 @@ class PropTorch(torch.nn.Module):
             cuda_options=cuda_options,
         )
         if impl == "eager":
-            legacy = [k for k in ("use_ckpt", "boundary_saving_config")
-                      if init_kwargs.get(k) is not None]
-            if memory is not None and legacy:
-                raise ValueError(
-                    "Specify the gradient-memory mode via either memory= or "
-                    f"the legacy {legacy} knobs, not both.")
+            # memory= alongside a legacy knob is fine unless they disagree;
+            # resolve_memory_strategy raises on a real conflict.
             strategy = resolve_memory_strategy(
                 "eager", memory, init_kwargs.get("use_ckpt"),
                 init_kwargs.get("boundary_saving_config"))

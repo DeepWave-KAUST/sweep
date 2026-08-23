@@ -262,10 +262,15 @@ def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_co
     checkpoint backward).
 
     Requests: ``memory.strategy`` (if set), ``use_ckpt=True`` (-> 'ckpt'),
-    ``boundary_saving_config['enabled']=True`` (-> 'boundary').  Exclusions:
-    ``use_ckpt=False`` and ``enabled=False`` remove that mode from the
-    backend-default fallback ('boundary' -> 'full' for impl='c',
-    'ckpt' -> 'full' otherwise).
+    ``boundary_saving_config['enabled']=True`` (-> 'boundary').
+
+    An explicit legacy off-switch (``use_ckpt=False``, ``enabled=False``) is
+    not a vote for the *other* trick: with no positive request it selects
+    ``'full'``.  That is what ``impl='c', use_ckpt=False`` has always meant --
+    the knob suppressed the boundary-saving default outright -- and what the
+    README and notebooks 00/12/16 document.  The implicit backend default
+    ('boundary' for impl='c', 'ckpt' otherwise) applies only when no
+    gradient-memory knob was passed at all.
     """
     requests = {}
     exclude = set()
@@ -308,6 +313,10 @@ def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_co
                 f"excluded by another knob; pass exactly one mode via "
                 "memory=MemoryOptions(strategy=...).")
         return strategy
+
+    if exclude:
+        # An explicit off-switch and nothing else: no memory trick at all.
+        return "full"
 
     default_order = ("boundary", "full") if impl == "c" else ("ckpt", "full")
     for strategy in default_order:
