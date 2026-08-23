@@ -394,12 +394,34 @@ class PropTorch(torch.nn.Module):
     _BACKEND_DELEGATED = ("compute_illumination", "source_illumination", "receiver_illumination",
                           "compute_adcig", "adcig_max_lag", "adcig")
 
+    # The boundary/layout spec is consumed at construction: it sizes the padded
+    # grid, decides the PML pad of every face, builds the profiles, and on
+    # impl='c' is compiled into the kernels' free-surface bitmask and image
+    # mirror. Writing it afterwards used to land on THIS wrapper, where it
+    # shadows the backend's value: the read-back showed the new setting while
+    # the physics kept the old one, so a script could believe it had switched a
+    # free surface on and quietly model without one (it did -- on marine field
+    # data). Refuse the write instead of accepting it and doing nothing.
+    _CONSTRUCTION_ONLY = ("free_surface", "fs_faces", "abcn", "pad",
+                          "pml_type", "topography")
+
     def __setattr__(self, name, value):
         if name in PropTorch._BACKEND_DELEGATED:
             backend = getattr(self, "_backend_impl", None)  # in self._modules once set
             if backend is not None:
                 setattr(backend, name, value)
                 return
+        if (name in PropTorch._CONSTRUCTION_ONLY
+                and getattr(self, "_backend_impl", None) is not None):
+            raise AttributeError(
+                f"{name!r} is fixed when the propagator is built: the padded "
+                "grid, the per-face PML widths and (on impl='c') the compiled "
+                "kernels all derive from it there, and none of them is "
+                "recomputed on assignment. Setting it here would only shadow "
+                f"the backend's value, so reads would report {value!r} while "
+                "the physics kept the original. Build a new propagator with "
+                f"PropTorch(..., {name}=...) instead."
+            )
         super().__setattr__(name, value)
 
     def parameters(self):
