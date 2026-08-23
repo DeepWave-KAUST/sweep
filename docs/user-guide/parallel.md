@@ -108,13 +108,20 @@ than an unpadded one, so compare like against like — the example scripts'
 
 ## Scope and limits
 
-- Equations: those with stepped compiled kernels — the acoustic family
-  (including VRZ) and elastic; others are refused at construction.
+- Equations: those with stepped compiled kernels — `Acoustic` (2-D),
+  `Acoustic3D`, `AcousticVRZ3D`, `Elastic` (2-D) and `Elastic3D`. Everything
+  else is refused at construction with an error that names the equation,
+  including the **2-D** `AcousticVRZ` (only its 3-D sibling is stepped),
+  `AcousticVTI`/`AcousticVTI1st`, `AcousticTTI`, `ElasticTTI`, `ElasticVRR`
+  and `ViscoAcoustic`.
 - Cuts: x strips in 2-D (`py=1`); x/y tile grids in 3-D.
 - Free surface: top face only under DD (a cut face can never carry one).
 - `BoundaryOptions.tail_steps`: Acoustic 2-D/3-D (see
   [Propagators](propagators.md#boundary-tail-truncation-boundaryoptionstail_steps)).
-- Not routed through DD: `rtm()` and source-encoding (B-mode) inputs.
+- Not routed through DD: `rtm()` — use the gradient path (notebook
+  [08](../notebooks/08_rtm_acoustic_marmousi.ipynb) shows how). Encoded
+  supershots (a `(nsrc, nt)` wavelet) *are* supported: each tile keeps the
+  rows of the sources it owns (`test/dd_encoded_check.py`).
 - `SWEEP_DD_DISABLE_OVERLAP=1` forces the serial step-then-exchange path —
   the bit-exact reference for the comm/compute-overlap forward and a
   production escape hatch.

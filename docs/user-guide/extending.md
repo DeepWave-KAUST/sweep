@@ -238,6 +238,16 @@ fields are read in `src/sweep/propagator/_c.py`:
 | `backward_workspace_nvar` | adjoint workspace tensors | `0` |
 | `backward_workspace_shapes` | optional shape callback for the workspace | `None` |
 | `boundary_tangent_pad` | extra tangential cells for staggered grids | `0` |
+| `adjoint_extra_nvar` | extra adjoint-only tensors for a fused adjoint | `0` |
+| `pml_slot_axes` | per-slot differencing axis (`'x'`/`'y'`/`'z'`) of the `pml_nvar` **forward** aux slots, in C++ bind order — tagged slots are allocated as per-axis slabs (PML band + stencil reach) instead of full grids | `None` (full grids) |
+| `checkpoint_slot_axes` | the same tagging for the checkpoint snapshot slots; `None` entries stay physical full-grid slots | `None` |
+| `adjoint_pml_slab` | also slab the **adjoint** aux. Only safe when the adjoint touches its memory variables own-cell (elastic); a fused adjoint that stencil-taps psi/zeta must stay full-domain (acoustic) | `False` |
+
+The last three are opt-in: leave them unset and your aux buffers are
+full-domain, which always works. Tagging them cuts CPML aux memory to the
+bands, and is what `Acoustic`/`Acoustic3D`/`Elastic`/`Elastic3D` do — the
+kernels adapt per bound tensor, so a mis-tagged slot shows up as a wrong
+read, not as a silent full-grid fallback.
 
 If the buffer counts are wrong, the propagator either over-allocates GPU
 memory or reads uninitialised data — there is no second line of defence, so
