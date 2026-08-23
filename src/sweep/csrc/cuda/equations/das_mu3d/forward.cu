@@ -83,6 +83,16 @@ ForwardOutput forward(const ForwardInput& in)
         p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
         dx, dy, dz
     };
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic3d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz,iy) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
+                "DAS Mu 3D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;

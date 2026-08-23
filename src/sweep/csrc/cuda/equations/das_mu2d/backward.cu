@@ -486,6 +486,16 @@ BackwardOutput backward(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic2d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, -1, solver.nx),
+                "DAS Mu 2D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
 
     DasMuWavefieldTensor2D adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -626,6 +636,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic2d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, -1, solver.nx),
+                "DAS Mu 2D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     DasMuWavefieldTensor2D adjoint;
@@ -742,6 +762,16 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic2d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, -1, solver.nx),
+                "DAS Mu 2D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     DasMuWavefieldTensor2D adjoint;
@@ -915,6 +945,16 @@ BackwardOutput backward_bs(const BackwardInput& in)
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic2d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, -1, solver.nx),
+                "DAS Mu 2D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto f_this = torch::zeros_like(vp); // for gradient calculation
