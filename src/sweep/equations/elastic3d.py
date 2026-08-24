@@ -577,4 +577,11 @@ class Elastic(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=9,
             backward_workspace_nvar=18,
+            # CPML memory variables in C++ bind order: nine (x, y, z) triples
+            # (m_vx*, m_vy*, m_vz*, m_sxx*, m_syy*, m_szz*, m_sxy*, m_sxz*,
+            # m_syz*); the differencing axis is the name's last letter.  All
+            # elastic aux access is own-cell, so the adjoint uses slabs too.
+            pml_slot_axes=("x", "y", "z") * 9,
+            checkpoint_slot_axes=(None,) * 9 + ("x", "y", "z") * 9,
+            adjoint_pml_slab=True,
         )

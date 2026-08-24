@@ -86,6 +86,24 @@ struct ElasticCPMLTensor {
     }
 };
 
+// Host-side: derive the per-axis CPML memory-variable slab geometry from the
+// bound tensor shapes and install it on the SolverContext (see the acoustic
+// twin).  Full-length tensors select the identity (legacy) layout.
+template <typename WF>
+inline void elastic_init_aux_slabs(SolverContext& ctx, const WF& wf) {
+    long lz = -1, ly = -1, lx = -1;
+    if (wf.use_pml && wf.m_vxx_t.defined() && wf.m_vxx_t.numel() > 0) {
+        lx = wf.m_vxx_t.size(-1);
+        lz = wf.m_vzz_t.size(2);
+        if (wf.dim == 3 && wf.m_vyy_t.defined() && wf.m_vyy_t.numel() > 0)
+            ly = wf.m_vyy_t.size(3);
+    }
+    TORCH_CHECK(ctx.init_aux_slabs(lz, ly, lx),
+                "elastic memory-variable tensor axis lengths match neither the "
+                "full grid nor the strip layout: z=", lz, " y=", ly, " x=", lx,
+                " grid (", ctx.nz, ",", ctx.ny, ",", ctx.nx, ") M=", ctx.M);
+}
+
 struct ElasticWavefieldPointer {
     float* __restrict__ vx;
     float* __restrict__ vy;  // 3D only
@@ -134,10 +152,19 @@ struct ElasticWavefieldPointer {
     float* __restrict__ m_syzy;
     float* __restrict__ m_syzz;
 
+    long aux_bn_x = -1;
+    long aux_bn_y = -1;
+    long aux_bn_z = -1;
+
     __device__ ElasticWavefieldPointer offset(int b, int spatial_size) const
     {
         ElasticWavefieldPointer out = *this;
         const int shift = b * spatial_size;
+        // Memory variables may live in per-axis slabs; view() records their
+        // per-batch numels (== spatial_size for legacy full-domain tensors).
+        const long sx_ = aux_bn_x >= 0 ? (long)b * aux_bn_x : (long)shift;
+        const long sy_ = aux_bn_y >= 0 ? (long)b * aux_bn_y : (long)shift;
+        const long sz_ = aux_bn_z >= 0 ? (long)b * aux_bn_z : (long)shift;
 
         out.vx += shift;
         if (out.vy) out.vy += shift;
@@ -150,41 +177,41 @@ struct ElasticWavefieldPointer {
         out.sxz += shift;
         if (out.syz) out.syz += shift;
 
-        out.m_vxx += shift;
-        if (out.m_vxy) out.m_vxy += shift;
-        out.m_vxz += shift;
+        out.m_vxx += sx_;
+        if (out.m_vxy) out.m_vxy += sy_;
+        out.m_vxz += sz_;
 
-        if (out.m_vyx) out.m_vyx += shift;
-        if (out.m_vyy) out.m_vyy += shift;
-        if (out.m_vyz) out.m_vyz += shift;
+        if (out.m_vyx) out.m_vyx += sx_;
+        if (out.m_vyy) out.m_vyy += sy_;
+        if (out.m_vyz) out.m_vyz += sz_;
 
-        out.m_vzx += shift;
-        if (out.m_vzy) out.m_vzy += shift;
-        out.m_vzz += shift;
+        out.m_vzx += sx_;
+        if (out.m_vzy) out.m_vzy += sy_;
+        out.m_vzz += sz_;
 
-        out.m_sxxx += shift;
-        if (out.m_sxxy) out.m_sxxy += shift;
-        out.m_sxxz += shift;
+        out.m_sxxx += sx_;
+        if (out.m_sxxy) out.m_sxxy += sy_;
+        out.m_sxxz += sz_;
 
-        if (out.m_syyx) out.m_syyx += shift;
-        if (out.m_syyy) out.m_syyy += shift;
-        if (out.m_syyz) out.m_syyz += shift;
+        if (out.m_syyx) out.m_syyx += sx_;
+        if (out.m_syyy) out.m_syyy += sy_;
+        if (out.m_syyz) out.m_syyz += sz_;
 
-        out.m_szzx += shift;
-        if (out.m_szzy) out.m_szzy += shift;
-        out.m_szzz += shift;
+        out.m_szzx += sx_;
+        if (out.m_szzy) out.m_szzy += sy_;
+        out.m_szzz += sz_;
 
-        if (out.m_sxyx) out.m_sxyx += shift;
-        if (out.m_sxyy) out.m_sxyy += shift;
-        if (out.m_sxyz) out.m_sxyz += shift;
+        if (out.m_sxyx) out.m_sxyx += sx_;
+        if (out.m_sxyy) out.m_sxyy += sy_;
+        if (out.m_sxyz) out.m_sxyz += sz_;
 
-        out.m_sxzx += shift;
-        if (out.m_sxzy) out.m_sxzy += shift;
-        out.m_sxzz += shift;
+        out.m_sxzx += sx_;
+        if (out.m_sxzy) out.m_sxzy += sy_;
+        out.m_sxzz += sz_;
 
-        if (out.m_syzx) out.m_syzx += shift;
-        if (out.m_syzy) out.m_syzy += shift;
-        if (out.m_syzz) out.m_syzz += shift;
+        if (out.m_syzx) out.m_syzx += sx_;
+        if (out.m_syzy) out.m_syzy += sy_;
+        if (out.m_syzz) out.m_syzz += sz_;
 
         return out;
     }
@@ -243,6 +270,28 @@ struct ElasticWavefieldTensor {
         allocated = true;
     }
 
+    // Allocate state whose slot shapes follow the Python-allocated checkpoint
+    // snapshots (bind order, each [n_ckpt, B, 1, ...]); memory variables may
+    // be per-axis slabs there.  Used by the checkpoint drivers, which have no
+    // bound forward wavefield to copy the layout from.
+    void allocate_from_snapshots(const torch::Tensor& vp,
+                                 const std::vector<torch::Tensor>& snaps,
+                                 int dim_)
+    {
+        if (allocated) return;
+        TORCH_CHECK((int)snaps.size() == (dim_ == 2 ? 15 : 36),
+                    "elastic checkpoint set expects 15 (2D) / 36 (3D) tensors, got ",
+                    snaps.size());
+        std::vector<torch::Tensor> ts;
+        ts.reserve(snaps.size());
+        for (const auto& t : snaps) {
+            auto sizes = t.sizes().vec();
+            sizes.erase(sizes.begin());          // drop the n_ckpt axis
+            ts.push_back(torch::zeros(sizes, vp.options()));
+        }
+        bind(ts, true);
+    }
+
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true)
     {
         int i = 0;
@@ -251,7 +300,18 @@ struct ElasticWavefieldTensor {
         reset_optional_3d();
         reset_optional_pml();
 
-        if (tensors.size() == 15) {
+        // Layouts: with PML 15 (2D) / 36 (3D); without PML the physical
+        // fields only: 5 (2D) / 9 (3D).  The 9-tensor no-pml case falls
+        // through to the 3D branch (which reads exactly 9 when use_pml
+        // is false).
+        TORCH_CHECK(
+            use_pml_ ? (tensors.size() == 15 || tensors.size() == 36)
+                     : (tensors.size() == 5 || tensors.size() == 9),
+            "ElasticWavefieldTensor::bind: expected ",
+            use_pml_ ? "15 (2D) or 36 (3D)" : "5 (2D) or 9 (3D)",
+            " tensors, got ", tensors.size());
+
+        if (tensors.size() == 15 || tensors.size() == 5) {
             dim = 2;
 
             vx_t = tensors[i++];
@@ -357,6 +417,15 @@ struct ElasticWavefieldTensor {
             }
         } else {
             clear_pml_view(v);
+        }
+
+        if (use_pml) {
+            auto bn = [](const torch::Tensor& t) -> long {
+                return t.defined() && t.numel() > 0 ? t.numel() / t.size(0) : -1;
+            };
+            v.aux_bn_x = bn(m_vxx_t);
+            v.aux_bn_z = bn(m_vzz_t);
+            if (dim == 3) v.aux_bn_y = bn(m_vyy_t);
         }
 
         return v;

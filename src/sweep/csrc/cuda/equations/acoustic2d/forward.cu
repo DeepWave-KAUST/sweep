@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 
 #include <c10/cuda/CUDAGuard.h>
 #include "acoustic2d.h"
@@ -12,6 +13,7 @@
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include <algorithm>
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/laplace.cuh"
@@ -63,26 +65,70 @@ ForwardOutput forward(const ForwardInput& in) {
     ctx.topo_category = nullptr;
     ctx.use_apm      = false;
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
+    // Cut-aware physical bounds (0 = single domain → legacy per-edge pad + M).
+    ctx.cut_mask     = p.cut_face_mask;
+
+    const int it0 = p.it_begin;
+    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                it0, ", ", it1, ") with nt=", p.nt);
+    const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
+
+    // ---- DD phase-split step (comm/compute overlap) ----
+    const int phase = p.step_phase;
+    const bool cut_x_lo = (p.cut_face_mask & 1) != 0;
+    const bool cut_x_hi = (p.cut_face_mask & 2) != 0;
+    if (phase != 0) {
+        TORCH_CHECK(phase == 1 || phase == 2,
+                    "step_phase must be 0 (legacy), 1 (boundary strips) or 2 (interior)");
+        TORCH_CHECK(it1 == it0 + 1,
+                    "phased forward (step_phase != 0) drives a single step: "
+                    "require it_end == it_begin + 1, got [", it0, ", ", it1, ")");
+        TORCH_CHECK(p.cut_face_mask != 0,
+                    "phased forward requires cut_face_mask != 0");
+        TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
+                    "phased forward v1 supports x-face cuts only (bits 0/1), got ",
+                    p.cut_face_mask);
+        TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
+                    "tile too narrow for phase-split strips: nx_phys=",
+                    ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
+    }
 
     AcousticWavefieldTensor wavefield;
+    // On a continuation call the internal allocate() would silently zero the
+    // propagation state — the caller must keep binding the same tensors.
+    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
+                "stepped continuation (it_begin>0) requires Python-bound wavefields");
     if (!p.wavefields.empty())
         wavefield.bind(p.wavefields, 2, true);
     else
         wavefield.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    acoustic_init_aux_slabs(ctx, wavefield);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    auto record = torch::zeros(
-        {N, p.receivers_loc.size(1), p.nt},
-        vp.options()
-    );
+    TORCH_CHECK(!stepped || p.record_out.defined(),
+                "stepped forward requires record_out bound from Python");
+    auto record = p.record_out.defined()
+        ? p.record_out
+        : torch::zeros({N, p.receivers_loc.size(1), p.nt}, vp.options());
+    if (p.record_out.defined())
+        TORCH_CHECK(record.is_contiguous() &&
+                    record.size(-1) == static_cast<long>(p.nt),
+                    "record_out must be contiguous with trailing dim nt");
 
     // Wavefields for all timestep
     torch::Tensor u_allt;
-    if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, B, nz, nx}, vp.options());
+    if (p.save_all_wavefields) {
+        TORCH_CHECK(!stepped || p.u_allt_out.defined(),
+                    "stepped + save_all_wavefields requires u_allt_out bound from Python");
+        u_allt = p.u_allt_out.defined()
+            ? p.u_allt_out
+            : torch::zeros({p.nt, B, nz, nx}, vp.options());
+    }
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -93,10 +139,16 @@ ForwardOutput forward(const ForwardInput& in) {
         p.checkpoint_steps,
         p.checkpoint_on_cpu,
         "forward",
-        "acoustic2d"
+        "acoustic2d",
+        it0
     );
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
+    // The internal full-storage fallback ring is per-call; segments after the
+    // first would lose everything saved before them.
+    if (stepped && p.use_boundary_saving)
+        TORCH_CHECK(!p.boundary_gpu.empty(),
+                    "stepped forward with boundary saving requires Python-bound boundary_gpu");
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary)
@@ -116,6 +168,16 @@ ForwardOutput forward(const ForwardInput& in) {
     GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    // Boundary tail truncation: with boundary_tail_steps = K > 0 only the
+    // last K steps' boundary strips are saved; the runtime and the Python
+    // buffers work in shifted "saved-step" coordinates [0, K).  bs_it0 = 0
+    // when disabled, making every shift below a no-op (bit-exact legacy).
+    // Stepped/DD segments compose transparently: ``it`` is the GLOBAL step
+    // index, so the save guard and shift never look at the segment bounds;
+    // the Python-bound boundary_gpu ring (mandatory under stepped) is
+    // allocated tail-shrunk by _ensure_boundary_buffers(nt_saved=...).
+    const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
+        ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -129,43 +191,78 @@ ForwardOutput forward(const ForwardInput& in) {
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    for (int it = 0; it < p.nt; ++it) {
+    for (int it = it0; it < it1; ++it) {
 
         auto view = wavefield.view();
 
         u_thist = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
 
+        // Ranged stencil launch over x in [xb, xe); (0, nx) reproduces the
+        // legacy full launch bit-identically (same grid dims, x_base = 0).
         // Pre-pass: clear air cells in a separate kernel launch so the
         // main acoustic2nd kernel only reads (never writes) air cells.
         // Eliminates intra-launch RAW race on PML aux fields that was
         // showing up as ~30% non-deterministic forward output across
-        // processes (sweep VTI history pattern).
-        if (p.has_topo) {
-            acoustic2d_air_clear_kernel<<<launch_config.grid, launch_config.block>>>(
-                view, p.save_all_wavefields, u_thist, ctx
+        // processes (sweep VTI history pattern).  The air-clear range is
+        // widened by the stencil halo M so a phase-split stencil launch
+        // still only reads air cells cleared earlier THIS step (re-clearing
+        // across phases writes the same zeros — idempotent).
+        auto launch_stencil = [&](int xb, int xe) {
+            if (xe <= xb) return;
+            if (p.has_topo) {
+                int axb = std::max(0, xb - p.M);
+                int axe = std::min(nx, xe + p.M);
+                SolverContext actx = ctx;
+                actx.x_base = axb;
+                actx.x_limit = axe;
+                auto alc = fdtd::Wave2D::make(axe - axb, nz, B);
+                acoustic2d_air_clear_kernel<<<alc.grid, alc.block>>>(
+                    view, p.save_all_wavefields, u_thist, actx
+                );
+            }
+            SolverContext sctx = ctx;
+            sctx.x_base = xb;
+            sctx.x_limit = xe;
+            auto lc = fdtd::Wave2D::make(xe - xb, nz, B);
+            ACOUSTIC2D(
+                order,
+                lc.grid,
+                lc.block,
+                view,
+                p.save_all_wavefields,
+                u_thist,
+                vp.data_ptr<float>(),
+                lap_ctx,
+                grad_ctx,
+                grad_ctx_x,
+                grad_ctx_z,
+                cpml,
+                sctx
             );
+        };
+
+        if (phase == 1) {
+            // Boundary phase: ONLY the cut-adjacent M-wide physical edge
+            // strips — exactly what the halo exchange sends.
+            if (cut_x_lo) launch_stencil(ctx.phys_x0(), ctx.phys_x0() + p.M);
+            if (cut_x_hi) launch_stencil(ctx.phys_x1() - p.M, ctx.phys_x1());
+        } else if (phase == 2) {
+            // Interior phase: the strict complement of the phase-1 strips
+            // (no overlap — re-running a strip cell would double-advance
+            // its CPML psi double-buffer write).
+            launch_stencil(cut_x_lo ? ctx.phys_x0() + p.M : 0,
+                           cut_x_hi ? ctx.phys_x1() - p.M : nx);
+        } else {
+            launch_stencil(0, nx);
         }
 
-        ACOUSTIC2D(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            view,
-            p.save_all_wavefields,
-            u_thist,
-            vp.data_ptr<float>(),
-            lap_ctx,
-            grad_ctx,
-            grad_ctx_x,
-            grad_ctx_z,
-            cpml,
-            ctx
-        );
+        if (phase == 1)
+            continue;   // no boundary saving / source / record / swap / ckpt
 
-        if (p.use_boundary_saving) {
+        if (p.use_boundary_saving && it >= bs_it0) {
             boundary_runtime.save_forward_2d(
-                it,
-                p.nt,
+                it - bs_it0,
+                (int)p.nt - bs_it0,
                 view.u_now,
                 launch_config.grid,
                 launch_config.block,
@@ -200,8 +297,11 @@ ForwardOutput forward(const ForwardInput& in) {
 
     }
 
-    // Save the last two time steps for backward
-    if (p.use_boundary_saving) {
+    // Save the last two time steps for backward (only once the final
+    // segment has run; mid-run segments leave last_two untouched).
+    // Phase 1 has not swapped yet — roles would be wrong; phase 2 of the
+    // same step does the copy.
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
         boundary_saver.last_two_t.select(1,0).copy_(wavefield.u_prev_t);
         boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }

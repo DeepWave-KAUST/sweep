@@ -77,6 +77,16 @@ ForwardOutput forward(const ForwardInput& in)
     if (p.save_all_wavefields) u_allt = torch::zeros({p.nt, 2, B, nz, nx}, vp.options()); // Only save Vx and Vz.
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DAS Mu reuses the elastic kernels (kernels.cuh includes elastic2d's),
+    // which address the CPML memory variables through the solver's aux slabs.
+    // DAS keeps those tensors full-domain -- its CUDALayoutSpec sets no
+    // pml_slot_axes -- so install identity slabs here.  Left default
+    // constructed they are lo=hi=n=0, tot() is 0, the aux row stride
+    // collapses and every (iz) row aliases the first: a data race whose
+    // output changes from run to run.
+    TORCH_CHECK(solver.init_aux_slabs(solver.nz, -1, solver.nx),
+                "DAS Mu 2D: full-grid CPML memory variables rejected by "
+                "init_aux_slabs");
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;

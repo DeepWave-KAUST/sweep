@@ -99,6 +99,7 @@ nav:
       - Equations: user-guide/equations.md
       - Operators: user-guide/operators.md
       - Propagators: user-guide/propagators.md
+      - Domain decomposition: user-guide/parallel.md
       - Datasets: user-guide/datasets.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
@@ -134,6 +135,8 @@ nav:
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
+              - Domain decomposition · model-parallel: notebooks/25_domain_decomposition.ipynb
+              - Domain decomposition · Overthrust 3-D: notebooks/26_dd_overthrust_3d.ipynb
           - Extending:
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
           - Sensitivity & resolution:
@@ -169,3 +172,4 @@ nav:
           - Propagator Options: api/propagators/options.md
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
+      - Parallel (DD): api/parallel.md

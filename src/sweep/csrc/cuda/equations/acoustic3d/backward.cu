@@ -87,6 +87,121 @@ void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp,
     }
 }
 
+// Validate the stepped-backward segment fields (bw_it_begin/bw_it_end).
+// ``need_recon`` is true for boundary-saving mode, where the 3-tensor
+// reconstruction wavefield list must be Python-owned to survive segments.
+void check_stepped_backward_3d(const BackwardInput& p, bool need_recon)
+{
+    const int it_hi = p.bw_begin();
+    const int it_lo = p.bw_it_end;
+    TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+                "stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
+                it_lo, ", ", it_hi, ") with nt=", p.nt);
+    TORCH_CHECK((p.cut_face_mask & ~0x3F) == 0,
+                "3D cut_face_mask uses bits 0..5 "
+                "(x_lo, x_hi, z_lo, z_hi, y_lo, y_hi) only, got ",
+                p.cut_face_mask);
+    // Domain decomposition is boundary-saving only: the full-storage backward
+    // keeps the whole forward history resident (no reconstruction halo to
+    // exchange), so DD's memory win is moot there.  Use backward_bs for DD.
+    TORCH_CHECK(need_recon || p.cut_face_mask == 0,
+                "domain-decomposed backward (cut_face_mask) is boundary-saving "
+                "only; the full-storage path does not support DD (use backward_bs)");
+    if (need_recon && p.cut_face_mask != 0) {
+        // DD supports gpu-direct AND cpu-staged boundary storage: the
+        // per-step DD backward re-primes the ring for its own step (see
+        // prefetch_initial_backward_chunk's it_hi), so staging works under the
+        // Python-driven loop.  disk staging is still unsupported for DD.
+        TORCH_CHECK(!p.boundary_on_disk,
+                    "domain-decomposed backward_bs (cut_face_mask) supports "
+                    "gpu-direct or cpu boundary storage only "
+                    "(boundary_on_disk unsupported in v1)");
+    }
+    if (!p.bw_stepped())
+        return;
+    TORCH_CHECK(p.adjoint_wavefields.size() == 15,
+                "stepped backward requires the 15-tensor adjoint wavefield list "
+                "(u triple + psi/zeta double-buffer) bound from Python");
+    TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                "stepped backward requires Python-bound grads_out "
+                "(slot 0 = grad_wavelet, then one per model)");
+    TORCH_CHECK(p.illum_out.size() == 2,
+                "stepped backward requires Python-bound illum_out "
+                "{source_illumination, receiver_illumination}");
+    if (need_recon) {
+        TORCH_CHECK(p.forward_wavefields.size() == 3,
+                    "stepped backward_bs requires the 3-tensor reconstruction "
+                    "wavefield list bound from Python");
+        TORCH_CHECK(!p.boundary_on_disk,
+                    "stepped backward_bs supports gpu-direct or cpu boundary "
+                    "storage only (boundary_on_disk unsupported in v1)");
+        // cpu staging is wired for the real DD backward only.  The single-tile
+        // stepped path (cut_face_mask == 0, i.e. ModelParallel with one tile)
+        // reaches an untested reconstruction indexing that segfaulted at larger
+        // nt in the MVP; keep it refused rather than silently wrong.  Use
+        // gpu-direct, or a plain monolithic PropTorch backward, for
+        // single-domain cpu boundary saving.
+        TORCH_CHECK(p.cut_face_mask != 0 || !p.boundary_on_cpu,
+                    "stepped backward_bs cpu boundary staging requires a DD cut "
+                    "mask (cut_face_mask != 0); single-tile cpu staging is "
+                    "unsupported here (use gpu-direct or a monolithic backward)");
+    }
+}
+
+// Bind grad/illum accumulators from Python when provided (stepped), else
+// fall back to internal zero allocation (legacy monolithic behaviour).
+// Bound tensors are accumulated "+=" and NOT zeroed here — Python zeroes
+// them once before the first segment.
+// ``want_adcig``: only the boundary-saving path consumes an ADCIG cube in 3-D
+// (the full-storage / ckpt / recursive drivers neither accumulate into nor
+// return one), so it stays opt-in.  Allocating it unconditionally would cost a
+// (2*max_lag+1, N, C, nz, ny, nx) zero-fill per call — gigabytes — that is
+// never read.  2-D differs: every 2-D driver consumes ADCIG.
+void bind_backward_outputs_3d(
+    const BackwardInput& p,
+    torch::Tensor& grad_wavelet,
+    torch::Tensor& grad,
+    RTMOutput& illumination,
+    bool want_adcig = false)
+{
+    if (!p.grads_out.empty()) {
+        TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                    "grads_out must hold models.size()+1 tensors "
+                    "(slot 0 = grad_wavelet)");
+        grad_wavelet = p.grads_out[0];
+        grad = p.grads_out[1];
+    } else {
+        grad_wavelet = torch::zeros_like(p.forward_source);
+        grad = torch::zeros_like(p.models[0]);
+    }
+    if (!p.illum_out.empty()) {
+        TORCH_CHECK(p.illum_out.size() == 2,
+                    "illum_out must be {source_illumination, receiver_illumination}");
+        // image is never returned from backward (only RTM consumes it, and
+        // RTM rejects stepping) — keep it internal per call.
+        illumination.image = torch::zeros_like(p.models[0]);
+        illumination.source_illumination = p.illum_out[0];
+        illumination.receiver_illumination = p.illum_out[1];
+        // NO ADCIG here.  This is the segmented (stepped / domain-decomposed)
+        // path: source/receiver illumination survive across segments only
+        // because Python owns those buffers and they accumulate into them.
+        // ADCIG has no such carrier -- allocating a cube here would give every
+        // segment a fresh zeroed cube that is filled for that one step and then
+        // dropped (DD runs one segment per time step and discards the return),
+        // so the user would silently get no ADCIG plus a full-cube memset per
+        // step. Refuse the combination instead of computing a wrong answer.
+        TORCH_CHECK(!p.compute_adcig,
+                    "compute_adcig is not supported on the segmented "
+                    "(stepped / domain-decomposed) 3-D backward: the ADCIG cube "
+                    "has no cross-segment accumulator. Run ADCIG on the "
+                    "single-segment backward instead.");
+    } else {
+        init_rtm_output_3d(illumination, p.models[0],
+                           want_adcig && p.compute_adcig,
+                           2 * p.adcig_max_lag + 1);
+    }
+}
+
 void accumulate_rtm_3d(
     dim3 wave_grid,
     dim3 wave_block,
@@ -541,6 +656,8 @@ void run_full_imaging(
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
+    ctx.cut_mask = 0;  // full-storage / RTM path is DD-free (DD is backward_bs only)
+    acoustic_init_aux_slabs(ctx, adjoint);
 
     LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
     GradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
@@ -549,15 +666,20 @@ void run_full_imaging(
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     float* grad_ptr = (grad != nullptr) ? grad->data_ptr<float>() : nullptr;
+    // Stepped/DD segments image the vp gradient with a per-step calculate_grad
+    // pass (it composes with segmentation); the non-DD monolithic sweep keeps
+    // dev's fused vp-grad imaging (lagged into the adjoint kernel + a trailing
+    // step-0 pass), bit-identical to calculate_grad.  Bounds default to [0, nt).
+    const bool fused_img = !p.bw_stepped() && p.cut_face_mask == 0;
 
-    for (int it = p.nt - 1; it >= 0; --it) {
+    for (int it = p.bw_begin() - 1; it >= p.bw_it_end; --it) {
         auto adj_view = adjoint.view();
 
         // Fold the vp-gradient imaging of step it+1 into the adjoint kernel: at
         // kernel entry u_now == post-source adjoint[it+1], the exact field
         // calculate_grad_3d would correlate.  Skip on the first reverse step
         // (it+1 == nt has no forward wavefield); step 0 is imaged after the loop.
-        const float* img_fwd = (grad_ptr != nullptr && it + 1 < p.nt)
+        const float* img_fwd = (fused_img && grad_ptr != nullptr && it + 1 < p.nt)
                              ? p.u_forward[it + 1].data_ptr<float>() : nullptr;
 
         run_acoustic3d_adjoint_step(
@@ -589,16 +711,20 @@ void run_full_imaging(
             forward_nsrc
         );
 
-        // Illumination still needs the per-step pass over the post-source
-        // adjoint[it]; the vp gradient is folded above, so pass grad=nullptr here.
-        if (rtm_out != nullptr) {
+        // RTM illumination needs the per-step pass over the post-source
+        // adjoint[it].  Fused monolithic path: the vp gradient is folded into
+        // the adjoint kernel above (pass grad=nullptr, no double-count).
+        // Stepped/DD path: image the vp gradient here per step (calculate_grad,
+        // bit-identical to the fused term) so it composes with segmentation.
+        torch::Tensor* step_grad = fused_img ? nullptr : grad;
+        if (step_grad != nullptr || rtm_out != nullptr) {
             accumulate_imaging_3d(
                 launch_config.grid,
                 launch_config.block,
                 p.u_forward[it].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp,
-                nullptr,
+                step_grad,
                 rtm_out,
                 B,
                 nx,
@@ -610,8 +736,8 @@ void run_full_imaging(
     }
 
     // Trailing: image step 0, the one reverse step never folded into an adjoint
-    // kernel.  adjoint.u_now_t now holds the post-source adjoint[0].
-    if (grad_ptr != nullptr) {
+    // kernel (fused monolithic path only; the stepped path imaged it in-loop).
+    if (fused_img && grad_ptr != nullptr) {
         accumulate_imaging_3d(
             launch_config.grid,
             launch_config.block,
@@ -632,11 +758,14 @@ void run_full_imaging(
 BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
 {
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
+    check_stepped_backward_3d(p, /*need_recon=*/false);
     BackwardOutput out;
-    auto grad = torch::zeros_like(p.models[0]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    torch::Tensor grad, grad_wavelet;
     RTMOutput illumination;
-    init_rtm_output_3d(illumination, p.models[0]);
+    // Bind Python-owned grad/illum accumulators when stepping, else allocate
+    // zeros (monolithic).  Subsumes init_rtm_output_3d and allocates the
+    // grad/grad_wavelet tensors run_full_imaging accumulates into.
+    bind_backward_outputs_3d(p, grad_wavelet, grad, illumination);
     // Skip the per-timestep illumination pass for a plain FWI gradient that does
     // not request it; the vp gradient (calculate_grad) is unaffected.
     run_full_imaging(p, &grad, &grad_wavelet,
@@ -681,6 +810,10 @@ void run_bs_imaging(
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, nullptr, nullptr, dx, dy, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
+    // DD: skip cut faces in the strip restore, the NOPML exclusion band
+    // and the fused-adjoint pure_interior test (3D has no seed
+    // rim-zeroing — nothing to mask there).
+    ctx.cut_mask = p.cut_face_mask;
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -688,13 +821,25 @@ void run_bs_imaging(
     else
         adjoint.allocate(vp, 3, true);
 
+    // Segment bounds: process [it_lo, it_hi) in descending order.  Defaults
+    // (bw_it_begin = -1 => nt, bw_it_end = 0) reproduce the monolithic call.
+    const int it_hi = p.bw_begin();
+    const int it_lo = p.bw_it_end;
+    const bool first_segment = (it_hi == static_cast<int>(p.nt));
+
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
         forward.bind(p.forward_wavefields, 3, false);
     else
         forward.allocate(vp, 3, false);
-    forward.u_prev_t.copy_(p.u_last_two.select(1,1).squeeze(0));
-    forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
+    acoustic_init_aux_slabs(ctx, adjoint);
+    // Seed the reverse reconstruction from the saved last two snapshots —
+    // FIRST segment only; re-running this mid-stream would clobber the
+    // carried reconstruction state.
+    if (first_segment) {
+        forward.u_prev_t.copy_(p.u_last_two.select(1,1).squeeze(0));
+        forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
+    }
 
     auto f_this = torch::zeros_like(vp);
 
@@ -747,9 +892,24 @@ void run_bs_imaging(
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
+    // Boundary tail truncation -- see acoustic2d/backward.cu (stepped/DD
+    // segments and cut faces compose; the driver must not issue segments
+    // entirely below bs_stop).
+    TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
+    const int bs_it0 = (p.boundary_tail_steps > 0)
+        ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
+    // The reverse loop's restore at step ``it`` consumes the boundary saved
+    // at forward step ``it - 1`` (backward_time_index), so the truncated
+    // loop must stop at bs_it0 + 1: the saved slots cover forward steps
+    // [bs_it0, nt-1] and slot -1 does not exist.  One saved step is spent
+    // on this alignment -- the usable reverse depth is tail_steps - 1.
+    const int bs_stop = bs_it0 > 0 ? bs_it0 + 1 : 0;
+    boundary_runtime.prefetch_initial_backward_chunk((int)p.nt - bs_it0,
+                                                 it_hi - bs_it0);
 
-    for (int it = p.nt - 1; it >= 1; --it) {
+    // Main loop covers [max(it_lo,1,bs_it0), it_hi); the it==0 adjoint-only
+    // tail below runs only in the segment whose bw_it_end == 0.
+    for (int it = it_hi - 1; it >= std::max(std::max(it_lo, 1), bs_stop); --it) {
         auto adj_view = adjoint.view();
         auto for_view = forward.view();
 
@@ -793,7 +953,7 @@ void run_bs_imaging(
         );
 
         boundary_runtime.restore_backward_3d(
-            it,
+            it - bs_it0,
             for_view.u_next,
             launch_config.grid,
             launch_config.block,
@@ -831,10 +991,10 @@ void run_bs_imaging(
 
         forward.swap();
 
-        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it - bs_it0, (int)p.nt - bs_it0);
     }
 
-    if (p.nt > 0) {
+    if (it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
         auto adj_view = adjoint.view();
 
         run_acoustic3d_adjoint_step(
@@ -870,19 +1030,21 @@ void run_bs_imaging(
 BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
 {
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
+    check_stepped_backward_3d(p, /*need_recon=*/true);
     BackwardOutput out;
-    auto grad = torch::zeros_like(p.models[0]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    torch::Tensor grad, grad_wavelet;
     RTMOutput illumination;
-    init_rtm_output_3d(illumination, p.models[0],
-                       p.compute_adcig, 2 * p.adcig_max_lag + 1);
+    // DD binds Python-owned grad/illum output buffers (the stepped backward
+    // needs them to survive segments); this is the one 3-D path that consumes
+    // ADCIG, so it opts into the cube.
     // Gate illumination on compute_illumination (mirror the FULL path). When
-    // off, accumulate_imaging_utt_3d skips the per-step RTM kernel because
-    // rtm_out==nullptr; the buffer stays zero. Previously this BS path passed
-    // &illumination unconditionally, so the RTM pass ran every step and the
-    // flag was ignored (no time saved, illumination computed then discarded).
-    // ADCIG (space-lag) rides the same imaging pass, so pass the RTMOutput when
-    // either is requested.
+    // off, run_bs_imaging / accumulate_imaging_utt_3d skips the per-step RTM
+    // kernel because rtm_out==nullptr; the buffer stays zero. Previously this
+    // BS path passed &illumination unconditionally, so the RTM pass ran every
+    // step and the flag was ignored (no time saved, illumination computed then
+    // discarded).  ADCIG (space-lag) rides the same imaging pass, so pass the
+    // RTMOutput when either is requested.
+    bind_backward_outputs_3d(p, grad_wavelet, grad, illumination, /*want_adcig=*/true);
     run_bs_imaging(p, &grad, &grad_wavelet,
                    (p.compute_illumination || p.compute_adcig) ? &illumination : nullptr);
     out.grads = {grad_wavelet, grad};
@@ -937,7 +1099,14 @@ void run_ckpt_imaging(
     if (!p.forward_wavefields.empty())
         forward.bind(p.forward_wavefields, 3, true);
     else
-        forward.allocate(vp, 3, true);
+        // Aux shapes must follow the Python-allocated checkpoint slots
+        // (possibly per-axis slabs); a plain allocate() would build
+        // full-domain aux and break the snapshot copies.
+        forward.allocate_from_snapshots(vp, p.checkpoints, 3);
+    // Slab geometry follows the FORWARD-state aux layout (the recompute runs
+    // the forward kernel); the adjoint aux stays full-domain and its legacy
+    // kernels never consult the slab geometry.
+    acoustic_init_aux_slabs(ctx, forward);
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -1166,14 +1335,19 @@ void run_recursive_imaging(
         max_segment_length = std::max(max_segment_length, end - start);
     }
 
+    AcousticWavefieldTensor start_state;
+    start_state.allocate_from_snapshots(vp, p.checkpoints, 3);
+    // Slab geometry follows the forward-state layout carried by the psi
+    // slots of the Python-allocated checkpoint buffers (adjoint aux stays
+    // full-domain; its legacy kernels never consult the slab geometry).
+    acoustic_init_aux_slabs(ctx, start_state);
+
     std::vector<AcousticWavefieldTensor> scratch_states(recursive_checkpoint_scratch_depth(max_segment_length));
     for (auto& scratch_state : scratch_states)
-        scratch_state.allocate(vp, 3, true);
+        scratch_state.allocate_like(vp, start_state);
     auto u_this_scratch = torch::empty_like(vp);
     // Scratch for the exact discrete-adjoint step (prepare/apply).
 
-    AcousticWavefieldTensor start_state;
-    start_state.allocate(vp, 3, true);
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];
@@ -1253,17 +1427,22 @@ RTMOutput rtm_recursive_ckpt_impl(const BackwardInput& p)
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    TORCH_CHECK(!in.bw_stepped(),
+                "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     return backward_ckpt_imaging_impl(in);
 }
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    TORCH_CHECK(!in.bw_stepped(),
+                "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     return backward_recursive_imaging_impl(in);
 }
 
 RTMOutput rtm(const BackwardInput& in)
 {
+    TORCH_CHECK(!in.bw_stepped(), "stepped RTM not supported in v1");
     const auto& p = in;
     if (!p.checkpoints.empty()) {
         if (p.checkpoint_steps.defined() && p.checkpoint_steps.numel() > 0) {

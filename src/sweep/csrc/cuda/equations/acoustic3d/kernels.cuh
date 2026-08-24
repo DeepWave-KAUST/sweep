@@ -50,12 +50,12 @@ static __global__ void acoustic3d_air_clear_kernel(
     float* __restrict__ u_this,
     SolverContext solver
 ){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iy = blockIdx.y * blockDim.y + threadIdx.y;
     int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz) return;
+    if (b >= solver.B || ix >= solver.x_end() || iy >= solver.ny || iz >= solver.nz) return;
     if (!solver.has_topo) return;
     if (iz >= solver.topo_rows[iy * solver.nx + ix]) return;
     int spatial_size = solver.nx * solver.ny * solver.nz;
@@ -64,8 +64,21 @@ static __global__ void acoustic3d_air_clear_kernel(
     int idx = iz * stride_z + iy * stride_y + ix;
     auto f = wf.offset(b, spatial_size);
     f.u_next[idx] = 0.f;
-    f.psix[idx] = 0.f; f.psiy[idx] = 0.f; f.psiz[idx] = 0.f;
-    f.zetax[idx] = 0.f; f.zetay[idx] = 0.f; f.zetaz[idx] = 0.f;
+    // Aux fields live in per-axis slabs; air cells outside a slab hold an
+    // implicit zero (the FD kernel never writes them), so only clear the
+    // stored part.  Full-domain (legacy) tensors report stored() everywhere.
+    if (solver.aux_x.stored(ix)) {
+        long xi = solver.aux_idx_x3(iz, iy, ix);
+        f.psix[xi] = 0.f; f.zetax[xi] = 0.f;
+    }
+    if (solver.aux_y.stored(iy)) {
+        long yi = solver.aux_idx_y3(iz, iy, ix);
+        f.psiy[yi] = 0.f; f.zetay[yi] = 0.f;
+    }
+    if (solver.aux_z.stored(iz)) {
+        long zi = solver.aux_idx_z3(iz, iy, ix);
+        f.psiz[zi] = 0.f; f.zetaz[zi] = 0.f;
+    }
     if (u_this) u_this[b * spatial_size + idx] = 0.f;
 }
 
@@ -87,14 +100,14 @@ __global__ void acoustic_forward_kernel_3d(
     SolverContext solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iy = blockIdx.y * blockDim.y + threadIdx.y;
     int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
 
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
+    if (b >= solver.B || ix >= solver.x_end() || iy >= solver.ny || iz >= solver.nz)
         return;
 
     constexpr bool is_runtime = (Order == -1);
@@ -173,19 +186,30 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_x) {
         float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
-        float dpsixdx = gradient<3, Order, X>(f.psix, ix, iy, iz, grad_ctx);
+        // rd() + stored() gate: on a DD cut tile the in-band test reaches
+        // cut-side cells that have NO slab storage; map() would hand them a
+        // negative offset and the unguarded psix/zetax stores aliased other
+        // rows' slab cells (racing their owners with +/-0 -- coefficients
+        // are zero here) or ran off the front of the tensor.  Single
+        // domain: every in-band cell is stored, bit-identical.  See the
+        // acoustic2d twin for the full account.
+        long xi = solver.aux_rd_x3(iz, iy, ix);
+        float dpsixdx = gradient_at<Order>(f.psix, (int)xi, grad_ctx.sx,
+                                           grad_ctx.M, grad_ctx.coeff, grad_ctx.dx);
         float ax_ = cpml.ax[ix];
         float bx_ = cpml.bx[ix];
         float dbxdx_ = cpml.dbxdx[ix];
         float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
 
         float tmpx = ((1.f + bx_) * lap_x + dbxdx_ * dudx)
-                     + ax_ * dpsixdx + daxdx * f.psix[idx];
+                     + ax_ * dpsixdx + daxdx * f.psix[xi];
 
-        w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[idx];
+        w_sum += (1.f + bx_) * tmpx + ax_ * f.zetax[xi];
 
-        (f.psixn ? f.psixn : f.psix)[idx]  = bx_ * dudx + ax_ * f.psix[idx];
-        f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+        if (solver.aux_x.stored(ix)) {
+            (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
+            f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+        }
     } else {
         w_sum += lap_x;
     }
@@ -195,19 +219,24 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_y) {
         float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);
-        float dpsiydy = gradient<3, Order, Y>(f.psiy, ix, iy, iz, grad_ctx);
+        // rd() + stored() gate -- see the X branch above.
+        long yi = solver.aux_rd_y3(iz, iy, ix);
+        float dpsiydy = gradient_at<Order>(f.psiy, (int)yi, grad_ctx.sy,
+                                           grad_ctx.M, grad_ctx.coeff, grad_ctx.dy);
         float ay_ = cpml.ay[iy];
         float by_ = cpml.by[iy];
         float dbydy_ = cpml.dbydy[iy];
         float daydy = gradient<2, Order, X>(cpml.ay, iy, 0, 0, grad_ctx_y);
 
         float tmpy = ((1.f + by_) * lap_y + dbydy_ * dudy)
-                     + ay_ * dpsiydy + daydy * f.psiy[idx];
+                     + ay_ * dpsiydy + daydy * f.psiy[yi];
 
-        w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[idx];
+        w_sum += (1.f + by_) * tmpy + ay_ * f.zetay[yi];
 
-        (f.psiyn ? f.psiyn : f.psiy)[idx]  = by_ * dudy + ay_ * f.psiy[idx];
-        f.zetay[idx] = by_ * tmpy + ay_ * f.zetay[idx];
+        if (solver.aux_y.stored(iy)) {
+            (f.psiyn ? f.psiyn : f.psiy)[yi]  = by_ * dudy + ay_ * f.psiy[yi];
+            f.zetay[yi] = by_ * tmpy + ay_ * f.zetay[yi];
+        }
     } else {
         w_sum += lap_y;
     }
@@ -217,19 +246,24 @@ __global__ void acoustic_forward_kernel_3d(
     // =========================================================
     if (in_pml_z) {
         float dudz = gradient<3, Order, Z>(f.u_now, ix, iy, iz, grad_ctx);
-        float dpsizdz = gradient<3, Order, Z>(f.psiz, ix, iy, iz, grad_ctx);
+        // rd() + stored() gate -- see the X branch above.
+        long zi = solver.aux_rd_z3(iz, iy, ix);
+        float dpsizdz = gradient_at<Order>(f.psiz, (int)zi, grad_ctx.sz,
+                                           grad_ctx.M, grad_ctx.coeff, grad_ctx.dz);
         float az_ = cpml.az[iz];
         float bz_ = cpml.bz[iz];
         float dbzdz_ = cpml.dbzdz[iz];
         float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
 
         float tmpz = ((1.f + bz_) * lap_z + dbzdz_ * dudz)
-                     + az_ * dpsizdz + dazdz * f.psiz[idx];
+                     + az_ * dpsizdz + dazdz * f.psiz[zi];
 
-        w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[idx];
+        w_sum += (1.f + bz_) * tmpz + az_ * f.zetaz[zi];
 
-        (f.psizn ? f.psizn : f.psiz)[idx]  = bz_ * dudz + az_ * f.psiz[idx];
-        f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+        if (solver.aux_z.stored(iz)) {
+            (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
+            f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+        }
     } else {
         w_sum += lap_z;
     }
@@ -334,13 +368,19 @@ __global__ void acoustic_adjoint_fused_3d(
     #define GW_AT(n) ( vpb[n]*vpb[n]*dt2 * f.u_now[n] )
 
     // Interior fast-path (aux all 0, g_l*=gw): 2L - L_prev + Lap(gw).
+    // On a DD cut side the bound collapses to the stencil halo so that
+    // cut-adjacent cells take the SAME fast path (same FP expression) as
+    // the matching single-domain interior cells — see acoustic2d.
     int x0 = solver.phys_x0(), x1 = solver.phys_x1();
     int y0 = solver.phys_y0(), y1 = solver.phys_y1();
     int z0 = solver.phys_z0(), z1 = solver.phys_z1();
     bool pure_interior =
-        (ix >= x0 + halo) && (ix < x1 - halo) &&
-        (iy >= y0 + halo) && (iy < y1 - halo) &&
-        (iz >= z0 + halo) && (iz < z1 - halo);
+        (ix >= (solver.cut_x_lo() ? halo : x0 + halo)) &&
+        (ix < (solver.cut_x_hi() ? solver.nx - halo : x1 - halo)) &&
+        (iy >= (solver.cut_y_lo() ? halo : y0 + halo)) &&
+        (iy < (solver.cut_y_hi() ? solver.ny - halo : y1 - halo)) &&
+        (iz >= (solver.cut_z_lo() ? halo : z0 + halo)) &&
+        (iz < (solver.cut_z_hi() ? solver.nz - halo : z1 - halo));
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapy = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll
@@ -460,13 +500,20 @@ __global__ void acoustic_nopml_3d(
         M = Order / 2;
     }
 
-    int halo = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
+    // Per-side exclusion bands; a DD cut side collapses to the stencil
+    // halo M (cut-adjacent cells are computed by plain reverse leapfrog
+    // from the per-step exchanged M-halo) — see acoustic2d nopml.
+    int wide = solver.abcn > 0 ? solver.abcn + 2*M+1 : 2*M;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hy_lo = solver.cut_y_lo() ? M : wide;
+    int hy_hi = solver.cut_y_hi() ? M : wide;
+    int hz_lo = solver.cut_z_lo() ? M : (solver.free_surface ? 2*M : wide);
+    int hz_hi = solver.cut_z_hi() ? M : wide;
 
-    int top_halo = solver.free_surface ? 2*M : halo;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < top_halo || iz >= solver.nz - halo)
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iy < hy_lo || iy >= solver.ny - hy_hi ||
+        iz < hz_lo || iz >= solver.nz - hz_hi)
         return;
     
     int stride_y = solver.nx;

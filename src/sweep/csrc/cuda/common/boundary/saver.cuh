@@ -261,6 +261,21 @@ struct EffectiveBoundarySaver {
             left_staging_t   = torch::zeros({1, 1, ctx.B, nz_boundary, width}, fp32_options);
             right_staging_t  = torch::zeros({1, 1, ctx.B, nz_boundary, width}, fp32_options);
         }
+        // Defensive: quantize_step / dequantize_step copy the persistent buffer's
+        // full per-step stride (top_t.stride(0) in 3D) between the staging and the
+        // int8 ring.  If the caller's tangent_pad here disagrees with the pad the
+        // persistent buffers were allocated with (Python boundary_tangent_pad),
+        // the staging is undersized and the copy reads/writes out of bounds.  Turn
+        // that silent illegal access into a clear error at allocation time.
+        if (dim == 3 && top_t.defined() && top_t.numel() > 0) {
+            TORCH_CHECK(top_staging_t.numel() >= top_t.stride(0) &&
+                        left_staging_t.numel() >= left_t.stride(0) &&
+                        front_staging_t.numel() >= front_t.stride(0),
+                        "INT8 FP32 staging is smaller than the persistent boundary "
+                        "buffer per-step stride -- tangent_pad mismatch between the "
+                        "Python layout and the CUDA saver (top ", top_staging_t.numel(),
+                        " vs ", top_t.stride(0), ").");
+        }
     }
 
     // INT8 path (legacy, fully-internal allocation — used only if

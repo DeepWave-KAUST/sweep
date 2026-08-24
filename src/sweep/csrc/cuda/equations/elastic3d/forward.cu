@@ -44,7 +44,25 @@ ForwardOutput forward(const ForwardInput& in)
 
     int B = N * C;
 
+    // ---- Stepped forward range [it_begin, it_end) ----
+    const int it0 = p.it_begin;
+    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                it0, ", ", it1, ") with nt=", p.nt);
+    const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
+    // Physics-split phases (see elastic2d/forward.cu): 1 = velocity only,
+    // 2 = stress + tail; the DD driver exchanges v between phases.
+    TORCH_CHECK(p.step_phase == 0 || p.step_phase == 1 || p.step_phase == 2,
+                "elastic step_phase must be 0, 1 or 2");
+
     ElasticWavefieldTensor wavefield;
+    // On a continuation call the internal allocate() would silently zero the
+    // propagation state — the caller must keep binding the same tensors.
+    // (Elastic has no buffer-role rotation: every field updates in place, so
+    // the caller binds the SAME 36-tensor list for every segment.)
+    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
+                "stepped continuation (it_begin>0) requires Python-bound wavefields");
     if (!p.wavefields.empty())
         wavefield.bind(p.wavefields, true);
     else
@@ -66,7 +84,15 @@ ForwardOutput forward(const ForwardInput& in)
     int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
+    TORCH_CHECK(!stepped || p.record_out.defined(),
+                "stepped forward requires record_out bound from Python");
+    auto record = p.record_out.defined()
+        ? p.record_out
+        : torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
+    if (p.record_out.defined())
+        TORCH_CHECK(record.is_contiguous() &&
+                    record.size(-1) == static_cast<long>(p.nt),
+                    "record_out must be contiguous with trailing dim nt");
 
     if (p.use_checkpoint) {
         TORCH_CHECK(p.checkpoints.size() == 36, "Elastic 3D checkpointing expects 36 checkpoint tensors");
@@ -79,17 +105,36 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     torch::Tensor u_allt;
-    if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+    if (p.save_all_wavefields) {
+        TORCH_CHECK(!stepped || p.u_allt_out.defined(),
+                    "stepped + save_all_wavefields requires u_allt_out bound from Python");
+        u_allt = p.u_allt_out.defined()
+            ? p.u_allt_out
+            : torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+    }
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
     auto record_config = fdtd::Geom::make(nrec, B);
 
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
-    
+    // DD cut faces: kernels switch the cut-side PML/interior band to the
+    // interior branch (per-rank PML widths zero the profile there; the
+    // zero-coefficient PML branch is not bitwise equal to the interior one).
+    TORCH_CHECK((p.cut_face_mask & ~0x33) == 0,
+                "elastic3d forward cut_face_mask supports x/y bits only "
+                "(bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi), got ",
+                p.cut_face_mask);
+    solver.cut_mask = p.cut_face_mask;
+    elastic_init_aux_slabs(solver, wavefield);
+
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
+    // The internal full-storage fallback ring is per-call; segments after the
+    // first would lose everything saved before them.
+    if (stepped && p.use_boundary_saving)
+        TORCH_CHECK(!p.boundary_gpu.empty(),
+                    "stepped forward with boundary saving requires Python-bound boundary_gpu");
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     boundary_saver.allocate(
         p.use_boundary_saving, 3, 9, solver, vp, save_width, 1,
@@ -131,13 +176,20 @@ ForwardOutput forward(const ForwardInput& in)
         p.checkpoint_steps,
         p.checkpoint_on_cpu,
         "forward",
-        "elastic3d"
+        "elastic3d",
+        it0
     );
 
-    for (unsigned int it = 0; it < p.nt; ++it) {
+    const bool do_v = (p.step_phase == 0 || p.step_phase == 1);
+    const bool do_s = (p.step_phase == 0 || p.step_phase == 2);
+    TORCH_CHECK(p.step_phase == 0 || it1 == it0 + 1,
+                "elastic phase-split requires a single step (it_end == it_begin + 1)");
+
+    for (int it = it0; it < it1; ++it) {
 
         u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
 
+        if (do_v)
         LAUNCH_3DELASTIC_VELOCITY(
             order,
             launch_config.grid,
@@ -148,6 +200,9 @@ ForwardOutput forward(const ForwardInput& in)
             cpml_view,
             solver
         ); // t+0.5
+
+        if (!do_s)
+            continue;
 
         LAUNCH_3DELASTIC_STRESS(
             order,
@@ -218,7 +273,9 @@ ForwardOutput forward(const ForwardInput& in)
     
     }
 
-    if (p.use_boundary_saving) {
+    // Save the final state for backward (only once the final segment has
+    // run; mid-run segments leave last_two untouched).
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
         boundary_saver.last_two_t.select(0,0).select(0,0).copy_(wavefield.vx_t);
         boundary_saver.last_two_t.select(0,1).select(0,0).copy_(wavefield.vy_t);
         boundary_saver.last_two_t.select(0,2).select(0,0).copy_(wavefield.vz_t);
@@ -262,6 +319,10 @@ ForwardOutput apm_forward(const ForwardInput& in)
     const auto& p = in;
     ForwardOutput out;
 
+    TORCH_CHECK(p.it_begin == 0 &&
+                (p.it_end < 0 || p.it_end == static_cast<int>(p.nt)) &&
+                p.step_phase == 0,
+                "stepped forward not supported for the elastic3d APM path");
     TORCH_CHECK(p.models.size() >= 21,
         "elastic3d::apm_forward expects 21-tensor models list "
         "[vp,vs,rho,lam,mu,lam_2mu,alpha_xx,alpha_yy,alpha_zz,"
@@ -339,6 +400,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
                          dx, dy, dz};
     solver.topo_category = p.topo_category.data_ptr<int>();
     solver.use_apm = true;
+    elastic_init_aux_slabs(solver, wavefield);
 
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;

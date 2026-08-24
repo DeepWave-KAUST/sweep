@@ -163,7 +163,11 @@ __device__ inline void vrz3d_index(
     int& iz,
     int& b
 ) {
-    ix = blockIdx.x * blockDim.x + threadIdx.x;
+    // ``solver.x_base`` (default 0) offsets the ranged phase-split launch used
+    // by the DD comm/compute overlap forward; every legacy launch leaves it 0,
+    // so ix is unchanged there.  Paired with ``solver.x_end()`` in
+    // vrz3d_interior (the ranged upper bound).
+    ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     iy = blockIdx.y * blockDim.y + threadIdx.y;
     int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
     b = iz_global / solver.nz;
@@ -173,7 +177,9 @@ __device__ inline void vrz3d_index(
 template<int Order>
 __device__ inline bool vrz3d_interior(SolverContext solver, int ix, int iy, int iz, int b)
 {
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
+    // ``solver.x_end()`` (default nx) bounds the ranged phase-split launch; the
+    // stencil-halo / physical-extent check below still uses the true nx-halo.
+    if (b >= solver.B || ix >= solver.x_end() || iy >= solver.ny || iz >= solver.nz)
         return false;
 
     constexpr bool is_runtime = (Order == -1);
@@ -364,10 +370,18 @@ __global__ void acoustic_vrz3nd(
     // zetaxn/zetayn/zetazn collapse to 0; rhs reduces to kappa*(beta*(sum_lap)
     // + dbdx*dudx + dbdy*dudy + dbdz*dudz). Skip the 6 aux-field writes and
     // the dpsix/dpsiy/dpsiz/daxdx/daydy/dazdz gradient loads.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware PML test (mirror acoustic3d/kernels.cuh:129-138). A cut face carries
+    // only the M halo (no PML), so its cut-adjacent PHYSICAL cells -- the forward
+    // source sits here, ~3 cells from the seam -- must take the INTERIOR fast-path,
+    // exactly as single domain computes those same global cells. The abcn-based band
+    // forced them onto the PML branch, which reads the (never-exchanged) psi halo
+    // (dpsixdx) and CPML profile terms that do not vanish at a DD seam => ~1e-5 drift
+    // at the source. cut_mask==0 => phys_*0/1 collapse to abcn+M (free-surface z -> M),
+    // so single domain stays bit-identical.
+    (void)halo;
+    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
+                  (iy < solver.phys_y0()) || (iy >= solver.phys_y1()) ||
+                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
 
     if (!in_pml) {
         float rhs = kappa * (beta * (lap_x + lap_y + lap_z) + dbdx * dudx + dbdy * dudy + dbdz * dudz);
@@ -438,12 +452,18 @@ __global__ void acoustic_vrz3nd_nopml(
     if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz)
         return;
 
-    int x_start = solver.phys_x0() + 1;
-    int x_end = solver.phys_x1() - 1;
-    int y_start = solver.phys_y0() + 1;
-    int y_end = solver.phys_y1() - 1;
-    int z_start = solver.phys_z0() + 1;
-    int z_end = solver.phys_z1() - 1;
+    // Reconstruction exclusion band.  A non-cut (PML/free-surface) side skips its
+    // first physical cell (phys_*0()) because the boundary save seeds it; a DD
+    // cut side has NO saved boundary -- the cut-adjacent cells are reconstructed
+    // by plain reverse leapfrog from the per-step exchanged M-halo, so the band
+    // must collapse to phys_*() (the +1/-1 offset would leave cell M stale and
+    // corrupt the gradient near the seam).  cut_mask == 0 keeps the legacy +1/-1.
+    int x_start = solver.phys_x0() + (solver.cut_x_lo() ? 0 : 1);
+    int x_end   = solver.phys_x1() - (solver.cut_x_hi() ? 0 : 1);
+    int y_start = solver.phys_y0() + (solver.cut_y_lo() ? 0 : 1);
+    int y_end   = solver.phys_y1() - (solver.cut_y_hi() ? 0 : 1);
+    int z_start = solver.phys_z0() + (solver.cut_z_lo() ? 0 : 1);
+    int z_end   = solver.phys_z1() - (solver.cut_z_hi() ? 0 : 1);
 
     if (ix < x_start || ix >= x_end ||
         iy < y_start || iy >= y_end ||
@@ -885,10 +905,18 @@ __global__ void acoustic_vrz3nd_adjoint_fused(
 
     auto f = wf.offset(b, spatial_size);
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware PML test (DD): cut-adjacent PHYSICAL cells take the TRANSPOSE
+    // fast-path -- exactly as single domain computes those global cells -- not the
+    // forward-form PML branch.  (The old NOTE that this "drifts the gradient" was
+    // pre-coeff-exchange: the fast-path reads C0/Cx over [ix-M, ix+M], into the cut
+    // halo; with the once-per-backward C0/Cx/Cy/Cz halo exchange those reads are
+    // valid, so the DD adjoint at the source matches single domain bitwise.  psi/
+    // zeta need NO exchange -- the CPML profile is 0 at cut-adjacent physical cells.)
+    // cut_mask==0 => phys_*0/1 collapse to the old abcn+M band; single-GPU unchanged.
+    (void)halo;
+    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
+                  (iy < solver.phys_y0()) || (iy >= solver.phys_y1()) ||
+                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
 
     if (!in_pml) {
         const float* C0_b = C0 + b * spatial_size;

@@ -84,7 +84,13 @@ class PropBase:
             dev (str, optional): Deprecated alias for ``device``. Defaults to None.
             device (str | torch.device, optional): The device to run the simulation on.
                 When None, the equation's device is used. Preferred over ``dev``.
-            use_ckpt (bool, optional): Use checkpointing to save memory. Defaults to True.
+            use_ckpt (bool | None, optional): Legacy request for / exclusion of
+                the checkpointing mode.  The gradient-memory mode is a
+                three-way choice (full / boundary / ckpt) resolved by
+                ``options.resolve_memory_strategy``; prefer
+                ``memory=MemoryOptions(strategy=...)``.  None (default) picks
+                the backend default: 'boundary' for impl='c', 'ckpt' for
+                eager/jax.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 100.
             ckpt_mode (str, optional): Checkpointing mode. "chunk" stores periodic checkpoints and
                 replays each chunk, while "recursive" stores a fixed number of checkpoints and
@@ -127,6 +133,11 @@ class PropBase:
         self._wavefield_spec_index = build_field_index(self.wavefield_specs)
         self.shape = shape
         self.ndim = len(shape)
+        # Physical (pre-pad) shape: self.shape is overwritten with the padded
+        # runtime shape below, so retain it for a strategy wrapper (e.g.
+        # sweep.parallel.ModelParallel) that reads a built propagator's
+        # global-problem spec. (dh/dt are already registered as buffers later.)
+        self._shape_phys = tuple(int(s) for s in shape)
         if device is not None and dev is not None and device != dev:
             import warnings
             warnings.warn(
@@ -237,7 +248,10 @@ class PropBase:
             self._grid_spacing = tuple(float(v) for v in dh)
             self._dh = float(self._grid_spacing[-1])
         self._dt = float(dt)
-        self.use_ckpt = use_ckpt
+        # None = unspecified; the torch entry points always pass a resolved
+        # bool (see options.resolve_memory_strategy).  Direct PropBase / JAX
+        # construction keeps the historical checkpointing default.
+        self.use_ckpt = True if use_ckpt is None else bool(use_ckpt)
         self.ckpt_chunks = ckpt_chunks
         self.ckpt_mode = ckpt_mode
         self.ckpt_num = ckpt_num
@@ -271,6 +285,11 @@ class PropBase:
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
         self._abc_cache_key = None
 
+        # Optional sweep.parallel.ModelParallelMesh; when set, init_abc routes
+        # through rank-local PML widths and source/receiver / model tile work
+        # is performed in subclasses. None = single-rank behaviour (unchanged).
+        self.model_parallel = kwargs.pop('model_parallel', None)
+
         # Keep the equation object aware of geometry-dependent boundary
         # behavior.  ``equation.free_surface`` is the image-method-layout
         # flag (used by the Python eager step to decide whether to apply
@@ -297,6 +316,35 @@ class PropBase:
         # ``_runtime_padding``.  ``self.padding`` is in torch pad order (last
         # spatial axis first), as every consumer has always assumed.  For the
         # top-only default this reproduces ``padding_z=(0, abcn)`` bit-for-bit.
+        #
+        # A model-parallel mesh contributes a SECOND, independent reason for a
+        # 0 pad: a cut (neighbour-facing) face gets no PML, only the stencil
+        # halo, because :class:`HaloExchange` supplies those cells.  That is the
+        # cut-aware compact padding — interior tiles no longer waste an ``abcn``
+        # pad on every split face.  ``build_rank_pml_widths`` returns the SAME
+        # axis-major ``[z_lo, z_hi, (y_lo, y_hi,) x_lo, x_hi]`` layout as
+        # ``self.pad``, so the two combine face-by-face with ``min``: a face is
+        # thin if EITHER the per-edge layout says so (free surface, or an
+        # explicitly thinner pad) or the mesh says it is cut.  Without a mesh
+        # ``self.pad`` is left exactly as ``normalize_pad`` produced it.
+        if self.model_parallel is not None:
+            from sweep.parallel.pml import build_rank_pml_widths
+            # image_method_active=False ON PURPOSE.  That flag makes the helper
+            # zero the z_lo entry, and its contract ("the top face is a free
+            # surface") only held on the DD branch, where _image_method_active
+            # was exactly that.  Under dev's per-edge feature
+            # ``_resolve_topo_method`` returns image=True for ANY free-surface
+            # face, so passing it here would delete the top PML whenever e.g.
+            # only the LEFT face is free -- a face that is neither a free
+            # surface nor ever cut (``_dd_cut_mask`` only sets x/y bits).
+            # ``normalize_pad`` has already zeroed every genuine free-surface
+            # face in ``self.pad``, so this call must contribute cut faces and
+            # nothing else.
+            _cut_pad = build_rank_pml_widths(
+                self.model_parallel, abcn=self.abcn, ndim=self.ndim,
+                image_method_active=False)
+            self.pad = tuple(min(p, c) for p, c in zip(self.pad, _cut_pad))
+
         self.padding_z = (self.pad[0], self.pad[1])
         self.padding = torch_pad_order(self.pad, self.ndim)
         self.shape_nopad = tuple([w+2*self.equation.so for w in self.shape])
@@ -305,6 +353,22 @@ class PropBase:
             for ax in range(self.ndim)
         )
         self.shape_cuda = tuple([s+self.equation.so for s in self.shape])
+
+        # DD cut-face bitmask (x_lo=1, x_hi=2, y_lo=16, y_hi=32; z is never
+        # split in v1). Passed to the boundary Layout so its phys_* bounds
+        # match this (possibly asymmetric) pad. 0 = single domain.
+        self._dd_cut_mask = 0
+        mp = self.model_parallel
+        if mp is not None:
+            if not mp.is_edge("x", "low"):
+                self._dd_cut_mask |= 1
+            if not mp.is_edge("x", "high"):
+                self._dd_cut_mask |= 2
+            if self.ndim == 3:
+                if not mp.is_edge("y", "low"):
+                    self._dd_cut_mask |= 16
+                if not mp.is_edge("y", "high"):
+                    self._dd_cut_mask |= 32
 
         # Topography is processed AFTER self.shape is PML-padded so the
         # runtime-coord conversion can compute the final padded surface row.
@@ -895,6 +959,7 @@ class PropBase:
             "disk_dir": BOUNDARY_DEFAULTS.disk_dir,
             "ring_buffers": BOUNDARY_DEFAULTS.ring_buffers,
             "disk_async_read": BOUNDARY_DEFAULTS.disk_async_read,
+            "tail_steps": None,
         }
 
         if config is None:
@@ -908,6 +973,11 @@ class PropBase:
 
         if merged["storage"] not in {"gpu", "cpu", "disk"}:
             raise ValueError("boundary_saving_config['storage'] must be 'gpu', 'cpu', or 'disk'")
+
+        if merged.get("tail_steps") is not None:
+            tail = merged["tail_steps"]
+            if not isinstance(tail, int) or isinstance(tail, bool) or tail < 1:
+                raise ValueError("boundary_saving_config['tail_steps'] must be a positive int or None")
 
         if merged["storage"] == "gpu":
             merged["transfer_interval"] = BOUNDARY_DEFAULTS.gpu_transfer_interval
@@ -979,9 +1049,23 @@ class PropBase:
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim
         fd_pad = tuple(kwargs.get('fd_pad', _padding))
         shape = tuple(kwargs.get('shape', self.shape))
+
+        # ``self.pad`` is the single source of truth for per-face PML widths,
+        # layout ``[z_low, z_high, (y_low, y_high,) x_low, x_high]``.  It already
+        # carries BOTH reasons a face can be thin: a per-edge free surface, and
+        # (with a model-parallel mesh) a cut face — interior-facing sides connect
+        # to neighbour tiles via HaloExchange and must NOT be absorbed.  Deriving
+        # the widths here a second time would drop the per-edge free-surface
+        # faces and disagree with the actual padding layout.
+        #
+        # ``rank_coord`` stays in the cache key: two ranks can share a pad tuple
+        # while sitting at different mesh coords.
+        rank_coord = (self.model_parallel.coord
+                      if self.model_parallel is not None else None)
+
         abc_key = (
             self.pml_type,
-            tuple(self.pad),  # per-edge PML widths, axis-major (FS faces = 0)
+            tuple(self.pad),  # per-edge PML widths, axis-major (FS/cut faces = 0)
             self.equation.so,
             fd_pad,
             self._dt,
@@ -989,6 +1073,7 @@ class PropBase:
             kwargs.get('max_vel', 4500.0),
             kwargs.get('pml_freq', 25.0),
             shape,
+            rank_coord,
         )
 
         if abc_key != self._abc_cache_key:

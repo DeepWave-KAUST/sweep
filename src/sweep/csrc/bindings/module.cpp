@@ -30,6 +30,10 @@ auto dispatch_forward(Func cuda_func, sweep_cpu::EquationKind kind)
 {
     return [cuda_func, kind](const ForwardInput& in) {
         if (sweep_cpu::is_cpu_input(in)) {
+            TORCH_CHECK(in.it_begin == 0 && in.it_end == -1,
+                        "stepped forward (it_begin/it_end) is CUDA-only");
+            TORCH_CHECK(in.step_phase == 0,
+                        "phased forward (step_phase) is CUDA-only");
             return sweep_cpu::forward(in, kind);
         }
         return cuda_func(in);
@@ -41,6 +45,12 @@ auto dispatch_backward(Func cuda_func, sweep_cpu::EquationKind kind, sweep_cpu::
 {
     return [cuda_func, kind, mode](const BackwardInput& in) {
         if (sweep_cpu::is_cpu_input(in)) {
+            TORCH_CHECK(!in.bw_stepped(),
+                        "stepped backward (bw_it_begin/bw_it_end) is CUDA-only");
+            TORCH_CHECK(in.cut_face_mask == 0,
+                        "domain-decomposed backward (cut_face_mask) is CUDA-only");
+            TORCH_CHECK(in.step_phase == 0,
+                        "phased backward (step_phase) is CUDA-only");
             return sweep_cpu::backward(in, kind, mode);
         }
         return cuda_func(in);
@@ -198,8 +208,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("spacing", &ForwardInput::spacing)
         .def_readwrite("transfer_interval", &ForwardInput::transfer_interval)
         .def_readwrite("boundary_ring_buffers", &ForwardInput::boundary_ring_buffers)
+        .def_readwrite("boundary_tail_steps", &ForwardInput::boundary_tail_steps)
         .def_readwrite("checkpoint_interval", &ForwardInput::checkpoint_interval)
         .def_readwrite("checkpoint_count", &ForwardInput::checkpoint_count)
+        .def_readwrite("it_begin", &ForwardInput::it_begin)
+        .def_readwrite("it_end", &ForwardInput::it_end)
+        .def_readwrite("step_phase", &ForwardInput::step_phase)
+        .def_readwrite("cut_face_mask", &ForwardInput::cut_face_mask)
+        .def_readwrite("record_out", &ForwardInput::record_out)
+        .def_readwrite("u_allt_out", &ForwardInput::u_allt_out)
         .def_readwrite("wavefields", &ForwardInput::wavefields)
         .def_readwrite("boundary_cpu", &ForwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu)
@@ -243,8 +260,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("use_pinned_memory", &BackwardInput::use_pinned_memory)
         .def_readwrite("transfer_interval", &BackwardInput::transfer_interval)
         .def_readwrite("boundary_ring_buffers", &BackwardInput::boundary_ring_buffers)
+        .def_readwrite("boundary_tail_steps", &BackwardInput::boundary_tail_steps)
         .def_readwrite("checkpoint_interval", &BackwardInput::checkpoint_interval)
         .def_readwrite("checkpoint_count", &BackwardInput::checkpoint_count)
+        .def_readwrite("bw_it_begin", &BackwardInput::bw_it_begin)
+        .def_readwrite("bw_it_end", &BackwardInput::bw_it_end)
+        .def_readwrite("step_phase", &BackwardInput::step_phase)
+        .def_readwrite("grads_out", &BackwardInput::grads_out)
+        .def_readwrite("illum_out", &BackwardInput::illum_out)
+        .def_readwrite("cut_face_mask", &BackwardInput::cut_face_mask)
         .def_readwrite("forward_wavefields", &BackwardInput::forward_wavefields)
         .def_readwrite("adjoint_wavefields", &BackwardInput::adjoint_wavefields)
         .def_readwrite("adjoint_workspace", &BackwardInput::adjoint_workspace)

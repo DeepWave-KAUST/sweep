@@ -190,5 +190,10 @@ __global__ void accumulate_source_grad_3d(
     int u_idx = b * spatial_size + iz * (solver.nx * solver.ny) + iy * solver.nx + ix;
     int grad_idx = (b * nsrc + s) * solver.nt + it;
 
-    grad_source[grad_idx] = u_backward[u_idx];
+    // "+=" for 2D parity and for Python-bound grads_out accumulators:
+    // each (b, s, it) is written exactly once per backward onto zeros, so
+    // single-domain results are bit-identical to the old "="; under
+    // segmented/DD accumulation a double-visit double-counts loudly instead
+    // of silently masking an ownership bug.
+    grad_source[grad_idx] += u_backward[u_idx];
 }

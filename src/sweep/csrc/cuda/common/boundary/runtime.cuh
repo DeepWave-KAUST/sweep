@@ -181,19 +181,35 @@ public:
     // per-step cell count from the saver's tensor stride.  The payload
     // is uint8 (INT8, *_q) or __half (FP16, *_h); the FP32 per-block
     // scale and the FP32 transient staging are shared by both.
-    inline void quantize_face(float* stage, uint8_t* q, __half* h, float* scale,
+    // ``face_t`` is the face's persistent saver tensor, passed only so a DD cut
+    // face can be skipped: ``gpu_full_shapes`` drops such a face to numel 0
+    // because the boundary kernels gate it on ctx.cut_* (nothing is ever
+    // written there — its halo is reconstructed in the DD backward).  The test
+    // MUST be on numel, not on ``cells``: PyTorch clamps a 0-size dim's stride
+    // to a nonzero value, so the stride-derived ``cells`` would still drive a
+    // launch that writes into the empty buffer.  Guarding here covers the FP16
+    // and INT8 payloads in one place.
+    inline bool face_is_cut(const torch::Tensor& face_t) const
+    {
+        return face_t.numel() == 0;
+    }
+    inline void quantize_face(const torch::Tensor& face_t,
+                              float* stage, uint8_t* q, __half* h, float* scale,
                               BoundaryDtype dt, int64_t step_idx,
                               int64_t cells, int64_t blocks)
     {
+        if (face_is_cut(face_t)) return;
         if (dt == BoundaryDtype::FP16)
             launch_quantize_fp16(stage, h + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
         else
             launch_quantize_int8(stage, q + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
     }
-    inline void dequantize_face(float* stage, uint8_t* q, __half* h, float* scale,
+    inline void dequantize_face(const torch::Tensor& face_t,
+                                float* stage, uint8_t* q, __half* h, float* scale,
                                 BoundaryDtype dt, int64_t step_idx,
                                 int64_t cells, int64_t blocks)
     {
+        if (face_is_cut(face_t)) return;
         if (dt == BoundaryDtype::FP16)
             launch_dequantize_fp16(h + step_idx * cells, scale + step_idx * blocks, stage, cells, compute_stream_);
         else
@@ -209,10 +225,10 @@ public:
         int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
-        quantize_face(b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        quantize_face(b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        quantize_face(b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        quantize_face(b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        quantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        quantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        quantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        quantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
     inline void dequantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -224,10 +240,10 @@ public:
         int64_t s_bot = saver_.bottom_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_lef = saver_.left_scale_t.stride(saver_.dim == 3 ? 0 : 1);
         int64_t s_rig = saver_.right_scale_t.stride(saver_.dim == 3 ? 0 : 1);
-        dequantize_face(b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        dequantize_face(b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        dequantize_face(b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        dequantize_face(b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        dequantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        dequantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        dequantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        dequantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
     inline void quantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -243,12 +259,12 @@ public:
         int64_t s_bac = saver_.back_scale_t.stride(0);
         int64_t s_lef = saver_.left_scale_t.stride(0);
         int64_t s_rig = saver_.right_scale_t.stride(0);
-        quantize_face(b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        quantize_face(b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        quantize_face(b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
-        quantize_face(b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
-        quantize_face(b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        quantize_face(b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        quantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        quantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        quantize_face(saver_.front_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
+        quantize_face(saver_.back_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
+        quantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        quantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
     inline void dequantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
@@ -264,12 +280,12 @@ public:
         int64_t s_bac = saver_.back_scale_t.stride(0);
         int64_t s_lef = saver_.left_scale_t.stride(0);
         int64_t s_rig = saver_.right_scale_t.stride(0);
-        dequantize_face(b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        dequantize_face(b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        dequantize_face(b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
-        dequantize_face(b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
-        dequantize_face(b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        dequantize_face(b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        dequantize_face(saver_.top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
+        dequantize_face(saver_.bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
+        dequantize_face(saver_.front_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
+        dequantize_face(saver_.back_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
+        dequantize_face(saver_.left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
+        dequantize_face(saver_.right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
     }
 
     inline void wait_before_forward_save(const BoundaryChunk& chunk)
@@ -738,12 +754,24 @@ public:
             flush_forward_if_needed(chunk);
     }
 
-    inline void prefetch_initial_backward_chunk(int nt)
+    // ``nt_saved`` is the ring length in SAVED-step coordinates (nt - bs_it0
+    // under boundary tail truncation, nt otherwise); ``it_hi_saved`` is this
+    // backward call's segment top in the same coordinates.  The first step the
+    // call processes is it_hi_saved-1, whose chunk has to be in the ring before
+    // the first restore.
+    //
+    // The monolithic backward runs the whole reverse loop in one C++ call, so
+    // it_hi_saved == nt_saved and the default reproduces the old nt_saved-1
+    // exactly.  The DD backward is driven one step per call from Python
+    // (SteppedBackwardRunner.run_segment(it+1, it)), so each call must prime
+    // the ring for ITS step -- that is what makes cpu staging work under the
+    // per-step loop instead of prefetching the tail chunk every time.
+    inline void prefetch_initial_backward_chunk(int nt, int it_hi = -1)
     {
         if (!enabled_ || !staged_)
             return;
 
-        int it0 = nt - 1;
+        int it0 = (it_hi >= 0 ? it_hi : nt) - 1;
         int buf_idx0 = (it0 - 1) % transfer_interval_;
         int chunk_start = it0 - buf_idx0 - 1;
         int chunk_len = buf_idx0 + 1;

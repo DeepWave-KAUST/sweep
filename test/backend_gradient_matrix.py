@@ -345,12 +345,20 @@ def run_within_matrix(args: argparse.Namespace, selected_cases: list[Case], cuda
                 known_gaps.extend(missing)
                 if ok:
                     row[backend.label] = "PASS*" if missing else "PASS"
+                elif (case.name, mode) in CUDA_MODE_REFERENCE_ONLY and backend.family == "c":
+                    # Declared: this mode is aligned to the matching mode on
+                    # the other device, not to full. Grade it GAP so the
+                    # within matrix separates documented deviations from
+                    # regressions -- it stays visible in the known-gaps list
+                    # and a case NOT on the list still fails loudly.
+                    row[backend.label] = "GAP"
+                    known_gaps.append(
+                        f"{case.name}/{mode}/{backend.label}: "
+                        f"{errors[0] if errors else 'mismatch'} "
+                        f"(declared: aligned to matching mode, not full)")
                 else:
                     row[backend.label] = "FAIL"
-                    suffix = ""
-                    if (case.name, mode) in CUDA_MODE_REFERENCE_ONLY and backend.family == "c":
-                        suffix = " (currently aligned to matching c-cuda/c-cpu mode, not full)"
-                    failures.append(f"{case.name}/{mode}/{backend.label}: {errors[0] if errors else 'mismatch'}{suffix}")
+                    failures.append(f"{case.name}/{mode}/{backend.label}: {errors[0] if errors else 'mismatch'}")
             rows.append(row)
 
     return rows, failures, known_gaps

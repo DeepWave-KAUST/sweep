@@ -53,7 +53,10 @@ class PropagatorDefaults:
     dh: float = 10.0
     dt: float = 0.002
     dev: str | None = None
-    use_ckpt: bool = True
+    # None = "not specified": the memory strategy resolver picks the backend
+    # default (impl='c' -> 'boundary', eager/jax -> 'ckpt').  An explicit
+    # True/False is treated as a request for / exclusion of checkpointing.
+    use_ckpt: bool | None = None
     nt: int = -1
     batch_size: int = 1
     allow_growth: bool = True
@@ -104,6 +107,18 @@ class BoundaryOptions:
     #             3.94× compression beats BF16's 2× and the gradient drop
     #             is acceptable for the equation in question.
     storage_dtype: Literal["fp32", "fp16", "bf16", "int8"] = "fp32"
+    # Boundary tail truncation for steady-state / frequency-selection FWI:
+    # when set, only the LAST ``tail_steps`` time steps have their boundary
+    # strips saved and back-propagated.  The forward physics is unchanged
+    # (the wavefield must still ring up), but the reverse sweep stops after
+    # ``tail_steps`` steps -- valid when the objective reads only the last
+    # ``tail_steps`` record samples (the adjoint source is zero earlier), and
+    # the dropped gradient term is exactly the adjoint x ring-up-transient
+    # correlation that steady-state methods discard by construction.  Include
+    # a safety margin on top of the probe window.  Boundary buffers shrink
+    # accordingly.  None = full-length backward (bit-exact legacy).
+    # Currently impl='c' Acoustic/Acoustic3D with boundary saving only.
+    tail_steps: int | None = None
 
     def __post_init__(self):
         if self.storage not in {"gpu", "cpu", "disk"}:
@@ -117,6 +132,8 @@ class BoundaryOptions:
             raise ValueError("BoundaryOptions.transfer_interval must be >= 1.")
         if self.ring_buffers is not None and self.ring_buffers < 1:
             raise ValueError("BoundaryOptions.ring_buffers must be >= 1.")
+        if self.tail_steps is not None and self.tail_steps < 1:
+            raise ValueError("BoundaryOptions.tail_steps must be >= 1 (or None).")
         if self.storage == "gpu":
             if self.transfer_interval not in (None, 1):
                 raise ValueError(
@@ -174,12 +191,22 @@ class CkptOptions:
 
 @dataclass
 class MemoryOptions:
-    # Choose exactly one CUDA memory-saving strategy and fill its matching options block.
-    strategy: Literal["boundary", "ckpt"] | None = None
+    # The gradient-memory mode is a three-way choice, identical for the eager
+    # and CUDA backends:
+    #   'full'     -- keep everything needed for backward in memory (no
+    #                 reconstruction, largest footprint)
+    #   'boundary' -- boundary-saving wavefield reconstruction
+    #   'ckpt'     -- checkpointing / rematerialisation
+    # None = backend default ('boundary' for impl='c', 'ckpt' for eager/jax).
+    strategy: Literal["full", "boundary", "ckpt"] | None = None
     boundary: BoundaryOptions | None = None
     ckpt: CkptOptions | None = None
 
     def __post_init__(self):
+        if self.strategy == "full":
+            if self.boundary is not None or self.ckpt is not None:
+                raise ValueError("MemoryOptions(strategy='full') takes no boundary/ckpt options.")
+            return
         if self.strategy is None:
             if self.boundary is not None or self.ckpt is not None:
                 raise ValueError(
@@ -223,3 +250,76 @@ def _drop_none(value: Any) -> Any:
     if isinstance(value, list):
         return [_drop_none(v) for v in value]
     return value
+
+
+def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_config=None):
+    """Resolve the three-way gradient-memory mode: 'full' | 'boundary' | 'ckpt'.
+
+    One mode wins, identically for every backend.  Conflicting explicit
+    requests raise instead of silently preferring one path (historically
+    ``use_ckpt`` -- which defaulted to True -- beat an explicitly enabled
+    ``boundary_saving_config``, so "boundary" test scripts silently ran the
+    checkpoint backward).
+
+    Requests: ``memory.strategy`` (if set), ``use_ckpt=True`` (-> 'ckpt'),
+    ``boundary_saving_config['enabled']=True`` (-> 'boundary').
+
+    An explicit legacy off-switch (``use_ckpt=False``, ``enabled=False``) is
+    not a vote for the *other* trick: with no positive request it selects
+    ``'full'``.  That is what ``impl='c', use_ckpt=False`` has always meant --
+    the knob suppressed the boundary-saving default outright -- and what the
+    README and notebooks 00/12/16 document.  The implicit backend default
+    ('boundary' for impl='c', 'ckpt' otherwise) applies only when no
+    gradient-memory knob was passed at all.
+    """
+    requests = {}
+    exclude = set()
+
+    if memory is not None:
+        mem_strategy = getattr(memory, "strategy", None)
+        if mem_strategy is None and isinstance(memory, dict):
+            mem_strategy = memory.get("strategy")
+        if mem_strategy is not None:
+            if mem_strategy not in ("full", "boundary", "ckpt"):
+                raise ValueError(f"memory strategy must be 'full', 'boundary' or 'ckpt', got {mem_strategy!r}")
+            requests["memory="] = mem_strategy
+
+    if use_ckpt is True:
+        requests["use_ckpt=True"] = "ckpt"
+    elif use_ckpt is False:
+        exclude.add("ckpt")
+
+    if boundary_saving_config is not None:
+        enabled = bool(dict(boundary_saving_config).get("enabled", BOUNDARY_DEFAULTS.enabled))
+        if enabled:
+            requests["boundary_saving_config"] = "boundary"
+        else:
+            exclude.add("boundary")
+
+    if len(set(requests.values())) > 1:
+        detail = ", ".join(f"{src} -> {mode!r}" for src, mode in sorted(requests.items()))
+        raise ValueError(
+            "Conflicting gradient-memory mode requests: " + detail +
+            ". The mode is a three-way choice (full/boundary/ckpt); pass "
+            "exactly one via memory=MemoryOptions(strategy=...).")
+
+    if requests:
+        strategy = next(iter(requests.values()))
+        if strategy in exclude:
+            src = next(s for s, m in requests.items() if m == strategy)
+            other = next(iter(exclude & {strategy}))
+            raise ValueError(
+                f"Gradient-memory mode {strategy!r} was requested by {src} but "
+                f"excluded by another knob; pass exactly one mode via "
+                "memory=MemoryOptions(strategy=...).")
+        return strategy
+
+    if exclude:
+        # An explicit off-switch and nothing else: no memory trick at all.
+        return "full"
+
+    default_order = ("boundary", "full") if impl == "c" else ("ckpt", "full")
+    for strategy in default_order:
+        if strategy not in exclude:
+            return strategy
+    return "full"
