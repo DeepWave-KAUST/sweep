@@ -181,9 +181,16 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
 
     float inv_rho = 1.f / rho_b[idx];
 
+    // DD cut faces (solver.cut_mask) carry no PML (per-rank widths zero the
+    // profile there), and the matching cells of the un-split run take the
+    // interior branch.  The PML branch with all-zero coefficients is
+    // mathematically identity but NOT bitwise identical (different FMA
+    // contraction), so the cut-side band must take the interior branch too.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -213,31 +220,49 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    // PML boundaries
-    f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
-    dszz_dz += f.m_szzz[idx];
-    f.m_sxzx[idx] = ax * f.m_sxzx[idx] + bx * dsxz_dx;
-    dsxz_dx += f.m_sxzx[idx];
+    // Memory variables live in per-axis slabs: reads go through rd() (out of
+    // the band every coefficient is exactly zero), updated values are carried
+    // in registers, stores are gated by stored().  Float ops unchanged.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+    bool st_x = solver.aux_x.stored(ix);
+    bool st_y = solver.aux_y.stored(iy);
+    bool st_z = solver.aux_z.stored(iz);
 
-    f.m_sxzz[idx] = az * f.m_sxzz[idx] + bz * dsxz_dz;
-    dsxz_dz += f.m_sxzz[idx];
-    f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
-    dsxx_dx += f.m_sxxx[idx];
+    float r_m_szzz = azh * f.m_szzz[zi] + bzh * dszz_dz;
+    if (st_z) f.m_szzz[zi] = r_m_szzz;
+    dszz_dz += r_m_szzz;
+    float r_m_sxzx = ax * f.m_sxzx[xi] + bx * dsxz_dx;
+    if (st_x) f.m_sxzx[xi] = r_m_sxzx;
+    dsxz_dx += r_m_sxzx;
 
-    f.m_sxyy[idx] = ay * f.m_sxyy[idx] + by * dsxy_dy;
-    dsxy_dy += f.m_sxyy[idx];
+    float r_m_sxzz = az * f.m_sxzz[zi] + bz * dsxz_dz;
+    if (st_z) f.m_sxzz[zi] = r_m_sxzz;
+    dsxz_dz += r_m_sxzz;
+    float r_m_sxxx = axh * f.m_sxxx[xi] + bxh * dsxx_dx;
+    if (st_x) f.m_sxxx[xi] = r_m_sxxx;
+    dsxx_dx += r_m_sxxx;
 
-    f.m_sxyx[idx] = ax * f.m_sxyx[idx] + bx * dsxy_dx;
-    dsxy_dx += f.m_sxyx[idx];
+    float r_m_sxyy = ay * f.m_sxyy[yi] + by * dsxy_dy;
+    if (st_y) f.m_sxyy[yi] = r_m_sxyy;
+    dsxy_dy += r_m_sxyy;
 
-    f.m_syyy[idx] = ayh * f.m_syyy[idx] + byh * dsyy_dy;
-    dsyy_dy += f.m_syyy[idx];
+    float r_m_sxyx = ax * f.m_sxyx[xi] + bx * dsxy_dx;
+    if (st_x) f.m_sxyx[xi] = r_m_sxyx;
+    dsxy_dx += r_m_sxyx;
 
-    f.m_syzz[idx] = az * f.m_syzz[idx] + bz * dsyz_dz;
-    dsyz_dz += f.m_syzz[idx];
+    float r_m_syyy = ayh * f.m_syyy[yi] + byh * dsyy_dy;
+    if (st_y) f.m_syyy[yi] = r_m_syyy;
+    dsyy_dy += r_m_syyy;
 
-    f.m_syzy[idx] = ay * f.m_syzy[idx] + by * dsyz_dy;
-    dsyz_dy += f.m_syzy[idx];
+    float r_m_syzz = az * f.m_syzz[zi] + bz * dsyz_dz;
+    if (st_z) f.m_syzz[zi] = r_m_syzz;
+    dsyz_dz += r_m_syzz;
+
+    float r_m_syzy = ay * f.m_syzy[yi] + by * dsyz_dy;
+    if (st_y) f.m_syzy[yi] = r_m_syzy;
+    dsyz_dy += r_m_syzy;
 
     // Updates
     f.vx[idx] += solver.dt * inv_rho *
@@ -315,9 +340,12 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
+    // Cut-aware interior band — see elastic_velocity_kernel_3d.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -377,26 +405,42 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    // PML
-    f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
-    dvz_dz += f.m_vzz[idx];
-    f.m_vyy[idx] = ay * f.m_vyy[idx] + by * dvy_dy;
-    dvy_dy += f.m_vyy[idx];
-    f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
-    dvx_dx += f.m_vxx[idx];
-    f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
-    dvx_dz += f.m_vxz[idx];
-    f.m_vzx[idx] = axh * f.m_vzx[idx] + bxh * dvz_dx;
-    dvz_dx += f.m_vzx[idx];
+    // Slab-resident memory variables: see elastic_velocity_kernel_3d.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+    bool st_x = solver.aux_x.stored(ix);
+    bool st_y = solver.aux_y.stored(iy);
+    bool st_z = solver.aux_z.stored(iz);
 
-    f.m_vxy[idx] = ayh * f.m_vxy[idx] + byh * dvx_dy;
-    dvx_dy += f.m_vxy[idx];
-    f.m_vyx[idx] = axh * f.m_vyx[idx] + bxh * dvy_dx;
-    dvy_dx += f.m_vyx[idx];
-    f.m_vyz[idx] = azh * f.m_vyz[idx] + bzh * dvy_dz;
-    dvy_dz += f.m_vyz[idx];
-    f.m_vzy[idx] = ayh * f.m_vzy[idx] + byh * dvz_dy;
-    dvz_dy += f.m_vzy[idx];
+    float r_m_vzz = az * f.m_vzz[zi] + bz * dvz_dz;
+    if (st_z) f.m_vzz[zi] = r_m_vzz;
+    dvz_dz += r_m_vzz;
+    float r_m_vyy = ay * f.m_vyy[yi] + by * dvy_dy;
+    if (st_y) f.m_vyy[yi] = r_m_vyy;
+    dvy_dy += r_m_vyy;
+    float r_m_vxx = ax * f.m_vxx[xi] + bx * dvx_dx;
+    if (st_x) f.m_vxx[xi] = r_m_vxx;
+    dvx_dx += r_m_vxx;
+    float r_m_vxz = azh * f.m_vxz[zi] + bzh * dvx_dz;
+    if (st_z) f.m_vxz[zi] = r_m_vxz;
+    dvx_dz += r_m_vxz;
+    float r_m_vzx = axh * f.m_vzx[xi] + bxh * dvz_dx;
+    if (st_x) f.m_vzx[xi] = r_m_vzx;
+    dvz_dx += r_m_vzx;
+
+    float r_m_vxy = ayh * f.m_vxy[yi] + byh * dvx_dy;
+    if (st_y) f.m_vxy[yi] = r_m_vxy;
+    dvx_dy += r_m_vxy;
+    float r_m_vyx = axh * f.m_vyx[xi] + bxh * dvy_dx;
+    if (st_x) f.m_vyx[xi] = r_m_vyx;
+    dvy_dx += r_m_vyx;
+    float r_m_vyz = azh * f.m_vyz[zi] + bzh * dvy_dz;
+    if (st_z) f.m_vyz[zi] = r_m_vyz;
+    dvy_dz += r_m_vyz;
+    float r_m_vzy = ayh * f.m_vzy[yi] + byh * dvz_dy;
+    if (st_y) f.m_vzy[yi] = r_m_vzy;
+    dvz_dy += r_m_vzy;
 
     // Update
     float div_v = dvx_dx + dvy_dy + dvz_dz;
@@ -462,13 +506,23 @@ __global__ void elastic_velocity_kernel_3d_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 1*M+1;
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // collapses to the stencil halo M — there is no PML at a cut, the
+    // restore skips the cut-face strip, and the cut-adjacent cells are
+    // reconstructed by the plain reverse stencil reading the per-phase
+    // exchanged M-halo (see acoustic2nd_nopml / elastic2d nopml kernels).
+    // z is never cut (the elastic backward rejects z cut bits).
+    int wide = solver.abcn + 1*M+1;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hy_lo = solver.cut_y_lo() ? M : wide;
+    int hy_hi = solver.cut_y_hi() ? M : wide;
+    int top_halo = solver.free_surface ? M : wide;
 
-    int top_halo = solver.free_surface ? M: halo;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < top_halo || iz >= solver.nz - halo)
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iy < hy_lo || iy >= solver.ny - hy_hi ||
+        iz < top_halo || iz >= solver.nz - wide)
         return;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
@@ -532,13 +586,23 @@ __global__ void elastic_stress_kernel_3d_nopml(
         M = Order / 2;
     }
 
-    int halo = solver.abcn + 1*M+1;
+    // Per-side exclusion bands.  On a non-cut side keep the legacy width
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // collapses to the stencil halo M — there is no PML at a cut, the
+    // restore skips the cut-face strip, and the cut-adjacent cells are
+    // reconstructed by the plain reverse stencil reading the per-phase
+    // exchanged M-halo (see acoustic2nd_nopml / elastic2d nopml kernels).
+    // z is never cut (the elastic backward rejects z cut bits).
+    int wide = solver.abcn + 1*M+1;
+    int hx_lo = solver.cut_x_lo() ? M : wide;
+    int hx_hi = solver.cut_x_hi() ? M : wide;
+    int hy_lo = solver.cut_y_lo() ? M : wide;
+    int hy_hi = solver.cut_y_hi() ? M : wide;
+    int top_halo = solver.free_surface ? M : wide;
 
-    int top_halo = solver.free_surface ? M: halo;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < top_halo || iz >= solver.nz - halo)
+    if (ix < hx_lo || ix >= solver.nx - hx_hi ||
+        iy < hy_lo || iy >= solver.ny - hy_hi ||
+        iz < top_halo || iz >= solver.nz - wide)
         return;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
@@ -591,6 +655,9 @@ __global__ void elastic_stress_kernel_3d_nopml(
 }
 
 
+// DEAD CODE: no .cu invokes this kernel's launch macro.  It still
+// indexes memory variables with full-grid offsets and would be WRONG
+// under the per-axis aux slab layout -- convert before reviving.
 template<int Order>
 __global__ void elastic_velocity_adjoint_kernel_3d(
     ElasticWavefieldPointer wf,
@@ -805,6 +872,10 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
@@ -831,19 +902,21 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     float bar_dsyz_dy = solver.dt * inv_rho * f.vz[idx];
     float bar_dszz_dz = solver.dt * inv_rho * f.vz[idx];
 
-    float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
-    float tmp_sxyy = f.m_sxyy[idx] + bar_dsxy_dy;
-    float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;
-    float tmp_sxyx = f.m_sxyx[idx] + bar_dsxy_dx;
-    float tmp_syyy = f.m_syyy[idx] + bar_dsyy_dy;
-    float tmp_syzz = f.m_syzz[idx] + bar_dsyz_dz;
-    float tmp_sxzx = f.m_sxzx[idx] + bar_dsxz_dx;
-    float tmp_syzy = f.m_syzy[idx] + bar_dsyz_dy;
-    float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
+    // Memory-variable loads are sunk below the interior gate: their values
+    // feed only the PML branch, and interior cells have no slab storage to
+    // read.  (The legacy code loaded them unconditionally over the full
+    // grid; the interior path never consumed them.)
 
+    // DD cut faces (solver.cut_mask) carry no PML and the matching cells
+    // of the un-split run take the interior branch; the cut-side band must
+    // take it too (different FMA contraction on the PML branch — see
+    // elastic_velocity_kernel_3d).  p at cut-side halo cells feeds owned
+    // cells through the apply stencil, so this is required for bitwise DD.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -872,6 +945,23 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
+    // Slab-resident memory variables: unweighted reads go through rd() but
+    // feed only a*/b*-weighted terms (zero outside the band); stores are
+    // gated by stored() and grouped per axis.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+
+    float tmp_sxxx = f.m_sxxx[xi] + bar_dsxx_dx;
+    float tmp_sxyy = f.m_sxyy[yi] + bar_dsxy_dy;
+    float tmp_sxzz = f.m_sxzz[zi] + bar_dsxz_dz;
+    float tmp_sxyx = f.m_sxyx[xi] + bar_dsxy_dx;
+    float tmp_syyy = f.m_syyy[yi] + bar_dsyy_dy;
+    float tmp_syzz = f.m_syzz[zi] + bar_dsyz_dz;
+    float tmp_sxzx = f.m_sxzx[xi] + bar_dsxz_dx;
+    float tmp_syzy = f.m_syzy[yi] + bar_dsyz_dy;
+    float tmp_szzz = f.m_szzz[zi] + bar_dszz_dz;
+
     pxx[b * spatial_size + idx] = bar_dsxx_dx + bxh * tmp_sxxx;
     pxy[b * spatial_size + idx] = bar_dsxy_dy + by * tmp_sxyy;
     pxz[b * spatial_size + idx] = bar_dsxz_dz + bz * tmp_sxzz;
@@ -882,15 +972,21 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     pzy[b * spatial_size + idx] = bar_dsyz_dy + by * tmp_syzy;
     pzz[b * spatial_size + idx] = bar_dszz_dz + bzh * tmp_szzz;
 
-    f.m_sxxx[idx] = axh * tmp_sxxx;
-    f.m_sxyy[idx] = ay * tmp_sxyy;
-    f.m_sxzz[idx] = az * tmp_sxzz;
-    f.m_sxyx[idx] = ax * tmp_sxyx;
-    f.m_syyy[idx] = ayh * tmp_syyy;
-    f.m_syzz[idx] = az * tmp_syzz;
-    f.m_sxzx[idx] = ax * tmp_sxzx;
-    f.m_syzy[idx] = ay * tmp_syzy;
-    f.m_szzz[idx] = azh * tmp_szzz;
+    if (solver.aux_x.stored(ix)) {
+        f.m_sxxx[xi] = axh * tmp_sxxx;
+        f.m_sxyx[xi] = ax * tmp_sxyx;
+        f.m_sxzx[xi] = ax * tmp_sxzx;
+    }
+    if (solver.aux_y.stored(iy)) {
+        f.m_sxyy[yi] = ay * tmp_sxyy;
+        f.m_syyy[yi] = ayh * tmp_syyy;
+        f.m_syzy[yi] = ay * tmp_syzy;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_sxzz[zi] = az * tmp_sxzz;
+        f.m_syzz[zi] = az * tmp_syzz;
+        f.m_szzz[zi] = azh * tmp_szzz;
+    }
 }
 
 template<int Order>
@@ -963,6 +1059,9 @@ __global__ void elastic_velocity_adjoint_apply_3d(
 }
 
 
+// DEAD CODE: no .cu invokes this kernel's launch macro.  It still
+// indexes memory variables with full-grid offsets and would be WRONG
+// under the per-axis aux slab layout -- convert before reviving.
 template<int Order>
 __global__ void elastic_stress_adjoint_kernel_3d(
     ElasticWavefieldPointer wf,
@@ -1135,6 +1234,10 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
@@ -1260,19 +1363,16 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float bar_dvz_dx = solver.dt * mu_ * bar_sxz;
     float bar_dvz_dy = solver.dt * mu_ * bar_syz;
 
-    float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
-    float tmp_vxy = f.m_vxy[idx] + bar_dvx_dy;
-    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz;
-    float tmp_vyx = f.m_vyx[idx] + bar_dvy_dx;
-    float tmp_vyy = f.m_vyy[idx] + bar_dvy_dy;
-    float tmp_vyz = f.m_vyz[idx] + bar_dvy_dz;
-    float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
-    float tmp_vzy = f.m_vzy[idx] + bar_dvz_dy;
-    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
+    // Memory-variable loads are sunk below the interior gate (see
+    // elastic_velocity_adjoint_prepare_3d): they feed only the PML branch,
+    // and interior cells have no slab storage to read.
 
+    // Cut-aware interior band — see elastic_velocity_adjoint_prepare_3d.
     bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
+        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
         iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
@@ -1301,6 +1401,21 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
+    // Slab-resident memory variables: see elastic_velocity_adjoint_prepare_3d.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+
+    float tmp_vxx = f.m_vxx[xi] + bar_dvx_dx;
+    float tmp_vxy = f.m_vxy[yi] + bar_dvx_dy;
+    float tmp_vxz = f.m_vxz[zi] + bar_dvx_dz;
+    float tmp_vyx = f.m_vyx[xi] + bar_dvy_dx;
+    float tmp_vyy = f.m_vyy[yi] + bar_dvy_dy;
+    float tmp_vyz = f.m_vyz[zi] + bar_dvy_dz;
+    float tmp_vzx = f.m_vzx[xi] + bar_dvz_dx;
+    float tmp_vzy = f.m_vzy[yi] + bar_dvz_dy;
+    float tmp_vzz = f.m_vzz[zi] + bar_dvz_dz;
+
     qxx[b * spatial_size + idx] = bar_dvx_dx + bx * tmp_vxx;
     qxy[b * spatial_size + idx] = bar_dvx_dy + byh * tmp_vxy;
     qxz[b * spatial_size + idx] = bar_dvx_dz + bzh * tmp_vxz;
@@ -1311,15 +1426,21 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     qzy[b * spatial_size + idx] = bar_dvz_dy + byh * tmp_vzy;
     qzz[b * spatial_size + idx] = bar_dvz_dz + bz * tmp_vzz;
 
-    f.m_vxx[idx] = ax * tmp_vxx;
-    f.m_vxy[idx] = ayh * tmp_vxy;
-    f.m_vxz[idx] = azh * tmp_vxz;
-    f.m_vyx[idx] = axh * tmp_vyx;
-    f.m_vyy[idx] = ay * tmp_vyy;
-    f.m_vyz[idx] = azh * tmp_vyz;
-    f.m_vzx[idx] = axh * tmp_vzx;
-    f.m_vzy[idx] = ayh * tmp_vzy;
-    f.m_vzz[idx] = az * tmp_vzz;
+    if (solver.aux_x.stored(ix)) {
+        f.m_vxx[xi] = ax * tmp_vxx;
+        f.m_vyx[xi] = axh * tmp_vyx;
+        f.m_vzx[xi] = axh * tmp_vzx;
+    }
+    if (solver.aux_y.stored(iy)) {
+        f.m_vxy[yi] = ayh * tmp_vxy;
+        f.m_vyy[yi] = ay * tmp_vyy;
+        f.m_vzy[yi] = ayh * tmp_vzy;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_vxz[zi] = azh * tmp_vxz;
+        f.m_vyz[zi] = azh * tmp_vyz;
+        f.m_vzz[zi] = az * tmp_vzz;
+    }
 }
 
 template<int Order>
@@ -1587,9 +1708,16 @@ __global__ void elastic3d_velocity_kernel_apm(
     float iry = invry_b[idx];
     float irz = invrz_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware interior split: a DD cut face has zero PML coefficients, so its
+    // interior takes the fast path (matches the backward kernels). z is never
+    // split in v1 (cut_z_* == false), so its terms are unchanged; a single
+    // domain (no cuts) collapses to the legacy symmetric split bit-for-bit.
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iy < solver.abcn + halo) && !solver.cut_y_lo()) ||
+                  ((iy >= solver.ny - solver.abcn - halo) && !solver.cut_y_hi()) ||
+                  ((iz < solver.abcn + halo) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * irx * (dsxx_dx + dsxy_dy + dsxz_dz);
@@ -1612,27 +1740,44 @@ __global__ void elastic3d_velocity_kernel_apm(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
-    dszz_dz += f.m_szzz[idx];
-    f.m_sxzx[idx] = ax * f.m_sxzx[idx] + bx * dsxz_dx;
-    dsxz_dx += f.m_sxzx[idx];
+    // Slab-resident memory variables: see elastic_velocity_kernel_3d.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+    bool st_x = solver.aux_x.stored(ix);
+    bool st_y = solver.aux_y.stored(iy);
+    bool st_z = solver.aux_z.stored(iz);
 
-    f.m_sxzz[idx] = az * f.m_sxzz[idx] + bz * dsxz_dz;
-    dsxz_dz += f.m_sxzz[idx];
-    f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
-    dsxx_dx += f.m_sxxx[idx];
+    float r_m_szzz = azh * f.m_szzz[zi] + bzh * dszz_dz;
+    if (st_z) f.m_szzz[zi] = r_m_szzz;
+    dszz_dz += r_m_szzz;
+    float r_m_sxzx = ax * f.m_sxzx[xi] + bx * dsxz_dx;
+    if (st_x) f.m_sxzx[xi] = r_m_sxzx;
+    dsxz_dx += r_m_sxzx;
 
-    f.m_sxyy[idx] = ay * f.m_sxyy[idx] + by * dsxy_dy;
-    dsxy_dy += f.m_sxyy[idx];
-    f.m_sxyx[idx] = ax * f.m_sxyx[idx] + bx * dsxy_dx;
-    dsxy_dx += f.m_sxyx[idx];
+    float r_m_sxzz = az * f.m_sxzz[zi] + bz * dsxz_dz;
+    if (st_z) f.m_sxzz[zi] = r_m_sxzz;
+    dsxz_dz += r_m_sxzz;
+    float r_m_sxxx = axh * f.m_sxxx[xi] + bxh * dsxx_dx;
+    if (st_x) f.m_sxxx[xi] = r_m_sxxx;
+    dsxx_dx += r_m_sxxx;
 
-    f.m_syyy[idx] = ayh * f.m_syyy[idx] + byh * dsyy_dy;
-    dsyy_dy += f.m_syyy[idx];
-    f.m_syzz[idx] = az * f.m_syzz[idx] + bz * dsyz_dz;
-    dsyz_dz += f.m_syzz[idx];
-    f.m_syzy[idx] = ay * f.m_syzy[idx] + by * dsyz_dy;
-    dsyz_dy += f.m_syzy[idx];
+    float r_m_sxyy = ay * f.m_sxyy[yi] + by * dsxy_dy;
+    if (st_y) f.m_sxyy[yi] = r_m_sxyy;
+    dsxy_dy += r_m_sxyy;
+    float r_m_sxyx = ax * f.m_sxyx[xi] + bx * dsxy_dx;
+    if (st_x) f.m_sxyx[xi] = r_m_sxyx;
+    dsxy_dx += r_m_sxyx;
+
+    float r_m_syyy = ayh * f.m_syyy[yi] + byh * dsyy_dy;
+    if (st_y) f.m_syyy[yi] = r_m_syyy;
+    dsyy_dy += r_m_syyy;
+    float r_m_syzz = az * f.m_syzz[zi] + bz * dsyz_dz;
+    if (st_z) f.m_syzz[zi] = r_m_syzz;
+    dsyz_dz += r_m_syzz;
+    float r_m_syzy = ay * f.m_syzy[yi] + by * dsyz_dy;
+    if (st_y) f.m_syzy[yi] = r_m_syzy;
+    dsyz_dy += r_m_syzy;
 
     f.vx[idx] += solver.dt * irx * (dsxx_dx + dsxy_dy + dsxz_dz);
     f.vy[idx] += solver.dt * iry * (dsxy_dx + dsyy_dy + dsyz_dz);
@@ -1727,9 +1872,16 @@ __global__ void elastic3d_stress_kernel_apm(
     float lzx  = lzzxx_b[idx], lzy  = lzzyy_b[idx];
     float mxy  = muxy_b[idx],  mxz  = muxz_b[idx],  myz  = muyz_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware interior split: a DD cut face has zero PML coefficients, so its
+    // interior takes the fast path (matches the backward kernels). z is never
+    // split in v1 (cut_z_* == false), so its terms are unchanged; a single
+    // domain (no cuts) collapses to the legacy symmetric split bit-for-bit.
+    bool in_pml = ((ix < solver.abcn + halo) && !solver.cut_x_lo()) ||
+                  ((ix >= solver.nx - solver.abcn - halo) && !solver.cut_x_hi()) ||
+                  ((iy < solver.abcn + halo) && !solver.cut_y_lo()) ||
+                  ((iy >= solver.ny - solver.abcn - halo) && !solver.cut_y_hi()) ||
+                  ((iz < solver.abcn + halo) && !solver.cut_z_lo()) ||
+                  ((iz >= solver.nz - solver.abcn - halo) && !solver.cut_z_hi());
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * (axx * dvx_dx + lxy * dvy_dy + lxz * dvz_dz);
@@ -1752,33 +1904,50 @@ __global__ void elastic3d_stress_kernel_apm(
         float axh = cpml.axh[ix];
         float bxh = cpml.bxh[ix];
 
-        f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
-        dvx_dx += f.m_vxx[idx];
-        f.m_vyy[idx] = ay * f.m_vyy[idx] + by * dvy_dy;
-        dvy_dy += f.m_vyy[idx];
-        f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
-        dvz_dz += f.m_vzz[idx];
+        // Slab-resident memory variables: see elastic_velocity_kernel_3d.
+        long xi = solver.aux_rd_x3(iz, iy, ix);
+        long yi = solver.aux_rd_y3(iz, iy, ix);
+        long zi = solver.aux_rd_z3(iz, iy, ix);
+        bool st_x = solver.aux_x.stored(ix);
+        bool st_y = solver.aux_y.stored(iy);
+        bool st_z = solver.aux_z.stored(iz);
+
+        float r_m_vxx = ax * f.m_vxx[xi] + bx * dvx_dx;
+        if (st_x) f.m_vxx[xi] = r_m_vxx;
+        dvx_dx += r_m_vxx;
+        float r_m_vyy = ay * f.m_vyy[yi] + by * dvy_dy;
+        if (st_y) f.m_vyy[yi] = r_m_vyy;
+        dvy_dy += r_m_vyy;
+        float r_m_vzz = az * f.m_vzz[zi] + bz * dvz_dz;
+        if (st_z) f.m_vzz[zi] = r_m_vzz;
+        dvz_dz += r_m_vzz;
 
         f.sxx[idx] += solver.dt * (axx * dvx_dx + lxy * dvy_dy + lxz * dvz_dz);
         f.syy[idx] += solver.dt * (lyx * dvx_dx + ayy * dvy_dy + lyz * dvz_dz);
         f.szz[idx] += solver.dt * (lzx * dvx_dx + lzy * dvy_dy + azz * dvz_dz);
 
-        f.m_vxy[idx] = ayh * f.m_vxy[idx] + byh * dvx_dy;
-        dvx_dy += f.m_vxy[idx];
-        f.m_vyx[idx] = axh * f.m_vyx[idx] + bxh * dvy_dx;
-        dvy_dx += f.m_vyx[idx];
+        float r_m_vxy = ayh * f.m_vxy[yi] + byh * dvx_dy;
+        if (st_y) f.m_vxy[yi] = r_m_vxy;
+        dvx_dy += r_m_vxy;
+        float r_m_vyx = axh * f.m_vyx[xi] + bxh * dvy_dx;
+        if (st_x) f.m_vyx[xi] = r_m_vyx;
+        dvy_dx += r_m_vyx;
         f.sxy[idx] += solver.dt * mxy * (dvx_dy + dvy_dx);
 
-        f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
-        dvx_dz += f.m_vxz[idx];
-        f.m_vzx[idx] = axh * f.m_vzx[idx] + bxh * dvz_dx;
-        dvz_dx += f.m_vzx[idx];
+        float r_m_vxz = azh * f.m_vxz[zi] + bzh * dvx_dz;
+        if (st_z) f.m_vxz[zi] = r_m_vxz;
+        dvx_dz += r_m_vxz;
+        float r_m_vzx = axh * f.m_vzx[xi] + bxh * dvz_dx;
+        if (st_x) f.m_vzx[xi] = r_m_vzx;
+        dvz_dx += r_m_vzx;
         f.sxz[idx] += solver.dt * mxz * (dvx_dz + dvz_dx);
 
-        f.m_vyz[idx] = azh * f.m_vyz[idx] + bzh * dvy_dz;
-        dvy_dz += f.m_vyz[idx];
-        f.m_vzy[idx] = ayh * f.m_vzy[idx] + byh * dvz_dy;
-        dvz_dy += f.m_vzy[idx];
+        float r_m_vyz = azh * f.m_vyz[zi] + bzh * dvy_dz;
+        if (st_z) f.m_vyz[zi] = r_m_vyz;
+        dvy_dz += r_m_vyz;
+        float r_m_vzy = ayh * f.m_vzy[yi] + byh * dvz_dy;
+        if (st_y) f.m_vzy[yi] = r_m_vzy;
+        dvz_dy += r_m_vzy;
         f.syz[idx] += solver.dt * myz * (dvy_dz + dvz_dy);
     }
 
@@ -2253,15 +2422,20 @@ __global__ void elastic3d_stress_adjoint_prepare_apm(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
-    float tmp_vxy = f.m_vxy[idx] + bar_dvx_dy;
-    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz;
-    float tmp_vyx = f.m_vyx[idx] + bar_dvy_dx;
-    float tmp_vyy = f.m_vyy[idx] + bar_dvy_dy;
-    float tmp_vyz = f.m_vyz[idx] + bar_dvy_dz;
-    float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
-    float tmp_vzy = f.m_vzy[idx] + bar_dvz_dy;
-    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
+    // Slab-resident memory variables: see elastic_velocity_adjoint_prepare_3d.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+
+    float tmp_vxx = f.m_vxx[xi] + bar_dvx_dx;
+    float tmp_vxy = f.m_vxy[yi] + bar_dvx_dy;
+    float tmp_vxz = f.m_vxz[zi] + bar_dvx_dz;
+    float tmp_vyx = f.m_vyx[xi] + bar_dvy_dx;
+    float tmp_vyy = f.m_vyy[yi] + bar_dvy_dy;
+    float tmp_vyz = f.m_vyz[zi] + bar_dvy_dz;
+    float tmp_vzx = f.m_vzx[xi] + bar_dvz_dx;
+    float tmp_vzy = f.m_vzy[yi] + bar_dvz_dy;
+    float tmp_vzz = f.m_vzz[zi] + bar_dvz_dz;
 
     qxx[b * spatial_size + idx] = bar_dvx_dx + bx * tmp_vxx;
     qxy[b * spatial_size + idx] = bar_dvx_dy + byh * tmp_vxy;
@@ -2273,15 +2447,21 @@ __global__ void elastic3d_stress_adjoint_prepare_apm(
     qzy[b * spatial_size + idx] = bar_dvz_dy + byh * tmp_vzy;
     qzz[b * spatial_size + idx] = bar_dvz_dz + bz * tmp_vzz;
 
-    f.m_vxx[idx] = ax * tmp_vxx;
-    f.m_vxy[idx] = ayh * tmp_vxy;
-    f.m_vxz[idx] = azh * tmp_vxz;
-    f.m_vyx[idx] = axh * tmp_vyx;
-    f.m_vyy[idx] = ay * tmp_vyy;
-    f.m_vyz[idx] = azh * tmp_vyz;
-    f.m_vzx[idx] = axh * tmp_vzx;
-    f.m_vzy[idx] = ayh * tmp_vzy;
-    f.m_vzz[idx] = az * tmp_vzz;
+    if (solver.aux_x.stored(ix)) {
+        f.m_vxx[xi] = ax * tmp_vxx;
+        f.m_vyx[xi] = axh * tmp_vyx;
+        f.m_vzx[xi] = axh * tmp_vzx;
+    }
+    if (solver.aux_y.stored(iy)) {
+        f.m_vxy[yi] = ayh * tmp_vxy;
+        f.m_vyy[yi] = ay * tmp_vyy;
+        f.m_vzy[yi] = ayh * tmp_vzy;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_vxz[zi] = azh * tmp_vxz;
+        f.m_vyz[zi] = azh * tmp_vyz;
+        f.m_vzz[zi] = az * tmp_vzz;
+    }
 }
 
 
@@ -2377,15 +2557,20 @@ __global__ void elastic3d_velocity_adjoint_prepare_apm(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
-    float tmp_sxyy = f.m_sxyy[idx] + bar_dsxy_dy;
-    float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;
-    float tmp_sxyx = f.m_sxyx[idx] + bar_dsxy_dx;
-    float tmp_syyy = f.m_syyy[idx] + bar_dsyy_dy;
-    float tmp_syzz = f.m_syzz[idx] + bar_dsyz_dz;
-    float tmp_sxzx = f.m_sxzx[idx] + bar_dsxz_dx;
-    float tmp_syzy = f.m_syzy[idx] + bar_dsyz_dy;
-    float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
+    // Slab-resident memory variables: see elastic_velocity_adjoint_prepare_3d.
+    long xi = solver.aux_rd_x3(iz, iy, ix);
+    long yi = solver.aux_rd_y3(iz, iy, ix);
+    long zi = solver.aux_rd_z3(iz, iy, ix);
+
+    float tmp_sxxx = f.m_sxxx[xi] + bar_dsxx_dx;
+    float tmp_sxyy = f.m_sxyy[yi] + bar_dsxy_dy;
+    float tmp_sxzz = f.m_sxzz[zi] + bar_dsxz_dz;
+    float tmp_sxyx = f.m_sxyx[xi] + bar_dsxy_dx;
+    float tmp_syyy = f.m_syyy[yi] + bar_dsyy_dy;
+    float tmp_syzz = f.m_syzz[zi] + bar_dsyz_dz;
+    float tmp_sxzx = f.m_sxzx[xi] + bar_dsxz_dx;
+    float tmp_syzy = f.m_syzy[yi] + bar_dsyz_dy;
+    float tmp_szzz = f.m_szzz[zi] + bar_dszz_dz;
 
     pxx[b*spatial_size+idx] = bar_dsxx_dx + bxh * tmp_sxxx;
     pxy[b*spatial_size+idx] = bar_dsxy_dy + by  * tmp_sxyy;
@@ -2397,15 +2582,21 @@ __global__ void elastic3d_velocity_adjoint_prepare_apm(
     pzy[b*spatial_size+idx] = bar_dsyz_dy + by  * tmp_syzy;
     pzz[b*spatial_size+idx] = bar_dszz_dz + bzh * tmp_szzz;
 
-    f.m_sxxx[idx] = axh * tmp_sxxx;
-    f.m_sxyy[idx] = ay  * tmp_sxyy;
-    f.m_sxzz[idx] = az  * tmp_sxzz;
-    f.m_sxyx[idx] = ax  * tmp_sxyx;
-    f.m_syyy[idx] = ayh * tmp_syyy;
-    f.m_syzz[idx] = az  * tmp_syzz;
-    f.m_sxzx[idx] = ax  * tmp_sxzx;
-    f.m_syzy[idx] = ay  * tmp_syzy;
-    f.m_szzz[idx] = azh * tmp_szzz;
+    if (solver.aux_x.stored(ix)) {
+        f.m_sxxx[xi] = axh * tmp_sxxx;
+        f.m_sxyx[xi] = ax  * tmp_sxyx;
+        f.m_sxzx[xi] = ax  * tmp_sxzx;
+    }
+    if (solver.aux_y.stored(iy)) {
+        f.m_sxyy[yi] = ay  * tmp_sxyy;
+        f.m_syyy[yi] = ayh * tmp_syyy;
+        f.m_syzy[yi] = ay  * tmp_syzy;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_sxzz[zi] = az  * tmp_sxzz;
+        f.m_syzz[zi] = az  * tmp_syzz;
+        f.m_szzz[zi] = azh * tmp_szzz;
+    }
 }
 
 #define LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE_APM(order, grid, block, ...)    \

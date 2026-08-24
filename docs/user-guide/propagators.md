@@ -168,19 +168,109 @@ fail loudly at construction time rather than during a long FWI run.
 
 ## Memory-saving features
 
+The gradient-memory mode is a **three-way choice — `'full'`, `'boundary'`, or
+`'ckpt'` — identical for the eager and CUDA backends**, selected once via
+`memory=MemoryOptions(strategy=...)`.  Left unset, `impl="c"` defaults to
+`'boundary'` (GPU ring, fp32) and the eager backend to `'ckpt'`.  The modes
+are mutually exclusive: conflicting requests (e.g. the legacy `use_ckpt=True`
+together with an enabled `boundary_saving_config`) raise a `ValueError`
+instead of one path silently winning.  The legacy `use_ckpt` /
+`boundary_saving_config` knobs remain accepted and resolve into the same
+three-way choice.
+
+Three rules make that resolution predictable:
+
+* **An off-switch means `'full'`, not "the other trick".**  `use_ckpt=False`
+  (or `boundary_saving_config={'enabled': False}`) with nothing else selects
+  full-wavefield storage on both backends — the long-standing meaning of
+  `impl='c', use_ckpt=False`.  The implicit backend default applies only when
+  no gradient-memory knob is passed at all.
+* **A request is honoured, not out-voted.**
+  `boundary_saving_config={'enabled': True}` now really runs the boundary
+  backward; it used to lose silently to the `use_ckpt=True` default, so
+  scripts that thought they were measuring boundary saving were checkpointing.
+* **`memory=` may sit next to a legacy knob when they agree.**
+  `memory=MemoryOptions(strategy='boundary'), use_ckpt=False` states one
+  intent twice and is accepted; `..., use_ckpt=True` contradicts it and
+  raises.  Where both carry detail, `memory=` wins.
+
+Tail truncation has a dict spelling too — `boundary_saving_config={'enabled':
+True, 'tail_steps': K}` is equivalent to
+`BoundaryOptions(tail_steps=K)`.
+
 | Feature | Path | Configured by |
 | --- | --- | --- |
-| Eager activation checkpointing | `impl="eager"` | top-level `use_ckpt` / `ckpt_chunks` on `PropTorch` |
-| `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
-| Boundary saving (GPU / pinned CPU / disk) | `impl="c"` | `BoundaryOptions(storage="gpu" | "cpu" | "disk", ...)` |
+| Full storage (no reconstruction) | both | `MemoryOptions(strategy="full")` |
+| Boundary saving (GPU ring; + pinned CPU / disk on `impl="c"`) | both | `MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage=..., storage_dtype=..., ...))` |
 | Asynchronous disk prefetch | `impl="c"` | `BoundaryOptions(storage="disk", disk_async_read=True, ...)` |
-| Chunked checkpointing | `impl="c"` | `CkptOptions(mode="chunk", chunks=...)` |
+| Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundaryOptions(tail_steps=...)` |
+| Chunked checkpointing | both | `MemoryOptions(strategy="ckpt", ckpt=CkptOptions(mode="chunk", chunks=...))` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `CkptOptions(mode="recursive", count=...)` |
+| `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
 
 A runnable comparison of these options lives in the
 [Memory · strategies notebook](../notebooks/07_memory_strategies.ipynb), which
 exercises full-wavefield, boundary saving, and checkpointing on the same
 Marmousi shot and prints the per-mode peak GPU / host memory.
+
+### Boundary tail truncation (`BoundaryOptions.tail_steps`)
+
+For **steady-state objectives** — frequency-selection / DFT-comb FWI, where the
+loss reads only the **last** `n_probe` samples of the record and the adjoint
+source is therefore zero everywhere earlier — the reverse sweep does not need
+to walk the whole record.  `tail_steps=K` makes the forward save only the last
+`K` steps' boundary strips and stops the backward after them:
+
+```python
+memory=MemoryOptions(
+    strategy="boundary",
+    boundary=BoundaryOptions(storage="gpu", tail_steps=n_probe + margin),
+)
+```
+
+- **The forward physics is unchanged** — the wavefield still runs the full
+  record so the steady state can ring up.  Only the saved/reconstructed step
+  range shrinks, so both the backward wall time and the one-shot boundary
+  buffer drop by roughly `1 - K / nt` (measured: 74 % backward time and 75 %
+  buffer at `K/nt = 25 %`).
+- The restore at reverse step `it` consumes the strip saved at forward step
+  `it - 1`, so one saved step is spent on alignment: the **effective reverse
+  depth is `K - 1`** — budget it inside `margin`.
+- **`margin` is physical**: the dropped gradient term is exactly the
+  adjoint × ring-up-transient correlation that steady-state methods discard,
+  and it decays as the adjoint field drains through the absorbing boundary.
+  Sweep the margin once per setup: on a ramped-sine test the truncated
+  gradient converges monotonically to the full one
+  (cos 0.992 → 1.000000 for margin 0 → 800 steps on a 140×160 grid).
+- **Do not use it with impulsive-source objectives**: there the early
+  adjoint–forward correlations are real gradient content and the truncated
+  gradient is genuinely different (cos ≈ 0.1 in the same test).
+- Scope: `impl="c"` Acoustic 2-D/3-D with the boundary-saving backward, any
+  `storage`/`storage_dtype`.  Checkpointing, elastic and `rtm()` raise
+  `NotImplementedError`/`ValueError` rather than silently ignoring the
+  option.  Unset (`None`, the default) is bit-exact legacy behaviour, and
+  `tail_steps >= nt` degenerates to it bitwise.
+- **Domain decomposition composes**: `ModelParallel` inherits `tail_steps`
+  from the wrapped propagator's memory config exactly like
+  `storage`/`storage_dtype`, shrinks every tile's boundary ring to `K`
+  steps, and stops the lockstep reverse halo loop at the same global step
+  on every rank (the stop index is derived from `(nt, tail_steps)`, which
+  are identical across ranks by construction, so no rank can be left
+  waiting in an exchange).  The truncated DD gradient is bit-exact against
+  the truncated single-domain gradient on fp32 boundaries
+  (`test/test_dd_tail_two_tile.py`, `test/dd_tail_nccl_check.py`).
+
+## Environment toggles
+
+A few knobs stay out of the API because the right value depends on the
+machine, not on the problem. All are read once per run; none changes results.
+
+| Variable | Effect |
+| --- | --- |
+| `SWEEP_VRZ_GRAD_SPLIT=1` | `AcousticVRZ3D` backward: force the O(M) split gradient (materialise `c_d`/`e_d`, then one divergence) instead of the fused nested-stencil kernel that `order<=4` picks by default. The crossover is GPU-dependent — fused wins on RTX 6000 Ada, split is ~12 s/iter faster on V100 at production scale. |
+| `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
+| `SWEEP_BOUNDARY_DTYPE` | Default `storage_dtype` for the boundary ring; an explicit `BoundaryOptions(storage_dtype=...)` wins. |
+| `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
 
 ## Consistency testing
 

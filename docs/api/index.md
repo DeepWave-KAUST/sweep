@@ -138,4 +138,25 @@
   </div>
 </section>
 
+<section class="sweep-api__sec">
+  <div class="sweep-api__sec-hd">
+    <span class="sweep-api__sec-dot accent"></span>
+    <h2>Parallel</h2>
+    <span class="sweep-api__count">2 classes</span>
+  </div>
+  <p class="sweep-api__sec-lede">Split one model across GPUs — a tile per rank, a halo exchange per step. Shot-parallel DDP needs nothing from here.</p>
+  <div class="sweep-api__grid">
+    <a class="sweep-api__card" href="parallel/">
+      <div class="sweep-api__card-hd"><code>ModelParallel</code><div class="sweep-api__card-tags"><span>torch</span><span>nccl</span></div></div>
+      <p>Wraps a PropTorch; tiles, halos and gradients are automatic.</p>
+      <div class="sweep-api__card-models">helpers: <span class="sweep-api__chip accent">pad_to_mesh</span> <span class="sweep-api__chip accent">gather_record</span></div>
+    </a>
+    <a class="sweep-api__card" href="parallel/">
+      <div class="sweep-api__card-hd"><code>MeshTopology</code><div class="sweep-api__card-tags"><span>py × px</span><span>shot groups</span></div></div>
+      <p>The rank grid: tile coordinates, neighbours, shot groups.</p>
+      <div class="sweep-api__card-models">guide: <span class="sweep-api__chip accent">Domain decomposition</span></div>
+    </a>
+  </div>
+</section>
+
 </div>

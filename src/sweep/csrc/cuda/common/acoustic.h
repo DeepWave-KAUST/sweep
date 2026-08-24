@@ -84,6 +84,27 @@ struct AcousticCPMLTensor {
 };
 
 
+// Host-side: derive the per-axis CPML aux slab geometry from the bound psi
+// tensor shapes and install it on the SolverContext.  Full-length tensors
+// select the identity (legacy full-domain) layout; slab-length tensors select
+// the strip layout; anything else is a Python/C++ layout drift and throws.
+// Call after BOTH the SolverContext (incl. set_per_edge/cut_mask) and the
+// PML-carrying wavefield tensor struct exist, before any kernel launch.
+template <typename WF>
+inline void acoustic_init_aux_slabs(SolverContext& ctx, const WF& wf) {
+    long lz = -1, ly = -1, lx = -1;
+    if (wf.use_pml && wf.psix_t.defined() && wf.psix_t.numel() > 0) {
+        lx = wf.psix_t.size(-1);
+        lz = wf.psiz_t.size(2);
+        if (wf.dim == 3 && wf.psiy_t.defined() && wf.psiy_t.numel() > 0)
+            ly = wf.psiy_t.size(3);
+    }
+    TORCH_CHECK(ctx.init_aux_slabs(lz, ly, lx),
+                "CPML aux tensor axis lengths match neither the full grid nor "
+                "the strip layout: z=", lz, " y=", ly, " x=", lx,
+                " grid (", ctx.nz, ",", ctx.ny, ",", ctx.nx, ") M=", ctx.M);
+}
+
 struct AcousticWavefieldPointer {
 
     float* __restrict__ u_prev;
@@ -111,6 +132,14 @@ struct AcousticWavefieldPointer {
     float* __restrict__ zetayn = nullptr;
     float* __restrict__ zetazn = nullptr;
 
+    // Per-batch numel of one aux field of each axis family, filled by view()
+    // from the bound tensor shapes.  Equals spatial_size for full-domain
+    // (legacy) tensors, the slab numel for strip tensors — so the batch
+    // offset below is correct for both layouts without any driver flag.
+    long aux_bn_x = -1;
+    long aux_bn_y = -1;
+    long aux_bn_z = -1;
+
     __device__ AcousticWavefieldPointer offset(
         int b,
         int spatial_size
@@ -119,26 +148,29 @@ struct AcousticWavefieldPointer {
         AcousticWavefieldPointer out = *this;
 
         int shift = b * spatial_size;
+        long sx = aux_bn_x >= 0 ? (long)b * aux_bn_x : (long)shift;
+        long sy = aux_bn_y >= 0 ? (long)b * aux_bn_y : (long)shift;
+        long sz = aux_bn_z >= 0 ? (long)b * aux_bn_z : (long)shift;
 
         out.u_prev += shift;
         out.u_now  += shift;
         out.u_next += shift;
 
-        if (out.psix)  out.psix  += shift;
-        if (out.psiy)  out.psiy  += shift;
-        if (out.psiz)  out.psiz  += shift;
+        if (out.psix)  out.psix  += sx;
+        if (out.psiy)  out.psiy  += sy;
+        if (out.psiz)  out.psiz  += sz;
 
-        if (out.zetax) out.zetax += shift;
-        if (out.zetay) out.zetay += shift;
-        if (out.zetaz) out.zetaz += shift;
+        if (out.zetax) out.zetax += sx;
+        if (out.zetay) out.zetay += sy;
+        if (out.zetaz) out.zetaz += sz;
 
-        if (out.psixn) out.psixn += shift;
-        if (out.psiyn) out.psiyn += shift;
-        if (out.psizn) out.psizn += shift;
+        if (out.psixn) out.psixn += sx;
+        if (out.psiyn) out.psiyn += sy;
+        if (out.psizn) out.psizn += sz;
 
-        if (out.zetaxn) out.zetaxn += shift;
-        if (out.zetayn) out.zetayn += shift;
-        if (out.zetazn) out.zetazn += shift;
+        if (out.zetaxn) out.zetaxn += sx;
+        if (out.zetayn) out.zetayn += sy;
+        if (out.zetazn) out.zetazn += sz;
 
         return out;
     }
@@ -228,6 +260,64 @@ struct AcousticWavefieldTensor {
             }
         }
 
+        allocated = true;
+    }
+
+    // Allocate state whose aux shapes follow the Python-allocated checkpoint
+    // snapshot slots (checkpoint_tensors() order, each [n_ckpt, B, 1, ...]).
+    // Used by the recursive-checkpoint driver, which has no bound forward
+    // wavefield to copy the (possibly slab-shaped) aux layout from.
+    void allocate_from_snapshots(const torch::Tensor& vp,
+                                 const std::vector<torch::Tensor>& snaps,
+                                 int dim_)
+    {
+        if (allocated) return;
+        dim = dim_;
+        use_pml = true;
+        u_prev_t = torch::zeros_like(vp);
+        u_now_t  = torch::zeros_like(vp);
+        u_next_t = torch::zeros_like(vp);
+        auto zl = [&](const torch::Tensor& t) {
+            auto sizes = t.sizes().vec();
+            sizes.erase(sizes.begin());          // drop the n_ckpt axis
+            return torch::zeros(sizes, vp.options());
+        };
+        if (dim == 2) {
+            TORCH_CHECK(snaps.size() == 6, "acoustic 2D checkpoint set expects 6 tensors");
+            psix_t = zl(snaps[2]); psiz_t = zl(snaps[3]);
+            zetax_t = zl(snaps[4]); zetaz_t = zl(snaps[5]);
+        } else {
+            TORCH_CHECK(snaps.size() == 8, "acoustic 3D checkpoint set expects 8 tensors");
+            psix_t = zl(snaps[2]); psiy_t = zl(snaps[3]); psiz_t = zl(snaps[4]);
+            zetax_t = zl(snaps[5]); zetay_t = zl(snaps[6]); zetaz_t = zl(snaps[7]);
+        }
+        allocated = true;
+    }
+
+    // Like allocate(), but clones the aux-field SHAPES from a reference
+    // wavefield (which may carry slab-shaped CPML aux tensors).  Physical
+    // fields stay model-shaped.  Use for driver-internal scratch/segment
+    // state so it agrees with the Python-chosen aux layout.
+    void allocate_like(const torch::Tensor& vp, const AcousticWavefieldTensor& ref)
+    {
+        if (allocated) return;
+        dim = ref.dim;
+        use_pml = ref.use_pml;
+
+        u_prev_t = torch::zeros_like(vp);
+        u_now_t  = torch::zeros_like(vp);
+        u_next_t = torch::zeros_like(vp);
+
+        if (use_pml) {
+            psix_t  = torch::zeros_like(ref.psix_t);
+            psiz_t  = torch::zeros_like(ref.psiz_t);
+            zetax_t = torch::zeros_like(ref.zetax_t);
+            zetaz_t = torch::zeros_like(ref.zetaz_t);
+            if (dim == 3) {
+                psiy_t  = torch::zeros_like(ref.psiy_t);
+                zetay_t = torch::zeros_like(ref.zetay_t);
+            }
+        }
         allocated = true;
     }
 
@@ -359,6 +449,15 @@ struct AcousticWavefieldTensor {
             v.zetax = v.zetay = v.zetaz = nullptr;
             v.psixn = v.psiyn = v.psizn = nullptr;
             v.zetaxn = v.zetayn = v.zetazn = nullptr;
+        }
+
+        if (use_pml) {
+            auto bn = [](const torch::Tensor& t) -> long {
+                return t.defined() && t.numel() > 0 ? t.numel() / t.size(0) : -1;
+            };
+            v.aux_bn_x = bn(psix_t);
+            v.aux_bn_z = bn(psiz_t);
+            if (dim == 3) v.aux_bn_y = bn(psiy_t);
         }
 
         return v;

@@ -24,6 +24,34 @@ struct AProductAccessor {
     }
 };
 
+// Slab-aware variant of AProductAccessor: the tap's axis coordinate maps
+// through AuxSlab::rd(), so taps outside the stored slab read element 0 —
+// their profile weight a[...] is exactly zero there, so the value is
+// irrelevant and the FLOAT expression tree is unchanged (same contraction).
+struct AProductSlabAccessor {
+    const float* __restrict__ a;
+    const float* __restrict__ psi;
+    int a_pos;
+    long pre;    // index contribution of the non-differencing axes
+    long step;   // slab stride along the differencing axis
+    SolverContext::AuxSlab slab;
+    __device__ __forceinline__
+    float operator()(int offset) const {
+        return a[a_pos + offset] * psi[pre + (long)slab.rd(a_pos + offset) * step];
+    }
+};
+
+template<int Order>
+__device__ __forceinline__
+float fused_d_aPsi_slab(const float* __restrict__ a, const float* __restrict__ psi,
+                        int a_pos, long pre, long step,
+                        const SolverContext::AuxSlab& slab,
+                        int M, const float* __restrict__ coeff, float h)
+{
+    return centered_gradient_stencil<Order>(
+        AProductSlabAccessor{a, psi, a_pos, pre, step, slab}, M, coeff, h);
+}
+
 template<int Order>
 __device__ __forceinline__
 float fused_d_aPsi(const float* __restrict__ a, const float* __restrict__ psi,
@@ -68,18 +96,27 @@ static __global__ void acoustic2d_air_clear_kernel(
     float* __restrict__ u_this,
     SolverContext solver
 ){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    if (ix >= solver.x_end() || iz >= solver.nz) return;
     if (!solver.has_topo) return;
     if (iz >= solver.topo_rows[ix]) return;
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
     auto f = wf.offset(b, spatial_size);
     f.u_next[idx] = 0.f;
-    f.psix[idx] = 0.f; f.psiz[idx] = 0.f;
-    f.zetax[idx] = 0.f; f.zetaz[idx] = 0.f;
+    // Aux fields live in per-axis slabs; air cells outside a slab hold an
+    // implicit zero (the FD kernel never writes them), so only clear the
+    // stored part.  Full-domain (legacy) tensors report stored() everywhere.
+    if (solver.aux_x.stored(ix)) {
+        long xi = solver.aux_idx_x2(iz, ix);
+        f.psix[xi] = 0.f; f.zetax[xi] = 0.f;
+    }
+    if (solver.aux_z.stored(iz)) {
+        long zi = solver.aux_idx_z2(iz, ix);
+        f.psiz[zi] = 0.f; f.zetaz[zi] = 0.f;
+    }
     if (u_this) u_this[b * spatial_size + idx] = 0.f;
 }
 
@@ -105,11 +142,11 @@ __global__ void acoustic2nd(
     AcousticCPMLPointer cpml,
     SolverContext solver
 ){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
 
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    if (ix >= solver.x_end() || iz >= solver.nz) return;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static  = is_runtime ? 0 : (Order / 2);
@@ -149,13 +186,27 @@ __global__ void acoustic2nd(
 
     // Position-based PML / interior split. ax/bx/dbxdx coefficient arrays are
     // exactly zero outside the PML band, and the centered gradient of those
-    // arrays vanishes once the stencil clears the band (>= abcn + halo from
+    // arrays vanishes once the stencil clears the band (>= pad + halo from
     // the edge). Skipping the full PML update there is bit-equivalent and
     // avoids ~8 aux-field loads/stores per cell. The check is warp-coherent
     // (same outcome for 32 consecutive ix values), so warps diverge only at
-    // the abcn boundary.
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) || (iz >= solver.nz - solver.padHi(0) - halo);
+    // the band boundary.
+    //
+    // These are the ``phys_*()`` bounds spelled out against ``halo`` rather
+    // than ``solver.M``, so the static-M specialisation keeps folding them
+    // into compile-time constants.  A DD cut face carries only the halo strip
+    // with zero PML coefficients, so its interior must take the fast path too
+    // — otherwise the algebraically-equal zero-coefficient PML branch reorders
+    // the FMAs and seeds ulp drift.  With cut_mask == 0 every bound collapses
+    // to the per-edge ``padLo/padHi + halo`` (and, with fs_faces == -1, to the
+    // legacy ``abcn + halo`` / free-surface form), bit-for-bit.
+    int pml_x0 = solver.cut_x_lo() ? halo : solver.padLo(2) + halo;
+    int pml_x1 = solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + halo);
+    int pml_z0 = solver.cut_z_lo() ? halo : solver.padLo(0) + halo;
+    int pml_z1 = solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + halo);
+    bool in_x = (ix < pml_x0) || (ix >= pml_x1);
+    bool in_z = (iz < pml_z0) || (iz >= pml_z1);
+    bool in_pml = in_x || in_z;
 
     if (!in_pml) {
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
@@ -165,36 +216,68 @@ __global__ void acoustic2nd(
         return;
     }
 
-    float ax_ = cpml.ax[ix];
-    float az_ = cpml.az[iz];
-    float bx_ = cpml.bx[ix];
-    float bz_ = cpml.bz[iz];
-    float dbxdx_ = cpml.dbxdx[ix];
-    float dbzdz_ = cpml.dbzdz[iz];
-
     float w_sum = 0.0f;
 
-    float dudz     = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
-    float dudx     = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-    // FUSED d(a·psi) (single stencil) instead of the product-rule split
-    // a·d(psi) + d(a)·psi.  Bit-matches the eager reference grad_op(a*psi);
-    // drops d(psi) and d(a) from the live set -> fewer registers (deepwave-style).
-    float daipsiz_dz = fused_d_aPsi<Order>(cpml.az, f.psiz, iz, idx, grad_ctx.sz, halo, grad_ctx.coeff, grad_ctx.dz);
-    float daipxix_dx = fused_d_aPsi<Order>(cpml.ax, f.psix, ix, idx, grad_ctx.sx, halo, grad_ctx.coeff, grad_ctx.dx);
+    // Per-axis split of the PML update.  The legacy union gate ran BOTH
+    // axis expressions for every frame cell, so the compute band of an axis
+    // extends one halo past its coefficient band: a frame cell within halo
+    // of the band edge still picks up nonzero fused-tap terms (a·psi taps
+    // reach into the band; dbxdx has one extra cell of support).  Beyond
+    // that the axis expression collapses to the bare Laplacian term
+    // bit-for-bit and its aux fields stay untouched zeros -- which is what
+    // allows psi/zeta to live in per-axis slabs (width pad + 3*halo + 1;
+    // fused taps from compute-band cells reach at most pad + 3*halo - 1).
+    bool cx = (ix < pml_x0 + halo) || (ix >= pml_x1 - halo);
+    bool cz = (iz < pml_z0 + halo) || (iz >= pml_z1 - halo);
 
-    // X direction.  Race-free: read psix at neighbours (above), write the NEXT
+    // X direction.  Race-free: read psix at neighbours, write the NEXT
     // psix to a separate buffer (psixn) when double-buffering; fall back to
     // in-place when psixn is null (equations that have not opted in).
-    float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
-    w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[idx];
-    (f.psixn ? f.psixn : f.psix)[idx]  = bx_ * dudx + ax_ * f.psix[idx];
-    f.zetax[idx] = bx_ * tmpx + ax_ * f.zetax[idx];
+    if (cx) {
+        float ax_ = cpml.ax[ix];
+        float bx_ = cpml.bx[ix];
+        float dbxdx_ = cpml.dbxdx[ix];
+        float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
+        // rd(): on a DD cut tile the compute band reaches cut-side columns
+        // that have NO slab storage (slab width 0 on cut faces); map() would
+        // hand them a NEGATIVE offset, and the unguarded psix/zetax stores
+        // below then ALIASED into other rows' slab cells (racing their
+        // owners with +/-0 -- the coefficients are zero here) or ran off
+        // the front of the tensor.  rd() clamps the read base in-bounds
+        // (zero-weight reads, value irrelevant) and stored() skips the
+        // stores, whose written value is exactly the +/-0 they clobbered
+        // with.  Single-domain: every cx cell is stored, bit-identical.
+        long xi = solver.aux_rd_x2(iz, ix);
+        float daipxix_dx = fused_d_aPsi<Order>(cpml.ax, f.psix, ix, (int)xi, grad_ctx.sx, halo, grad_ctx.coeff, grad_ctx.dx);
+        float tmpx = ((1.0f+bx_)*lap_x + dbxdx_*dudx) + daipxix_dx;
+        w_sum += (1.0f+bx_) * tmpx + ax_ * f.zetax[xi];
+        if (solver.aux_x.stored(ix)) {
+            (f.psixn ? f.psixn : f.psix)[xi]  = bx_ * dudx + ax_ * f.psix[xi];
+            f.zetax[xi] = bx_ * tmpx + ax_ * f.zetax[xi];
+        }
+    } else {
+        w_sum += lap_x;
+    }
 
     // Z direction
-    float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
-    w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[idx];
-    (f.psizn ? f.psizn : f.psiz)[idx]  = bz_ * dudz + az_ * f.psiz[idx];
-    f.zetaz[idx] = bz_ * tmpz + az_ * f.zetaz[idx];
+    if (cz) {
+        float az_ = cpml.az[iz];
+        float bz_ = cpml.bz[iz];
+        float dbzdz_ = cpml.dbzdz[iz];
+        float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
+        // See the cx branch: rd() + stored() gate (z cuts do not exist in
+        // 2-D DD v1, but the invariant is per-axis, not per-configuration).
+        long zi = solver.aux_rd_z2(iz, ix);
+        float daipsiz_dz = fused_d_aPsi<Order>(cpml.az, f.psiz, iz, (int)zi, grad_ctx.sz, halo, grad_ctx.coeff, grad_ctx.dz);
+        float tmpz = ((1.0f+bz_)*lap_z + dbzdz_*dudz) + daipsiz_dz;
+        w_sum += (1.0f+bz_) * tmpz + az_ * f.zetaz[zi];
+        if (solver.aux_z.stored(iz)) {
+            (f.psizn ? f.psizn : f.psiz)[zi]  = bz_ * dudz + az_ * f.psiz[zi];
+            f.zetaz[zi] = bz_ * tmpz + az_ * f.zetaz[zi];
+        }
+    } else {
+        w_sum += lap_z;
+    }
 
     f.u_next[idx] =
         2.0f * f.u_now[idx] -
@@ -281,10 +364,16 @@ __global__ void acoustic2nd_adjoint_fused(
     #define GW_AT(n) ( vpb[n]*vpb[n]*dt2 * f.u_now[n] )
 
     // Interior fast-path: aux all 0, g_lx=g_lz=gw -> 2L - L_prev + Lap(gw).
+    // On a DD cut side the bound collapses from abcn + 2*halo to halo: a
+    // cut clears the global PML band, so cut-adjacent cells are genuine
+    // interior cells and must take the SAME fast path (same FP expression)
+    // as the matching single-domain cells — taps read lambda from the
+    // exchanged M-halo and vp from the tile model's halo slice.
     bool pure_interior =
-        (ix >= solver.padLo(2) + 2 * halo) && (ix < solver.nx - solver.padHi(2) - 2 * halo) &&
-        (iz >= solver.padLo(0) + 2 * halo) &&
-        (iz < solver.nz - solver.padHi(0) - 2 * halo);
+        (ix >= (solver.cut_x_lo() ? halo : solver.padLo(2) + 2 * halo)) &&
+        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + 2 * halo)) &&
+        (iz >= (solver.cut_z_lo() ? halo : solver.padLo(0) + 2 * halo)) &&
+        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + 2 * halo));
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll
@@ -377,13 +466,19 @@ __global__ void acoustic2nd_nopml(
         M = Order / 2;
     }
 
-    // Per-face boundary band: a free-surface (0-pad) face keeps only the 2*M
-    // image halo; a PML face keeps abcn+2*M+1.  Reproduces the old halo/top_halo
-    // for the legacy z-min-only free surface.
-    int bx_lo = solver.padLo(2) > 0 ? solver.padLo(2) + 2*M + 1 : 2*M;
-    int bx_hi = solver.padHi(2) > 0 ? solver.padHi(2) + 2*M + 1 : 2*M;
-    int bz_lo = solver.padLo(0) > 0 ? solver.padLo(0) + 2*M + 1 : 2*M;
-    int bz_hi = solver.padHi(0) > 0 ? solver.padHi(0) + 2*M + 1 : 2*M;
+    // Per-face boundary band, from the two independent reasons a face can be
+    // narrow:
+    //   * DD cut face -> only the stencil halo M.  The cut-adjacent cells are
+    //     computed by plain reverse leapfrog reading the per-step exchanged
+    //     M-halo of u_now (no PML there; restore skips the cut-face strip).
+    //   * free surface (0 pad) -> only the 2*M image halo.
+    //   * PML face -> pad + 2*M + 1.
+    // Cut wins; with cut_mask == 0 this is exactly the dev per-edge band, and
+    // with fs_faces == -1 on top of that, the legacy halo/top_halo.
+    int bx_lo = solver.cut_x_lo() ? M : (solver.padLo(2) > 0 ? solver.padLo(2) + 2*M + 1 : 2*M);
+    int bx_hi = solver.cut_x_hi() ? M : (solver.padHi(2) > 0 ? solver.padHi(2) + 2*M + 1 : 2*M);
+    int bz_lo = solver.cut_z_lo() ? M : (solver.padLo(0) > 0 ? solver.padLo(0) + 2*M + 1 : 2*M);
+    int bz_hi = solver.cut_z_hi() ? M : (solver.padHi(0) > 0 ? solver.padHi(0) + 2*M + 1 : 2*M);
     if (ix < bx_lo || ix >= solver.nx - bx_hi || iz < bz_lo || iz >= solver.nz - bz_hi)
         return;
 

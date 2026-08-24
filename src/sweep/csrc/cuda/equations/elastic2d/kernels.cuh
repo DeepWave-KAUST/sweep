@@ -146,9 +146,15 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     // Position-based PML / interior split. All ax/bx CPML coefficients vanish
     // outside the PML band, so the auxiliary fields m_szzz/m_sxzx/m_sxzz/m_sxxx
     // become 0 → 0 in the interior. Skip the four reads + four writes.
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
+    // Per-edge PML band, with DD cut faces switched off entirely: a cut face
+    // has zero PML coefficients, so its cells must take the fast path too
+    // (matches the backward kernels).  With cut_mask == 0 each ``!cut_*``
+    // vanishes and this is exactly the per-edge band; with fs_faces == -1 on
+    // top of that, the legacy symmetric split, bit-for-bit.
+    bool in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
+                  (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
+                  (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho * (dsxx_dx + dsxz_dz);
@@ -166,15 +172,30 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
-    dszz_dz += f.m_szzz[idx];
-    f.m_sxzx[idx] = ax * f.m_sxzx[idx] + bx * dsxz_dx;
-    dsxz_dx += f.m_sxzx[idx];
+    // Memory variables live in per-axis slabs: reads go through rd() (out of
+    // the band every coefficient is exactly zero, so the clamped read value
+    // is irrelevant), the updated value is carried in a register (the legacy
+    // __restrict__ re-read was register-forwarded anyway), and stores are
+    // gated by stored() -- outside the band they wrote exact zeros.  The
+    // float expression tree is unchanged.
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+    bool st_x = solver.aux_x.stored(ix);
+    bool st_z = solver.aux_z.stored(iz);
 
-    f.m_sxzz[idx] = az * f.m_sxzz[idx] + bz * dsxz_dz;
-    dsxz_dz += f.m_sxzz[idx];
-    f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
-    dsxx_dx += f.m_sxxx[idx];
+    float m_szzz = azh * f.m_szzz[zi] + bzh * dszz_dz;
+    if (st_z) f.m_szzz[zi] = m_szzz;
+    dszz_dz += m_szzz;
+    float m_sxzx = ax * f.m_sxzx[xi] + bx * dsxz_dx;
+    if (st_x) f.m_sxzx[xi] = m_sxzx;
+    dsxz_dx += m_sxzx;
+
+    float m_sxzz = az * f.m_sxzz[zi] + bz * dsxz_dz;
+    if (st_z) f.m_sxzz[zi] = m_sxzz;
+    dsxz_dz += m_sxzz;
+    float m_sxxx = axh * f.m_sxxx[xi] + bxh * dsxx_dx;
+    if (st_x) f.m_sxxx[xi] = m_sxxx;
+    dsxx_dx += m_sxxx;
 
     f.vx[idx] += solver.dt * inv_rho *
         (dsxx_dx + dsxz_dz);
@@ -250,8 +271,12 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
                               : (solver.padLo(2) + halo);
     int x_hi = solver.fsHi(2) ? elastic_x_right_surface_col(solver)
                               : (solver.nx - solver.padHi(2) - halo);
-    bool in_pml = (ix < x_lo) || (ix >= x_hi) ||
-                  (iz < z_lo) || (iz >= z_hi);
+    // A DD cut face carries no PML and no free surface, so it drops out of the
+    // test entirely; cut_mask == 0 leaves the per-edge bounds untouched.
+    bool in_pml = (!solver.cut_x_lo() && ix < x_lo) ||
+                  (!solver.cut_x_hi() && ix >= x_hi) ||
+                  (!solver.cut_z_lo() && iz < z_lo) ||
+                  (!solver.cut_z_hi() && iz >= z_hi);
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
@@ -275,10 +300,18 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
-    dvz_dz += f.m_vzz[idx];
-    f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
-    dvx_dx += f.m_vxx[idx];
+    // Slab-resident memory variables: see elastic_velocity_kernel.
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+    bool st_x = solver.aux_x.stored(ix);
+    bool st_z = solver.aux_z.stored(iz);
+
+    float m_vzz = az * f.m_vzz[zi] + bz * dvz_dz;
+    if (st_z) f.m_vzz[zi] = m_vzz;
+    dvz_dz += m_vzz;
+    float m_vxx = ax * f.m_vxx[xi] + bx * dvx_dx;
+    if (st_x) f.m_vxx[xi] = m_vxx;
+    dvx_dx += m_vxx;
 
     f.sxx[idx] += solver.dt *
         ((lam + 2.f*mu_) * dvx_dx +
@@ -288,10 +321,12 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
         ((lam + 2.f*mu_) * dvz_dz +
          lam * dvx_dx);
 
-    f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
-    dvx_dz += f.m_vxz[idx];
-    f.m_vzx[idx] = axh * f.m_vzx[idx] + bxh * dvz_dx;
-    dvz_dx += f.m_vzx[idx];
+    float m_vxz = azh * f.m_vxz[zi] + bzh * dvx_dz;
+    if (st_z) f.m_vxz[zi] = m_vxz;
+    dvx_dz += m_vxz;
+    float m_vzx = axh * f.m_vzx[xi] + bxh * dvz_dx;
+    if (st_x) f.m_vzx[xi] = m_vzx;
+    dvz_dx += m_vzx;
 
     f.sxz[idx] += solver.dt *
         mu_ * (dvx_dz + dvz_dx);
@@ -337,12 +372,18 @@ __global__ void elastic_velocity_kernel_nopml(
         M = Order / 2;
     }
 
+    // Per-side exclusion bands.  A face narrows to the stencil halo M for
+    // either of two independent reasons: it is a free surface (its band holds
+    // the image mirror), or it is a DD cut (no PML at a cut, the restore skips
+    // the cut-face strip, and the cut-adjacent cells are reconstructed by the
+    // plain reverse stencil reading the per-phase exchanged M-halo — see
+    // acoustic2nd_nopml).  Otherwise it keeps the full PML band + saved strip.
     int halo = solver.abcn + M+1;
 
-    int z_lo = solver.fsLo(0) ? M : halo;
-    int z_hi = solver.fsHi(0) ? M : halo;
-    int x_lo = solver.fsLo(2) ? M : halo;
-    int x_hi = solver.fsHi(2) ? M : halo;
+    int z_lo = (solver.cut_z_lo() || solver.fsLo(0)) ? M : halo;
+    int z_hi = (solver.cut_z_hi() || solver.fsHi(0)) ? M : halo;
+    int x_lo = (solver.cut_x_lo() || solver.fsLo(2)) ? M : halo;
+    int x_hi = (solver.cut_x_hi() || solver.fsHi(2)) ? M : halo;
     if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
@@ -391,12 +432,18 @@ __global__ void elastic_stress_kernel_nopml(
         M = Order / 2;
     }
 
+    // Per-side exclusion bands.  A face narrows to the stencil halo M for
+    // either of two independent reasons: it is a free surface (its band holds
+    // the image mirror), or it is a DD cut (no PML at a cut, the restore skips
+    // the cut-face strip, and the cut-adjacent cells are reconstructed by the
+    // plain reverse stencil reading the per-phase exchanged M-halo — see
+    // acoustic2nd_nopml).  Otherwise it keeps the full PML band + saved strip.
     int halo = solver.abcn + M+1;
 
-    int z_lo = solver.fsLo(0) ? M : halo;
-    int z_hi = solver.fsHi(0) ? M : halo;
-    int x_lo = solver.fsLo(2) ? M : halo;
-    int x_hi = solver.fsHi(2) ? M : halo;
+    int z_lo = (solver.cut_z_lo() || solver.fsLo(0)) ? M : halo;
+    int z_hi = (solver.cut_z_hi() || solver.fsHi(0)) ? M : halo;
+    int x_lo = (solver.cut_x_lo() || solver.fsLo(2)) ? M : halo;
+    int x_hi = (solver.cut_x_hi() || solver.fsHi(2)) ? M : halo;
     if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
@@ -587,9 +634,16 @@ __global__ void elastic_stress_adjoint_prepare(
     // q* outputs collapse to bar_dv*_d* and the four m_v* writes become
     // 0 -> 0. Skip them — saves 4 reads + 4 writes per interior cell.
     // Matches the forward elastic_stress_kernel fast-path (line 230).
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
+    // DD cut faces (solver.cut_mask) carry no PML; the matching cells of
+    // the un-split run take the interior branch, so the cut-side band must
+    // take it too (the zero-coefficient PML branch is mathematically the
+    // identity but not bitwise identical — q at cut-side halo cells feeds
+    // owned cells through the apply stencil).  cut_mask == 0 leaves the
+    // per-edge band untouched.
+    bool in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
+                  (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
+                  (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -607,20 +661,30 @@ __global__ void elastic_stress_adjoint_prepare(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
-    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
-    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz;
-    float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
+    // Slab-resident memory variables: unweighted reads go through rd() but
+    // feed only b*-weighted terms (zero outside the band); stores are gated
+    // by stored() and grouped per axis (independent arrays, same thread).
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+
+    float tmp_vxx = f.m_vxx[xi] + bar_dvx_dx;
+    float tmp_vzz = f.m_vzz[zi] + bar_dvz_dz;
+    float tmp_vxz = f.m_vxz[zi] + bar_dvx_dz;
+    float tmp_vzx = f.m_vzx[xi] + bar_dvz_dx;
 
     qxx_b[idx] = bar_dvx_dx + bx * tmp_vxx;
     qzz_b[idx] = bar_dvz_dz + bz * tmp_vzz;
     qxz_b[idx] = bar_dvx_dz + bzh * tmp_vxz;
     qzx_b[idx] = bar_dvz_dx + bxh * tmp_vzx;
 
-    f.m_vxx[idx] = ax * tmp_vxx;
-    f.m_vzz[idx] = az * tmp_vzz;
-    f.m_vxz[idx] = azh * tmp_vxz;
-    f.m_vzx[idx] = axh * tmp_vzx;
+    if (solver.aux_x.stored(ix)) {
+        f.m_vxx[xi] = ax * tmp_vxx;
+        f.m_vzx[xi] = axh * tmp_vzx;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_vzz[zi] = az * tmp_vzz;
+        f.m_vxz[zi] = azh * tmp_vxz;
+    }
 }
 
 template<int Order>
@@ -709,9 +773,11 @@ __global__ void elastic_velocity_adjoint_prepare(
     // elastic_stress_adjoint_prepare above: ax/az/bx/bz vanish outside the
     // PML band, m_s* aux fields stay 0, so the four p* outputs collapse to
     // the bar_ds*_d* values and the four m_s* writes become 0 -> 0.
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
+    // DD cut faces take the interior branch (see stress prepare above).
+    bool in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
+                  (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
+                  (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
+                  (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;
@@ -729,20 +795,28 @@ __global__ void elastic_velocity_adjoint_prepare(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
-    float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;
-    float tmp_sxzx = f.m_sxzx[idx] + bar_dsxz_dx;
-    float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
+    // Slab-resident memory variables: see elastic_stress_adjoint_prepare.
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+
+    float tmp_sxxx = f.m_sxxx[xi] + bar_dsxx_dx;
+    float tmp_sxzz = f.m_sxzz[zi] + bar_dsxz_dz;
+    float tmp_sxzx = f.m_sxzx[xi] + bar_dsxz_dx;
+    float tmp_szzz = f.m_szzz[zi] + bar_dszz_dz;
 
     pxx_b[idx] = bar_dsxx_dx + bxh * tmp_sxxx;
     pxz_b[idx] = bar_dsxz_dz + bz * tmp_sxzz;
     pzx_b[idx] = bar_dsxz_dx + bx * tmp_sxzx;
     pzz_b[idx] = bar_dszz_dz + bzh * tmp_szzz;
 
-    f.m_sxxx[idx] = axh * tmp_sxxx;
-    f.m_sxzz[idx] = az * tmp_sxzz;
-    f.m_sxzx[idx] = ax * tmp_sxzx;
-    f.m_szzz[idx] = azh * tmp_szzz;
+    if (solver.aux_x.stored(ix)) {
+        f.m_sxxx[xi] = axh * tmp_sxxx;
+        f.m_sxzx[xi] = ax * tmp_sxzx;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_sxzz[zi] = az * tmp_sxzz;
+        f.m_szzz[zi] = azh * tmp_szzz;
+    }
 }
 
 template<int Order>
@@ -1090,15 +1164,30 @@ __global__ void elastic_velocity_kernel_apm(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    f.m_szzz[idx] = azh * f.m_szzz[idx] + bzh * dszz_dz;
-    dszz_dz += f.m_szzz[idx];
-    f.m_sxzx[idx] = ax * f.m_sxzx[idx] + bx * dsxz_dx;
-    dsxz_dx += f.m_sxzx[idx];
+    // Memory variables live in per-axis slabs: reads go through rd() (out of
+    // the band every coefficient is exactly zero, so the clamped read value
+    // is irrelevant), the updated value is carried in a register (the legacy
+    // __restrict__ re-read was register-forwarded anyway), and stores are
+    // gated by stored() -- outside the band they wrote exact zeros.  The
+    // float expression tree is unchanged.
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+    bool st_x = solver.aux_x.stored(ix);
+    bool st_z = solver.aux_z.stored(iz);
 
-    f.m_sxzz[idx] = az * f.m_sxzz[idx] + bz * dsxz_dz;
-    dsxz_dz += f.m_sxzz[idx];
-    f.m_sxxx[idx] = axh * f.m_sxxx[idx] + bxh * dsxx_dx;
-    dsxx_dx += f.m_sxxx[idx];
+    float m_szzz = azh * f.m_szzz[zi] + bzh * dszz_dz;
+    if (st_z) f.m_szzz[zi] = m_szzz;
+    dszz_dz += m_szzz;
+    float m_sxzx = ax * f.m_sxzx[xi] + bx * dsxz_dx;
+    if (st_x) f.m_sxzx[xi] = m_sxzx;
+    dsxz_dx += m_sxzx;
+
+    float m_sxzz = az * f.m_sxzz[zi] + bz * dsxz_dz;
+    if (st_z) f.m_sxzz[zi] = m_sxzz;
+    dsxz_dz += m_sxzz;
+    float m_sxxx = axh * f.m_sxxx[xi] + bxh * dsxx_dx;
+    if (st_x) f.m_sxxx[xi] = m_sxxx;
+    dsxx_dx += m_sxxx;
 
     f.vx[idx] += solver.dt * inv_rho_x * (dsxx_dx + dsxz_dz);
     f.vz[idx] += solver.dt * inv_rho_z * (dsxz_dx + dszz_dz);
@@ -1186,18 +1275,28 @@ __global__ void elastic_stress_kernel_apm(
         float axh = cpml.axh[ix];
         float bxh = cpml.bxh[ix];
 
-        f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
-        dvz_dz += f.m_vzz[idx];
-        f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
-        dvx_dx += f.m_vxx[idx];
+        // Slab-resident memory variables: see elastic_velocity_kernel.
+        long xi = solver.aux_rd_x2(iz, ix);
+        long zi = solver.aux_rd_z2(iz, ix);
+        bool st_x = solver.aux_x.stored(ix);
+        bool st_z = solver.aux_z.stored(iz);
+
+        float m_vzz = az * f.m_vzz[zi] + bz * dvz_dz;
+        if (st_z) f.m_vzz[zi] = m_vzz;
+        dvz_dz += m_vzz;
+        float m_vxx = ax * f.m_vxx[xi] + bx * dvx_dx;
+        if (st_x) f.m_vxx[xi] = m_vxx;
+        dvx_dx += m_vxx;
 
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
         f.szz[idx] += solver.dt * ((lam + 2.f*mu_) * dvz_dz + lam * dvx_dx);
 
-        f.m_vxz[idx] = azh * f.m_vxz[idx] + bzh * dvx_dz;
-        dvx_dz += f.m_vxz[idx];
-        f.m_vzx[idx] = axh * f.m_vzx[idx] + bxh * dvz_dx;
-        dvz_dx += f.m_vzx[idx];
+        float m_vxz = azh * f.m_vxz[zi] + bzh * dvx_dz;
+        if (st_z) f.m_vxz[zi] = m_vxz;
+        dvx_dz += m_vxz;
+        float m_vzx = axh * f.m_vzx[xi] + bxh * dvz_dx;
+        if (st_x) f.m_vzx[xi] = m_vzx;
+        dvz_dx += m_vzx;
 
         f.sxz[idx] += solver.dt * muxz * (dvx_dz + dvz_dx);
     }
@@ -1474,20 +1573,28 @@ __global__ void elastic_stress_adjoint_prepare_apm(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float tmp_vxx = f.m_vxx[idx] + bar_dvx_dx;
-    float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
-    float tmp_vxz = f.m_vxz[idx] + bar_dvx_dz;
-    float tmp_vzx = f.m_vzx[idx] + bar_dvz_dx;
+    // Slab-resident memory variables: see elastic_stress_adjoint_prepare.
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+
+    float tmp_vxx = f.m_vxx[xi] + bar_dvx_dx;
+    float tmp_vzz = f.m_vzz[zi] + bar_dvz_dz;
+    float tmp_vxz = f.m_vxz[zi] + bar_dvx_dz;
+    float tmp_vzx = f.m_vzx[xi] + bar_dvz_dx;
 
     qxx_b[idx] = bar_dvx_dx + bx  * tmp_vxx;
     qzz_b[idx] = bar_dvz_dz + bz  * tmp_vzz;
     qxz_b[idx] = bar_dvx_dz + bzh * tmp_vxz;
     qzx_b[idx] = bar_dvz_dx + bxh * tmp_vzx;
 
-    f.m_vxx[idx] = ax  * tmp_vxx;
-    f.m_vzz[idx] = az  * tmp_vzz;
-    f.m_vxz[idx] = azh * tmp_vxz;
-    f.m_vzx[idx] = axh * tmp_vzx;
+    if (solver.aux_x.stored(ix)) {
+        f.m_vxx[xi] = ax  * tmp_vxx;
+        f.m_vzx[xi] = axh * tmp_vzx;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_vzz[zi] = az  * tmp_vzz;
+        f.m_vxz[zi] = azh * tmp_vxz;
+    }
 }
 
 template<int Order>
@@ -1560,20 +1667,28 @@ __global__ void elastic_velocity_adjoint_prepare_apm(
     float axh = cpml.axh[ix];
     float bxh = cpml.bxh[ix];
 
-    float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
-    float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;
-    float tmp_sxzx = f.m_sxzx[idx] + bar_dsxz_dx;
-    float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
+    // Slab-resident memory variables: see elastic_stress_adjoint_prepare.
+    long xi = solver.aux_rd_x2(iz, ix);
+    long zi = solver.aux_rd_z2(iz, ix);
+
+    float tmp_sxxx = f.m_sxxx[xi] + bar_dsxx_dx;
+    float tmp_sxzz = f.m_sxzz[zi] + bar_dsxz_dz;
+    float tmp_sxzx = f.m_sxzx[xi] + bar_dsxz_dx;
+    float tmp_szzz = f.m_szzz[zi] + bar_dszz_dz;
 
     pxx_b[idx] = bar_dsxx_dx + bxh * tmp_sxxx;
     pxz_b[idx] = bar_dsxz_dz + bz  * tmp_sxzz;
     pzx_b[idx] = bar_dsxz_dx + bx  * tmp_sxzx;
     pzz_b[idx] = bar_dszz_dz + bzh * tmp_szzz;
 
-    f.m_sxxx[idx] = axh * tmp_sxxx;
-    f.m_sxzz[idx] = az  * tmp_sxzz;
-    f.m_sxzx[idx] = ax  * tmp_sxzx;
-    f.m_szzz[idx] = azh * tmp_szzz;
+    if (solver.aux_x.stored(ix)) {
+        f.m_sxxx[xi] = axh * tmp_sxxx;
+        f.m_sxzx[xi] = ax  * tmp_sxzx;
+    }
+    if (solver.aux_z.stored(iz)) {
+        f.m_sxzz[zi] = az  * tmp_sxzz;
+        f.m_szzz[zi] = azh * tmp_szzz;
+    }
 }
 
 #define LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE_APM(order, grid, block, ...)       \

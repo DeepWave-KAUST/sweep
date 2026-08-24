@@ -123,6 +123,7 @@ class Warpper(torch.autograd.Function):
         boundary_on_cpu: bool=False,
         boundary_on_disk: bool=False,
         boundary_disk_async_read: bool=False,
+        boundary_tail_steps: int=0,
         forward_wavefields: tuple=(),
         adjoint_wavefields: tuple=(),
         adjoint_workspace: tuple=(),
@@ -141,6 +142,7 @@ class Warpper(torch.autograd.Function):
         topo_category_param: torch.Tensor=None,  # runtime padded APM category int32
         use_apm_param: bool=False,
         fs_faces: int=-1,   # per-edge free-surface bitmask (-1 => legacy z-min)
+        cut_face_mask: int=0,  # DD cut faces (0 => single domain)
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -184,6 +186,7 @@ class Warpper(torch.autograd.Function):
         params.checkpoints = [c.zero_() for c in checkpoint_buffers] if use_checkpoint else []
         params.transfer_interval = transfer_interval
         params.boundary_ring_buffers = boundary_ring_buffers
+        params.boundary_tail_steps = boundary_tail_steps
         params.models = [m.contiguous() for m in models]
         params.source = wavelet.contiguous()
         params.lap_coes = lap_coes.contiguous()
@@ -206,6 +209,12 @@ class Warpper(torch.autograd.Function):
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.fs_faces = fs_faces
+        # DD cut faces MUST be told to C too, not just to the Python Layout:
+        # ``Layout(cut_mask=...)`` drops a cut face's boundary buffer to numel 0
+        # (gpu_full_shapes), and only ``ctx.cut_*`` stops boundary_kernel2d from
+        # writing there. Setting one without the other writes through a null
+        # data_ptr. Both sides read the same ``PropBase._dd_cut_mask``.
+        params.cut_face_mask = cut_face_mask
         # Topography plumbing (image method) — empty tensor + has_topo=False
         # for flat. topo_rows_param is passed in via the autograd Function
         # call site (see Warpper.apply below).
@@ -256,6 +265,7 @@ class Warpper(torch.autograd.Function):
             )
             ctx.transfer_interval = transfer_interval
             ctx.boundary_ring_buffers = boundary_ring_buffers
+            ctx.boundary_tail_steps = boundary_tail_steps
             ctx.checkpoint_interval = checkpoint_interval
             ctx.checkpoint_count = checkpoint_count
             ctx.models = models
@@ -273,6 +283,7 @@ class Warpper(torch.autograd.Function):
             ctx.dt = dt
             ctx.free_surface = free_surface
             ctx.fs_faces = fs_faces
+            ctx.cut_face_mask = cut_face_mask
             # Topography (image method): preserve runtime row-index tensor so
             # the autograd backward can plumb it without referencing ``self``.
             ctx.topo_rows_param = topo_rows_param
@@ -326,12 +337,14 @@ class Warpper(torch.autograd.Function):
         nt = ctx.nt
         dt = ctx.dt
         fs_faces = getattr(ctx, "fs_faces", -1)
+        cut_face_mask = getattr(ctx, "cut_face_mask", 0)
 
         _C = _get_C()
         params = _C.BackwardInput()
         # common
         params.transfer_interval = ctx.transfer_interval
         params.boundary_ring_buffers = ctx.boundary_ring_buffers
+        params.boundary_tail_steps = ctx.boundary_tail_steps
         params.checkpoint_interval = ctx.checkpoint_interval
         params.checkpoint_count = ctx.checkpoint_count
         # Compute source/receiver illumination only if the caller requested it
@@ -381,6 +394,7 @@ class Warpper(torch.autograd.Function):
         params.spacing = ctx.spacing
         params.free_surface = ctx.free_surface
         params.fs_faces = fs_faces
+        params.cut_face_mask = cut_face_mask   # see the forward path
         # Topography plumbing (image method) — mirrors forward path.
         # ``ctx`` carries the runtime row tensor saved at forward time;
         # ``self`` doesn't exist here (Warpper.backward is a staticmethod).
@@ -550,6 +564,7 @@ class Warpper(torch.autograd.Function):
             None,      # boundary_on_cpu
             None,      # boundary_on_disk
             None,      # boundary_disk_async_read
+            None,      # boundary_tail_steps
             None,      # forward wavefields
             None,      # adjoint wavefields
             None,      # adjoint workspace
@@ -568,6 +583,7 @@ class Warpper(torch.autograd.Function):
             None,      # topo_category_param
             None,      # use_apm_param
             None,      # fs_faces
+            None,      # cut_face_mask
             *model_grads # models
         )
 
@@ -940,7 +956,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_disk_root = root
         self._boundary_disk_files = tuple(files)
 
-    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None):
+    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None, nt_saved=None):
+        # nt_saved < self.nt when boundary tail truncation is active: buffers
+        # only hold the last nt_saved steps (the C++ side indexes them in
+        # shifted saved-step coordinates).
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
@@ -975,7 +994,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_ring_buffers == ring_buffers
             and self._boundary_cache_pinned == staging_pinned
             and self._boundary_cache_disk_dir == disk_dir
-            and self._boundary_cache_nt == self.nt
+            and self._boundary_cache_nt == (self.nt if nt_saved is None else nt_saved)
             and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
         ):
             return
@@ -984,7 +1003,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         layout = Layout(
             self.shape_cuda,
             cuda_layout.resolved_boundary_save_nvar(),
-            self.nt,
+            self.nt if nt_saved is None else nt_saved,
             self.abcn,
             self.equation.so // 2,
             self.B,
@@ -993,6 +1012,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.equation.so // 2 + 1,
             tangent_pad=cuda_layout.boundary_tangent_pad,
             pad=self.pad,
+            cut_mask=getattr(self, "_dd_cut_mask", 0),
         )
 
         self.boundary_cpu_allocator = Allocator('cpu')
@@ -1128,11 +1148,56 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_cache_ring_buffers = ring_buffers
         self._boundary_cache_pinned = staging_pinned
         self._boundary_cache_disk_dir = disk_dir
-        self._boundary_cache_nt = self.nt
+        self._boundary_cache_nt = self.nt if nt_saved is None else nt_saved
         self._boundary_cache_batch = self.B
 
     def __del__(self):
         self._remove_boundary_disk_cache()
+
+    def _aux_slab_len(self, caxis):
+        """Slab length of one CPML aux axis (caxis: 0=z, 1=y, 2=x, C order).
+
+        Mirrors SolverContext::aux_slab_formula exactly: per non-cut side
+        ``pad + 3*M + 1`` (band + widest adjoint write band + stencil tap
+        reach + staggered half cell), a DD cut side carries nothing, an
+        all-cut axis keeps one dummy column for clamped reads, and when the
+        two slabs meet the axis degenerates to full coverage.  The C++ side
+        recomputes this from the same inputs and TORCH_CHECKs the bound
+        tensors, so drift between the two is loud.
+        """
+        M = self.equation.so // 2
+        dims = {0: 0, 1: 1, 2: self.ndim - 1}
+        n = self.shape_cuda[dims[caxis]]
+        pad_i = {0: 0, 1: 2, 2: (2 if self.ndim == 2 else 4)}[caxis]
+        cm = getattr(self, "_dd_cut_mask", 0) or 0
+        cut_lo, cut_hi = {0: (4, 8), 1: (16, 32), 2: (1, 2)}[caxis]
+        lo = 0 if cm & cut_lo else self.pad[pad_i] + 3 * M + 1
+        hi = 0 if cm & cut_hi else self.pad[pad_i + 1] + 3 * M + 1
+        if lo + hi == 0:
+            lo = 1
+        if lo + hi >= n:
+            return n
+        return lo + hi
+
+    def _aux_slab_shape(self, axis_char, lead):
+        """[B, 1, ...] shape of one slab-allocated aux slot (lead = [B, 1])."""
+        caxis = {"z": 0, "y": 1, "x": 2}[axis_char]
+        w = self._aux_slab_len(caxis)
+        sp = list(self.shape_cuda)
+        sp[{0: 0, 1: 1, 2: self.ndim - 1}[caxis]] = w
+        return lead + sp
+
+    def _forward_wavefield_shapes(self):
+        """Per-slot forward wavefield shapes: physical slots on the full grid,
+        CPML aux slots as per-axis slabs when the equation declares
+        ``pml_slot_axes`` (kernels adapt per bound tensor either way)."""
+        cuda_layout = self._cuda_layout()
+        base = [[self.B, 1, *self.shape_cuda]] * cuda_layout.base_nvar
+        axes = getattr(cuda_layout, "pml_slot_axes", None)
+        if not axes:
+            return base + [[self.B, 1, *self.shape_cuda]] * cuda_layout.pml_nvar
+        assert len(axes) == cuda_layout.pml_nvar, "pml_slot_axes/pml_nvar mismatch"
+        return base + [self._aux_slab_shape(a, [self.B, 1]) for a in axes]
 
     def _ensure_wavefield_buffers(self, batch_size, persist_forward_state=False, need_adjoint=True):
         # persist_forward_state: keep the forward propagation-state buffers
@@ -1164,11 +1229,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.B = target_capacity
         cuda_layout = self._cuda_layout()
         total_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
-        wavefield_shapes = total_wavefields * [[self.B, 1, *self.shape_cuda]]
+        wavefield_shapes = self._forward_wavefield_shapes()
         # The adjoint may need extra double-buffer tensors (fused single-kernel
-        # adjoint double-buffers zeta); the forward never does.
+        # adjoint double-buffers zeta); the forward never does.  Acoustic's
+        # fused adjoint stencil-taps psi/zeta, so its aux stays FULL-domain
+        # (adjoint_pml_slab=False); elastic memory variables are own-cell only
+        # and reuse the forward slab shapes.
         adjoint_wavefields_n = total_wavefields + int(getattr(cuda_layout, "adjoint_extra_nvar", 0))
-        adjoint_wavefield_shapes = adjoint_wavefields_n * [[self.B, 1, *self.shape_cuda]]
+        if getattr(cuda_layout, "adjoint_pml_slab", False):
+            extra = adjoint_wavefields_n - total_wavefields
+            adjoint_wavefield_shapes = list(wavefield_shapes) + \
+                [[self.B, 1, *self.shape_cuda]] * extra
+        else:
+            adjoint_wavefield_shapes = adjoint_wavefields_n * [[self.B, 1, *self.shape_cuda]]
         if batch_size > (current_capacity or 0):
             self.forward_allocator = Allocator(self.dev)
             self.adjoint_allocator = Allocator(self.dev)
@@ -1199,11 +1272,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         the C++ scratch it replaces, so boundary-saving backward peak memory
         is unchanged.
         """
-        cuda_layout = self._cuda_layout()
-        n_wavefields = cuda_layout.base_nvar + cuda_layout.pml_nvar
         return tuple(
-            torch.zeros([batch_size, 1, *self.shape_cuda], device=self.dev)
-            for _ in range(n_wavefields)
+            torch.zeros([batch_size, 1, *shape[2:]], device=self.dev)
+            for shape in self._forward_wavefield_shapes()
         )
 
     def _ensure_adjoint_workspace_buffers(self, batch_size):
@@ -1279,14 +1350,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         ):
             return
 
-        checkpoint_shape = [n_checkpoints, active_batch, 1, *self.shape_cuda]
         cuda_layout = self._cuda_layout()
         num_checkpoint_tensors = int(cuda_layout.resolved_checkpoint_nvar())
+        ckpt_axes = getattr(cuda_layout, "checkpoint_slot_axes", None)
+        if ckpt_axes:
+            # Per-slot shapes: physical slots on the full grid, CPML aux
+            # slots as per-axis slabs (mirrors the C++ checkpoint_tensors()
+            # slot order for this equation).
+            assert len(ckpt_axes) == num_checkpoint_tensors, \
+                "checkpoint_slot_axes/checkpoint_nvar mismatch"
+            checkpoint_shapes = [
+                [n_checkpoints, active_batch, 1, *self.shape_cuda] if a is None
+                else self._aux_slab_shape(a, [n_checkpoints, active_batch, 1])
+                for a in ckpt_axes
+            ]
+        else:
+            checkpoint_shapes = (
+                num_checkpoint_tensors
+                * [[n_checkpoints, active_batch, 1, *self.shape_cuda]]
+            )
         checkpoint_device = "cpu" if checkpoint_storage == "cpu" else self.dev
         self.checkpoint_allocator = Allocator(checkpoint_device)
         self.checkpoints = tuple(
             self.checkpoint_allocator.zeros(
-                [checkpoint_shape] * num_checkpoint_tensors,
+                checkpoint_shapes,
                 dtype=torch.float32,
                 dev=checkpoint_device,
                 pin_memory=checkpoint_pinned,
@@ -1413,6 +1500,22 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         boundary_disk_dir = boundary_cfg.get("disk_dir")
 
         self.nt = wavelet.shape[-1]
+
+        # Boundary tail truncation (steady-state / frequency-selection FWI):
+        # save + back-propagate only the last ``tail_steps`` boundary steps.
+        # See BoundaryOptions.tail_steps for the validity argument.
+        boundary_tail_steps = boundary_cfg.get("tail_steps") or 0
+        if boundary_tail_steps:
+            if not use_boundary_saving:
+                raise ValueError(
+                    "boundary_saving_config['tail_steps'] requires boundary "
+                    "saving to be enabled.")
+            if type(self.equation).__name__ not in {"Acoustic", "Acoustic3D"}:
+                raise NotImplementedError(
+                    "tail_steps is currently implemented for the Acoustic / "
+                    "Acoustic3D impl='c' backends only.")
+            boundary_tail_steps = int(boundary_tail_steps)
+        nt_saved = min(self.nt, boundary_tail_steps) if boundary_tail_steps else self.nt
         if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
         checkpoint_steps = torch.empty(0, dtype=torch.int32)
@@ -1436,8 +1539,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # Shift physical (x,[y,]z) coords into the padded runtime grid by each
         # axis' LOW-side pad + M.  Per-edge aware (free-surface faces have 0 pad,
         # so e.g. a top free surface shifts z by only M, a left free surface x by
-        # only M).  For the top-only / no-FS defaults this reproduces the old
-        # ``base_shift`` (x/y) + ``M`` (z) behaviour bit-for-bit.
+        # only M), and DD-aware for free: ``self.pad`` already carries the cut
+        # faces, so a cut face shifts by only M and coords land in the right
+        # runtime cell on a compact-padded tile.  For the top-only / no-FS
+        # single-domain defaults this reproduces the old ``base_shift`` (x/y) +
+        # ``M`` (z) behaviour bit-for-bit.
         coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
         for _i in range(self.ndim):
             sources[..., _i] += coord_offset[_i]
@@ -1509,6 +1615,21 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.adcig = None
         use_checkpoint = bool(self.use_ckpt and requires_backward)
+        if use_checkpoint and use_boundary_saving:
+            # Never silently prefer one path (ckpt historically won): the
+            # gradient-memory mode is a three-way choice.
+            raise ValueError(
+                "boundary saving and checkpointing are both enabled; the "
+                "gradient-memory mode is a three-way choice (full/boundary/"
+                "ckpt) -- pass memory=MemoryOptions(strategy=...) or disable "
+                "one of use_ckpt/boundary_saving_config.")
+        # NB: when both flags are set the Warpper picks the CHECKPOINT
+        # backward, which would silently ignore the truncation -- reject any
+        # checkpointing combination outright.
+        if boundary_tail_steps and use_checkpoint:
+            raise NotImplementedError(
+                "tail_steps requires the boundary-saving backward; pass "
+                "use_ckpt=False (or memory=MemoryOptions(strategy='boundary')).")
         if not requires_backward:
             use_boundary_saving = False
         # APM first: it is the more fundamental limitation of the two, so its
@@ -1544,7 +1665,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.checkpoint_allocator.zero_()
         if boundary_on_cpu:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -1552,7 +1673,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
         else:
             if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'))
+                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
                 for t in self.boundary_gpu_full:
                     t.zero_()
             boundary_cpu = ()
@@ -1663,6 +1784,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 boundary_on_cpu,
                 boundary_on_disk,
                 boundary_disk_async_read,
+                boundary_tail_steps,
                 forward_wavefields,
                 adjoint_wavefields,
                 adjoint_workspace,
@@ -1684,6 +1806,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 topo_cat_arg,
                 use_apm_arg,
                 self._fs_faces_c,
+                getattr(self, "_dd_cut_mask", 0),
                 *models_arg,
             )
         
@@ -1726,6 +1849,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             override=boundary_saving_config,
             use_boundary_saving=use_boundary_saving,
         )
+        if boundary_cfg.get("tail_steps"):
+            raise NotImplementedError("tail_steps is not supported in rtm().")
         use_boundary_saving = boundary_cfg["enabled"]
         boundary_storage = boundary_cfg["storage"]
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
@@ -1796,7 +1921,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         sources = sources.copy()
         receivers = receivers.copy()
-        # Per-edge coord shift (see the forward path): each axis' low-side pad + M.
+        # Per-edge (and cut-aware) coord shift, see the forward path: each axis'
+        # low-side pad + M.
         coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
         for _i in range(self.ndim):
             sources[..., _i] += coord_offset[_i]
@@ -1919,6 +2045,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.use_pinned_memory = use_pinned_memory
         fwd.free_surface = self._image_method_active
         fwd.fs_faces = self._fs_faces_c
+        fwd.cut_face_mask = getattr(self, "_dd_cut_mask", 0)
         # Topography plumbing (image method).  Empty + has_topo=False for flat.
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
@@ -1975,6 +2102,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.spacing = spacing
         bwd.free_surface = self._image_method_active
         bwd.fs_faces = self._fs_faces_c
+        bwd.cut_face_mask = getattr(self, "_dd_cut_mask", 0)
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
         if topo_rows_rt is not None:
             bwd.topo_rows = topo_rows_rt.to(torch.int32).contiguous()

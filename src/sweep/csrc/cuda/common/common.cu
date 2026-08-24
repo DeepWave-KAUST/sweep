@@ -220,7 +220,8 @@ __global__ void set_boundary_zeros(
     bool fs_top,       // per-face free-surface flags: a free-surface face is
     bool fs_bottom,    // NOT zeroed (its boundary band holds the image mirror).
     bool fs_left,
-    bool fs_right
+    bool fs_right,
+    int cut_mask       // DD cut faces keep their rim (neighbour tile data)
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -234,10 +235,12 @@ __global__ void set_boundary_zeros(
 
     int halo = width;
 
-    bool left   = ix < halo;
-    bool right  = ix >= nx - halo;
-    bool bottom = iz >= nz - halo;
-    bool top    = iz < halo;
+    // DD cut faces (cut_mask bits: 0=x_lo, 1=x_hi, 2=z_lo, 3=z_hi) keep
+    // their rim values — the neighbour tile's data lives there.
+    bool left   = (ix < halo)        && !(cut_mask & 1);
+    bool right  = (ix >= nx - halo)  && !(cut_mask & 2);
+    bool bottom = (iz >= nz - halo)  && !(cut_mask & 8);
+    bool top    = (iz < halo)        && !(cut_mask & 4);
 
     // Zero a boundary cell unless every face it belongs to is a free surface.
     bool zero = (left && !fs_left) || (right && !fs_right) ||
