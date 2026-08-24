@@ -39,7 +39,9 @@ absorbing boundaries live only on true domain edges), global→tile source
 and receiver remapping, and the per-tile boundary-saving ring. The
 gradient-memory configuration (`storage`, `storage_dtype`,
 `BoundaryOptions.tail_steps`) is inherited from the wrapped prop's memory
-config, so every rank is consistent by construction.
+config, so every rank is consistent by construction — see
+[Boundary storage under DD](#boundary-storage-under-dd) for which values the
+DD backward actually accepts.
 
 Launch with one process per GPU:
 
@@ -116,8 +118,10 @@ than an unpadded one, so compare like against like — the example scripts'
   and `ViscoAcoustic`.
 - Cuts: x strips in 2-D (`py=1`); x/y tile grids in 3-D.
 - Free surface: top face only under DD (a cut face can never carry one).
+- Boundary storage and dtype: see the table below.
 - `BoundaryOptions.tail_steps`: Acoustic 2-D/3-D (see
-  [Propagators](propagators.md#boundary-tail-truncation-boundaryoptionstail_steps)).
+  [Propagators](propagators.md#boundary-tail-truncation-boundaryoptionstail_steps));
+  it composes with cpu staging.
 - Not routed through DD: `rtm()` — use the gradient path (notebook
   [08](../notebooks/08_rtm_acoustic_marmousi.ipynb) shows how). Encoded
   supershots (a `(nsrc, nt)` wavelet) *are* supported: each tile keeps the
@@ -125,5 +129,32 @@ than an unpadded one, so compare like against like — the example scripts'
 - `SWEEP_DD_DISABLE_OVERLAP=1` forces the serial step-then-exchange path —
   the bit-exact reference for the comm/compute-overlap forward and a
   production escape hatch.
+
+## Boundary storage under DD
+
+The per-tile ring inherits `storage` / `storage_dtype` from the wrapped prop,
+but not every value is wired for the DD backward — which Python drives one
+step per kernel call, unlike the monolithic loop the staged paths were built
+for. What is refused, is refused loudly at the first backward:
+
+| `BoundaryOptions.storage` | Acoustic 2-D / 3-D | Elastic 2-D / 3-D |
+| --- | --- | --- |
+| `"gpu"` (default, gpu-direct) | yes | yes |
+| `"cpu"` (pinned-host staging) | **yes** | no — raises |
+| `"disk"` | no — raises | no — raises |
+
+`storage="cpu"` also needs a **real cut**: a single-tile `ModelParallel`
+(`world_size=1`) refuses it, because that path reaches a reconstruction
+indexing that is not exercised by any multi-tile run. Use gpu-direct there, or
+a plain `PropTorch` backward, which supports cpu and disk staging as usual.
+
+Every `storage_dtype` works with either storage. On fp32 and bf16 the
+cpu-staged gradient is **bit-identical** to the gpu-direct one; fp16 and int8
+differ only within their own run-to-run quantisation floor, i.e. by no more
+than two runs of the *same* configuration differ from each other
+(`test/dd_offload_check.py` checks exactly that, on both counts).
+
+Staging trades PCIe traffic for GPU memory and the copies are synchronous, so
+it is the escape hatch for a tile whose ring does not fit, not a default.
 
 API details: [sweep.parallel reference](../api/parallel.md).
