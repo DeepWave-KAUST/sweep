@@ -18,6 +18,13 @@ convenience namespace.
 
 from __future__ import annotations
 
+try:  # distribution name differs from the import name (`sweep`)
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("sweep-solver")
+except (ImportError, PackageNotFoundError):  # a source tree with nothing installed
+    __version__ = "unknown"
+
 import sys
 from importlib import import_module
 from importlib.abc import MetaPathFinder

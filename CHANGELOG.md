@@ -9,6 +9,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
 ### Added
 - **Domain decomposition (`sweep.parallel`).**  `ModelParallel` splits one
   model into tiles — one GPU per tile — and exchanges a halo every time step,
@@ -127,4 +129,5 @@ see the
 [GitHub commit history](https://github.com/DeepWave-KAUST/sweep/commits/dev)
 for changes prior to this entry.
 
-[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/main...dev
+[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.2.0...dev
+[0.2.0]: https://github.com/DeepWave-KAUST/sweep/compare/v0.1.0...v0.2.0
