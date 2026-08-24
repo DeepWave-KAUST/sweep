@@ -154,7 +154,16 @@ differ only within their own run-to-run quantisation floor, i.e. by no more
 than two runs of the *same* configuration differ from each other
 (`test/dd_offload_check.py` checks exactly that, on both counts).
 
-Staging trades PCIe traffic for GPU memory and the copies are synchronous, so
-it is the escape hatch for a tile whose ring does not fit, not a default.
+Staging trades PCIe traffic for GPU memory, and under DD it does so without
+the overlap the monolithic backward gets. The boundary runtime does own the
+machinery — a copy stream beside the compute stream, events either way, ring
+slots, and a prefetch of the next chunk issued while the current one is still
+being consumed — but it is constructed **per kernel call**, and the DD backward
+is driven one step per call from Python. Each call therefore builds a runtime,
+waits for its own copy, and destroys it, so a prefetch never survives to the
+step it was meant for. That is a lifetime problem, not a design limit: a
+runtime handle persisted across the reverse loop would restore the overlap.
+Until then, treat cpu staging as the escape hatch for a tile whose ring does
+not fit, not as a default.
 
 API details: [sweep.parallel reference](../api/parallel.md).
