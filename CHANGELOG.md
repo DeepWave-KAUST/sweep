@@ -21,6 +21,15 @@ and this project adheres to
   `Elastic` (2-D), `Elastic3D`; anything without stepped kernels is refused at
   construction.  See the [Domain decomposition](docs/user-guide/parallel.md)
   guide and notebooks 25 / 26.
+- **CPU-staged boundary storage under domain decomposition.**
+  `BoundaryOptions(storage="cpu")` now works for the Acoustic 2-D/3-D DD
+  backward, so a tile whose boundary ring does not fit in GPU memory has a
+  fallback instead of a hard stop.  The gradient is **bit-identical** to
+  gpu-direct on fp32 and bf16, and within each dtype's own run-to-run floor on
+  fp16/int8; it composes with `tail_steps`.  `storage="disk"` under DD, and
+  cpu staging on a single-tile mesh, are still refused — by name, at the first
+  backward.  Elastic DD remains gpu-direct only.  See
+  [Domain decomposition](docs/user-guide/parallel.md#boundary-storage-under-dd).
 - **`BoundaryOptions.tail_steps`** (dict spelling:
   `boundary_saving_config={'tail_steps': K}`): keep only the last `K` steps of
   the boundary ring and stop the reverse loop there.  For steady-state
