@@ -422,14 +422,24 @@ def test_dd_backward_guards():
     with pytest.raises(RuntimeError, match="bits 0..3"):
         func(bp)
 
-    # cut_face_mask requires gpu-direct boundary storage (v1)
+    # cut_face_mask now accepts gpu-direct AND cpu-staged boundary storage;
+    # only disk is still refused.  The bitwise cpu-vs-gpu equivalence lives in
+    # test/dd_offload_check.py (it needs real ranks); what belongs here is that
+    # the STORAGE guard no longer rejects cpu.  This harness only builds a
+    # gpu-direct ring, so the cpu call still fails -- on the staged-buffer
+    # count, which is a different, legitimate complaint.
     bp.cut_face_mask = X_HI_BIT
     bp.boundary_on_cpu = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    try:
         func(bp)
+    except RuntimeError as exc:
+        assert "boundary storage only" not in str(exc), (
+            "cpu staging must not be rejected by the DD storage guard: " + str(exc))
     bp.boundary_on_cpu = False
+
+    # disk staging is still unsupported under DD, and has to say which knob
     bp.boundary_on_disk = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    with pytest.raises(RuntimeError, match="boundary_on_disk unsupported"):
         func(bp)
     bp.boundary_on_disk = False
     bp.cut_face_mask = 0

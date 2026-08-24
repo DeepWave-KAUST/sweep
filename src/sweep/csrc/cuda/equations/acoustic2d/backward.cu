@@ -84,10 +84,14 @@ void check_stepped_backward_2d(const BackwardInput& p, bool need_recon)
                 "domain-decomposed backward (cut_face_mask) is boundary-saving "
                 "only; the full-storage path does not support DD (use backward_bs)");
     if (need_recon && p.cut_face_mask != 0) {
-        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
+        // DD supports gpu-direct AND cpu-staged boundary storage: the
+        // per-step DD backward re-primes the ring for its own step (see
+        // prefetch_initial_backward_chunk's it_hi), so staging works under the
+        // Python-driven loop.  disk staging is still unsupported for DD.
+        TORCH_CHECK(!p.boundary_on_disk,
                     "domain-decomposed backward_bs (cut_face_mask) supports "
-                    "gpu-direct boundary storage only "
-                    "(boundary_on_cpu/boundary_on_disk unsupported in v1)");
+                    "gpu-direct or cpu boundary storage only "
+                    "(boundary_on_disk unsupported in v1)");
     }
     if (!p.bw_stepped())
         return;
@@ -104,9 +108,19 @@ void check_stepped_backward_2d(const BackwardInput& p, bool need_recon)
         TORCH_CHECK(p.forward_wavefields.size() == 3,
                     "stepped backward_bs requires the 3-tensor reconstruction "
                     "wavefield list bound from Python");
-        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
-                    "stepped backward_bs supports gpu-direct boundary storage only "
-                    "(boundary_on_cpu/boundary_on_disk unsupported in v1)");
+        TORCH_CHECK(!p.boundary_on_disk,
+                    "stepped backward_bs supports gpu-direct or cpu boundary "
+                    "storage only (boundary_on_disk unsupported in v1)");
+        // cpu staging is wired for the real DD backward only.  The single-tile
+        // stepped path (cut_face_mask == 0, i.e. ModelParallel with one tile)
+        // reaches an untested reconstruction indexing that segfaulted at larger
+        // nt in the MVP; keep it refused rather than silently wrong.  Use
+        // gpu-direct, or a plain monolithic PropTorch backward, for
+        // single-domain cpu boundary saving.
+        TORCH_CHECK(p.cut_face_mask != 0 || !p.boundary_on_cpu,
+                    "stepped backward_bs cpu boundary staging requires a DD cut "
+                    "mask (cut_face_mask != 0); single-tile cpu staging is "
+                    "unsupported here (use gpu-direct or a monolithic backward)");
     }
 }
 
@@ -559,7 +573,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // [bs_it0, nt-1] and slot -1 does not exist.  One saved step is spent
     // on this alignment -- the usable reverse depth is tail_steps - 1.
     const int bs_stop = bs_it0 > 0 ? bs_it0 + 1 : 0;
-    boundary_runtime.prefetch_initial_backward_chunk((int)p.nt - bs_it0);
+    boundary_runtime.prefetch_initial_backward_chunk((int)p.nt - bs_it0,
+                                                 it_hi - bs_it0);
 
     // Main loop covers [max(it_lo,1,bs_it0), it_hi); the it==0 adjoint-only
     // tail below runs only in the segment whose bw_it_end == 0.

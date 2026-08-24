@@ -754,12 +754,24 @@ public:
             flush_forward_if_needed(chunk);
     }
 
-    inline void prefetch_initial_backward_chunk(int nt)
+    // ``nt_saved`` is the ring length in SAVED-step coordinates (nt - bs_it0
+    // under boundary tail truncation, nt otherwise); ``it_hi_saved`` is this
+    // backward call's segment top in the same coordinates.  The first step the
+    // call processes is it_hi_saved-1, whose chunk has to be in the ring before
+    // the first restore.
+    //
+    // The monolithic backward runs the whole reverse loop in one C++ call, so
+    // it_hi_saved == nt_saved and the default reproduces the old nt_saved-1
+    // exactly.  The DD backward is driven one step per call from Python
+    // (SteppedBackwardRunner.run_segment(it+1, it)), so each call must prime
+    // the ring for ITS step -- that is what makes cpu staging work under the
+    // per-step loop instead of prefetching the tail chunk every time.
+    inline void prefetch_initial_backward_chunk(int nt, int it_hi = -1)
     {
         if (!enabled_ || !staged_)
             return;
 
-        int it0 = nt - 1;
+        int it0 = (it_hi >= 0 ? it_hi : nt) - 1;
         int buf_idx0 = (it0 - 1) % transfer_interval_;
         int chunk_start = it0 - buf_idx0 - 1;
         int chunk_len = buf_idx0 + 1;

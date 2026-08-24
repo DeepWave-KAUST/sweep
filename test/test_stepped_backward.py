@@ -321,14 +321,17 @@ def test_stepped_backward_guards():
     with pytest.raises(RuntimeError, match="3-tensor reconstruction"):
         func(p)
 
-    # stepped + staged (cpu/disk) boundary storage is v1-unsupported
+    # Staged boundary storage on the SINGLE-TILE stepped path stays refused.
+    # cpu staging is wired for the DD backward only (cut_face_mask != 0, see
+    # test/dd_offload_check.py); disk staging is unsupported everywhere.  Both
+    # still raise here -- only the wording moved with the DD support.
     p.forward_wavefields = recon
     p.boundary_on_cpu = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    with pytest.raises(RuntimeError, match="requires a DD cut mask"):
         func(p)
     p.boundary_on_cpu = False
     p.boundary_on_disk = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    with pytest.raises(RuntimeError, match="boundary_on_disk unsupported"):
         func(p)
     p.boundary_on_disk = False
 
