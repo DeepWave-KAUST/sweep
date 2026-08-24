@@ -219,6 +219,31 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/24_wavefield_per_edge_free_surface.ipynb)
 
+-   ![Domain decomposition](../figures/gallery/25_domain_decomposition.png){ loading=lazy }
+
+    **HPC · Domain decomposition**
+
+    ---
+
+    One model, several GPUs: `ModelParallel` slices it into tiles and exchanges
+    a halo every step, so a single shot is solved cooperatively rather than
+    replicated. Gradients are bit-identical to the single-domain run — the
+    notebook checks that, tile by tile.
+
+    [:material-notebook-outline: Open notebook](../notebooks/25_domain_decomposition.ipynb)
+
+-   ![DD on Overthrust 3-D](../figures/gallery/26_dd_overthrust_3d.png){ loading=lazy }
+
+    **HPC · DD on Overthrust 3-D**
+
+    ---
+
+    The same split on a real 3-D benchmark, 2 × 2 tiles across four GPUs. The
+    gradient is sliced three ways straight across the cut planes, where a halo
+    bug would show as a stripe — and compared against the single-GPU answer.
+
+    [:material-notebook-outline: Open notebook](../notebooks/26_dd_overthrust_3d.ipynb)
+
 -   ![ADCIG](../figures/gallery/16_adcig.png){ loading=lazy }
 
     **ADCIG · Poynting (custom backward)**
@@ -326,6 +351,12 @@ multi-GPU FWI — see:
 - [**Multi-GPU DDP** (`fwi_marmousi_dist.py`)](multi_gpu_dist.md) — Torch
   `torchrun` driver that scales one-shot-per-rank across multiple GPUs and
   syncs gradients with `torch.distributed`.
+
+- [**Model-parallel FWI** (`dd_fwi_marmousi_2d.py`, `dd_fwi_marmousi_elastic_2d.py`,
+  `dd_fwi_overthrust_update.py`)](../user-guide/parallel.md) — the other axis:
+  one model split across GPUs instead of one shot per GPU. Acoustic and elastic
+  2-D on Marmousi, plus a 3-D Overthrust model update; each script has a
+  `--check` mode that runs the same problem undivided and compares.
 
 Browse [`examples/`](https://github.com/DeepWave-KAUST/sweep/tree/dev/examples)
 on GitHub for the full collection of runnable scripts.
