@@ -275,11 +275,36 @@ def test_two_tile_elastic_bitexact(src_gx, free_surface):
 
     # final state over each tile's physical region — every wavefield slot
     # (5 physical + 10 CPML memories) must be bitwise identical.
+    #
+    # How a slot is INDEXED depends on what it is. The 5 physical slots are
+    # full-grid, so a physical-grid x range picks the tile's own columns. Since
+    # `5ea32fa` a CPML memory instead lives in a slab holding only the PML
+    # band(s) of ONE axis — the axis named by the last letter of its elastic.h
+    # symbol, so m_vxx/m_vxz/m_vzx/m_vzz/... run x, z, x, z ... in slot order:
+    #
+    #   z-slab: still spans x in full -> slice it exactly like a physical field.
+    #   x-slab: laid out [low band | high band]. The single domain carries both;
+    #           tile 0 keeps only the low band and tile 1 only the high one,
+    #           because a CUT face carries no PML. So the tile's WHOLE slab maps
+    #           onto that end of the single domain's — comparing it against a
+    #           physical-grid x range compares unrelated cells.
+    CPML_AXIS = ("x", "z")            # slot NPHYS+k has axis CPML_AXIS[k % 2]
     for xi, r in enumerate(runners):
         lo_x = los[xi]
         for f in range(NWF):
-            ref = runner_full.L[f][..., PAD + xi * nxp: PAD + xi * nxp + nxp]
-            got = r.L[f][..., lo_x:lo_x + nxp]
+            if f >= NPHYS and CPML_AXIS[(f - NPHYS) % len(CPML_AXIS)] == "x":
+                w = r.L[f].shape[-1]                       # this tile's single band
+                full_w = runner_full.L[f].shape[-1]
+                got = r.L[f]
+                ref = (runner_full.L[f][..., :w] if xi == 0
+                       else runner_full.L[f][..., full_w - w:])
+            else:
+                got = r.L[f][..., lo_x:lo_x + nxp]
+                ref = runner_full.L[f][..., PAD + xi * nxp: PAD + xi * nxp + nxp]
+            assert got.shape == ref.shape, (
+                f"tile {xi} slot {f}: mapped shapes disagree, "
+                f"{tuple(got.shape)} vs {tuple(ref.shape)} — the aux layout changed"
+            )
             assert torch.equal(got, ref), (
                 f"tile {xi} wavefield slot {f} differs over physical region"
             )
