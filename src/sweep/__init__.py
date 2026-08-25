@@ -28,6 +28,7 @@ except (ImportError, PackageNotFoundError):  # a source tree with nothing instal
 import sys
 from importlib import import_module
 from importlib.abc import MetaPathFinder
+from importlib.machinery import EXTENSION_SUFFIXES
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -87,12 +88,42 @@ def _extend_package_path_with_build_outputs() -> None:
 _extend_package_path_with_build_outputs()
 
 
+def _is_extension_origin(origin: str | None) -> bool:
+    """True when a module spec's origin is a compiled extension rather than a
+    ``.py`` file — i.e. ``sweep._C`` is a real binary, not the JIT shim."""
+    return bool(origin) and origin.endswith(tuple(EXTENSION_SUFFIXES))
+
+
+def _prebuilt_binding_present() -> bool:
+    """True when a compiled ``sweep._C`` extension already exists on disk.
+
+    Two ways to get one: a wheel built with ``SWEEP_BUILD_CUDA=1``, or
+    ``setup.py build_ext --inplace`` (whose output `_extend_package_path_with_
+    build_outputs` above already puts on ``sweep.__path__``). Either way the
+    kernels are compiled, so no CUDA toolkit is needed at run time.
+
+    Resolves the spec without importing, so this never compiles anything.
+    """
+    try:
+        spec = find_spec("sweep._C")
+    except Exception:
+        return False
+    return spec is not None and _is_extension_origin(spec.origin)
+
+
 def is_torch_binding_available() -> bool:
-    """Return True when PyTorch + a CUDA GPU + nvcc are present, so ``sweep._C``
+    """Return True when ``sweep._C`` can be used for ``impl='c'`` — either it is
+    already compiled on disk, or PyTorch + a CUDA GPU + nvcc are present so it
     can be JIT-compiled against your torch on first use. Does NOT trigger the
     compile itself (see ``sweep._jit``)."""
     if find_spec("torch") is None:
         return False
+    # A pre-built extension answers this on its own: the kernels exist, and
+    # asking `can_build()` would demand an nvcc the run does not need. Checking
+    # this first is what keeps a `SWEEP_BUILD_CUDA=1` install from silently
+    # falling back to eager on a node with no CUDA toolkit loaded.
+    if _prebuilt_binding_present():
+        return True
     try:
         from sweep import _jit
         return _jit.can_build()[0]
