@@ -132,8 +132,9 @@ From Python, the simplest one-liner is:
 ```python
 import sweep
 
-# True when PyTorch + a CUDA GPU + nvcc are present, so sweep._C can be
-# JIT-compiled on first use (this check itself does NOT trigger the compile).
+# True when sweep._C is already compiled on disk, OR PyTorch + a CUDA GPU +
+# nvcc are present so it can be JIT-compiled on first use (this check itself
+# does NOT trigger the compile).
 print(sweep.is_torch_binding_available())
 ```
 
@@ -144,9 +145,9 @@ import sweep
 
 print(sweep.backend.torch.is_available())            # PyTorch importable
 print(sweep.backend.torch.cuda.is_available())       # PyTorch sees a CUDA device
-print(sweep.backend.torch.binding.is_available())    # backend usable (torch + GPU + nvcc>=12.4)
-print(sweep.backend.torch.binding.is_compiled())     # backend already built (compiled/cached)
-print(sweep.backend.torch.binding.diagnostics())     # {'usable', 'reason', 'cuda_home', 'already_compiled'}
+print(sweep.backend.torch.binding.is_available())    # backend usable (pre-built, or torch + GPU + nvcc>=12.4)
+print(sweep.backend.torch.binding.is_compiled())     # backend already built (pre-built/compiled/cached)
+print(sweep.backend.torch.binding.diagnostics())     # {'usable', 'reason', 'cuda_home', 'already_compiled', 'prebuilt'}
 print(sweep.backend.jax.is_available())              # JAX importable
 ```
 
