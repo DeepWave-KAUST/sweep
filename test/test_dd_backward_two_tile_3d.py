@@ -242,7 +242,8 @@ def test_dd_backward_two_tile_3d_bitexact():
     # reference boundary ring and fills ref.record (record_out is bound
     # only after the public run). Public run and replay are bit-identical
     # now that internal allocation opts into the psi double-buffer (see
-    # _dd_cuda/REPORT.md "public-vs-replay quirk").
+    # the "public-vs-replay quirk" section of _dd_cuda/REPORT.md, which is
+    # scaffolding no longer checked out -- read it at commit c122dc17).
     rr = ref.fwd_runner()
     with torch.no_grad():
         rr.run_to(NT)
