@@ -49,6 +49,23 @@ Launch with one process per GPU:
 torchrun --standalone --nproc-per-node=4 your_script.py
 ```
 
+`--standalone` means *this machine only*. To spread the same tiles over several
+machines, drop it and give the ranks a meeting point instead — every node then
+runs an identical command and negotiates its own numbering:
+
+```bash
+torchrun --nnodes=3 --nproc-per-node=4 \
+  --rdzv-backend=c10d --rdzv-endpoint=<first-node>:29500 --rdzv-id=dd1 \
+  your_script.py                      # py * px must now be 3 * 4 = 12
+```
+
+Nothing in your script changes: `ModelParallel` never picks a device and NCCL
+does not care whether a tile's neighbour is on this machine or the next one.
+The cross-node gradient is bit-identical to the single-domain one, same as
+within a node. A ready SLURM batch script and the pitfalls (one task per *node*,
+not per GPU; ask for partial nodes) are in
+[`examples/multi-gpu/torch/README.md`](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/multi-gpu/torch/README.md#across-nodes).
+
 ## Forward and gradients — plain autograd
 
 The forward returns this rank's differentiable tile record; `backward()`
