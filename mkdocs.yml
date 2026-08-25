@@ -129,6 +129,7 @@ nav:
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
               - Custom gradient: notebooks/14_custom_gradient.ipynb
+              - Reflection FWI · RWI gradient: notebooks/27_rwi_acoustic_vs_lsrtm_gradient.ipynb
               - ADCIG · Poynting (custom backward): notebooks/16_adcig.ipynb
               - ADCIG · space-lag (2D & 3D): notebooks/22_adcig_space_lag.ipynb
           - HPC:

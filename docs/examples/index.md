@@ -194,6 +194,19 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/14_custom_gradient.ipynb)
 
+-   ![RWI velocity gradient](../figures/gallery/27_rwi_acoustic_vs_lsrtm_gradient.png){ loading=lazy }
+
+    **Reflection FWI · where the velocity gradient comes from**
+
+    ---
+
+    The RWI velocity gradient splits into a transmission half and a reflection
+    half, and the two come from different equations: `Acoustic` gives term I,
+    `AcousticLSRTM` gives II+III+IV. One loss with a separate `vp` leaf per
+    solver separates them under the same residual.
+
+    [:material-notebook-outline: Open notebook](../notebooks/27_rwi_acoustic_vs_lsrtm_gradient.ipynb)
+
 -   ![Wavefield Topography](../figures/gallery/15_wavefield_topography.png){ loading=lazy }
 
     **Wavefield · irregular topography**
