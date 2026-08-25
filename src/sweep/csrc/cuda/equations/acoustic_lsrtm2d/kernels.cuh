@@ -197,6 +197,53 @@ static __global__ void compute_v2_lambda_lsrtm2d(
     v2_lambda[idx] = v * v * lambda[idx];
 }
 
+// Combined input for the background adjoint (lambda_bg) step:
+//   v2_lambda_bg = vp^2*lambda_bg + mp*vp^2*lambda_sc
+// The second term is the transpose of the forward scattered source
+// (sc_next += dt^2 mp vp^2 Lap(bg)), which couples the scattered adjoint back into
+// the background adjoint (paper term IV).  Running the shared lsrtm adjoint
+// (L* = lap(.)) on lambda_bg with THIS input does self-propagation + coupling
+// injection in one interior pass.
+static __global__ void compute_v2_lambda_bg_lsrtm2d(
+    const float* __restrict__ vp,
+    const float* __restrict__ mp,
+    const float* __restrict__ lam_bg,
+    const float* __restrict__ lam_sc,
+    float* __restrict__ v2_lambda_bg,
+    int nx, int nz, int B
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= nx || iz >= nz || b >= B) return;
+    int sp = nx * nz; int idx = b * sp + iz * nx + ix;
+    float v2 = vp[idx] * vp[idx];
+    v2_lambda_bg[idx] = v2 * lam_bg[idx] + mp[idx] * v2 * lam_sc[idx];
+}
+
+// Tomographic vp gradient (Wu & Alkhalifah 2015, eq. 15-17), written PER TERM so the
+// caller can weight the singular image-point term III separately (paper eq. 18-20:
+//   min_beta ||beta*III + I+II+IV||_s ).  grad_ii_iv accumulates the smooth wavepath
+// (II from scattered propagation + IV from the background-adjoint coupling); grad_iii
+// accumulates the singular reflectivity term.  If grad_iii is null both go into
+// grad_ii_iv (i.e. the plain summed gradient II+III+IV).
+//   II  = (2 dt^2/vp) * sc_utt * lambda_sc
+//   III = (2 dt^2/vp) * mp * bg_utt * lambda_sc
+//   IV  = (2 dt^2/vp) * bg_utt * lambda_bg
+__global__ void calculate_grad_lsrtm_vp(
+    const float* __restrict__ bg_utt,
+    const float* __restrict__ sc_utt,
+    const float* __restrict__ lam_bg,
+    const float* __restrict__ lam_sc,
+    const float* __restrict__ mp,
+    const float* __restrict__ vp,
+    float* __restrict__ grad_ii_iv,
+    float* __restrict__ grad_iii,
+    int nx,
+    int nz,
+    float dt
+);
+
 // Proper adjoint (transpose) of the lsrtm scattered-field propagation:
 //   lambda_next = 2 lambda_now - lambda_pre + dt^2 * lap(v^2 * lambda_now)
 // in the non-PML interior -- the transpose of the forward  v^2 * lap(lambda)
@@ -258,6 +305,7 @@ __global__ void acoustic_lsrtm2nd(
     AcousticWavefieldPointer sc,
     bool save_all_wavefields,
     float* __restrict__ bg_utt,
+    float* __restrict__ sc_utt,
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     LaplaceParam lap_ctx,
@@ -286,6 +334,7 @@ __global__ void acoustic_lsrtm2nd(
     auto bg_f = bg.offset(b, spatial_size);
     auto sc_f = sc.offset(b, spatial_size);
     float* bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
+    float* sc_utt_b = sc_utt ? sc_utt + b * spatial_size : nullptr;
     const float* vp_b = vp + b * spatial_size;
     const float* mp_b = mp + b * spatial_size;
 
@@ -301,6 +350,8 @@ __global__ void acoustic_lsrtm2nd(
 
     if (save_all_wavefields && bg_utt_b != nullptr)
         bg_utt_b[idx] = bg_utt_val;
+    if (save_all_wavefields && sc_utt_b != nullptr)
+        sc_utt_b[idx] = sc_utt_val;
 }
 
 __global__ void calculate_grad_lsrtm_mp(

@@ -7,6 +7,21 @@ import torch.nn.functional as F
 
 import numpy as np
 from sweep.memory.torch import Allocator
+
+# RWI: last term-III vp gradient produced by the acoustic_lsrtm c backward when
+# SWEEP_LSRTM_SPLIT_III=1 (runtime-padded grid).  See last_grad_split_iii().
+_LAST_GRAD_SPLIT_III = None
+
+
+def last_grad_split_iii():
+    """Term III (singular image-point) of the LSRTM tomographic vp gradient.
+
+    Only populated when SWEEP_LSRTM_SPLIT_III=1; in that mode ``vp.grad`` holds II+IV,
+    so the paper's weighted gradient is ``vp.grad + beta * last_grad_split_iii()``
+    (Wu & Alkhalifah 2015, eq. 18-20).  Returns the runtime-padded tensor, or None.
+    """
+    return _LAST_GRAD_SPLIT_III
+
 from sweep.memory.shape import Layout
 from sweep.propagator.base import PropBase
 from sweep.equations._edges import is_top_only_or_none
@@ -528,6 +543,16 @@ class Warpper(torch.autograd.Function):
         if len(returned_grads) == len(ctx.models) + 1:
             wavelet_grad = returned_grads[0]
             model_grads = returned_grads[1:]
+
+        # RWI (acoustic_lsrtm, SWEEP_LSRTM_SPLIT_III=1): term III of the tomographic vp
+        # gradient, returned separately so the caller can apply the paper's beta weight
+        # (grad_v = II+IV + beta*III).  model_grads[0] then holds II+IV only.  It is on the
+        # runtime-padded grid like the raw model grads; the caller reads it via
+        # ``sweep.propagator.last_grad_split_iii()``.
+        if len(gradients) >= 6:
+            split_iii = gradients[5]
+            if isinstance(split_iii, torch.Tensor) and split_iii.numel() > 0:
+                globals()["_LAST_GRAD_SPLIT_III"] = split_iii.detach().clone()
 
         del ctx.backward_func, ctx.backward_bs_func, ctx.backward_ckpt_func, ctx.backward_recursive_ckpt_func
         del ctx.pml_vals, ctx.forward_source

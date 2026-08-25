@@ -28,7 +28,8 @@ auto wrap_backward(Func f)
             out.grads,
             out.source_illumination,
             out.receiver_illumination,
-            out.adcig
+            out.adcig,
+            out.grad_split_iii   // RWI term III (acoustic_lsrtm, SWEEP_LSRTM_SPLIT_III=1); else undefined
         );
     };
 }

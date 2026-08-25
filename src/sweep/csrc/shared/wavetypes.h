@@ -136,6 +136,12 @@ struct BackwardOutput {
     // condition).  Shape (nlag, N, C, nz, nx[, ny]) on the runtime-padded grid;
     // undefined unless compute_adcig was requested.  See BackwardInput below.
     torch::Tensor adcig;
+
+    // RWI (acoustic_lsrtm only): the singular image-point term III of the tomographic
+    // vp gradient, split out so the caller can weight it (Wu & Alkhalifah 2015, eq. 18-20:
+    // grad_v = II+IV + beta*III).  When defined, grads[1] holds II+IV only.
+    // Undefined unless SWEEP_LSRTM_SPLIT_III=1.
+    torch::Tensor grad_split_iii;
 };
 
 struct RTMOutput {

@@ -80,9 +80,11 @@ ForwardOutput forward(const ForwardInput& in) {
 
     auto record = torch::zeros({N, nrec, p.nt}, vp.options());
 
+    // stacked [bg_utt, sc_utt] per step: sc_utt is needed for the tomographic vp gradient
+    // (paper term II); index 0 = background, index 1 = scattered.
     torch::Tensor bg_utt_all;
     if (p.save_all_wavefields)
-        bg_utt_all = torch::zeros({p.nt, B, nz, nx}, vp.options());
+        bg_utt_all = torch::zeros({p.nt, 2, B, nz, nx}, vp.options());
 
     if (p.use_checkpoint)
         TORCH_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D checkpointing expects 6 checkpoint tensors.");
@@ -96,12 +98,12 @@ ForwardOutput forward(const ForwardInput& in) {
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
-            p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, false,
+            p.use_boundary_saving, 2, 2, ctx, vp, save_width, 2, true, false,
             p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory
         );
     } else {
         boundary_saver.allocate(
-            p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, true,
+            p.use_boundary_saving, 2, 2, ctx, vp, save_width, 2, true, true,
             1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory
         );
     }
@@ -145,7 +147,8 @@ ForwardOutput forward(const ForwardInput& in) {
     for (int it = 0; it < p.nt; ++it) {
         auto bg_view = bg.view();
         auto sc_view = sc.view();
-        float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all[it].data_ptr<float>() : nullptr;
+        float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all[it][0].data_ptr<float>() : nullptr;
+        float* sc_utt_ptr = bg_utt_all.defined() ? bg_utt_all[it][1].data_ptr<float>() : nullptr;
 
         ACOUSTIC_LSRTM2D_COUPLED(
             order,
@@ -155,6 +158,7 @@ ForwardOutput forward(const ForwardInput& in) {
             sc_view,
             p.save_all_wavefields,
             bg_utt_ptr,
+            sc_utt_ptr,
             vp.data_ptr<float>(),
             mp.data_ptr<float>(),
             lap_ctx,
@@ -166,17 +170,25 @@ ForwardOutput forward(const ForwardInput& in) {
         );
 
         if (p.use_boundary_saving) {
-            boundary_runtime.save_forward_2d(
-                it,
-                p.nt,
-                bg_view.u_now,
-                launch_config.grid,
-                launch_config.block,
-                bs,
-                save_width,
-                0,
-                ctx
-            );
+            // field 0 = background, field 1 = scattered.  The scattered field needs its own
+            // boundary trace: the bs backward reconstructs BOTH to form the vp gradient
+            // (terms II/III/IV correlate against the scattered field).
+            float* bs_fields[2] = { bg_view.u_now, sc_view.u_now };
+            for (int f = 0; f < 2; ++f) {
+                boundary_runtime.save_forward_2d_field(
+                    it,
+                    p.nt,
+                    bs_fields[f],
+                    launch_config.grid,
+                    launch_config.block,
+                    bs,
+                    save_width,
+                    0,
+                    ctx,
+                    f,
+                    f == 1          // flush the chunk once the last field is written
+                );
+            }
         }
 
         add_source<<<source_config.grid, source_config.block>>>(
@@ -204,8 +216,11 @@ ForwardOutput forward(const ForwardInput& in) {
     }
 
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(1, 0).copy_(bg.u_prev_t);
-        boundary_saver.last_two_t.select(1, 1).copy_(bg.u_now_t);
+        // last_two_t: [field, time(prev,now), B, nz, nx].  field 0 = bg, field 1 = sc.
+        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(bg.u_prev_t);
+        boundary_saver.last_two_t.select(0, 0).select(0, 1).copy_(bg.u_now_t);
+        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(sc.u_prev_t);
+        boundary_saver.last_two_t.select(0, 1).select(0, 1).copy_(sc.u_now_t);
     }
 
     boundary_runtime.synchronize();

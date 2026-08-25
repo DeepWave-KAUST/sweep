@@ -168,8 +168,10 @@ class AcousticLSRTM(SecondOrderEquation):
             # for the race-free forward psi double-buffer -> 2*(4+2)=12.
             pml_nvar=12,
             last_two_nvar=2,
-            last_two_storage_nvar=1,
+            # 2 fields (bg + scattered): the scattered field is boundary-saved too, so the
+            # bs backward can reconstruct it and form the vp (tomographic) gradient.
+            last_two_storage_nvar=2,
             checkpoint_nvar=6,
-            boundary_save_nvar=1,
+            boundary_save_nvar=2,
         )
     
