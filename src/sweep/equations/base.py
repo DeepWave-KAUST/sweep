@@ -43,6 +43,17 @@ class WaveEquation:
     # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.
     default_pml_type = "cpmlr"
 
+    # Symbol prefix of this equation's compiled bindings in ``sweep._C``:
+    # ``{C_NAME}_forward`` plus the four backward variants.  Declaring it is
+    # what gives the class a ``_C()`` -- ``__init_subclass__`` installs
+    # :meth:`_compiled_funcs` under that name -- so it is also what
+    # ``supports_torch_binding()`` keys off.  ``None`` = eager only.
+    C_NAME = None
+
+    # A couple of kernels ship no ``{C_NAME}_backward_recursive_ckpt``
+    # (ElasticTTISG); their 5th binding slot is ``None``.
+    C_HAS_RECURSIVE_CKPT = True
+
     # Whether this equation has a parameter-modified (APM, Cao & Chen 2018)
     # path for irregular free-surface topography.  When True, the propagator's
     # ``topography=`` accepts a 2-D air_mask + ``free_surface=False`` and
@@ -154,6 +165,15 @@ class WaveEquation:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        # Declaring ``C_NAME`` is what gives a class its compiled bindings.
+        # Install ``_C`` for exactly those classes and no others: the propagator
+        # asks ``supports_torch_binding()``, which is ``callable(cls._C)``, so
+        # putting ``_C`` on the base unconditionally would silently promote
+        # every eager-only equation into the compiled set. A class that writes
+        # its own ``_C`` keeps it (the curvilinear pair, whose ``_C`` raises a
+        # "use impl='eager'" NotImplementedError but still counts as declared).
+        if cls.__dict__.get("C_NAME") and "_C" not in cls.__dict__:
+            cls._C = WaveEquation._compiled_funcs
         # Skip facades / placeholders that declare neither table — they have
         # no specs to render, and instantiating them (e.g. AcousticAniso's
         # __new__ dispatch) would cause surprises.
@@ -192,6 +212,37 @@ class WaveEquation:
         )
         if section:
             cls.__doc__ = existing_doc.rstrip() + "\n\n" + section
+
+    def _compiled_funcs(self):
+        """This equation's compiled binding 5-tuple, resolved from :attr:`C_NAME`.
+
+        Every CUDA equation exposes the same ``sweep._C`` symbol set --
+        ``{C_NAME}_forward`` plus ``_backward`` / ``_backward_bs`` /
+        ``_backward_ckpt`` / ``_backward_recursive_ckpt`` -- so the naming
+        convention lives here once instead of as a hand-copied import block per
+        equation.  Attribute access on ``sweep._C`` is what triggers the
+        one-time JIT compile, exactly as those blocks did.
+
+        Installed as ``_C`` on every subclass that declares ``C_NAME``; see
+        :meth:`__init_subclass__`.
+        """
+        import sweep._C as _C
+
+        name = self.C_NAME
+        if not name:
+            raise NotImplementedError(
+                f"{type(self).__name__} declares no C_NAME, so it has no "
+                f"compiled CUDA bindings; use impl='eager'."
+            )
+        return (
+            getattr(_C, f"{name}_forward"),
+            getattr(_C, f"{name}_backward"),
+            getattr(_C, f"{name}_backward_bs"),
+            getattr(_C, f"{name}_backward_ckpt"),
+            getattr(_C, f"{name}_backward_recursive_ckpt")
+            if self.C_HAS_RECURSIVE_CKPT
+            else None,
+        )
 
     @classmethod
     def supports_torch_binding(cls):

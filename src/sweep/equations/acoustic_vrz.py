@@ -4,6 +4,7 @@ from .fields import FieldSpec, ModelSpec
 from .utils import to_backend, zero_top_halo_fields
 from sweep.scalars import fd_coefficients
 import numpy as np
+from ._registry import register_equation
 
 
 def _gradient_kernel3d(spatial_order, axis, sign=-1):
@@ -136,6 +137,7 @@ def step_cpml_3d(
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
 
+@register_equation()
 class AcousticVRZ(SecondOrderEquation):
     """Second-order 2-D acoustic wave equation in variable-density VRZ form.
 
@@ -150,6 +152,8 @@ class AcousticVRZ(SecondOrderEquation):
 
     
     """
+    C_NAME = "acoustic_vrz2d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic velocity model.", unit="m/s"),
         ModelSpec("z", description="Auxiliary parameter used by the VRZ formulation."),
@@ -213,24 +217,6 @@ class AcousticVRZ(SecondOrderEquation):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
 
-    def _C(self):
-        import torch
-        from sweep._C import (
-            acoustic_vrz2d_forward,
-            acoustic_vrz2d_backward,
-            acoustic_vrz2d_backward_bs,
-            acoustic_vrz2d_backward_ckpt,
-            acoustic_vrz2d_backward_recursive_ckpt,
-        )
-
-        return (
-            acoustic_vrz2d_forward,
-            acoustic_vrz2d_backward,
-            acoustic_vrz2d_backward_bs,
-            acoustic_vrz2d_backward_ckpt,
-            acoustic_vrz2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
@@ -246,6 +232,7 @@ class AcousticVRZ(SecondOrderEquation):
         )
 
 
+@register_equation()
 class AcousticVRZ3D(SecondOrderEquation):
     """Second-order 3-D acoustic wave equation in variable-density VRZ form.
 
@@ -260,6 +247,8 @@ class AcousticVRZ3D(SecondOrderEquation):
 
     
     """
+    C_NAME = "acoustic_vrz3d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic velocity model.", unit="m/s"),
         ModelSpec("z", description="Auxiliary parameter used by the 3D VRZ formulation."),
@@ -331,24 +320,6 @@ class AcousticVRZ3D(SecondOrderEquation):
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out
-
-    def _C(self):
-        import torch
-        from sweep._C import (
-            acoustic_vrz3d_forward,
-            acoustic_vrz3d_backward,
-            acoustic_vrz3d_backward_bs,
-            acoustic_vrz3d_backward_ckpt,
-            acoustic_vrz3d_backward_recursive_ckpt,
-        )
-
-        return (
-            acoustic_vrz3d_forward,
-            acoustic_vrz3d_backward,
-            acoustic_vrz3d_backward_bs,
-            acoustic_vrz3d_backward_ckpt,
-            acoustic_vrz3d_backward_recursive_ckpt,
-        )
 
     @property
     def cuda_layout(self):

@@ -36,6 +36,7 @@ from .fields import FieldSpec, ModelSpec
 # ---------------------------------------------------------------------------
 # 2-D step function
 # ---------------------------------------------------------------------------
+from ._registry import register_equation
 
 def step_vti_2d(
     vx, vz, sH, sV,
@@ -209,6 +210,7 @@ def _build_stiffness(vp, epsilon, delta, rho):
 # 2-D equation class
 # ---------------------------------------------------------------------------
 
+@register_equation(aliases=('AcousticVTIDuveneck',))
 class AcousticVTI1st(FirstOrderEquation):
     """First-order 2-D acoustic VTI wave equation on a standard staggered grid.
 
@@ -240,6 +242,8 @@ class AcousticVTI1st(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic_vti_1st_2d"
 
     # The isotropic image-method free surface is WRONG for an anisotropic
     # medium (see EquationBase.supports_free_surface); fail loud instead.
@@ -407,28 +411,6 @@ class AcousticVTI1st(FirstOrderEquation):
         """
         return cfl * h / (vp_max * (1.0 + 2.0 * epsilon_max) ** 0.5)
 
-    def _C(self):
-        """Expose the compiled CUDA forward + Phase-1 backward bindings.
-
-        * forward          — full CUDA forward (verified against eager,
-                             ~62× speedup on 401×401).
-        * backward         — Phase 1 (full mode): uses saved forward
-                             wavefield; interior gradients correct, PML-band
-                             gradients approximate.  Mask the PML in your
-                             gradient if it matters.
-        * backward_bs / _ckpt / _recursive_ckpt — Phase 2+, currently raise
-                             TORCH_CHECK.  Use ``use_ckpt=False`` and
-                             ``save_all_wavefields=True`` for full mode.
-        """
-        import sweep._C as _C
-        return (
-            _C.acoustic_vti_1st_2d_forward,
-            _C.acoustic_vti_1st_2d_backward,
-            _C.acoustic_vti_1st_2d_backward_bs,
-            _C.acoustic_vti_1st_2d_backward_ckpt,
-            _C.acoustic_vti_1st_2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         """CUDA buffer layout.
@@ -454,6 +436,7 @@ class AcousticVTI1st(FirstOrderEquation):
 # 3-D equation class
 # ---------------------------------------------------------------------------
 
+@register_equation(aliases=('AcousticVTIDefault3D', 'AcousticVTIDuveneck3D'))
 class AcousticVTI1st3D(FirstOrderEquation):
     """First-order 3-D acoustic VTI wave equation on a standard staggered grid.
 
@@ -470,6 +453,8 @@ class AcousticVTI1st3D(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic_vti_1st_3d"
 
     # The isotropic image-method free surface is WRONG for an anisotropic
     # medium (see EquationBase.supports_free_surface); fail loud instead.
@@ -592,28 +577,6 @@ class AcousticVTI1st3D(FirstOrderEquation):
         Same formula as the 2-D case (the fast horizontal P velocity governs).
         """
         return cfl * h / (vp_max * (1.0 + 2.0 * epsilon_max) ** 0.5)
-
-    def _C(self):
-        """Expose the compiled CUDA 3-D bindings.
-
-        Same memory-mode coverage as the 2-D entry point:
-
-        * forward          — CUDA forward with optional save_all_wavefields /
-                             boundary saving / chunk checkpointing.
-        * backward         — full mode (consumes ``u_forward`` from the
-                             ``save_all_wavefields=True`` forward).
-        * backward_bs      — boundary-saving + last_two reconstruction.
-        * backward_ckpt    — chunk replay from saved checkpoints.
-        * backward_recursive_ckpt — TORCH_CHECK stub (not implemented).
-        """
-        import sweep._C as _C
-        return (
-            _C.acoustic_vti_1st_3d_forward,
-            _C.acoustic_vti_1st_3d_backward,
-            _C.acoustic_vti_1st_3d_backward_bs,
-            _C.acoustic_vti_1st_3d_backward_ckpt,
-            _C.acoustic_vti_1st_3d_backward_recursive_ckpt,
-        )
 
     @property
     def cuda_layout(self):

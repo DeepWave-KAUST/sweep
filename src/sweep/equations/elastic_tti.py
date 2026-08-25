@@ -26,6 +26,7 @@ STIFFNESS_KEYS = (
     "C56",
     "C66",
 )
+from ._registry import register_equation
 
 
 def step(
@@ -186,6 +187,7 @@ def step(
     )
 
 
+@register_equation()
 class ElasticTTI(FirstOrderEquation):
     """First-order 2-D three-component elastic TTI wave equation (RSG).
 

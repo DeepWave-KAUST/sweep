@@ -6,6 +6,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 
 def step_cpml(
@@ -80,6 +81,7 @@ def step_cpml(
     return u_next, u_now, psixn, psizn, zetaxn, zetazn
 
 
+@register_equation(aliases=('AcousticTTILiang',))
 class AcousticTTI(SecondOrderEquation):
     """Second-order 2-D pseudo-acoustic TTI wave equation (Liang 2022).
 

@@ -2,6 +2,7 @@ from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
+from ._registry import register_equation
 
 
 def step_cpml(
@@ -38,6 +39,7 @@ def step_cpml(
 
     return u_next, u_now, psixn, psiyn, zetax, zetaz
 
+@register_equation()
 class Acoustic(SecondOrderEquation):
     """Second-order 2-D acoustic wave equation with CPML auxiliary fields.
 
@@ -48,6 +50,8 @@ class Acoustic(SecondOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic P-wave velocity model.", unit="m/s"),
@@ -137,24 +141,6 @@ class Acoustic(SecondOrderEquation):
             else:
                 out = self._apply_free_surface(out)
         return out
-
-    def _C(self, ):
-        # CUDA IMPLEMENTATION
-        import torch
-        from sweep._C import (
-            acoustic2d_forward,
-            acoustic2d_backward,
-            acoustic2d_backward_bs,
-            acoustic2d_backward_ckpt,
-            acoustic2d_backward_recursive_ckpt,
-        )
-        return (
-            acoustic2d_forward,
-            acoustic2d_backward,
-            acoustic2d_backward_bs,
-            acoustic2d_backward_ckpt,
-            acoustic2d_backward_recursive_ckpt,
-        )
 
     def _C_rtm(self):
         import torch

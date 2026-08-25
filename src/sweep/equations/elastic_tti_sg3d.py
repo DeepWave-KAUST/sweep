@@ -6,6 +6,7 @@ from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .elastic_tti import ElasticTTI
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 
 # Full 21-component Voigt upper triangle produced by the 3-D Bond rotation.
@@ -163,6 +164,7 @@ def step(
     )
 
 
+@register_equation()
 class ElasticTTISG3D(FirstOrderEquation):
     """First-order 3-D three-component elastic TTI wave equation (axis-aligned SG).
 

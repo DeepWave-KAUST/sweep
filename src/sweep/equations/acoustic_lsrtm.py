@@ -2,6 +2,7 @@ from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
+from ._registry import register_equation
 
 def step(u_now, u_pre, psix, psiz, zetax, zetaz, 
          su_now, su_pre, spsix, spsiz, szetax, szetaz, 
@@ -63,6 +64,7 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
     return u_next, u_now, psixn, psiyn, zetax, zetaz, \
             su_next, su_now, spsixn, spsiyn, szetax, szetaz
 
+@register_equation()
 class AcousticLSRTM(SecondOrderEquation):
     """Second-order 2-D acoustic Born / LSRTM wave equation.
 
@@ -77,6 +79,8 @@ class AcousticLSRTM(SecondOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic_lsrtm2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Background acoustic velocity model.", unit="m/s"),
@@ -142,23 +146,6 @@ class AcousticLSRTM(SecondOrderEquation):
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
-
-    def _C(self):
-        from sweep._C import (
-            acoustic_lsrtm2d_forward,
-            acoustic_lsrtm2d_backward,
-            acoustic_lsrtm2d_backward_bs,
-            acoustic_lsrtm2d_backward_ckpt,
-            acoustic_lsrtm2d_backward_recursive_ckpt,
-        )
-
-        return (
-            acoustic_lsrtm2d_forward,
-            acoustic_lsrtm2d_backward,
-            acoustic_lsrtm2d_backward_bs,
-            acoustic_lsrtm2d_backward_ckpt,
-            acoustic_lsrtm2d_backward_recursive_ckpt,
-        )
 
     @property
     def cuda_layout(self):

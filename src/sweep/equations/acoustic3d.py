@@ -3,6 +3,7 @@ from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
 from ._free_surface import zero_above_topo
+from ._registry import register_equation
 
 
 def step_cpml(
@@ -44,6 +45,7 @@ def step_cpml(
 
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
+@register_equation()
 class Acoustic3D(SecondOrderEquation):
     """Second-order 3-D acoustic wave equation with CPML auxiliary fields.
 
@@ -54,6 +56,8 @@ class Acoustic3D(SecondOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic3d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic P-wave velocity model.", unit="m/s"),
@@ -126,23 +130,6 @@ class Acoustic3D(SecondOrderEquation):
             else:
                 out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out
-
-    def _C(self, ):
-        import torch
-        from sweep._C import (
-            acoustic3d_forward,
-            acoustic3d_backward,
-            acoustic3d_backward_bs,
-            acoustic3d_backward_ckpt,
-            acoustic3d_backward_recursive_ckpt,
-        )
-        return (
-            acoustic3d_forward,
-            acoustic3d_backward,
-            acoustic3d_backward_bs,
-            acoustic3d_backward_ckpt,
-            acoustic3d_backward_recursive_ckpt,
-        )
 
     def _C_rtm(self):
         import torch
