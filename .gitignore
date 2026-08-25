@@ -28,3 +28,11 @@ dcgm/
 scripts/
 site/
 .cache/
+
+# Development scaffolding kept out of a PUBLIC repo.
+# Root-level underscore directories are this repo's scratch convention: one-shot
+# sbatch/benchmark/debug scripts for a feature under construction. They carry
+# cluster-specific absolute paths (/ibex/user/<name>, conda prefixes), which is
+# noise for anyone cloning and leaks our directory layout. Keep them local, or
+# promote the durable parts into docs/.
+/_*/

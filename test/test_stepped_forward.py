@@ -219,7 +219,8 @@ def run_equivalence(ndim, k, **build_kw):
     # psi double-buffer, so the public run takes the same race-free kernel
     # branch as the Python-bound replay.  (It used to take the legacy
     # in-place psi branch — an intra-launch RAW race, nondeterministic at
-    # ulp level in 3-D; see _dd_cuda/REPORT.md.)
+    # ulp level in 3-D; see _dd_cuda/REPORT.md, scaffolding no longer
+    # checked out -- read it at commit c122dc17.)
     assert torch.equal(record, raw_record)
 
     # Stepped: same zeroed state, k-step segments (ragged tail included).
