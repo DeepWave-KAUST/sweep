@@ -294,15 +294,60 @@ def test_tiles_3d_elastic_bitexact(py, px, free_surface):
 
     # final state over each tile's physical region — every wavefield slot
     # (9 physical + 27 CPML memories) must be bitwise identical.
+    #
+    # How a slot is INDEXED depends on what it is. The 9 physical slots are
+    # full-grid, so a physical-grid (y, x) range picks the tile's own cells.
+    # Since `5ea32fa` a CPML memory instead lives in a slab holding only the PML
+    # band(s) of ONE axis — the axis named by the last letter of its elastic.h
+    # symbol, so m_vxx/m_vxy/m_vxz/... cycle x, y, z in slot order. Per axis:
+    #
+    #   the slab's OWN axis: laid out [low band | high band]. The single domain
+    #       carries both; a tile at the low end of that axis keeps only the low
+    #       band, one at the high end only the high band, because a CUT face
+    #       carries no PML. The tile's whole extent maps onto that end.
+    #   any OTHER axis: the slab spans it in full, so slice it physically.
+    #
+    # A y-slab on a py>1 mesh needs BOTH rules at once, and getting it wrong is
+    # not loud: slicing its y band by a physical y range truncates to a shape
+    # that can match the reference's, so the mismatch surfaces as unequal VALUES
+    # rather than as a shape error.
+    CPML_AXIS = ("x", "y", "z")       # slot NPHYS+k has axis CPML_AXIS[k % 3]
+
+    def _band(tile_arr, full_arr, dim, idx, n):
+        # (tile slice, full slice) along a slab's OWN axis.
+        if n == 1:                                   # uncut: the tile has both bands
+            return slice(None), slice(None)
+        w = tile_arr.shape[dim]
+        if idx == 0:
+            return slice(None), slice(0, w)
+        assert idx == n - 1, (
+            f"tile index {idx} of {n} is interior — it owns no PML band on this "
+            f"axis, so the slab layout assumed here no longer holds"
+        )
+        return slice(None), slice(full_arr.shape[dim] - w, None)
+
     for rank, (runner, _, lo_y, lo_x) in tiles.items():
         topo_yi, topo_xi = rank // px, rank % px
         for f in range(NWF):
-            ref = runner_full.L[f][
-                ...,
-                PAD + topo_yi * nyp: PAD + topo_yi * nyp + nyp,
-                PAD + topo_xi * nxp: PAD + topo_xi * nxp + nxp,
-            ]
-            got = runner.L[f][..., lo_y:lo_y + nyp, lo_x:lo_x + nxp]
+            axis = CPML_AXIS[(f - NPHYS) % 3] if f >= NPHYS else None
+            t, full = runner.L[f], runner_full.L[f]
+
+            if axis == "y":
+                gy, ry = _band(t, full, -2, topo_yi, py)
+            else:
+                gy = slice(lo_y, lo_y + nyp)
+                ry = slice(PAD + topo_yi * nyp, PAD + topo_yi * nyp + nyp)
+            if axis == "x":
+                gx, rx = _band(t, full, -1, topo_xi, px)
+            else:
+                gx = slice(lo_x, lo_x + nxp)
+                rx = slice(PAD + topo_xi * nxp, PAD + topo_xi * nxp + nxp)
+
+            got, ref = t[..., gy, gx], full[..., ry, rx]
+            assert got.shape == ref.shape, (
+                f"tile {rank} slot {f}: mapped shapes disagree, "
+                f"{tuple(got.shape)} vs {tuple(ref.shape)} — the aux layout changed"
+            )
             assert torch.equal(got, ref), (
                 f"tile {rank} wavefield slot {f} differs over physical region"
             )
