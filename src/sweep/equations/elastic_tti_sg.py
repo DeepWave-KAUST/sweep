@@ -13,6 +13,7 @@ import os as _os
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
+from ._registry import register_equation
 
 
 def _slice_axis(u, axis, start=None, stop=None):
@@ -287,6 +288,7 @@ def step(
     )
 
 
+@register_equation()
 class ElasticTTISG(ElasticTTI):
     """First-order 2-D three-component elastic TTI wave equation (axis-aligned SG).
 
@@ -300,6 +302,9 @@ class ElasticTTISG(ElasticTTI):
 
     
     """
+
+    C_NAME = "elastic_tti_sg2d"
+    C_HAS_RECURSIVE_CKPT = False
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"  # SG variant uses 8 staggered CPML profiles, not 6.
@@ -351,17 +356,6 @@ class ElasticTTISG(ElasticTTI):
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
             **kwargs,
-        )
-
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.elastic_tti_sg2d_forward,
-            _C.elastic_tti_sg2d_backward,
-            _C.elastic_tti_sg2d_backward_bs,
-            _C.elastic_tti_sg2d_backward_ckpt,
-            None,
         )
 
     @property

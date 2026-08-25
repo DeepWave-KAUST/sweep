@@ -73,6 +73,7 @@ from sweep.scalars import fd_coefficients
 # ---------------------------------------------------------------------------
 
 _GRAD_COEF_CACHE: dict[int, np.ndarray] = {}
+from ._registry import register_equation
 
 
 def _grad_coefs(order):
@@ -303,6 +304,7 @@ def elastic_vr_step_core(
     )
 
 
+@register_equation()
 class ElasticVRR(FirstOrderEquation):
     """First-order 2-D elastic vector-reflectivity wave equation.
 
@@ -318,6 +320,8 @@ class ElasticVRR(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "elastic_vr2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",),
@@ -449,17 +453,6 @@ class ElasticVRR(FirstOrderEquation):
             free_surface=free_surface,
         )
         return out
-
-    def _C(self):
-        """Compiled CUDA entry points (added in Phase 2)."""
-        import sweep._C as _C
-        return (
-            _C.elastic_vr2d_forward,
-            _C.elastic_vr2d_backward,
-            _C.elastic_vr2d_backward_bs,
-            _C.elastic_vr2d_backward_ckpt,
-            _C.elastic_vr2d_backward_recursive_ckpt,
-        )
 
     @property
     def cuda_layout(self):

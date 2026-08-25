@@ -19,6 +19,7 @@ import os as _os
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 
 def _is_torch_tensor(value):
@@ -1017,6 +1018,7 @@ def step_das_zhao_3d(
     )
 
 
+@register_equation(aliases=('DASElastic',))
 class DASZhao(FirstOrderEquation):
     """First-order 2-D stress / normal-strain-rate DAS equation (Zhao 2022).
 
@@ -1033,6 +1035,8 @@ class DASZhao(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
@@ -1112,17 +1116,6 @@ class DASZhao(FirstOrderEquation):
             raise ValueError(f"DASZhao.func expected 3 or 5 models, got {len(models)}")
         return step_das_zhao_2d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das2d_forward,
-            _C.das2d_backward,
-            _C.das2d_backward_bs,
-            _C.das2d_backward_ckpt,
-            _C.das2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
@@ -1134,6 +1127,7 @@ class DASZhao(FirstOrderEquation):
         )
 
 
+@register_equation(aliases=('DASElastic3D',))
 class DASZhao3D(FirstOrderEquation):
     """First-order 3-D stress / normal-strain-rate DAS equation (Zhao 2022).
 
@@ -1149,6 +1143,8 @@ class DASZhao3D(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das3d"
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1238,17 +1234,6 @@ class DASZhao3D(FirstOrderEquation):
             raise ValueError(f"DASZhao3D.func expected 3 or 5 models, got {len(models)}")
         return step_das_zhao_3d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das3d_forward,
-            _C.das3d_backward,
-            _C.das3d_backward_bs,
-            _C.das3d_backward_ckpt,
-            _C.das3d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
@@ -1260,6 +1245,7 @@ class DASZhao3D(FirstOrderEquation):
         )
 
 
+@register_equation()
 class DASMu(FirstOrderEquation):
     """First-order 2-D velocity-stress-strain DAS equation (Mu).
 
@@ -1278,6 +1264,8 @@ class DASMu(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das_mu2d"
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1370,17 +1358,6 @@ class DASMu(FirstOrderEquation):
             **kwargs,
         )
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das_mu2d_forward,
-            _C.das_mu2d_backward,
-            _C.das_mu2d_backward_bs,
-            _C.das_mu2d_backward_ckpt,
-            _C.das_mu2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
@@ -1392,6 +1369,7 @@ class DASMu(FirstOrderEquation):
         )
 
 
+@register_equation()
 class DASMu3D(FirstOrderEquation):
     """First-order 3-D velocity-stress-strain DAS equation (Mu).
 
@@ -1407,6 +1385,8 @@ class DASMu3D(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das_mu3d"
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1510,17 +1490,6 @@ class DASMu3D(FirstOrderEquation):
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
             **kwargs,
-        )
-
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das_mu3d_forward,
-            _C.das_mu3d_backward,
-            _C.das_mu3d_backward_bs,
-            _C.das_mu3d_backward_ckpt,
-            _C.das_mu3d_backward_recursive_ckpt,
         )
 
     @property

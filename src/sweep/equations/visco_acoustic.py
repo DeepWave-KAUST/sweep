@@ -5,6 +5,7 @@ from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
 from .utils import to_backend
 from .acoustic import step_cpml
+from ._registry import register_equation
 
 
 def step_visco_cpml(
@@ -66,6 +67,7 @@ def step_visco_cpml(
     return u_next, u_prev, psixn, psizn, zetaxn, zetazn
 
 
+@register_equation()
 class ViscoAcoustic(SecondOrderEquation):
     """Second-order 2-D nearly constant-Q visco-acoustic wave equation.
 

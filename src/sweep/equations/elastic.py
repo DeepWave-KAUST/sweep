@@ -18,8 +18,10 @@ from ._topography import (
     precompute_apm_moduli,
     zero_at_air,
 )
+from ._registry import register_equation
 
 
+@register_equation(aliases=('ElasticAPM',))
 class Elastic(FirstOrderEquation):
     """First-order 2-D elastic wave equation on a staggered grid (Virieux 1986).
 
@@ -36,6 +38,8 @@ class Elastic(FirstOrderEquation):
 
     
     """
+    C_NAME = "elastic2d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
         ModelSpec("vs", aliases=("s_velocity",), description="Elastic S-wave velocity model.", unit="m/s"),
@@ -330,18 +334,6 @@ class Elastic(FirstOrderEquation):
             m_txzx, m_txzz,
         )
     
-    def _C(self, ):
-        # CUDA IMPLEMENTATION
-        import torch
-        import sweep._C as _C
-        return (
-            _C.elastic2d_forward,
-            _C.elastic2d_backward,
-            _C.elastic2d_backward_bs,
-            _C.elastic2d_backward_ckpt,
-            _C.elastic2d_backward_recursive_ckpt,
-        )
-
     def _C_apm(self):
         """CUDA APM (Cao & Chen 2018) entry points.  Forward is fully
         implemented; backward is a stub — gradients should be computed

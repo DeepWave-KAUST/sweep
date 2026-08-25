@@ -45,6 +45,7 @@ from __future__ import annotations
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 TTI2ND_STIFFNESS_KEYS = ("C11", "C33", "C13", "C55", "C15", "C35")
 
@@ -202,6 +203,7 @@ def step(
     )
 
 
+@register_equation()
 class ElasticTTI2nd(FirstOrderEquation):
     """Displacement-based 2-D elastic TTI wave equation (Oh et al. 2020).
 

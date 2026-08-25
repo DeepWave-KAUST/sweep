@@ -27,6 +27,7 @@ from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import top_free_surface_derivative, zero_top_row
+from ._registry import register_equation
 
 
 def step_curv(
@@ -218,6 +219,7 @@ def _enforce_curved_surface(target, sxx, h_prime, surf_row, exponent):
     return out
 
 
+@register_equation()
 class ElasticCurvilinear(FirstOrderEquation):
     """Curvilinear-grid Elastic 2-D for irregular topography.
 

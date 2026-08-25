@@ -18,6 +18,7 @@ from ._topography import (
     enforce_apm_traction_bc_3d,
     zero_at_air,
 )
+from ._registry import register_equation
 
 
 def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
@@ -332,6 +333,7 @@ def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
            m_syzy, m_syzz
 
 
+@register_equation('Elastic3D')
 class Elastic(FirstOrderEquation):
     """First-order 3-D elastic wave equation on a staggered grid (Virieux 1986).
 
@@ -348,6 +350,8 @@ class Elastic(FirstOrderEquation):
 
     
     """
+    C_NAME = "elastic3d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="3D elastic P-wave velocity model.", unit="m/s"),
         ModelSpec("vs", aliases=("s_velocity",), description="3D elastic S-wave velocity model.", unit="m/s"),
@@ -546,18 +550,6 @@ class Elastic(FirstOrderEquation):
             m_syzy, m_syzz,
         )
     
-    def _C(self, ):
-        # CUDA IMPLEMENTATION
-        import torch
-        import sweep._C as _C
-        return (
-            _C.elastic3d_forward,
-            _C.elastic3d_backward,
-            _C.elastic3d_backward_bs,
-            _C.elastic3d_backward_ckpt,
-            _C.elastic3d_backward_recursive_ckpt,
-        )
-
     def _C_apm(self):
         """APM CUDA bindings (Cao & Chen 2018, 3-D).
         Forward is fully implemented; backward is a stub pending Phase 3D

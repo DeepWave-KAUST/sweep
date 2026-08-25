@@ -1,6 +1,7 @@
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
+from ._registry import register_equation
 
 
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
@@ -56,6 +57,7 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
     return u_next, u_now, psixn, psizn, zetax, zetaz
 
 
+@register_equation()
 class AcousticVRR(SecondOrderEquation):
     """Second-order 2-D acoustic wave equation in variable-density VRR form.
 

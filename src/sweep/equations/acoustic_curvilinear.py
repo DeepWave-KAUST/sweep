@@ -31,8 +31,10 @@ from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
+from ._registry import register_equation
 
 
+@register_equation()
 class AcousticCurvilinear(SecondOrderEquation):
     """Curvilinear-grid Acoustic 2-D for irregular topography.
 
