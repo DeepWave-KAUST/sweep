@@ -229,3 +229,67 @@ It also shows the forward-only path: generating observed data under
 `torch.no_grad()` keeps the DD capture free of adjoint wavefields and of the
 boundary ring, and the capture is promoted automatically at the first
 `.backward()`.
+
+### Across nodes
+
+Every script above runs unchanged on several machines. They read `LOCAL_RANK`
+and the process group, and `torchrun` sets both the same way whether the ranks
+share a machine or not — so going multi-node is a launcher change, not a code
+change. What grows is `py × px`, which must equal *nodes × GPUs-per-node*.
+
+`torchrun` needs four numbers, and only one of them is awkward:
+
+| | where it comes from |
+|---|---|
+| `--nnodes` | you know it |
+| `--nproc-per-node` | GPUs per node, you know it |
+| `--rdzv-endpoint` | pick one node as the meeting point |
+| *which node am I* | **the only thing a scheduler is needed for** |
+
+With `--rdzv-backend=c10d` the ranks negotiate their own numbering, so that
+last row disappears and every node runs an identical command. Two nodes, four
+GPUs each, by hand:
+
+```bash
+# on BOTH nodes, character for character
+torchrun --nnodes=2 --nproc-per-node=4 \
+  --rdzv-backend=c10d --rdzv-endpoint=node0:29500 --rdzv-id=dd1 \
+  examples/multi-gpu/torch/dd_fwi_overthrust_update.py --py 4 --px 2
+```
+
+That is the whole mechanism; a scheduler only automates it. On SLURM:
+
+```bash
+sbatch examples/multi-gpu/torch/dd_fwi_multinode.slurm
+```
+
+`dd_fwi_multinode.slurm` is that same command with `--nnodes` and the endpoint
+filled in from the allocation. On PBS, LSF or SGE, substitute the host list
+(`$PBS_NODEFILE`, `$LSB_DJOB_HOSTFILE`, `$PE_HOSTFILE`) for `scontrol show
+hostnames` and launch it once per node however that scheduler does it — only
+the SLURM path is exercised here, so treat the others as the recipe rather than
+a tested script.
+
+The older static form (`--node-rank=$SLURM_NODEID` with `--master-addr` /
+`--master-port`) also works and is what you want if your torch predates
+`--rdzv-backend`. It needs the scheduler to tell each node its index, which is
+exactly the coupling c10d removes.
+
+**Verified** on `origin/dev`, V100: `test/dd_nccl_backward_check.py` with tiles
+spanning a node boundary returns `grad_vp`, `grad_wavelet` and both
+illuminations **bit-identical** to the single-domain reference — on 2 nodes and
+on 3, under c10d and static rendezvous alike. `dd_fwi_multinode.slurm` itself
+was run unmodified over 2 nodes on `dd_fwi_overthrust_update.py`: a full 3-D
+update, misfit 7.44e+02 -> 6.76e+02, 4.70 GiB per tile. Production runs at this
+repo's scale have gone to 12 V100 over 3 nodes and 16 over 4.
+
+Three things that cost real time when they are wrong:
+
+- **One task per node, not one per GPU.** `--ntasks-per-node=1`: `srun` starts
+  one `torchrun` and `torchrun` forks the GPU workers. One task per GPU starts
+  four launchers per node and the job hangs in rendezvous.
+- **Never pipe `torchrun` through `grep`/`tail`.** The pipe eats the worker
+  traceback and a crash reports only the launcher's exit code.
+- **Ask for partial nodes.** On a cluster whose GPU nodes hold 8, requesting
+  4 GPUs on each of 3 nodes schedules far sooner than 8 on each of 2, and the
+  halo does not care.
