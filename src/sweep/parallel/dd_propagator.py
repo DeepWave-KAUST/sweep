@@ -72,6 +72,11 @@ _FAMILIES = {
                      half_step=False),
     "elastic": dict(nwf=(15, 36), nphys=(5, 9), nv=(2, 3), nrecon=(7, 12),
                     half_step=True),
+    # LSRTM: two coupled acoustic fields in one wavefield list (background +
+    # scattered), so nwf and nrecon are the acoustic numbers doubled.  Both
+    # fields advance together in one step and BOTH get their halo exchanged.
+    "lsrtm": dict(nwf=(18, 24), nphys=None, nv=None, nrecon=(6, 6),
+                  half_step=False),
 }
 
 
@@ -101,6 +106,11 @@ _DD_EQUATIONS = {
     "Elastic": "elastic",               # elastic2d and elastic3d -- the 3-D
                                         # class is also named ``Elastic``,
                                         # exported as ``Elastic3D``
+    # csrc/cuda/equations/acoustic_lsrtm3d -- forward is stepped; the backward
+    # is NOT yet, so gradients under DD raise instead of running the whole
+    # record per stepped call (see _run_adjoint).  The 2-D AcousticLSRTM is
+    # not stepped at all and stays unsupported.
+    "AcousticLSRTM3D": "lsrtm",
 }
 
 
@@ -864,6 +874,8 @@ class ModelParallel:
         with torch.no_grad():
             if self.family == "acoustic":
                 self._forward_loop_acoustic(fhalo, sg)
+            elif self.family == "lsrtm":
+                self._forward_loop_lsrtm(fhalo)
             else:
                 self._forward_loop_elastic(fhalo)
 
@@ -1028,6 +1040,28 @@ class ModelParallel:
                 runner.run_to(it + 1)
                 self._exchange(fhalo, runner.u_now)
 
+    def _forward_loop_lsrtm(self, fhalo):
+        """LSRTM forward time loop: one coupled step (background + scattered
+        advance together), then exchange the halo of BOTH ``u_now`` fields.
+
+        Exchanging only the background would leave the scattered field's cut
+        halo stale, and the coupling ``mp * vp^2 * lap(bg)`` would inject that
+        staleness into the recorded scattered data.  Serial step-then-exchange
+        only: the phase-split overlap path is acoustic-2D/3D-specific.
+        """
+        from sweep.propagator._stepped import (
+            lsrtm_psi_pairs, lsrtm_u_blocks, u_now_slot)
+
+        u_blocks = lsrtm_u_blocks(self.ndim)
+        runner = SteppedBindingRunner(
+            self.f_func, self.fp, self.L_fwd,
+            psi_pairs=lsrtm_psi_pairs(self.ndim), u_blocks=u_blocks)
+        for it in range(self.nt):
+            runner.run_to(it + 1)
+            # u_now slots rotate per step; recompute both after the step.
+            self._exchange_group(
+                fhalo, [self.L_fwd[u_now_slot(runner.k, b)] for b in u_blocks])
+
     def _forward_loop_elastic(self, fhalo):
         """Elastic forward time loop: phase-1 velocity update + batched velocity-
         halo exchange, phase-2 stress update + batched stress-halo exchange.
@@ -1049,6 +1083,17 @@ class ModelParallel:
         (interior). Drives :class:`_DDForward.backward`; users get gradients via
         autograd (``loss.backward()`` / ``record.backward(gradient=adjoint)``),
         not by calling this directly."""
+        if self.family == "lsrtm":
+            # acoustic_lsrtm3d/backward.cu still runs a plain [nt-1, 0] loop, so a
+            # stepped call would replay the WHOLE record and DD would exchange halos
+            # of an adjoint that already reached t=0 -- silently wrong gradients.
+            # Refuse until the backward honours bw_it_begin/bw_it_end.
+            raise NotImplementedError(
+                "domain decomposition supports AcousticLSRTM3D for FORWARD modelling "
+                "only: its CUDA backward is not stepped yet (bw_it_begin/bw_it_end), "
+                "so DD gradients would be silently wrong. Run the gradient on a "
+                "single device, or use an equation whose backward is stepped "
+                "(Acoustic, Acoustic3D, AcousticVRZ3D, Elastic).")
         if not self._captured:
             raise RuntimeError("forward() must run before the adjoint")
         if self.bp is None:

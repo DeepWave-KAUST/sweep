@@ -71,10 +71,14 @@ __device__ inline float acoustic_cpml_update_3d(
 
     // Interior fast-path: ax/bx/dbxdx vanish, so w_sum reduces to the sum of
     // laplacians and the aux fields stay zero. Skip the 14+ extra loads/stores.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware physical bounds: a domain-decomposition cut face carries only the M
+    // halo (no abcn PML pad), so the PML band must shrink there -- hardcoding
+    // ``abcn + halo`` would damp the wavefield across the tile seam.  phys_*() also
+    // folds in per-edge free surface (padLo = fsLo ? 0 : abcn), so this is a strict
+    // superset of the old bounds and identical when cut_mask == 0.
+    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
+                  (iy < solver.phys_y0()) || (iy >= solver.phys_y1()) ||
+                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
     if (!in_pml) {
         return lap_x + lap_y + lap_z;
     }
@@ -269,10 +273,14 @@ __global__ void acoustic_lsrtm3d_adjoint(
     const float* v2l_b = v2_lambda + b * spatial_size;
     float dt2 = solver.dt * solver.dt;
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    // Cut-aware physical bounds: a domain-decomposition cut face carries only the M
+    // halo (no abcn PML pad), so the PML band must shrink there -- hardcoding
+    // ``abcn + halo`` would damp the wavefield across the tile seam.  phys_*() also
+    // folds in per-edge free surface (padLo = fsLo ? 0 : abcn), so this is a strict
+    // superset of the old bounds and identical when cut_mask == 0.
+    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
+                  (iy < solver.phys_y0()) || (iy >= solver.phys_y1()) ||
+                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
 
     if (!in_pml) {
         // L* = lap(v^2 . lambda)  (transpose of forward v^2 . lap(lambda))

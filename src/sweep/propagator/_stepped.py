@@ -79,6 +79,27 @@ def acoustic_adj_pairs(ndim: int) -> Tuple[Tuple[int, int], ...]:
     return ACOUSTIC2D_ADJ_PAIRS if ndim == 2 else ACOUSTIC3D_ADJ_PAIRS
 
 
+# LSRTM packs two coupled acoustic fields into ONE wavefield list: the
+# background occupies the first block of slots and the scattered field the next
+# (2-D: 9+9=18, 3-D: 12+12=24).  Each block carries its own rotating u-triple
+# and psi double-buffer, so a stepped/DD driver must rotate AND exchange both --
+# the scattered slots are the background ones shifted by the block width.
+def lsrtm_block_width(ndim: int) -> int:
+    return 9 if ndim == 2 else 12
+
+
+def lsrtm_u_blocks(ndim: int) -> Tuple[int, ...]:
+    """Start slots of the two rotating u-triples (background, scattered)."""
+    return (0, lsrtm_block_width(ndim))
+
+
+def lsrtm_psi_pairs(ndim: int) -> Tuple[Tuple[int, int], ...]:
+    """Psi double-buffer pairs of both coupled fields."""
+    base = acoustic_psi_pairs(ndim)
+    off = lsrtm_block_width(ndim)
+    return tuple(base) + tuple((a + off, b + off) for a, b in base)
+
+
 def rotate_wavefield_roles(
     wavefields: Sequence[torch.Tensor],
     steps_done: int,

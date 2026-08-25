@@ -64,8 +64,25 @@ ForwardOutput forward(const ForwardInput& in) {
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
+    // Cut-aware physical bounds: a cut face carries only the M halo (no abcn PML
+    // pad), so phys_x0()/phys_x1()/... shrink there.  0 = single domain.
+    ctx.cut_mask = p.cut_face_mask;
+
+    // Stepped range for domain decomposition: DD advances one step at a time and
+    // exchanges halos of BOTH coupled fields (bg and sc) between steps.
+    const int it0 = p.it_begin;
+    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                it0, ", ", it1, ") with nt=", p.nt);
+    const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
+
     AcousticWavefieldTensor bg;
     AcousticWavefieldTensor sc;
+    // On a continuation call the internal allocate() would silently zero the
+    // propagation state — the caller must keep binding the same tensors.
+    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
+                "stepped continuation (it_begin>0) requires Python-bound wavefields");
     if (!p.wavefields.empty()) {
         TORCH_CHECK(p.wavefields.size() == 24, "Acoustic LSRTM 3D expects 24 wavefield tensors (bg+sc, each 12 with psi double-buffer).");
         bg.bind(slice_wavefields(p.wavefields, 0, 12), 3, true);
@@ -79,10 +96,25 @@ ForwardOutput forward(const ForwardInput& in) {
     cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
-    auto record = torch::zeros({N, nrec, p.nt}, vp.options());
+    // Stepped calls must accumulate into caller-owned buffers: a per-call temporary
+    // would only ever hold the current segment.
+    TORCH_CHECK(!stepped || p.record_out.defined(),
+                "stepped forward requires record_out bound from Python");
+    auto record = p.record_out.defined()
+        ? p.record_out
+        : torch::zeros({N, nrec, p.nt}, vp.options());
+    if (p.record_out.defined())
+        TORCH_CHECK(record.is_contiguous() &&
+                    record.size(-1) == static_cast<long>(p.nt),
+                    "record_out must be contiguous with trailing dim nt");
+
     torch::Tensor bg_utt_all;
     if (p.save_all_wavefields) {
-        bg_utt_all = torch::zeros({p.nt, B, nz, ny, nx}, vp.options());
+        TORCH_CHECK(!stepped || p.u_allt_out.defined(),
+                    "stepped + save_all_wavefields requires u_allt_out bound from Python");
+        bg_utt_all = p.u_allt_out.defined()
+            ? p.u_allt_out
+            : torch::zeros({p.nt, B, nz, ny, nx}, vp.options());
     }
 
     if (p.use_checkpoint) {
@@ -145,7 +177,7 @@ ForwardOutput forward(const ForwardInput& in) {
         "acoustic_lsrtm3d"
     );
 
-    for (int it = 0; it < p.nt; ++it) {
+    for (int it = it0; it < it1; ++it) {
         auto bg_view = bg.view();
         auto sc_view = sc.view();
         float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all[it].data_ptr<float>() : nullptr;
@@ -207,7 +239,8 @@ ForwardOutput forward(const ForwardInput& in) {
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), bg.checkpoint_tensors());
     }
 
-    if (p.use_boundary_saving) {
+    // Only once the final segment has run; mid-run segments leave last_two untouched.
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
         boundary_saver.last_two_t.select(1, 0).copy_(bg.u_prev_t);
         boundary_saver.last_two_t.select(1, 1).copy_(bg.u_now_t);
     }
