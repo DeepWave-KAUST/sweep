@@ -2,6 +2,7 @@ from collections.abc import Sequence
 import inspect
 
 import numpy as np
+from sweep.parallel.pml import dd_cut_face_mask, dd_cut_pad
 from sweep.core.arguments import (
     merge_legacy_boundary_kwargs,
     refuse_free_surface_if_anisotropic,
@@ -266,23 +267,7 @@ class PropBase:
         # thin if EITHER the per-edge layout says so (free surface, or an
         # explicitly thinner pad) or the mesh says it is cut.  Without a mesh
         # ``self.pad`` is left exactly as ``normalize_pad`` produced it.
-        if self.model_parallel is not None:
-            from sweep.parallel.pml import build_rank_pml_widths
-            # image_method_active=False ON PURPOSE.  That flag makes the helper
-            # zero the z_lo entry, and its contract ("the top face is a free
-            # surface") only held on the DD branch, where _image_method_active
-            # was exactly that.  Under dev's per-edge feature
-            # ``_resolve_topo_method`` returns image=True for ANY free-surface
-            # face, so passing it here would delete the top PML whenever e.g.
-            # only the LEFT face is free -- a face that is neither a free
-            # surface nor ever cut (``_dd_cut_mask`` only sets x/y bits).
-            # ``normalize_pad`` has already zeroed every genuine free-surface
-            # face in ``self.pad``, so this call must contribute cut faces and
-            # nothing else.
-            _cut_pad = build_rank_pml_widths(
-                self.model_parallel, abcn=self.abcn, ndim=self.ndim,
-                image_method_active=False)
-            self.pad = tuple(min(p, c) for p, c in zip(self.pad, _cut_pad))
+        self.pad = dd_cut_pad(self.model_parallel, self.pad, self.abcn, self.ndim)
 
         self.padding_z = (self.pad[0], self.pad[1])
         self.padding = torch_pad_order(self.pad, self.ndim)
@@ -296,18 +281,7 @@ class PropBase:
         # DD cut-face bitmask (x_lo=1, x_hi=2, y_lo=16, y_hi=32; z is never
         # split in v1). Passed to the boundary Layout so its phys_* bounds
         # match this (possibly asymmetric) pad. 0 = single domain.
-        self._dd_cut_mask = 0
-        mp = self.model_parallel
-        if mp is not None:
-            if not mp.is_edge("x", "low"):
-                self._dd_cut_mask |= 1
-            if not mp.is_edge("x", "high"):
-                self._dd_cut_mask |= 2
-            if self.ndim == 3:
-                if not mp.is_edge("y", "low"):
-                    self._dd_cut_mask |= 16
-                if not mp.is_edge("y", "high"):
-                    self._dd_cut_mask |= 32
+        self._dd_cut_mask = dd_cut_face_mask(self.model_parallel, self.ndim)
 
         # Topography is processed AFTER self.shape is PML-padded so the
         # runtime-coord conversion can compute the final padded surface row.
