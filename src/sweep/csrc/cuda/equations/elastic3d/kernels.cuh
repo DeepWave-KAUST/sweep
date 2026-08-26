@@ -181,7 +181,7 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
 
     float inv_rho = 1.f / rho_b[idx];
 
-    // DD cut faces (solver.cut_mask) carry no PML (per-rank widths zero the
+    // DD cut faces (solver.cut_mask()) carry no PML (per-rank widths zero the
     // profile there), and the matching cells of the un-split run take the
     // interior branch.  The PML branch with all-zero coefficients is
     // mathematically identity but NOT bitwise identical (different FMA
@@ -507,7 +507,7 @@ __global__ void elastic_velocity_kernel_3d_nopml(
     }
 
     // Per-side exclusion bands.  On a non-cut side keep the legacy width
-    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask()) the band
     // collapses to the stencil halo M — there is no PML at a cut, the
     // restore skips the cut-face strip, and the cut-adjacent cells are
     // reconstructed by the plain reverse stencil reading the per-phase
@@ -587,7 +587,7 @@ __global__ void elastic_stress_kernel_3d_nopml(
     }
 
     // Per-side exclusion bands.  On a non-cut side keep the legacy width
-    // (PML band + saved strip); on a DD cut side (solver.cut_mask) the band
+    // (PML band + saved strip); on a DD cut side (solver.cut_mask()) the band
     // collapses to the stencil halo M — there is no PML at a cut, the
     // restore skips the cut-face strip, and the cut-adjacent cells are
     // reconstructed by the plain reverse stencil reading the per-phase
@@ -907,7 +907,7 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     // read.  (The legacy code loaded them unconditionally over the full
     // grid; the interior path never consumed them.)
 
-    // DD cut faces (solver.cut_mask) carry no PML and the matching cells
+    // DD cut faces (solver.cut_mask()) carry no PML and the matching cells
     // of the un-split run take the interior branch; the cut-side band must
     // take it too (different FMA contraction on the PML branch — see
     // elastic_velocity_kernel_3d).  p at cut-side halo cells feeds owned

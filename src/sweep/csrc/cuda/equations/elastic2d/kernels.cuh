@@ -634,7 +634,7 @@ __global__ void elastic_stress_adjoint_prepare(
     // q* outputs collapse to bar_dv*_d* and the four m_v* writes become
     // 0 -> 0. Skip them — saves 4 reads + 4 writes per interior cell.
     // Matches the forward elastic_stress_kernel fast-path (line 230).
-    // DD cut faces (solver.cut_mask) carry no PML; the matching cells of
+    // DD cut faces (solver.cut_mask()) carry no PML; the matching cells of
     // the un-split run take the interior branch, so the cut-side band must
     // take it too (the zero-coefficient PML branch is mathematically the
     // identity but not bitwise identical — q at cut-side halo cells feeds

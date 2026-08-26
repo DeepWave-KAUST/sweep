@@ -125,7 +125,7 @@ ForwardOutput forward(const ForwardInput& in)
                 "elastic3d forward cut_face_mask supports x/y bits only "
                 "(bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi), got ",
                 p.cut_face_mask);
-    solver.cut_mask = p.cut_face_mask;
+    solver.set_cut_mask(p.cut_face_mask);
     elastic_init_aux_slabs(solver, wavefield);
 
     EffectiveBoundarySaver boundary_saver;
