@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 DEV = "cuda"
 
 
-def _build(cls, free_surface, ndim=2):
+def _build(cls, free_surface, ndim=2, **extra):
     from sweep.propagator.torch import PropTorch
     from sweep.propagator.options import EagerOptions
 
@@ -28,7 +28,7 @@ def _build(cls, free_surface, ndim=2):
     shape = (48, 56) if ndim == 2 else (24, 20, 24)
     return PropTorch(eq, impl="eager", eager_options=EagerOptions(use_compile=False),
                      use_ckpt=False, dev=DEV, shape=shape, abcn=16, dh=10.0, dt=8e-4,
-                     free_surface=free_surface, nt=100, B=1)
+                     free_surface=free_surface, nt=100, B=1, **extra)
 
 
 def _cases():
@@ -53,6 +53,20 @@ def test_per_edge_top_also_raises():
         _build(ElasticTTISG, ["top"])
 
 
+@pytest.mark.parametrize("cls,ndim", [c for c in _cases() if c[1] == 2],
+                         ids=lambda c: getattr(c, "__name__", c))
+def test_topography_also_raises(cls, ndim):
+    """``topography=`` implies a free surface even with free_surface=False, so
+    it has to hit the same guard.  It used to slip through: the guard ran on
+    fs_faces before _resolve_topo_method folded the topography-implied top face
+    in, and the isotropic image mirror then ran on the anisotropic solver --
+    measured 29% wavefield difference against the no-topography run."""
+    import numpy as np
+
+    with pytest.raises(NotImplementedError, match="anisotropic"):
+        _build(cls, False, ndim, topography=np.zeros(56, dtype=np.int64))
+
+
 @pytest.mark.parametrize("cls,ndim", _cases(), ids=lambda c: getattr(c, "__name__", c))
 def test_no_free_surface_still_constructs(cls, ndim):
     _build(cls, False, ndim)
@@ -61,6 +75,9 @@ def test_no_free_surface_still_constructs(cls, ndim):
 def test_isotropic_free_surface_unaffected():
     from sweep.equations import Acoustic, Elastic
 
+    import numpy as np
+
     _build(Elastic, True)
     _build(Elastic, ["top", "left"])
     _build(Acoustic, True)
+    _build(Elastic, False, topography=np.zeros(56, dtype=np.int64))
