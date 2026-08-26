@@ -218,6 +218,46 @@ class SteppedBindingRunner:
         if phase == 2:
             self.k = int(it_end)
 
+    def run(self, it_end: int, phase: int | None = None,
+            advance: bool = True) -> None:
+        """Unified entry: ``phase=None`` is the legacy unphased segment.
+
+        ``run_to`` / ``run_phase`` differ only in the phase value and in which
+        phase advances the buffer-role counter -- facts a schedule states as
+        data. Keeping them as arguments is what lets one interpreter drive every
+        equation's loop instead of one hand-written loop per family.
+        """
+        if phase is None:
+            self.run_to(it_end)
+            return
+        if int(it_end) != self.k + 1:
+            raise ValueError(
+                f"phased forward drives exactly one step: it_end={it_end} "
+                f"but k={self.k}")
+        p = self.p
+        p.it_begin, p.it_end = self.k, int(it_end)
+        p.step_phase = int(phase)
+        p.wavefields = self._bound_wavefields()
+        try:
+            self.func(p)
+        finally:
+            p.step_phase = 0
+        if advance:
+            self.k = int(it_end)
+
+    def at(self, buf: str, role: str) -> torch.Tensor:
+        """The tensor currently holding ``role`` in the forward list."""
+        assert buf == "fwd", f"forward runner cannot resolve {buf!r}"
+        assert self.u_blocks, "time-role resolution requires a rotating u block"
+        b = self.u_blocks[0]
+        if role == "u_now":
+            return self.L[u_now_slot(self.k, b)]
+        if role == "u_next":
+            return self.L[u_next_slot(self.k, b)]
+        if role == "u_prev":
+            return self.L[b + self.k % 3]
+        raise ValueError(f"unknown time role {role!r}")
+
     @property
     def u_next(self) -> torch.Tensor:
         """Tensor the CURRENT step is writing (``L[(k+2) % 3]``, i.e.
@@ -399,6 +439,52 @@ class SteppedBackwardRunner:
             self.k_adj += 1
             self.k_f += 1 if e >= 1 else 0
         return out
+
+    def run(self, bw_it_begin: int, bw_it_end: int, phase: int | None = None,
+            advance: bool = True):
+        """Unified entry; ``phase=None`` is the legacy unphased segment.
+
+        The advance arithmetic is the SAME rule in every variant: over a
+        single-step segment ``b == e + 1``, ``k_adj += b - e`` gives +1 and
+        ``k_f += b - max(e, 1)`` gives +1 unless the ``it == 0`` tail (which
+        runs no reconstruction step). ``run_phase`` and ``run_vrz_phase``
+        differed only in WHICH phase advanced -- now an argument.
+        """
+        b, e = int(bw_it_begin), int(bw_it_end)
+        if phase is None:
+            return self.run_segment(b, e)
+        if b != e + 1:
+            raise ValueError(
+                f"phased backward drives exactly one step: got segment [{e}, {b})")
+        p = self.p
+        p.bw_it_begin, p.bw_it_end = b, e
+        p.step_phase = int(phase)
+        self._bind_lists()
+        try:
+            out = self.func(p)
+        finally:
+            p.step_phase = 0
+        if advance:
+            self.k_adj += b - e
+            self.k_f += b - max(e, 1)
+        return out
+
+    def at(self, buf: str, role: str) -> torch.Tensor:
+        """The tensor currently holding ``role`` in the adjoint / recon list."""
+        if buf == "adj":
+            L, k = self.L_adj, self.k_adj
+        elif buf == "recon":
+            assert self.L_recon is not None, "no reconstruction list bound"
+            L, k = self.L_recon, self.k_f
+        else:
+            raise ValueError(f"backward runner cannot resolve {buf!r}")
+        if role == "u_now":
+            return L[u_now_slot(k)]
+        if role == "u_next":
+            return L[u_next_slot(k)]
+        if role == "u_prev":
+            return L[k % 3]
+        raise ValueError(f"unknown time role {role!r}")
 
     @property
     def lambda_now(self) -> torch.Tensor:
