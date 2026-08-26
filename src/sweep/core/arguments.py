@@ -190,3 +190,30 @@ def resolve_boundary_spec(free_surface, abcn, ndim, equation, topography,
                 "per-edge free surface cannot be combined with topography= yet."
             )
     return fs_faces, pad, abcn_scalar
+
+
+def validate_memory_strategy(use_checkpoint, use_boundary_saving,
+                             boundary_tail_steps):
+    """Refuse gradient-memory combinations that would silently pick one path.
+
+    Both refusals exist because the failure they prevent is SILENT:
+
+    * checkpointing and boundary saving together -- the compiled wrapper picks
+      the checkpoint backward, so the boundary-saving request would simply be
+      ignored. Historically ckpt just won; making it an error keeps the
+      three-way choice (full / boundary / ckpt) an explicit one.
+    * `tail_steps` with checkpointing -- truncated backward is implemented only
+      in the boundary-saving backward, and the checkpoint path the wrapper would
+      choose ignores the truncation, producing a full-length gradient that looks
+      entirely plausible.
+    """
+    if use_checkpoint and use_boundary_saving:
+        raise ValueError(
+            "boundary saving and checkpointing are both enabled; the "
+            "gradient-memory mode is a three-way choice (full/boundary/"
+            "ckpt) -- pass memory=MemoryOptions(strategy=...) or disable "
+            "one of use_ckpt/boundary_saving_config.")
+    if boundary_tail_steps and use_checkpoint:
+        raise NotImplementedError(
+            "tail_steps requires the boundary-saving backward; pass "
+            "use_ckpt=False (or memory=MemoryOptions(strategy='boundary')).")
