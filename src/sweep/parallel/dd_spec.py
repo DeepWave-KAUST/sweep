@@ -151,6 +151,18 @@ class DDLoop:
 class DDSpec:
     forward: DDLoop
     backward: DDLoop
+    #: Optional second forward schedule the driver may use INSTEAD of
+    #: ``forward`` when it can discharge the overlap's proof obligation.
+    #:
+    #: Modelled as a separate loop rather than as a flag on ``forward``,
+    #: because the two are not a reordering of one schedule: the serial
+    #: variant issues ONE unphased kernel call over the whole grid, the
+    #: overlapped one issues TWO (cut strips, then interior). Different call
+    #: sequences deserve different declarations -- and stating both means the
+    #: ``u_now`` / ``u_next`` question answers itself, since each loop names
+    #: the tensor as of its own resolution point instead of relying on the
+    #: interpreter to shift the role by one advance.
+    forward_overlapped: DDLoop | None = None
     name: str = ""
 
 
@@ -238,9 +250,38 @@ ACOUSTIC_FWD = DDLoop(
                           "cut line forbids it."),)),),
 )
 
+#: The comm/compute-overlap variant of the acoustic forward. Phase 1 computes
+#: ONLY the cut-adjacent strips -- exactly what the halo ships -- so the
+#: exchange can run on a comm stream while phase 2 computes the strict
+#: complement. ``U_NEXT`` rather than ``U_NOW`` because this loop resolves the
+#: tensor BEFORE the advance: ``u_next`` at k and ``u_now`` at k+1 are the same
+#: slot by construction, and naming it per-loop beats shifting roles in the
+#: interpreter.
+#:
+#: The driver still owes the proof that no later writer lands in a shipped
+#: strip. Two writers exist: the source injection, which atomically adds into
+#: the very buffer the comm stream is packing (hence the "no source within M of
+#: a cut line" test), and -- with irregular topography -- phase 2's air-clear
+#: pre-pass, whose range is widened by M. The latter is benign because phase 1
+#: already zeroed those same cells and it re-writes the same zeros, and because
+#: the widened range stops at the physical bounds and never reaches the halo pad
+#: the receive-copy writes.
+ACOUSTIC_FWD_OVERLAP = DDLoop(
+    direction="fwd",
+    phases=(
+        Phase(1, advances=False, label="cut strips",
+              after=(ExchangeGroup(
+                  (U_NEXT,), batched=False, overlappable=True,
+                  why="shipped async on a comm stream while phase 2 computes "
+                      "the interior; joined before the next step's phase 1"),)),
+        Phase(2, advances=True, label="interior + tail"),
+    ),
+)
+
 ACOUSTIC_DD = DDSpec(
     name="acoustic",
     forward=ACOUSTIC_FWD,
+    forward_overlapped=ACOUSTIC_FWD_OVERLAP,
     backward=DDLoop(
         direction="rev",
         floor=0,   # the it==0 adjoint-only tail still contributes grad_wavelet
@@ -268,6 +309,7 @@ ACOUSTIC_DD = DDSpec(
 VRZ_DD = DDSpec(
     name="acoustic_vrz",
     forward=ACOUSTIC_FWD,
+    forward_overlapped=ACOUSTIC_FWD_OVERLAP,
     backward=DDLoop(
         direction="rev",
         floor=1,

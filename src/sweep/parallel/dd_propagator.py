@@ -1171,6 +1171,37 @@ class ModelParallel:
                         continue
                     self._ship(halo, runner, grp)
 
+    def _run_dd_loop_overlapped(self, L, runner, halo):
+        """Interpret a two-phase forward with the exchange on a comm stream.
+
+        The only place in this file that knows about CUDA streams. Phase 1
+        computes just the cut strips, the shipment starts on the comm stream,
+        phase 2 computes the strict complement over it, and the join happens
+        before the next step's phase 1. Bit-identical to the serial loop -- the
+        strips carry the same values either way -- so ``SWEEP_DD_DISABLE_OVERLAP``
+        selecting the serial variant is a usable reference, not a fallback.
+        """
+        p1, p2 = L.phases
+        grp = p1.after[0]
+        if self._comm_stream is None:
+            self._comm_stream = torch.cuda.Stream()
+            self._comm_evt = torch.cuda.Event()
+        comm, evt = self._comm_stream, self._comm_evt
+        compute = torch.cuda.current_stream()
+        hs = halo["x"]          # eligibility implies x-only cuts, so one axis
+        for it in range(self.nt):
+            runner.run(it + 1, phase=p1.step_phase, advance=p1.advances)
+            evt.record()
+            (t,) = self._tensors(grp.refs[0], runner)
+            view = self._halo_view(t, "x")
+            with torch.cuda.stream(comm):
+                comm.wait_event(evt)
+                hs.exchange_start(view)         # copy-send + P2P, no wait
+            runner.run(it + 1, phase=p2.step_phase, advance=p2.advances)
+            with torch.cuda.stream(comm):
+                hs.exchange_finish(view)        # wait P2P + copy-recv
+            compute.wait_stream(comm)
+
     def _forward_loop_acoustic(self, fhalo, sg):
         """Acoustic forward time loop. Uses true comm/compute overlap (phase-1
         cut strips exchanged async on a comm stream while phase-2 interior
@@ -1178,29 +1209,19 @@ class ModelParallel:
         and no source in a cut strip — else a serial step-then-exchange loop.
         Both are bit-identical (the overlap is a pure reordering)."""
         runner = SteppedBindingRunner(
-            self.f_func, self.fp, self.L_fwd, acoustic_psi_pairs(self.ndim))
-        if self._overlap_ok and self._src_away_from_cuts(sg):
-            if self._comm_stream is None:
-                self._comm_stream = torch.cuda.Stream()
-                self._comm_evt = torch.cuda.Event()
-            comm, evt = self._comm_stream, self._comm_evt
-            compute = torch.cuda.current_stream()
-            fx = fhalo["x"]                # _overlap_ok => axes == ("x",)
-            for it in range(self.nt):
-                runner.run_phase(it + 1, 1)
-                evt.record()
-                un = self._halo_view(runner.u_next, "x")
-                with torch.cuda.stream(comm):
-                    comm.wait_event(evt)
-                    fx.exchange_start(un)           # copy-send + P2P (no wait)
-                runner.run_phase(it + 1, 2)         # interior, overlaps P2P
-                with torch.cuda.stream(comm):
-                    fx.exchange_finish(un)          # wait P2P + copy-recv
-                compute.wait_stream(comm)
+            self.f_func, self.fp, self.L_fwd,
+            psi_pairs=self._table.pairs(adjoint=False) if self._table
+            else acoustic_psi_pairs(self.ndim),
+            u_blocks=self._table.u_blocks if self._table else (0,))
+        # The spec offers two forward schedules; the driver picks the
+        # overlapped one only where it can discharge the proof obligation that
+        # comes with it (see ACOUSTIC_FWD_OVERLAP). Both are bit-identical.
+        ov = self._spec.forward_overlapped
+        if (ov is not None and self._overlap_ok
+                and self._src_away_from_cuts(sg)):
+            self._run_dd_loop_overlapped(ov, runner, fhalo)
         else:
-            for it in range(self.nt):
-                runner.run_to(it + 1)
-                self._exchange(fhalo, runner.u_now)
+            self._run_dd_loop(self._spec.forward, runner, fhalo)
 
     def _forward_loop_elastic(self, fhalo):
         """Elastic forward time loop: phase-1 velocity update + batched velocity-
