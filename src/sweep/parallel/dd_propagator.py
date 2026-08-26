@@ -274,6 +274,13 @@ class ModelParallel:
         # equation's declaration -- it used to be `"vrz" in class name`, which
         # a subclass named anything else would have slipped straight past.
         _layout = getattr(equation, "cuda_layout", None)
+        # grads_out layout and illumination are output-binding facts about the
+        # compiled backward, declared by the equation rather than inferred from
+        # its family: grads_out is models+1 with slot 0 = grad_wavelet for the
+        # acoustic family, models for elastic (see the TORCH_CHECKs cited on
+        # CUDALayoutSpec).
+        self._ngrad_prefix = 1 if getattr(_layout, "grads_out_has_wavelet", False) else 0
+        self._illum_nvar = int(getattr(_layout, "illum_nvar", 0) or 0)
         self._dd_coupling_nvar = int(getattr(_layout, "dd_coupling_nvar", 0) or 0)
         self._dd_coeff_nvar = int(getattr(_layout, "dd_adjoint_coeff_nvar", 0) or 0)
         self._is_vrz = self._dd_coupling_nvar > 0
@@ -777,20 +784,14 @@ class ModelParallel:
         else:
             self.coupling = []
             self.adj_coeffs = []
-        # acoustic grads_out = [grad_wavelet, *model_grads] (size = models + 1);
-        # elastic has no wavelet grad (size = models).
-        if self.family == "acoustic":
-            self.gbufs = ([torch.zeros_like(self.bp.forward_source)]
-                          + [torch.zeros_like(m) for m in self.bp.models])
-        else:
-            self.gbufs = [torch.zeros_like(m) for m in self.bp.models]
+        # grads_out = [grad_wavelet?, *model_grads]; the prefix is declared.
+        self.gbufs = (
+            [torch.zeros_like(self.bp.forward_source)] * self._ngrad_prefix
+            + [torch.zeros_like(m) for m in self.bp.models])
         self.bp.grads_out = self.gbufs
-        # acoustic backward produces source/receiver illumination; elastic none
-        if self.family == "acoustic":
-            self.illum = [torch.zeros_like(self.bp.models[0]),
-                          torch.zeros_like(self.bp.models[0])]
-        else:
-            self.illum = []
+        # source/receiver illumination, where the compiled backward writes it
+        self.illum = [torch.zeros_like(self.bp.models[0])
+                      for _ in range(self._illum_nvar)]
         self.bp.illum_out = self.illum
 
     def __call__(self, *args, **kwargs):
@@ -856,7 +857,7 @@ class ModelParallel:
                 # gbufs only exists once the adjoint has been captured; a
                 # forward-only instance still needs the _fs_shape update above
                 # (it reshapes this shot's wavelet into fp.source).
-                if self.family == "acoustic" and self.bp is not None:
+                if self._ngrad_prefix and self.bp is not None:
                     self.gbufs[0] = torch.zeros(
                         self._fs_shape, dtype=self.gbufs[0].dtype,
                         device=self.gbufs[0].device)
@@ -941,6 +942,10 @@ class ModelParallel:
         sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
         fhalo = self._halo("_fwd_halo")
         with torch.no_grad():
+            # Still keyed on family: this picks between two hand-written time
+            # loops, which is schedule shape rather than an equation property.
+            # It goes away with the DDSpec interpreter, not before -- see
+            # gate/DDSPEC_DESIGN.md.
             if self.family == "acoustic":
                 self._forward_loop_acoustic(fhalo, sg)
             else:
@@ -1247,8 +1252,8 @@ class ModelParallel:
         else:
             interior = (..., slice(ztop, ztop + nz),
                         slice(self.lo_y, self.hi_y), slice(self.lo, self.hi))
-        # grads_out slot 0 is grad_wavelet for acoustic; model grads are the rest
-        model_grads = self.gbufs[1:] if self.family == "acoustic" else self.gbufs
+        # model grads follow the declared grad_wavelet prefix
+        model_grads = self.gbufs[self._ngrad_prefix:]
         out = [g[interior].clone() for g in model_grads]
         # Shot-parallel: with shot_groups>1 each group ran a DIFFERENT shot on
         # the SAME tile, so the FWI gradient (a sum over shots) needs the per-

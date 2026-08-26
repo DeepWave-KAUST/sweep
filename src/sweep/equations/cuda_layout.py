@@ -56,6 +56,22 @@ class CUDALayoutSpec:
     # Declared here rather than sniffed from the class name, which is what the
     # DD driver used to do ("vrz" in type(equation).__name__.lower()) and which
     # silently misses a subclass named anything else.
+    # Output-binding facts about the compiled backward, which the DD driver used
+    # to infer from the equation family:
+    #   grads_out.size() == models.size() + 1, slot 0 = grad_wavelet
+    #     (acoustic2d/backward.cu:101, acoustic3d:125, acoustic_vrz3d:329)
+    #   vs grads_out.size() == models.size()
+    #     (elastic2d/backward.cu:306, elastic3d:528)
+    grads_out_has_wavelet: bool = False
+    # illum_out.size() == 2 (acoustic2d/backward.cu:104, acoustic3d:128) vs
+    # illum_out.empty() (elastic2d/backward.cu:310, elastic3d:532).
+    #
+    # NOTE acoustic_vrz3d declares 2 to reproduce today's behaviour, not because
+    # it needs them: its backward.cu contains no reference to illum_out at all,
+    # so the driver has been allocating two model-sized buffers that nothing
+    # reads. Dropping it to 0 is a real (numerically inert) saving, but it is a
+    # separate change with its own gate rather than a free rider here.
+    illum_nvar: int = 0
     dd_coupling_nvar: int = 0
     # Model-only adjoint coefficients the fused adjoint reads across the cut
     # (constant within a backward, so built and exchanged once before the

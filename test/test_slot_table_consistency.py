@@ -186,3 +186,27 @@ def test_recon_names_are_real_slots_or_declared_carries(table_name):
     for r in t.recon:
         assert r in names or r.endswith("_prev"), (
             f"{r} is neither a bind slot nor a reconstruction carry")
+
+
+# --------------------------------------------------------------------------- #
+# output-binding declarations vs the compiled backward's TORCH_CHECKs
+# --------------------------------------------------------------------------- #
+GRADS_OUT = {
+    # equation -> (grads_out_has_wavelet, illum_nvar), from the TORCH_CHECKs in
+    # each backward.cu. These used to be inferred from the DD driver's notion of
+    # "family"; a wrong value is a length/offset error in the gradient list, so
+    # it is worth pinning independently of the driver.
+    "Acoustic": (True, 2),        # acoustic2d/backward.cu:101, :104
+    "Acoustic3D": (True, 2),      # acoustic3d/backward.cu:125, :128
+    "AcousticVRZ3D": (True, 2),   # acoustic_vrz3d/backward.cu:329; illum unused
+    "Elastic": (False, 0),        # elastic2d/backward.cu:306, :310
+    "Elastic3D": (False, 0),      # elastic3d/backward.cu:528, :532
+}
+
+
+@pytest.mark.parametrize("eq_name,expected", sorted(GRADS_OUT.items()))
+def test_grads_out_and_illum_declarations(eq_name, expected):
+    import sweep.equations as E
+
+    spec = getattr(E, eq_name)(device="cpu", backend="torch").cuda_layout
+    assert (spec.grads_out_has_wavelet, spec.illum_nvar) == expected

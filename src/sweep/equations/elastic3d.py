@@ -579,4 +579,6 @@ class Elastic(FirstOrderEquation):
             checkpoint_slot_axes=(None,) * 9 + ("x", "y", "z") * 9,
             adjoint_pml_slab=True,
             slots=slot_table.ELASTIC3D,
+            grads_out_has_wavelet=False,
+            illum_nvar=0,
         )
