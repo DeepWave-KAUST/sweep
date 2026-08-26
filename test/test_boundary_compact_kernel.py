@@ -29,7 +29,8 @@ cuda_only = pytest.mark.skipif(
 )
 
 _DT = 1.5e-3
-_NT = 300
+_NT = 900          # long enough for the reflection to reach the receivers
+_PERTURB_FRAC = 4  # perturbation at nz/4, not nz/2 -- see _assert_nonvacuous
 
 
 def _wavelet(nt=_NT, dt=_DT, f=9.0):
@@ -44,7 +45,7 @@ def _acoustic_grad(force_scan, *, shape, free_surface, batch, storage_dtype="fp3
     z = np.arange(nz, dtype=np.float32)[:, None]
     vp_init = (1500.0 + 8.0 * z).repeat(nx, 1).astype(np.float32)
     vp_true = vp_init.copy()
-    vp_true[nz // 2:, nx // 3: 2 * nx // 3] += 400.0
+    vp_true[nz // _PERTURB_FRAC:, nx // 3: 2 * nx // 3] += 400.0
 
     src_x = np.linspace(nx * 0.2, nx * 0.8, batch).astype(np.int64)
     sources = np.stack([src_x, np.full(batch, 3, dtype=np.int64)], axis=1)
@@ -70,13 +71,13 @@ def _acoustic_grad(force_scan, *, shape, free_surface, batch, storage_dtype="fp3
     return vp.grad.detach().cpu().numpy(), float(loss.detach())
 
 
-def _acoustic3d_grad(force_scan, *, shape=(48, 44, 52), nt=150):
+def _acoustic3d_grad(force_scan, *, shape=(48, 44, 52), nt=500):
     nz, ny, nx = shape
     dev = torch.device("cuda")
     z = np.arange(nz, dtype=np.float32)[:, None, None]
     vp_init = (1800.0 + 12.0 * z).repeat(ny, 1).repeat(nx, 2).astype(np.float32)
     vp_true = vp_init.copy()
-    vp_true[nz // 2:, :, :] += 300.0
+    vp_true[nz // _PERTURB_FRAC:, :, :] += 300.0
 
     sources = np.array([[nx // 2, ny // 2, 3]], dtype=np.int64)
     rx = np.linspace(2, nx - 3, 6).astype(np.int64)
@@ -101,7 +102,7 @@ def _acoustic3d_grad(force_scan, *, shape=(48, 44, 52), nt=150):
     return vp.grad.detach().cpu().numpy(), float(loss.detach())
 
 
-def _elastic_grad(force_scan, *, shape=(70, 110), free_surface=False, nt=250):
+def _elastic_grad(force_scan, *, shape=(70, 110), free_surface=False, nt=900):
     """Multi-field boundary saving -> the per-field save/restore launch sites."""
     nz, nx = shape
     dev = torch.device("cuda")
@@ -110,7 +111,7 @@ def _elastic_grad(force_scan, *, shape=(70, 110), free_surface=False, nt=250):
     vs = (vp / 1.8).astype(np.float32)
     rho = (1800.0 + 0.3 * z).repeat(nx, 1).astype(np.float32)
     vp_true = vp.copy()
-    vp_true[nz // 2:, :] += 300.0
+    vp_true[nz // _PERTURB_FRAC:, :] += 300.0
 
     sources = np.array([[nx // 2, 4]], dtype=np.int64)
     rec_x = np.linspace(2, nx - 3, 32).astype(np.int64)
@@ -156,9 +157,24 @@ class _forced:
             os.environ["SWEEP_BOUNDARY_NO_COMPACT"] = self.prev
 
 
+def _assert_nonvacuous(g, loss, what):
+    """A zero loss or an all-zero gradient makes the byte comparison pass no
+    matter what the kernels do.  That is the failure mode this whole file
+    exists to catch, so check the check."""
+    assert loss > 0.0, (
+        f"{what}: loss is exactly 0 -- nothing reached the receivers, so the "
+        "bit-comparison below would be vacuous. Lengthen nt or move the "
+        "perturbation shallower.")
+    assert np.abs(g).max() > 0.0, (
+        f"{what}: gradient is identically zero -- the bit-comparison would be "
+        "vacuous.")
+
+
 def _assert_bit_identical(a, b, what):
     ga, la = a
     gb, lb = b
+    _assert_nonvacuous(ga, la, what + " [compact]")
+    _assert_nonvacuous(gb, lb, what + " [scan]")
     assert ga.shape == gb.shape, f"{what}: shape {ga.shape} vs {gb.shape}"
     assert la.hex() == lb.hex(), f"{what}: loss {la!r} vs {lb!r}"
     assert ga.tobytes() == gb.tobytes(), (
