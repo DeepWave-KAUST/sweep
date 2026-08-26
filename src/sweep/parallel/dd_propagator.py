@@ -67,16 +67,6 @@ from sweep.propagator._stepped import (
 X_LO_BIT, X_HI_BIT = 1, 2
 Y_LO_BIT, Y_HI_BIT = 16, 32
 
-# Per-family wavefield-list geometry (see acoustic.h / elastic.h ::bind and
-# sweep/propagator/_stepped.py).  ``nv``/``nphys``/``nrecon`` are 2-D, 3-D.
-_FAMILIES = {
-    "acoustic": dict(nwf=(9, 12), nphys=None, nv=None, nrecon=(3, 3),
-                     half_step=False),
-    "elastic": dict(nwf=(15, 36), nphys=(5, 9), nv=(2, 3), nrecon=(7, 12),
-                    half_step=True),
-}
-
-
 # Which equations ModelParallel can actually run, and their wavefield family.
 #
 # The criterion is NOT the class name. DD advances the solver one step at a
@@ -95,7 +85,8 @@ _FAMILIES = {
 #
 # Adding an equation here means all three of: its forward.cu and backward.cu
 # implement the stepped range; its wavefield list matches the family geometry
-# in ``_FAMILIES``; and a DD-vs-single parity test covers it (test/dd_corner_*).
+# declares a slot table and a DD schedule; and a DD-vs-single parity test
+# covers it (gate/ddgate.py, test/dd_corner_*).
 _DD_EQUATIONS = {
     "Acoustic": "acoustic",             # csrc/cuda/equations/acoustic2d
     "Acoustic3D": "acoustic",           # csrc/cuda/equations/acoustic3d
@@ -268,6 +259,9 @@ class ModelParallel:
         if self.ndim not in (2, 3):
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
+        # Accepted-equation check only. NOTHING dispatches on this any more:
+        # the schedule comes from the equation's own declarations (see
+        # _spec below), and the wavefield geometry from its slot table.
         self.family = _family_of(equation)
         # Whether this equation's backward needs the coupling-field exchange
         # (a gradient that is a spatial DIVERGENCE rather than a pointwise
@@ -284,7 +278,6 @@ class ModelParallel:
         self._illum_nvar = int(getattr(_layout, "illum_nvar", 0) or 0)
         self._dd_coupling_nvar = int(getattr(_layout, "dd_coupling_nvar", 0) or 0)
         self._dd_coeff_nvar = int(getattr(_layout, "dd_adjoint_coeff_nvar", 0) or 0)
-        self._is_vrz = self._dd_coupling_nvar > 0
         self.dev = dev
         self.nt = int(nt)
         self.abcn = int(abcn)
@@ -294,7 +287,6 @@ class ModelParallel:
         self.free_surface = bool(free_surface)
         self.world = self.topo.world_size
         self.rank = self.topo.rank
-        self._st = dict(_FAMILIES[self.family])
 
         self.local_shape, self.offsets = self.topo.local_extent(self.global_shape)
         self.x0 = self.offsets[-1]                       # global x-origin of tile
@@ -405,47 +397,40 @@ class ModelParallel:
         self._need_adjoint = False
         self._model_dtype = None  # pinned by the first capture; see _capture
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
-        # Wavefield-list geometry: derived from the equation's declared slot
-        # table where it has one, from the hand-written _FAMILIES table where it
-        # does not.  Both branches produce identical values for every equation
-        # that declares a table -- test_slot_table_consistency.py asserts it --
-        # so this is a source-of-truth change, not a behaviour change.
+        # Wavefield-list geometry, derived from the equation's declared slot
+        # table. Every DD-capable equation has one; a missing table is a
+        # configuration error rather than something to paper over, because the
+        # fallback would have to guess counts that are load-bearing.
         table = slot_table_of(equation)
+        if table is None:
+            raise NotImplementedError(
+                f"{type(equation).__name__} is accepted for domain "
+                f"decomposition but declares no cuda_layout.slots table, so "
+                f"its wavefield geometry cannot be derived.")
         self._table = table
         self._role_idx = {}
-        # Declarative time-loop schedule. Every BACKWARD is interpreted; the
-        # acoustic/VRZ FORWARD keeps its hand-written form (and its
-        # comm/compute overlap variant) until its own migration step.
-        self._spec = (ELASTIC_DD if self.family == "elastic"
+        # Declarative time-loop schedule -- the only thing that decides how
+        # this equation's DD loops run. Selected from what the equation
+        # DECLARES: a fixed-slot layout (no rotating time-level block) is the
+        # staggered first-order protocol; a divergence-form gradient needs the
+        # coupling exchange; otherwise it is the plain second-order schedule.
+        self._spec = (ELASTIC_DD if not table.u_blocks
                       else VRZ_DD if self._dd_coupling_nvar else ACOUSTIC_DD)
-        i3 = 0 if self.ndim == 2 else 1
-        if table is not None:
-            self._nwf = table.n_forward
-            # The FORWARD and ADJOINT lists are different lengths for the
-            # acoustic family (9/12 vs 11/15: the fused adjoint double-buffers
-            # zeta as well as psi). _FAMILIES only ever knew one number, so the
-            # adjoint fallback at _bind_adjoint_buffers sized itself with the
-            # forward count -- latent only because bp.adjoint_wavefields is
-            # never actually empty (_c.py always allocates). Two quantities, two
-            # names.
-            self._nadj = table.n_adjoint
-            self._nrecon = table.nrecon
-            # Explicit index tuples rather than two counts plus the unstated
-            # assumption that velocities are a contiguous prefix -- true for
-            # elastic, false for DAS-Zhao, whose physical block is split around
-            # the PML block.
-            self._vel_idx = table.vel_idx
-            self._phys_idx = table.phys_idx
-        else:
-            self._nwf = self._nadj = self._st["nwf"][i3]
-            self._nrecon = self._st["nrecon"][i3]
-            nv = self._st["nv"][i3] if self._st["nv"] else 0
-            nphys = self._st["nphys"][i3] if self._st["nphys"] else self._nwf
-            self._vel_idx = tuple(range(nv))
-            self._phys_idx = tuple(range(nphys))
-        if self.family == "elastic":
-            self._nv = len(self._vel_idx)
-            self._nphys = len(self._phys_idx)
+        self._nwf = table.n_forward
+        # FORWARD and ADJOINT list lengths are different quantities for the
+        # acoustic family (9/12 vs 11/15: the fused adjoint double-buffers zeta
+        # as well as psi). The old hand table only ever knew one number, so the
+        # adjoint fallback in _bind_adjoint_buffers sized itself with the
+        # forward count -- latent only because bp.adjoint_wavefields is never
+        # actually empty. Two quantities, two names.
+        self._nadj = table.n_adjoint
+        self._nrecon = table.nrecon
+        # Explicit index tuples rather than two counts plus the unstated
+        # assumption that velocity slots are a contiguous prefix -- true for
+        # elastic, false for DAS-Zhao, whose physical block is split around the
+        # PML block.
+        self._vel_idx = table.vel_idx
+        self._phys_idx = table.phys_idx
 
     # ------------------------------------------------------------------ utils
     def _halo(self, attr):
@@ -777,7 +762,7 @@ class ModelParallel:
         # there) so _run_adjoint can halo-exchange them between the build and
         # divergence sub-steps.  Plain acoustic's pointwise u_tt*lambda gradient
         # needs no such exchange, so it keeps self.coupling empty.
-        if self._is_vrz:
+        if self._dd_coupling_nvar:
             self.coupling = [torch.zeros_like(self.bp.models[0])
                              for _ in range(self._dd_coupling_nvar)]
             # C0/Cx/Cy/Cz: the fused adjoint's transpose fast-path reads these coeffs
@@ -950,14 +935,7 @@ class ModelParallel:
         sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
         fhalo = self._halo("_fwd_halo")
         with torch.no_grad():
-            # Still keyed on family: this picks between two hand-written time
-            # loops, which is schedule shape rather than an equation property.
-            # It goes away with the DDSpec interpreter, not before -- see
-            # gate/DDSPEC_DESIGN.md.
-            if self.family == "acoustic":
-                self._forward_loop_acoustic(fhalo, sg)
-            else:
-                self._forward_loop_elastic(fhalo)
+            self._forward_loop(fhalo, sg)
 
         # A tile owning no real receivers carries only a dummy receiver; its
         # record is meaningless.  Zero it so a residual/adjoint derived from it
@@ -1202,36 +1180,24 @@ class ModelParallel:
                 hs.exchange_finish(view)        # wait P2P + copy-recv
             compute.wait_stream(comm)
 
-    def _forward_loop_acoustic(self, fhalo, sg):
-        """Acoustic forward time loop. Uses true comm/compute overlap (phase-1
-        cut strips exchanged async on a comm stream while phase-2 interior
-        computes, then compute waits for comm) when eligible — x-face cuts only
-        and no source in a cut strip — else a serial step-then-exchange loop.
-        Both are bit-identical (the overlap is a pure reordering)."""
+    def _forward_loop(self, fhalo, sg):
+        """Run the equation's declared forward schedule.
+
+        One loop for every family. Where a spec offers an overlapped variant,
+        the driver takes it only if it can discharge that variant's proof
+        obligation -- for acoustic, that no source sits within M of a cut line,
+        because the source injection atomically adds into the very buffer the
+        comm stream would be packing. Both variants are bit-identical.
+        """
         runner = SteppedBindingRunner(
             self.f_func, self.fp, self.L_fwd,
-            psi_pairs=self._table.pairs(adjoint=False) if self._table
-            else acoustic_psi_pairs(self.ndim),
-            u_blocks=self._table.u_blocks if self._table else (0,))
-        # The spec offers two forward schedules; the driver picks the
-        # overlapped one only where it can discharge the proof obligation that
-        # comes with it (see ACOUSTIC_FWD_OVERLAP). Both are bit-identical.
+            psi_pairs=self._table.pairs(adjoint=False),
+            u_blocks=self._table.u_blocks)
         ov = self._spec.forward_overlapped
-        if (ov is not None and self._overlap_ok
-                and self._src_away_from_cuts(sg)):
+        if ov is not None and self._overlap_ok and self._src_away_from_cuts(sg):
             self._run_dd_loop_overlapped(ov, runner, fhalo)
         else:
             self._run_dd_loop(self._spec.forward, runner, fhalo)
-
-    def _forward_loop_elastic(self, fhalo):
-        """Elastic forward time loop: phase-1 velocity update + batched velocity-
-        halo exchange, phase-2 stress update + batched stress-halo exchange.
-        Elastic slots don't rotate, so the field lists are fixed across steps."""
-        runner = SteppedBindingRunner(
-            self.f_func, self.fp, self.L_fwd,
-            psi_pairs=self._table.pairs(adjoint=False) if self._table else (),
-            u_blocks=self._table.u_blocks if self._table else ())
-        self._run_dd_loop(self._spec.forward, runner, fhalo)
 
     # -------------------------------------------------------------- gradient
     def _run_adjoint(self, adjoint_source_tile):
@@ -1256,55 +1222,30 @@ class ModelParallel:
             t.zero_()
         self.bp.cut_face_mask = self.cut_mask
         bhalo = self._halo("_bwd_halo")
-        nv = self._nv if self.family == "elastic" else None
 
         with torch.no_grad():
-            if self._is_vrz:
-                # VRZ phased backward (Fix A): advance+recon -> exchange lambda,p
-                # -> build coupling c/e from the POST-exchange lambda,p -> exchange
-                # c/e -> divergence/accumulate.  The c/e exchange gives the gradient
-                # divergence the neighbour's coupling values at the cut seam
-                # (acoustic's pointwise gradient needs no such exchange).  VRZ
-                # rotates the psi pairs only (swap_pml), like the forward recon.
-                # VRZ has no fused adjoint, so it has no adjoint-only shadow
-                # slots and pairs(adjoint=True) == pairs(adjoint=False). That
-                # equality is what removes the old `adjoint_extra_nvar`
-                # discriminator: the table answers it without being asked which
-                # family this is.
-                br = SteppedBackwardRunner(
-                    self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=self._table.pairs(adjoint=True) if self._table
-                    else acoustic_psi_pairs(self.ndim))
-                self._run_dd_loop(self._spec.backward, br, bhalo)
-            elif self.family == "acoustic":
-                # The pair set comes from the slot table, which is what makes
-                # the old adjoint_extra_nvar discriminator unnecessary: plain
-                # acoustic double-buffers psi AND zeta in its fused adjoint (15
-                # slots, the wider pair set) while VRZ doubles only psi (12), and
-                # the table already knows which slots are adjoint-only. Asking it
-                # removes the chance of handing VRZ the wider set and indexing
-                # past its list.
-                br = SteppedBackwardRunner(
-                    self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=self._table.pairs(adjoint=True) if self._table
-                    else acoustic_adj_pairs(self.ndim))
-                # tail truncation and the floor-iteration exchange drop are both
-                # declared on the loop (tail_truncatable /
-                # drop_trailing_exchange_on_floor); see _loop_floor.
-                self._run_dd_loop(self._spec.backward, br, bhalo)
-            else:
-                br = SteppedBackwardRunner(
-                    self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=self._table.pairs(adjoint=True) if self._table else (),
-                    adj_u_blocks=self._table.u_blocks if self._table else (),
-                    recon_u_blocks=())
-                # The one runtime predicate the elastic schedule needs; its
-                # justification lives on the ExchangeGroup that uses it.
-                _vel = ("vx", "vy", "vz")
-                preds = {"inj_cross": (
-                    any(t in _vel for t in self.prop.source_type)
-                    or any(t not in _vel for t in self.prop.receiver_type))}
-                self._run_dd_loop(self._spec.backward, br, bhalo, preds)
+            # One loop for every family. The schedule says which phases run,
+            # what each ships, and which phase advances the buffer-role
+            # counters -- so what used to be three hand-written loops behind a
+            # vrz / acoustic / elastic branch is one interpreter reading three
+            # declarations.
+            #
+            # The runner arguments unify too: adj_u_blocks and recon_u_blocks
+            # are both the table's u_blocks, which is (0,) for the rotating
+            # acoustic/VRZ lists and () for elastic's fixed slots -- exactly
+            # what the three branches passed by hand.
+            br = SteppedBackwardRunner(
+                self.b_func, self.bp, self.L_adj, self.recon,
+                adj_pairs=self._table.pairs(adjoint=True),
+                adj_u_blocks=self._table.u_blocks,
+                recon_u_blocks=self._table.u_blocks)
+            # Runtime predicates a schedule may gate a shipment on. Only the
+            # elastic backward declares one; an unused key costs nothing.
+            _vel = ("vx", "vy", "vz")
+            preds = {"inj_cross": (
+                any(t in _vel for t in self.prop.source_type)
+                or any(t not in _vel for t in self.prop.receiver_type))}
+            self._run_dd_loop(self._spec.backward, br, bhalo, preds)
 
         # crop the runtime model grad to the physical tile interior (z is
         # FS-aware: top pad = M under free surface; cut-side x-pad grad belongs

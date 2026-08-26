@@ -114,20 +114,35 @@ def test_pml_slot_axes_match_cuda_layout(eq_name, table_name):
 # --------------------------------------------------------------------------- #
 # vs parallel/dd_propagator.py
 # --------------------------------------------------------------------------- #
-def test_dd_family_counts_match():
-    from sweep.parallel import dd_propagator as DD
+def test_dd_wavefield_counts():
+    """Pin the counts the DD driver derives from the table.
 
-    fam = DD._FAMILIES
-    pairs = {"acoustic": (ST.ACOUSTIC2D, ST.ACOUSTIC3D),
-             "elastic": (ST.ELASTIC2D, ST.ELASTIC3D)}
-    for name, (t2, t3) in pairs.items():
-        f = fam[name]
-        assert f["nwf"] == (t2.n_forward, t3.n_forward)
-        assert f["nrecon"] == (t2.nrecon, t3.nrecon)
-        if f["nphys"] is not None:
-            assert f["nphys"] == (t2.base_nvar, t3.base_nvar)
-        if f["nv"] is not None:
-            assert f["nv"] == (len(t2.vel_idx), len(t3.vel_idx))
+    These used to be asserted against ``dd_propagator._FAMILIES``, the
+    hand-written copy. That copy is gone -- the driver reads the table -- so
+    with nothing on the other side of the equals sign the table could drift
+    silently. The expected values are therefore spelled out here, taken from
+    the C++ bind order they describe:
+
+      acoustic 2-D/3-D  9 / 12 forward, 11 / 15 adjoint (the fused adjoint
+                        double-buffers zeta as well as psi), 3 reconstruction
+      elastic  2-D/3-D  15 / 36 forward, same adjoint (no shadow slots),
+                        7 / 12 reconstruction (physical + velocity carries)
+    """
+    import sweep.equations as E
+
+    expected = {
+        # name: (n_forward, n_adjoint, nrecon, n_velocity)
+        "Acoustic": (9, 11, 3, 0),
+        "Acoustic3D": (12, 15, 3, 0),
+        "AcousticVRZ": (9, 9, 3, 0),
+        "AcousticVRZ3D": (12, 12, 3, 0),
+        "Elastic": (15, 15, 7, 2),
+        "Elastic3D": (36, 36, 12, 3),
+    }
+    for name, want in expected.items():
+        t = getattr(E, name)(device="cpu", backend="torch").cuda_layout.slots
+        got = (t.n_forward, t.n_adjoint, t.nrecon, len(t.vel_idx))
+        assert got == want, f"{name}: {got} != {want}"
 
 
 def test_adjoint_list_is_longer_than_the_forward_one_for_acoustic():
