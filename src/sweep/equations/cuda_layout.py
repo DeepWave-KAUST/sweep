@@ -45,6 +45,22 @@ class CUDALayoutSpec:
     # declared, ``test_slot_table_consistency.py`` requires the derived values to
     # equal the hand-written ones, so the two cannot drift while both exist.
     slots: "SlotTable | None" = None
+    # ---- Domain decomposition ------------------------------------------
+    # Some equations' model gradient is a spatial DIVERGENCE of an intermediate
+    # coupling field rather than a pointwise product, so at a cut seam it needs
+    # the neighbour's coupling values -- the DD backward has to build the field,
+    # exchange it, and only then take the divergence.  Variable-density VRZ is
+    # the case in the tree (c/e = lambda*vp*grad(p)); plain acoustic's
+    # u_tt*lambda needs no such exchange.
+    #
+    # Declared here rather than sniffed from the class name, which is what the
+    # DD driver used to do ("vrz" in type(equation).__name__.lower()) and which
+    # silently misses a subclass named anything else.
+    dd_coupling_nvar: int = 0
+    # Model-only adjoint coefficients the fused adjoint reads across the cut
+    # (constant within a backward, so built and exchanged once before the
+    # reverse loop rather than per step).
+    dd_adjoint_coeff_nvar: int = 0
 
     def resolved_last_two_storage_nvar(self) -> int:
         return self.base_nvar if self.last_two_storage_nvar is None else self.last_two_storage_nvar
