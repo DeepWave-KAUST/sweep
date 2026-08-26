@@ -1,5 +1,6 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
 from ._registry import register_equation
@@ -170,4 +171,5 @@ class Acoustic(SecondOrderEquation):
             checkpoint_slot_axes=(None, None, "x", "z", "x", "z"),
             boundary_save_nvar=1,
             backward_workspace_nvar=1,
+            slots=slot_table.ACOUSTIC2D,
         )

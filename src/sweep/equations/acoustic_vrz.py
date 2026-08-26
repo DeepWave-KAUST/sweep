@@ -1,5 +1,6 @@
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from .utils import to_backend, zero_top_halo_fields
 from sweep.scalars import fd_coefficients
@@ -229,6 +230,7 @@ class AcousticVRZ(SecondOrderEquation):
             checkpoint_nvar=6,
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
+            slots=slot_table.ACOUSTIC_VRZ2D,
         )
 
 
@@ -333,4 +335,5 @@ class AcousticVRZ3D(SecondOrderEquation):
             checkpoint_nvar=8,
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
+            slots=slot_table.ACOUSTIC_VRZ3D,
         )
