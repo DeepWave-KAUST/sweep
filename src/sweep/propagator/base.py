@@ -2,6 +2,7 @@ from collections.abc import Sequence
 import inspect
 
 import numpy as np
+from sweep.core import geometry, validation
 from sweep.equations.fields import build_field_index, format_field_specs
 from sweep.equations._edges import (
     normalize_free_surface,
@@ -859,105 +860,13 @@ class PropBase:
             signature = signature.replace(parameters=parameters[1:])
         self.__signature__ = signature
 
+    # Shape validation lives in sweep.core.validation as a pure function of the
+    # three shapes; this stays as the binding that supplies self.ndim.
     def _shape_tuple(self, value):
-        shape = getattr(value, "shape", None)
-        if shape is None:
-            shape = np.shape(value)
-        return tuple(int(dim) for dim in shape)
+        return validation.shape_tuple(value)
 
     def _normalize_io(self, wavelet, sources, receivers):
-        """Validate user-facing shapes for ``wavelet`` / ``sources`` / ``receivers``.
-
-        The propagator accepts three input modes:
-
-        - **A1**: ``wavelet=(nt,)``, ``sources=(nshots, ndim)``,
-          ``receivers=(nshots, nrec, ndim)`` — naive multi-shot, shared wavelet.
-        - **A2**: ``wavelet=(nshots, nt)``, ``sources=(nshots, ndim)``,
-          ``receivers=(nshots, nrec, ndim)`` — naive multi-shot, per-shot wavelet.
-        - **B**:  ``wavelet=(nt,)`` or ``(nsrc, nt)``,
-          ``sources=(1, nsrc, ndim)``, ``receivers=(1, nrec, ndim)`` —
-          source encoding (single super-shot, ``nsrc`` superposed point sources).
-
-        ``receivers`` must always be 3-D; shared receiver arrays should be
-        pre-broadcast/repeated to ``(B, nrec, ndim)`` by the user.
-
-        Returns
-        -------
-        mode : {'A1', 'A2', 'B'}
-        batch_size : int
-            Internal batch dim (``nshots`` for A, ``1`` for B).
-        nsrc_per_shot : int
-            Number of point sources per shot (``1`` for A, ``nsrc`` for B).
-        is_encoded : bool
-            ``True`` iff ``mode == 'B'``.
-        """
-        ws = self._shape_tuple(wavelet)
-        ss = self._shape_tuple(sources)
-        rs = self._shape_tuple(receivers)
-        ndim = self.ndim
-
-        if len(rs) != 3 or rs[-1] != ndim:
-            raise ValueError(
-                f"receivers must have shape (B, nrec, {ndim}); got {rs}. "
-                "Pre-broadcast/repeat per-shot if you previously passed a "
-                "shared (nrec, dim) array."
-            )
-        nrec = rs[1]
-
-        if len(ss) == 2:
-            if ss[-1] != ndim:
-                raise ValueError(
-                    f"sources must have shape (nshots, {ndim}); got {ss}."
-                )
-            nshots = ss[0]
-            if rs[0] != nshots:
-                raise ValueError(
-                    f"receivers batch ({rs[0]}) must match sources nshots "
-                    f"({nshots}) in naive multi-shot mode."
-                )
-            if len(ws) == 1:
-                return 'A1', nshots, 1, nrec, False
-            if len(ws) == 2:
-                if ws[0] != nshots:
-                    raise ValueError(
-                        f"wavelet must have shape (nshots={nshots}, nt); got {ws}."
-                    )
-                return 'A2', nshots, 1, nrec, False
-            raise ValueError(
-                "wavelet must have shape (nt,) [shared] or (nshots, nt) "
-                f"[per-shot] in naive multi-shot mode; got {ws}."
-            )
-
-        if len(ss) == 3:
-            if ss[0] != 1 or ss[-1] != ndim:
-                raise ValueError(
-                    "sources in source-encoding mode must have shape "
-                    f"(1, nsrc, {ndim}); got {ss}."
-                )
-            nsrc = ss[1]
-            if rs[0] != 1:
-                raise ValueError(
-                    "receivers batch must be 1 in source-encoding mode; "
-                    f"got {rs[0]}."
-                )
-            if len(ws) == 1:
-                return 'B', 1, nsrc, nrec, True
-            if len(ws) == 2:
-                if ws[0] != nsrc:
-                    raise ValueError(
-                        f"wavelet must have shape (nt,) or (nsrc={nsrc}, nt) "
-                        f"in source-encoding mode; got {ws}."
-                    )
-                return 'B', 1, nsrc, nrec, True
-            raise ValueError(
-                "wavelet must have shape (nt,) or (nsrc, nt) in "
-                f"source-encoding mode; got {ws}."
-            )
-
-        raise ValueError(
-            f"sources must have shape (nshots, {ndim}) [naive multi-shot] "
-            f"or (1, nsrc, {ndim}) [source encoding]; got {ss}."
-        )
+        return validation.normalize_io(wavelet, sources, receivers, self.ndim)
 
     def _normalize_boundary_saving_config(self, config):
         default = {
@@ -1115,12 +1024,7 @@ class PropBase:
         # Remove each face's PML pad, recovering the physical model.  Free-surface
         # faces have pad 0 (their halo is handled elsewhere), so nothing is cropped
         # there — reproducing the old image ``data[..., 0:-abcn, abcn:-abcn]``.
-        slices = [Ellipsis]
-        for ax in range(self.ndim):
-            lo = self.pad[2*ax]
-            hi = self.pad[2*ax + 1]
-            slices.append(slice(lo, -hi if hi > 0 else None))
-        return data[tuple(slices)]
+        return geometry.crop_to_physical(data, self.pad, self.ndim)
 
     def get_parameters(self, key):
         assert key in self.model_names, f'Key must be in {self.model_names}, got {key}'
@@ -1129,45 +1033,30 @@ class PropBase:
     def parameters(self, ):
         return [getattr(self, name) for name in self.model_names]
 
+    # Grid geometry lives in sweep.core.geometry as plain functions of the
+    # numbers; these stay as the thin bindings that supply them from self.
     def _runtime_fd_halo(self):
-        return self.equation.so // 2
+        return geometry.fd_halo(self.equation.so)
 
     def _runtime_shape(self):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return self.shape
-        return tuple(s + 2 * halo for s in self.shape)
+        return geometry.runtime_shape(self.shape, self._runtime_fd_halo())
 
     def _runtime_padding(self):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return self.padding
-        return tuple(p + halo for p in self.padding)
+        return geometry.runtime_padding(self.padding, self._runtime_fd_halo())
 
     def _runtime_fd_pad(self):
-        halo = self._runtime_fd_halo()
-        return [halo, halo] * self.ndim
+        return geometry.runtime_fd_pad(self._runtime_fd_halo(), self.ndim)
 
     def _runtime_coord_offset(self):
-        halo = self._runtime_fd_halo()
-        # Physical origin -> padded-grid origin: each axis' LOW-side pad plus the
-        # stencil halo, in torch/reverse-axis order (last entry is z) to match
-        # ``self.padding``.  Free-surface low faces have pad 0, so e.g. a top FS
-        # gives z-offset ``halo`` — reproducing the old image-method rule.
-        return tuple(self.pad[2*ax] + halo for ax in reversed(range(self.ndim)))
+        return geometry.runtime_coord_offset(
+            self.pad, self._runtime_fd_halo(), self.ndim)
 
     def _runtime_crop_slices(self):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return (slice(None),) * self.ndim
-        return tuple(slice(halo, -halo) for _ in range(self.ndim))
+        return geometry.runtime_crop_slices(self._runtime_fd_halo(), self.ndim)
 
     def _crop_runtime_halo(self, data):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return data
-        return data[(...,) + self._runtime_crop_slices()]
+        return geometry.crop_runtime_halo(
+            data, self._runtime_fd_halo(), self.ndim)
 
     def _spatial_pad_pairs(self, flat_padding):
-        pairs = [(flat_padding[2 * i], flat_padding[2 * i + 1]) for i in range(len(flat_padding) // 2)]
-        return tuple(reversed(pairs))
+        return geometry.spatial_pad_pairs(flat_padding)
