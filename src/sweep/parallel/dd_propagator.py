@@ -52,6 +52,7 @@ import numpy as np
 import torch
 
 from sweep.equations.slot_table import slot_table_of
+from sweep.parallel.dd_spec import ELASTIC_DD
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
@@ -410,6 +411,12 @@ class ModelParallel:
         # that declares a table -- test_slot_table_consistency.py asserts it --
         # so this is a source-of-truth change, not a behaviour change.
         table = slot_table_of(equation)
+        self._table = table
+        self._role_idx = {}
+        # Declarative time-loop schedule. Only the elastic family is
+        # routed through the interpreter so far; acoustic and VRZ keep
+        # their hand-written loops until their own migration step.
+        self._spec = ELASTIC_DD if self.family == "elastic" else None
         i3 = 0 if self.ndim == 2 else 1
         if table is not None:
             self._nwf = table.n_forward
@@ -1081,6 +1088,88 @@ class ModelParallel:
         self.record.zero_()
         return sg
 
+    # ------------------------------------------------- DDSpec interpreter
+    _BUFS = {"fwd": "L_fwd", "adj": "L_adj", "recon": "recon",
+             "coupling": "coupling", "coeffs": "adj_coeffs"}
+
+    def _role_index(self, buf, roles):
+        """Slot indices of ``buf`` whose slot-table role is in ``roles``.
+
+        For ``recon`` the lookup is by NAME against the table's reconstruction
+        tuple, so the trailing ``fv*_prev`` carries fall out of every group on
+        their own: they are not bind slots, so they have no role to match.
+        """
+        t = self._table
+        if buf == "recon":
+            role_of = {sl.name: sl.role for sl in t.slots}
+            return tuple(i for i, n in enumerate(t.recon)
+                         if role_of.get(n) in roles)
+        pool = t.slots if buf == "adj" else t._fwd()
+        return tuple(i for i, sl in enumerate(pool) if sl.role in roles)
+
+    def _tensors(self, ref, runner):
+        if ref.at is not None:
+            return (runner.at(ref.buf, ref.at),)
+        L = getattr(self, self._BUFS[ref.buf])
+        if ref.roles is None:
+            return tuple(L)
+        key = (ref.buf, ref.roles)
+        idx = self._role_idx.get(key)
+        if idx is None:
+            idx = self._role_idx[key] = self._role_index(*key)
+        return tuple(L[i] for i in idx)
+
+    def _ship(self, halo, runner, grp):
+        ts = [t for ref in grp.refs for t in self._tensors(ref, runner)]
+        if not ts:
+            return                       # a workspace this equation does not have
+        if grp.batched:
+            self._exchange_group(halo, ts)
+        else:
+            for t in ts:
+                self._exchange(halo, t)
+
+    def _loop_floor(self, L):
+        """Lowest ``it`` the reverse loop executes.
+
+        Boundary-tail truncation raises it: with ``tail_steps = K`` the strips
+        cover forward steps ``[nt-K, nt)`` and the restore at reverse step
+        ``it`` consumes the strip of step ``it - 1``, so the loop stops at
+        ``bs_it0 + 1``. Derived from ``nt`` and the captured tail, both of which
+        are identical on every rank -- which is what keeps the ranks' lockstep
+        exchanges from leaving one of them waiting.
+        """
+        if not L.tail_truncatable:
+            return L.floor
+        tail = int(getattr(self.bp, "boundary_tail_steps", 0) or 0)
+        bs_it0 = max(0, self.nt - tail) if tail > 0 else 0
+        return max(L.floor, bs_it0 + 1 if bs_it0 > 0 else 0)
+
+    def _run_dd_loop(self, L, runner, halo, preds=None):
+        """Interpret one :class:`DDLoop` -- the generic DD time loop."""
+        preds = preds or {}
+        fwd = L.direction == "fwd"
+        seg = (lambda it: (it + 1,)) if fwd else (lambda it: (it + 1, it))
+
+        for ph in L.prologue:
+            runner.run(*seg(self.nt - 1), phase=ph.step_phase, advance=ph.advances)
+            for grp in ph.after:
+                self._ship(halo, runner, grp)
+
+        floor = self._loop_floor(L)
+        its = range(self.nt) if fwd else range(self.nt - 1, floor - 1, -1)
+        last = L.phases[-1]
+        for it in its:
+            on_floor = (not fwd) and it == floor
+            for ph in L.phases:
+                runner.run(*seg(it), phase=ph.step_phase, advance=ph.advances)
+                if on_floor and ph is last and L.drop_trailing_exchange_on_floor:
+                    continue
+                for grp in ph.after:
+                    if grp.when is not None and not preds.get(grp.when, True):
+                        continue
+                    self._ship(halo, runner, grp)
+
     def _forward_loop_acoustic(self, fhalo, sg):
         """Acoustic forward time loop. Uses true comm/compute overlap (phase-1
         cut strips exchanged async on a comm stream while phase-2 interior
@@ -1117,14 +1206,10 @@ class ModelParallel:
         halo exchange, phase-2 stress update + batched stress-halo exchange.
         Elastic slots don't rotate, so the field lists are fixed across steps."""
         runner = SteppedBindingRunner(
-            self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
-        vel = [self.L_fwd[f] for f in range(self._nv)]
-        stress = [self.L_fwd[f] for f in range(self._nv, self._nphys)]
-        for it in range(self.nt):
-            runner.run_phase(it + 1, 1)
-            self._exchange_group(fhalo, vel)
-            runner.run_phase(it + 1, 2)
-            self._exchange_group(fhalo, stress)
+            self.f_func, self.fp, self.L_fwd,
+            psi_pairs=self._table.pairs(adjoint=False) if self._table else (),
+            u_blocks=self._table.u_blocks if self._table else ())
+        self._run_dd_loop(self._spec.forward, runner, fhalo)
 
     # -------------------------------------------------------------- gradient
     def _run_adjoint(self, adjoint_source_tile):
@@ -1212,35 +1297,16 @@ class ModelParallel:
             else:
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=(), adj_u_blocks=(), recon_u_blocks=())
-                # fixed elastic slots -> precompute each phase's exchange group
-                # (adjoint + recon fields) and batch into one P2P per phase
-                ph1 = ([self.L_adj[f] for f in range(nv)]
-                       + [self.recon[f] for f in range(nv, self._nphys)])
-                ph2 = ([self.L_adj[f] for f in range(nv, self._nphys)]
-                       + [self.recon[f] for f in range(nv)])
-                # The injections run as their own sub-phase (step_phase 3),
-                # at the same op position monolithic runs them; the split
-                # exists purely so an exchange can sit between the injections
-                # and the phase-1 kernels. A body-force source writes recon
-                # VELOCITY and a stress receiver writes adjoint STRESS -- both
-                # are ph2 fields, which phase 1 READS across the cut, so
-                # without that exchange the neighbour's halo is one injection
-                # stale at every reverse step. When neither is in play the
-                # strips are untouched since the previous ph2 exchange and
-                # the ship is skipped: the default combination (stress
-                # source, velocity receivers) keeps the two-exchange step.
+                    adj_pairs=self._table.pairs(adjoint=True) if self._table else (),
+                    adj_u_blocks=self._table.u_blocks if self._table else (),
+                    recon_u_blocks=())
+                # The one runtime predicate the elastic schedule needs; its
+                # justification lives on the ExchangeGroup that uses it.
                 _vel = ("vx", "vy", "vz")
-                inj_cross = (any(t in _vel for t in self.prop.source_type)
-                             or any(t not in _vel for t in self.prop.receiver_type))
-                for it in range(self.nt - 1, 0, -1):     # elastic BS floor it==1
-                    br.run_phase(it + 1, it, 3)          # injections(it)
-                    if inj_cross:
-                        self._exchange_group(bhalo, ph2)
-                    br.run_phase(it + 1, it, 1)
-                    self._exchange_group(bhalo, ph1)
-                    br.run_phase(it + 1, it, 2)
-                    self._exchange_group(bhalo, ph2)
+                preds = {"inj_cross": (
+                    any(t in _vel for t in self.prop.source_type)
+                    or any(t not in _vel for t in self.prop.receiver_type))}
+                self._run_dd_loop(self._spec.backward, br, bhalo, preds)
 
         # crop the runtime model grad to the physical tile interior (z is
         # FS-aware: top pad = M under free surface; cut-side x-pad grad belongs
