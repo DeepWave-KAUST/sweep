@@ -125,7 +125,9 @@ void apply_body_force_rho_correction(
     int it
 )
 {
-    if (it + 1 >= static_cast<int>(p.nt)) return;
+    // amp(it), not amp(it+1): the injected amplitude that survives in
+    // v(it) - v(it+1) is the one added at step it (3ba5663 on tti_sg2d).
+    if (it < 0 || it >= static_cast<int>(p.nt)) return;
     for (int isrc_bf = 0; isrc_bf < source_fields.numel(); ++isrc_bf) {
         int sfield_bf = source_fields[isrc_bf].item<int>();
         if (sfield_bf > 2) continue;
@@ -137,9 +139,48 @@ void apply_body_force_rho_correction(
             rho.data_ptr<float>(),
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
-            it + 1,
+            it,
             (int)p.forward_sources_loc.size(1),
             3,
+            solver
+        );
+    }
+}
+
+// Undo the just-injected receiver residual from this reverse step's rho
+// imaging, at every VELOCITY-receiver cell; stress receivers carry no rho
+// term.  Call it right after the imaging launch, while fv_now / fv_next still
+// point at the operands the imaging correlated.  Same helper elastic3d uses
+// (undo_receiver_rho_injection_3d) -- ported here because ElasticTTISG3D was
+// forked from the pre-PR#62 elastic3d template.
+void undo_receiver_rho_injection(
+    const fdtd::LaunchConfig& adj_source_config,
+    torch::Tensor& grad_rho,
+    const float* fv_now[3],
+    const float* fv_next[3],
+    const torch::Tensor& rho,
+    const BackwardInput& p,
+    const torch::Tensor& receiver_fields,
+    int it,
+    int adjoint_nsrc,
+    SolverContext solver
+)
+{
+    const int nrec_fields = static_cast<int>(receiver_fields.numel());
+    for (int irec = 0; irec < nrec_fields; ++irec) {
+        const int field = receiver_fields[irec].item<int>();
+        if (field > 2) continue;                      // stress receiver: no rho term
+        sub_receiver_rho_grad_correction<<<adj_source_config.grid, adj_source_config.block>>>(
+            grad_rho.data_ptr<float>(),
+            fv_now[field],
+            fv_next[field],
+            rho.data_ptr<float>(),
+            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_sources_loc.data_ptr<int>(),
+            it,
+            adjoint_nsrc,
+            3,
+            p.M,                                      // imaging halo (order/2 == M)
             solver
         );
     }
@@ -242,25 +283,35 @@ void backward_segment_ckpt(
         }
     }
 
+    // Stress receivers inject with the opposite sign (the constitutive update
+    // folds the negated-stress convention into scale = -dt); injecting the
+    // residual raw negates EVERY model gradient.  Same fix as 3ba5663 on
+    // elastic_tti_sg2d, which shares this 3-D-style field layout.
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = end - 1; it >= start; --it) {
         auto adj_view = adjoint.view();
+
+        // BEFORE the receiver injection: at a cell that is both source and
+        // receiver, the post-injection adjoint carries the residual too and the
+        // correction would over-shoot.
+        apply_body_force_rho_correction(
+            p, source_fields, adj_view, grad_rho, rho, fwd_source_config, solver, it
+        );
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
                 solver
             );
         }
-
-        apply_body_force_rho_correction(
-            p, source_fields, adj_view, grad_rho, rho, fwd_source_config, solver, it
-        );
 
         const int offset = it - start;
         const int now_offset = offset + 1;
@@ -291,6 +342,13 @@ void backward_segment_ckpt(
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3] = {seg_vx.select(0, now_offset).data_ptr<float>(), seg_vy.select(0, now_offset).data_ptr<float>(), seg_vz.select(0, now_offset).data_ptr<float>()};
+            const float* fv_next[3] = {vx_next, vy_next, vz_next};
+            undo_receiver_rho_injection(adj_source_config, grad_rho, fv_now, fv_next,
+                                        rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
 
         if (it == 0)
             continue;
@@ -371,23 +429,33 @@ BackwardOutput backward(const BackwardInput& in)
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
 
+    // Stress receivers inject with the opposite sign (the constitutive update
+    // folds the negated-stress convention into scale = -dt); injecting the
+    // residual raw negates EVERY model gradient.  Same fix as 3ba5663 on
+    // elastic_tti_sg2d, which shares this 3-D-style field layout.
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
+        // BEFORE the receiver injection: at a cell that is both source and
+        // receiver, the post-injection adjoint carries the residual too and the
+        // correction would over-shoot.
+        apply_body_force_rho_correction(
+            p, source_fields, adj_view, grads[0], rho, fwd_source_config, solver, it
+        );
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source_3d<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
                 solver
             );
         }
-
-        apply_body_force_rho_correction(
-            p, source_fields, adj_view, grads[0], rho, fwd_source_config, solver, it
-        );
 
         const float* vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
         const float* vy_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
@@ -418,6 +486,13 @@ BackwardOutput backward(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3] = {vx_now, vy_now, vz_now};
+            const float* fv_next[3] = {vx_next, vy_next, vz_next};
+            undo_receiver_rho_injection(source_config, grads[0], fv_now, fv_next,
+                                        rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
 
         if (it == 0)
             continue;
@@ -550,23 +625,33 @@ BackwardOutput backward_bs(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
+    // Stress receivers inject with the opposite sign (the constitutive update
+    // folds the negated-stress convention into scale = -dt); injecting the
+    // residual raw negates EVERY model gradient.  Same fix as 3ba5663 on
+    // elastic_tti_sg2d, which shares this 3-D-style field layout.
+    const auto adj_source_signed =
+        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+
     for (int it = static_cast<int>(p.nt) - 1; it >= 1; --it) {
+        // BEFORE the receiver injection: at a cell that is both source and
+        // receiver, the post-injection adjoint carries the residual too and the
+        // correction would over-shoot.
+        apply_body_force_rho_correction(
+            p, source_fields, adj_view, grads[0], rho, fwd_source_config, solver, it
+        );
+
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                adj_source_signed[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
                 solver
             );
         }
-
-        apply_body_force_rho_correction(
-            p, source_fields, adj_view, grads[0], rho, fwd_source_config, solver, it
-        );
 
         // Wavefield reconstruction: subtract source, reverse the stress
         // update, then restore the saved stress boundary ring.
@@ -629,6 +714,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
             grad_ctx,
             solver
         );
+
+        {
+            const float* fv_now[3] = {for_view.vx, for_view.vy, for_view.vz};
+            const float* fv_next[3] = {fvx_next.data_ptr<float>(), fvy_next.data_ptr<float>(), fvz_next.data_ptr<float>()};
+            undo_receiver_rho_injection(adj_source_config, grads[0], fv_now, fv_next,
+                                        rho, p, receiver_fields, it, adjoint_nsrc, solver);
+        }
 
         apply_adjoint_step(
             order,
