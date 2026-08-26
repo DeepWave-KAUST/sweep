@@ -51,6 +51,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 import torch
 
+from sweep.equations.slot_table import slot_table_of
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
@@ -267,13 +268,15 @@ class ModelParallel:
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
         self.family = _family_of(equation)
-        # VRZ is an "acoustic"-family variant (variable density).  Its CUDA
-        # forward kernels now implement the phased (comm/compute overlap) path
-        # (acoustic_vrz3d/forward.cu), so VRZ is eligible for the same forward
-        # overlap as acoustic3d.  The BACKWARD stays serial for the whole
-        # acoustic family (only elastic has a phased backward), so VRZ's
-        # backward still uses the step-then-exchange loop.
-        self._is_vrz = "vrz" in type(equation).__name__.lower()
+        # Whether this equation's backward needs the coupling-field exchange
+        # (a gradient that is a spatial DIVERGENCE rather than a pointwise
+        # product; variable-density VRZ is the case in the tree). Read off the
+        # equation's declaration -- it used to be `"vrz" in class name`, which
+        # a subclass named anything else would have slipped straight past.
+        _layout = getattr(equation, "cuda_layout", None)
+        self._dd_coupling_nvar = int(getattr(_layout, "dd_coupling_nvar", 0) or 0)
+        self._dd_coeff_nvar = int(getattr(_layout, "dd_adjoint_coeff_nvar", 0) or 0)
+        self._is_vrz = self._dd_coupling_nvar > 0
         self.dev = dev
         self.nt = int(nt)
         self.abcn = int(abcn)
@@ -394,11 +397,40 @@ class ModelParallel:
         self._need_adjoint = False
         self._model_dtype = None  # pinned by the first capture; see _capture
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
-        self._nwf = self._st["nwf"][0 if self.ndim == 2 else 1]
-        self._nrecon = self._st["nrecon"][0 if self.ndim == 2 else 1]
+        # Wavefield-list geometry: derived from the equation's declared slot
+        # table where it has one, from the hand-written _FAMILIES table where it
+        # does not.  Both branches produce identical values for every equation
+        # that declares a table -- test_slot_table_consistency.py asserts it --
+        # so this is a source-of-truth change, not a behaviour change.
+        table = slot_table_of(equation)
+        i3 = 0 if self.ndim == 2 else 1
+        if table is not None:
+            self._nwf = table.n_forward
+            # The FORWARD and ADJOINT lists are different lengths for the
+            # acoustic family (9/12 vs 11/15: the fused adjoint double-buffers
+            # zeta as well as psi). _FAMILIES only ever knew one number, so the
+            # adjoint fallback at _bind_adjoint_buffers sized itself with the
+            # forward count -- latent only because bp.adjoint_wavefields is
+            # never actually empty (_c.py always allocates). Two quantities, two
+            # names.
+            self._nadj = table.n_adjoint
+            self._nrecon = table.nrecon
+            # Explicit index tuples rather than two counts plus the unstated
+            # assumption that velocities are a contiguous prefix -- true for
+            # elastic, false for DAS-Zhao, whose physical block is split around
+            # the PML block.
+            self._vel_idx = table.vel_idx
+            self._phys_idx = table.phys_idx
+        else:
+            self._nwf = self._nadj = self._st["nwf"][i3]
+            self._nrecon = self._st["nrecon"][i3]
+            nv = self._st["nv"][i3] if self._st["nv"] else 0
+            nphys = self._st["nphys"][i3] if self._st["nphys"] else self._nwf
+            self._vel_idx = tuple(range(nv))
+            self._phys_idx = tuple(range(nphys))
         if self.family == "elastic":
-            self._nv = self._st["nv"][0 if self.ndim == 2 else 1]
-            self._nphys = self._st["nphys"][0 if self.ndim == 2 else 1]
+            self._nv = len(self._vel_idx)
+            self._nphys = len(self._phys_idx)
 
     # ------------------------------------------------------------------ utils
     def _halo(self, attr):
@@ -720,7 +752,8 @@ class ModelParallel:
         suppresses, that is the whole memory win of the lazy split."""
         self.L_adj = list(self.bp.adjoint_wavefields)
         if not self.L_adj:
-            self.L_adj = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nwf)]
+            self.L_adj = [torch.zeros_like(self.bp.models[0])
+                          for _ in range(self._nadj)]
         self.recon = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nrecon)]
         # VRZ variable-density gradient is a spatial divergence of the coupling
         # field c/e = lambda*vp*grad(p), so under DD the divergence at a cut seam
@@ -730,14 +763,16 @@ class ModelParallel:
         # divergence sub-steps.  Plain acoustic's pointwise u_tt*lambda gradient
         # needs no such exchange, so it keeps self.coupling empty.
         if self._is_vrz:
-            self.coupling = [torch.zeros_like(self.bp.models[0]) for _ in range(6)]
+            self.coupling = [torch.zeros_like(self.bp.models[0])
+                             for _ in range(self._dd_coupling_nvar)]
             # C0/Cx/Cy/Cz: the fused adjoint's transpose fast-path reads these coeffs
             # over [ix-M,ix+M] -> into the cut halo.  They are model-only (constant
             # within a backward), so build once + halo-exchange once (before the reverse
             # loop) rather than per step.  Without their exchanged halo, cut-adjacent
             # physical cells (now on the cut-aware fast-path) read a 0 coeff halo -> the
             # adjoint (hence gradient) drifts at the source.
-            self.adj_coeffs = [torch.zeros_like(self.bp.models[0]) for _ in range(4)]
+            self.adj_coeffs = [torch.zeros_like(self.bp.models[0])
+                               for _ in range(self._dd_coeff_nvar)]
             self.bp.adjoint_workspace = self.coupling + self.adj_coeffs  # [0-5]=c/e, [6-9]=C0,Cx,Cy,Cz
         else:
             self.coupling = []

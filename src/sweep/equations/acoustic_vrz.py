@@ -231,6 +231,11 @@ class AcousticVRZ(SecondOrderEquation):
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
             slots=slot_table.ACOUSTIC_VRZ2D,
+            # Same divergence-form gradient as the 3-D sibling; declared
+            # for the physics, not for DD (which refuses this class today
+            # because its CUDA kernels are not stepped).
+            dd_coupling_nvar=6,
+            dd_adjoint_coeff_nvar=4,
         )
 
 
@@ -336,4 +341,9 @@ class AcousticVRZ3D(SecondOrderEquation):
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
             slots=slot_table.ACOUSTIC_VRZ3D,
+            # DD: the variable-density gradient is div(c/e) with
+            # c/e = lambda*vp*grad(p), so a cut seam needs the
+            # neighbour's coupling field before the divergence.
+            dd_coupling_nvar=6,
+            dd_adjoint_coeff_nvar=4,
         )
