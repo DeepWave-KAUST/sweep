@@ -52,7 +52,7 @@ import numpy as np
 import torch
 
 from sweep.equations.slot_table import slot_table_of
-from sweep.parallel.dd_spec import ELASTIC_DD, VRZ_DD
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, VRZ_DD
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
@@ -413,12 +413,11 @@ class ModelParallel:
         table = slot_table_of(equation)
         self._table = table
         self._role_idx = {}
-        # Declarative time-loop schedule. The elastic loops and the VRZ
-        # backward are interpreted; the acoustic loops and the VRZ forward
-        # (which is the acoustic one) keep their hand-written form until
-        # their own migration steps.
+        # Declarative time-loop schedule. Every BACKWARD is interpreted; the
+        # acoustic/VRZ FORWARD keeps its hand-written form (and its
+        # comm/compute overlap variant) until its own migration step.
         self._spec = (ELASTIC_DD if self.family == "elastic"
-                      else VRZ_DD if self._dd_coupling_nvar else None)
+                      else VRZ_DD if self._dd_coupling_nvar else ACOUSTIC_DD)
         i3 = 0 if self.ndim == 2 else 1
         if table is not None:
             self._nwf = table.n_forward
@@ -1257,39 +1256,21 @@ class ModelParallel:
                     else acoustic_psi_pairs(self.ndim))
                 self._run_dd_loop(self._spec.backward, br, bhalo)
             elif self.family == "acoustic":
-                # Plain acoustic doubles psi AND zeta in the fused adjoint
-                # (swap_aux), needing the wider adj-pairs over a 15-field list.
-                # VRZ (variable density) doubles only psi in the adjoint
-                # (swap_pml), so its 12-field adjoint rotates just the psi pairs
-                # -- exactly like the forward recon.  adjoint_extra_nvar (the
-                # zeta double-buffer) is the discriminator: acoustic sets it to
-                # 3, VRZ leaves it 0.  Using adj_pairs for VRZ indexes past the
-                # 12-field list -> IndexError in rotate_wavefield_roles.
-                _adj_extra = getattr(getattr(self.equation, "cuda_layout", None),
-                                     "adjoint_extra_nvar", 0)
-                _adj_pairs = (acoustic_adj_pairs(self.ndim) if _adj_extra
-                              else acoustic_psi_pairs(self.ndim))
+                # The pair set comes from the slot table, which is what makes
+                # the old adjoint_extra_nvar discriminator unnecessary: plain
+                # acoustic double-buffers psi AND zeta in its fused adjoint (15
+                # slots, the wider pair set) while VRZ doubles only psi (12), and
+                # the table already knows which slots are adjoint-only. Asking it
+                # removes the chance of handing VRZ the wider set and indexing
+                # past its list.
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=_adj_pairs)
-                # Boundary tail truncation: with tail_steps = K the strips
-                # cover forward steps [nt-K, nt-1] and the restore at reverse
-                # step ``it`` consumes the strip of step ``it - 1``, so the
-                # reverse loop stops at bs_it0 + 1 (same bound as the C++
-                # monolithic driver).  ``stop`` is derived from nt and the
-                # captured tail — both identical on every rank — so all tiles
-                # cease their lockstep halo exchanges at the same step; no
-                # rank can be left waiting.  stop == 0 (tail off or >= nt)
-                # reproduces the historical loop verbatim.
-                _tail = int(getattr(self.bp, "boundary_tail_steps", 0) or 0)
-                _bs_it0 = max(0, self.nt - _tail) if _tail > 0 else 0
-                stop = _bs_it0 + 1 if _bs_it0 > 0 else 0
-                for it in range(self.nt - 1, stop - 1, -1):
-                    br.run_segment(it + 1, it)
-                    if it == stop:
-                        break
-                    self._exchange(bhalo, br.lambda_now)
-                    self._exchange(bhalo, br.recon_u_now)
+                    adj_pairs=self._table.pairs(adjoint=True) if self._table
+                    else acoustic_adj_pairs(self.ndim))
+                # tail truncation and the floor-iteration exchange drop are both
+                # declared on the loop (tail_truncatable /
+                # drop_trailing_exchange_on_floor); see _loop_floor.
+                self._run_dd_loop(self._spec.backward, br, bhalo)
             else:
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
