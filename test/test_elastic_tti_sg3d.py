@@ -211,7 +211,8 @@ def _canonical_models(cfg, req_grad=False, true_variant=False, device="cuda"):
     ]
 
 
-def _build_prop(cfg, impl, mode="full", device="cuda"):
+def _build_prop(cfg, impl, mode="full", device="cuda",
+                src_t=("sxx", "syy", "szz"), rec_t=("vx", "vy", "vz")):
     from sweep.propagator.options import (
         CUDAOptions, MemoryOptions, BoundaryOptions, CkptOptions,
     )
@@ -219,8 +220,8 @@ def _build_prop(cfg, impl, mode="full", device="cuda"):
     eq = ElasticTTISG3D(spatial_order=cfg["spatial_order"], device=device,
                         backend="torch")
     kwargs = dict(
-        source_type=["sxx", "syy", "szz"],
-        receiver_type=["vx", "vy", "vz"],
+        source_type=list(src_t),
+        receiver_type=list(rec_t),
         abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
         device=device, impl=impl,
     )
@@ -241,13 +242,14 @@ def _build_prop(cfg, impl, mode="full", device="cuda"):
     raise ValueError(mode)
 
 
-def _run_grads(cfg, impl, mode, observed):
+def _run_grads(cfg, impl, mode, observed, src_t=("sxx", "syy", "szz"),
+               rec_t=("vx", "vy", "vz")):
     # The eager autograd reference keeps every intermediate of 120 3-D steps
     # alive (~50 GB on the padded canonical grid) — run it on host RAM; the
     # compiled path stays on CUDA.  fp32 CPU-vs-GPU round-off is far below
     # the comparison thresholds.
     device = "cpu" if impl == "eager" else "cuda"
-    prop = _build_prop(cfg, impl, mode, device=device)
+    prop = _build_prop(cfg, impl, mode, device=device, src_t=src_t, rec_t=rec_t)
     models = _canonical_models(cfg, req_grad=True, device=device)
     wavelet = cfg["wavelet"].to(device)
     record = prop(wavelet, cfg["src"], cfg["rec"], models=models)
@@ -256,8 +258,8 @@ def _run_grads(cfg, impl, mode, observed):
     return [g.detach().double().cpu() for g in grads]
 
 
-def _observed(cfg):
-    prop = _build_prop(cfg, "c", "full")
+def _observed(cfg, src_t=("sxx", "syy", "szz"), rec_t=("vx", "vy", "vz")):
+    prop = _build_prop(cfg, "c", "full", src_t=src_t, rec_t=rec_t)
     with torch.no_grad():
         return prop(cfg["wavelet"], cfg["src"], cfg["rec"],
                     models=_canonical_models(cfg, true_variant=True)).detach()
@@ -291,24 +293,42 @@ def test_cuda_forward_matches_eager():
     assert rel < 1e-4, f"CUDA vs eager forward divergence: rel={rel:.3e}"
 
 
+# Source / receiver combinations that exercise the three rho / sign paths of
+# the adjoint.  A velocity-receiver-only, stress-source-only test passes even
+# with the receiver-cell rho correction and the stress-receiver sign flip both
+# missing, which is exactly how those two defects survived here after the
+# equation was forked from the pre-PR#62 elastic3d template.
+SRC_REC_CASES = [
+    (("sxx", "syy", "szz"), ("vx", "vy", "vz")),   # stress source, velocity receivers
+    (("sxx", "syy", "szz"), ("sxx", "syy", "szz")),  # stress receivers -> signed adjoint
+    (("vz",), ("vx", "vy", "vz")),                 # body force -> source-cell rho term
+]
+
+
 @cuda_mark
-def test_cuda_backward_full_matches_eager_all_params():
+@pytest.mark.parametrize("src_t,rec_t", SRC_REC_CASES,
+                         ids=lambda v: "".join(x[0] for x in v))
+def test_cuda_backward_full_matches_eager_all_params(src_t, rec_t):
     """Every one of the eight raw parameter gradients (velocities, density,
     Thomsen constants AND both angles) must agree between the CUDA adjoint
-    and the eager autograd reference."""
+    and the eager autograd reference, for every source/receiver kind."""
     cfg = _canonical_3d_setup()
-    observed = _observed(cfg)
+    observed = _observed(cfg, src_t, rec_t)
 
-    grads_eager = _run_grads(cfg, "eager", "full", observed)
-    grads_cuda = _run_grads(cfg, "c", "full", observed)
+    grads_eager = _run_grads(cfg, "eager", "full", observed, src_t, rec_t)
+    grads_cuda = _run_grads(cfg, "c", "full", observed, src_t, rec_t)
 
     failures = []
     for name, ge, gc in zip(MODEL_NAMES, grads_eager, grads_cuda):
         rel_l2, cos, ref_l2 = _metrics(ge, gc)
-        print(f"[full-vs-eager] {name:8s} rel_l2={rel_l2:.4e} cos={cos:.6f} "
-              f"ref_l2={ref_l2:.4e}")
+        print(f"[full-vs-eager {src_t[0]}/{rec_t[0]}] {name:8s} rel_l2={rel_l2:.4e} "
+              f"cos={cos:.6f} ref_l2={ref_l2:.4e}")
         assert ref_l2 > 0, f"eager grad {name} is identically zero"
-        if not (rel_l2 < 1.5 and cos > 0.8):
+        # Measured worst case over the three cases is ~2e-5 / cos 1.000000.
+        # Keep real margin but stay far tighter than the defects this pins:
+        # missing receiver-cell rho correction was rel 0.25 / cos 0.968, and a
+        # raw stress-receiver injection is rel 2.0 / cos -1.
+        if not (rel_l2 < 2e-3 and cos > 0.9999):
             failures.append((name, rel_l2, cos))
     assert not failures, f"gradient mismatch: {failures}"
 
