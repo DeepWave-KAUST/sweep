@@ -1,3 +1,4 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from . import slot_table
@@ -23,24 +24,19 @@ def step_cpml(
     dudy = grad_op(u_now, h, -2)
     dudx = grad_op(u_now, h, -1)
 
-    # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -3)
-    w_sum += (1+bz) * tmpz + az * zetaz
+    # Axes are accumulated z, y, x -- the order is preserved because
+    # floating-point addition is not associative.
+    contrib_z, psizn, zetaz = cpml_axis_update(
+        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op)
+    w_sum += contrib_z
 
-    psizn = bz * dudz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
+    contrib_y, psiyn, zetay = cpml_axis_update(
+        lap_y, dudy, psiy, zetay, ay, by, dbydy, h, -2, grad_op)
+    w_sum += contrib_y
 
-    # Y direction
-    tmpy = ((1+by)*lap_y + dbydy * dudy) + grad_op(ay*psiy, h, -2)
-    w_sum += (1+by) * tmpy + ay * zetay
-    psiyn = by * dudy + ay * psiy
-    zetay = by * tmpy + ay * zetay
-
-    # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1)
-    w_sum += (1+bx) * tmpx + ax * zetax
-    psixn = bx * dudx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
 

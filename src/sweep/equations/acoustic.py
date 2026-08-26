@@ -1,3 +1,4 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from . import slot_table
@@ -23,18 +24,17 @@ def step_cpml(
     dudz = grad_op(u_now, h, -2, kernels=grad_kernels)
     dudx = grad_op(u_now, h, -1, kernels=grad_kernels)
     
-    # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -2, kernels=grad_kernels)
-    w_sum += (1+bz) * tmpz + az * zetaz
-
-    psiyn = bz * dudz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
+    # Z direction. The z memory variable is named ``psiyn`` for historical
+    # reasons -- it is returned in the z slot, so the name is wrong but the
+    # wiring is right. Renaming it is a separate change from this one.
+    contrib_z, psiyn, zetaz = cpml_axis_update(
+        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels)
+    w_sum += contrib_z
 
     # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1, kernels=grad_kernels)
-    w_sum += (1+bx) * tmpx + ax * zetax
-    psixn = bx * dudx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels)
+    w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
 
