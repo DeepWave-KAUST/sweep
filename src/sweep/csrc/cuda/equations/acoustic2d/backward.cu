@@ -280,7 +280,7 @@ void run_full_imaging(
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
-    ctx.cut_mask = 0;  // full-storage / RTM path is DD-free (DD is backward_bs only)
+    ctx.set_cut_mask(0);  // full-storage / RTM path is DD-free (DD is backward_bs only)
     acoustic_init_aux_slabs(ctx, adjoint);
 
     LaplaceParam lap_ctx{nx, 1, M, p.lap_coes.data_ptr<float>(), dx, 0, dz};
@@ -466,7 +466,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     // DD: skip cut faces in the strip restore, the seed rim-zeroing, the
     // NOPML exclusion band and the fused-adjoint pure_interior test.
-    ctx.cut_mask = p.cut_face_mask;
+    ctx.set_cut_mask(p.cut_face_mask);
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -524,10 +524,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
         auto for_view = forward.view();
         set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
             for_view.u_prev, ctx.abcn+ctx.M, nx, nz,
-            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask);
+            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask());
         set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
             for_view.u_now, ctx.abcn+ctx.M, nx, nz,
-            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask);
+            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask());
     }
 
 
@@ -562,7 +562,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // _run_adjoint) must simply not issue segments entirely below bs_stop —
     // it derives the SAME stop from (nt, tail) on every rank, keeping the
     // lockstep halo exchanges aligned.  Cut faces are orthogonal: the strip
-    // save/restore is already cut-aware via ctx.cut_mask and the per-step
+    // save/restore is already cut-aware via ctx.cut_mask() and the per-step
     // strip layout does not depend on the step index, so the saved-step
     // shift passes through untouched.
     const int bs_it0 = (p.boundary_tail_steps > 0)
