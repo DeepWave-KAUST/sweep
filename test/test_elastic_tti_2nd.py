@@ -171,9 +171,17 @@ def _canonical_models(cfg, req_grad=False, true_variant=False, device="cuda"):
     vh = _ramp(2000.0, 2600.0)
     vs = vh / 1.9
     rho = _ramp(1000.0, 1200.0)
-    eps = np.full(shape, 0.12, dtype=np.float32)
-    eta = np.full(shape, 0.06, dtype=np.float32)
-    the = np.full(shape, 0.35, dtype=np.float32)
+    # Non-uniform on purpose: a constant Thomsen/angle field makes an
+    # anisotropic adjoint test blind to every term that needs structure in the
+    # stiffness field (lesson_acoustic_vti_1st_c_grad_defect).
+    def _tilt(base, dz, dx):
+        z = np.linspace(0.0, 1.0, nz, dtype=np.float32)[:, None]
+        x = np.linspace(-0.5, 0.5, nx, dtype=np.float32)[None, :]
+        return np.broadcast_to(base + dz * z + dx * x, shape).astype(np.float32).copy()
+
+    eps = _tilt(0.12, 0.06, 0.03)
+    eta = _tilt(0.06, 0.04, 0.02)
+    the = _tilt(0.35, 0.18, 0.12)
 
     if true_variant:
         vh = _box(vh, 200.0)
