@@ -52,7 +52,7 @@ import numpy as np
 import torch
 
 from sweep.equations.slot_table import slot_table_of
-from sweep.parallel.dd_spec import ELASTIC_DD
+from sweep.parallel.dd_spec import ELASTIC_DD, VRZ_DD
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
@@ -413,10 +413,12 @@ class ModelParallel:
         table = slot_table_of(equation)
         self._table = table
         self._role_idx = {}
-        # Declarative time-loop schedule. Only the elastic family is
-        # routed through the interpreter so far; acoustic and VRZ keep
-        # their hand-written loops until their own migration step.
-        self._spec = ELASTIC_DD if self.family == "elastic" else None
+        # Declarative time-loop schedule. The elastic loops and the VRZ
+        # backward are interpreted; the acoustic loops and the VRZ forward
+        # (which is the acoustic one) keep their hand-written form until
+        # their own migration steps.
+        self._spec = (ELASTIC_DD if self.family == "elastic"
+                      else VRZ_DD if self._dd_coupling_nvar else None)
         i3 = 0 if self.ndim == 2 else 1
         if table is not None:
             self._nwf = table.n_forward
@@ -1244,22 +1246,16 @@ class ModelParallel:
                 # divergence the neighbour's coupling values at the cut seam
                 # (acoustic's pointwise gradient needs no such exchange).  VRZ
                 # rotates the psi pairs only (swap_pml), like the forward recon.
+                # VRZ has no fused adjoint, so it has no adjoint-only shadow
+                # slots and pairs(adjoint=True) == pairs(adjoint=False). That
+                # equality is what removes the old `adjoint_extra_nvar`
+                # discriminator: the table answers it without being asked which
+                # family this is.
                 br = SteppedBackwardRunner(
                     self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=acoustic_psi_pairs(self.ndim))
-                # Pre-loop: build the adjoint coeffs C0/Cx/Cy/Cz once (model-only,
-                # constant within a backward) and halo-exchange them once, so the fused
-                # adjoint's transpose fast-path reads valid coeffs in the cut halo at
-                # every reverse step (phase 1).  step_phase 4 = coeff build only.
-                br.run_vrz_phase(self.nt, self.nt - 1, 4)
-                self._exchange_group(bhalo, self.adj_coeffs)
-                for it in range(self.nt - 1, 0, -1):    # step 0 contributes no grad
-                    br.run_vrz_phase(it + 1, it, 1)     # advance adjoint + recon
-                    self._exchange(bhalo, br.lambda_now)
-                    self._exchange(bhalo, br.recon_u_now)
-                    br.run_vrz_phase(it + 1, it, 2)     # build c/e (POST-exchange lambda,p)
-                    self._exchange_group(bhalo, self.coupling)
-                    br.run_vrz_phase(it + 1, it, 3)     # divergence -> grad += (once)
+                    adj_pairs=self._table.pairs(adjoint=True) if self._table
+                    else acoustic_psi_pairs(self.ndim))
+                self._run_dd_loop(self._spec.backward, br, bhalo)
             elif self.family == "acoustic":
                 # Plain acoustic doubles psi AND zeta in the fused adjoint
                 # (swap_aux), needing the wider adj-pairs over a 15-field list.

@@ -221,3 +221,75 @@ ELASTIC_DD = DDSpec(
         ),
     ),
 )
+
+
+#: Acoustic (Acoustic, Acoustic3D). One unphased call per step; the next step's
+#: stencil reads ``u_now`` across the cut.
+ACOUSTIC_FWD = DDLoop(
+    direction="fwd",
+    phases=(Phase(None, advances=True, label="step",
+                  after=(ExchangeGroup(
+                      (U_NOW,), batched=False, overlappable=True,
+                      why="the next step's stencil reads u_now across the cut. "
+                          "Overlappable only because the driver can prove no "
+                          "later writer lands in a shipped strip: the source "
+                          "injection atomically adds into the very buffer the "
+                          "comm stream is packing, so a source within M of a "
+                          "cut line forbids it."),)),),
+)
+
+ACOUSTIC_DD = DDSpec(
+    name="acoustic",
+    forward=ACOUSTIC_FWD,
+    backward=DDLoop(
+        direction="rev",
+        floor=0,   # the it==0 adjoint-only tail still contributes grad_wavelet
+        tail_truncatable=True,
+        drop_trailing_exchange_on_floor=True,
+        phases=(Phase(None, advances=True, label="reverse step",
+                      after=(ExchangeGroup(
+                          (LAMBDA, RECON_U), batched=False,
+                          why="the next reverse step reads both across the cut"),)),),
+    ),
+)
+
+
+#: Variable-density VRZ. Its forward is the acoustic one; its BACKWARD is the
+#: only three-phase adjoint in the tree, because the gradient is a spatial
+#: divergence of a coupling field rather than a pointwise product -- so the
+#: coupling has to be built from the POST-exchange lambda/p, shipped, and only
+#: then differentiated.
+#:
+#: Note ``advances`` sits on phase 1, not on the last phase. Phases 2 and 3
+#: deliberately re-read the ALREADY-advanced lists, which is exactly what makes
+#: them see the tensors the driver exchanged in between. Putting the advance at
+#: the end would bind pre-advance lists and silently differentiate the wrong
+#: step.
+VRZ_DD = DDSpec(
+    name="acoustic_vrz",
+    forward=ACOUSTIC_FWD,
+    backward=DDLoop(
+        direction="rev",
+        floor=1,
+        prologue=(Phase(4, advances=False, label="adjoint coeff build",
+                        after=(ExchangeGroup(
+                            (COEFFS,),
+                            why="the fused adjoint's transpose fast path reads "
+                                "C0/Cx/Cy/Cz over [ix-M, ix+M], i.e. into the cut "
+                                "halo. Model-only and constant within a backward, "
+                                "so built and shipped once instead of per step."),)),),
+        phases=(
+            Phase(1, advances=True, label="advance adjoint + reconstruct",
+                  after=(ExchangeGroup(
+                      (LAMBDA, RECON_U), batched=False,
+                      why="phase 2 builds the coupling from the POST-exchange "
+                          "lambda and p"),)),
+            Phase(2, advances=False, label="build coupling",
+                  after=(ExchangeGroup(
+                      (COUPLING,),
+                      why="the gradient is div(c/e), so the divergence at a cut "
+                          "seam needs the neighbour's coupling values"),)),
+            Phase(3, advances=False, label="divergence -> gradient"),
+        ),
+    ),
+)
