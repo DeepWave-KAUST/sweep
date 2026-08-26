@@ -2,6 +2,11 @@ from collections.abc import Sequence
 import inspect
 
 import numpy as np
+from sweep.core.arguments import (
+    merge_legacy_boundary_kwargs,
+    normalise_spacing,
+    resolve_device,
+)
 from sweep.core import geometry, validation
 from sweep.core import topography as topography_
 from sweep.equations.fields import build_field_index, format_field_specs
@@ -140,19 +145,7 @@ class PropBase:
         # sweep.parallel.ModelParallel) that reads a built propagator's
         # global-problem spec. (dh/dt are already registered as buffers later.)
         self._shape_phys = tuple(int(s) for s in shape)
-        if device is not None and dev is not None and device != dev:
-            import warnings
-            warnings.warn(
-                "Both 'device' and 'dev' were passed to the propagator; using 'device'. "
-                "'dev' is deprecated and will be removed in a future release.",
-                DeprecationWarning, stacklevel=2,
-            )
-        resolved_device = device if device is not None else dev
-        if resolved_device is None:
-            # Inherit from the equation, which is the source of truth: its
-            # operators (laplace kernels etc.) were already built on this device.
-            resolved_device = getattr(equation, 'device', None)
-        self.dev = resolved_device
+        self.dev = resolve_device(device, dev, equation)
         # ---- Per-edge boundary spec (free surface + PML thickness) ----------
         # ``free_surface`` and ``abcn`` accept the historical scalar/bool forms
         # as well as per-edge specs; both normalise to canonical axis-major
@@ -242,22 +235,7 @@ class PropBase:
         if topography is not None and self._image_method_active and not self.fs_faces[0]:
             self.fs_faces = (True,) + tuple(self.fs_faces[1:])
             self.pad = normalize_pad(self._abcn_arg, self.fs_faces, self.ndim)
-        if np.isscalar(dh):
-            self._dh = float(dh)
-            self._grid_spacing = tuple([self._dh] * self.ndim)
-        else:
-            if not isinstance(dh, Sequence) or isinstance(dh, (str, bytes)):
-                raise TypeError(
-                    "dh must be a float or a sequence ordered like shape "
-                    "(2D: (dz, dx), 3D: (dz, dy, dx))."
-                )
-            if len(dh) != self.ndim:
-                raise ValueError(
-                    f"dh must have length {self.ndim} to match shape {shape}, "
-                    f"got {len(dh)}."
-                )
-            self._grid_spacing = tuple(float(v) for v in dh)
-            self._dh = float(self._grid_spacing[-1])
+        self._dh, self._grid_spacing = normalise_spacing(dh, self.ndim, shape)
         self._dt = float(dt)
         # None = unspecified; the torch entry points always pass a resolved
         # bool (see options.resolve_memory_strategy).  Direct PropBase / JAX
@@ -276,19 +254,8 @@ class PropBase:
         self.B = B
         self.allow_growth = allow_growth
         self.full_mode = full_mode
-        legacy_boundary_config = {}
-        if "transfer_interval" in kwargs:
-            legacy_boundary_config["transfer_interval"] = kwargs.pop("transfer_interval")
-        if "boundary_on_cpu" in kwargs:
-            legacy_boundary_config["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
-        if "use_pinned_memory" in kwargs:
-            legacy_boundary_config["pinned_memory"] = kwargs.pop("use_pinned_memory")
-        if "boundary_disk_async_read" in kwargs:
-            legacy_boundary_config["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
-        if boundary_saving_config is None:
-            boundary_saving_config = legacy_boundary_config or None
-        else:
-            boundary_saving_config = {**legacy_boundary_config, **boundary_saving_config}
+        boundary_saving_config = merge_legacy_boundary_kwargs(
+            kwargs, boundary_saving_config)
 
         self.boundary_saving_config = self._normalize_boundary_saving_config(boundary_saving_config)
         self.transfer_interval = self.boundary_saving_config["transfer_interval"]
