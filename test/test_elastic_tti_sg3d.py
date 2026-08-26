@@ -186,14 +186,25 @@ def _canonical_models(cfg, req_grad=False, true_variant=False, device="cuda"):
             nx // 4: (3 * nx) // 4] += val
         return out
 
+    def _tilt(base, dz, dx):
+        """Depth ramp plus a lateral gradient, so theta/phi vary along the
+        Bond rotation's own axes rather than only with depth."""
+        z = np.linspace(0.0, 1.0, nz, dtype=np.float32)[:, None, None]
+        x = np.linspace(-0.5, 0.5, nx, dtype=np.float32)[None, None, :]
+        return np.broadcast_to(base + dz * z + dx * x, shape).astype(np.float32).copy()
+
     vp = _ramp(1800.0, 2400.0)
     vs = vp / 1.73
     rho = _ramp(1000.0, 1200.0)
-    eps = np.full(shape, 0.08, dtype=np.float32)
-    delta = np.full(shape, 0.04, dtype=np.float32)
-    gam = np.full(shape, 0.05, dtype=np.float32)
-    the = np.full(shape, 0.3, dtype=np.float32)
-    phi = np.full(shape, 0.2, dtype=np.float32)
+    # Every anisotropy parameter varies in space.  A constant Thomsen/angle
+    # field is the classic way an anisotropic adjoint test goes blind (see
+    # lesson_acoustic_vti_1st_c_grad_defect): terms that only survive where the
+    # stiffness field has structure drop out of the comparison entirely.
+    eps = _tilt(0.08, 0.05, 0.02)
+    delta = _tilt(0.04, 0.03, 0.015)
+    gam = _tilt(0.05, 0.03, 0.02)
+    the = _tilt(0.30, 0.15, 0.10)
+    phi = _tilt(0.20, 0.12, 0.08)
 
     if true_variant:
         vp = _box(vp, 180.0)
