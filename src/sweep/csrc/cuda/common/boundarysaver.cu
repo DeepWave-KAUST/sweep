@@ -81,7 +81,7 @@ __global__ void boundary_kernel2d(
     int right_end   = x1 - offset;
     int right_start = right_end - width;
 
-    // DD cut faces (ctx.cut_mask: bit0=x_lo/left, bit1=x_hi/right,
+    // DD cut faces (ctx.cut_mask(): bit0=x_lo/left, bit1=x_hi/right,
     // bit2=z_lo/top, bit3=z_hi/bottom) are skipped: the strip there is
     // reverse-leapfrog-computed + halo-exchanged instead of restored.
     bool is_top =
@@ -332,7 +332,7 @@ __global__ void boundary_kernel3d(
     int right_end   = x1 - offset;
     int right_start = right_end - width;
 
-    // DD cut faces (ctx.cut_mask) are skipped — see boundary_kernel2d.
+    // DD cut faces (ctx.cut_mask()) are skipped — see boundary_kernel2d.
     bool is_top =
         iz >= top_start && iz < top_end &&
         iy >= y_t0 && iy < y_t1 &&
@@ -605,6 +605,119 @@ __global__ void boundary_kernel3d_bf16(
 {
     boundary_kernel3d_body<__nv_bfloat16>(u, top, bottom, front, back, left, right,
                                           it, width, offset, ctx, mode, tangent_pad);
+}
+
+// One thread per boundary-band cell, covering exactly what the full-grid
+// boundary_kernel2d covers -- including the corner cells that belong to both a
+// horizontal and a vertical band.  In the scan kernel one thread writes such a
+// cell into two buffers; here they are two threads carrying the same value, so
+// SAVE is identical.  On RESTORE the two threads write the same wavefield cell,
+// but both read the value the same SAVE wrote, so the (unordered) duplicate
+// write is bit-identical either way -- which is why this path is FP32 only:
+// under a lossy storage dtype the two copies could differ.
+__global__ void boundary_kernel2d_compact(
+    float* __restrict__ u,
+
+    float* __restrict__ top,
+    float* __restrict__ bottom,
+    float* __restrict__ left,
+    float* __restrict__ right,
+
+    int it,
+    int width,
+    int offset,
+    SolverContext ctx,
+    int mode,
+    int tangent_pad
+)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int x0 = ctx.phys_x0();
+    int x1 = ctx.phys_x1();
+    int z0 = ctx.phys_z0();
+    int z1 = ctx.phys_z1();
+
+    int nx_boundary = ctx.nx_phys() + 2 * tangent_pad;
+    int nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
+
+    int tb_count = width * nx_boundary;
+    int lr_count = nz_boundary * width;
+    int per_batch = 2 * tb_count + 2 * lr_count;
+    int total = ctx.B * per_batch;
+    if (tid >= total)
+        return;
+
+    int b = tid / per_batch;
+    int local = tid - b * per_batch;
+
+    int x_t0 = x0 - tangent_pad;
+    int z_t0 = z0 - tangent_pad;
+    int top_start = z0 + offset;
+    int bot_end = z1 - offset;
+    int bot_start = bot_end - width;
+    int left_start = x0 + offset;
+    int right_end = x1 - offset;
+    int right_start = right_end - width;
+
+    int ix = 0;
+    int iz = 0;
+    int64_t idx = 0;
+    float* boundary = nullptr;
+
+    // DD cut faces carry neighbour data supplied by HaloExchange, not saved
+    // boundary values; the scan kernel drops them via !ctx.cut_*(), so the
+    // matching band is skipped here.  Their buffer slots are never written,
+    // so restoring from them would read uninitialised memory.
+    if (local < tb_count) {
+        if (ctx.cut_z_lo()) return;
+        int zloc = local / nx_boundary;
+        int xloc = local - zloc * nx_boundary;
+        iz = top_start + zloc;
+        ix = x_t0 + xloc;
+        idx = ((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * nx_boundary + xloc;
+        boundary = top;
+    } else if (local < 2 * tb_count) {
+        if (ctx.cut_z_hi()) return;
+        int rem = local - tb_count;
+        int zloc = rem / nx_boundary;
+        int xloc = rem - zloc * nx_boundary;
+        iz = bot_start + zloc;
+        ix = x_t0 + xloc;
+        idx = ((static_cast<int64_t>(it) * ctx.B + b) * width + zloc) * nx_boundary + xloc;
+        boundary = bottom;
+    } else if (local < 2 * tb_count + lr_count) {
+        if (ctx.cut_x_lo()) return;
+        int rem = local - 2 * tb_count;
+        int zloc = rem / width;
+        int xloc = rem - zloc * width;
+        ix = left_start + xloc;
+        iz = z_t0 + zloc;
+        idx = ((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + xloc;
+        boundary = left;
+    } else {
+        if (ctx.cut_x_hi()) return;
+        int rem = local - 2 * tb_count - lr_count;
+        int zloc = rem / width;
+        int xloc = rem - zloc * width;
+        ix = right_start + xloc;
+        iz = z_t0 + zloc;
+        idx = ((static_cast<int64_t>(it) * ctx.B + b) * nz_boundary + zloc) * width + xloc;
+        boundary = right;
+    }
+
+    // The scan kernel's threads are grid-derived, so a band cell outside the
+    // allocated grid simply never had a thread; with a nonzero tangent_pad the
+    // band can reach past an edge, and those slots stay unwritten there.  Drop
+    // the same cells here instead of running off the wavefield.
+    if (ix < 0 || ix >= ctx.nx || iz < 0 || iz >= ctx.nz)
+        return;
+
+    float* u_b = u + b * (ctx.nx * ctx.nz);
+    if (mode == BOUNDARY_SAVE)
+        boundary[idx] = u_b[iz * ctx.nx + ix];
+    else
+        u_b[iz * ctx.nx + ix] = boundary[idx];
 }
 
 __global__ void boundary_kernel3d_compact(

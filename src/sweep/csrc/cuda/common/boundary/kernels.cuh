@@ -21,6 +21,29 @@ __global__ void boundary_kernel2d(
     int tangent_pad = 0
 );
 
+// Band-only counterpart of boundary_kernel2d: one thread per boundary-band
+// cell instead of one per grid cell.  The full-grid scan launches nx*nz*B
+// threads of which only ~4% (at production sizes) land inside a band; every
+// other thread still pays the prologue -- four SolverContext::phys_*()
+// evaluations -- which is essentially this kernel's whole cost.  Mirrors
+// boundary_kernel3d_compact.  FP32 save/restore only; the bf16 / fp16 / int8
+// paths keep the scan kernel.
+__global__ void boundary_kernel2d_compact(
+    float* __restrict__ u,
+
+    float* __restrict__ top,
+    float* __restrict__ bottom,
+    float* __restrict__ left,
+    float* __restrict__ right,
+
+    int it,
+    int width,
+    int offset,
+    SolverContext ctx,
+    int mode,
+    int tangent_pad = 0
+);
+
 __global__ void boundary_kernel3d(
     float* __restrict__ u,
 

@@ -44,29 +44,18 @@ ForwardOutput forward(const ForwardInput& in) {
     const int order =
         (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext ctx;
-    ctx.ndim         = 2;
-    ctx.nx           = nx;
-    ctx.ny           = 0;
-    ctx.nz           = nz;
-    ctx.B            = B;
-    ctx.dt           = p.dt;
-    ctx.nt           = p.nt;
-    ctx.M            = p.M;
-    ctx.abcn         = p.abcn;
-    ctx.free_surface = p.free_surface;
-    ctx.lap_coeff    = p.lap_coes.data_ptr<float>();
-    ctx.grad_coeff   = p.grad_coes.data_ptr<float>();
-    ctx.dx           = dx;
-    ctx.dy           = 0.f;
-    ctx.dz           = dz;
+    // The geometry feeds the cached phys_* bounds, so it is const after
+    // construction and goes through the constructor instead of field writes.
+    SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
+                      p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
+                      dx, 0.f, dz};
     ctx.topo_rows    = p.has_topo ? p.topo_rows.data_ptr<int>() : nullptr;
     ctx.has_topo     = p.has_topo;
     ctx.topo_category = nullptr;
     ctx.use_apm      = false;
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     // Cut-aware physical bounds (0 = single domain → legacy per-edge pad + M).
-    ctx.cut_mask     = p.cut_face_mask;
+    ctx.set_cut_mask(p.cut_face_mask);
 
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;

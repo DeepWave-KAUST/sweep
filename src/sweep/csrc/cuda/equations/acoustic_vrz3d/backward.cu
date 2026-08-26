@@ -86,7 +86,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, in.dt, in.nt, in.M, in.abcn, in.free_surface,
                       in.lap_coes.data_ptr<float>(), in.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
-    ctx.cut_mask = in.cut_face_mask;   // DD cut-aware: skip cut faces in bs reconstruction
+    ctx.set_cut_mask(in.cut_face_mask);   // DD cut-aware: skip cut faces in bs reconstruction
 
     AcousticWavefieldTensor adjoint;
     if (!in.adjoint_wavefields.empty())
@@ -247,7 +247,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
-    ctx.cut_mask = p.cut_face_mask;   // DD cut-aware: skip cut faces in boundary reconstruction
+    ctx.set_cut_mask(p.cut_face_mask);   // DD cut-aware: skip cut faces in boundary reconstruction
 
     // Stepped backward: process [bw_it_end, bw_begin()) in descending order so a
     // DD driver can halo-exchange the adjoint + reconstruction fields between
@@ -669,7 +669,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
                       dx, dy, dz};
-    ctx.cut_mask = p.cut_face_mask;   // DD cut-aware: skip cut faces in boundary reconstruction
+    ctx.set_cut_mask(p.cut_face_mask);   // DD cut-aware: skip cut faces in boundary reconstruction
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())

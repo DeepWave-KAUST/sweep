@@ -99,6 +99,11 @@ public:
           copy_stream_(copy_stream)
     {
         profile_enabled_ = std::getenv("SWEEP_BOUNDARY_PROFILE") != nullptr;
+        // Escape hatch back to the full-grid scan kernels.  The compact and
+        // scan paths are bit-identical by construction, so this exists to prove
+        // that in a test (and to isolate the compact kernels if they are ever
+        // suspected), not to change results.
+        no_compact_kernel_ = std::getenv("SWEEP_BOUNDARY_NO_COMPACT") != nullptr;
         if (!enabled_ || !staged_)
             return;
 
@@ -597,6 +602,13 @@ public:
                 /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
             int64_t bt = boundary_time_index(chunk);
             quantize_step_2d(b, bt);
+        } else if (use_compact_boundary_kernel()) {
+            int compact_total = compact_boundary_count_2d(ctx, width, 0);
+            int compact_threads = 512;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
         } else {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
@@ -622,7 +634,7 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs(chunk, direct);
 
-        if (use_compact_3d_boundary_kernel()) {
+        if (use_compact_boundary_kernel()) {
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
@@ -687,6 +699,13 @@ public:
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
             quantize_step_2d(b, boundary_time_index_field(chunk));
+        } else if (use_compact_boundary_kernel()) {
+            int compact_total = compact_boundary_count_2d(ctx, width, 0);
+            int compact_threads = 512;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
         } else {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
@@ -715,7 +734,7 @@ public:
         wait_before_forward_save(chunk);
         auto b = forward_save_ptrs_field(chunk, direct, field_idx);
 
-        if (use_compact_3d_boundary_kernel()) {
+        if (use_compact_boundary_kernel()) {
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
@@ -1084,6 +1103,13 @@ public:
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+        } else if (use_compact_boundary_kernel()) {
+            int compact_total = compact_boundary_count_2d(ctx, width, 0);
+            int compact_threads = 512;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
         } else {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
@@ -1105,7 +1131,7 @@ public:
     {
         wait_before_backward_restore(it);
         auto b = backward_restore_ptrs(it, direct);
-        if (use_compact_3d_boundary_kernel()) {
+        if (use_compact_boundary_kernel()) {
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
@@ -1168,6 +1194,13 @@ public:
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+        } else if (use_compact_boundary_kernel()) {
+            int compact_total = compact_boundary_count_2d(ctx, width, 0);
+            int compact_threads = 512;
+            int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
+            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+                u, b.top, b.bottom, b.left, b.right,
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
         } else {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
@@ -1194,7 +1227,7 @@ public:
         if (wait_chunk)
             wait_before_backward_restore(it);
         auto b = backward_restore_ptrs_field(it, direct, field_idx);
-        if (use_compact_3d_boundary_kernel()) {
+        if (use_compact_boundary_kernel()) {
             int compact_total = compact_boundary_count_3d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
@@ -1281,6 +1314,7 @@ private:
     cudaStream_t compute_stream_ = nullptr;
     cudaStream_t copy_stream_ = nullptr;
     bool profile_enabled_ = false;
+    bool no_compact_kernel_ = false;
     bool backward_active_ = false;
     bool profile_printed_ = false;
     bool profile_have_compute_start_ = true;
@@ -1328,8 +1362,20 @@ private:
         return ctx.B * (2 * top_count + 2 * front_count + 2 * left_count);
     }
 
-    inline bool use_compact_3d_boundary_kernel() const
+    inline int compact_boundary_count_2d(const SolverContext& ctx, int width, int tangent_pad) const
     {
+        int nx_boundary = ctx.nx_phys() + 2 * tangent_pad;
+        int nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
+        return ctx.B * (2 * width * nx_boundary + 2 * nz_boundary * width);
+    }
+
+    // Gate for both the 2-D and 3-D compact kernels: the synchronous disk path
+    // reuses the full-grid launch geometry, everything else takes band-only
+    // threads.
+    inline bool use_compact_boundary_kernel() const
+    {
+        if (no_compact_kernel_)
+            return false;
         return !boundary_on_disk_ || boundary_disk_async_read_;
     }
 

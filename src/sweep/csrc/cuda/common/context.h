@@ -1,29 +1,67 @@
 #pragma once
 #include <vector>
+#include <type_traits>
+
+// ============================================================================
+// SolverContext -- launch-invariant solver geometry, passed BY VALUE to every
+// kernel of every equation.
+//
+// WHY THE PHYSICAL BOUNDS ARE CACHED
+// ----------------------------------
+// phys_x0() ... nz_phys() are launch-invariant, yet every thread of every
+// kernel evaluates them.  Stacking the DD cut-select on top of the per-edge pad
+// sentinels made each face a 3-deep nested conditional (x 6 faces); ptxas gives
+// up on if-conversion and emits a serial chain of warp-uniform branches in the
+// kernel prologue.  For a thin kernel -- a boundary saver, a no-PML update --
+// that prologue IS the kernel, which is how a purely geometric refactor came to
+// cost 93% on boundary_kernel2d and 47% on acoustic2nd_nopml.
+//
+// So they are resolved ONCE, on the host, in refresh(), and stored as plain
+// ints; the device accessors are then bare loads from the kernel parameter
+// bank.  One place to fix, every equation benefits.
+//
+// WHY THE CACHE CANNOT GO STALE
+// -----------------------------
+// Enforced by the compiler, not by discipline:
+//   * every input to refresh() is either ``const`` (a post-construction write
+//     is a compile error) or ``private`` (reachable only through a setter that
+//     re-runs refresh());
+//   * there is deliberately NO default constructor, so a SolverContext cannot
+//     exist without having gone through refresh();
+//   * copy-assignment is implicitly deleted by the const members, so a
+//     refreshed context can never be overwritten wholesale (copy-CONSTRUCTION
+//     stays trivial, which is what the by-value kernel launches need).
+// The remaining public members (topo_rows, has_topo, topo_category, use_apm,
+// x_base, x_limit, aux_*) are free to assign because none of them feeds
+// refresh().
+// IF YOU ADD A MEMBER THAT phys_*() DEPENDS ON, IT MUST GO IN THE PRIVATE
+// SECTION WITH A REFRESHING SETTER, OR BE const.
+// ============================================================================
 struct SolverContext {
 
-    int ndim;
+    // ---- Geometry & physics: immutable after construction ----------------
+    const int ndim;
 
-    int nx;
-    int ny;
-    int nz;
+    const int nx;
+    const int ny;
+    const int nz;
 
-    int B;
+    const int B;
 
-    float dt;
-    unsigned int nt;
+    const float dt;
+    const unsigned int nt;
 
-    int M;
-    int abcn;
+    const int M;
+    const int abcn;
 
-    bool free_surface;
+    const bool free_surface;
 
-    const float* lap_coeff;
-    const float* grad_coeff;
+    const float* const lap_coeff;
+    const float* const grad_coeff;
 
-    float dx;
-    float dy;
-    float dz;
+    const float dx;
+    const float dy;
+    const float dz;
 
     // ---- Trailing fields (default-initialised, so existing brace-init
     // sites that pass the first 13 positional args don't need to change).
@@ -50,29 +88,29 @@ struct SolverContext {
     // ``fs_faces = -1`` and ``pad_* < 0`` (the defaults) reproduce the legacy
     // single ``free_surface`` (z-min only) + uniform ``abcn`` layout, so every
     // untouched brace-init / call site is bit-exact.
-    int fs_faces = -1;
-    int pad_lo[3] = {-1, -1, -1};   // [z, y, x]
-    int pad_hi[3] = {-1, -1, -1};
+    // (private: see the bottom of the struct -- writes must go through
+    // set_per_edge()/set_cut_mask() so the cached bounds stay in sync.)
 
     __host__ __device__
     inline bool fsLo(int axis) const {
-        return fs_faces < 0 ? (axis == 0 && free_surface) : ((fs_faces >> (2 * axis)) & 1);
+        return fs_faces_ < 0 ? (axis == 0 && free_surface) : ((fs_faces_ >> (2 * axis)) & 1);
     }
     __host__ __device__
     inline bool fsHi(int axis) const {
-        return fs_faces < 0 ? false : ((fs_faces >> (2 * axis + 1)) & 1);
+        return fs_faces_ < 0 ? false : ((fs_faces_ >> (2 * axis + 1)) & 1);
     }
+    __host__ __device__ inline int fs_faces() const { return fs_faces_; }
     // Per-face PML pad.  An explicit ``pad_lo``/``pad_hi`` (>= 0, per-edge
     // thickness) wins; otherwise a free-surface face has 0 pad and every other
     // face the uniform ``abcn``.  With ``fs_faces = -1`` this is exactly the
     // legacy ``free_surface ? 0 : abcn`` on z-min and ``abcn`` elsewhere.
     __host__ __device__
     inline int padLo(int axis) const {
-        return pad_lo[axis] >= 0 ? pad_lo[axis] : (fsLo(axis) ? 0 : abcn);
+        return pad_lo_[axis] >= 0 ? pad_lo_[axis] : (fsLo(axis) ? 0 : abcn);
     }
     __host__ __device__
     inline int padHi(int axis) const {
-        return pad_hi[axis] >= 0 ? pad_hi[axis] : (fsHi(axis) ? 0 : abcn);
+        return pad_hi_[axis] >= 0 ? pad_hi_[axis] : (fsHi(axis) ? 0 : abcn);
     }
 
     // Host-only: copy per-edge fields from a bound input's ``fs_faces`` +
@@ -80,11 +118,12 @@ struct SolverContext {
     // leave the -1 sentinels => legacy layout.  Call right after the positional
     // brace-init of a SolverContext at every driver.
     inline void set_per_edge(int fs, const std::vector<int>& plo, const std::vector<int>& phi) {
-        fs_faces = fs;
+        fs_faces_ = fs;
         for (int a = 0; a < 3; ++a) {
-            pad_lo[a] = (a < (int)plo.size()) ? plo[a] : -1;
-            pad_hi[a] = (a < (int)phi.size()) ? phi[a] : -1;
+            pad_lo_[a] = (a < (int)plo.size()) ? plo[a] : -1;
+            pad_hi_[a] = (a < (int)phi.size()) ? phi[a] : -1;
         }
+        refresh();
     }
 
     // ---- Domain-decomposition cut faces ---------------------------------
@@ -104,14 +143,18 @@ struct SolverContext {
     //   bit4 = y_lo, bit5 = y_hi.
     // 0 (default) = single domain — every kernel below behaves exactly as
     // before.  Backward drivers copy BackwardInput::cut_face_mask here.
-    int cut_mask = 0;
+    // (private ``cut_mask_``; assign through set_cut_mask().)
 
-    __host__ __device__ inline bool cut_x_lo() const { return cut_mask & 1; }
-    __host__ __device__ inline bool cut_x_hi() const { return cut_mask & 2; }
-    __host__ __device__ inline bool cut_z_lo() const { return cut_mask & 4; }
-    __host__ __device__ inline bool cut_z_hi() const { return cut_mask & 8; }
-    __host__ __device__ inline bool cut_y_lo() const { return cut_mask & 16; }
-    __host__ __device__ inline bool cut_y_hi() const { return cut_mask & 32; }
+    __host__ __device__ inline int  cut_mask() const { return cut_mask_; }
+    __host__ __device__ inline bool cut_x_lo() const { return cut_mask_ & 1; }
+    __host__ __device__ inline bool cut_x_hi() const { return cut_mask_ & 2; }
+    __host__ __device__ inline bool cut_z_lo() const { return cut_mask_ & 4; }
+    __host__ __device__ inline bool cut_z_hi() const { return cut_mask_ & 8; }
+    __host__ __device__ inline bool cut_y_lo() const { return cut_mask_ & 16; }
+    __host__ __device__ inline bool cut_y_hi() const { return cut_mask_ & 32; }
+
+    // The ONLY way to change the DD cut faces: re-runs refresh().
+    __host__ __device__ inline void set_cut_mask(int mask) { cut_mask_ = mask; refresh(); }
 
     // Ranged x stencil launch (DD phase-split forward): the kernel adds
     // ``x_base`` to its block/thread-derived ix and early-returns at
@@ -142,32 +185,18 @@ struct SolverContext {
     //   cut face                       -> ``M`` (legacy DD behaviour)
     // The z-low legacy ``free_surface ? M : abcn + M`` is reproduced via
     // ``padLo(0)``, whose fs_faces == -1 branch is ``free_surface ? 0 : abcn``.
-    __host__ __device__
-    inline int phys_x0() const { return cut_x_lo() ? M : padLo(2) + M; }
+    // Bare loads: refresh() resolved the branch chain on the host.
+    // Axis order of the cache is [z, y, x] (0, 1, 2), as everywhere else here.
+    __host__ __device__ inline int phys_x0() const { return phys_lo_[2]; }
+    __host__ __device__ inline int phys_x1() const { return phys_hi_[2]; }
+    __host__ __device__ inline int phys_y0() const { return phys_lo_[1]; }
+    __host__ __device__ inline int phys_y1() const { return phys_hi_[1]; }
+    __host__ __device__ inline int phys_z0() const { return phys_lo_[0]; }
+    __host__ __device__ inline int phys_z1() const { return phys_hi_[0]; }
 
-    __host__ __device__
-    inline int phys_x1() const { return nx - (cut_x_hi() ? M : padHi(2) + M); }
-
-    __host__ __device__
-    inline int phys_y0() const { return cut_y_lo() ? M : padLo(1) + M; }
-
-    __host__ __device__
-    inline int phys_y1() const { return ny - (cut_y_hi() ? M : padHi(1) + M); }
-
-    __host__ __device__
-    inline int phys_z0() const { return cut_z_lo() ? M : padLo(0) + M; }
-
-    __host__ __device__
-    inline int phys_z1() const { return nz - (cut_z_hi() ? M : padHi(0) + M); }
-
-    __host__ __device__
-    inline int nx_phys() const { return phys_x1() - phys_x0(); }
-
-    __host__ __device__
-    inline int ny_phys() const { return phys_y1() - phys_y0(); }
-
-    __host__ __device__
-    inline int nz_phys() const { return phys_z1() - phys_z0(); }
+    __host__ __device__ inline int nx_phys() const { return phys_hi_[2] - phys_lo_[2]; }
+    __host__ __device__ inline int ny_phys() const { return phys_hi_[1] - phys_lo_[1]; }
+    __host__ __device__ inline int nz_phys() const { return phys_hi_[0] - phys_lo_[0]; }
 
     // Per-column surface row (2-D propagator).  Returns the row index of
     // the first SOLID cell in column ``ix`` (matches Python ``topo_rows``
@@ -308,4 +337,66 @@ struct SolverContext {
         return has_topo ? topo_rows[iy * nx + ix] : phys_z0();
     }
 
+    // ---- Sole constructor ------------------------------------------------
+    // Its parameter list is exactly the 15 leading members, in order, so every
+    // existing brace-init site
+    //     SolverContext ctx{2, nx, 0, nz, B, dt, nt, M, abcn, fs,
+    //                       lap, grad, dx, 0.f, dz};
+    // still compiles verbatim -- it is now a constructor call rather than
+    // aggregate initialisation, with identical narrowing rules.  There is no
+    // default constructor on purpose: it would let a context exist with an
+    // unrefreshed cache.
+    __host__ __device__
+    SolverContext(int ndim_, int nx_, int ny_, int nz_, int B_,
+                  float dt_, unsigned int nt_, int M_, int abcn_,
+                  bool free_surface_,
+                  const float* lap_coeff_, const float* grad_coeff_,
+                  float dx_, float dy_, float dz_)
+        : ndim(ndim_), nx(nx_), ny(ny_), nz(nz_), B(B_),
+          dt(dt_), nt(nt_), M(M_), abcn(abcn_), free_surface(free_surface_),
+          lap_coeff(lap_coeff_), grad_coeff(grad_coeff_),
+          dx(dx_), dy(dy_), dz(dz_)
+    {
+        refresh();
+    }
+
+private:
+    // ---- Refresh inputs: private, so the only writers are the setters -----
+    int fs_faces_ = -1;
+    int pad_lo_[3] = {-1, -1, -1};   // [z, y, x]
+    int pad_hi_[3] = {-1, -1, -1};
+    int cut_mask_ = 0;
+
+    // ---- The cache -------------------------------------------------------
+    int phys_lo_[3] = {0, 0, 0};      // [z, y, x]
+    int phys_hi_[3] = {0, 0, 0};
+
+    // Resolve the per-face bounds once.  A DD cut face is exactly M regardless
+    // of the per-edge pad (its halo holds neighbour data); otherwise the face
+    // carries padLo/padHi, which is 0 on a free surface.  This is the former
+    // phys_*() expression, evaluated on the host instead of per thread.
+    __host__ __device__ void refresh()
+    {
+        const int extent[3] = {nz, ny, nx};
+        for (int a = 0; a < 3; ++a) {
+            // cut_mask bit layout: 0=x_lo 1=x_hi 2=z_lo 3=z_hi 4=y_lo 5=y_hi
+            const int lo_bit = (a == 0) ? 4 : (a == 1) ? 16 : 1;
+            const int hi_bit = (a == 0) ? 8 : (a == 1) ? 32 : 2;
+            const bool cl = (cut_mask_ & lo_bit) != 0;
+            const bool ch = (cut_mask_ & hi_bit) != 0;
+            phys_lo_[a] = cl ? M : padLo(a) + M;
+            phys_hi_[a] = extent[a] - (ch ? M : padHi(a) + M);
+        }
+    }
 };
+
+// Kernels take SolverContext BY VALUE, so trivial copyability is not
+// negotiable.  The const members delete copy-ASSIGNMENT (which is what stops a
+// refreshed context being overwritten wholesale) but leave copy-CONSTRUCTION
+// trivial, which is what the launches actually use.
+static_assert(std::is_trivially_copyable<SolverContext>::value,
+              "SolverContext must stay trivially copyable: it is passed by value to kernels.");
+static_assert(!std::is_default_constructible<SolverContext>::value,
+              "SolverContext must not be default-constructible: the bounds cache would be unrefreshed.");
+static_assert(!std::is_copy_assignable<SolverContext>::value,
+              "SolverContext must not be copy-assignable: that would bypass refresh().");

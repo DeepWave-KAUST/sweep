@@ -656,7 +656,7 @@ void run_full_imaging(
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
     if (p.has_topo) { ctx.topo_rows = p.topo_rows.data_ptr<int>(); ctx.has_topo = true; }
-    ctx.cut_mask = 0;  // full-storage / RTM path is DD-free (DD is backward_bs only)
+    ctx.set_cut_mask(0);  // full-storage / RTM path is DD-free (DD is backward_bs only)
     acoustic_init_aux_slabs(ctx, adjoint);
 
     LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
@@ -813,7 +813,7 @@ void run_bs_imaging(
     // DD: skip cut faces in the strip restore, the NOPML exclusion band
     // and the fused-adjoint pure_interior test (3D has no seed
     // rim-zeroing — nothing to mask there).
-    ctx.cut_mask = p.cut_face_mask;
+    ctx.set_cut_mask(p.cut_face_mask);
 
     AcousticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
