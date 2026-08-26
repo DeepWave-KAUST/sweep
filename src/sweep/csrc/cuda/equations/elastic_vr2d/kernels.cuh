@@ -185,9 +185,7 @@ __global__ void evr_momentum_kernel(
 
     // Free surface: the top has no PML (the surface replaces it), so the top
     // physical rows take the plain (non-PML) update path.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * (dsxx_dx + dsxz_dz);   // px += ...
@@ -323,9 +321,7 @@ __global__ void evr_stress_kernel(
     float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
     // Free surface: top physical rows are not in the PML zone.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (in_pml) {
         // CPML on the momentum derivatives (same memvar layout as elastic m_vxx etc.).

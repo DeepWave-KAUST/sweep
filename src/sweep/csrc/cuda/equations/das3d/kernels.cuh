@@ -193,10 +193,7 @@ __global__ void das3d_first_derivatives_kernel(
 
     // Interior fast-path: 9 aux fields all stay zero outside the PML band; just
     // pass the raw gradients through to the tmp_* arrays.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         tmp_sxx_x_b[idx] = dsxx_dx;
@@ -320,10 +317,7 @@ __global__ void das3d_update_kernel(
 
     // Interior fast-path; update_halo widens the standard halo, so re-key the
     // PML check accordingly.
-    bool in_pml = (ix < solver.abcn + update_halo) || (ix >= solver.nx - solver.abcn - update_halo) ||
-                  (iy < solver.abcn + update_halo) || (iy >= solver.ny - solver.abcn - update_halo) ||
-                  (iz < (solver.free_surface ? update_halo : solver.abcn + update_halo)) ||
-                  (iz >= solver.nz - solver.abcn - update_halo);
+    bool in_pml = solver.in_pml_3d(ix, iy, iz, update_halo);
 
     if (!in_pml) {
         float exx_new = f.exx[idx] + solver.dt * inv_rho *

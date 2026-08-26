@@ -72,9 +72,7 @@ __device__ inline float acoustic_cpml_update_2d(
 
     // Interior fast-path: ax/bx/dbxdx vanish, so w_sum reduces to lap_x+lap_z
     // and the aux fields psix/psiz/zetax/zetaz stay zero. Skip the loads/stores.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) return lap_x + lap_z;
 
     float ax_ = cpml.ax[ix];
@@ -234,9 +232,7 @@ __global__ void acoustic_lsrtm2nd_adjoint(
     const float* v2l_b = v2_lambda + b * spatial_size;
     float dt2 = solver.dt * solver.dt;
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         // L* = lap(v^2 . lambda)  (transpose of forward v^2 . lap(lambda))

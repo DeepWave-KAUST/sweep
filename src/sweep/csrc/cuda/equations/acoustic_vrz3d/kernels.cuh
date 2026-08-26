@@ -395,9 +395,7 @@ __global__ void acoustic_vrz3nd(
     // at the source. cut_mask==0 => phys_*0/1 collapse to abcn+M (free-surface z -> M),
     // so single domain stays bit-identical.
     (void)halo;
-    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
-                  (iy < solver.phys_y0()) || (iy >= solver.phys_y1()) ||
-                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
+    bool in_pml = solver.in_pml_3d(ix, iy, iz, solver.M);
 
     if (!in_pml) {
         float rhs = kappa * (beta * (lap_x + lap_y + lap_z) + dbdx * dudx + dbdy * dudy + dbdz * dudz);
@@ -664,10 +662,7 @@ __global__ void acoustic_vrz3nd_adjoint(
 
     auto f = wf.offset(b, spatial_size);
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         const float* aq0_b = aq0 + b * spatial_size;
@@ -930,9 +925,7 @@ __global__ void acoustic_vrz3nd_adjoint_fused(
     // zeta need NO exchange -- the CPML profile is 0 at cut-adjacent physical cells.)
     // cut_mask==0 => phys_*0/1 collapse to the old abcn+M band; single-GPU unchanged.
     (void)halo;
-    bool in_pml = (ix < solver.phys_x0()) || (ix >= solver.phys_x1()) ||
-                  (iy < solver.phys_y0()) || (iy >= solver.phys_y1()) ||
-                  (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
+    bool in_pml = solver.in_pml_3d(ix, iy, iz, solver.M);
 
     if (!in_pml) {
         const float* C0_b = C0 + b * spatial_size;

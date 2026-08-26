@@ -326,9 +326,7 @@ __global__ void acoustic_vrz2nd(
     // zetaxn/zetazn all collapse to 0; rhs reduces to kappa*(beta*(lap_x+lap_z)
     // + dbdx*dudx + dbdz*dudz). Skipping the dpsix/dpsiz/daxdx/dazdz loads and
     // four aux-field writes is the main bandwidth win here.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         float rhs = kappa * (beta * (lap_x + lap_z) + dbdx * dudx + dbdz * dudz);
@@ -517,9 +515,7 @@ __global__ void acoustic_vrz2nd_adjoint(
     auto f = wf.offset(b, spatial_size);
 
     // Position-based PML / interior split (mirrors the forward fast-path).
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         // Exact transpose Aᵀλ of the forward interior operator
@@ -850,9 +846,7 @@ __global__ void acoustic_vrz2nd_adjoint_fused(
 
     auto f = wf.offset(b, spatial_size);
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         // Aᵀλ = ∇²(vp²·λ) − ∂ₓ((∂ₓb·κ)·λ) − ∂_z((∂_z b·κ)·λ), each tap recomputed

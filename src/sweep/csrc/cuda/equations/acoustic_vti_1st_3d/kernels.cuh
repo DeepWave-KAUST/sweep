@@ -171,9 +171,7 @@ __global__ void velocity_kernel_3d(
     // PML / interior split — outside the PML the half-step coefficients
     // vanish so the memory variables stay at zero.
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
@@ -264,9 +262,7 @@ __global__ void stress_kernel_3d(
     float C13 = c13_b[idx];
 
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         float dh = dvx_dx + dvy_dy;       // horizontal divergence

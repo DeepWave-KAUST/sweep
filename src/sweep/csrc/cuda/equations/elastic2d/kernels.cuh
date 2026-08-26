@@ -1145,8 +1145,7 @@ __global__ void elastic_velocity_kernel_apm(
     float inv_rho_x = 1.f / rho_x_b[idx];
     float inv_rho_z = 1.f / rho_z_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho_x * (dsxx_dx + dsxz_dz);
@@ -1257,8 +1256,7 @@ __global__ void elastic_stress_kernel_apm(
     float mu_   = mu_b[idx];
     float muxz  = muxz_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
@@ -1553,9 +1551,7 @@ __global__ void elastic_stress_adjoint_prepare_apm(
     float bar_dvx_dz = solver.dt * muxz * bar_sxz;
     float bar_dvz_dx = solver.dt * muxz * bar_sxz;
 
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -1647,9 +1643,7 @@ __global__ void elastic_velocity_adjoint_prepare_apm(
     float bar_dsxz_dx = solver.dt * inv_rho_z * bar_vz;
     float bar_dszz_dz = solver.dt * inv_rho_z * bar_vz;
 
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;

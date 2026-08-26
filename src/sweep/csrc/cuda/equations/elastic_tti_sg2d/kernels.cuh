@@ -279,9 +279,7 @@ __global__ void elastic_tti_sg_velocity_kernel(
 
     // Interior fast-path: ax/bx vanish, so the six aux fields stay zero and the
     // gradients just feed through to the velocity update.
-    const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                        (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                        (iz >= solver.nz - solver.abcn - halo);
+    const bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         f.vx[idx] += scale * (dsxx_dx + dsxz_dz);
         f.vy[idx] += scale * (dsxy_dx + dsyz_dz);
@@ -705,9 +703,7 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     // fields stay 0, so the six q_v* outputs collapse to bar_dv*_d* and
     // the six m_v* writes become 0 -> 0. Skip them.
     const int shift = b * spatial_size + idx;
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         q_vxx[shift] = bar_dvx_dx;
         q_vxz[shift] = bar_dvx_dz_full;
@@ -837,9 +833,7 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
     // ax/az/bx/bz coefficients vanish, m_t* aux fields stay 0, so the six
     // q_t* outputs collapse to bar_ds*_d* and the six m_t* writes become
     // 0 -> 0. Skip them.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         q_txxx[shift] = bar_dsxx_dx;
         q_txzz[shift] = bar_dsxz_dz;
