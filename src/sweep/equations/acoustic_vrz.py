@@ -1,3 +1,4 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from . import slot_table
@@ -53,19 +54,14 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
     dbdx = dvpdx * inv_z + vp * dinvzdx
     dbdz = dvpdz * inv_z + vp * dinvzdz
 
-    # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-2, kernels=grad_kernels)
-    w_sum += (1+bz) * tmpz + az * zetaz
+    # ``psiyn`` is the Z memory variable -- historical name, correct slot.
+    contrib_z, psiyn, zetaz = cpml_axis_update(
+        lap_z, dpdz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels)
+    w_sum += contrib_z
 
-    psiyn = bz * dpdz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
-
-    # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + grad_op(ax * psix, h, axis=-1, kernels=grad_kernels)
-    w_sum += (1+bx) * tmpx + ax * zetax
-
-    psixn = bx * dpdx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dpdx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels)
+    w_sum += contrib_x
 
     dpdx_cpml = dpdx + psixn
     dpdz_cpml = dpdz + psiyn
@@ -106,26 +102,17 @@ def step_cpml_3d(
     dbdy = dvpdy * inv_z + vp * dinvzdy
     dbdz = dvpdz * inv_z + vp * dinvzdz
 
-    # Z direction
-    tmpz = ((1 + bz) * lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-3, kernels=grad_kernels)
-    w_sum += (1 + bz) * tmpz + az * zetaz
+    contrib_z, psizn, zetaz = cpml_axis_update(
+        lap_z, dpdz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op, grad_kernels)
+    w_sum += contrib_z
 
-    psizn = bz * dpdz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
+    contrib_y, psiyn, zetay = cpml_axis_update(
+        lap_y, dpdy, psiy, zetay, ay, by, dbydy, h, -2, grad_op, grad_kernels)
+    w_sum += contrib_y
 
-    # Y direction
-    tmpy = ((1 + by) * lap_y + dbydy * dpdy) + grad_op(ay * psiy, h, axis=-2, kernels=grad_kernels)
-    w_sum += (1 + by) * tmpy + ay * zetay
-
-    psiyn = by * dpdy + ay * psiy
-    zetay = by * tmpy + ay * zetay
-
-    # X direction
-    tmpx = ((1 + bx) * lap_x + dbxdx * dpdx) + grad_op(ax * psix, h, axis=-1, kernels=grad_kernels)
-    w_sum += (1 + bx) * tmpx + ax * zetax
-
-    psixn = bx * dpdx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dpdx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels)
+    w_sum += contrib_x
 
     dpdx_cpml = dpdx + psixn
     dpdy_cpml = dpdy + psiyn

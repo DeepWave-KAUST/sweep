@@ -1,3 +1,4 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
@@ -47,39 +48,33 @@ def step_cpml(
 
     w_sum = 0.0
 
-    tmpz = ((1 + bz) * lap_z + dbzdz * dudz) + grad_op(az * psiz, h, -3)
-    w_sum += (1 + bz) * tmpz + az * zetaz
-    psizn = bz * dudz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
+    contrib_z, psizn, zetaz = cpml_axis_update(
+        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op)
+    w_sum += contrib_z
 
-    tmpy = ((1 + by) * lap_y + dbydy * dudy) + grad_op(ay * psiy, h, -2)
-    w_sum += (1 + by) * tmpy + ay * zetay
-    psiyn = by * dudy + ay * psiy
-    zetay = by * tmpy + ay * zetay
+    contrib_y, psiyn, zetay = cpml_axis_update(
+        lap_y, dudy, psiy, zetay, ay, by, dbydy, h, -2, grad_op)
+    w_sum += contrib_y
 
-    tmpx = ((1 + bx) * lap_x + dbxdx * dudx) + grad_op(ax * psix, h, -1)
-    w_sum += (1 + bx) * tmpx + ax * zetax
-    psixn = bx * dudx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
 
     sw_sum = 0.0
 
-    stmpz = ((1 + bz) * lap_sz + dbzdz * dsudz) + grad_op(az * spsiz, h, -3)
-    sw_sum += (1 + bz) * stmpz + az * szetaz
-    spsizn = bz * dsudz + az * spsiz
-    szetaz = bz * stmpz + az * szetaz
+    contrib_sz, spsizn, szetaz = cpml_axis_update(
+        lap_sz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -3, grad_op)
+    sw_sum += contrib_sz
 
-    stmpy = ((1 + by) * lap_sy + dbydy * dsudy) + grad_op(ay * spsiy, h, -2)
-    sw_sum += (1 + by) * stmpy + ay * szetay
-    spsiyn = by * dsudy + ay * spsiy
-    szetay = by * stmpy + ay * szetay
+    contrib_sy, spsiyn, szetay = cpml_axis_update(
+        lap_sy, dsudy, spsiy, szetay, ay, by, dbydy, h, -2, grad_op)
+    sw_sum += contrib_sy
 
-    stmpx = ((1 + bx) * lap_sx + dbxdx * dsudx) + grad_op(ax * spsix, h, -1)
-    sw_sum += (1 + bx) * stmpx + ax * szetax
-    spsixn = bx * dsudx + ax * spsix
-    szetax = bx * stmpx + ax * szetax
+    contrib_sx, spsixn, szetax = cpml_axis_update(
+        lap_sx, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op)
+    sw_sum += contrib_sx
 
     su_next = 2 * su_now - su_pre + vp**2 * dt**2 * sw_sum + ref * vp**2 * dt**2 * w_sum
 

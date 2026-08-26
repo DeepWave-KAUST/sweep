@@ -1,3 +1,4 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
@@ -22,33 +23,26 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
 
     # Background wavefield
     w_sum = 0.
-    # Z direction
-    tmpz = ((1+bz)*lap_uz + dbzdz * dudz) + grad_op(az*psiz, h, -2)
-    w_sum += (1+bz) * tmpz + az * zetaz
+    # ``psiyn`` is the Z memory variable -- historical name, correct slot.
+    contrib_z, psiyn, zetaz = cpml_axis_update(
+        lap_uz, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op)
+    w_sum += contrib_z
 
-    psiyn = bz * dudz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
-
-    # X direction
-    tmpx = ((1+bx)*lap_ux + dbxdx * dudx) + grad_op(ax*psix, h, -1)
-    w_sum += (1+bx) * tmpx + ax * zetax
-    psixn = bx * dudx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_ux, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
 
     # Scatter wavefield
     w_sum_s = 0.
-    # Z direction
-    tmpsz = ((1+bz)*lap_suz + dbzdz * dsudz) + grad_op(az*spsiz, h, -2)
-    w_sum_s += (1+bz) * tmpsz + az * szetaz
-    spsiyn = bz * dsudz + az * spsiz
-    szetaz = bz * tmpsz + az * szetaz   
-    # X direction
-    tmpx_s = ((1+bx)*lap_sux + dbxdx * dsudx) + grad_op(ax*spsix, h, -1)
-    w_sum_s += (1+bx) * tmpx_s + ax * szetax
-    spsixn = bx * dsudx + ax * spsix
-    szetax = bx * tmpx_s + ax * szetax
+    contrib_sz, spsiyn, szetaz = cpml_axis_update(
+        lap_suz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -2, grad_op)
+    w_sum_s += contrib_sz
+
+    contrib_sx, spsixn, szetax = cpml_axis_update(
+        lap_sux, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum_s += contrib_sx
     su_next = 2 * su_now - su_pre + vp**2 * dt**2 * w_sum_s + ref * vp**2 * dt**2 * w_sum
 
     # # background wavefield
