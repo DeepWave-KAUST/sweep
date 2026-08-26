@@ -117,3 +117,34 @@ def test_an_explicit_config_beats_a_legacy_keyword():
 
 def test_neither_form_yields_none():
     assert merge_legacy_boundary_kwargs({}, None) is None
+
+
+# --------------------------------------------------------------------------- #
+# validate_memory_strategy -- both refusals prevent a SILENT wrong answer
+# --------------------------------------------------------------------------- #
+def test_checkpoint_plus_boundary_saving_is_refused():
+    """The compiled wrapper picks the checkpoint backward when both are set, so
+    the boundary-saving request would be ignored rather than honoured."""
+    from sweep.core.arguments import validate_memory_strategy
+    with pytest.raises(ValueError, match="three-way choice"):
+        validate_memory_strategy(use_checkpoint=True, use_boundary_saving=True,
+                                 boundary_tail_steps=0)
+
+
+def test_tail_steps_with_checkpointing_is_refused():
+    """Truncated backward exists only in the boundary-saving backward. The
+    checkpoint path would ignore the truncation and return a full-length
+    gradient that looks entirely plausible."""
+    from sweep.core.arguments import validate_memory_strategy
+    with pytest.raises(NotImplementedError, match="tail_steps"):
+        validate_memory_strategy(use_checkpoint=True, use_boundary_saving=False,
+                                 boundary_tail_steps=50)
+
+
+@pytest.mark.parametrize("ckpt,bs,tail", [
+    (False, False, 0), (True, False, 0), (False, True, 0), (False, True, 50),
+])
+def test_the_valid_combinations_pass(ckpt, bs, tail):
+    from sweep.core.arguments import validate_memory_strategy
+    validate_memory_strategy(use_checkpoint=ckpt, use_boundary_saving=bs,
+                             boundary_tail_steps=tail)

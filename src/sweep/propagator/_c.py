@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import numpy as np
 from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
+from sweep.core.arguments import validate_memory_strategy
 from sweep.core.topography import build_apm_model_tensors
 from sweep.propagator._call_params import CompiledCallParams
 from sweep.propagator.base import PropBase
@@ -1552,21 +1553,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             self.adcig = None
         use_checkpoint = bool(self.use_ckpt and requires_backward)
-        if use_checkpoint and use_boundary_saving:
-            # Never silently prefer one path (ckpt historically won): the
-            # gradient-memory mode is a three-way choice.
-            raise ValueError(
-                "boundary saving and checkpointing are both enabled; the "
-                "gradient-memory mode is a three-way choice (full/boundary/"
-                "ckpt) -- pass memory=MemoryOptions(strategy=...) or disable "
-                "one of use_ckpt/boundary_saving_config.")
-        # NB: when both flags are set the Warpper picks the CHECKPOINT
-        # backward, which would silently ignore the truncation -- reject any
-        # checkpointing combination outright.
-        if boundary_tail_steps and use_checkpoint:
-            raise NotImplementedError(
-                "tail_steps requires the boundary-saving backward; pass "
-                "use_ckpt=False (or memory=MemoryOptions(strategy='boundary')).")
+        validate_memory_strategy(use_checkpoint, use_boundary_saving,
+                                 boundary_tail_steps)
         if not requires_backward:
             use_boundary_saving = False
         # APM first: it is the more fundamental limitation of the two, so its
