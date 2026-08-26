@@ -1,5 +1,6 @@
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._elastic_step_core import (
     elastic_step_core,
@@ -361,4 +362,5 @@ class Elastic(FirstOrderEquation):
             checkpoint_slot_axes=(None,) * 5
                 + ("x", "z", "x", "z", "x", "z", "x", "z", "x", "z"),
             adjoint_pml_slab=True,
+            slots=slot_table.ELASTIC2D,
         )

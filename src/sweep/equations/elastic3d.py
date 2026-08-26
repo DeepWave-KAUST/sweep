@@ -2,6 +2,7 @@ import os as _os
 
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
     top_free_surface_derivative,
@@ -577,4 +578,5 @@ class Elastic(FirstOrderEquation):
             pml_slot_axes=("x", "y", "z") * 9,
             checkpoint_slot_axes=(None,) * 9 + ("x", "y", "z") * 9,
             adjoint_pml_slab=True,
+            slots=slot_table.ELASTIC3D,
         )

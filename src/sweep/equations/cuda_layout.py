@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:                       # avoids a slot_table <-> cuda_layout cycle
+    from .slot_table import SlotTable
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,13 @@ class CUDALayoutSpec:
     pml_slot_axes: tuple | None = None
     checkpoint_slot_axes: tuple | None = None
     adjoint_pml_slab: bool = False
+    # Declarative CUDA wavefield bind order (see ``slot_table.py``).  Optional:
+    # equations without one keep the legacy path, where every count above is
+    # declared by hand and the matching index tuples live in
+    # ``propagator/_stepped.py`` and ``parallel/dd_propagator.py``.  Where it IS
+    # declared, ``test_slot_table_consistency.py`` requires the derived values to
+    # equal the hand-written ones, so the two cannot drift while both exist.
+    slots: "SlotTable | None" = None
 
     def resolved_last_two_storage_nvar(self) -> int:
         return self.base_nvar if self.last_two_storage_nvar is None else self.last_two_storage_nvar
