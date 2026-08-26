@@ -60,7 +60,7 @@ ForwardOutput forward(const ForwardInput& in)
     // Cut-aware physical bounds: a cut face carries only the M halo (no abcn
     // PML pad), so phys_x0()/phys_x1()/... must shrink there. 0 = single
     // domain (every bound collapses to the legacy abcn+M).
-    ctx.cut_mask = p.cut_face_mask;
+    ctx.set_cut_mask(p.cut_face_mask);
 
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(nt) : p.it_end;

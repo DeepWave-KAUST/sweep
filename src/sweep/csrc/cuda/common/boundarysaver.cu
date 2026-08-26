@@ -81,7 +81,7 @@ __global__ void boundary_kernel2d(
     int right_end   = x1 - offset;
     int right_start = right_end - width;
 
-    // DD cut faces (ctx.cut_mask: bit0=x_lo/left, bit1=x_hi/right,
+    // DD cut faces (ctx.cut_mask(): bit0=x_lo/left, bit1=x_hi/right,
     // bit2=z_lo/top, bit3=z_hi/bottom) are skipped: the strip there is
     // reverse-leapfrog-computed + halo-exchanged instead of restored.
     bool is_top =
@@ -332,7 +332,7 @@ __global__ void boundary_kernel3d(
     int right_end   = x1 - offset;
     int right_start = right_end - width;
 
-    // DD cut faces (ctx.cut_mask) are skipped — see boundary_kernel2d.
+    // DD cut faces (ctx.cut_mask()) are skipped — see boundary_kernel2d.
     bool is_top =
         iz >= top_start && iz < top_end &&
         iy >= y_t0 && iy < y_t1 &&

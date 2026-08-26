@@ -55,7 +55,7 @@ ForwardOutput forward(const ForwardInput& in)
     // face on ctx.cut_* — but only if cut_mask is propagated here (acoustic3d does
     // the same).  Missing this makes VRZ write cut faces' null buffers => illegal
     // memory access under DD (PY*/PX* tiles with cut faces).
-    ctx.cut_mask = p.cut_face_mask;
+    ctx.set_cut_mask(p.cut_face_mask);
 
     // Stepped execution: run [it_begin, it_end) instead of [0, nt) so a DD
     // driver can halo-exchange between single steps.  All per-step indexing

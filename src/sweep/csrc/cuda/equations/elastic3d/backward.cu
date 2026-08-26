@@ -826,7 +826,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // DD: skip cut faces in the strip restore, collapse the NOPML exclusion
     // bands to the stencil halo on cut sides, and route cut-side cells of
     // the adjoint prepare kernels through the interior branch.
-    solver.cut_mask = p.cut_face_mask;
+    solver.set_cut_mask(p.cut_face_mask);
 
     ElasticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
@@ -1162,7 +1162,7 @@ BackwardOutput backward(const BackwardInput& in)
 
     SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
     // DD: cut-aware PML predicates in the adjoint prepare kernels.
-    solver.cut_mask = p.cut_face_mask;
+    solver.set_cut_mask(p.cut_face_mask);
 
     ElasticWavefieldTensor adjoint;
     if (!p.adjoint_wavefields.empty())
