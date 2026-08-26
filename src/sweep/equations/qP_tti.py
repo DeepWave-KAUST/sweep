@@ -64,7 +64,14 @@ def step_cpml(
         + (dpdx * sin0 + dpdz * cos0) ** 4
         + 2 * (1 + delta) * (dpdx * cos0 - dpdz * sin0) ** 2 * (dpdx * sin0 + dpdz * cos0) ** 2
     )
-    sk = numerator * ((denominator + 1e-26) ** -1)
+    # NOT ``numerator * ((denominator + 1e-26) ** -1)``. That form is finite in
+    # the forward, but autograd's pow backward evaluates ``x ** -2``, and in
+    # fp32 ``(1e-26) ** -2`` overflows to +inf. Wherever the numerator is also
+    # zero -- the whole grid at t=0, the quiet region ahead of the wavefront,
+    # the PML corners -- the chain rule computes ``0 * inf = NaN``, and a single
+    # NaN poisons the entire model gradient. Division's backward is
+    # ``-grad * result / denominator`` and never forms ``den ** -2``.
+    sk = numerator / (denominator + 1e-26)
 
     vp2dt2 = vp**2 * dt**2
     u_next = 2 * u_now - u_pre + (
