@@ -108,3 +108,85 @@ def merge_legacy_boundary_kwargs(kwargs, boundary_saving_config):
     if boundary_saving_config is None:
         return legacy or None
     return {**legacy, **boundary_saving_config}
+
+
+def refuse_free_surface_if_anisotropic(equation, requested, how):
+    """Refuse a free surface on an equation that has no correct one.
+
+    Called TWICE, from two different places, and both are needed: once on the
+    explicit request (``free_surface=`` as a bool or a per-edge list), and once
+    more after the topography method has been resolved, because ``topography=``
+    implies a free surface even with ``free_surface=False`` and that is only
+    known once ``resolve_topo_method`` has run. The second call is the one that
+    was missing -- an anisotropic equation given a topography sailed straight
+    past the first check.
+
+    ``how`` names which of the two fired, so the message says what the caller
+    actually did rather than just what it could not have.
+    """
+    if not requested or getattr(equation, "supports_free_surface", True):
+        return
+    raise NotImplementedError(
+        f"{type(equation).__name__} does not support a free surface "
+        f"({how}): the anisotropic stress-free boundary condition "
+        "couples through the stiffness tensor and is not the isotropic "
+        "image method this solver implements. Use free_surface=False "
+        "(absorbing top) or an isotropic equation."
+    )
+
+
+def resolve_boundary_spec(free_surface, abcn, ndim, equation, topography,
+                          *, normalize_free_surface, normalize_pad,
+                          is_top_only_or_none):
+    """`(free_surface, abcn)` -> `(fs_faces, pad, abcn_scalar)`, or a refusal.
+
+    The normalisers are injected rather than imported so this module stays free
+    of a dependency on the equations package, which imports propagator code.
+
+    Three capability checks live here, and all three REFUSE rather than degrade:
+
+    * an anisotropic equation with any free surface at all -- the anisotropic
+      stress-free condition couples through the stiffness tensor and is not the
+      isotropic image condition these solvers implement, so accepting the
+      request would produce confident, wrong surface physics;
+    * a per-edge free surface or per-edge PML in 3-D, or on an equation that has
+      not opted in;
+    * a per-edge free surface combined with topography.
+
+    The `isinstance(abcn, bool)` exclusion below is belt-and-braces: `normalize_pad`
+    already rejects a bool `abcn` outright, so this branch is never the guard that
+    fires. It stays because `isinstance(True, int)` is True, and losing both at
+    once would silently turn `abcn=True` into a 1-cell PML.
+
+    `abcn_scalar` is a REPRESENTATIVE uniform width kept for the legacy readers
+    (topography, curvilinear) that assume one number. It is the max over faces
+    when the pad is per-edge -- those readers are guarded to the top-only
+    configuration, so the representative value is never the one that matters.
+    """
+    fs_faces = normalize_free_surface(free_surface, ndim)
+    refuse_free_surface_if_anisotropic(equation, any(fs_faces), "free_surface=")
+    pad = normalize_pad(abcn, fs_faces, ndim)
+    abcn_scalar = (abcn if isinstance(abcn, int) and not isinstance(abcn, bool)
+                   else max(pad + (0,)))
+
+    # Per-edge anything is a staged feature. `not isinstance(abcn, int)` catches
+    # a per-edge PML spec even when the free surface is plain top-only.
+    if (not is_top_only_or_none(fs_faces)) or not isinstance(abcn, int):
+        if ndim != 2:
+            raise NotImplementedError(
+                "per-edge free surface / per-edge PML thickness is currently "
+                f"2-D only; got a {ndim}-D propagator (free_surface="
+                f"{free_surface!r}, abcn={abcn!r})."
+            )
+        if not getattr(equation, "supports_per_edge_free_surface", False):
+            raise NotImplementedError(
+                f"{type(equation).__name__} does not support a per-edge free "
+                "surface or per-edge PML thickness yet (only top-only "
+                "free_surface=True/False with a scalar abcn). Supported: "
+                "Acoustic, Elastic (2-D)."
+            )
+        if topography is not None:
+            raise NotImplementedError(
+                "per-edge free surface cannot be combined with topography= yet."
+            )
+    return fs_faces, pad, abcn_scalar

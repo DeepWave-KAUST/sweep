@@ -4,6 +4,8 @@ import inspect
 import numpy as np
 from sweep.core.arguments import (
     merge_legacy_boundary_kwargs,
+    refuse_free_surface_if_anisotropic,
+    resolve_boundary_spec,
     normalise_spacing,
     resolve_device,
 )
@@ -151,55 +153,13 @@ class PropBase:
         # as well as per-edge specs; both normalise to canonical axis-major
         # tuples ``(z_lo, z_hi, [y_lo, y_hi,] x_lo, x_hi)``.  ``free_surface=True``
         # with a scalar ``abcn`` reproduces the old top-only layout bit-for-bit.
-        self.fs_faces = normalize_free_surface(free_surface, self.ndim)
-        # Anisotropic equations have no correct free-surface implementation:
-        # the anisotropic stress-free condition is NOT the isotropic image
-        # condition these solvers implement.  Fail loud on ANY free-surface
-        # request rather than silently produce wrong surface physics.  Checked
-        # twice: here for the explicit request (bool / per-edge list), and again
-        # after ``_resolve_topo_method`` -- ``topography=`` implies a free
-        # surface, and that is only known once the method has been resolved.
-        def _refuse_free_surface_if_anisotropic(requested, how):
-            if not requested or getattr(equation, "supports_free_surface", True):
-                return
-            raise NotImplementedError(
-                f"{type(equation).__name__} does not support a free surface "
-                f"({how}): the anisotropic stress-free boundary condition "
-                "couples through the stiffness tensor and is not the isotropic "
-                "image method this solver implements. Use free_surface=False "
-                "(absorbing top) or an isotropic equation."
-            )
-
-        _refuse_free_surface_if_anisotropic(any(self.fs_faces), "free_surface=")
         self._abcn_arg = abcn
-        self.pad = normalize_pad(abcn, self.fs_faces, self.ndim)
-        # ``self.abcn`` stays a representative uniform PML width for the legacy
-        # readers (topography / curvilinear) that assume one — those paths are
-        # guarded to the top-only configuration just below.
-        self.abcn = abcn if isinstance(abcn, int) and not isinstance(abcn, bool) else max(self.pad + (0,))
-        # Per-edge free surface (anything other than top-only or none), and
-        # per-edge PML thickness, are a staged feature: only equations that opt
-        # in (``supports_per_edge_free_surface``) handle them, 2-D only, and not
-        # with topography.  Fail loud rather than silently degrade to top-only.
-        _extended_boundary = (not is_top_only_or_none(self.fs_faces)) or not isinstance(abcn, int)
-        if _extended_boundary:
-            if self.ndim != 2:
-                raise NotImplementedError(
-                    "per-edge free surface / per-edge PML thickness is currently "
-                    f"2-D only; got a {self.ndim}-D propagator (free_surface="
-                    f"{free_surface!r}, abcn={abcn!r})."
-                )
-            if not getattr(equation, "supports_per_edge_free_surface", False):
-                raise NotImplementedError(
-                    f"{type(equation).__name__} does not support a per-edge free "
-                    "surface or per-edge PML thickness yet (only top-only "
-                    "free_surface=True/False with a scalar abcn). Supported: "
-                    "Acoustic, Elastic (2-D)."
-                )
-            if topography is not None:
-                raise NotImplementedError(
-                    "per-edge free surface cannot be combined with topography= yet."
-                )
+        self.fs_faces, self.pad, self.abcn = resolve_boundary_spec(
+            free_surface, abcn, self.ndim, equation, topography,
+            normalize_free_surface=normalize_free_surface,
+            normalize_pad=normalize_pad,
+            is_top_only_or_none=is_top_only_or_none,
+        )
         # Resolve topo_method + free_surface BEFORE PML padding is
         # computed.  Two separate flags come out:
         #   ``self.free_surface``           — physical: model has a free
@@ -222,7 +182,8 @@ class PropBase:
         )
         # ``topography=`` implies a free surface even with free_surface=False --
         # image method or APM alike, both of them isotropic constructions.
-        _refuse_free_surface_if_anisotropic(self.free_surface, "implied by topography=")
+        refuse_free_surface_if_anisotropic(
+            equation, self.free_surface, "implied by topography=")
         # ``_resolve_topo_method`` can turn the TOP free surface on implicitly
         # (topography= implies an image-method free surface even with
         # free_surface=False).  Fold that back into the canonical fs_faces/pad so
