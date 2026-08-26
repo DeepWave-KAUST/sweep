@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import numpy as np
 from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
+from sweep.propagator._call_params import CompiledCallParams
 from sweep.propagator.base import PropBase
 from sweep.equations._edges import is_top_only_or_none
 from sweep.utils.torch import EdgePadding
@@ -93,64 +94,25 @@ class Warpper(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        forward_func,
-        backward_func,
-        backward_bs_func,
-        backward_ckpt_func,
-        backward_recursive_ckpt_func,
-        wavelet,             # (B, nsrc, nt)
-        sources_loc,        # (B, nsrc, 2)
-        receivers_loc,      # (B, nrec, 2)
-        source_field_indices,
-        receiver_field_indices,
-        coes_list,          
-        M: int,
-        abcn: int,
-        spacing: list,       # list of floats for grid spacing
-        dt: float,
-        pml_vals: list,     # list of 6 tensors for PML profiles
-        use_checkpoint: bool=False,
-        checkpoint_interval: int=1,
-        use_recursive_checkpoint: bool=False,
-        checkpoint_count: int=0,
-        checkpoint_steps: torch.Tensor=None,
-        checkpoint_on_cpu: bool=False,
-        use_boundary_saving: bool=False,
-        use_pinned_memory: bool=False,
-        free_surface: bool=False,
-        transfer_interval: int=1,
-        boundary_ring_buffers: int=1,
-        boundary_on_cpu: bool=False,
-        boundary_on_disk: bool=False,
-        boundary_disk_async_read: bool=False,
-        boundary_tail_steps: int=0,
-        forward_wavefields: tuple=(),
-        adjoint_wavefields: tuple=(),
-        adjoint_workspace: tuple=(),
-        checkpoint_buffers: tuple=(),
-        last_two: torch.Tensor=None,
-        boundary_cpu: tuple=(),
-        boundary_gpu: tuple=(),
-        boundary_disk_files: tuple=(),
-        source_illumination_buffer: torch.Tensor=None,
-        receiver_illumination_buffer: torch.Tensor=None,
-        illumination_padding: tuple=(),
-        adcig_buffer: torch.Tensor=None,      # (nlag, nz, nx[, ny]) model-shaped
-        adcig_max_lag: int=0,
-        topo_rows_param: torch.Tensor=None,   # runtime padded surface row per col
-        has_topo_param: bool=False,
-        topo_category_param: torch.Tensor=None,  # runtime padded APM category int32
-        use_apm_param: bool=False,
-        fs_faces: int=-1,   # per-edge free-surface bitmask (-1 => legacy z-min)
-        cut_face_mask: int=0,  # DD cut faces (0 => single domain)
-        eq_aux: tuple=(),   # equation-specific aux tensors (e.g. visco |k| grid)
-        *models             # list of (B, nz, nx) tensors
+        cp,                  # CompiledCallParams: everything autograd ignores
+        wavelet,             # (B, nsrc, nt) -- differentiable, so positional
+        *models              # list of (B, nz, nx) tensors -- differentiable
     ):
         """
         Forward modeling: vp -> synthetic seismograms
         """
-        
-        lap_coes, grad_coes = coes_list
+        # Bound to locals rather than read through ``cp`` because the body
+        # REFINES each of these: spacing/dt are coerced, and the three
+        # memory-strategy flags are switched off when nothing requires a
+        # gradient. Keeping the refinement local makes it visible here and stops
+        # it leaking back into the caller's params object.
+        spacing = cp.spacing
+        dt = cp.dt
+        use_checkpoint = cp.use_checkpoint
+        use_recursive_checkpoint = cp.use_recursive_checkpoint
+        use_boundary_saving = cp.use_boundary_saving
+
+        lap_coes, grad_coes = cp.coes_list
         nt = wavelet.shape[-1]
         spacing = [float(s) for s in spacing]
         dt = float(dt)
@@ -159,8 +121,8 @@ class Warpper(torch.autograd.Function):
         requires_model_grad = any(m.requires_grad for m in models)
         requires_wavelet_grad = wavelet.requires_grad
         requires_backward = bool(requires_model_grad or requires_wavelet_grad)
-        use_recursive_checkpoint = bool(use_recursive_checkpoint and backward_recursive_ckpt_func is not None)
-        use_checkpoint = bool(use_checkpoint and (backward_ckpt_func is not None or use_recursive_checkpoint))
+        use_recursive_checkpoint = bool(use_recursive_checkpoint and cp.backward_recursive_ckpt_func is not None)
+        use_checkpoint = bool(use_checkpoint and (cp.backward_ckpt_func is not None or use_recursive_checkpoint))
         save_all_wavefields = requires_backward
         if requires_backward and (use_boundary_saving or use_checkpoint):
             save_all_wavefields = False
@@ -172,58 +134,58 @@ class Warpper(torch.autograd.Function):
 
         _C = _get_C()
         params = _C.ForwardInput()
-        params.wavefields = forward_wavefields
-        params.last_two = last_two
-        if boundary_on_disk:
-            params.boundary_cpu = [b.zero_() for b in boundary_cpu]
-            params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
-        elif boundary_on_cpu:
-            params.boundary_cpu = list(boundary_cpu)
-            params.boundary_gpu = list(boundary_gpu) if use_boundary_saving else []
+        params.wavefields = cp.forward_wavefields
+        params.last_two = cp.last_two
+        if cp.boundary_on_disk:
+            params.boundary_cpu = [b.zero_() for b in cp.boundary_cpu]
+            params.boundary_gpu = [b.zero_() for b in cp.boundary_gpu] if use_boundary_saving else []
+        elif cp.boundary_on_cpu:
+            params.boundary_cpu = list(cp.boundary_cpu)
+            params.boundary_gpu = list(cp.boundary_gpu) if use_boundary_saving else []
         else:
             params.boundary_cpu = []
-            params.boundary_gpu = [b.zero_() for b in boundary_gpu] if use_boundary_saving else []
-        params.boundary_disk_files = list(boundary_disk_files) if boundary_on_disk else []
-        params.checkpoints = [c.zero_() for c in checkpoint_buffers] if use_checkpoint else []
-        params.transfer_interval = transfer_interval
-        params.boundary_ring_buffers = boundary_ring_buffers
-        params.boundary_tail_steps = boundary_tail_steps
+            params.boundary_gpu = [b.zero_() for b in cp.boundary_gpu] if use_boundary_saving else []
+        params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
+        params.checkpoints = [c.zero_() for c in cp.checkpoint_buffers] if use_checkpoint else []
+        params.transfer_interval = cp.transfer_interval
+        params.boundary_ring_buffers = cp.boundary_ring_buffers
+        params.boundary_tail_steps = cp.boundary_tail_steps
         params.models = [m.contiguous() for m in models]
         params.source = wavelet.contiguous()
         params.lap_coes = lap_coes.contiguous()
         params.grad_coes = grad_coes.contiguous()
-        params.M = M
-        params.abcn = abcn
-        params.sources_loc = sources_loc.contiguous()
-        params.receivers_loc = receivers_loc.contiguous()
-        params.source_field_indices = source_field_indices.contiguous()
-        params.receiver_field_indices = receiver_field_indices.contiguous()
-        params.pml_vals = [p.contiguous() for p in pml_vals]
+        params.M = cp.M
+        params.abcn = cp.abcn
+        params.sources_loc = cp.sources_loc.contiguous()
+        params.receivers_loc = cp.receivers_loc.contiguous()
+        params.source_field_indices = cp.source_field_indices.contiguous()
+        params.receiver_field_indices = cp.receiver_field_indices.contiguous()
+        params.pml_vals = [p.contiguous() for p in cp.pml_vals]
         params.save_all_wavefields = save_all_wavefields
         params.use_boundary_saving = use_boundary_saving
         params.use_checkpoint = use_checkpoint
         params.use_recursive_checkpoint = use_recursive_checkpoint
-        params.checkpoint_on_cpu = checkpoint_on_cpu
-        params.boundary_on_cpu = boundary_on_cpu
-        params.boundary_on_disk = boundary_on_disk
-        params.boundary_disk_async_read = boundary_disk_async_read
-        params.use_pinned_memory = use_pinned_memory
-        params.free_surface = free_surface
-        params.fs_faces = fs_faces
+        params.checkpoint_on_cpu = cp.checkpoint_on_cpu
+        params.boundary_on_cpu = cp.boundary_on_cpu
+        params.boundary_on_disk = cp.boundary_on_disk
+        params.boundary_disk_async_read = cp.boundary_disk_async_read
+        params.use_pinned_memory = cp.use_pinned_memory
+        params.free_surface = cp.free_surface
+        params.fs_faces = cp.fs_faces
         # Equation-specific aux tensors (opaque to this wrapper; e.g. the
-        # visco-acoustic |k| grid).  Constants — no grad flows through them.
-        params.eq_aux = [t.contiguous() for t in eq_aux]
+        # visco-acoustic |k| grid).  Constants -- no grad flows through them.
+        params.eq_aux = [t.contiguous() for t in cp.eq_aux]
         # DD cut faces MUST be told to C too, not just to the Python Layout:
         # ``Layout(cut_mask=...)`` drops a cut face's boundary buffer to numel 0
         # (gpu_full_shapes), and only ``ctx.cut_*`` stops boundary_kernel2d from
         # writing there. Setting one without the other writes through a null
         # data_ptr. Both sides read the same ``PropBase._dd_cut_mask``.
-        params.cut_face_mask = cut_face_mask
+        params.cut_face_mask = cp.cut_face_mask
         # Topography plumbing (image method) — empty tensor + has_topo=False
         # for flat. topo_rows_param is passed in via the autograd Function
         # call site (see Warpper.apply below).
-        if has_topo_param:
-            params.topo_rows = topo_rows_param.to(torch.int32).contiguous()
+        if cp.has_topo_param:
+            params.topo_rows = cp.topo_rows_param.to(torch.int32).contiguous()
             params.has_topo = True
         else:
             params.topo_rows = torch.empty(0, dtype=torch.int32,
@@ -232,8 +194,8 @@ class Warpper(torch.autograd.Function):
         # APM (Cao & Chen 2018) plumbing.  ``params.models`` is already
         # extended with the precomputed effective moduli by the caller
         # (positions 6..10); we just attach the category and flag here.
-        if use_apm_param:
-            params.topo_category = topo_category_param.to(torch.int32).contiguous()
+        if cp.use_apm_param:
+            params.topo_category = cp.topo_category_param.to(torch.int32).contiguous()
             params.use_apm = True
         else:
             params.topo_category = torch.empty(0, dtype=torch.int32,
@@ -242,12 +204,12 @@ class Warpper(torch.autograd.Function):
         params.nt = nt
         params.dt = dt
         params.spacing = spacing
-        params.checkpoint_interval = checkpoint_interval
-        params.checkpoint_count = checkpoint_count
-        params.checkpoint_steps = checkpoint_steps if checkpoint_steps is not None else torch.empty(0, dtype=torch.int32)
+        params.checkpoint_interval = cp.checkpoint_interval
+        params.checkpoint_count = cp.checkpoint_count
+        params.checkpoint_steps = cp.checkpoint_steps if cp.checkpoint_steps is not None else torch.empty(0, dtype=torch.int32)
 
         # -------- CUDA forward --------
-        (u_allt, last, syn) = forward_func(params)
+        (u_allt, last, syn) = cp.forward_func(params)
 
         # Permute to canonical (B, nt, nrec, nfield) for the user-facing
         # output; remember the raw CUDA ndim so backward can invert it.
@@ -259,65 +221,65 @@ class Warpper(torch.autograd.Function):
             ctx.save_for_backward(
                 u_allt,
                 last,
-                sources_loc,
-                receivers_loc,
-                source_field_indices,
-                receiver_field_indices,
+                cp.sources_loc,
+                cp.receivers_loc,
+                cp.source_field_indices,
+                cp.receiver_field_indices,
                 lap_coes, grad_coes,
-                checkpoint_steps if checkpoint_steps is not None else torch.empty(0, dtype=torch.int32),
-                *checkpoint_buffers,
+                cp.checkpoint_steps if cp.checkpoint_steps is not None else torch.empty(0, dtype=torch.int32),
+                *cp.checkpoint_buffers,
             )
-            ctx.transfer_interval = transfer_interval
-            ctx.boundary_ring_buffers = boundary_ring_buffers
-            ctx.boundary_tail_steps = boundary_tail_steps
-            ctx.checkpoint_interval = checkpoint_interval
-            ctx.checkpoint_count = checkpoint_count
+            ctx.transfer_interval = cp.transfer_interval
+            ctx.boundary_ring_buffers = cp.boundary_ring_buffers
+            ctx.boundary_tail_steps = cp.boundary_tail_steps
+            ctx.checkpoint_interval = cp.checkpoint_interval
+            ctx.checkpoint_count = cp.checkpoint_count
             ctx.models = models
-            ctx.eq_aux = tuple(eq_aux)
-            ctx.boundary_on_cpu = boundary_on_cpu
-            ctx.boundary_on_disk = boundary_on_disk
-            ctx.boundary_disk_async_read = boundary_disk_async_read
-            ctx.boundary_cpu = boundary_cpu if boundary_on_cpu else ()
-            ctx.boundary_gpu = boundary_gpu if use_boundary_saving else ()
-            ctx.boundary_disk_files = tuple(boundary_disk_files) if boundary_on_disk else ()
-            ctx.pml_vals = pml_vals
-            ctx.abcn = abcn
-            ctx.M = M
+            ctx.boundary_on_cpu = cp.boundary_on_cpu
+            ctx.boundary_on_disk = cp.boundary_on_disk
+            ctx.boundary_disk_async_read = cp.boundary_disk_async_read
+            ctx.boundary_cpu = cp.boundary_cpu if cp.boundary_on_cpu else ()
+            ctx.boundary_gpu = cp.boundary_gpu if use_boundary_saving else ()
+            ctx.boundary_disk_files = tuple(cp.boundary_disk_files) if cp.boundary_on_disk else ()
+            ctx.pml_vals = cp.pml_vals
+            ctx.abcn = cp.abcn
+            ctx.M = cp.M
+            ctx.eq_aux = tuple(cp.eq_aux)
             ctx.nt = nt
             ctx.spacing = spacing
             ctx.dt = dt
-            ctx.free_surface = free_surface
-            ctx.fs_faces = fs_faces
-            ctx.cut_face_mask = cut_face_mask
+            ctx.free_surface = cp.free_surface
+            ctx.fs_faces = cp.fs_faces
+            ctx.cut_face_mask = cp.cut_face_mask
             # Topography (image method): preserve runtime row-index tensor so
             # the autograd backward can plumb it without referencing ``self``.
-            ctx.topo_rows_param = topo_rows_param
-            ctx.has_topo_param  = has_topo_param
-            ctx.topo_category_param = topo_category_param
-            ctx.use_apm_param   = use_apm_param
+            ctx.topo_rows_param = cp.topo_rows_param
+            ctx.has_topo_param  = cp.has_topo_param
+            ctx.topo_category_param = cp.topo_category_param
+            ctx.use_apm_param   = cp.use_apm_param
             ctx.use_boundary_saving = use_boundary_saving
             ctx.use_checkpoint = use_checkpoint
             ctx.use_recursive_checkpoint = use_recursive_checkpoint
-            ctx.checkpoint_on_cpu = checkpoint_on_cpu
-            ctx.use_pinned_memory = use_pinned_memory
-            ctx.backward_func = backward_func
-            ctx.backward_bs_func = backward_bs_func
-            ctx.backward_ckpt_func = backward_ckpt_func
-            ctx.backward_recursive_ckpt_func = backward_recursive_ckpt_func
+            ctx.checkpoint_on_cpu = cp.checkpoint_on_cpu
+            ctx.use_pinned_memory = cp.use_pinned_memory
+            ctx.backward_func = cp.backward_func
+            ctx.backward_bs_func = cp.backward_bs_func
+            ctx.backward_ckpt_func = cp.backward_ckpt_func
+            ctx.backward_recursive_ckpt_func = cp.backward_recursive_ckpt_func
             ctx.forward_source = wavelet
             # save_all binds the propagator's persistent buffers; the other
             # modes (BS/ckpt) pass per-call transient scratch that must NOT
             # outlive the forward — and their backwards expect an empty list
             # here (the ckpt recompute allocates its own legacy 7/9-slot
             # state paired with the u-only swap()).
-            ctx.forward_wavefields = forward_wavefields if save_all_wavefields else ()
-            ctx.adjoint_wavefields = adjoint_wavefields
-            ctx.adjoint_workspace = adjoint_workspace
-            ctx.source_illumination_buffer = source_illumination_buffer
-            ctx.receiver_illumination_buffer = receiver_illumination_buffer
-            ctx.illumination_padding = tuple(illumination_padding)
-            ctx.adcig_buffer = adcig_buffer
-            ctx.adcig_max_lag = int(adcig_max_lag)
+            ctx.forward_wavefields = cp.forward_wavefields if save_all_wavefields else ()
+            ctx.adjoint_wavefields = cp.adjoint_wavefields
+            ctx.adjoint_workspace = cp.adjoint_workspace
+            ctx.source_illumination_buffer = cp.source_illumination_buffer
+            ctx.receiver_illumination_buffer = cp.receiver_illumination_buffer
+            ctx.illumination_padding = tuple(cp.illumination_padding)
+            ctx.adcig_buffer = cp.adcig_buffer
+            ctx.adcig_max_lag = int(cp.adcig_max_lag)
 
         return syn
     
@@ -543,56 +505,11 @@ class Warpper(torch.autograd.Function):
         del ctx.illumination_padding
         del ctx.adcig_buffer, ctx.adcig_max_lag
         del ctx.models
-        return (
-            None, None, None, None, None, # functions
-            wavelet_grad,
-            None,      # sources_loc
-            None,      # receivers_loc
-            None,      # source_field_indices
-            None,      # receiver_field_indices
-            None,      # fd_coeff
-            None,      # M
-            None,      # abcn
-            None,      # spacing
-            None,      # dt
-            None,      # pml_vals
-            None,      # use_checkpoint
-            None,      # checkpoint_interval
-            None,      # use_recursive_checkpoint
-            None,      # checkpoint_count
-            None,      # checkpoint_steps
-            None,      # checkpoint_on_cpu
-            None,      # use_boundary_saving
-            None,      # use_pinned_memory
-            None,      # free_surface
-            None,      # transfer_interval
-            None,      # boundary_ring_buffers
-            None,      # boundary_on_cpu
-            None,      # boundary_on_disk
-            None,      # boundary_disk_async_read
-            None,      # boundary_tail_steps
-            None,      # forward wavefields
-            None,      # adjoint wavefields
-            None,      # adjoint workspace
-            None,      # checkpoint buffers
-            None,      # last_two
-            None,      # boundary cpu
-            None,      # boundary gpu
-            None,      # boundary disk files
-            None,      # source illumination buffer
-            None,      # receiver illumination buffer
-            None,      # illumination padding
-            None,      # adcig buffer
-            None,      # adcig_max_lag
-            None,      # topo_rows_param
-            None,      # has_topo_param
-            None,      # topo_category_param
-            None,      # use_apm_param
-            None,      # fs_faces
-            None,      # cut_face_mask
-            None,      # eq_aux
-            *model_grads # models
-        )
+        # One gradient per forward input, in order: the params object (never
+        # differentiable), the wavelet, then one per model. The 48-entry wall of
+        # ``None``s this replaces had to be kept in lockstep with the signature
+        # by hand, and stayed correct only because autograd checks the length.
+        return (None, wavelet_grad, *model_grads)
 
 class _CompiledPropagator(PropBase, torch.nn.Module):
 
@@ -1773,60 +1690,62 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # ``.to`` is a no-op when the tensors already live on ``self.dev``.
         pml_vals = [b.to(self.dev) for b in self.equation.b]
         syn = Warpper.apply(
-                self.forward_func,
-                self.backward_func,
-                self.backward_bs_func,
-                self.backward_ckpt_func,
-                self.backward_recursive_ckpt_func,
+                # Non-differentiable arguments travel as one object; only the
+                # wavelet and the models stay positional, because those are the
+                # two autograd must see to return gradients for them.
+                CompiledCallParams(
+                    forward_func=self.forward_func,
+                    backward_func=self.backward_func,
+                    backward_bs_func=self.backward_bs_func,
+                    backward_ckpt_func=self.backward_ckpt_func,
+                    backward_recursive_ckpt_func=self.backward_recursive_ckpt_func,
+                    sources_loc=sources,
+                    receivers_loc=receivers,
+                    source_field_indices=source_field_indices,
+                    receiver_field_indices=receiver_field_indices,
+                    coes_list=(lap_coes, grad_coes),
+                    M=M,
+                    abcn=self.abcn,
+                    spacing=spacing,
+                    dt=self._dt,
+                    pml_vals=pml_vals,
+                    use_checkpoint=use_checkpoint,
+                    checkpoint_interval=self.ckpt_chunks,
+                    use_recursive_checkpoint=use_recursive_checkpoint,
+                    checkpoint_count=int(checkpoint_steps.numel()),
+                    checkpoint_steps=checkpoint_steps,
+                    checkpoint_on_cpu=checkpoint_on_cpu,
+                    use_boundary_saving=use_boundary_saving,
+                    use_pinned_memory=use_pinned_memory,
+                    free_surface=self._image_method_active,
+                    transfer_interval=transfer_interval,
+                    boundary_ring_buffers=boundary_ring_buffers,
+                    boundary_on_cpu=boundary_on_cpu,
+                    boundary_on_disk=boundary_on_disk,
+                    boundary_disk_async_read=boundary_disk_async_read,
+                    boundary_tail_steps=boundary_tail_steps,
+                    forward_wavefields=forward_wavefields,
+                    adjoint_wavefields=adjoint_wavefields,
+                    adjoint_workspace=adjoint_workspace,
+                    checkpoint_buffers=checkpoint_buffers,
+                    last_two=last_two,
+                    boundary_cpu=boundary_cpu,
+                    boundary_gpu=boundary_gpu,
+                    boundary_disk_files=self._boundary_disk_files if boundary_on_disk else (),
+                    source_illumination_buffer=self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
+                    receiver_illumination_buffer=self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
+                    illumination_padding=tuple(padding),
+                    adcig_buffer=self.adcig if self.adcig is not None else torch.empty(0, device=self.dev),
+                    adcig_max_lag=int(self.adcig_max_lag),
+                    topo_rows_param=topo_rows_arg,
+                    has_topo_param=has_topo_arg,
+                    topo_category_param=topo_cat_arg,
+                    use_apm_param=use_apm_arg,
+                    fs_faces=self._fs_faces_c,
+                    cut_face_mask=getattr(self, "_dd_cut_mask", 0),
+                    eq_aux=tuple(self._c_eq_aux()),
+                ),
                 wavelet,
-                sources,
-                receivers,
-                source_field_indices,
-                receiver_field_indices,
-                (lap_coes, grad_coes),
-                M,
-                self.abcn,
-                spacing,
-                self._dt,
-                pml_vals,
-                use_checkpoint,
-                self.ckpt_chunks,
-                use_recursive_checkpoint,
-                int(checkpoint_steps.numel()),
-                checkpoint_steps,
-                checkpoint_on_cpu,
-                use_boundary_saving,
-                use_pinned_memory,
-                self._image_method_active,
-                transfer_interval,
-                boundary_ring_buffers,
-                boundary_on_cpu,
-                boundary_on_disk,
-                boundary_disk_async_read,
-                boundary_tail_steps,
-                forward_wavefields,
-                adjoint_wavefields,
-                adjoint_workspace,
-                checkpoint_buffers,
-                last_two,
-                boundary_cpu,
-                boundary_gpu,
-                self._boundary_disk_files if boundary_on_disk else (),
-                self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
-                self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
-                tuple(padding),
-                self.adcig if self.adcig is not None else torch.empty(0, device=self.dev),
-                int(self.adcig_max_lag),
-                # Topography plumbing — both image-method (1-D row) and
-                # APM (per-cell category + extended models) are routed
-                # through ``Warpper.forward`` via these positional args.
-                topo_rows_arg,
-                has_topo_arg,
-                topo_cat_arg,
-                use_apm_arg,
-                self._fs_faces_c,
-                getattr(self, "_dd_cut_mask", 0),
-                tuple(self._c_eq_aux()),
                 *models_arg,
             )
         
