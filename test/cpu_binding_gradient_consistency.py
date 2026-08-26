@@ -51,6 +51,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from sweep.equations import (  # noqa: E402
     Acoustic,
+    ElasticTTI2nd,
+    ElasticTTISG,
+    ElasticTTISG3D,
     Acoustic3D,
     AcousticLSRTM,
     AcousticLSRTM3D,
@@ -145,6 +148,20 @@ CASES = (
     Case("das3d", DASZhao3D, (8, 8, 8), "cpmls", ["exx_t", "eyy_t", "ezz_t", "das35_t"]),
     Case("das_mu2d", DASMu, (14, 16), "cpmls", ["exx", "ezz", "exz"]),
     Case("das_mu3d", DASMu3D, (8, 8, 8), "cpmls", ["exx", "eyy", "ezz", "exy", "exz", "eyz"]),
+    # Anisotropic elastic.  These were missing when PR#62 revived the matrix,
+    # which is why elastic_tti_sg3d kept a negated stress-receiver adjoint and
+    # a missing receiver-cell rho correction until 9ee4def.
+    #
+    # Run these with --scale cuda-suite.  The 'tiny' profile (order 2, abcn 2,
+    # nt=8) cannot resolve the TTI rho gradient: it is the smallest of the eight
+    # by three orders of magnitude, so eight order-2 steps leave it at the fp32
+    # cancellation floor (rel_l2 8e-4..1.6e-3 at cos 1.000000, against the 5e-4
+    # default rtol) and the rho cells report FAIL on noise.  At cuda-suite every
+    # TTI cell passes.  Same at tiny for the upstream elastic_tti_sg2d, so this
+    # is the scale, not the equations.
+    Case("elastic_tti_sg2d", ElasticTTISG, (14, 16), "cpmls"),
+    Case("elastic_tti_sg3d", ElasticTTISG3D, (8, 8, 8), "cpmls"),
+    Case("elastic_tti_2nd2d", ElasticTTI2nd, (14, 16), "cpmls", ["ux", "uz"], ["uz"]),
     # ---- source / receiver loading axes -------------------------------------
     # Every case above rides on the equation defaults, which for Elastic means
     # an explosive stress source recorded on velocities.  These add the corners
@@ -168,6 +185,11 @@ CASES = (
     Case("elastic2d_rec_mixed", Elastic, (14, 16), "cpmls", ["vz", "sxx"], ["vz"]),
     Case("elastic3d_src_vz", Elastic3D, (8, 8, 8), "cpmls", None, ["vz"]),
     Case("elastic3d_rec_stress", Elastic3D, (8, 8, 8), "cpmls", ["sxx", "syy", "szz"], None),
+    Case("elastic_tti_sg2d_rec_stress", ElasticTTISG, (14, 16), "cpmls", ["sxx", "szz"], None),
+    Case("elastic_tti_sg2d_src_vz", ElasticTTISG, (14, 16), "cpmls", None, ["vz"]),
+    Case("elastic_tti_sg3d_rec_stress", ElasticTTISG3D, (8, 8, 8), "cpmls",
+         ["sxx", "syy", "szz"], None),
+    Case("elastic_tti_sg3d_src_vz", ElasticTTISG3D, (8, 8, 8), "cpmls", None, ["vz"]),
     Case("das_mu2d_src_vz", DASMu, (14, 16), "cpmls", ["exx", "ezz", "exz"], ["vz"]),
 )
 
@@ -309,6 +331,28 @@ def model_arrays(model_names: list[str], shape: tuple[int, ...]) -> list[np.ndar
             arrays.append(0.03 + 0.01 * grid)
         elif name == "z":
             arrays.append(4.6e6 + 1.0e4 * grid)
+        # Anisotropic (TTI) parameters.  Non-uniform on purpose: a constant
+        # Thomsen/angle field degenerates several of these gradients and hides
+        # defects (see reference_canonical_gradient_test_model).  Nonzero
+        # theta/phi also keep the Bond rotation off its VTI fallback branch.
+        elif name == "vp0":
+            arrays.append(2200.0 + 60.0 * grid)
+        elif name == "vs0":
+            arrays.append(1200.0 + 30.0 * grid)
+        elif name == "vh":
+            arrays.append(2400.0 + 60.0 * grid)
+        elif name == "epsilon":
+            arrays.append(0.08 + 0.04 * grid)
+        elif name == "delta":
+            arrays.append(0.03 + 0.02 * grid)
+        elif name == "eta":
+            arrays.append(0.04 + 0.02 * grid)
+        elif name == "gamma":
+            arrays.append(0.05 + 0.02 * grid)
+        elif name == "theta":
+            arrays.append(0.25 + 0.10 * grid)
+        elif name == "phi":
+            arrays.append(0.15 + 0.08 * grid)
         else:
             raise KeyError(f"No synthetic model recipe for {name!r}.")
     return [array.astype(np.float32, copy=False) for array in arrays]
