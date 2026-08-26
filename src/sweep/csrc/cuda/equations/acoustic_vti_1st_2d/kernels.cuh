@@ -126,8 +126,7 @@ __global__ void velocity_kernel(
     // PML / interior split — outside the PML the half-step coefficients
     // axh/bxh/azh/bzh vanish so the memory variables remain zero.
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
@@ -205,8 +204,7 @@ __global__ void stress_kernel(
     float C13 = c13_b[idx];
 
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.sH[idx] += solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
