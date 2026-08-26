@@ -363,4 +363,6 @@ class Elastic(FirstOrderEquation):
                 + ("x", "z", "x", "z", "x", "z", "x", "z", "x", "z"),
             adjoint_pml_slab=True,
             slots=slot_table.ELASTIC2D,
+            grads_out_has_wavelet=False,
+            illum_nvar=0,
         )
