@@ -287,3 +287,64 @@ def build_apm_air_mask(air_mask_phys, *, abcn, halo, device):
         except (RuntimeError, TypeError):
             pass
     return air_mask_padded
+
+
+# 2-D and 3-D APM model bind order. These are the names the CUDA side reads
+# positionally, so the tuples below are a CONTRACT, not documentation: inserting
+# a tensor anywhere but the end silently reinterprets every later one.
+APM_MODEL_NAMES_2D = (
+    "vp", "vs", "rho", "lam", "mu", "lam_2mu",
+    "lam_eff", "mu_eff", "mu_xz", "rho_x", "rho_z",
+)
+APM_MODEL_NAMES_3D = (
+    "vp", "vs", "rho", "lam", "mu", "lam_2mu",
+    "alpha_xx", "alpha_yy", "alpha_zz",
+    "lam_xx_yy", "lam_xx_zz", "lam_yy_xx", "lam_yy_zz",
+    "lam_zz_xx", "lam_zz_yy",
+    "mu_xy", "mu_xz", "mu_yz",
+    "inv_rho_x", "inv_rho_y", "inv_rho_z",
+)
+
+
+def build_apm_model_tensors(models, air_mask_runtime, ndim):
+    """Elastic (vp, vs, rho) -> the full APM model list the CUDA side expects.
+
+    Returns ``(models_arg, category_tensor)``. The category tensor is int32
+    because the compiled side reads it as ``int``; see the note on runtime topo
+    rows above -- widening it is a pointer reinterpretation, not a wider number.
+
+    The moduli arithmetic is reproduced exactly as the inline version had it.
+    ``lam = rho * (vp**2 - 2*vs**2)`` is not algebraically rearranged, because
+    this refactor's contract is bit-exact output and the rearrangement
+    ``rho*vp**2 - 2*rho*vs**2`` is a different floating-point number.
+    """
+    import torch
+
+    vp_r, vs_r, rho_r = models[0], models[1], models[2]
+    lam_r = rho_r * (vp_r ** 2 - 2 * vs_r ** 2)
+    mu_r = rho_r * (vs_r ** 2)
+    lam_2mu_r = lam_r + 2 * mu_r
+
+    if ndim == 2:
+        from sweep.equations._topography import (
+            classify_topography, precompute_apm_moduli,
+        )
+        cat_np = classify_topography(air_mask_runtime)
+        extra = precompute_apm_moduli(lam_r, mu_r, rho_r, cat_np)
+    else:
+        from sweep.equations._topography import (
+            classify_topography_3d, precompute_apm_moduli_3d,
+        )
+        cat_np = classify_topography_3d(air_mask_runtime)
+        extra = precompute_apm_moduli_3d(lam_r, mu_r, rho_r, cat_np)
+
+    cat_t = torch.from_numpy(cat_np).to(device=vp_r.device, dtype=torch.int32)
+    models_arg = (vp_r, vs_r, rho_r, lam_r, mu_r, lam_2mu_r, *extra)
+
+    expected = APM_MODEL_NAMES_2D if ndim == 2 else APM_MODEL_NAMES_3D
+    if len(models_arg) != len(expected):
+        raise RuntimeError(
+            f"APM {ndim}-D expects {len(expected)} model tensors "
+            f"{expected}, built {len(models_arg)}"
+        )
+    return models_arg, cat_t
