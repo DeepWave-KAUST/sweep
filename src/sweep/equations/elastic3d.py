@@ -29,13 +29,14 @@ def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
     ``tau_zx(-h/2) = -tau_zx(+h/2)`` (Kristek, Moczo & Archuleta 2002, Table 1).
     The integer-grid mirror would instead pair ``-h/2`` with ``+3h/2`` — masked
     while the surface row is force-zeroed, destabilising once it is not.
-    (Irregular topography keeps the integer-grid mirror for now.)"""
+    Irregular topography reflects about ``iz_surf-1/2`` for the same fields, so
+    a constant ``topo_rows`` reproduces the flat path exactly."""
     if topo_rows is None:
         deriv_fn = (top_free_surface_cell_derivative if half
                     else top_free_surface_derivative)
         return deriv_fn(field, deriv, top_halo, odd=odd, axis=-3)
     return top_free_surface_derivative_topo(
-        field, deriv, top_halo, odd=odd, axis=-3, iz_surf=topo_rows
+        field, deriv, top_halo, odd=odd, axis=-3, iz_surf=topo_rows, half=half
     )
 
 
