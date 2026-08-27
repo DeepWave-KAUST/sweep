@@ -218,6 +218,10 @@ class PropBase:
         self.B = B
         self.allow_growth = allow_growth
         self.full_mode = full_mode
+        # NOT warned here: by this point ``boundary_saving_config`` is the
+        # INTERNAL wire format -- PropTorch translates memory=BoundarySaving()
+        # into exactly this dict, so warning here would warn about the new API.
+        # The warning belongs at the entry point the caller crosses.
         boundary_saving_config = merge_legacy_boundary_kwargs(
             kwargs, boundary_saving_config)
 

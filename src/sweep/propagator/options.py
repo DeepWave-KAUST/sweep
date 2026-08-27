@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass, fields, is_dataclass
+from sweep.core.arguments import warn_deprecated_spelling
 from typing import Any
 from typing import ClassVar
 from typing import Literal
@@ -390,6 +391,9 @@ def as_memory_strategy(value):
         return value
 
     if isinstance(value, MemoryOptions):
+        warn_deprecated_spelling(
+            "MemoryOptions(strategy=..., boundary=..., ckpt=...)",
+            "Full() / BoundarySaving(...) / Ckpt(...)")
         if value.strategy is None:
             return None
         if value.strategy == "full":
@@ -412,6 +416,9 @@ def as_memory_strategy(value):
         # strategy, and the same word therefore appears twice.
         nested = data.pop(kind, None)
         if nested is not None:
+            warn_deprecated_spelling(
+                f"the nested {{'strategy': {kind!r}, {kind!r}: {{...}}}} dict",
+                f"a flat {{'kind': {kind!r}, ...}} dict")
             data = dict(nested)
         data.pop("boundary", None)
         data.pop("ckpt", None)

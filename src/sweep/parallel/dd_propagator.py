@@ -56,6 +56,7 @@ from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, VRZ_DD
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
+from sweep.propagator.options import BoundarySaving
 from sweep.propagator.torch import PropTorch
 from sweep.propagator._stepped import (
     SteppedBackwardRunner,
@@ -333,22 +334,20 @@ class ModelParallel:
             dh=dh, dt=dt, source_type=list(source_type),
             receiver_type=list(receiver_type), abcn=abcn,
             free_surface=self.free_surface, pml_type=pml, nt=nt, B=B,
-            use_ckpt=False,
-            boundary_saving_config={
-                "enabled": True,
+            memory=BoundarySaving(
                 # inherited from the wrapped prop (PropTorch memory= API);
                 # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
-                "storage": self._bstorage,
-                "storage_dtype": self._bdtype,
+                storage=self._bstorage,
+                storage_dtype=self._bdtype,
                 # tail truncation shrinks each tile's boundary ring to the
                 # last tail_steps steps (None = full length); the C++ side
                 # indexes it in shifted saved-step coordinates either way.
-                "tail_steps": self._btail or None,
+                tail_steps=self._btail or None,
                 # batching + ring depth decide whether the staged copies can
                 # overlap compute at all; 1/1 serialises them per step.
-                "transfer_interval": self._bti,
-                "ring_buffers": self._bring,
-                "pinned_memory": self._bpinned},
+                transfer_interval=self._bti,
+                ring_buffers=self._bring,
+                pinned_memory=self._bpinned),
             model_parallel=self.topo,
         )
 
