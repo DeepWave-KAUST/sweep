@@ -61,6 +61,19 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/03_fwi_multiscale.ipynb)
 
+-   ![Batched local-window FWI](../figures/gallery/23_batched_local_window_fwi.png){ loading=lazy }
+
+    **FWI · Batched per-shot local windows**
+
+    ---
+
+    A fixed streamer makes every shot's model window the same width, so all the
+    crops stack into one batched solver call and the overlapping windows
+    scatter-add back onto the full model through autograd. Frequency
+    continuation recovers Marmousi from a smooth start on one GPU.
+
+    [:material-notebook-outline: Open notebook](../notebooks/23_batched_local_window_fwi.ipynb)
+
 -   ![DAS Zhao vs Mu](../figures/gallery/04_das_zhao_vs_mu.png){ loading=lazy }
 
     **DAS · Zhao vs Mu**
@@ -145,6 +158,31 @@ linked at the bottom of this page.
     with `(ε, δ, γ, θ, φ)` rotated symmetry axis.
 
     [:material-notebook-outline: Open notebook](../notebooks/10_wavefield_elastic_tti.ipynb)
+
+-   ![Wavefield Elastic TTI 3-D](../figures/gallery/27_wavefield_elastic_tti_3d.png){ loading=lazy }
+
+    **Wavefield · Elastic TTI · 3-D**
+
+    ---
+
+    `ElasticTTISG3D` on a 2.88 km cube: `vz` through the source plane for a VTI
+    reference and two rotated axes. In 3-D the azimuth stops being decorative —
+    at φ = 45° the qP front leaves the x–z plane, which no 2-D run can show.
+
+    [:material-notebook-outline: Open notebook](../notebooks/27_wavefield_elastic_tti_3d.ipynb)
+
+-   ![Wavefield Elastic TTI displacement](../figures/gallery/28_wavefield_elastic_tti_2nd.png){ loading=lazy }
+
+    **Wavefield · Elastic TTI · displacement (Oh 2020)**
+
+    ---
+
+    `ElasticTTI2nd`: two displacements on a triple time buffer instead of three
+    velocities and five stresses, with the hierarchical `(vh, η)` parametrisation
+    of Oh et al. 2020. Three tilts, cross-checked against `ElasticTTISG` on the
+    qP wavefront.
+
+    [:material-notebook-outline: Open notebook](../notebooks/28_wavefield_elastic_tti_2nd.ipynb)
 
 -   ![3D Overthrust FWI](../figures/gallery/11_fwi_acoustic_overthrust_3d.png){ loading=lazy }
 
