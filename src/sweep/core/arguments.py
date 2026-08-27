@@ -104,6 +104,9 @@ def merge_legacy_boundary_kwargs(kwargs, boundary_saving_config):
     legacy = {}
     for old_key, (new_key, convert) in _LEGACY_BOUNDARY_KEYS.items():
         if old_key in kwargs:
+            warn_deprecated_spelling(
+                f"the loose {old_key}= keyword",
+                f"memory=BoundarySaving({new_key}=...)")
             legacy[new_key] = convert(kwargs.pop(old_key))
     if boundary_saving_config is None:
         return legacy or None
@@ -217,3 +220,48 @@ def validate_memory_strategy(use_checkpoint, use_boundary_saving,
         raise NotImplementedError(
             "tail_steps requires the boundary-saving backward; pass "
             "use_ckpt=False (or memory=MemoryOptions(strategy='boundary')).")
+
+
+# ===========================================================================
+# DEPRECATED SPELLINGS -- delete this section, and the functions marked with
+# `_deprecated`, in one go.
+#
+# Removal criterion, so that "is it safe yet?" is checkable rather than a
+# judgement call years from now:
+#
+#   1. sweep-tasks' YAML emitter writes only the flat `kind:` form
+#      (yaml_io.py, currently emits `strategy:` + a same-named sub-block);
+#   2. no YAML under the campaign directories still uses `strategy:` with a
+#      same-named sub-block (22 files did at the time of writing);
+#   3. `test/test_memory_legacy_spellings.py` -- which exists only to pin what
+#      this section accepts -- has no remaining callers to protect.
+#
+# When all three hold: delete this section, the legacy branches of
+# `as_memory_strategy`, and that test file. The test file is the checklist;
+# deleting it is the confirmation.
+#
+# The stored experiment YAML is the reason this is a deprecation rather than a
+# removal. Those files record what was actually run, so they are read, not
+# rewritten.
+# ===========================================================================
+
+_WARNED_SPELLINGS = set()
+
+
+def warn_deprecated_spelling(what: str, instead: str, *, stacklevel: int = 3):
+    """Warn once per process per spelling.
+
+    Once-per-spelling rather than once-per-call because the alternative is a
+    line of noise per propagator construction, and a warning that scrolls is a
+    warning that gets filtered out wholesale -- taking the ones that matter with
+    it. ``DeprecationWarning`` is hidden by default in library code but pytest
+    surfaces it, which is where the remaining callers actually are.
+    """
+    if what in _WARNED_SPELLINGS:
+        return
+    _WARNED_SPELLINGS.add(what)
+    warnings.warn(
+        f"{what} is deprecated; use {instead} instead. "
+        "The old spelling still works and is still read.",
+        DeprecationWarning, stacklevel=stacklevel,
+    )

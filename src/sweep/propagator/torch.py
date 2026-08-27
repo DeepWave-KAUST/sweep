@@ -4,6 +4,7 @@ import warnings
 import torch
 
 from sweep.propagator._torch_eager import _PropTorchEager
+from sweep.core.arguments import warn_deprecated_spelling
 from sweep.propagator.options import (
     CUDAOptions,
     EagerOptions,
@@ -368,11 +369,24 @@ class PropTorch(torch.nn.Module):
         # (dict-style config still goes through boundary_saving_config=/use_ckpt=).
         # For impl='c' it folds into cuda_options.memory; for impl='eager' it is
         # applied to the backend after construction (see below).
+        # Deprecation warnings fire HERE, at the boundary the caller crosses.
+        # Anything further down sees the internal wire format, which this file
+        # synthesises from the new API -- warning there would tell a caller who
+        # used the new spelling that they used the old one.
+        if "boundary_saving_config" in kwargs:
+            warn_deprecated_spelling(
+                "boundary_saving_config={...}",
+                "memory=BoundarySaving(...) / Full() / Ckpt(...)")
+
         if memory is not None:
             # Full()/BoundarySaving()/Ckpt() are the current spelling; a legacy
             # MemoryOptions and a dict both still read. as_memory_strategy is
-            # the single place that knows all of them.
+            # the single place that knows all of them -- and the only place a
+            # deprecation warning for a legacy spelling is raised, so it must be
+            # called on what the CALLER passed and never on something this file
+            # converted. Otherwise the new API warns about itself.
             memory = as_memory_strategy(memory)
+        _caller_request = memory
         if memory is not None and impl == "c":
             if cuda_options is not None and getattr(cuda_options, "memory", None) is not None:
                 raise ValueError(
@@ -410,13 +424,19 @@ class PropTorch(torch.nn.Module):
         # it here, once, is what makes ``memory_strategy`` a fact rather than a
         # reading. ``memory=`` is folded into cuda_options above for impl='c',
         # so the request is recovered from whichever slot holds it.
-        _requested = memory if memory is not None else getattr(cuda_options, "memory", None)
+        # ``memory`` was cleared when it was folded into cuda_options above, so
+        # recover the request from whichever slot holds it. Prefer the caller's
+        # own object: it is already normalised, and re-reading the converted
+        # copy would re-trigger the legacy warning on the new spelling.
+        _requested = _caller_request
+        if _requested is None:
+            _requested = as_memory_strategy(getattr(cuda_options, "memory", None))
         strategy = resolve_memory_strategy(
             impl, _requested, init_kwargs.get("use_ckpt"),
             init_kwargs.get("boundary_saving_config"))
         # Refuse what this backend cannot honour BEFORE building it, so an
         # unsupported option is an error rather than a silent downgrade.
-        check_memory_supported(impl, as_memory_strategy(_requested))
+        check_memory_supported(impl, _requested)
 
         if impl == "eager":
             init_kwargs["use_ckpt"] = (strategy == "ckpt")
