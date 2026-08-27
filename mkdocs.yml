@@ -124,8 +124,10 @@ nav:
               - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
-              - AcousticVTI: notebooks/05_wavefield_vti.ipynb
-              - ElasticTTI: notebooks/10_wavefield_elastic_tti.ipynb
+              - Acoustic VTI: notebooks/05_wavefield_vti.ipynb
+              - Elastic TTI · rotation (2-D RSG): notebooks/10_wavefield_elastic_tti.ipynb
+              - Elastic TTI · 3-D: notebooks/27_wavefield_elastic_tti_3d.ipynb
+              - Elastic TTI · displacement (Oh 2020): notebooks/28_wavefield_elastic_tti_2nd.ipynb
           - Imaging:
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
               - Custom gradient: notebooks/14_custom_gradient.ipynb
@@ -164,6 +166,8 @@ nav:
           - Elastic3D: api/equations/elastic3d.md
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md
+          - ElasticTTISG3D: api/equations/elastic_tti_sg3d.md
+          - ElasticTTI2nd: api/equations/elastic_tti_2nd.md
           - DAS family: api/equations/das.md
       - Operators:
           - api/operators/index.md

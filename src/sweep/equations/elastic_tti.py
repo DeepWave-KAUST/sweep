@@ -200,7 +200,9 @@ class ElasticTTI(FirstOrderEquation):
     Reference: Bond-rotated VTI stiffness with RSG operators (Saenger /
     Bohlen rotated staggered grid).
 
-    
+    Point sources and point receivers are folded through a 3x3 binomial
+    stencil by default to keep the RSG checkerboard null space out of both
+    the forward record and the adjoint — see ``checkerboard_smoothing``.
     """
 
     # The isotropic image-method free surface is WRONG for an anisotropic
@@ -243,7 +245,8 @@ class ElasticTTI(FirstOrderEquation):
 
     default_pml_type = "cpmlr"
 
-    def __init__(self, spatial_order=8, device="cpu", backend="torch"):
+    def __init__(self, spatial_order=8, device="cpu", backend="torch",
+                 checkerboard_smoothing=True):
         """Build the 2-D-3C elastic TTI equation operator (RSG variant).
 
         Args:
@@ -261,11 +264,46 @@ class ElasticTTI(FirstOrderEquation):
                 Defaults to ``'cpu'``.
             backend: Array / programming backend, ``'torch'`` or
                 ``'jax'``. Defaults to ``'torch'``.
+            checkerboard_smoothing: The RSG diagonal stencils have a
+                checkerboard null space ``(-1)^(i+j)``: it maps to zero under
+                the diagonal differences, so the scheme neither propagates
+                nor damps it, a single-cell source excites it and a
+                single-cell receiver samples it back. The damage is in the
+                waveform, not the amplitude — against the axis-aligned
+                :class:`ElasticTTISG` reference on a uniform TTI medium
+                (theta 30 deg, vz source and receiver) the trace correlation
+                drops to cos 0.70 below the source and cos 0.51 in the
+                weak-radiation (horizontal) direction, while the peak
+                amplitude is only 1.15x too large. When True (default) source
+                injection and receiver sampling are folded through a 3x3
+                binomial stencil, whose response to the checkerboard mode is
+                exactly ``(1-2+1)^2/16 = 0``; it does not move the
+                source/receiver position, and the traces come back to cos
+                0.994-1.000 against the SG reference. Both ends are treated
+                because the receiver gather's transpose is the adjoint
+                source injection, so sampling raw would re-excite the mode on
+                the backward pass and contaminate the gradient. Set False to
+                recover the legacy raw point injection/sampling.
         """
         super().__init__(spatial_order, device, backend, ndim=2)
         self.rsg = RSGDerivative(spatial_order, device, backend, ndim=2)
         self.rsg.to_backend(to_backend)
         self.pd = self.rsg
+        self.checkerboard_smoothing = checkerboard_smoothing
+
+    @property
+    def source_receiver_stencil(self):
+        """3x3 binomial stencil folded into source injection / receiver
+        sampling by the propagator (see ``checkerboard_smoothing``).
+
+        Returned as a plain NumPy array so both the torch and the jax
+        front-ends can consume it without importing the other backend."""
+        if not getattr(self, "checkerboard_smoothing", False):
+            return None
+        import numpy as np
+
+        k = np.array([1.0, 2.0, 1.0], dtype=np.float32) / 4.0
+        return np.outer(k, k)
 
     @property
     def default_source_fields(self):

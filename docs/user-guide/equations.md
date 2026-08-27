@@ -44,6 +44,8 @@ is supported for every class.
 | `Elastic3D` | `['vp', 'vs', 'rho']` | 3D | 3D counterpart of `Elastic` | ✅ |
 | `ElasticTTI` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Rotated-staggered-grid elastic TTI | ❌ |
 | `ElasticTTISG` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Standard-staggered-grid elastic TTI | ✅ |
+| `ElasticTTISG3D` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 3D | Standard-staggered-grid elastic TTI | ✅ |
+| `ElasticTTI2nd` | `['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']` | 2D | Displacement-based elastic TTI (Oh et al. 2020) | ✅ |
 
 ### Distributed Acoustic Sensing (DAS) family
 

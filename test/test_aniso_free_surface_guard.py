@@ -33,11 +33,13 @@ def _build(cls, free_surface, ndim=2, **extra):
 
 def _cases():
     from sweep.equations import (AcousticTTI, AcousticVTI, AcousticVTI1st,
-                                 AcousticVTI1st3D, ElasticTTI, ElasticTTISG)
+                                 AcousticVTI1st3D, ElasticTTI, ElasticTTISG,
+                                 ElasticTTISG3D, ElasticTTI2nd)
     from sweep.equations.qP_tariq import AcousticTariq
 
     return [(AcousticVTI1st, 2), (AcousticVTI1st3D, 3), (AcousticVTI, 2),
-            (AcousticTTI, 2), (AcousticTariq, 2), (ElasticTTI, 2), (ElasticTTISG, 2)]
+            (AcousticTTI, 2), (AcousticTariq, 2), (ElasticTTI, 2), (ElasticTTISG, 2),
+            (ElasticTTISG3D, 3), (ElasticTTI2nd, 2)]
 
 
 @pytest.mark.parametrize("cls,ndim", _cases(), ids=lambda c: getattr(c, "__name__", c))
