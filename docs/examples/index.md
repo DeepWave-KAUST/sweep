@@ -146,6 +146,31 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/10_wavefield_elastic_tti.ipynb)
 
+-   ![Wavefield Elastic TTI 3-D](../figures/gallery/27_wavefield_elastic_tti_3d.png){ loading=lazy }
+
+    **Wavefield · Elastic TTI · 3-D**
+
+    ---
+
+    `ElasticTTISG3D` on a 2.88 km cube: `vz` through the source plane for a VTI
+    reference and two rotated axes. In 3-D the azimuth stops being decorative —
+    at φ = 45° the qP front leaves the x–z plane, which no 2-D run can show.
+
+    [:material-notebook-outline: Open notebook](../notebooks/27_wavefield_elastic_tti_3d.ipynb)
+
+-   ![Wavefield Elastic TTI displacement](../figures/gallery/28_wavefield_elastic_tti_2nd.png){ loading=lazy }
+
+    **Wavefield · Elastic TTI · displacement (Oh 2020)**
+
+    ---
+
+    `ElasticTTI2nd`: two displacements on a triple time buffer instead of three
+    velocities and five stresses, with the hierarchical `(vh, η)` parametrisation
+    of Oh et al. 2020. Three tilts, cross-checked against `ElasticTTISG` on the
+    qP wavefront.
+
+    [:material-notebook-outline: Open notebook](../notebooks/28_wavefield_elastic_tti_2nd.ipynb)
+
 -   ![3D Overthrust FWI](../figures/gallery/11_fwi_acoustic_overthrust_3d.png){ loading=lazy }
 
     **FWI · 3-D · Overthrust**
