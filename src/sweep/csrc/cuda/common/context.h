@@ -37,6 +37,28 @@
 // IF YOU ADD A MEMBER THAT phys_*() DEPENDS ON, IT MUST GO IN THE PRIVATE
 // SECTION WITH A REFRESHING SETTER, OR BE const.
 // ============================================================================
+// A read-only view of just the launch geometry a stencil accessor needs.
+//
+// SolverContext is 240 bytes and grew there honestly (per-edge free surface, DD
+// cut faces, CPML aux slabs, the cached bounds).  That is fine for a kernel
+// parameter -- it is passed once and amortised over the whole kernel.  It is
+// NOT fine inside a functor that gets inlined once per stencil tap: the VRZ
+// gradient kernels build six accessors and each one is expanded 2M times, so
+// every byte of state is paid for 24 times over at order 4.  Those accessors
+// read six-to-twelve ints; this is that subset.
+struct GridBounds {
+    int nx, ny, nz, B, M;
+    int x_end;
+    int phys_lo[3], phys_hi[3];   // [z, y, x], same axis order as SolverContext
+
+    __host__ __device__ inline int phys_x0() const { return phys_lo[2]; }
+    __host__ __device__ inline int phys_x1() const { return phys_hi[2]; }
+    __host__ __device__ inline int phys_y0() const { return phys_lo[1]; }
+    __host__ __device__ inline int phys_y1() const { return phys_hi[1]; }
+    __host__ __device__ inline int phys_z0() const { return phys_lo[0]; }
+    __host__ __device__ inline int phys_z1() const { return phys_hi[0]; }
+};
+
 struct SolverContext {
 
     // ---- Geometry & physics: immutable after construction ----------------
@@ -193,6 +215,14 @@ struct SolverContext {
     __host__ __device__ inline int phys_y1() const { return phys_hi_[1]; }
     __host__ __device__ inline int phys_z0() const { return phys_lo_[0]; }
     __host__ __device__ inline int phys_z1() const { return phys_hi_[0]; }
+
+    // Hand a stencil accessor only what it reads (see GridBounds above).
+    __host__ __device__ inline GridBounds bounds() const {
+        GridBounds g;
+        g.nx = nx; g.ny = ny; g.nz = nz; g.B = B; g.M = M; g.x_end = x_end();
+        for (int a = 0; a < 3; ++a) { g.phys_lo[a] = phys_lo_[a]; g.phys_hi[a] = phys_hi_[a]; }
+        return g;
+    }
 
     __host__ __device__ inline int nx_phys() const { return phys_hi_[2] - phys_lo_[2]; }
     __host__ __device__ inline int ny_phys() const { return phys_hi_[1] - phys_lo_[1]; }

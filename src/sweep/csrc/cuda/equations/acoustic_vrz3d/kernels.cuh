@@ -174,6 +174,22 @@ __device__ inline void vrz3d_index(
     iz = iz_global % solver.nz;
 }
 
+// GridBounds overload: used by the gradient accessors, which are inlined once
+// per stencil tap.  The SolverContext version below stays for the kernel-level
+// callers (one call per thread, not per tap).
+template<int Order>
+__device__ __forceinline__ bool vrz3d_interior(GridBounds solver, int ix, int iy, int iz, int b)
+{
+    if (b >= solver.B || ix >= solver.x_end || iy >= solver.ny || iz >= solver.nz)
+        return false;
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+    return ix >= halo && ix < solver.nx - halo
+        && iy >= halo && iy < solver.ny - halo
+        && iz >= halo && iz < solver.nz - halo;
+}
+
 template<int Order>
 __device__ inline bool vrz3d_interior(SolverContext solver, int ix, int iy, int iz, int b)
 {
@@ -193,7 +209,7 @@ __device__ inline bool vrz3d_interior(SolverContext solver, int ix, int iy, int 
 
 template<int Order, int Direction>
 __device__ __forceinline__ bool vrz3d_grad_product_interior(
-    SolverContext solver,
+    GridBounds solver,
     int ix,
     int iy,
     int iz
@@ -241,7 +257,7 @@ struct VRZ3DGradientProductAccessor {
     int sy;
     int sz;
     GradParam grad_ctx;
-    SolverContext solver;
+    GridBounds solver;          // not SolverContext: this is inlined per tap
 
     __device__ __forceinline__
     float operator()(int offset) const
@@ -284,7 +300,7 @@ __device__ __forceinline__ float vrz3d_grad_q_gradp(
 
     return centered_gradient_stencil<Order>(
         VRZ3DGradientProductAccessor<Order, Direction>{
-            q, p, ix, iy, iz, sx, sy, sz, grad_ctx, solver
+            q, p, ix, iy, iz, sx, sy, sz, grad_ctx, solver.bounds()
         },
         solver.M,
         grad_ctx.coeff,
@@ -1030,7 +1046,7 @@ struct VrzGradAccessor3D {
     const float* __restrict__ vp;
     const float* __restrict__ z;
     int ix, iy, iz, b;
-    SolverContext solver;
+    GridBounds solver;          // not SolverContext: this is inlined per tap
     GradParam grad_ctx;
 
     __device__ __forceinline__ float operator()(int off) const
@@ -1099,15 +1115,15 @@ __global__ void calculate_grad_vrz3d_fused(
     float z1y = gradient<3, Order, Y>(inv_z_b, ix, iy, iz, grad_ctx);
     float z1z = gradient<3, Order, Z>(inv_z_b, ix, iy, iz, grad_ctx);
 
-    VrzGradAccessor3D<Order, X, false> cx{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver, grad_ctx};
-    VrzGradAccessor3D<Order, Y, false> cy{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver, grad_ctx};
-    VrzGradAccessor3D<Order, Z, false> cz{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver, grad_ctx};
+    VrzGradAccessor3D<Order, X, false> cx{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Y, false> cy{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Z, false> cz{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
     float div_c = centered_gradient_stencil<Order>(cx, solver.M, grad_ctx.coeff, grad_ctx.dx)
                 + centered_gradient_stencil<Order>(cy, solver.M, grad_ctx.coeff, grad_ctx.dy)
                 + centered_gradient_stencil<Order>(cz, solver.M, grad_ctx.coeff, grad_ctx.dz);
-    VrzGradAccessor3D<Order, X, true> ex{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver, grad_ctx};
-    VrzGradAccessor3D<Order, Y, true> ey{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver, grad_ctx};
-    VrzGradAccessor3D<Order, Z, true> ez{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver, grad_ctx};
+    VrzGradAccessor3D<Order, X, true> ex{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Y, true> ey{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Z, true> ez{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
     float div_e = centered_gradient_stencil<Order>(ex, solver.M, grad_ctx.coeff, grad_ctx.dx)
                 + centered_gradient_stencil<Order>(ey, solver.M, grad_ctx.coeff, grad_ctx.dy)
                 + centered_gradient_stencil<Order>(ez, solver.M, grad_ctx.coeff, grad_ctx.dz);
