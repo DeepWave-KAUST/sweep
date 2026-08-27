@@ -79,7 +79,7 @@ class PropJax(PropBase):
                     "(BoundaryOptions.storage='gpu'); cpu/disk staging is "
                     "available on the torch paths."
                 )
-            self.use_ckpt = False
+            self._set_memory_strategy("boundary")
             self.enable_boundary_saving(
                 True, storage_dtype=getattr(boundary, "storage_dtype", "fp32")
             )
@@ -89,7 +89,7 @@ class PropJax(PropBase):
             if mode != "chunk":
                 raise ValueError("JAX checkpointing supports mode='chunk' only.")
             self._bs_options = None
-            self.use_ckpt = True
+            self._set_memory_strategy("ckpt")
             if ckpt is not None and getattr(ckpt, "chunks", None):
                 self.ckpt_chunks = ckpt.chunks
         else:

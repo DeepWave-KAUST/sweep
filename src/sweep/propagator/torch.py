@@ -14,7 +14,9 @@ from sweep.propagator.options import (
     MemoryOptions,
     options_to_dict,
     resolve_memory_strategy,
-)
+    as_memory_strategy,
+    check_memory_supported,
+    to_legacy_memory_options,)
 
 
 SUPPORTED_BACKENDS = {"torch"}
@@ -221,6 +223,30 @@ def _normalize_cuda_memory_kwargs(merged, equation=None):
     raise ValueError(f"Unsupported c memory strategy '{strategy}'. Expected 'boundary' or 'ckpt'.")
 
 
+def _assert_backend_matches_strategy(backend_impl, strategy):
+    """The constructed backend must agree with the strategy that was resolved.
+
+    Not a tautology: the flags reach the backend through several translations
+    (cuda_options -> init kwargs, the legacy dict, per-backend defaults), and a
+    disagreement between "what was decided" and "what was built" is silent --
+    it produces a run that measures one thing while reporting another. That
+    exact failure is on record downstream as "thought I measured bs, actually
+    ran ckpt". Assert the state rather than the intention.
+    """
+    got_ckpt = bool(getattr(backend_impl, "use_ckpt", False))
+    cfg = getattr(backend_impl, "boundary_saving_config", None) or {}
+    # ``_eager_bs`` is what enable_eager_boundary_saving() actually sets; the
+    # eager backend has no boundary_saving_config to read.
+    got_bs = bool(cfg.get("enabled", False)) or bool(
+        getattr(backend_impl, "_eager_bs", False))
+    built = "ckpt" if got_ckpt else ("boundary" if got_bs else "full")
+    if built != strategy:
+        raise RuntimeError(
+            f"gradient-memory strategy resolved to {strategy!r} but the backend "
+            f"was built as {built!r} (use_ckpt={got_ckpt}, boundary_saving={got_bs}). "
+            "This is a bug in the option plumbing, not in the caller's arguments.")
+
+
 def _apply_eager_memory(backend_impl, memory):
     """Apply a ``MemoryOptions`` to an already-built eager backend.
 
@@ -230,13 +256,16 @@ def _apply_eager_memory(backend_impl, memory):
     checkpointing are mutually exclusive (the eager forward checks ``use_ckpt``
     first), so each branch disables the other.
     """
-    md = options_to_dict(memory)
+    # Same bridge as the impl='c' path: this function reads the tagged wire
+    # format, and the new types keep their strategy in a ClassVar, which
+    # asdict() does not emit.
+    md = options_to_dict(to_legacy_memory_options(memory))
     strategy = md.get("strategy")
     if strategy is None:
         raise ValueError("memory= must set strategy to 'full', 'boundary' or 'ckpt'.")
 
     if strategy == "full":
-        backend_impl.use_ckpt = False
+        backend_impl._set_memory_strategy("full")
         backend_impl.enable_eager_boundary_saving(False)
         return
 
@@ -258,7 +287,7 @@ def _apply_eager_memory(backend_impl, memory):
                 "Eager boundary saving storage_dtype must be 'fp32'/'fp16'/'bf16'/"
                 f"'int8', got {storage_dtype!r}."
             )
-        backend_impl.use_ckpt = False
+        backend_impl._set_memory_strategy("boundary")
         backend_impl.enable_eager_boundary_saving(
             True, storage=storage, storage_dtype=storage_dtype
         )
@@ -270,7 +299,7 @@ def _apply_eager_memory(backend_impl, memory):
         if mode != "chunk":
             raise ValueError("Eager checkpointing supports mode='chunk' only.")
         backend_impl.enable_eager_boundary_saving(False)
-        backend_impl.use_ckpt = True
+        backend_impl._set_memory_strategy("ckpt")
         backend_impl.ckpt_mode = "chunk"
         backend_impl.ckpt_chunks = ckpt.get("chunks", CKPT_DEFAULTS.chunks)
         return
@@ -339,18 +368,20 @@ class PropTorch(torch.nn.Module):
         # (dict-style config still goes through boundary_saving_config=/use_ckpt=).
         # For impl='c' it folds into cuda_options.memory; for impl='eager' it is
         # applied to the backend after construction (see below).
-        if memory is not None and not isinstance(memory, MemoryOptions):
-            raise TypeError(
-                "memory= expects a MemoryOptions instance; for dict-style config "
-                "use boundary_saving_config=/use_ckpt= instead."
-            )
+        if memory is not None:
+            # Full()/BoundarySaving()/Ckpt() are the current spelling; a legacy
+            # MemoryOptions and a dict both still read. as_memory_strategy is
+            # the single place that knows all of them.
+            memory = as_memory_strategy(memory)
         if memory is not None and impl == "c":
             if cuda_options is not None and getattr(cuda_options, "memory", None) is not None:
                 raise ValueError(
                     "Specify the memory strategy via either memory= or "
                     "cuda_options.memory, not both."
                 )
-            cuda_options = CUDAOptions(memory=memory)
+            # The layers below read the tagged wire format; convert once here
+            # rather than teaching each of them the new types.
+            cuda_options = CUDAOptions(memory=to_legacy_memory_options(memory))
             memory = None
 
         if impl == "eager" and (cuda_options is not None or CUDA_OPTION_KEYS & set(kwargs)):
@@ -372,12 +403,22 @@ class PropTorch(torch.nn.Module):
             cuda_options=cuda_options,
             equation=equation,
         )
+        # ONE resolution, for BOTH impls, BEFORE construction. impl='c' used to
+        # skip this entirely: it constructed the backend and then inferred the
+        # strategy back out of the flags the constructor happened to default to,
+        # so the strategy was decided in two places that merely agreed. Deciding
+        # it here, once, is what makes ``memory_strategy`` a fact rather than a
+        # reading. ``memory=`` is folded into cuda_options above for impl='c',
+        # so the request is recovered from whichever slot holds it.
+        _requested = memory if memory is not None else getattr(cuda_options, "memory", None)
+        strategy = resolve_memory_strategy(
+            impl, _requested, init_kwargs.get("use_ckpt"),
+            init_kwargs.get("boundary_saving_config"))
+        # Refuse what this backend cannot honour BEFORE building it, so an
+        # unsupported option is an error rather than a silent downgrade.
+        check_memory_supported(impl, as_memory_strategy(_requested))
+
         if impl == "eager":
-            # memory= alongside a legacy knob is fine unless they disagree;
-            # resolve_memory_strategy raises on a real conflict.
-            strategy = resolve_memory_strategy(
-                "eager", memory, init_kwargs.get("use_ckpt"),
-                init_kwargs.get("boundary_saving_config"))
             init_kwargs["use_ckpt"] = (strategy == "ckpt")
             backend_impl = _PropTorchEager(*args, **init_kwargs)
             backend_impl.memory_strategy = strategy
@@ -396,10 +437,8 @@ class PropTorch(torch.nn.Module):
             from sweep.propagator._c import _CompiledPropagator
 
             backend_impl = _CompiledPropagator(*args, **init_kwargs)
-            backend_impl.memory_strategy = (
-                "ckpt" if backend_impl.use_ckpt
-                else ("boundary" if backend_impl.boundary_saving_config.get("enabled")
-                      else "full"))
+            backend_impl.memory_strategy = strategy
+        _assert_backend_matches_strategy(backend_impl, strategy)
         self._backend_impl = backend_impl
         self.__signature__ = _public_forward_signature(type(self).forward)
 
