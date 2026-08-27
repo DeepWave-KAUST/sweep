@@ -90,6 +90,13 @@ def test_eager_iso_rotation_invariance():
 
 
 def test_eager_long_run_stable_and_absorbed():
+    """Short-record sanity: the wavetrain leaves and the record decays.
+
+    0.8 s is nowhere near long enough to see the CPML instability this
+    equation would otherwise have — that one only passes the direct arrival
+    at ~9.6 s. See ``test_mpml_long_record_stays_bounded`` for the test that
+    actually pins it.
+    """
     shape, nt, dt = (48, 56), 800, 1e-3
     wavelet, src, rec = _cpu_geometry(shape, nt, dt)
     with torch.no_grad():
@@ -347,3 +354,104 @@ def test_fwi_smoke_reduces_misfit():
     assert losses[-1] < 0.5 * losses[0], (
         f"FWI smoke failed to reduce misfit: {losses[0]:.3e} -> {losses[-1]:.3e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Multiaxial PML — the absorbing layer that keeps this equation stable
+# ---------------------------------------------------------------------------
+
+def test_mpml_profiles_contract():
+    """The profile transform is the whole fix: ``step`` never sees it."""
+    from sweep.equations.elastic_tti_2nd import DEFAULT_MPML_RATIO, mpml_profiles
+
+    nz, nx, dt, width = 40, 56, 1.2e-3, 10
+
+    def prof(n):
+        i = np.arange(n)
+        frac = np.clip(np.maximum((width - i) / width, (i - (n - 1 - width)) / width), 0, 1)
+        sigma = 300.0 * frac ** 2
+        alpha = np.pi * 25.0 * (1.0 - frac)
+        a = np.exp(-(sigma + alpha) * dt).astype(np.float32)
+        a[frac == 0] = 0.0
+        b = ((sigma / np.maximum(sigma + alpha, 1e-9)) * (a - 1.0)).astype(np.float32)
+        return a, b
+
+    az, bz = prof(nz)
+    ax, bx = prof(nx)
+    src = [az[None, :, None], bz[None, :, None], az[None, :, None], bz[None, :, None],
+           ax[None, None, :], bx[None, None, :], ax[None, None, :], bx[None, None, :]]
+
+    plain = mpml_profiles(src, dt, 0.0)
+    mixed = mpml_profiles(src, dt, DEFAULT_MPML_RATIO)
+    for got in (plain, mixed):
+        assert len(got) == 8
+        for t in got:
+            assert t.shape == (1, nz, nx), "profiles must come back as 2-D fields"
+
+    # ratio=0 is the plain CPML broadcast, bit for bit -- the compiled kernel
+    # has a single index path, so this must not perturb anything.
+    assert np.array_equal(plain[0][0], np.broadcast_to(az[:, None], (nz, nx)))
+    assert np.array_equal(plain[4][0], np.broadcast_to(ax[None, :], (nz, nx)))
+
+    # The mix damps x where only z is inside the layer (and vice versa): that
+    # region is exactly where the plain layer has no x-damping at all.
+    z_band, x_interior = 2, nx // 2
+    assert plain[4][0, z_band, x_interior] == 0.0
+    assert mixed[4][0, z_band, x_interior] != 0.0, "multiaxial mix did not reach the z band"
+
+
+@cuda_mark
+@pytest.mark.parametrize("impl", ["eager", "c"])
+def test_mpml_long_record_stays_bounded(impl):
+    """12 s on a uniform TTI medium, both backends.
+
+    Plain CPML is unstable for this second-order displacement system — a
+    documented limitation (Li & Bou Matar 2010), not a defect of the
+    discretisation — and grows out of the PML corners at +34 dB/s. The second
+    half of this test keeps ``mpml_ratio=0`` in the picture on purpose: it
+    pins the mechanism, so if the underlying CPML ever gains a real fix this
+    assertion is the one that says so.
+    """
+    from sweep.propagator.options import CUDAOptions, MemoryOptions
+
+    n, dh, dt, abcn, freq = 120, 10.0, 1.2e-3, 25, 8.0
+    nt = int(round(12.0 / dt))
+    eps, eta = 0.20, (0.20 - 0.05) / (1 + 2 * 0.05)
+
+    def _run(ratio):
+        eq = ElasticTTI2nd(spatial_order=4, device="cuda", backend="torch",
+                           mpml_ratio=ratio)
+        kwargs = dict(shape=(n, n), dh=dh, dt=dt, nt=nt, abcn=abcn, dev="cuda",
+                      source_type=["uz"], receiver_type=["ux", "uz"],
+                      pml_type=eq.default_pml_type)
+        prop = (PropTorch(eq, impl="eager", use_ckpt=False,
+                          eager_options=EagerOptions(use_compile=False), **kwargs)
+                if impl == "eager" else
+                PropTorch(eq, impl="c", cuda_options=CUDAOptions(
+                    memory=MemoryOptions(strategy="full")), **kwargs))
+        full = lambda v: torch.full((n, n), float(v), dtype=torch.float32, device="cuda")
+        models = [full(2400.0 * np.sqrt(1 + 2 * eps)), full(1200.0), full(2200.0),
+                  full(eps), full(eta), full(np.deg2rad(30.0))]
+        src = np.array([[[n // 2, n // 2]]], dtype=np.int64)
+        rx = np.arange(15, n - 15, 3, dtype=np.int64)
+        rec = np.stack([rx, np.full_like(rx, 20)], axis=1)[None]
+        t = np.arange(nt, dtype=np.float32) * dt - 1.2 / freq
+        wavelet = (1e3 * _ricker(t, freq)).astype(np.float32)
+        with torch.no_grad():
+            out = prop(wavelet, src, rec, models=models)
+        env = out.abs().amax(dim=(0, 2, 3)).cpu().numpy()
+        return out, env, float(env[:int(2.0 / dt)].max())
+
+    out, env, direct = _run(ElasticTTI2nd(spatial_order=4).mpml_ratio)
+    late = float(env[int(2.0 / dt):].max())
+    print(f"[mpml-{impl}] direct={direct:.3e} late={late:.3e} "
+          f"({20 * np.log10(max(late, 1e-38) / direct):.1f} dB)")
+    assert torch.isfinite(out).all(), "M-PML record went non-finite"
+    assert late < direct, (
+        f"late-time energy passed the direct arrival: {late:.3e} vs {direct:.3e}")
+
+    _, env0, direct0 = _run(0.0)
+    late0 = float(env0[int(2.0 / dt):].max())
+    assert late0 > direct0, (
+        "plain CPML no longer blows up here — if that is a real fix, retire "
+        "the mpml_ratio default; if it is just this grid, make the test harsher")
