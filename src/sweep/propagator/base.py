@@ -201,8 +201,10 @@ class PropBase:
         self._dt = float(dt)
         # None = unspecified; the torch entry points always pass a resolved
         # bool (see options.resolve_memory_strategy).  Direct PropBase / JAX
-        # construction keeps the historical checkpointing default.
-        self.use_ckpt = True if use_ckpt is None else bool(use_ckpt)
+        # construction keeps the historical checkpointing default.  Held raw
+        # here because the strategy needs the boundary config too, which is not
+        # built yet -- it is derived once, below.
+        _ckpt_requested = True if use_ckpt is None else bool(use_ckpt)
         self.ckpt_chunks = ckpt_chunks
         self.ckpt_mode = ckpt_mode
         self.ckpt_num = ckpt_num
@@ -220,6 +222,13 @@ class PropBase:
             kwargs, boundary_saving_config)
 
         self.boundary_saving_config = self._normalize_boundary_saving_config(boundary_saving_config)
+        # ONE piece of state for the gradient-memory mode. ``use_ckpt`` used to
+        # be an independent flag that happened to agree with the boundary
+        # config; the two could drift, and a drift is silent -- the run measures
+        # one strategy and reports the other.
+        self._memory_strategy = (
+            "ckpt" if _ckpt_requested
+            else ("boundary" if self.boundary_saving_config.get("enabled") else "full"))
         self.transfer_interval = self.boundary_saving_config["transfer_interval"]
         self.boundary_on_cpu = (self.boundary_saving_config["storage"] == "cpu")
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
@@ -555,6 +564,50 @@ class PropBase:
                 )
             output.append(spec.name)
         return output
+
+    @property
+    def use_ckpt(self):
+        """Whether the gradient-memory strategy is checkpointing.
+
+        Read-only on purpose. It was a writable flag, and six places flipped it
+        after construction while the boundary config stayed as it was, so the
+        object could hold two answers to one question. Change the strategy with
+        :meth:`_set_memory_strategy`, which says which one it is becoming.
+        """
+        return self._memory_strategy == "ckpt"
+
+    @property
+    def memory_strategy(self):
+        """'full' | 'boundary' | 'ckpt' -- the single source for the mode."""
+        return self._memory_strategy
+
+    @memory_strategy.setter
+    def memory_strategy(self, value):
+        self._set_memory_strategy(value)
+
+    def _set_memory_strategy(self, strategy, *, reason=None):
+        """Move to another gradient-memory strategy, deliberately.
+
+        ``reason`` is for the caller's benefit at the call site, not stored: it
+        makes ``_set_memory_strategy('boundary', reason='APM has no ckpt
+        backward')`` read as what it is, where ``use_ckpt = False`` left the
+        reader to work out what it fell back TO.
+        """
+        if strategy not in ("full", "boundary", "ckpt"):
+            raise ValueError(
+                f"memory strategy must be 'full', 'boundary' or 'ckpt', got {strategy!r}")
+        self._memory_strategy = strategy
+
+    def _disable_ckpt(self, reason):
+        """Drop out of checkpointing, keeping boundary saving if it is enabled.
+
+        ``use_ckpt = False`` did not say where it landed. It landed here.
+        """
+        if self._memory_strategy != "ckpt":
+            return
+        self._set_memory_strategy(
+            "boundary" if self.boundary_saving_config.get("enabled") else "full",
+            reason=reason)
 
     def _set_call_signature(self):
         forward = getattr(type(self), "forward", None)

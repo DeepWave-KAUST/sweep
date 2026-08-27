@@ -420,3 +420,101 @@ def as_memory_strategy(value):
     raise TypeError(
         f"cannot read a memory strategy from {type(value).__name__}; pass "
         "Full(), BoundarySaving(...), Ckpt(...) or a dict with 'kind'.")
+
+
+def to_legacy_memory_options(strategy):
+    """Inverse of :func:`as_memory_strategy`, for the internal plumbing.
+
+    The impl='c' path translates ``cuda_options.memory`` into init kwargs
+    through code that reads the tagged shape (``{'strategy': ..., 'boundary':
+    {...}}``). Rather than teach every one of those layers the new types, the
+    public entry point converts once, here, on the way in. The new types are the
+    API; the tagged form remains the wire format until the layers below are
+    migrated in their own right.
+    """
+    if strategy is None or isinstance(strategy, MemoryOptions):
+        return strategy
+    if isinstance(strategy, Full):
+        return MemoryOptions(strategy="full")
+    if isinstance(strategy, BoundarySaving):
+        return MemoryOptions(
+            strategy="boundary",
+            boundary=BoundaryOptions(**{f.name: getattr(strategy, f.name)
+                                        for f in fields(BoundaryOptions)}))
+    if isinstance(strategy, Ckpt):
+        return MemoryOptions(
+            strategy="ckpt",
+            ckpt=CkptOptions(**{f.name: getattr(strategy, f.name)
+                                for f in fields(CkptOptions)}))
+    raise TypeError(f"not a memory strategy: {type(strategy).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# What each backend can actually do
+# ---------------------------------------------------------------------------
+# Declared per backend rather than discovered by hitting a scattered ValueError
+# somewhere down the call stack, so that the answer to "can eager do this?" is
+# one table instead of a search. Every entry below was MEASURED, not read off a
+# docstring.
+#
+# The entry that matters most is ``tail_steps`` on eager. It was being ACCEPTED
+# and then dropped: ``_apply_eager_memory`` forwards only storage and
+# storage_dtype, and the eager backend has no implementation of truncation at
+# all. So ``BoundarySaving(tail_steps=20)`` on eager silently produced a
+# full-length gradient. Refusing an unsupported option is a nuisance; accepting
+# it and ignoring it is a wrong answer that looks right.
+_MEMORY_CAPABILITIES = {
+    "c": {
+        "strategies": ("full", "boundary", "ckpt"),
+        "boundary_storage": ("gpu", "cpu", "disk"),
+        "boundary_tail_steps": True,
+        "ckpt_mode": ("chunk", "recursive"),
+    },
+    "eager": {
+        "strategies": ("full", "boundary", "ckpt"),
+        "boundary_storage": ("gpu", "cpu"),   # the ring stays on device or in host RAM
+        "boundary_tail_steps": False,         # no truncated backward in the eager driver
+        "ckpt_mode": ("chunk",),              # no recursive/binomial schedule
+    },
+}
+
+
+def check_memory_supported(impl, strategy):
+    """Refuse a memory request the backend cannot honour, before it is built.
+
+    Raises :class:`NotImplementedError` naming the impl, the option and what it
+    does support. An unsupported request must never be quietly downgraded: the
+    run would report one strategy and compute another.
+    """
+    caps = _MEMORY_CAPABILITIES.get(impl)
+    if caps is None or strategy is None:
+        return
+    name = getattr(strategy, "strategy", None)
+    if name is None:
+        return
+    if name not in caps["strategies"]:
+        raise NotImplementedError(
+            f"impl={impl!r} does not implement the {name!r} gradient-memory "
+            f"strategy; it supports {', '.join(caps['strategies'])}.")
+
+    if name == "boundary":
+        storage = getattr(strategy, "storage", "gpu")
+        if storage not in caps["boundary_storage"]:
+            raise NotImplementedError(
+                f"impl={impl!r} boundary saving does not implement "
+                f"storage={storage!r}; it supports "
+                f"{', '.join(caps['boundary_storage'])}.")
+        tail = getattr(strategy, "tail_steps", None)
+        if tail and not caps["boundary_tail_steps"]:
+            raise NotImplementedError(
+                f"impl={impl!r} boundary saving does not implement tail_steps "
+                f"(truncated backward); it would be accepted and ignored, "
+                f"returning a full-length gradient. Use impl='c' for "
+                f"tail_steps={tail!r}.")
+
+    elif name == "ckpt":
+        mode = getattr(strategy, "mode", "chunk")
+        if mode not in caps["ckpt_mode"]:
+            raise NotImplementedError(
+                f"impl={impl!r} checkpointing does not implement "
+                f"mode={mode!r}; it supports {', '.join(caps['ckpt_mode'])}.")

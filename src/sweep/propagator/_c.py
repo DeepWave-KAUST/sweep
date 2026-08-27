@@ -589,11 +589,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.forward_func = apm_funcs[0]
             self.backward_func = apm_funcs[1]
             self.backward_bs_func = apm_funcs[2]
-            # APM has no checkpoint backward implementation; disable
-            # checkpoint dispatch so backward routes to full / bs only.
+            # APM has no checkpoint backward implementation; drop out of
+            # checkpointing so backward routes to boundary saving if it is on,
+            # otherwise to full.
             self.backward_ckpt_func = None
             self.backward_recursive_ckpt_func = None
-            self.use_ckpt = False
+            self._disable_ckpt(reason="APM has no compiled ckpt backward")
 
         # Initialize reusable runtime buffers lazily so they always match the
         # current batch size used by the CUDA kernels.
