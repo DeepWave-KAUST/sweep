@@ -1,6 +1,8 @@
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from typing import Any
+from typing import ClassVar
 from typing import Literal
+from typing import Union
 
 
 @dataclass(frozen=True)
@@ -323,3 +325,98 @@ def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_co
         if strategy not in exclude:
             return strategy
     return "full"
+
+
+# ---------------------------------------------------------------------------
+# The gradient-memory strategy as a type, not a tag plus optional bags
+# ---------------------------------------------------------------------------
+# ``MemoryOptions(strategy=..., boundary=..., ckpt=...)`` can express states that
+# are not valid -- a strategy with the wrong bag filled, or a bag with no
+# strategy -- so it carries six runtime checks whose only job is to reject them.
+# When the TYPE carries the strategy, every one of those states becomes
+# unrepresentable and the errors move to the call site with the right argument
+# names: ``Ckpt(transfer_interval=4)`` is a TypeError from Python itself.
+#
+# The names follow the vocabulary already in the codebase rather than taste:
+# ``Ckpt`` because everything here says ckpt (``use_ckpt``, ``ckpt_chunks``),
+# ``Full`` because the strategy string is 'full'. ``BoundarySaving`` is the one
+# spelled out: bare ``Boundary`` would be badly ambiguous in a solver where
+# "boundary" means the absorbing/PML boundary in ~685 places against ~299 for
+# boundary saving.
+#
+# They subclass the existing option dataclasses, so every field, default and
+# validation rule is inherited rather than copied, and ``isinstance(x,
+# BoundaryOptions)`` keeps working for code that predates this.
+
+@dataclass
+class Full:
+    """Keep everything the backward needs in memory. No parameters, by nature."""
+    strategy: ClassVar[str] = "full"
+
+
+@dataclass
+class BoundarySaving(BoundaryOptions):
+    """Reconstruct the forward wavefield from saved boundary values."""
+    strategy: ClassVar[str] = "boundary"
+
+
+@dataclass
+class Ckpt(CkptOptions):
+    """Rematerialise the forward wavefield from checkpoints."""
+    strategy: ClassVar[str] = "ckpt"
+
+
+MemoryStrategy = Union[Full, BoundarySaving, Ckpt]
+
+_STRATEGY_TYPES = {"full": Full, "boundary": BoundarySaving, "ckpt": Ckpt}
+
+
+def as_memory_strategy(value):
+    """Normalise anything that can name a memory strategy into one of the types.
+
+    Accepts, in order of preference:
+
+    * ``Full`` / ``BoundarySaving`` / ``Ckpt`` -- returned unchanged;
+    * a legacy ``MemoryOptions(strategy=..., boundary=..., ckpt=...)``;
+    * a dict, either the new flat shape ``{'kind': 'boundary', 'storage': ...}``
+      or the legacy nested one ``{'strategy': 'boundary', 'boundary': {...}}``.
+      Both are accepted on the way IN because the nested shape is already
+      written into stored experiment YAML -- rewriting those files would edit
+      the record of what was actually run;
+    * ``None`` -- returned as ``None``, meaning "no request", which is distinct
+      from ``Full()``.
+    """
+    if value is None or isinstance(value, (Full, BoundarySaving, Ckpt)):
+        return value
+
+    if isinstance(value, MemoryOptions):
+        if value.strategy is None:
+            return None
+        if value.strategy == "full":
+            return Full()
+        sub = value.boundary if value.strategy == "boundary" else value.ckpt
+        cls = _STRATEGY_TYPES[value.strategy]
+        return cls(**{f.name: getattr(sub, f.name) for f in fields(sub)})
+
+    if isinstance(value, dict):
+        data = dict(value)
+        kind = data.pop("kind", None) or data.pop("strategy", None)
+        if kind is None:
+            raise ValueError(
+                "a memory-strategy dict needs 'kind' (or the legacy 'strategy'); "
+                f"got keys {sorted(value)}")
+        if kind not in _STRATEGY_TYPES:
+            raise ValueError(
+                f"memory strategy must be 'full', 'boundary' or 'ckpt', got {kind!r}")
+        # Legacy nested shape: the parameters sit under a key named after the
+        # strategy, and the same word therefore appears twice.
+        nested = data.pop(kind, None)
+        if nested is not None:
+            data = dict(nested)
+        data.pop("boundary", None)
+        data.pop("ckpt", None)
+        return _STRATEGY_TYPES[kind](**data)
+
+    raise TypeError(
+        f"cannot read a memory strategy from {type(value).__name__}; pass "
+        "Full(), BoundarySaving(...), Ckpt(...) or a dict with 'kind'.")
