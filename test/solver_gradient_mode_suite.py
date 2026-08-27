@@ -56,6 +56,8 @@ from sweep.equations import (  # noqa: E402
     Elastic,
     Elastic3D,
     ElasticTTISG,
+    ElasticTTISG3D,
+    ElasticTTI2nd,
 )
 from sweep.propagator.options import (  # noqa: E402
     BoundaryOptions,
@@ -225,6 +227,64 @@ SOLVERS = {
             "ckpt_chunk_cpu",
         ),
     ),
+    "elastic_tti_sg3d": SolverSpec(
+        "elastic_tti_sg3d",
+        ElasticTTISG3D, 3,
+        ("vp0", "vs0", "rho", "epsilon", "delta", "gamma", "theta", "phi"),
+        ("sxx", "syy", "szz"),
+        ("vx", "vy", "vz"),
+        "cpmls",
+        elastic=True,
+        # Same binding surface as the 2-D TTI SG: no ``ckpt_recursive``.
+        supported_modes=(
+            "full",
+            "bs_gpu",
+            "bs_gpu_fp16",
+            "bs_gpu_bf16",
+            "bs_gpu_int8",
+            "bs_cpu",
+            "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
+            "bs_disk",
+            "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
+            "ckpt_chunk",
+            "ckpt_chunk_cpu",
+        ),
+    ),
+    "elastic_tti_2nd2d": SolverSpec(
+        "elastic_tti_2nd2d",
+        ElasticTTI2nd, 2,
+        ("vh", "vs", "rho", "epsilon", "eta", "theta"),
+        ("uz",),
+        ("ux", "uz"),
+        "cpmls",
+        elastic=True,
+        # Same binding surface as the TTI SG family: no ``ckpt_recursive``.
+        supported_modes=(
+            "full",
+            "bs_gpu",
+            "bs_gpu_fp16",
+            "bs_gpu_bf16",
+            "bs_gpu_int8",
+            "bs_cpu",
+            "bs_cpu_pinned",
+            "bs_cpu_fp16",
+            "bs_cpu_bf16",
+            "bs_cpu_int8",
+            "bs_disk",
+            "bs_disk_async",
+            "bs_disk_fp16",
+            "bs_disk_bf16",
+            "bs_disk_int8",
+            "ckpt_chunk",
+            "ckpt_chunk_cpu",
+        ),
+    ),
 }
 
 SCENARIOS = {
@@ -326,6 +386,8 @@ def require_cuda_bindings(solver_keys: list[str]):
         "elastic2d": "elastic2d",
         "elastic3d": "elastic3d",
         "elastic_tti_sg2d": "elastic_tti_sg2d",
+        "elastic_tti_sg3d": "elastic_tti_sg3d",
+        "elastic_tti_2nd2d": "elastic_tti_2nd2d",
         "acoustic_vti_1st_2d": "acoustic_vti_1st_2d",
         "acoustic_vti_1st_3d": "acoustic_vti_1st_3d",
     }
@@ -426,6 +488,20 @@ def make_models(spec: SolverSpec, shape: tuple[int, ...]):
         # Compare gradients only on the three iso-like parameters (vp0, vs0,
         # rho); anisotropic ones stay constant.
         grad_flags = [True, True, True, False, False, False, False, False]
+        return true_list, init_list, grad_flags
+
+    # ElasticTTI2nd (Oh et al. 2020): vh + vs + rho + epsilon + eta + theta.
+    if spec.model_names == ("vh", "vs", "rho", "epsilon", "eta", "theta"):
+        vs_init = (vp_init / 1.9).astype(np.float32)
+        vs_true = (vp_true / 1.9).astype(np.float32)
+        rho_init = depth_ramp(shape, 1000.0, 1200.0)
+        rho_true = add_box(rho_init, 60.0)
+        eps_init = np.full(shape, 0.12, dtype=np.float32)
+        eta_init = np.full(shape, 0.06, dtype=np.float32)
+        the_init = np.full(shape, 0.35, dtype=np.float32)
+        true_list = [vp_true, vs_true, rho_true, eps_init, eta_init, the_init]
+        init_list = [vp_init, vs_init, rho_init, eps_init, eta_init, the_init]
+        grad_flags = [True, True, True, False, False, False]
         return true_list, init_list, grad_flags
 
     # AcousticVTI1st (1st-order VTI): vp + epsilon + delta + rho
