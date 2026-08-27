@@ -401,7 +401,7 @@ def _broadcast_topo(u, iz_surf, axis):
     return z, surf, ax, nz
 
 
-def extend_top_free_surface_topo(u, halo, odd, axis, iz_surf):
+def extend_top_free_surface_topo(u, halo, odd, axis, iz_surf, half=False):
     """Per-column image-method mirror across an irregular surface.
 
     Parameters
@@ -418,6 +418,17 @@ def extend_top_free_surface_topo(u, halo, odd, axis, iz_surf):
         Long-tensor giving the surface row per column in padded-grid
         coordinates. Shape must match ``u``'s non-z dims after the z-axis;
         see :func:`_broadcast_topo`.
+    half : bool
+        Mark fields that sit half a cell BELOW the surface plane (``sxz``,
+        ``syz``, ``vz`` on the staggered grid). Their image must reflect
+        about ``iz_surf - 1/2`` — ``mirror = 2*surf - 1 - z``, i.e.
+        ``tau_zx(-h/2) = -tau_zx(+h/2)`` — not about ``iz_surf``, which
+        would pair ``-h/2`` with ``+3h/2`` (Kristek, Moczo & Archuleta 2002,
+        Eq. 7 / Table 1). This is the per-column analogue of
+        :func:`extend_top_free_surface_cell_centered`, and with a constant
+        ``iz_surf == halo`` it reproduces it index-for-index, which is what
+        keeps the flat-degenerate topography path bit-exact against the flat
+        free surface.
 
     Notes
     -----
@@ -432,7 +443,8 @@ def extend_top_free_surface_topo(u, halo, odd, axis, iz_surf):
 
     z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
     above = z < surf
-    mirror_z = torch.where(above, 2 * surf - z, z).clamp(0, nz - 1)
+    reflected = (2 * surf - 1 - z) if half else (2 * surf - z)
+    mirror_z = torch.where(above, reflected, z).clamp(0, nz - 1)
     mirror_z = mirror_z.expand_as(u)
     out = u.gather(ax, mirror_z)
     if odd:
@@ -440,10 +452,12 @@ def extend_top_free_surface_topo(u, halo, odd, axis, iz_surf):
     return out
 
 
-def top_free_surface_derivative_topo(u, deriv, halo, odd, axis, iz_surf):
+def top_free_surface_derivative_topo(u, deriv, halo, odd, axis, iz_surf, half=False):
     """Apply ``deriv`` to the topo-mirrored field. Mirror of
-    :func:`top_free_surface_derivative` for the irregular-surface path."""
-    return deriv(extend_top_free_surface_topo(u, halo, odd, axis, iz_surf))
+    :func:`top_free_surface_derivative` (``half=False``) and
+    :func:`top_free_surface_cell_derivative` (``half=True``) for the
+    irregular-surface path."""
+    return deriv(extend_top_free_surface_topo(u, halo, odd, axis, iz_surf, half=half))
 
 
 def zero_above_topo(u, iz_surf, axis):
