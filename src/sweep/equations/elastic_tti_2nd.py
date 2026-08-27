@@ -19,6 +19,25 @@ forward/backward staggered first-derivative pair,
 ``D_b [ C D_f u ]`` — a conservative discretisation whose stiffness
 operator is exactly self-adjoint (``K = -D^T C D``), checkerboard-free,
 and CPML-absorbed per first derivative (8 memory variables, ``cpmls``).
+
+Absorbing boundary: the plain CPML that works for the velocity-stress
+solvers is **unstable** here past a few seconds. That is a documented
+limitation of CPML for the second-order displacement system, not a defect
+of this discretisation — Li & Bou Matar (2010, *J. Acoust. Soc. Am.* 127,
+1318-1327), who derive exactly this CPML, report the same growth and note it
+occurs "even in the case of an isotropic medium"; the root cause is the
+Bécache, Fauqueux & Joly (2003) condition, which Oh et al. themselves cite
+(they sidestep it with parameter bounds, and their frequency-domain FEM
+cannot show late-time growth at all). Measured here on a uniform TTI medium:
+the record envelope passes the direct-arrival peak at 9.6 s and overflows to
+NaN at 19.5 s, growing at +34 dB/s from the PML corners.
+
+The fix is the multiaxial PML (M-PML) of Meza-Fajardo & Papageorgiou, in the
+form of Li & Bou Matar's eq. (23): mix a fraction ``mpml_ratio`` of each
+damping profile into the other axis. The update in :func:`step` is untouched
+— only the profiles change. At ``mpml_ratio=0.05`` the boundary artefact
+goes from -56.3 dB to -53.2 dB against a domain no reflection can reach,
+and the envelope decays for as long as float64 can resolve it.
 """
 
 from __future__ import annotations
@@ -28,6 +47,93 @@ from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 
 TTI2ND_STIFFNESS_KEYS = ("C11", "C33", "C13", "C55", "C15", "C35")
+
+#: Default multiaxial-PML mixing ratio.  Measured stability threshold on a
+#: uniform TTI medium is between 0.02 (blows up at 23.3 s) and 0.05 (stable);
+#: Li & Bou Matar use 0.25 for a much harder orthotropic medium.  Each step up
+#: costs absorption: 0.05 -> -53.2 dB, 0.10 -> -49.9 dB, 0.25 -> -44.5 dB,
+#: against -56.3 dB for the (unstable) plain CPML.
+DEFAULT_MPML_RATIO = 0.05
+
+
+def _cpml_decompose(a, b, dt):
+    """Recover ``(sigma, alpha)`` from a CPML ``(a, b)`` profile pair.
+
+    ``setup_pml`` builds ``a = exp(-(sigma + alpha) dt)`` and
+    ``b = sigma / (sigma + alpha) * (a - 1)``, then zeroes ``a`` outside the
+    layer.  Outside, ``sigma = 0`` and the CFS ``alpha`` sits at its maximum,
+    which is what the multiaxial mix needs when the other axis pulls damping
+    into a region this axis does not damp on its own.
+    """
+    import numpy as np
+
+    a = np.asarray(a)
+    b = np.asarray(b)
+    inside = a > 0
+    a_safe = np.where(inside, a, 1.0)
+    sum_sa = -np.log(a_safe) / dt                       # sigma + alpha
+    den = a_safe - 1.0
+    den = np.where(np.abs(den) < 1e-12, -1e-12, den)
+    sigma = np.where(inside, b * sum_sa / den, 0.0)
+    smax = max(float(sigma.max()), 1e-30)
+    frac = np.sqrt(np.clip(sigma / smax, 0.0, None))    # sigma ~ frac**2
+    alpha_in = np.where(inside, sum_sa - sigma, 0.0)
+    near = inside & (frac < 0.5)
+    alpha0 = float((alpha_in[near] / (1.0 - frac[near])).max()) if near.any() \
+        else float(alpha_in.max())
+    return sigma, alpha0 * (1.0 - frac)
+
+
+def _cpml_recombine(sigma, alpha, dt, dtype):
+    import numpy as np
+
+    sum_sa = sigma + alpha
+    sum_sa = np.where(np.abs(sum_sa) < 1e-9, 1e-9, sum_sa)
+    a = np.exp(-sum_sa * dt)
+    b = (sigma / sum_sa) * (a - 1.0)
+    off = sigma <= 0
+    return (np.where(off, 0.0, a).astype(dtype, copy=False),
+            np.where(off, 0.0, b).astype(dtype, copy=False))
+
+
+def mpml_profiles(profiles, dt, ratio):
+    """Turn the eight per-axis CPML profiles into multiaxial (2-D) ones.
+
+    Li & Bou Matar (2010) eq. (23), after Meza-Fajardo & Papageorgiou::
+
+        sigma_z(x, z) = sigma_zz(z) + ratio * sigma_xx(x)
+        sigma_x(x, z) = sigma_xx(x) + ratio * sigma_zz(z)
+
+    Every CPML equation stays as it was; only the profiles change, so
+    :func:`step` needs no modification. The per-axis inputs broadcast
+    (``(1, nz, 1)`` and ``(1, 1, nx)``), so the sums come out ``(1, nz, nx)``.
+
+    The result is deliberately no longer perfectly matched — that is the
+    trade the multiaxial layer makes for stability, and it is why ``ratio``
+    should be the smallest value that holds.
+    """
+    import numpy as np
+
+    az, bz, azh, bzh, ax, bx, axh, bxh = [np.asarray(t) for t in profiles]
+    dtype = az.dtype
+    if ratio <= 0:
+        # Still hand back FULL 2-D fields: the compiled kernel indexes the
+        # profiles as ``iz * nx + ix`` unconditionally, so there is one code
+        # path instead of two.  Broadcasting the unmixed profiles reproduces
+        # the plain CPML bit for bit.
+        zeros = np.zeros(np.broadcast_shapes(az.shape, ax.shape), dtype=dtype)
+        return [np.ascontiguousarray(t + zeros, dtype=dtype)
+                for t in (az, bz, azh, bzh, ax, bx, axh, bxh)]
+    out = []
+    for (a_z, b_z), (a_x, b_x) in (((az, bz), (ax, bx)), ((azh, bzh), (axh, bxh))):
+        sz, alz = _cpml_decompose(a_z, b_z, dt)
+        sx, alx = _cpml_decompose(a_x, b_x, dt)
+        A_z, B_z = _cpml_recombine(sz + ratio * sx, alz + np.zeros_like(sx), dt, dtype)
+        A_x, B_x = _cpml_recombine(sx + ratio * sz, alx + np.zeros_like(sz), dt, dtype)
+        out.append((A_z, B_z, A_x, B_x))
+    (Az, Bz, Ax, Bx), (Azh, Bzh, Axh, Bxh) = out
+    return [np.ascontiguousarray(t, dtype=dtype)
+            for t in (Az, Bz, Azh, Bzh, Ax, Bx, Axh, Bxh)]
 
 
 def step(
@@ -148,7 +254,8 @@ class ElasticTTI2nd(FirstOrderEquation):
         FieldSpec("m_szzz", description="CPML memory for dszz/dz.", internal=True, boundary_related=True),
     )
 
-    def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+    def __init__(self, spatial_order=4, device="cpu", backend="torch",
+                 mpml_ratio=DEFAULT_MPML_RATIO):
         """Build the displacement-based 2-D elastic TTI operator.
 
         Args:
@@ -171,8 +278,42 @@ class ElasticTTI2nd(FirstOrderEquation):
             backend: Array / programming backend, ``'torch'`` or
                 ``'jax'``. When you later want ``impl='c'``, leave this
                 on ``'torch'``. Defaults to ``'torch'``.
+            mpml_ratio: Multiaxial-PML mixing ratio (Li & Bou Matar 2010
+                eq. 23). Plain CPML is unstable for this second-order
+                displacement system — see the module docstring — and this is
+                the knob that fixes it: each damping profile receives this
+                fraction of the other axis'. ``0`` restores the plain CPML
+                and with it the late-time growth (envelope past the direct
+                arrival at 9.6 s, NaN at 19.5 s on a uniform TTI medium).
+                Larger values are safer but absorb worse: measured boundary
+                artefact against a domain no reflection can reach is
+                -56.3 dB at 0 (unstable), -53.2 dB at 0.05, -49.9 dB at 0.10,
+                -44.5 dB at 0.25. Defaults to
+                :data:`DEFAULT_MPML_RATIO` (0.05).
         """
         super().__init__(spatial_order, device, backend, ndim=2)
+        if mpml_ratio < 0:
+            raise ValueError(f"mpml_ratio must be >= 0, got {mpml_ratio!r}.")
+        self.mpml_ratio = float(mpml_ratio)
+
+    def init_abc(self, type="cpml", **kwargs):
+        """Build the CPML profiles, then mix them multiaxially.
+
+        The mix has to happen here rather than in ``step``: that is exactly
+        the property of the multiaxial layer that makes it cheap — the update
+        never learns about it.  The profiles come back as full 2-D fields even
+        at ``mpml_ratio=0`` so the compiled kernel has a single index path.
+        """
+        super().init_abc(type=type, **kwargs)
+        from .utils import to_backend
+
+        import numpy as np
+
+        profiles = [np.asarray(t.detach().cpu() if hasattr(t, "detach") else t)
+                    for t in self.b]
+        mixed = mpml_profiles(profiles, float(kwargs["dt"]), self.mpml_ratio)
+        self.b = mixed if self.backend == "jax" else to_backend(
+            mixed, self.backend, self.device)
 
     @property
     def default_source_fields(self):

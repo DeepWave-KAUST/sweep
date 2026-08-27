@@ -176,10 +176,15 @@ __global__ void tti2nd_stress_kernel(
     const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
                         (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
     if (in_pml) {
-        const float azh = cpml.azh[iz];
-        const float bzh = cpml.bzh[iz];
-        const float axh = cpml.axh[ix];
-        const float bxh = cpml.bxh[ix];
+        // Multiaxial PML: the damping profiles are FULL 2-D fields, not one
+        // per axis -- sigma_x picks up a fraction of sigma_z and vice versa
+        // (Li & Bou Matar 2010 eq. 23), which is what keeps this second-order
+        // displacement system stable.  Same index for every profile.
+        const int pml_idx = iz * solver.nx + ix;
+        const float azh = cpml.azh[pml_idx];
+        const float bzh = cpml.bzh[pml_idx];
+        const float axh = cpml.axh[pml_idx];
+        const float bxh = cpml.bxh[pml_idx];
 
         f.m_gxux[idx] = axh * f.m_gxux[idx] + bxh * gxux;
         gxux += f.m_gxux[idx];
@@ -242,10 +247,11 @@ __global__ void tti2nd_displacement_kernel(
     const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
                         (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
     if (in_pml) {
-        const float az = cpml.az[iz];
-        const float bz = cpml.bz[iz];
-        const float ax = cpml.ax[ix];
-        const float bx = cpml.bx[ix];
+        const int pml_idx = iz * solver.nx + ix;   // 2-D M-PML profiles
+        const float az = cpml.az[pml_idx];
+        const float bz = cpml.bz[pml_idx];
+        const float ax = cpml.ax[pml_idx];
+        const float bx = cpml.bx[pml_idx];
 
         f.m_sxxx[idx] = ax * f.m_sxxx[idx] + bx * dsxx_dx;
         dsxx_dx += f.m_sxxx[idx];
@@ -412,10 +418,11 @@ __global__ void tti2nd_adjoint_div_prepare(
         return;
     }
 
-    const float az = cpml.az[iz];
-    const float bz = cpml.bz[iz];
-    const float ax = cpml.ax[ix];
-    const float bx = cpml.bx[ix];
+    const int pml_idx = iz * solver.nx + ix;   // 2-D M-PML profiles
+    const float az = cpml.az[pml_idx];
+    const float bz = cpml.bz[pml_idx];
+    const float ax = cpml.ax[pml_idx];
+    const float bx = cpml.bx[pml_idx];
 
     float tmp_sxxx = f.m_sxxx[idx] + bar_dsxx_dx;
     float tmp_sxzz = f.m_sxzz[idx] + bar_dsxz_dz;
@@ -499,10 +506,11 @@ __global__ void tti2nd_adjoint_strain_prepare(
         return;
     }
 
-    const float azh = cpml.azh[iz];
-    const float bzh = cpml.bzh[iz];
-    const float axh = cpml.axh[ix];
-    const float bxh = cpml.bxh[ix];
+    const int pml_idx = iz * solver.nx + ix;   // 2-D M-PML profiles
+    const float azh = cpml.azh[pml_idx];
+    const float bzh = cpml.bzh[pml_idx];
+    const float axh = cpml.axh[pml_idx];
+    const float bxh = cpml.bxh[pml_idx];
 
     float tmp_gxux = f.m_gxux[idx] + bar_gxux;
     float tmp_gzux = f.m_gzux[idx] + bar_gzux;
