@@ -61,6 +61,19 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/03_fwi_multiscale.ipynb)
 
+-   ![Batched local-window FWI](../figures/gallery/23_batched_local_window_fwi.png){ loading=lazy }
+
+    **FWI · Batched per-shot local windows**
+
+    ---
+
+    A fixed streamer makes every shot's model window the same width, so all the
+    crops stack into one batched solver call and the overlapping windows
+    scatter-add back onto the full model through autograd. Frequency
+    continuation recovers Marmousi from a smooth start on one GPU.
+
+    [:material-notebook-outline: Open notebook](../notebooks/23_batched_local_window_fwi.ipynb)
+
 -   ![DAS Zhao vs Mu](../figures/gallery/04_das_zhao_vs_mu.png){ loading=lazy }
 
     **DAS · Zhao vs Mu**
