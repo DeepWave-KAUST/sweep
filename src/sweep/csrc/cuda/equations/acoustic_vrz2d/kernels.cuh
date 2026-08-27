@@ -163,7 +163,7 @@ __global__ void calculate_grad_vrz2d(
 
 template<int Order, int Direction>
 __device__ __forceinline__ bool vrz2d_grad_product_interior(
-    SolverContext solver,
+    GridBounds solver,
     int ix,
     int iz
 ) {
@@ -186,7 +186,7 @@ __device__ __forceinline__ float vrz2d_q_gradp(
     int ix,
     int iz,
     GradParam grad_ctx,
-    SolverContext solver
+    GridBounds solver
 ) {
     if (!vrz2d_grad_product_interior<Order, Direction>(solver, ix, iz))
         return 0.f;
@@ -204,7 +204,7 @@ struct VRZ2DGradientProductAccessor {
     int sx;
     int sz;
     GradParam grad_ctx;
-    SolverContext solver;
+    GridBounds solver;          // not SolverContext: this is inlined per tap
 
     __device__ __forceinline__
     float operator()(int offset) const
@@ -242,7 +242,7 @@ __device__ __forceinline__ float vrz2d_fused_grad_q_gradp(
 
     return centered_gradient_stencil<Order>(
         VRZ2DGradientProductAccessor<Order, Direction>{
-            q, p, ix, iz, sx, sz, grad_ctx, solver
+            q, p, ix, iz, sx, sz, grad_ctx, solver.bounds()
         },
         solver.M,
         grad_ctx.coeff,
@@ -257,7 +257,7 @@ __device__ __forceinline__ float vrz2d_split_grad_q_gradp(
     int ix,
     int iz,
     GradParam grad_ctx,
-    SolverContext solver
+    GridBounds solver
 ) {
     if (!vrz2d_grad_product_interior<Order, Direction>(solver, ix, iz))
         return 0.f;
