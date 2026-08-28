@@ -1,3 +1,4 @@
+import dataclasses
 import inspect
 import warnings
 
@@ -11,7 +12,10 @@ from sweep.propagator.options import (
     EAGER_OPTION_KEYS,
     CUDA_OPTION_KEYS,
     BOUNDARY_DEFAULTS,
+    BoundaryOptions,
+    BoundarySaving,
     CKPT_DEFAULTS,
+    Ckpt,
     MemoryOptions,
     options_to_dict,
     resolve_memory_strategy,
@@ -437,6 +441,23 @@ class PropTorch(torch.nn.Module):
         # Refuse what this backend cannot honour BEFORE building it, so an
         # unsupported option is an error rather than a silent downgrade.
         check_memory_supported(impl, _requested)
+        if _requested is None and strategy != "full":
+            # The legacy dict/flag route resolved a strategy without a typed
+            # request, which made the check above a no-op -- so eager plus
+            # tail_steps/disk in boundary_saving_config (or ckpt_mode=
+            # 'recursive') was accepted and silently dropped. Synthesise the
+            # equivalent typed request for validation only.
+            if strategy == "boundary":
+                cfg = init_kwargs.get("boundary_saving_config") or {}
+                probe = BoundarySaving(**{f.name: cfg[f.name]
+                                          for f in dataclasses.fields(BoundaryOptions)
+                                          if f.name in cfg})
+            elif init_kwargs.get("ckpt_mode", CKPT_DEFAULTS.mode) == "recursive":
+                probe = Ckpt(mode="recursive",
+                             count=max(1, int(init_kwargs.get("ckpt_num") or 1)))
+            else:
+                probe = Ckpt(mode="chunk")
+            check_memory_supported(impl, probe)
 
         if impl == "eager":
             init_kwargs["use_ckpt"] = (strategy == "ckpt")

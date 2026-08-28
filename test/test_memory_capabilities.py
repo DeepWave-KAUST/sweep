@@ -121,3 +121,39 @@ def test_recursive_ckpt_without_binding_is_refused_at_construction():
 
 def test_recursive_ckpt_with_binding_still_constructs():
     assert _build("c", Ckpt(mode="recursive", count=4)).memory_strategy == "ckpt"
+
+
+def _build_eager_dict(cfg, **kw):
+    from sweep.equations.acoustic import Acoustic
+    from sweep.propagator.torch import PropTorch
+    dev = torch.device("cuda")
+    eq = Acoustic(spatial_order=4, device=dev, backend="torch")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return PropTorch(eq, backend="torch", impl="eager", shape=(48, 56),
+                         dev=dev, dh=10.0, dt=1e-3, abcn=20, nt=50, B=1,
+                         boundary_saving_config=cfg, **kw)
+
+
+def test_legacy_dict_route_is_capability_checked():
+    """boundary_saving_config={...} used to bypass check_memory_supported (no
+    typed request -> the check no-ops): eager + tail_steps was silently
+    dropped and 'disk' silently became CPU storage."""
+    with pytest.raises(NotImplementedError, match="tail_steps"):
+        _build_eager_dict({"enabled": True, "tail_steps": 20})
+    with pytest.raises(NotImplementedError, match="disk"):
+        _build_eager_dict({"enabled": True, "storage": "disk"})
+    assert _build_eager_dict({"enabled": True, "storage": "cpu"}).memory_strategy == "boundary"
+
+
+def test_legacy_ckpt_flags_route_is_capability_checked():
+    from sweep.equations.acoustic import Acoustic
+    from sweep.propagator.torch import PropTorch
+    dev = torch.device("cuda")
+    eq = Acoustic(spatial_order=4, device=dev, backend="torch")
+    with pytest.raises(NotImplementedError, match="recursive"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            PropTorch(eq, backend="torch", impl="eager", shape=(48, 56), dev=dev,
+                      dh=10.0, dt=1e-3, abcn=20, nt=50, B=1,
+                      use_ckpt=True, ckpt_mode="recursive", ckpt_num=4)
