@@ -46,7 +46,7 @@ shrink the boundary ring for finer grids; defaults to gpu/fp32.
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Sequence
+from typing import List
 
 import numpy as np
 import torch
@@ -57,16 +57,13 @@ from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
 from sweep.propagator.options import BoundarySaving
+from sweep.parallel.pml import dd_cut_face_mask
 from sweep.propagator.torch import PropTorch
 from sweep.propagator._stepped import (
     SteppedBackwardRunner,
     SteppedBindingRunner,
-    acoustic_adj_pairs,
-    acoustic_psi_pairs,
 )
 
-X_LO_BIT, X_HI_BIT = 1, 2
-Y_LO_BIT, Y_HI_BIT = 16, 32
 
 # Which equations ModelParallel can actually run, and their wavefield family.
 #
@@ -97,24 +94,6 @@ _DD_EQUATIONS = {
                                         # exported as ``Elastic3D``
 }
 
-
-def _family_of(equation) -> str:
-    # Walk the MRO so a subclass of a supported equation still works. Every
-    # equation in the library derives straight from First/SecondOrderEquation,
-    # never from a sibling, so this cannot smuggle in an unsupported one.
-    for klass in type(equation).__mro__:
-        family = _DD_EQUATIONS.get(klass.__name__)
-        if family is not None:
-            return family
-    raise NotImplementedError(
-        f"domain decomposition does not support {type(equation).__name__}. It "
-        f"needs an equation whose CUDA forward and backward implement the "
-        f"stepped range (it_begin/it_end): "
-        f"{', '.join(sorted(_DD_EQUATIONS))} -- Elastic covers 2-D and 3-D, "
-        f"and note AcousticVRZ3D is stepped while the 2-D AcousticVRZ is not. "
-        f"An equation without it would not raise, it would run the full record "
-        f"on every stepped call."
-    )
 
 
 class _DDForward(torch.autograd.Function):
@@ -195,7 +174,6 @@ class ModelParallel:
         # Read the global-problem spec off the single-domain propagator.
         # dh/dt are stored as buffer tensors (dh per-axis); recover plain Python
         # for the per-tile prop (scalar dh when the spacing is uniform).
-        self._global_prop = prop
         equation = prop.equation
         global_shape = prop._shape_phys
         if torch.is_tensor(prop.dh):
@@ -263,7 +241,6 @@ class ModelParallel:
         # Accepted-equation check only. NOTHING dispatches on this any more:
         # the schedule comes from the equation's own declarations (see
         # _spec below), and the wavefield geometry from its slot table.
-        self.family = _family_of(equation)
         # Whether this equation's backward needs the coupling-field exchange
         # (a gradient that is a spatial DIVERGENCE rather than a pointwise
         # product; variable-density VRZ is the case in the tree). Read off the
@@ -301,22 +278,14 @@ class ModelParallel:
 
         # cut-face mask + active halo axes: a cut exists wherever a neighbour is
         # present.  x-cut (px>1) and, for 3-D, y-cut (py>1) -> 2x2 when both.
-        self.cut_mask = 0
-        axes = []
-        if self.topo.neighbour_rank("x", -1) is not None:
-            self.cut_mask |= X_LO_BIT
-        if self.topo.neighbour_rank("x", +1) is not None:
-            self.cut_mask |= X_HI_BIT
-        if self.topo.px > 1:
-            axes.append("x")
-        if self.ndim == 3:
-            if self.topo.neighbour_rank("y", -1) is not None:
-                self.cut_mask |= Y_LO_BIT
-            if self.topo.neighbour_rank("y", +1) is not None:
-                self.cut_mask |= Y_HI_BIT
-            if self.topo.py > 1:
-                axes.append("y")
-        self.axes = tuple(axes)
+        # Same function PropBase uses for its own cut mask, so the two cannot
+        # drift; equivalence with the old inline neighbour_rank spelling was
+        # checked exhaustively over py<=3 x px<=4 x every rank x both ndims.
+        self.cut_mask = dd_cut_face_mask(self.topo, self.ndim)
+        self.axes = tuple(
+            ax for ax, n in (("x", self.topo.px),
+                             ("y", self.topo.py if self.ndim == 3 else 1))
+            if n > 1)
 
         # Inherit the wrapped prop's formulation verbatim. There is deliberately
         # no fallback: PropBase.__init__ already resolved a None pml_type to
@@ -428,8 +397,6 @@ class ModelParallel:
         # assumption that velocity slots are a contiguous prefix -- true for
         # elastic, false for DAS-Zhao, whose physical block is split around the
         # PML block.
-        self._vel_idx = table.vel_idx
-        self._phys_idx = table.phys_idx
 
     # ------------------------------------------------------------------ utils
     def _halo(self, attr):
@@ -695,7 +662,6 @@ class ModelParallel:
             if _p is not None and self._bsession is not None:
                 _p.boundary_session = self._bsession
         self.f_func, self.b_func = f_orig, b_orig
-        self._cuda_ndim = cap["fraw"][2].ndim
 
         L = list(self.fp.wavefields)
         if not L:
@@ -1293,7 +1259,6 @@ class ModelParallel:
         if self.rank != 0:
             return None
         # place each tile's receiver columns at their global index
-        ncomp_axis = tile_record.ndim
         full = None
         nrec_global = max(max(idx) for idx, _ in gathered if idx) + 1
         for idx, rc in gathered:

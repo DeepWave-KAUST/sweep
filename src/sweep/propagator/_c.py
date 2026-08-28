@@ -1420,7 +1420,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         elif legacy_override:
             boundary_saving_config = {**legacy_override, **boundary_saving_config}
 
-        mode, batch_size, nsrc_per_shot, nrec, source_encoding = self._normalize_io(
+        mode, batch_size, nsrc_per_shot, _, _ = self._normalize_io(
             wavelet, sources, receivers
         )
 
@@ -1462,16 +1462,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # Set zeros
         M = self.equation.so // 2
 
-        pml_padding = M
         padding = [p+M for p in self.padding]
-        base_shift = M + self.abcn
 
         shape_for_pml = [p+2*M for p in self.shape]
 
         kwargs['shape'] = shape_for_pml
         self.init_abc(**kwargs)
 
-        nt = self.nt
         sources = sources.copy()
         receivers = receivers.copy()
 
@@ -1697,7 +1694,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         use_boundary_saving = kwargs.pop("use_boundary_saving", None)
         boundary_saving_config = kwargs.pop("boundary_saving_config", None)
-        mode, batch_size, nsrc_per_shot, nrec, _ = self._normalize_io(
+        mode, batch_size, _, _, _ = self._normalize_io(
             wavelet, sources, receivers
         )
         if mode == 'B':
@@ -1793,7 +1790,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         M = self.equation.so // 2
         padding = [p + M for p in self.padding]
-        base_shift = M + self.abcn
         shape_for_pml = [p + 2 * M for p in self.shape]
         kwargs["shape"] = shape_for_pml
         self.init_abc(**kwargs)
