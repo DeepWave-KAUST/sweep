@@ -780,19 +780,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         for name, data in zip(self.model_names, model):
             setattr(self, name, torch.nn.Parameter(data))
 
-    def _default_field_types(self, kinds, is_source):
-        if kinds:
-            return kinds
-
-        if self.equation.__class__.__name__ == 'Elastic':
-            if self.ndim == 2:
-                return ['sxx', 'szz'] if is_source else ['vx', 'vz']
-            return ['sxx', 'syy', 'szz'] if is_source else ['vx', 'vy', 'vz']
-
-        return [self.wavefield_names[0]]
-
     def _field_indices_tensor(self, kinds, is_source):
-        resolved = self._default_field_types(kinds, is_source)
+        # ``kinds`` is the non-empty list PropBase.__init__ already resolved
+        # from the equation's declared defaults (base.py); the c side adds no
+        # defaults of its own.
+        resolved = list(kinds)
+        if not resolved:
+            role = 'source_type' if is_source else 'receiver_type'
+            raise ValueError(f"{role} resolved to an empty list; PropBase should have defaulted it")
         missing = [name for name in resolved if name not in self.wavefield_names]
         if missing:
             role = 'source_type' if is_source else 'receiver_type'
