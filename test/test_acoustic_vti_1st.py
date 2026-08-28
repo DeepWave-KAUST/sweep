@@ -603,7 +603,7 @@ def test_cuda_backward_bs_matches_full():
             impl="c", use_ckpt=False,
         )
         if memory_options is not None:
-            kwargs["memory_options"] = memory_options
+            kwargs["memory"] = memory_options
         prop = PropTorch(eq, shape, **kwargs)
         models = _make_models(vp_init, rho_init, req_grad=True)
         rec_syn = prop(wavelet, src, rec, models=models)
@@ -620,8 +620,12 @@ def test_cuda_backward_bs_matches_full():
         ref = float(gf.abs().max())
         rel = diff / max(ref, 1e-30)
         # The two modes share the SAME adjoint kernel + gradient kernel; the
-        # only numerical difference is reconstruction round-off, which is at
-        # float32 machine precision.  Tight threshold.
+        # only numerical difference is reconstruction round-off.  The relative
+        # threshold needs an absolute floor: grad_eps peaks near 1e-5, where a
+        # ~1e-10 float32 round-off already reads as ~2e-5 relative.  (This
+        # comparison first ran for real on 2026-08-28 -- it used to pass a
+        # misspelled memory_options= kwarg, so both sides were 'full'.)
+        rel = diff / max(ref, 1e-30) if diff > 1e-9 else 0.0
         assert rel < 1e-5, (
             f"{name}: backward_bs vs full diff {rel:.3e} > 1e-5 "
             f"(diff max {diff:.3e}, full max {ref:.3e})"
@@ -722,7 +726,7 @@ def test_cuda_backward_ckpt_matches_full():
 
     g_full = _grads(use_ckpt=False)
     g_ckpt = _grads(use_ckpt=True, ckpt_chunks=20,
-                    memory_options=MemoryOptions(
+                    memory=MemoryOptions(
                         strategy="ckpt",
                         ckpt=CkptOptions(mode="chunk", chunks=20, storage="gpu")))
 
@@ -1008,7 +1012,7 @@ def test_cuda_backward_3d_bs_matches_full():
             device="cuda", impl="c", use_ckpt=False,
         )
         if memory_options is not None:
-            kwargs["memory_options"] = memory_options
+            kwargs["memory"] = memory_options
         prop = PropTorch(eq, cfg["shape"], **kwargs)
         _, init_models = _canonical_3d_models_with_anomaly(cfg, req_grad=True)
         rec_syn = prop(cfg["wavelet"], cfg["src"], cfg["rec"], models=init_models)
@@ -1070,10 +1074,10 @@ def test_cuda_backward_3d_ckpt_matches_full():
         kwargs = dict(
             source_type=["sH", "sV"], receiver_type=["vz"],
             abcn=cfg["abcn"], dh=cfg["dh"], dt=cfg["dt"], nt=cfg["nt"],
-            device="cuda", impl="c", use_ckpt=False,
+            device="cuda", impl="c",
         )
         if memory_options is not None:
-            kwargs["memory_options"] = memory_options
+            kwargs["memory"] = memory_options
         prop = PropTorch(eq, cfg["shape"], **kwargs)
         _, init_models = _canonical_3d_models_with_anomaly(cfg, req_grad=True)
         rec_syn = prop(cfg["wavelet"], cfg["src"], cfg["rec"], models=init_models)

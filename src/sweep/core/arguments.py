@@ -91,9 +91,9 @@ _LEGACY_BOUNDARY_KEYS = {
 def merge_legacy_boundary_kwargs(kwargs, boundary_saving_config):
     """Fold the pre-config-dict boundary keywords into `boundary_saving_config`.
 
-    Consumes the legacy keys from `kwargs` (popping them, so an unrecognised
-    leftover still surfaces as an unexpected keyword) and returns the merged
-    config, or None when neither form was used.
+    Consumes the legacy keys from `kwargs` (popping them; PropBase.__init__
+    rejects whatever is left over) and returns the merged config, or None when
+    neither form was used.
 
     **An explicit config wins.** `{**legacy, **explicit}` is the order the
     constructor has always used, and it is the right way round: a caller who

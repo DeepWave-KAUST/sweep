@@ -242,6 +242,13 @@ class PropBase:
         # through rank-local PML widths and source/receiver / model tile work
         # is performed in subclasses. None = single-rank behaviour (unchanged).
         self.model_parallel = kwargs.pop('model_parallel', None)
+        if kwargs:
+            # Every named option and every legacy spelling has been consumed by
+            # now, so anything left is a typo -- swallowing it silently turns
+            # e.g. free_surfce=True into a flat-surface run that looks fine.
+            raise TypeError(
+                f"{type(self).__name__} got unexpected keyword arguments: "
+                f"{sorted(kwargs)}")
 
         # Keep the equation object aware of geometry-dependent boundary
         # behavior.  ``equation.free_surface`` is the image-method-layout
@@ -729,7 +736,17 @@ class PropBase:
             config["enabled"] = bool(use_boundary_saving)
         return config
 
+    _INIT_ABC_KEYS = frozenset({"fd_pad", "shape", "max_vel", "pml_freq"})
+
     def init_abc(self, **kwargs):
+        # forward()'s residual kwargs land here on both impls, so this is the
+        # one place a call-time typo (pml_freqs=...) can be caught instead of
+        # silently keeping the default.
+        unknown = set(kwargs) - self._INIT_ABC_KEYS
+        if unknown:
+            raise TypeError(
+                f"forward() got unexpected keyword arguments: {sorted(unknown)}; "
+                f"recognised extras are {sorted(self._INIT_ABC_KEYS)}")
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim
         fd_pad = tuple(kwargs.get('fd_pad', _padding))
         shape = tuple(kwargs.get('shape', self.shape))

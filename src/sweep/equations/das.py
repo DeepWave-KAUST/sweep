@@ -388,11 +388,13 @@ class DAS(torch.nn.Module):
         sources,
         receivers,
         models=None,
-        source_encoding=False,
         adj=False,
         return_wavefield=False,
         **kwargs,
     ):
+        # (no source_encoding parameter: the solver derives the encoding mode
+        # from the wavelet/sources shapes; the old parameter was forwarded to a
+        # forward() that never read it.)
         if return_wavefield:
             raise NotImplementedError("DAS facade returns records only. Use PropTorch directly for wavefields.")
 
@@ -401,7 +403,6 @@ class DAS(torch.nn.Module):
             sources=sources,
             receivers=receivers,
             models=models,
-            source_encoding=source_encoding,
             adj=adj,
             return_wavefield=False,
             **kwargs,
