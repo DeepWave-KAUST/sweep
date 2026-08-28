@@ -150,5 +150,6 @@ class Acoustic3D(SecondOrderEquation):
             backward_workspace_nvar=1,
             slots=slot_table.ACOUSTIC3D,
             grads_out_has_wavelet=True,
+            supports_boundary_tail_steps=True,
             illum_nvar=2,
         )
