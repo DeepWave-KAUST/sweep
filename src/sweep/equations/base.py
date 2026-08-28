@@ -103,6 +103,19 @@ class WaveEquation:
     # only once its CUDA forward + adjoint honour ``fs_faces`` per edge.
     supports_per_edge_free_surface_c = False
 
+    # Whether the eager ``func`` applies the image-method topography staircase
+    # (it reads ``_topo_rows_runtime``).  Without this flag, ``topography=``
+    # with ``topo_method='image'`` on an equation whose step ignores the rows
+    # would silently model a FLAT surface -- the propagator refuses instead.
+    # A flat free surface (no ``topography=``) never consults this flag.
+    supports_image_topography = False
+
+    # Same, for the compiled ``impl='c'`` kernels (they read the rows through
+    # ``SolverContext``).  Declared separately because support differs by impl:
+    # 3-D Elastic honours topography on eager but its CUDA kernels do not, and
+    # ElasticVRR is the reverse.
+    supports_image_topography_c = False
+
     # Class-level spec tables. Subclasses that declare these tables drive
     # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``
     # properties below automatically; manual property overrides remain

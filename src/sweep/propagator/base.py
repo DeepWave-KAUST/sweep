@@ -24,6 +24,10 @@ from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFA
 
 class PropBase:
 
+    # Which equation flag gates an image-method topography staircase on this
+    # impl; the compiled backend overrides it with the _c spelling.
+    _IMAGE_TOPO_FLAG = "supports_image_topography"
+
     def __init__(self,
                  equation,
                  shape,
@@ -185,6 +189,18 @@ class PropBase:
         # image method or APM alike, both of them isotropic constructions.
         refuse_free_surface_if_anisotropic(
             equation, self.free_surface, "implied by topography=")
+        # A topography STAIRCASE (not a flat free surface) needs the equation
+        # to actually apply ``_topo_rows_runtime`` / the kernel-side rows;
+        # accepting it otherwise silently models a flat surface.  The flag name
+        # is per-impl (``_IMAGE_TOPO_FLAG``): e.g. 3-D Elastic honours the
+        # rows on eager but not in its CUDA kernels.
+        if topography is not None and self._topo_method == 'image' \
+                and not getattr(equation, self._IMAGE_TOPO_FLAG, False):
+            raise NotImplementedError(
+                f"topography= with the image method is not implemented by "
+                f"{type(equation).__name__} on this impl "
+                f"({self._IMAGE_TOPO_FLAG} is False)."
+            )
         # ``_resolve_topo_method`` can turn the TOP free surface on implicitly
         # (topography= implies an image-method free surface even with
         # free_surface=False).  Fold that back into the canonical fs_faces/pad so

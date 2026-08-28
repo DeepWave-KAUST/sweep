@@ -515,6 +515,8 @@ class Warpper(torch.autograd.Function):
 
 class _CompiledPropagator(PropBase, torch.nn.Module):
 
+    _IMAGE_TOPO_FLAG = "supports_image_topography_c"
+
     def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
         # Pre-set the attributes ``__del__`` may touch so a raise-during-init
