@@ -174,6 +174,7 @@ def elastic_stress_substep(
     topo_rows=None,
     fs_faces=None,
     lame_lambda_2mu=None,
+    return_gradients=False,
 ):
     """Stress sub-step: update ``(sxx, szz, sxz)`` from the velocity gradients (a
     pure shear — velocities are read, not written).  Second half of
@@ -256,12 +257,20 @@ def elastic_stress_substep(
     vz_x = vz_x + m_vzx
     sxz = sxz + dt * mu_xz * (vx_z + vz_x)
 
-    return (
+    out = (
         vx, vz, sxx, szz, sxz,
         m_vxx, m_vxz, m_vzx, m_vzz,
         m_txxx, m_txxz, m_tzzx, m_tzzz,
         m_txzx, m_txzz,
     )
+    if return_gradients:
+        # The CPML-corrected velocity gradients this sub-step just consumed.
+        # DASMu integrates its strain state from exactly these; exporting them
+        # is what lets its step delegate here instead of keeping a literal
+        # copy. Nothing recomputed, nothing reordered: the default path is
+        # untouched.
+        return out + ((vx_x, vz_z, vx_z, vz_x),)
+    return out
 
 
 def elastic_step_core(

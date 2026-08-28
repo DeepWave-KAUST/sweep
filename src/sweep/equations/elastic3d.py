@@ -57,6 +57,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          pml=None,
          free_surface=False,
          topo_rows=None,
+         return_gradients=False,
          ):
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
@@ -192,15 +193,24 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
         else:
             szz = zero_top_row(szz, top_halo, axis=-3)
     
-    return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
-           m_vxx, m_vxy, m_vxz, \
-           m_vyx, m_vyy, m_vyz, \
-           m_vzx, m_vzy, m_vzz, \
-           m_sxxx, m_szzz, \
-           m_sxyx, m_sxyy, \
-           m_sxzx, m_sxzz, \
-           m_syyy, \
-           m_syzy, m_syzz
+    out = (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+           m_vxx, m_vxy, m_vxz,
+           m_vyx, m_vyy, m_vyz,
+           m_vzx, m_vzy, m_vzz,
+           m_sxxx, m_szzz,
+           m_sxyx, m_sxyy,
+           m_sxzx, m_sxzz,
+           m_syyy,
+           m_syzy, m_syzz)
+    if return_gradients:
+        # The CPML-corrected velocity gradients the stress update just consumed.
+        # DASMu3D derives its strain-rate state from exactly these; exporting
+        # them is what lets its step be this step plus six strain lines instead
+        # of a 130-line copy. Nothing is recomputed and nothing reordered, so
+        # the flag cannot perturb the default path.
+        return out + ((dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
+                       dvx_dz, dvz_dx, dvy_dz, dvz_dy),)
+    return out
 
 
 def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
