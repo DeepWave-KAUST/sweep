@@ -2,14 +2,6 @@
 
 from __future__ import annotations
 
-from ._free_surface import (
-    top_free_surface_derivative,
-    zero_top_row,
-    fs_deriv as _fs_deriv,
-    get_o2_pd as _get_o2_pd,
-    near_surface_o2_count as _near_surface_o2_count,
-)
-import os as _os
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
@@ -40,73 +32,6 @@ def _replace_axis_slice(u, axis, index, value):
     return out
 
 
-def _apply_top_traction_free_gradients(
-    dvx_dx,
-    dvy_dx,
-    dvz_dx,
-    dvx_dz,
-    dvy_dz,
-    dvz_dz,
-    C13,
-    C14,
-    C15,
-    C33,
-    C34,
-    C35,
-    C36,
-    C44,
-    C45,
-    C46,
-    C55,
-    C56,
-    top_halo,
-):
-    """Enforce sigma_zz=sigma_xz=sigma_yz=0 on the SG free-surface row.
-
-    For anisotropic media the three normal-direction velocity gradients on the
-    free surface are coupled. Solving the local 3x3 traction system prevents
-    the horizontal stress updates from seeing inconsistent top-row gradients.
-    """
-
-    row = top_halo
-    vx_x = _slice_axis(dvx_dx, -2, row, row + 1)
-    vy_x = _slice_axis(dvy_dx, -2, row, row + 1)
-    vz_x = _slice_axis(dvz_dx, -2, row, row + 1)
-
-    c13 = _slice_axis(C13, -2, row, row + 1)
-    c14 = _slice_axis(C14, -2, row, row + 1)
-    c15 = _slice_axis(C15, -2, row, row + 1)
-    c33 = _slice_axis(C33, -2, row, row + 1)
-    c34 = _slice_axis(C34, -2, row, row + 1)
-    c35 = _slice_axis(C35, -2, row, row + 1)
-    c36 = _slice_axis(C36, -2, row, row + 1)
-    c44 = _slice_axis(C44, -2, row, row + 1)
-    c45 = _slice_axis(C45, -2, row, row + 1)
-    c46 = _slice_axis(C46, -2, row, row + 1)
-    c55 = _slice_axis(C55, -2, row, row + 1)
-    c56 = _slice_axis(C56, -2, row, row + 1)
-
-    rhs_zz = c13 * vx_x + c36 * vy_x + c35 * vz_x
-    rhs_yz = c14 * vx_x + c46 * vy_x + c45 * vz_x
-    rhs_xz = c15 * vx_x + c56 * vy_x + c55 * vz_x
-
-    # Matrix rows are the coefficients of [dvx_dz, dvy_dz, dvz_dz] in
-    # sigma_zz, sigma_yz, and sigma_xz.
-    a, b, c = c35, c34, c33
-    d, e, f = c45, c44, c34
-    g, h, i = c55, c45, c35
-    r1, r2, r3 = -rhs_zz, -rhs_yz, -rhs_xz
-
-    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
-    vx_z = ((e * i - f * h) * r1 + (c * h - b * i) * r2 + (b * f - c * e) * r3) / det
-    vy_z = ((f * g - d * i) * r1 + (a * i - c * g) * r2 + (c * d - a * f) * r3) / det
-    vz_z = ((d * h - e * g) * r1 + (b * g - a * h) * r2 + (a * e - b * d) * r3) / det
-
-    return (
-        _replace_axis_slice(dvx_dz, -2, row, vx_z),
-        _replace_axis_slice(dvy_dz, -2, row, vy_z),
-        _replace_axis_slice(dvz_dz, -2, row, vz_z),
-    )
 
 
 def step(
@@ -165,11 +90,15 @@ def step(
     if len(pml) != 8:
         raise ValueError("ElasticTTISG requires pml_type='cpmls', which provides eight staggered CPML profiles.")
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
-    top_halo = pd.coes.shape[0]
-    # Near-surface order reduction (matches the shared CUDA helper, which reduces
-    # these same six FS z-derivatives): order-2 image stencil in the top band.
-    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) if free_surface else 0
-    _pd2 = _get_o2_pd(pd) if _n_o2 else None
+    if free_surface:
+        # The class refuses a free surface at construction (supports_free_surface
+        # is False, inherited from ElasticTTI -- the anisotropic stress-free
+        # condition is not the isotropic mirror this branch used to apply). A
+        # True here can only mean the propagator was bypassed; fail loud rather
+        # than run physics nothing has ever tested.
+        raise NotImplementedError(
+            "ElasticTTISG.step has no free-surface implementation; construct "
+            "via PropTorch, which refuses free_surface=True for this equation.")
 
     dsxx_dx = pd.x_forward(sxx)
     dsxz_dz = pd.z_backward(sxz)
@@ -177,11 +106,6 @@ def step(
     dsyz_dz = pd.z_backward(syz)
     dsxz_dx = pd.x_backward(sxz)
     dszz_dz = pd.z_forward(szz)
-
-    if free_surface:
-        dsxz_dz = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
-        dsyz_dz = _fs_deriv(syz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
-        dszz_dz = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
 
     m_txxx = axh * m_txxx + bxh * dsxx_dx
     m_txzz = az * m_txzz + bz * dsxz_dz
@@ -205,14 +129,9 @@ def step(
     dvy_dx = pd.x_forward(vy)
     dvz_dx = pd.x_forward(vz)
 
-    if free_surface:
-        dvz_dz = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
-        dvx_dz = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
-        dvy_dz = _fs_deriv(vy, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
-    else:
-        dvz_dz = pd.z_backward(vz)
-        dvx_dz = pd.z_forward(vx)
-        dvy_dz = pd.z_forward(vy)
+    dvz_dz = pd.z_backward(vz)
+    dvx_dz = pd.z_forward(vx)
+    dvy_dz = pd.z_forward(vy)
 
     m_vxx = ax * m_vxx + bx * dvx_dx
     m_vxz = azh * m_vxz + bzh * dvx_dz
@@ -228,29 +147,6 @@ def step(
     dvz_dx = dvz_dx + m_vzx
     dvz_dz = dvz_dz + m_vzz
 
-    if free_surface:
-        dvx_dz, dvy_dz, dvz_dz = _apply_top_traction_free_gradients(
-            dvx_dx,
-            dvy_dx,
-            dvz_dx,
-            dvx_dz,
-            dvy_dz,
-            dvz_dz,
-            C13,
-            C14,
-            C15,
-            C33,
-            C34,
-            C35,
-            C36,
-            C44,
-            C45,
-            C46,
-            C55,
-            C56,
-            top_halo,
-        )
-
     shear_xz = dvz_dx + dvx_dz
 
     sxx = sxx + dt * (C11 * dvx_dx + C16 * dvy_dx + C15 * shear_xz + C14 * dvy_dz + C13 * dvz_dz)
@@ -258,11 +154,6 @@ def step(
     syz = syz + dt * (C14 * dvx_dx + C46 * dvy_dx + C45 * shear_xz + C44 * dvy_dz + C34 * dvz_dz)
     sxz = sxz + dt * (C15 * dvx_dx + C56 * dvy_dx + C55 * shear_xz + C45 * dvy_dz + C35 * dvz_dz)
     sxy = sxy + dt * (C16 * dvx_dx + C66 * dvy_dx + C56 * shear_xz + C46 * dvy_dz + C36 * dvz_dz)
-
-    if free_surface:
-        szz = zero_top_row(szz, top_halo, axis=-2)
-        sxz = zero_top_row(sxz, top_halo, axis=-2)
-        syz = zero_top_row(syz, top_halo, axis=-2)
 
     return (
         vx,
