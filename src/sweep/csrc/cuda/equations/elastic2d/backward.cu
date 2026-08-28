@@ -50,10 +50,10 @@ static __global__ void sub_receiver_rho_grad_correction_apm_2d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
-    int u_idx = b * spatial_size + idx;
-    int src_idx = (b * nrec + s) * solver.nt + it;
+    long long u_idx = (long long)b * spatial_size + idx;
+    long long src_idx = ((long long)b * nrec + s) * solver.nt + it;
 
     float drho_x_drho, drho_z_drho;
     apm_rho_jacobian(category[idx], &drho_x_drho, &drho_z_drho);

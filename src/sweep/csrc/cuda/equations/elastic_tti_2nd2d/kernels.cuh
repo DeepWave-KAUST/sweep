@@ -677,7 +677,7 @@ static __global__ void tti2nd_rho_grad_source_correction(
     if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz) return;
 
     const int idx = b * spatial_size + iz * solver.nx + ix;
-    const float s = source[(b * nsrc + isrc) * solver.nt + it];
+    const float s = source[((long long)b * nsrc + isrc) * solver.nt + it];
     atomicAdd(&grad_rho[idx], adj_field[idx] * s / rho[idx]);
 }
 
