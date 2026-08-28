@@ -143,6 +143,7 @@ class Warpper(torch.autograd.Function):
         use_apm_param: bool=False,
         fs_faces: int=-1,   # per-edge free-surface bitmask (-1 => legacy z-min)
         cut_face_mask: int=0,  # DD cut faces (0 => single domain)
+        eq_aux: tuple=(),   # equation-specific aux tensors (e.g. visco |k| grid)
         *models             # list of (B, nz, nx) tensors
     ):
         """
@@ -209,6 +210,9 @@ class Warpper(torch.autograd.Function):
         params.use_pinned_memory = use_pinned_memory
         params.free_surface = free_surface
         params.fs_faces = fs_faces
+        # Equation-specific aux tensors (opaque to this wrapper; e.g. the
+        # visco-acoustic |k| grid).  Constants — no grad flows through them.
+        params.eq_aux = [t.contiguous() for t in eq_aux]
         # DD cut faces MUST be told to C too, not just to the Python Layout:
         # ``Layout(cut_mask=...)`` drops a cut face's boundary buffer to numel 0
         # (gpu_full_shapes), and only ``ctx.cut_*`` stops boundary_kernel2d from
@@ -269,6 +273,7 @@ class Warpper(torch.autograd.Function):
             ctx.checkpoint_interval = checkpoint_interval
             ctx.checkpoint_count = checkpoint_count
             ctx.models = models
+            ctx.eq_aux = tuple(eq_aux)
             ctx.boundary_on_cpu = boundary_on_cpu
             ctx.boundary_on_disk = boundary_on_disk
             ctx.boundary_disk_async_read = boundary_disk_async_read
@@ -371,6 +376,7 @@ class Warpper(torch.autograd.Function):
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.adjoint_workspace = list(ctx.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
+        params.eq_aux = [t.contiguous() for t in getattr(ctx, "eq_aux", ())]
         # ``adjoint_source`` arrives in the canonical (B, nt, nrec, nfield)
         # layout that ``forward`` returned; permute it back to the raw CUDA
         # layout the C++ adjoint-source kernels expect.
@@ -584,6 +590,7 @@ class Warpper(torch.autograd.Function):
             None,      # use_apm_param
             None,      # fs_faces
             None,      # cut_face_mask
+            None,      # eq_aux
             *model_grads # models
         )
 
@@ -873,6 +880,18 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             raise ValueError(f'Invalid {role} entries {missing}; available wavefields are {self.wavefield_names}')
         indices = [self.wavefield_names.index(name) for name in resolved]
         return torch.tensor(indices, dtype=torch.int32, device=self.dev)
+
+    def _c_eq_aux(self):
+        """Equation-specific aux tensors for the C kernels (``eq_aux``).
+
+        Delegates to the equation's ``c_eq_aux(propagator)`` hook when defined
+        (e.g. ViscoAcoustic packs its |k| FFT grid); every other equation gets
+        the empty default.  Constants — no grad flows through them.
+        """
+        hook = getattr(self.equation, "c_eq_aux", None)
+        if hook is None:
+            return ()
+        return tuple(hook(self))
 
     def _cuda_layout(self):
         layout = getattr(self.equation, "cuda_layout", None)
@@ -1807,6 +1826,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 use_apm_arg,
                 self._fs_faces_c,
                 getattr(self, "_dd_cut_mask", 0),
+                tuple(self._c_eq_aux()),
                 *models_arg,
             )
         
@@ -1964,6 +1984,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         lap_coes, grad_coes = self._build_fd_coefficients(M)
 
         models = [m[None, None, ...].repeat(batch_size, *([1] * (m.ndim + 1))) for m in self.models_padded]
+        if getattr(self.equation, "prepare_models_for_c", False):
+            # Same hook as the forward path: the C kernels consume the
+            # prepared model set (e.g. ViscoAcoustic's (vp_step, A)).
+            models = list(self.equation.prepare_models(models))
         requires_model_grad = any(m.requires_grad for m in models)
         save_all_wavefields = bool(self.ndim == 2 or (requires_model_grad and not use_boundary_saving and not use_ckpt))
         self._ensure_wavefield_buffers(batch_size, persist_forward_state=save_all_wavefields, need_adjoint=requires_model_grad)
@@ -2045,6 +2069,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fwd.use_pinned_memory = use_pinned_memory
         fwd.free_surface = self._image_method_active
         fwd.fs_faces = self._fs_faces_c
+        fwd.eq_aux = list(self._c_eq_aux())
         fwd.cut_face_mask = getattr(self, "_dd_cut_mask", 0)
         # Topography plumbing (image method).  Empty + has_topo=False for flat.
         topo_rows_rt = getattr(self.equation, "_topo_rows_runtime", None)
@@ -2097,6 +2122,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         bwd.source_field_indices = self._field_indices_tensor(self.source_type, is_source=True)
         bwd.receiver_field_indices = self._field_indices_tensor(self.receiver_type, is_source=False)
         bwd.pml_vals = [p.to(self.dev).contiguous() for p in self.equation.b]
+        bwd.eq_aux = list(self._c_eq_aux())
         bwd.nt = self.nt
         bwd.dt = self._dt
         bwd.spacing = spacing

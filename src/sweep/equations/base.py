@@ -5,6 +5,8 @@ from sweep.operators.general import StaggeredDerivative
 from sweep.scalars import generate_convolution_kernel
 from sweep.operators.factory import LaplaceGradientOps
 from sweep.equations.pml import set_cpml_profiles_s, set_cpml_profiles_r, set_spml_profiles
+from ._edges import face_axis_side, field_z_like_axis
+from .utils import zero_top_halo_fields, zero_edge_halo_fields
 from .fields import (
     available_role_specs,
     ensure_field_specs,
@@ -58,6 +60,14 @@ class WaveEquation:
     # propagator raises on any free_surface request instead of silently
     # running the wrong surface physics.
     supports_free_surface = True
+
+    # Whether the CUDA backend of this equation can run the boundary-saving
+    # gradient-memory strategy.  Equations whose step cannot be reverse-time
+    # reconstructed from boundary strips (e.g. the dissipative, global-FFT
+    # visco-acoustic damping) override this to False; the impl='c' default
+    # strategy then falls back to 'full' and an explicit boundary request
+    # raises instead of running a wrong reconstruction.
+    supports_boundary_saving_c = True
 
     # Whether the compiled (``impl='c'``) kernels accept a per-shot *batched*
     # velocity model — one model per shot in the batch, shape ``(B, *spatial)``
@@ -535,6 +545,25 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
     Base class for second-order equations.
     This class can be extended to implement specific second-order equations.
     """
+
+    def _apply_free_surface(self, fields):
+        """Enforce ``p = 0`` (pressure release) at every active free-surface face
+        by zeroing that face's ``so//2`` halo band.  ``self.fs_faces`` (set by the
+        propagator) selects the faces; for the top-only default the single
+        iteration is bit-identical to ``zero_top_halo_fields(..., axis=-2)``."""
+        halo = self.so // 2
+        fs_faces = getattr(self, "fs_faces", None)
+        if not fs_faces:
+            return zero_top_halo_fields(fields, halo, axis=-2)
+        for face, active in enumerate(fs_faces):
+            if not active:
+                continue
+            shape_axis, side = face_axis_side(face, self.ndim)
+            field_axis = field_z_like_axis(shape_axis, self.ndim)
+            fields = zero_edge_halo_fields(
+                fields, halo, axis=field_axis, side=("low" if side == 0 else "high")
+            )
+        return fields
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', **kwargs):
         """

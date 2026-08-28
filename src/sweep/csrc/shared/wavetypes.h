@@ -51,6 +51,13 @@ struct ForwardInput {
     std::vector<int> pad_lo;
     std::vector<int> pad_hi;
 
+    // Equation-specific auxiliary input tensors, opaque to the shared
+    // plumbing (packed by the equation's ``c_eq_aux`` hook, mirrored to the
+    // backward by the autograd wrapper).  visco_acoustic2d: {|k| grid}
+    // (nz_runtime, nx_runtime float32) — present iff amplitude damping is
+    // active.  Empty for every other equation.
+    std::vector<torch::Tensor> eq_aux;
+
     // Irregular free-surface topography (image method / vacuum staircase).
     // ``topo_rows`` is a 1-D ``int32`` tensor of length nx_runtime giving
     // the surface row index per column in runtime (PML-padded) coords; any
@@ -193,6 +200,9 @@ struct BackwardInput {
 
     // pml
     std::vector<torch::Tensor> pml_vals;
+
+    // Equation-specific auxiliary tensors (see ForwardInput::eq_aux).
+    std::vector<torch::Tensor> eq_aux;
 
     // time
     unsigned int nt;
