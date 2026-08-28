@@ -575,6 +575,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.backward_bs_func = funcs[2]
         self.backward_ckpt_func = funcs[3] if len(funcs) > 3 else None
         self.backward_recursive_ckpt_func = funcs[4] if len(funcs) > 4 else None
+        # Refuse at construction rather than silently running chunk ckpt at the
+        # default interval, which is what the forward-time fallback used to do
+        # with the requested count ignored.
+        if (self.use_ckpt and self.ckpt_mode == "recursive"
+                and self.backward_recursive_ckpt_func is None):
+            raise NotImplementedError(
+                f"Ckpt(mode='recursive'): {type(self.equation).__name__} has no "
+                "recursive-checkpoint C binding; use Ckpt(mode='chunk', ...).")
 
         # APM CUDA path — only attached when the equation supports it AND the
         # user selected ``topo_method='apm'``.  Forward only: the APM backward
