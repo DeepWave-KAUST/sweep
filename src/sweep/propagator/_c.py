@@ -1,4 +1,5 @@
 import os
+import warnings
 import shutil
 import tempfile
 
@@ -452,16 +453,18 @@ class Warpper(torch.autograd.Function):
                     and isinstance(source_illumination, torch.Tensor)
                 ):
                     source_buffer.copy_(fit_illumination_to_model(source_illumination, source_buffer))
-            except RuntimeError:
-                pass
+            except RuntimeError as e:
+                # The buffer stays all-zeros -- do not let that read as "no
+                # illumination" without a trace.
+                warnings.warn(f"source illumination left as zeros: crop-to-model failed ({e})")
             try:
                 if (
                     isinstance(receiver_buffer, torch.Tensor)
                     and isinstance(receiver_illumination, torch.Tensor)
                 ):
                     receiver_buffer.copy_(fit_illumination_to_model(receiver_illumination, receiver_buffer))
-            except RuntimeError:
-                pass
+            except RuntimeError as e:
+                warnings.warn(f"receiver illumination left as zeros: crop-to-model failed ({e})")
 
         # Space-lag ADCIG cube (gradients[4]): (nlag, N, C, nz, nx[, ny]) on the
         # runtime-padded grid.  Sum over the batch (N, C) — keeping the leading
@@ -490,8 +493,8 @@ class Warpper(torch.autograd.Function):
                     return adcig
                 try:
                     adcig_buffer.copy_(fit_adcig_to_model(adcig_returned, adcig_buffer))
-                except RuntimeError:
-                    pass
+                except RuntimeError as e:
+                    warnings.warn(f"ADCIG cube left as zeros: crop-to-model failed ({e})")
 
         wavelet_grad = None
         model_grads = returned_grads
