@@ -48,7 +48,6 @@ from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
     zero_top_row,
-    top_free_surface_derivative,
     fs_deriv as _fs_deriv,
     get_o2_pd as _get_o2_pd,
     near_surface_o2_count as _near_surface_o2_count,

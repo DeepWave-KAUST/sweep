@@ -35,7 +35,7 @@ never pads implicitly and the divisibility check stays loud.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import numpy as np
 import torch
@@ -97,7 +97,7 @@ def pad_to_mesh(model, mesh=None, *, py: int = 1, px: int = 1):
 
     * ``80x95x95``, 700 steps, 1-cell pad -> ``1.7e-5``, and 98 % of the
       difference sits in the padded faces;
-    * ``109x294x135``, 5258 steps, 24 encoded sources, 1-cell pad ->
+    * a production-size grid, thousands of steps, encoded sources, 1-cell pad ->
       ``1.3e-3``, spread over the WHOLE volume (every cell differs; median
       distance to the nearest tile face 9 cells).
 

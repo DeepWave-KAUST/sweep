@@ -108,7 +108,7 @@ def build(ndim, *, abcn=8, bs=None, use_ckpt=False, nt=NT2D):
 
 def capture_backward(prop):
     """Wrap the compiled propagator's backward funcs so the populated
-    BackwardInput is kept (Warpper.apply reads the attrs at forward time)."""
+    BackwardInput is kept (Wrapper.apply reads the attrs at forward time)."""
     cap = {}
     impl = prop._backend_impl
     for name in ("backward_func", "backward_bs_func", "backward_ckpt_func"):

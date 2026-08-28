@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 import inspect
 
 import numpy as np
@@ -51,7 +50,6 @@ class PropBase:
                  nt=PROP_DEFAULTS.nt,
                  B=PROP_DEFAULTS.batch_size,
                  allow_growth=PROP_DEFAULTS.allow_growth,
-                 full_mode=PROP_DEFAULTS.full_mode,
                  boundary_saving_config=None,
                  **kwargs):
         """Base class for the Propagator
@@ -233,7 +231,6 @@ class PropBase:
         self.nt = nt
         self.B = B
         self.allow_growth = allow_growth
-        self.full_mode = full_mode
         # NOT warned here: by this point ``boundary_saving_config`` is the
         # INTERNAL wire format -- PropTorch translates memory=BoundarySaving()
         # into exactly this dict, so warning here would warn about the new API.
@@ -808,9 +805,6 @@ class PropBase:
             )
             self._abc_cache_key = abc_key
         
-        if getattr(self.equation, 'need_init', False):
-            self.equation.init(self.shape, self.dev, self._dh)
-
     def crop(self, data):
         """Crop the data to the original shape
 

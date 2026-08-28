@@ -63,7 +63,6 @@ class PropagatorDefaults:
     nt: int = -1
     batch_size: int = 1
     allow_growth: bool = True
-    full_mode: str = "full"
 
 
 EAGER_DEFAULTS = EagerDefaults()

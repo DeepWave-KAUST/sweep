@@ -14,7 +14,6 @@ from .fields import (
     format_field_specs,
     format_model_specs,
 )
-from .cuda_layout import CUDALayoutSpec
 
 
 class hybridmethod:

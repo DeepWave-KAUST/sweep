@@ -25,7 +25,7 @@ NZ, NX, NT = 48, 56, 120
 
 
 def _run_once(capture: list):
-    """One compiled forward+backward, capturing what reached ``Warpper.apply``."""
+    """One compiled forward+backward, capturing what reached ``Wrapper.apply``."""
     from sweep.equations.acoustic import Acoustic
     from sweep.propagator.torch import PropTorch
     from sweep.propagator import _c as c_mod
@@ -37,7 +37,7 @@ def _run_once(capture: list):
                      abcn=10, nt=NT, B=1, allow_growth=True, use_ckpt=False,
                      boundary_saving_config={"enabled": False})
 
-    orig_apply = c_mod.Warpper.apply
+    orig_apply = c_mod.Wrapper.apply
 
     def spy(*args, **kwargs):
         capture.append(args)
@@ -53,14 +53,14 @@ def _run_once(capture: list):
     receivers = np.stack([rec_x, np.full_like(rec_x, NZ // 4)], axis=-1)[None, ...]
     vp = torch.full((1, NZ, NX), 2000.0, device=dev).requires_grad_(True)
 
-    c_mod.Warpper.apply = staticmethod(spy)
+    c_mod.Wrapper.apply = staticmethod(spy)
     try:
         rec = prop(wavelet, sources, receivers, models=[vp])
         rec = rec[0] if isinstance(rec, (tuple, list)) else rec
         rec.pow(2).mean().backward()
         torch.cuda.synchronize(dev)
     finally:
-        c_mod.Warpper.apply = orig_apply
+        c_mod.Wrapper.apply = orig_apply
     return wavelet, vp
 
 
@@ -73,7 +73,7 @@ def test_no_differentiable_tensor_hides_in_the_params_object():
     """
     capture: list = []
     _run_once(capture)
-    assert capture, "Warpper.apply was never called -- the test proves nothing"
+    assert capture, "Wrapper.apply was never called -- the test proves nothing"
     params = capture[0][0]
 
     offenders = []
@@ -98,7 +98,7 @@ def test_only_the_wavelet_and_models_are_positional():
     _run_once(capture)
     args = capture[0]
     assert len(args) == 3, (
-        f"Warpper.apply got {len(args)} positional args, expected "
+        f"Wrapper.apply got {len(args)} positional args, expected "
         f"(params, wavelet, *models) with one model")
     assert type(args[0]).__name__ == "CompiledCallParams"
     assert isinstance(args[1], torch.Tensor) and args[1].requires_grad
