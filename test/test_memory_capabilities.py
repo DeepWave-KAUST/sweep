@@ -100,3 +100,24 @@ def test_every_declared_ckpt_mode_really_builds(impl):
 def test_the_check_is_a_no_op_for_an_unknown_backend_or_no_request():
     check_memory_supported("jax", BoundarySaving(tail_steps=5))   # not in the table
     check_memory_supported("eager", None)
+
+
+# --------------------------------------------------------------------------- #
+# per-equation gaps the per-impl table cannot see
+# --------------------------------------------------------------------------- #
+def test_recursive_ckpt_without_binding_is_refused_at_construction():
+    """ElasticTTISG ships no recursive-ckpt C binding. The request used to be
+    silently downgraded to chunk ckpt at the default interval, the requested
+    count ignored -- a different memory/perf behaviour than asked for."""
+    from sweep.equations import ElasticTTISG
+    from sweep.propagator.torch import PropTorch
+    dev = torch.device("cuda")
+    eq = ElasticTTISG(spatial_order=4, device=dev, backend="torch")
+    with pytest.raises(NotImplementedError, match="recursive-checkpoint"):
+        PropTorch(eq, backend="torch", impl="c", shape=(48, 56), dev=dev,
+                  dh=10.0, dt=1e-3, abcn=20, nt=50, B=1,
+                  memory=Ckpt(mode="recursive", count=4))
+
+
+def test_recursive_ckpt_with_binding_still_constructs():
+    assert _build("c", Ckpt(mode="recursive", count=4)).memory_strategy == "ckpt"
