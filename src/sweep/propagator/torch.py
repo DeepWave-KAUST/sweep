@@ -8,7 +8,6 @@ from sweep.propagator._torch_eager import _PropTorchEager
 from sweep.core.arguments import warn_deprecated_spelling
 from sweep.propagator.options import (
     CUDAOptions,
-    EagerOptions,
     EAGER_OPTION_KEYS,
     CUDA_OPTION_KEYS,
     BOUNDARY_DEFAULTS,
@@ -16,7 +15,6 @@ from sweep.propagator.options import (
     BoundarySaving,
     CKPT_DEFAULTS,
     Ckpt,
-    MemoryOptions,
     options_to_dict,
     resolve_memory_strategy,
     as_memory_strategy,

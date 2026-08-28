@@ -4,7 +4,6 @@ import shutil
 import tempfile
 
 import torch
-import torch.nn.functional as F
 
 import numpy as np
 from sweep.memory.torch import Allocator
@@ -41,7 +40,7 @@ def _get_C():
 #   * canonical             : ``(B, nt, nrec, nfield)``
 #
 # To keep the user-facing API consistent across backends we permute the
-# CUDA output to canonical inside the Warpper / RTM wrappers, and permute
+# CUDA output to canonical inside the Wrapper / RTM wrappers, and permute
 # the canonical-shaped autograd / RTM gradient back to the raw CUDA layout
 # before handing it to the C++ adjoint-source kernels.
 
@@ -92,7 +91,7 @@ def _canonical_to_cuda_record(grad: torch.Tensor, cuda_ndim: int) -> torch.Tenso
     raise ValueError(f"Unexpected cuda_ndim={cuda_ndim}; expected 3 or 4.")
 
 
-class Warpper(torch.autograd.Function):
+class Wrapper(torch.autograd.Function):
 
     @staticmethod
     def forward(
@@ -186,7 +185,7 @@ class Warpper(torch.autograd.Function):
         params.cut_face_mask = cp.cut_face_mask
         # Topography plumbing (image method) — empty tensor + has_topo=False
         # for flat. topo_rows_param is passed in via the autograd Function
-        # call site (see Warpper.apply below).
+        # call site (see Wrapper.apply below).
         if cp.has_topo_param:
             params.topo_rows = cp.topo_rows_param.to(torch.int32).contiguous()
             params.has_topo = True
@@ -368,7 +367,7 @@ class Warpper(torch.autograd.Function):
         params.cut_face_mask = cut_face_mask   # see the forward path
         # Topography plumbing (image method) — mirrors forward path.
         # ``ctx`` carries the runtime row tensor saved at forward time;
-        # ``self`` doesn't exist here (Warpper.backward is a staticmethod).
+        # ``self`` doesn't exist here (Wrapper.backward is a staticmethod).
         topo_rows_rt = getattr(ctx, "topo_rows_param", None)
         has_topo     = bool(getattr(ctx, "has_topo_param", False))
         if has_topo and topo_rows_rt is not None:
@@ -545,13 +544,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 raise NotImplementedError(
                     f"per-edge free surface on impl='c' is not implemented for "
                     f"{type(self.equation).__name__} yet; use impl='eager'."
-                )
-            if (getattr(self.equation, "supports_per_edge_free_surface_c_z_only", False)
-                    and (self.fs_faces[2] or self.fs_faces[3])):
-                raise NotImplementedError(
-                    f"per-edge free surface on impl='c' for "
-                    f"{type(self.equation).__name__} currently supports only the z "
-                    "faces (top/bottom); x faces (left/right) need impl='eager'."
                 )
             if 'cuda' not in str(self.dev):
                 raise NotImplementedError(
@@ -1649,7 +1641,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # doesn't feed host pointers to the CUDA kernel -> illegal address.
         # ``.to`` is a no-op when the tensors already live on ``self.dev``.
         pml_vals = [b.to(self.dev) for b in self.equation.b]
-        syn = Warpper.apply(
+        syn = Wrapper.apply(
                 # Non-differentiable arguments travel as one object; only the
                 # wavelet and the models stay positional, because those are the
                 # two autograd must see to return gradients for them.

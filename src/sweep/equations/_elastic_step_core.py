@@ -33,13 +33,10 @@ from __future__ import annotations
 import os as _os
 
 from ._free_surface import (
-    top_free_surface_derivative,
     top_free_surface_derivative_topo,
-    overwrite_top_row,
     overwrite_at_topo,
     overwrite_surface_row,
     get_o2_pd as _get_o2_pd,
-    fs_deriv as _fs_deriv,
     fs_deriv_edges as _fs_deriv_edges,
     sides_from_fs_faces_2d as _sides_from_fs_faces_2d,
     near_surface_o2_count as _near_surface_o2_count,

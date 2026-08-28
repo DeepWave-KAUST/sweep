@@ -5,17 +5,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from ._free_surface import (
-    top_free_surface_derivative,
-    top_free_surface_cell_derivative,
-    zero_top_row,
-    overwrite_top_row,
-    blend_top_n,
-    get_o2_pd as _get_o2_pd,
-    fs_deriv as _fs_deriv,
-    near_surface_o2_count as _near_surface_o2_count,
-)
-import os as _os
+from ._free_surface import zero_top_row
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec

@@ -42,7 +42,7 @@ structs, which a flat slot tuple cannot express. They keep the legacy path.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 Role = Literal[

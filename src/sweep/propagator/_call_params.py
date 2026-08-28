@@ -1,6 +1,6 @@
 """One object for the compiled call's non-differentiable arguments.
 
-``Warpper`` is a ``torch.autograd.Function``, and autograd's contract is
+``Wrapper`` is a ``torch.autograd.Function``, and autograd's contract is
 positional: ``backward`` must return exactly one gradient per ``forward`` input,
 in order. That contract had been paid literally -- 51 positional parameters, and
 a hand-maintained wall of 48 ``None``s in ``backward`` that only stays correct if
@@ -30,7 +30,7 @@ import torch
 
 @dataclass
 class CompiledCallParams:
-    """Everything ``Warpper.forward`` needs that autograd does not differentiate.
+    """Everything ``Wrapper.forward`` needs that autograd does not differentiate.
 
     Field order is irrelevant to correctness here -- that is the entire point of
     the change. Adding one means adding a field, not also counting ``None``s.
