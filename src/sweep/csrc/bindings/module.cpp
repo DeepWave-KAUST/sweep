@@ -80,16 +80,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic2d_backward_bs", wrap_backward(dispatch_backward(acoustic2d::backward_bs, EK::Acoustic2D, BM::BoundarySaving)), "Acoustic backward with boundary saving (CUDA/CPU)");
     m.def("acoustic2d_backward_ckpt", wrap_backward(dispatch_backward(acoustic2d::backward_ckpt, EK::Acoustic2D, BM::Checkpoint)), "Acoustic backward with checkpointing (CUDA/CPU)");
     m.def("acoustic2d_backward_recursive_ckpt", wrap_backward(dispatch_backward(acoustic2d::backward_recursive_ckpt, EK::Acoustic2D, BM::RecursiveCheckpoint)), "Acoustic backward with recursive checkpointing (CUDA/CPU)");
-    m.def("acoustic2d_rtm", wrap_rtm(acoustic2d::rtm), "Acoustic RTM 2D (CUDA)");
-
     // Visco-acoustic 2D (nearly constant-Q, Zhu & Harris 2014).  CUDA-only —
     // no CPU-C dispatch (the eager backend covers CPU).
+    // No ``visco_acoustic2d_rtm``: the rtm() API was removed wholesale in
+    // 295858c (no caller; production RTM runs forward+backward with
+    // compute_illumination), and wrap_rtm no longer exists.
     m.def("visco_acoustic2d_forward", wrap_forward(visco_acoustic2d::forward), "Visco-acoustic forward 2D (CUDA only)");
     m.def("visco_acoustic2d_backward", wrap_backward(visco_acoustic2d::backward), "Visco-acoustic backward 2D full mode (CUDA only)");
     m.def("visco_acoustic2d_backward_bs", wrap_backward(visco_acoustic2d::backward_bs), "Visco-acoustic backward 2D boundary-saving (unsupported: raises)");
     m.def("visco_acoustic2d_backward_ckpt", wrap_backward(visco_acoustic2d::backward_ckpt), "Visco-acoustic backward 2D with checkpointing (CUDA only)");
     m.def("visco_acoustic2d_backward_recursive_ckpt", wrap_backward(visco_acoustic2d::backward_recursive_ckpt), "Visco-acoustic backward 2D with recursive checkpointing (CUDA only)");
-    m.def("visco_acoustic2d_rtm", wrap_rtm(visco_acoustic2d::rtm), "Visco-acoustic RTM 2D (CUDA only)");
     m.def("acoustic_lsrtm2d_forward", wrap_forward(dispatch_forward(acoustic_lsrtm2d::forward, EK::AcousticLSRTM2D)), "Acoustic LSRTM forward 2D (CUDA/CPU)");
     m.def("acoustic_lsrtm2d_backward", wrap_backward(dispatch_backward(acoustic_lsrtm2d::backward, EK::AcousticLSRTM2D, BM::Full)), "Acoustic LSRTM backward 2D (CUDA/CPU)");
     m.def("acoustic_lsrtm2d_backward_bs", wrap_backward(dispatch_backward(acoustic_lsrtm2d::backward_bs, EK::AcousticLSRTM2D, BM::BoundarySaving)), "Acoustic LSRTM backward with boundary saving 2D (CUDA/CPU)");
@@ -115,7 +115,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic3d_backward_bs", wrap_backward(dispatch_backward(acoustic3d::backward_bs, EK::Acoustic3D, BM::BoundarySaving)), "Acoustic backward with boundary saving 3D (CUDA/CPU)");
     m.def("acoustic3d_backward_ckpt", wrap_backward(dispatch_backward(acoustic3d::backward_ckpt, EK::Acoustic3D, BM::Checkpoint)), "Acoustic backward with checkpointing 3D (CUDA/CPU)");
     m.def("acoustic3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(acoustic3d::backward_recursive_ckpt, EK::Acoustic3D, BM::RecursiveCheckpoint)), "Acoustic backward with recursive checkpointing 3D (CUDA/CPU)");
-    m.def("acoustic3d_rtm", wrap_rtm(acoustic3d::rtm), "Acoustic RTM 3D (CUDA)");
     m.def("elastic2d_forward", wrap_forward(dispatch_forward(elastic2d::forward, EK::Elastic2D)), "Elastic forward 2D (CUDA/CPU)");
     m.def("elastic2d_backward", wrap_backward(dispatch_backward(elastic2d::backward, EK::Elastic2D, BM::Full)), "Elastic backward 2D (CUDA/CPU)");
     m.def("elastic2d_backward_bs", wrap_backward(dispatch_backward(elastic2d::backward_bs, EK::Elastic2D, BM::BoundarySaving)), "Elastic backward with boundary saving 2D (CUDA/CPU)");

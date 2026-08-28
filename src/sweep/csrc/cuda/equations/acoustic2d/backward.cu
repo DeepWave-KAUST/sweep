@@ -405,29 +405,6 @@ BackwardOutput backward(const BackwardInput& in)
     return out;
 }
 
-RTMOutput rtm(const BackwardInput& in)
-{
-    TORCH_CHECK(!in.bw_stepped(), "stepped RTM not supported in v1");
-    TORCH_CHECK(
-        in.u_forward.defined() && in.u_forward.numel() > 0,
-        "Acoustic2D RTM currently requires full forward wavefields."
-    );
-    TORCH_CHECK(
-        !in.u_last_two.defined() || in.u_last_two.numel() == 0,
-        "Acoustic2D RTM does not yet support boundary-saving mode."
-    );
-    TORCH_CHECK(
-        in.checkpoints.empty(),
-        "Acoustic2D RTM does not yet support checkpoint mode."
-    );
-
-    RTMOutput out;
-    init_rtm_output_2d(out, in.models[0],
-                       in.compute_adcig, 2 * in.adcig_max_lag + 1);
-    run_full_imaging(in, nullptr, nullptr, &out);
-    return out;
-}
-
 BackwardOutput backward_bs(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());

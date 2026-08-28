@@ -128,12 +128,6 @@ class Acoustic3D(SecondOrderEquation):
                 out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out
 
-    def _C_rtm(self):
-        import torch
-        from sweep._C import acoustic3d_rtm
-
-        return acoustic3d_rtm
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(

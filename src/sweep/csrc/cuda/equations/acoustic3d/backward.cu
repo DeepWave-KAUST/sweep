@@ -22,10 +22,6 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p);
 BackwardOutput backward_bs_imaging_impl(const BackwardInput& p);
 BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p);
 BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p);
-RTMOutput rtm_full_impl(const BackwardInput& p);
-RTMOutput rtm_bs_impl(const BackwardInput& p);
-RTMOutput rtm_ckpt_impl(const BackwardInput& p);
-RTMOutput rtm_recursive_ckpt_impl(const BackwardInput& p);
 
 } // namespace
 
@@ -777,14 +773,6 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
     return out;
 }
 
-RTMOutput rtm_full_impl(const BackwardInput& p)
-{
-    RTMOutput out;
-    init_rtm_output_3d(out, p.models[0]);
-    run_full_imaging(p, nullptr, nullptr, &out);
-    return out;
-}
-
 void run_bs_imaging(
     const BackwardInput& p,
     torch::Tensor* grad,
@@ -1067,14 +1055,6 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     return out;
 }
 
-RTMOutput rtm_bs_impl(const BackwardInput& p)
-{
-    RTMOutput out;
-    init_rtm_output_3d(out, p.models[0]);
-    run_bs_imaging(p, nullptr, nullptr, &out);
-    return out;
-}
-
 void run_ckpt_imaging(
     const BackwardInput& p,
     torch::Tensor* grad,
@@ -1259,14 +1239,6 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
     return out;
 }
 
-RTMOutput rtm_ckpt_impl(const BackwardInput& p)
-{
-    RTMOutput out;
-    init_rtm_output_3d(out, p.models[0]);
-    run_ckpt_imaging(p, nullptr, nullptr, &out);
-    return out;
-}
-
 void run_recursive_imaging(
     const BackwardInput& p,
     torch::Tensor* grad,
@@ -1427,14 +1399,6 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
     return out;
 }
 
-RTMOutput rtm_recursive_ckpt_impl(const BackwardInput& p)
-{
-    RTMOutput out;
-    init_rtm_output_3d(out, p.models[0]);
-    run_recursive_imaging(p, nullptr, nullptr, &out);
-    return out;
-}
-
 } // namespace
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
@@ -1451,26 +1415,6 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     TORCH_CHECK(!in.bw_stepped(),
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     return backward_recursive_imaging_impl(in);
-}
-
-RTMOutput rtm(const BackwardInput& in)
-{
-    TORCH_CHECK(!in.bw_stepped(), "stepped RTM not supported in v1");
-    const auto& p = in;
-    if (!p.checkpoints.empty()) {
-        if (p.checkpoint_steps.defined() && p.checkpoint_steps.numel() > 0) {
-            return rtm_recursive_ckpt_impl(p);
-        }
-        return rtm_ckpt_impl(p);
-    }
-    if (p.u_last_two.defined() && p.u_last_two.numel() > 0) {
-        return rtm_bs_impl(p);
-    }
-    TORCH_CHECK(
-        p.u_forward.defined() && p.u_forward.numel() > 0,
-        "Acoustic3D RTM requires full wavefields, boundary buffers, or checkpoints."
-    );
-    return rtm_full_impl(p);
 }
 
 }
