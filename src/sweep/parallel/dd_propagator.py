@@ -95,6 +95,24 @@ _DD_EQUATIONS = {
 }
 
 
+def _family_of(equation) -> str:
+    # Walk the MRO so a subclass of a supported equation still works. Every
+    # equation in the library derives straight from First/SecondOrderEquation,
+    # never from a sibling, so this cannot smuggle in an unsupported one.
+    for klass in type(equation).__mro__:
+        family = _DD_EQUATIONS.get(klass.__name__)
+        if family is not None:
+            return family
+    raise NotImplementedError(
+        f"domain decomposition does not support {type(equation).__name__}. It "
+        f"needs an equation whose CUDA forward and backward implement the "
+        f"stepped range (it_begin/it_end): "
+        f"{', '.join(sorted(_DD_EQUATIONS))} -- Elastic covers 2-D and 3-D, "
+        f"and note AcousticVRZ3D is stepped while the 2-D AcousticVRZ is not. "
+        f"An equation without it would not raise, it would run the full record "
+        f"on every stepped call."
+    )
+
 
 class _DDForward(torch.autograd.Function):
     """Differentiable bridge so a domain-decomposed forward composes with plain
@@ -238,9 +256,12 @@ class ModelParallel:
         if self.ndim not in (2, 3):
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
-        # Accepted-equation check only. NOTHING dispatches on this any more:
-        # the schedule comes from the equation's own declarations (see
-        # _spec below), and the wavefield geometry from its slot table.
+        # Accepted-equation check only, called for its refusal: nothing
+        # dispatches on the returned family any more (the schedule comes from
+        # the equation's own declarations -- see _spec below -- and the
+        # wavefield geometry from its slot table), but without this raise an
+        # unstepped equation would run the full record on every stepped call.
+        _family_of(equation)
         # Whether this equation's backward needs the coupling-field exchange
         # (a gradient that is a spatial DIVERGENCE rather than a pointwise
         # product; variable-density VRZ is the case in the tree). Read off the
