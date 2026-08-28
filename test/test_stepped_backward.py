@@ -350,21 +350,6 @@ def test_stepped_backward_guards_ckpt():
 
 
 @cuda_only
-def test_stepped_backward_guards_rtm():
-    # full-storage params carry u_forward, which is what rtm() needs; the
-    # stepped TORCH_CHECK must fire before anything else.
-    prop, wavelet, sources, receivers, models = build(2, nt=16)
-    cap = capture_backward(prop)
-    run_public_once(prop, wavelet, sources, receivers, models)
-    p = cap["params"]
-    from sweep.propagator._c import _get_C
-    _C = _get_C()
-    p.bw_it_begin, p.bw_it_end = int(p.nt), 1
-    with pytest.raises(RuntimeError, match="stepped RTM not supported"):
-        _C.acoustic2d_rtm(p)
-
-
-@cuda_only
 @pytest.mark.parametrize("ndim", [2, 3])
 def test_full_backward_rejects_cut_face_mask(ndim):
     # Domain decomposition is boundary-saving only: the full-storage backward

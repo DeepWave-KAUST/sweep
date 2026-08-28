@@ -29,7 +29,7 @@ HEADER = (pathlib.Path(P.__file__).resolve().parents[1]
 def _cut_bits_from_header():
     """`cut_x_lo() const { return cut_mask & 1; }` -> {'x_lo': 1, ...}"""
     text = HEADER.read_text()
-    found = dict(re.findall(r"cut_([xyz]_(?:lo|hi))\(\)\s*const\s*\{\s*return\s+cut_mask\s*&\s*(\d+)",
+    found = dict(re.findall(r"cut_([xyz]_(?:lo|hi))\(\)\s*const\s*\{\s*return\s+cut_mask_?\s*&\s*(\d+)",
                             text))
     return {k: int(v) for k, v in found.items()}
 
