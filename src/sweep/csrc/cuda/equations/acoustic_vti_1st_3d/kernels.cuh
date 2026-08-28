@@ -152,7 +152,7 @@ __global__ void velocity_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
@@ -243,7 +243,7 @@ __global__ void stress_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
@@ -333,7 +333,7 @@ __global__ void velocity_kernel_3d_nopml(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
@@ -377,7 +377,7 @@ __global__ void stress_kernel_3d_nopml(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
@@ -495,9 +495,9 @@ __global__ void adjoint_premultiply_stress_kernel_3d(
     int iz = iz_global % solver.nz;
 
     // No halo guard: kernel A's stencil reads these cells.
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    int u_idx = b * spatial_size + idx;
+    long long u_idx = (long long)b * spatial_size + idx;
 
     auto a = adj.offset(b, spatial_size);
     const float lSH = a.sH[idx];
@@ -527,9 +527,9 @@ __global__ void adjoint_premultiply_vel_kernel_3d(
     int b  = iz_global / solver.nz;
     int iz = iz_global % solver.nz;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    int u_idx = b * spatial_size + idx;
+    long long u_idx = (long long)b * spatial_size + idx;
 
     auto a = adj.offset(b, spatial_size);
     const float ir = inv_rho[u_idx];
@@ -567,7 +567,7 @@ __global__ void adjoint_stress_to_vel_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
@@ -616,7 +616,7 @@ __global__ void adjoint_vel_to_stress_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
@@ -683,7 +683,7 @@ __global__ void calculate_grad_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     const float* fvx_b = fvx_now  + b * spatial_size;

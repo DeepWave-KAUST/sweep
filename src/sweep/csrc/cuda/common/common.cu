@@ -24,9 +24,9 @@ __global__ void add_source(
     if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int u_idx = b * spatial_size + iz * solver.nx + ix;
-    int src_idx = (b * nsrc + s) * solver.nt + it;
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
 
     atomicAdd(&u[u_idx], source[src_idx]);
 
@@ -60,10 +60,10 @@ __global__ void add_body_force_rho_grad_correction(
     if (loc_dim == 3 && (iy < 0 || iy >= solver.ny))
         return;
 
-    int spatial_size = solver.nx * solver.nz * (loc_dim == 3 ? solver.ny : 1);
+    long long spatial_size = (long long)solver.nx * solver.nz * (loc_dim == 3 ? solver.ny : 1);
     int row = (loc_dim == 3) ? (iz * solver.ny + iy) : iz;
-    int u_idx = b * spatial_size + row * solver.nx + ix;
-    int src_idx = (b * nsrc + s) * solver.nt + amp_it;
+    long long u_idx = (long long)b * spatial_size + (long long)row * solver.nx + ix;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + amp_it;
 
     atomicAdd(&grad_rho[u_idx],
               adj_field[u_idx] * source[src_idx] / rho[u_idx]);
@@ -102,10 +102,10 @@ __global__ void sub_receiver_rho_grad_correction(
     if (loc_dim == 3 && (iy < halo || iy >= solver.ny - halo))
         return;
 
-    int spatial_size = solver.nx * solver.nz * (loc_dim == 3 ? solver.ny : 1);
+    long long spatial_size = (long long)solver.nx * solver.nz * (loc_dim == 3 ? solver.ny : 1);
     int row = (loc_dim == 3) ? (iz * solver.ny + iy) : iz;
-    int u_idx = b * spatial_size + row * solver.nx + ix;
-    int src_idx = (b * nrec + s) * solver.nt + it;
+    long long u_idx = (long long)b * spatial_size + (long long)row * solver.nx + ix;
+    long long src_idx = ((long long)b * nrec + s) * solver.nt + it;
 
     atomicAdd(&grad_rho[u_idx],
               -adjoint_source[src_idx] * (fv_now[u_idx] - fv_next[u_idx]) / rho[u_idx]);
@@ -132,9 +132,9 @@ __global__ void record_kernel(
     if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int u_idx = b * spatial_size + iz * solver.nx + ix;
-    int rec_idx = (b * nrec + r) * solver.nt + it;
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long rec_idx = ((long long)b * nrec + r) * solver.nt + it;
 
     record[rec_idx] = u[u_idx];
 }
@@ -163,14 +163,14 @@ __global__ void add_source_3d(
         iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
 
-    int u_idx = b * spatial_size
-              + iz * solver.ny * solver.nx
+    long long u_idx = (long long)b * spatial_size
+              + (long long)iz * solver.ny * solver.nx
               + iy * solver.nx
               + ix;
 
-    int src_idx = (b * nsrc + s) * solver.nt + it;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
 
     atomicAdd(&u[u_idx], source[src_idx]);
 }
@@ -200,14 +200,14 @@ __global__ void record_kernel_3d(
         iz < 0 || iz >= solver.nz)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
 
-    int u_idx = b * spatial_size
-              + iz * solver.ny * solver.nx
+    long long u_idx = (long long)b * spatial_size
+              + (long long)iz * solver.ny * solver.nx
               + iy * solver.nx
               + ix;
 
-    int rec_idx = (b * nrec + r) * solver.nt + it;
+    long long rec_idx = ((long long)b * nrec + r) * solver.nt + it;
 
     record[rec_idx] = u[u_idx];
 }
