@@ -9,6 +9,31 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **ViscoAcoustic per-edge free surface + CUDA backend (`impl='c'`).**
+  The nearly constant-Q equation now accepts every `free_surface=` form the
+  acoustic solver does (bool / face names / mask / dict, any subset of the 4
+  edges), and gains compiled CUDA kernels: the acoustic2d CPML stencil runs
+  with the dispersion-folded `vp_step` and the spectral amplitude damping is
+  applied per step through ATen/cuFFT, with a hand-derived exact adjoint
+  (closed-box c-vs-eager gradients agree to ~1e-6; wavelet/vp/Q cosine
+  1.000000).  Forward, full / chunk-checkpoint / recursive-checkpoint
+  backwards, and full-storage RTM are supported.  Boundary saving is refused
+  (the dissipative global-FFT term is not reverse-reconstructible from
+  boundary strips): the impl='c' default memory strategy falls back to
+  'full', and an explicit boundary request raises.
+- `ForwardInput/BackwardInput.eq_aux` — equation-specific auxiliary tensors
+  (opaque to the shared autograd wrapper); ViscoAcoustic uses it for its |k|
+  FFT grid.
+
+### Changed
+- `SecondOrderEquation._apply_free_surface` — the per-edge pressure-release
+  zeroing moved from `Acoustic` to the shared base (bit-identical) so
+  ViscoAcoustic reuses it.
+- `ViscoAcoustic.prepare_models` maps (vp, Q, omega) -> (vp_step, A) once per
+  forward (shared by the eager and CUDA paths; the eager step no longer
+  recomputes the dispersion/damping coefficients every time step).
+
 ## [0.2.0] - 2026-08-24
 
 ### Added
