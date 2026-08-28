@@ -81,7 +81,7 @@ def build(ndim, *, abcn=8, free_surface=False, bs=None, use_ckpt=False,
         B=1,
         use_ckpt=use_ckpt,
         ckpt_mode=ckpt_mode,
-        ckpt_count=ckpt_count,
+        ckpt_num=ckpt_count,
         boundary_saving_config=boundary_saving_config,
     )
 
