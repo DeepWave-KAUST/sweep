@@ -20,7 +20,7 @@ __global__ void calculate_grad_3d(
 
     int stride_y = nx;
     int stride_z = nx * ny;
-    int spatial_size = nx * ny * nz;
+    long long spatial_size = (long long)nx * ny * nz;
 
     int idx = iz * stride_z + iy * stride_y + ix;
 
@@ -57,7 +57,7 @@ __global__ void calculate_grad_utt_3d(
 
     int stride_y = nx;
     int stride_z = nx * ny;
-    int spatial_size = nx * ny * nz;
+    long long spatial_size = (long long)nx * ny * nz;
 
     int idx = iz * stride_z + iy * stride_y + ix;
 
@@ -100,7 +100,7 @@ __global__ void accumulate_rtm_image_3d(
 
     int stride_y = nx;
     int stride_z = nx * ny;
-    int spatial_size = nx * ny * nz;
+    long long spatial_size = (long long)nx * ny * nz;
 
     int idx = iz * stride_z + iy * stride_y + ix;
 
@@ -186,9 +186,9 @@ __global__ void accumulate_source_grad_3d(
         return;
     }
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int u_idx = b * spatial_size + iz * (solver.nx * solver.ny) + iy * solver.nx + ix;
-    int grad_idx = (b * nsrc + s) * solver.nt + it;
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
+    long long u_idx = (long long)b * spatial_size + iz * (solver.nx * solver.ny) + iy * solver.nx + ix;
+    long long grad_idx = ((long long)b * nsrc + s) * solver.nt + it;
 
     // "+=" for 2D parity and for Python-bound grads_out accumulators:
     // each (b, s, it) is written exactly once per backward onto zeros, so

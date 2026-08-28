@@ -15,7 +15,7 @@ __global__ void calculate_grad(
     if (ix >= nx || iz >= nz)
         return;
 
-    int spatial_size = nx * nz;
+    long long spatial_size = (long long)nx * nz;
     int idx = iz * nx + ix;
 
     const float* u_forward_b  = u_forward  + b * spatial_size;
@@ -47,7 +47,7 @@ __global__ void calculate_grad_utt(
     if (ix >= nx || iz >= nz)
         return;
 
-    int spatial_size = nx * nz;
+    long long spatial_size = (long long)nx * nz;
     int idx = iz * nx + ix;
 
     const float* u_next_b  = u_forward_next  + b * spatial_size;
@@ -84,7 +84,7 @@ __global__ void accumulate_rtm_image_2d(
     if (ix >= nx || iz >= nz)
         return;
 
-    int spatial_size = nx * nz;
+    long long spatial_size = (long long)nx * nz;
     int idx = iz * nx + ix;
 
     const float* u_forward_b = u_forward + b * spatial_size;
@@ -162,9 +162,9 @@ __global__ void accumulate_source_grad_2d(
         return;
     }
 
-    int spatial_size = solver.nx * solver.nz;
-    int u_idx = b * spatial_size + iz * solver.nx + ix;
-    int grad_idx = (b * nsrc + s) * solver.nt + it;
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long grad_idx = ((long long)b * nsrc + s) * solver.nt + it;
 
     grad_source[grad_idx] += u_backward[u_idx];
 }
