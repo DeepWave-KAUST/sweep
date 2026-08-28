@@ -38,6 +38,10 @@ class CUDALayoutSpec:
     pml_slot_axes: tuple | None = None
     checkpoint_slot_axes: tuple | None = None
     adjoint_pml_slab: bool = False
+    # The compiled backward_bs honours nt_saved < nt (truncated boundary
+    # backward for steady-state / frequency-selection FWI).  Declared here so
+    # the driver refuses tail_steps by declaration instead of by class name.
+    supports_boundary_tail_steps: bool = False
     # Declarative CUDA wavefield bind order (see ``slot_table.py``).  Optional:
     # equations without one keep the legacy path, where every count above is
     # declared by hand and the matching index tuples live in

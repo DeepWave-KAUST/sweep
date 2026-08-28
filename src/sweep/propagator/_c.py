@@ -1481,10 +1481,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 raise ValueError(
                     "boundary_saving_config['tail_steps'] requires boundary "
                     "saving to be enabled.")
-            if type(self.equation).__name__ not in {"Acoustic", "Acoustic3D"}:
+            if not self._cuda_layout().supports_boundary_tail_steps:
                 raise NotImplementedError(
-                    "tail_steps is currently implemented for the Acoustic / "
-                    "Acoustic3D impl='c' backends only.")
+                    f"tail_steps: the {type(self.equation).__name__} impl='c' "
+                    "backend does not implement the truncated boundary "
+                    "backward (cuda_layout.supports_boundary_tail_steps).")
             boundary_tail_steps = int(boundary_tail_steps)
         nt_saved = min(self.nt, boundary_tail_steps) if boundary_tail_steps else self.nt
         if self.use_ckpt and self.ckpt_mode not in {"chunk", "recursive"}:
