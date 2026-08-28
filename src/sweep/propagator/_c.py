@@ -1382,6 +1382,57 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         )
 
     @torch._dynamo.disable
+    def _merge_legacy_call_kwargs(self, kwargs, boundary_saving_config):
+        """Fold the per-call legacy boundary keywords into the config dict.
+
+        The per-CALL twin of ``core.arguments.merge_legacy_boundary_kwargs``
+        (which handles the constructor): same merge direction -- an explicit
+        config wins over a loose keyword -- plus ``boundary_ring_buffers``,
+        which only exists as a call-time knob. forward() and rtm() carried
+        byte-identical copies of this block.
+        """
+        legacy_override = {}
+        if "transfer_interval" in kwargs:
+            legacy_override["transfer_interval"] = kwargs.pop("transfer_interval")
+        if "boundary_on_cpu" in kwargs:
+            legacy_override["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
+        if "use_pinned_memory" in kwargs:
+            legacy_override["pinned_memory"] = kwargs.pop("use_pinned_memory")
+        if "boundary_ring_buffers" in kwargs:
+            legacy_override["ring_buffers"] = kwargs.pop("boundary_ring_buffers")
+        if "boundary_disk_async_read" in kwargs:
+            legacy_override["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
+        if boundary_saving_config is None and legacy_override:
+            return legacy_override
+        if legacy_override:
+            return {**legacy_override, **boundary_saving_config}
+        return boundary_saving_config
+
+    def _prepare_runtime_geometry(self, kwargs, sources, receivers):
+        """Grow the PML profiles to the runtime grid and shift coords onto it.
+
+        Returns ``(M, padding, sources, receivers)`` -- the copies, shifted.
+        Shift each physical (x,[y,]z) coord by its axis' LOW-side pad + M.
+        Per-edge aware (a free-surface face has 0 pad, so e.g. a top free
+        surface shifts z by only M) and DD-aware for free: ``self.pad`` already
+        carries the cut faces, so coords land in the right runtime cell on a
+        compact-padded tile. For the top-only / no-FS single-domain defaults
+        this reproduces the old ``base_shift`` (x/y) + ``M`` (z) behaviour
+        bit-for-bit. Integer arithmetic throughout.
+        """
+        M = self.equation.so // 2
+        padding = [p + M for p in self.padding]
+        kwargs["shape"] = [p + 2 * M for p in self.shape]
+        self.init_abc(**kwargs)
+
+        sources = sources.copy()
+        receivers = receivers.copy()
+        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
+        for _i in range(self.ndim):
+            sources[..., _i] += coord_offset[_i]
+            receivers[..., _i] += coord_offset[_i]
+        return M, padding, sources, receivers
+
     def forward(self, wavelet, sources, receivers, models=None, adj=False, return_wavefield=False, use_boundary_saving=None, boundary_saving_config=None, **kwargs):
         """Forward pass of the wave equation.
 
@@ -1404,21 +1455,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             models: List of model parameters (must be ``torch.Tensor``).
         """
 
-        legacy_override = {}
-        if "transfer_interval" in kwargs:
-            legacy_override["transfer_interval"] = kwargs.pop("transfer_interval")
-        if "boundary_on_cpu" in kwargs:
-            legacy_override["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
-        if "use_pinned_memory" in kwargs:
-            legacy_override["pinned_memory"] = kwargs.pop("use_pinned_memory")
-        if "boundary_ring_buffers" in kwargs:
-            legacy_override["ring_buffers"] = kwargs.pop("boundary_ring_buffers")
-        if "boundary_disk_async_read" in kwargs:
-            legacy_override["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
-        if boundary_saving_config is None and legacy_override:
-            boundary_saving_config = legacy_override
-        elif legacy_override:
-            boundary_saving_config = {**legacy_override, **boundary_saving_config}
+        boundary_saving_config = self._merge_legacy_call_kwargs(
+            kwargs, boundary_saving_config)
 
         mode, batch_size, nsrc_per_shot, _, _ = self._normalize_io(
             wavelet, sources, receivers
@@ -1459,31 +1497,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}'. Expected 'chunk' or 'recursive'.")
         checkpoint_steps = torch.empty(0, dtype=torch.int32)
 
-        # Set zeros
-        M = self.equation.so // 2
-
-        padding = [p+M for p in self.padding]
-
-        shape_for_pml = [p+2*M for p in self.shape]
-
-        kwargs['shape'] = shape_for_pml
-        self.init_abc(**kwargs)
-
-        sources = sources.copy()
-        receivers = receivers.copy()
-
-        # Shift physical (x,[y,]z) coords into the padded runtime grid by each
-        # axis' LOW-side pad + M.  Per-edge aware (free-surface faces have 0 pad,
-        # so e.g. a top free surface shifts z by only M, a left free surface x by
-        # only M), and DD-aware for free: ``self.pad`` already carries the cut
-        # faces, so a cut face shifts by only M and coords land in the right
-        # runtime cell on a compact-padded tile.  For the top-only / no-FS
-        # single-domain defaults this reproduces the old ``base_shift`` (x/y) +
-        # ``M`` (z) behaviour bit-for-bit.
-        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
-        for _i in range(self.ndim):
-            sources[..., _i] += coord_offset[_i]
-            receivers[..., _i] += coord_offset[_i]
+        M, padding, sources, receivers = self._prepare_runtime_geometry(
+            kwargs, sources, receivers)
 
         # Canonicalize wavelet/sources to (B, nsrc_per_shot, nt) / (B, nsrc_per_shot, ndim).
         # `mode` was validated by _normalize_io above.
@@ -1706,21 +1721,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._ensure_wavefield_buffers(batch_size)
         self._ensure_adjoint_workspace_buffers(batch_size)
 
-        legacy_override = {}
-        if "transfer_interval" in kwargs:
-            legacy_override["transfer_interval"] = kwargs.pop("transfer_interval")
-        if "boundary_on_cpu" in kwargs:
-            legacy_override["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
-        if "use_pinned_memory" in kwargs:
-            legacy_override["pinned_memory"] = kwargs.pop("use_pinned_memory")
-        if "boundary_ring_buffers" in kwargs:
-            legacy_override["ring_buffers"] = kwargs.pop("boundary_ring_buffers")
-        if "boundary_disk_async_read" in kwargs:
-            legacy_override["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
-        if boundary_saving_config is None and legacy_override:
-            boundary_saving_config = legacy_override
-        elif legacy_override:
-            boundary_saving_config = {**legacy_override, **boundary_saving_config}
+        boundary_saving_config = self._merge_legacy_call_kwargs(
+            kwargs, boundary_saving_config)
         boundary_cfg = self.resolve_boundary_saving_config(
             override=boundary_saving_config,
             use_boundary_saving=use_boundary_saving,
@@ -1788,20 +1790,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         save_all_wavefields = not use_boundary_saving and not use_ckpt
 
-        M = self.equation.so // 2
-        padding = [p + M for p in self.padding]
-        shape_for_pml = [p + 2 * M for p in self.shape]
-        kwargs["shape"] = shape_for_pml
-        self.init_abc(**kwargs)
-
-        sources = sources.copy()
-        receivers = receivers.copy()
-        # Per-edge (and cut-aware) coord shift, see the forward path: each axis'
-        # low-side pad + M.
-        coord_offset = self._runtime_coord_offset()   # (x, [y,] z) order
-        for _i in range(self.ndim):
-            sources[..., _i] += coord_offset[_i]
-            receivers[..., _i] += coord_offset[_i]
+        M, padding, sources, receivers = self._prepare_runtime_geometry(
+            kwargs, sources, receivers)
 
         if isinstance(wavelet, torch.Tensor):
             wavelet_t = wavelet.to(self.dev, dtype=torch.float32)
