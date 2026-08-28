@@ -20,6 +20,8 @@ from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
+from .elastic3d import step as _elastic3d_step
+from ._elastic_step_core import elastic_stress_substep, elastic_velocity_substep
 
 
 def _is_torch_tensor(value):
@@ -519,82 +521,52 @@ def step_das_mu_2d(
 ):
     """One Mu velocity-stress-strain DAS step in 2D.
 
-    The velocity and stress update follows the standard first-order elastic
-    staggered-grid equation. The strain fields integrate the velocity
-    derivatives from the same step:
-    ``exx_t = vx_x``, ``ezz_t = vz_z``, and
-    ``exz_t = 0.5 * (vx_z + vz_x)``.
+    This IS the shared elastic pair (:func:`elastic_velocity_substep` +
+    :func:`elastic_stress_substep`) plus three strain integrations
+    (``exx_t = vx_x``, ``ezz_t = vz_z``, ``exz_t = 0.5 (vx_z + vz_x)``) -- the
+    bodies were maintained as literal copies apart from variable names and the
+    staggered-parameter generality (DASMu uses the plain ``rho`` and
+    ``lame_mu`` where elastic passes staggered averages, so those are forwarded
+    as-is and the arithmetic is unchanged). The post-step ``szz`` zeroing is the
+    caller's job by the sub-step contract, and happens here as before.
     """
-
-    az, bz, azh, bzh, ax, bx, axh, bxh = pml
-    top_halo = pd.coes.shape[0]
-
-    sxx_x = pd.x_forward(sxx)
-    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1"))
-    _pd2 = _get_o2_pd(pd) if _n_o2 else None
-    if free_surface:
-        # sxz sits at z=+h/2 -> half-cell mirror (about halo-1/2); szz is on the
-        # surface plane -> integer-grid mirror.  See ``_free_surface.fs_deriv``.
-        sxz_z = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2, half=True)
-        szz_z = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
-    else:
-        sxz_z = pd.z_backward(sxz)
-        szz_z = pd.z_forward(szz)
-    sxz_x = pd.x_backward(sxz)
-
-    m_tzzz = azh * m_tzzz + bzh * szz_z
-    szz_z = szz_z + m_tzzz
-    m_txzx = ax * m_txzx + bx * sxz_x
-    sxz_x = sxz_x + m_txzx
-    vz = vz + dt / rho * (szz_z + sxz_x)
-
-    m_txzz = az * m_txzz + bz * sxz_z
-    sxz_z = sxz_z + m_txzz
-    m_txxx = axh * m_txxx + bxh * sxx_x
-    sxx_x = sxx_x + m_txxx
-    vx = vx + dt / rho * (sxx_x + sxz_z)
-
-    vx_x = pd.x_backward(vx)
-    if free_surface:
-        # vz sits at z=+h/2 -> half-cell mirror; vx is on the surface plane.
-        vz_z = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2, half=True)
-        vx_z = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
-    else:
-        vz_z = pd.z_backward(vz)
-        vx_z = pd.z_forward(vx)
-    vz_x = pd.x_forward(vz)
-
-    m_vzz = az * m_vzz + bz * vz_z
-    vz_z = vz_z + m_vzz
-    m_vxx = ax * m_vxx + bx * vx_x
-    vx_x = vx_x + m_vxx
-
-    sxx_pre = sxx
-    szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
-    sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
-    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
-        # Robertsson free-surface fix: at the surface row sigma_zz=0 implies
-        # d vz/dz = -lam/(lam+2mu) d vx/dx, so sigma_xx there reduces to the
-        # modified coefficient  4 mu (lam+mu)/(lam+2mu) * d vx/dx  (no vz-in-air).
-        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
-        sxx_surf = sxx_pre + dt * _coef * vx_x
-        sxx = overwrite_top_row(sxx, sxx_surf, top_halo, axis=-2)
-
-    m_vxz = azh * m_vxz + bzh * vx_z
-    vx_z = vx_z + m_vxz
-    m_vzx = axh * m_vzx + bxh * vz_x
-    vz_x = vz_x + m_vzx
-    sxz = sxz + dt * lame_mu * (vx_z + vz_x)
+    (vx, vz, sxx, szz, sxz,
+     m_vxx, m_vxz, m_vzx, m_vzz,
+     m_txxx, m_txxz, m_tzzx, m_tzzz,
+     m_txzx, m_txzz) = elastic_velocity_substep(
+        vx, vz, sxx, szz, sxz,
+        m_vxx, m_vxz, m_vzx, m_vzz,
+        m_txxx, m_txxz, m_tzzx, m_tzzz,
+        m_txzx, m_txzz,
+        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
+        rho_x=rho, rho_z=rho,
+        dt=dt, h=h, b=b, pd=pd, pml=pml,
+        free_surface=free_surface,
+        lame_lambda_2mu=lame_lambda_2mu,
+    )
+    *state, (vx_x, vz_z, vx_z, vz_x) = elastic_stress_substep(
+        vx, vz, sxx, szz, sxz,
+        m_vxx, m_vxz, m_vzx, m_vzz,
+        m_txxx, m_txxz, m_tzzx, m_tzzz,
+        m_txzx, m_txzz,
+        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
+        rho_x=rho, rho_z=rho,
+        dt=dt, h=h, b=b, pd=pd, pml=pml,
+        free_surface=free_surface,
+        lame_lambda_2mu=lame_lambda_2mu,
+        return_gradients=True,
+    )
+    (vx, vz, sxx, szz, sxz,
+     m_vxx, m_vxz, m_vzx, m_vzz,
+     m_txxx, m_txxz, m_tzzx, m_tzzz,
+     m_txzx, m_txzz) = state
 
     exx = exx + dt * vx_x
     ezz = ezz + dt * vz_z
     exz = exz + 0.5 * dt * (vx_z + vz_x)
 
     if free_surface:
-        # z-low FS: zero only szz (normal stress, on-surface node); sxz is a
-        # +h/2 medium value -- zeroing it adds ~6% Rayleigh dispersion (cf. the
-        # elastic sxz free-surface fix, Kristek 2002 Table 1).
-        szz = zero_top_row(szz, top_halo, axis=-2)
+        szz = zero_top_row(szz, pd.coes.shape[0], axis=-2)
 
     return (
         vx,
@@ -664,123 +636,43 @@ def step_das_mu_3d(
     pml=None,
     free_surface=False,
 ):
-    """One Mu velocity-stress-strain DAS step in 3D."""
+    """One Mu velocity-stress-strain DAS step in 3D.
 
-    az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
-    top_halo = pd.coes.shape[0]
-
-    dsxx_dx = pd.x_forward(sxx)
-    dsxy_dy = pd.y_backward(sxy)
-    if free_surface:
-        dsxz_dz = top_free_surface_cell_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-3)
-    else:
-        dsxz_dz = pd.z_backward(sxz)
-
-    dsxy_dx = pd.x_backward(sxy)
-    dsyy_dy = pd.y_forward(syy)
-    if free_surface:
-        dsyz_dz = top_free_surface_cell_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-3)
-    else:
-        dsyz_dz = pd.z_backward(syz)
-
-    dsxz_dx = pd.x_backward(sxz)
-    dsyz_dy = pd.y_backward(syz)
-    if free_surface:
-        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-3)
-    else:
-        dszz_dz = pd.z_forward(szz)
-
-    m_szzz = azh * m_szzz + bzh * dszz_dz
-    dszz_dz = dszz_dz + m_szzz
-    m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    dsxz_dx = dsxz_dx + m_sxzx
-
-    m_sxzz = az * m_sxzz + bz * dsxz_dz
-    dsxz_dz = dsxz_dz + m_sxzz
-    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    dsxx_dx = dsxx_dx + m_sxxx
-
-    m_sxyy = ay * m_sxyy + by * dsxy_dy
-    dsxy_dy = dsxy_dy + m_sxyy
-
-    m_sxyx = ax * m_sxyx + bx * dsxy_dx
-    dsxy_dx = dsxy_dx + m_sxyx
-
-    m_syyy = ayh * m_syyy + byh * dsyy_dy
-    dsyy_dy = dsyy_dy + m_syyy
-    m_syzz = az * m_syzz + bz * dsyz_dz
-    dsyz_dz = dsyz_dz + m_syzz
-
-    m_syzy = ay * m_syzy + by * dsyz_dy
-    dsyz_dy = dsyz_dy + m_syzy
-
-    vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
-    vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
-    vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
-
-    dvx_dx = pd.x_backward(vx)
-    dvx_dy = pd.y_forward(vx)
-    if free_surface:
-        dvx_dz = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-3)
-    else:
-        dvx_dz = pd.z_forward(vx)
-
-    dvy_dx = pd.x_forward(vy)
-    dvy_dy = pd.y_backward(vy)
-    if free_surface:
-        dvy_dz = top_free_surface_derivative(vy, pd.z_forward, top_halo, odd=False, axis=-3)
-    else:
-        dvy_dz = pd.z_forward(vy)
-
-    dvz_dx = pd.x_forward(vz)
-    dvz_dy = pd.y_forward(vz)
-    if free_surface:
-        dvz_dz = top_free_surface_cell_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-3)
-    else:
-        dvz_dz = pd.z_backward(vz)
-
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
-    m_vyy = ay * m_vyy + by * dvy_dy
-    dvy_dy = dvy_dy + m_vyy
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
-    m_vxz = azh * m_vxz + bzh * dvx_dz
-    dvx_dz = dvx_dz + m_vxz
-    m_vzx = axh * m_vzx + bxh * dvz_dx
-    dvz_dx = dvz_dx + m_vzx
-
-    m_vxy = ayh * m_vxy + byh * dvx_dy
-    dvx_dy = dvx_dy + m_vxy
-    m_vyx = axh * m_vyx + bxh * dvy_dx
-    dvy_dx = dvy_dx + m_vyx
-    m_vyz = azh * m_vyz + bzh * dvy_dz
-    dvy_dz = dvy_dz + m_vyz
-    m_vzy = ayh * m_vzy + byh * dvz_dy
-    dvz_dy = dvz_dy + m_vzy
-
-    div_v = dvx_dx + dvy_dy + dvz_dz
-
-    sxx_pre_fs = sxx
-    syy_pre_fs = syy
-    sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx)
-    syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy)
-    szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz)
-    sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx)
-    sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx)
-    syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
-    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
-        # Robertsson tangential FS correction (3-D): at a z-low free surface
-        # sigma_zz=0 => surface-row sigma_xx = coef*dvx_dx + coef2*dvy_dy
-        # (x<->y for sigma_yy); coef = 4 mu (lam+mu)/(lam+2mu),
-        # coef2 = 2 lam mu/(lam+2mu).  Same fix as DASMu-2D above.
-        _l2m = lame_lambda + 2.0 * lame_mu
-        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / _l2m
-        _coef2 = 2.0 * lame_lambda * lame_mu / _l2m
-        _sxx_surf = sxx_pre_fs + dt * (_coef * dvx_dx + _coef2 * dvy_dy)
-        _syy_surf = syy_pre_fs + dt * (_coef2 * dvx_dx + _coef * dvy_dy)
-        sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
-        syy = overwrite_top_row(syy, _syy_surf, top_halo, axis=-3)
+    This IS :func:`elastic3d.step` plus six strain integrations -- the two
+    bodies were maintained as ~130-line literal copies, verified statement-for-
+    statement identical before being merged (with ``topo_rows=None`` the
+    elastic free-surface helper reduces by construction to the very functions
+    this copy called). ``return_gradients=True`` hands back the CPML-corrected
+    velocity gradients the stress update consumed, which are exactly what the
+    strain-rate state integrates.
+    """
+    *state, (dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
+             dvx_dz, dvz_dx, dvy_dz, dvz_dy) = _elastic3d_step(
+        vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+        m_vxx, m_vxy, m_vxz,
+        m_vyx, m_vyy, m_vyz,
+        m_vzx, m_vzy, m_vzz,
+        m_sxxx, m_szzz,
+        m_sxyx, m_sxyy,
+        m_sxzx, m_sxzz,
+        m_syyy,
+        m_syzy, m_syzz,
+        vp, vs, rho,
+        lame_lambda, lame_mu,
+        dt, h, b, pd,
+        pml=pml,
+        free_surface=free_surface,
+        return_gradients=True,
+    )
+    (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+     m_vxx, m_vxy, m_vxz,
+     m_vyx, m_vyy, m_vyz,
+     m_vzx, m_vzy, m_vzz,
+     m_sxxx, m_szzz,
+     m_sxyx, m_sxyy,
+     m_sxzx, m_sxzz,
+     m_syyy,
+     m_syzy, m_syzz) = state
 
     exx = exx + dt * dvx_dx
     eyy = eyy + dt * dvy_dy
@@ -788,12 +680,6 @@ def step_das_mu_3d(
     exy = exy + 0.5 * dt * (dvx_dy + dvy_dx)
     exz = exz + 0.5 * dt * (dvx_dz + dvz_dx)
     eyz = eyz + 0.5 * dt * (dvy_dz + dvz_dy)
-
-    if free_surface:
-        # z-low FS: zero only szz (normal stress, on-surface node); sxz/syz are
-        # +h/2 medium values -- zeroing them adds ~6% Rayleigh dispersion (cf.
-        # the elastic sxz free-surface fix, Kristek 2002 Table 1).
-        szz = zero_top_row(szz, top_halo, axis=-3)
 
     return (
         vx,
