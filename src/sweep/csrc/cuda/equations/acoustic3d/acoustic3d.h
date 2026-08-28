@@ -14,6 +14,5 @@ BackwardOutput backward_ckpt(const BackwardInput& in);
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
 
-RTMOutput rtm(const BackwardInput& in);
 
 } // namespace acoustic3d

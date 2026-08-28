@@ -33,16 +33,3 @@ auto wrap_backward(Func f)
     };
 }
 
-template <typename Func>
-auto wrap_rtm(Func f)
-{
-    return [f](const BackwardInput& in) {
-        auto out = f(in);
-        return std::make_tuple(
-            out.image,
-            out.source_illumination,
-            out.receiver_illumination,
-            out.adcig
-        );
-    };
-}
