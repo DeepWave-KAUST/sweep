@@ -86,6 +86,8 @@ class Elastic(FirstOrderEquation):
     # directly by ``impl='c'``: shot ``b`` propagates in its own (vp,vs,rho)[b]
     # and each parameter's gradient is kept per-shot. Same for the eager path.
     supports_batched_models = True
+    supports_image_topography = True
+    supports_image_topography_c = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic equation operator.

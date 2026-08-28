@@ -125,6 +125,8 @@ class ViscoAcoustic(SecondOrderEquation):
         validated against the Kjartansson power law to 0.4% over the band;
         attenuation to 2%).
     """
+    supports_image_topography = True   # eager func applies the staircase
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Visco-acoustic wave velocity model.", unit="m/s"),
         ModelSpec("Q", description="Quality factor controlling attenuation."),

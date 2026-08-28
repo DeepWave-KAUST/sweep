@@ -323,6 +323,10 @@ class ElasticVRR(FirstOrderEquation):
 
     C_NAME = "elastic_vr2d"
 
+    # The CUDA forward applies the staircase (elastic_vr2d/forward.cu reads
+    # topo_rows); the eager step does not.
+    supports_image_topography_c = True
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",),
                   description="Elastic P-wave velocity model.", unit="m/s"),

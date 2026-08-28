@@ -55,6 +55,8 @@ class Acoustic3D(SecondOrderEquation):
     """
 
     C_NAME = "acoustic3d"
+    supports_image_topography = True
+    supports_image_topography_c = True
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic P-wave velocity model.", unit="m/s"),

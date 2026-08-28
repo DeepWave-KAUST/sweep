@@ -83,6 +83,8 @@ class Acoustic(SecondOrderEquation):
     # batched model ``(B, nz, nx)`` is supported directly by ``impl='c'``:
     # shot ``b`` propagates in ``vp[b]`` and its gradient is kept per-shot.
     supports_batched_models = True
+    supports_image_topography = True
+    supports_image_topography_c = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2):
         """Build the acoustic equation operator.

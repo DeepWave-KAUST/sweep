@@ -400,6 +400,9 @@ class Elastic(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
     supports_apm = True          # Cao & Chen 2018 3-D APM is implemented
+    supports_image_topography = True   # eager func applies the staircase
+    # supports_image_topography_c stays False: the CUDA kernels never read
+    # the topo rows (topo3d_gradient_mode_suite's docstring says the same).
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         """Build the 3-D elastic equation operator.
