@@ -186,6 +186,8 @@ ForwardOutput generic_forward(const ForwardInput& in)
             : torch::zeros(Eq::allt_shape(d, p.nt), vp.options());
     }
 
+    Eq::validate_forward(p);
+
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
         Eq::CKPT_NVAR,
@@ -299,6 +301,8 @@ ForwardOutput generic_forward(const ForwardInput& in)
 
         Eq::end_of_step(wavefield);
 
+        Eq::capture_allt(u_allt, wavefield, it);
+
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt),
                                         wavefield.checkpoint_tensors());
 
@@ -335,6 +339,12 @@ void check_stepped_backward(const BackwardInput& p, bool need_recon)
     TORCH_CHECK((p.cut_face_mask & ~Eq::CUT_MASK_BITS) == 0,
                 Eq::NDIM, "D cut_face_mask uses ", Eq::CUT_MASK_DESC,
                 " only, got ", p.cut_face_mask);
+    // No second-order backward in this family implements a phase split; a
+    // phased schedule (e.g. the VRZ coupling exchange) reaching an equation
+    // without one must fail loudly, not run un-phased.
+    TORCH_CHECK(p.step_phase == 0,
+                Eq::NAME, " backward does not implement step_phase (got ",
+                p.step_phase, ")");
     TORCH_CHECK(need_recon || p.cut_face_mask == 0,
                 "domain-decomposed backward (cut_face_mask) is boundary-saving "
                 "only; the full-storage path does not support DD (use backward_bs)");
@@ -382,13 +392,17 @@ inline void init_rtm_output(RTMOutput& out, const torch::Tensor& vp,
     }
 }
 
+// Acoustic-flavoured output binding: grads = {grad_wavelet, grad_model} with
+// Python-owned accumulators on the stepped path, plus the RTM/illumination
+// buffers.  Traits whose equation has no wavelet gradient or illumination
+// (VRZ) implement their own bind hook instead of calling this helper.
 template <class Eq>
-void bind_backward_outputs(const BackwardInput& p,
-                           torch::Tensor& grad_wavelet,
-                           torch::Tensor& grad,
-                           RTMOutput& illumination,
-                           bool want_adcig)
+void acoustic_bind_backward_outputs(const BackwardInput& p,
+                                    std::vector<torch::Tensor>& grads,
+                                    RTMOutput& illumination,
+                                    bool want_adcig)
 {
+    torch::Tensor grad_wavelet, grad;
     if (!p.grads_out.empty()) {
         TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
                     "grads_out must hold models.size()+1 tensors "
@@ -414,6 +428,7 @@ void bind_backward_outputs(const BackwardInput& p,
         init_rtm_output(illumination, p.models[0],
                         want_adcig && p.compute_adcig, 2 * p.adcig_max_lag + 1);
     }
+    grads = {grad_wavelet, grad};
 }
 
 // ---- generic_backward (full storage) ----
@@ -422,16 +437,13 @@ BackwardOutput generic_backward(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     check_stepped_backward<Eq>(in, /*need_recon=*/false);
+    Eq::validate_backward(in, /*need_recon=*/false);
     BackwardOutput out;
-    torch::Tensor grad, grad_wavelet;
+    std::vector<torch::Tensor> grads;
     RTMOutput illumination;
-    // 2-D acoustic serves ADCIG from every mode; 3-D only from backward_bs
-    // (the full/ckpt imaging there correlates vp^2*Lap(u), not raw pressure).
-    bind_backward_outputs<Eq>(in, grad_wavelet, grad, illumination,
-                              Eq::ADCIG_IN_FULL_MODES);
-    RTMOutput* rtm_out = (in.compute_illumination ||
-                          (Eq::ADCIG_IN_FULL_MODES && in.compute_adcig))
-        ? &illumination : nullptr;
+    Eq::bind_backward_outputs(in, grads, illumination,
+                              /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
+    RTMOutput* rtm_out = Eq::full_rtm_gate(in, illumination);
 
     const auto& p = in;
     auto vp = p.models[0];
@@ -458,41 +470,33 @@ BackwardOutput generic_backward(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, ctx, launch_config,
                                               forward_source_config,
                                               adj_source_config);
-    // NOTE role reuse: in backward states, source_config = FORWARD sources,
-    // record_config slot = ADJOINT sources.
+    typename Eq::BwdWorkspace ws = Eq::make_bwd_workspace(p, state, ctx, adjoint);
 
-    float* grad_ptr = grad.defined() ? grad.data_ptr<float>() : nullptr;
-    const bool fused_img = !p.bw_stepped() && p.cut_face_mask == 0;
+    const bool fused_img = Eq::HAS_FUSED_FULL_IMG
+        && !p.bw_stepped() && p.cut_face_mask == 0;
+    float* fuse_grad = fused_img ? Eq::fused_grad_ptr(grads) : nullptr;
 
     for (int it = p.bw_begin() - 1; it >= p.bw_it_end; --it) {
         auto adj_view = adjoint.view();
-        const float* img_fwd = (fused_img && grad_ptr != nullptr && it + 1 < p.nt)
-                             ? p.u_forward[it + 1].data_ptr<float>() : nullptr;
-        Eq::adjoint_step(state, ctx, adj_view, cpml,
-                         img_fwd, img_fwd ? grad_ptr : nullptr);
-        Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc);
+        const float* img_fwd = (fused_img && fuse_grad != nullptr && it + 1 < p.nt)
+                             ? Eq::full_store_ptr(p, it + 1) : nullptr;
+        Eq::adjoint_step(state, ctx, adj_view, cpml, ws,
+                         img_fwd, img_fwd ? fuse_grad : nullptr);
+        Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc, ws);
         Eq::post_adjoint(adjoint);
-        Eq::accumulate_source_grad(state, ctx, adjoint, p, &grad_wavelet,
+        Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    it, forward_nsrc);
-        torch::Tensor* step_grad = fused_img ? nullptr : &grad;
-        if (step_grad != nullptr || rtm_out != nullptr) {
-            Eq::image_step(state, ctx,
-                           p.u_forward[it].data_ptr<float>(),
-                           adjoint.u_now_t.template data_ptr<float>(),
-                           vp, step_grad, rtm_out);
+        if (!fused_img || rtm_out != nullptr) {
+            Eq::image_step(state, ctx, Eq::full_store_ptr(p, it), adjoint,
+                           fused_img ? nullptr : &grads, rtm_out, ws);
         }
     }
-    if (fused_img && grad_ptr != nullptr) {
-        Eq::image_step(state, ctx,
-                       p.u_forward[0].data_ptr<float>(),
-                       adjoint.u_now_t.template data_ptr<float>(),
-                       vp, &grad, nullptr);
+    if (fused_img && fuse_grad != nullptr) {
+        Eq::image_step(state, ctx, Eq::full_store_ptr(p, 0), adjoint,
+                       &grads, nullptr, ws);
     }
 
-    out.grads = {grad_wavelet, grad};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    Eq::pack_outputs(out, grads, illumination);
     return out;
 }
 
@@ -505,6 +509,7 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
     BackwardOutput out;
 
     check_stepped_backward<Eq>(p, /*need_recon=*/true);
+    Eq::validate_backward(p, /*need_recon=*/true);
     const int it_hi = p.bw_begin();
     const int it_lo = p.bw_it_end;
     const bool first_segment = (it_hi == static_cast<int>(p.nt));
@@ -526,13 +531,10 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
     Eq::bind_or_alloc_recon(forward, p, vp);
     Eq::init_aux_slabs(ctx, adjoint);
 
-    torch::Tensor grad, grad_wavelet;
+    std::vector<torch::Tensor> grads;
     RTMOutput illumination;
-    bind_backward_outputs<Eq>(p, grad_wavelet, grad, illumination,
-                              /*want_adcig=*/true);
-    RTMOutput* bs_rtm = (p.compute_illumination || p.compute_adcig)
-        ? &illumination : nullptr;
-    typename Eq::BsScratch bs_scratch = Eq::make_bs_scratch(p, vp);
+    Eq::bind_backward_outputs(p, grads, illumination, /*want_adcig=*/true);
+    RTMOutput* bs_rtm = Eq::bs_rtm_gate(p, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -571,11 +573,14 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, ctx, launch_config,
                                               fwd_source_config,
                                               adj_source_config);
+    typename Eq::BwdWorkspace ws = Eq::make_bwd_workspace(p, state, ctx, adjoint);
 
     // FIRST segment only: re-running the seeding (last-state copy + any
     // rim-zeroing) mid-stream would clobber the carried reconstruction state.
     if (first_segment)
         Eq::seed_reconstruction(state, ctx, forward, p);
+
+    typename Eq::BsScratch bs_scratch = Eq::make_bs_scratch(p, vp);
 
     AsyncCopyContext async_copy(staged_boundary);
     BoundaryRuntime boundary_runtime(
@@ -601,16 +606,16 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
     for (int it = it_hi - 1; it >= std::max(std::max(it_lo, 1), bs_stop); --it) {
         auto adj_view = adjoint.view();
 
-        Eq::adjoint_step(state, ctx, adj_view, cpml, nullptr, nullptr);
-        Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc);
+        Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
+        Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc, ws);
         Eq::post_adjoint(adjoint);
-        Eq::accumulate_source_grad(state, ctx, adjoint, p, &grad_wavelet,
+        Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    it, forward_nsrc);
 
         // Reconstruction + gradient imaging, in this equation's exact order.
         Eq::bs_reverse_step(state, ctx, forward, adjoint, boundary_runtime,
-                            bs, save_width, cpml, p, grad, bs_rtm, bs_scratch,
-                            it, bs_it0);
+                            bs, save_width, cpml, p, grads, bs_rtm, ws,
+                            bs_scratch, it, bs_it0);
 
         boundary_runtime.prefetch_next_backward_chunk_if_needed(
             it - bs_it0, (int)p.nt - bs_it0);
@@ -619,23 +624,20 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
                           in.compute_illumination);
     }
 
-    if (it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
+    if (Eq::HAS_BS_T0_TAIL && it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
         auto adj_view = adjoint.view();
-        Eq::adjoint_step(state, ctx, adj_view, cpml, nullptr, nullptr);
-        Eq::inject_adjoint_source(state, ctx, adj_view, p, 0, adjoint_nsrc);
+        Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
+        Eq::inject_adjoint_source(state, ctx, adj_view, p, 0, adjoint_nsrc, ws);
         Eq::post_adjoint(adjoint);
-        Eq::accumulate_source_grad(state, ctx, adjoint, p, &grad_wavelet,
+        Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    0, forward_nsrc);
     }
 
-    out.grads = {grad_wavelet, grad};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    Eq::pack_outputs(out, grads, illumination);
     return out;
 }
 
-// ---- generic_backward_ckpt (uniform chunks) ----
+// ---- generic_backward_ckpt (uniform chunks; acoustic-family shape) ----
 template <class Eq>
 BackwardOutput generic_backward_ckpt(const BackwardInput& in)
 {
@@ -666,15 +668,13 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     // the forward kernel); the adjoint aux stays full-domain.
     Eq::init_aux_slabs(ctx, forward);
 
-    auto grad = torch::zeros_like(vp);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    std::vector<torch::Tensor> grads;
+    Eq::alloc_grads(p, grads);
     RTMOutput illumination;
     init_rtm_output(illumination, vp,
                     Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
                     2 * in.adcig_max_lag + 1);
-    RTMOutput* rtm_out = (in.compute_illumination ||
-                          (Eq::ADCIG_IN_FULL_MODES && in.compute_adcig))
-        ? &illumination : nullptr;
+    RTMOutput* rtm_out = Eq::full_rtm_gate(in, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -687,6 +687,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, ctx, launch_config,
                                               fwd_source_config,
                                               adj_source_config);
+    typename Eq::BwdWorkspace ws = Eq::make_bwd_workspace(p, state, ctx, adjoint);
 
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
@@ -708,26 +709,22 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
 
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
-            Eq::adjoint_step(state, ctx, adj_view, cpml, nullptr, nullptr);
-            Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc);
+            Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
+            Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc, ws);
             Eq::post_adjoint(adjoint);
-            Eq::accumulate_source_grad(state, ctx, adjoint, p, &grad_wavelet,
+            Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                        it, forward_nsrc);
             Eq::image_step(state, ctx,
                            chunk_forward[it - start].template data_ptr<float>(),
-                           adjoint.u_now_t.template data_ptr<float>(),
-                           vp, &grad, rtm_out);
+                           adjoint, &grads, rtm_out, ws);
         }
     }
 
-    out.grads = {grad_wavelet, grad};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    Eq::pack_outputs(out, grads, illumination);
     return out;
 }
 
-// ---- generic_backward_recursive_ckpt ----
+// ---- generic_backward_recursive_ckpt (acoustic-family bisection) ----
 inline int recursive_checkpoint_scratch_depth(int interval_length)
 {
     int depth = 0;
@@ -758,10 +755,10 @@ void process_recursive_interval(int start, int end,
                                 typename Eq::Wavefield& start_state,
                                 typename Eq::Wavefield& adjoint,
                                 const BackwardInput& p,
-                                const torch::Tensor& vp,
-                                torch::Tensor* grad, torch::Tensor* grad_wavelet,
+                                std::vector<torch::Tensor>& grads,
                                 RTMOutput* rtm_out,
                                 typename Eq::State& state, const SolverContext& ctx,
+                                typename Eq::BwdWorkspace& ws,
                                 decltype(std::declval<typename Eq::CPML>().view()) cpml,
                                 int forward_nsrc, int adjoint_nsrc,
                                 CheckpointRuntime& checkpoint_runtime,
@@ -781,14 +778,12 @@ void process_recursive_interval(int start, int end,
         Eq::swap_recon(start_state);
 
         auto adj_view = adjoint.view();
-        Eq::adjoint_step(state, ctx, adj_view, cpml, nullptr, nullptr);
-        Eq::inject_adjoint_source(state, ctx, adj_view, p, start, adjoint_nsrc);
+        Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
+        Eq::inject_adjoint_source(state, ctx, adj_view, p, start, adjoint_nsrc, ws);
         Eq::post_adjoint(adjoint);
-        Eq::accumulate_source_grad(state, ctx, adjoint, p, grad_wavelet,
+        Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    start, forward_nsrc);
-        Eq::image_step(state, ctx, u_this,
-                       adjoint.u_now_t.template data_ptr<float>(),
-                       vp, grad, rtm_out);
+        Eq::image_step(state, ctx, u_this, adjoint, &grads, rtm_out, ws);
         return;
     }
 
@@ -798,12 +793,12 @@ void process_recursive_interval(int start, int end,
     typename Eq::Wavefield& mid_state = scratch_states[scratch_depth];
     checkpoint_runtime.copy_state(mid_state.state_tensors(), start_state.state_tensors());
     advance_forward_interval<Eq>(mid_state, start, mid, state, ctx, p, cpml, forward_nsrc);
-    process_recursive_interval<Eq>(mid, end, mid_state, adjoint, p, vp, grad,
-                                   grad_wavelet, rtm_out, state, ctx, cpml,
+    process_recursive_interval<Eq>(mid, end, mid_state, adjoint, p, grads,
+                                   rtm_out, state, ctx, ws, cpml,
                                    forward_nsrc, adjoint_nsrc, checkpoint_runtime,
                                    scratch_states, scratch_depth + 1, u_this_scratch);
-    process_recursive_interval<Eq>(start, mid, start_state, adjoint, p, vp, grad,
-                                   grad_wavelet, rtm_out, state, ctx, cpml,
+    process_recursive_interval<Eq>(start, mid, start_state, adjoint, p, grads,
+                                   rtm_out, state, ctx, ws, cpml,
                                    forward_nsrc, adjoint_nsrc, checkpoint_runtime,
                                    scratch_states, scratch_depth + 1, u_this_scratch);
 }
@@ -840,15 +835,13 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     Eq::bind_or_alloc_adjoint(adjoint, p, vp);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
-    auto grad = torch::zeros_like(vp);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    std::vector<torch::Tensor> grads;
+    Eq::alloc_grads(p, grads);
     RTMOutput illumination;
     init_rtm_output(illumination, vp,
                     Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
                     2 * in.adcig_max_lag + 1);
-    RTMOutput* rtm_out = (in.compute_illumination ||
-                          (Eq::ADCIG_IN_FULL_MODES && in.compute_adcig))
-        ? &illumination : nullptr;
+    RTMOutput* rtm_out = Eq::full_rtm_gate(in, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -861,6 +854,7 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, ctx, launch_config,
                                               fwd_source_config,
                                               adj_source_config);
+    typename Eq::BwdWorkspace ws = Eq::make_bwd_workspace(p, state, ctx, adjoint);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
     TORCH_CHECK(p.checkpoint_count == num_saved_checkpoints || p.checkpoint_count == 0,
@@ -897,18 +891,14 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
             checkpoint_runtime.load(segment_idx - 1, start_state.checkpoint_tensors(),
                                     start_state.next_tensors());
 
-        process_recursive_interval<Eq>(start, end, start_state, adjoint, p, vp,
-                                       &grad, &grad_wavelet, rtm_out,
-                                       state, ctx, cpml,
+        process_recursive_interval<Eq>(start, end, start_state, adjoint, p,
+                                       grads, rtm_out, state, ctx, ws, cpml,
                                        forward_nsrc, adjoint_nsrc,
                                        checkpoint_runtime, scratch_states, 0,
                                        u_this_scratch);
     }
 
-    out.grads = {grad_wavelet, grad};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    Eq::pack_outputs(out, grads, illumination);
     return out;
 }
 

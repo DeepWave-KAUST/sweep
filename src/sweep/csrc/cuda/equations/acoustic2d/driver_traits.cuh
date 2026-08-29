@@ -229,6 +229,69 @@ struct Driver {
     static constexpr int RECON_WF_COUNT = 3;
     // 2-D serves ADCIG from full/ckpt modes too (raw-pressure imaging).
     static constexpr bool ADCIG_IN_FULL_MODES = true;
+    // Full mode folds the lagged vp-gradient imaging into the adjoint kernel.
+    static constexpr bool HAS_FUSED_FULL_IMG = true;
+    // The bs reverse loop runs an it==0 adjoint-only tail (grad_wavelet).
+    static constexpr bool HAS_BS_T0_TAIL = true;
+
+    struct BwdWorkspace {};   // fused adjoint keeps scratch in psi/zeta buffers
+    static BwdWorkspace make_bwd_workspace(const BackwardInput&, const State&,
+                                           const SolverContext&, Wavefield&)
+    { return {}; }
+
+    static void validate_forward(const ForwardInput&) {}
+    static void validate_backward(const BackwardInput&, bool) {}
+    static void capture_allt(torch::Tensor&, Wavefield&, int) {}
+
+    static void bind_backward_outputs(const BackwardInput& p,
+                                      std::vector<torch::Tensor>& grads,
+                                      RTMOutput& illumination, bool want_adcig)
+    {
+        eqdrv::acoustic_bind_backward_outputs<Driver>(p, grads, illumination,
+                                                      want_adcig);
+    }
+
+    static void alloc_grads(const BackwardInput& p,
+                            std::vector<torch::Tensor>& grads)
+    {
+        grads = {torch::zeros_like(p.forward_source),
+                 torch::zeros_like(p.models[0])};
+    }
+
+    static void pack_outputs(BackwardOutput& out,
+                             std::vector<torch::Tensor>& grads,
+                             RTMOutput& illumination)
+    {
+        out.grads = {grads[0], grads[1]};
+        out.source_illumination = illumination.source_illumination;
+        out.receiver_illumination = illumination.receiver_illumination;
+        out.adcig = illumination.adcig;
+    }
+
+    static RTMOutput* full_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    {
+        return (p.compute_illumination ||
+                (ADCIG_IN_FULL_MODES && p.compute_adcig))
+            ? &illumination : nullptr;
+    }
+
+    static RTMOutput* bs_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    {
+        // 2-D images after the prefetch (bs_image_step); the gated pointer is
+        // consumed by the 3-D twin's in-step imaging and ignored here.
+        return (p.compute_illumination || p.compute_adcig)
+            ? &illumination : nullptr;
+    }
+
+    static float* fused_grad_ptr(std::vector<torch::Tensor>& grads)
+    {
+        return grads[1].data_ptr<float>();
+    }
+
+    static const float* full_store_ptr(const BackwardInput& p, int it)
+    {
+        return p.u_forward[it].data_ptr<float>();
+    }
 
     struct BsScratch {};   // 2-D NOPML writes no per-step scratch field
     static BsScratch make_bs_scratch(const BackwardInput&, const torch::Tensor&)
@@ -277,7 +340,7 @@ struct Driver {
     // round-trip => ~forward bandwidth.  Caller must swap_aux() each step.
     static void adjoint_step(const State& s, const SolverContext& ctx,
                              AcousticWavefieldPointer adj_view,
-                             AcousticCPMLPointer cpml,
+                             AcousticCPMLPointer cpml, BwdWorkspace&,
                              const float* grad_forward_img, float* grad_out)
     {
         TORCH_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
@@ -291,7 +354,8 @@ struct Driver {
 
     static void inject_adjoint_source(const State& s, const SolverContext& ctx,
                                       const AcousticWavefieldPointer& adj_view,
-                                      const BackwardInput& p, int it, int nsrc)
+                                      const BackwardInput& p, int it, int nsrc,
+                                      BwdWorkspace&)
     {
         // record_config slot carries the ADJOINT source config in backward states.
         add_source<<<s.record_config.grid, s.record_config.block>>>(
@@ -313,14 +377,12 @@ struct Driver {
 
     static void accumulate_source_grad(const State& s, const SolverContext& ctx,
                                        Wavefield& adjoint, const BackwardInput& p,
-                                       torch::Tensor* grad_wavelet,
+                                       std::vector<torch::Tensor>& grads,
                                        int it, int nsrc)
     {
-        if (grad_wavelet == nullptr)
-            return;
         accumulate_source_grad_2d<<<s.source_config.grid, s.source_config.block>>>(
             adjoint.u_now_t.data_ptr<float>(),
-            grad_wavelet->data_ptr<float>(),
+            grads[0].data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
             it,
             nsrc,
@@ -329,15 +391,16 @@ struct Driver {
     }
 
     static void image_step(const State& s, const SolverContext& ctx,
-                           const float* forward_ptr, const float* adjoint_ptr,
-                           const torch::Tensor& vp,
-                           torch::Tensor* grad, RTMOutput* rtm_out)
+                           const float* forward_ptr, Wavefield& adjoint,
+                           std::vector<torch::Tensor>* grads,
+                           RTMOutput* rtm_out, BwdWorkspace&)
     {
-        if (grad != nullptr) {
+        const float* adjoint_ptr = adjoint.u_now_t.data_ptr<float>();
+        if (grads != nullptr) {
             calculate_grad<<<s.launch_config.grid, s.launch_config.block>>>(
                 forward_ptr, adjoint_ptr,
-                vp.data_ptr<float>(),
-                grad->data_ptr<float>(),
+                s.vp,
+                (*grads)[1].data_ptr<float>(),
                 s.nx, s.nz, ctx.dt
             );
         }
@@ -421,9 +484,10 @@ struct Driver {
                                 const GeneralBoundaryPointer& bs, int save_width,
                                 AcousticCPMLPointer /*cpml*/,
                                 const BackwardInput& p,
-                                torch::Tensor& grad,
+                                std::vector<torch::Tensor>& grads,
                                 RTMOutput* /*rtm_out: 2-D images after the
                                              prefetch, in bs_image_step*/,
+                                BwdWorkspace& /*ws*/,
                                 BsScratch& /*scratch*/,
                                 int it, int bs_it0)
     {
@@ -453,7 +517,7 @@ struct Driver {
             forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             s.vp,
-            grad.data_ptr<float>(),
+            grads[1].data_ptr<float>(),
             s.nx, s.nz, ctx.dt
         );
         add_source<<<s.source_config.grid, s.source_config.block>>>(

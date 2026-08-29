@@ -48,7 +48,6 @@ struct Driver {
     static constexpr int ADJ_WF_COUNT = 15;     // u triple + psi/zeta triple double-buffer
     static constexpr int RECON_WF_COUNT = 3;
     static constexpr bool ADCIG_IN_FULL_MODES = false;
-
     using Wavefield = AcousticWavefieldTensor;
     using CPML = AcousticCPMLTensor;
 
@@ -233,6 +232,67 @@ struct Driver {
 
     // ---- backward hooks -------------------------------------------------- //
 
+    static constexpr bool HAS_FUSED_FULL_IMG = true;
+    static constexpr bool HAS_BS_T0_TAIL = true;
+
+    struct BwdWorkspace {};   // fused adjoint keeps scratch in psi/zeta buffers
+    static BwdWorkspace make_bwd_workspace(const BackwardInput&, const State&,
+                                           const SolverContext&, Wavefield&)
+    { return {}; }
+
+    static void validate_forward(const ForwardInput&) {}
+    static void validate_backward(const BackwardInput&, bool) {}
+    static void capture_allt(torch::Tensor&, Wavefield&, int) {}
+
+    static void bind_backward_outputs(const BackwardInput& p,
+                                      std::vector<torch::Tensor>& grads,
+                                      RTMOutput& illumination, bool want_adcig)
+    {
+        eqdrv::acoustic_bind_backward_outputs<Driver>(p, grads, illumination,
+                                                      want_adcig);
+    }
+
+    static void alloc_grads(const BackwardInput& p,
+                            std::vector<torch::Tensor>& grads)
+    {
+        grads = {torch::zeros_like(p.forward_source),
+                 torch::zeros_like(p.models[0])};
+    }
+
+    static void pack_outputs(BackwardOutput& out,
+                             std::vector<torch::Tensor>& grads,
+                             RTMOutput& illumination)
+    {
+        out.grads = {grads[0], grads[1]};
+        out.source_illumination = illumination.source_illumination;
+        out.receiver_illumination = illumination.receiver_illumination;
+        out.adcig = illumination.adcig;
+    }
+
+    static RTMOutput* full_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    {
+        return (p.compute_illumination ||
+                (ADCIG_IN_FULL_MODES && p.compute_adcig))
+            ? &illumination : nullptr;
+    }
+
+    static RTMOutput* bs_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    {
+        return (p.compute_illumination || p.compute_adcig)
+            ? &illumination : nullptr;
+    }
+
+    static float* fused_grad_ptr(std::vector<torch::Tensor>& grads)
+    {
+        return grads[1].data_ptr<float>();
+    }
+
+    static const float* full_store_ptr(const BackwardInput& p, int it)
+    {
+        return p.u_forward[it].data_ptr<float>();
+    }
+
+
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
@@ -269,7 +329,7 @@ struct Driver {
     // FUSED single-kernel exact 3D adjoint (see acoustic2d twin).
     static void adjoint_step(const State& s, const SolverContext& ctx,
                              AcousticWavefieldPointer adj_view,
-                             AcousticCPMLPointer cpml,
+                             AcousticCPMLPointer cpml, BwdWorkspace&,
                              const float* grad_forward_img, float* grad_out)
     {
         TORCH_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
@@ -285,7 +345,8 @@ struct Driver {
 
     static void inject_adjoint_source(const State& s, const SolverContext& ctx,
                                       const AcousticWavefieldPointer& adj_view,
-                                      const BackwardInput& p, int it, int nsrc)
+                                      const BackwardInput& p, int it, int nsrc,
+                                      BwdWorkspace&)
     {
         add_source_3d<<<s.record_config.grid, s.record_config.block>>>(
             adj_view.u_next,
@@ -303,14 +364,12 @@ struct Driver {
 
     static void accumulate_source_grad(const State& s, const SolverContext& ctx,
                                        Wavefield& adjoint, const BackwardInput& p,
-                                       torch::Tensor* grad_wavelet,
+                                       std::vector<torch::Tensor>& grads,
                                        int it, int nsrc)
     {
-        if (grad_wavelet == nullptr)
-            return;
         accumulate_source_grad_3d<<<s.source_config.grid, s.source_config.block>>>(
             adjoint.u_now_t.data_ptr<float>(),
-            grad_wavelet->data_ptr<float>(),
+            grads[0].data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
             it,
             nsrc,
@@ -319,15 +378,16 @@ struct Driver {
     }
 
     static void image_step(const State& s, const SolverContext& ctx,
-                           const float* forward_ptr, const float* adjoint_ptr,
-                           const torch::Tensor& vp,
-                           torch::Tensor* grad, RTMOutput* rtm_out)
+                           const float* forward_ptr, Wavefield& adjoint,
+                           std::vector<torch::Tensor>* grads,
+                           RTMOutput* rtm_out, BwdWorkspace&)
     {
-        if (grad != nullptr) {
+        const float* adjoint_ptr = adjoint.u_now_t.data_ptr<float>();
+        if (grads != nullptr) {
             calculate_grad_3d<<<s.launch_config.grid, s.launch_config.block>>>(
                 forward_ptr, adjoint_ptr,
-                vp.data_ptr<float>(),
-                grad->data_ptr<float>(),
+                s.vp,
+                (*grads)[1].data_ptr<float>(),
                 s.B, s.nx, s.ny, s.nz, ctx.dt
             );
         }
@@ -406,8 +466,9 @@ struct Driver {
                                 const GeneralBoundaryPointer& bs, int save_width,
                                 AcousticCPMLPointer /*cpml*/,
                                 const BackwardInput& p,
-                                torch::Tensor& grad,
+                                std::vector<torch::Tensor>& grads,
                                 RTMOutput* rtm_out,
+                                BwdWorkspace& /*ws*/,
                                 BsScratch& scratch,
                                 int it, int bs_it0)
     {
@@ -438,7 +499,7 @@ struct Driver {
             forward.u_now_t.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             s.vp,
-            grad.data_ptr<float>(),
+            grads[1].data_ptr<float>(),
             s.B, s.nx, s.ny, s.nz, ctx.dt
         );
         if (rtm_out != nullptr) {
