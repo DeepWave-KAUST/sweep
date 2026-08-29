@@ -367,13 +367,13 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
             continue;
         }
 
-        // FULL-mode step: equations with grad fusion fold the imaging into the
-        // stress-adjoint-prepare kernel; the others image standalone first.
+        // FULL-mode step, in this equation's exact order: elastic folds the
+        // imaging into the stress-adjoint-prepare kernel and corrects rho
+        // after; das_mu images standalone, corrects rho, THEN steps the
+        // adjoint.  The receiver-rho correction position is bit-load-bearing,
+        // so the whole compound lives in the hook.
         Eq::full_fused_step(state, solver, adjoint, workspace, cpml_view,
-                            vptrs, grads);
-
-        Eq::undo_receiver_rho(state, solver, grads, vptrs, p,
-                              receiver_fields, it, adjoint_nsrc);
+                            vptrs, grads, p, receiver_fields, it, adjoint_nsrc);
     }
 
     out.grads = grads;
