@@ -102,6 +102,8 @@ ForwardOutput sg_generic_forward(const ForwardInput& in)
                     record.size(-1) == static_cast<long>(p.nt),
                     "record_out must be contiguous with trailing dim nt");
 
+    Eq::validate_forward(p);
+
     if (p.use_checkpoint) {
         TORCH_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                     Eq::CKPT_COUNT_MSG);
@@ -303,6 +305,7 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     // partition reproduces the monolithic loop bit-for-bit.
     const int it_hi = p.bw_begin();
     const int it_lo = p.bw_it_end;
+    const bool first_segment = (it_hi == static_cast<int>(p.nt));
     BackwardOutput out;
 
     typename Eq::Models models = Eq::parse_models(p);
@@ -321,6 +324,10 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     typename Eq::Wavefield adjoint;
     Eq::bind_or_alloc_adjoint(adjoint, p, vp);
     Eq::init_aux_slabs(solver, adjoint);
+    // A continuation segment must keep the carried adjoint state; the 3-D
+    // twin zeroes it on the FIRST segment only (2-D relies on Python-zeroed
+    // buffers and no-ops here).
+    Eq::prep_adjoint(adjoint, first_segment);
 
     auto adj_view = Eq::view(adjoint);
 
