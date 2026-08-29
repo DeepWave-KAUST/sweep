@@ -299,6 +299,10 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
+    // Per-equation entry validation (model/PML counts, mode-specific input
+    // tensors) with the equation's own per-mode message texts.  Runs FIRST,
+    // like the hand-written entry points it replaces.
+    Eq::validate_backward(p, "full");
     sg_check_stepped_backward<Eq>(p, /*need_recon=*/false);
     // it == 0 keeps its legacy asymmetry (gradient only, no adjoint step)
     // and runs in whichever segment contains it — position-based, so any
@@ -388,6 +392,7 @@ BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
     const auto& p = in;
     BackwardOutput out;
 
+    Eq::validate_backward(p, "bs");
     sg_check_stepped_backward<Eq>(p, /*need_recon=*/true);
     // The staggered BS loop legacy floor is it == 1 (no it==0 tail), so the
     // segment containing it == 0 simply runs nothing extra.
@@ -423,6 +428,10 @@ BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
     typename Eq::Wavefield adjoint;
     Eq::bind_or_alloc_adjoint(adjoint, p, vp);
     Eq::init_aux_slabs(solver, adjoint);
+    // Equations whose hand-written backward_bs zeroed the adjoint state after
+    // binding hook it here (FIRST segment only — a continuation segment must
+    // keep the carried adjoint state); the rest no-op.
+    Eq::prep_adjoint_bs(adjoint, first_segment);
 
     // Reconstruction state: the physical fields plus the carried velocity
     // tensors (v at time it+1, consumed by the gradient kernel).  When
@@ -599,6 +608,7 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
+    Eq::validate_backward(p, "ckpt");
     TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
                 "checkpoint backward does not support bw_it_begin/bw_it_end, "
                 "step_phase or cut_face_mask in v1");
@@ -634,8 +644,13 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, models, launch_config,
                                               fwd_source_config, adj_source_config);
 
+    // bind_grads, not alloc_grads: ckpt refuses stepped calls (above), and
+    // grads_out is only ever bound for stepped/DD, so the bound branch is
+    // unreachable here and this is the same allocation — but it hands the
+    // hook the full BackwardInput (equations whose gradient set is not
+    // {vp, vs, rho} need all of p.models to size it).
     std::vector<torch::Tensor> grads;
-    Eq::alloc_grads(vp, grads);
+    Eq::bind_grads(p, grads);
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
 
     typename Eq::Wavefield start_state;
@@ -737,6 +752,7 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
     const auto& p = in;
+    Eq::validate_backward(p, "ckpt_recursive");
     TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
                 "checkpoint backward does not support bw_it_begin/bw_it_end, "
                 "step_phase or cut_face_mask in v1");
