@@ -451,7 +451,10 @@ struct Driver {
                                 Wavefield& adjoint, Workspace& workspace,
                                 ElasticCPMLPointer cpml_view,
                                 const VelPtrs& v,
-                                std::vector<torch::Tensor>& grads)
+                                std::vector<torch::Tensor>& grads,
+                                const BackwardInput& p,
+                                const torch::Tensor& receiver_fields,
+                                int it, int adjoint_nsrc)
     {
         auto adj_view = adjoint.view();
         LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
@@ -507,6 +510,9 @@ struct Driver {
             s.grad_ctx,
             solver
         );
+
+        undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
+                          adjoint_nsrc);
     }
 
     // Null imaging pointers => behaviour byte-for-byte identical to the
