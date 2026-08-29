@@ -54,6 +54,7 @@ cut-placement guard), unlike the abcn=30 canonical suite default.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 import numpy as np
@@ -64,6 +65,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+
+# The staged-copy bounds check is read once into a static on first use, so it
+# has to be set before the extension loads.  Without it the off-by-one this
+# file regresses against is silent at test sizes: a chunk_start of -1 lands a
+# few bytes before a small host buffer, still inside the allocator's mapping,
+# and the chunk it prefetches is never consumed -- so it neither faults nor
+# changes a gradient.  It only segfaults once the buffer is big enough for -1
+# to fall off the mapping, which is not a size a unit test should need.
+os.environ.setdefault("SWEEP_BOUNDARY_BOUNDS", "1")
 
 from sweep.equations import Acoustic  # noqa: E402
 from sweep.parallel import MeshTopology  # noqa: E402
@@ -107,7 +117,7 @@ def vp_global():
     return vp
 
 
-def make_prop(shape, topo=None):
+def make_prop(shape, topo=None, storage="gpu", ti=1, ring=1):
     equation = Acoustic(spatial_order=SO, device=DEV, backend="torch")
     kwargs = dict(
         backend="torch",
@@ -125,8 +135,9 @@ def make_prop(shape, topo=None):
         B=1,
         use_ckpt=False,
         boundary_saving_config={
-            "enabled": True, "storage": "gpu",
-            "transfer_interval": 1, "pinned_memory": False,
+            "enabled": True, "storage": storage,
+            "transfer_interval": ti, "ring_buffers": ring,
+            "pinned_memory": False,
         },
     )
     if topo is not None:
@@ -234,7 +245,7 @@ def build_reference():
     return TileState(cap)
 
 
-def build_tiles(residual_raw):
+def build_tiles(residual_raw, storage="gpu", ti=1, ring=1):
     """Two tile TileStates; per-tile adjoint_source filled from the shared
     synthetic residual (reference raw record), split by receiver ownership."""
     vp = vp_global()
@@ -261,7 +272,7 @@ def build_tiles(residual_raw):
             [[[gx - x0, REC_GZ] for gx in own_rec]], dtype=np.int32
         )
 
-        prop = make_prop((NZ, NXP), topo=topo)
+        prop = make_prop((NZ, NXP), topo=topo, storage=storage, ti=ti, ring=ring)
         cap = capture_both(prop)
         run_public_once(prop, tile_wavelet, tile_sources, tile_receivers, vp_tile)
         t = TileState(cap)
@@ -443,3 +454,47 @@ def test_dd_backward_guards():
         func(bp)
     bp.boundary_on_disk = False
     bp.cut_face_mask = 0
+
+
+@cuda_only
+def test_dd_backward_two_tile_cpu_staged_matches_gpu():
+    """Host-staged boundary must give the SAME gradient as the in-VRAM ring.
+
+    Regression for two defects that only DD reaches:
+
+    * ``prefetch_initial_backward_chunk`` put chunk_start at it0-1.  The
+      monolithic backward primes the ring once with it_hi == nt, so it lands at
+      nt-2; the DD backward is driven one step per call, so its last call
+      (it_hi == 1) asked for chunk -1 and staged a copy from one chunk BEFORE
+      the host buffer -- a host-side segfault inside cudaMemcpyAsync that
+      compute-sanitizer cannot see and that surfaced as a hang about as often
+      as a crash.
+    * ``ModelParallel`` pinned transfer_interval at 1 and dropped
+      ring_buffers, so the staging never batched.  ti/ring are varied here so
+      a regression to the hardcoded 1/1 changes what is exercised.
+
+    Bitwise, not approximate: staging moves where the boundary lives, not what
+    it holds, so every gradient buffer must match element for element.
+    """
+    ref = build_reference()
+    residual_raw = ref.fwd_record_raw.clone()
+
+    def run(storage, ti, ring):
+        tiles = build_tiles(residual_raw, storage=storage, ti=ti, ring=ring)
+        replay_dd_forward(tiles, ref.fp.models[0])
+        replay_dd_backward(tiles)
+        return tiles
+
+    base = run("gpu", 1, 1)
+    for ti, ring in ((1, 1), (8, 2), (16, 4)):
+        staged = run("cpu", ti, ring)
+        for t, (a, b) in enumerate(zip(base, staged)):
+            assert len(a.gbufs) == len(b.gbufs) and len(a.ibufs) == len(b.ibufs)
+            for k in range(len(a.gbufs)):
+                assert torch.equal(a.gbufs[k], b.gbufs[k]), (
+                    f"tile{t} gbufs[{k}] differs with storage=cpu "
+                    f"(transfer_interval={ti}, ring_buffers={ring})")
+            for k in range(len(a.ibufs)):
+                assert torch.equal(a.ibufs[k], b.ibufs[k]), (
+                    f"tile{t} ibufs[{k}] differs with storage=cpu "
+                    f"(transfer_interval={ti}, ring_buffers={ring})")
