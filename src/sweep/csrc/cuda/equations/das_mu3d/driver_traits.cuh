@@ -331,6 +331,9 @@ struct Driver {
             if (tensor.defined()) tensor.zero_();
     }
 
+    static void validate_backward(const BackwardInput&, const char*) {}
+    static void prep_adjoint_bs(Wavefield&, bool) {}
+
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
         if (!p.grads_out.empty()) {

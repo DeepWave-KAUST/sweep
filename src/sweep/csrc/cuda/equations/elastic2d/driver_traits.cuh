@@ -88,6 +88,8 @@ struct Driver {
 
     static void validate_forward(const ForwardInput&) {}
     static void prep_adjoint(Wavefield&, bool) {}
+    static void validate_backward(const BackwardInput&, const char*) {}
+    static void prep_adjoint_bs(Wavefield&, bool) {}
 
     template <class P>
     static void setup_ctx(SolverContext& solver, const P& p)

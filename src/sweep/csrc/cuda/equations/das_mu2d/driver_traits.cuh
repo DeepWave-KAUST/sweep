@@ -122,8 +122,9 @@ struct Driver {
     static void setup_ctx(SolverContext&, const P&) {}   // no per-edge / topo
 
     static void validate_forward(const ForwardInput&) {}
-    static void validate_backward(const BackwardInput&, bool) {}
+    static void validate_backward(const BackwardInput&, const char*) {}
     static void prep_adjoint(Wavefield&, bool) {}
+    static void prep_adjoint_bs(Wavefield&, bool) {}
 
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& vp)
