@@ -57,6 +57,7 @@ struct Driver {
     static constexpr const char* RECON_LIST_DESC =
         "(the full 36-tensor elastic wavefield list)";
     static constexpr int N_VEL = 3;
+    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Wavefield = ElasticWavefieldTensor;
     using WfView = ElasticWavefieldPointer;

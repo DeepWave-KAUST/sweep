@@ -237,6 +237,7 @@ struct Driver {
     static constexpr const char* CKPT_RECURSIVE_COUNT_MSG =
         "Elastic 2D recursive checkpointing expects 15 checkpoint tensors";
     static constexpr int N_VEL = 2;
+    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Workspace = ElasticAdjointWorkspaceTensor;
 

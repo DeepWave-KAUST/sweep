@@ -51,6 +51,7 @@ struct Driver {
     static constexpr const char* RECON_LIST_DESC =
         "[vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, fvx_prev, fvy_prev, fvz_prev]";
     static constexpr int N_VEL = 3;
+    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Wavefield = ElasticWavefieldTensor;
     using WfView = ElasticWavefieldPointer;
