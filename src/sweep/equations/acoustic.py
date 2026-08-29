@@ -189,5 +189,6 @@ class Acoustic(SecondOrderEquation):
             slots=slot_table.ACOUSTIC2D,
             grads_out_has_wavelet=True,
             supports_boundary_tail_steps=True,
+            stepped=True,
             illum_nvar=2,
         )

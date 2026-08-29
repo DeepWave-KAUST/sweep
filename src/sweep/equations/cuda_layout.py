@@ -50,6 +50,21 @@ class CUDALayoutSpec:
     # equal the hand-written ones, so the two cannot drift while both exist.
     slots: "SlotTable | None" = None
     # ---- Domain decomposition ------------------------------------------
+    # The compiled forward AND backward_bs honour the stepped it_begin/it_end
+    # range (propagation state persists across Python-driven segments) -- the
+    # prerequisite for domain decomposition.  Declared here so ModelParallel
+    # admits by declaration instead of by the class-name whitelist it used to
+    # keep.  An equation without it would not raise under DD -- it would run
+    # the full record on every stepped call and return zeros -- so the flag
+    # must only be set once the kernels' drivers are actually stepped (the
+    # shared template drivers in csrc/cuda/common are).
+    stepped: bool = False
+    # The compiled backward implements the NUMBERED backward phases its DD
+    # schedule drives (the elastic physics split, the VRZ coupling exchange).
+    # The plain acoustic schedule phases nothing and ignores this flag.  The
+    # 2-D AcousticVRZ is the live gap: stepped, but its backward lacks the
+    # coupling-exchange phases the 3-D sibling implements.
+    dd_backward_phases: bool = False
     # Some equations' model gradient is a spatial DIVERGENCE of an intermediate
     # coupling field rather than a pointwise product, so at a cut seam it needs
     # the neighbour's coupling values -- the DD backward has to build the field,

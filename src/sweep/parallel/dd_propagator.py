@@ -65,53 +65,41 @@ from sweep.propagator._stepped import (
 )
 
 
-# Which equations ModelParallel can actually run, and their wavefield family.
-#
-# The criterion is NOT the class name. DD advances the solver one step at a
-# time and exchanges halos between steps, so the equation's CUDA forward AND
-# backward have to honour the stepped range (``p.it_begin`` / ``p.it_end``).
-# Only these do -- see csrc/cuda/equations/{acoustic2d, acoustic3d,
-# acoustic_vrz3d, elastic2d, elastic3d}/{forward,backward}.cu.
-#
-# This used to be a substring match on the class name, which accepted every
-# ``Acoustic*`` / ``Elastic*`` variant in the library. The ones without a
-# stepped forward do not fail on the way in: their time loop is a plain
-# ``for (it = 0; it < p.nt; ++it)``, so a "run one step" call runs the WHOLE
-# record and DD then exchanges halos of a wavefield that already reached nt.
-# Silently wrong, which is worse than unsupported. ``AcousticVRZ`` (2-D) is
-# the clearest case -- its 3-D sibling IS stepped, so the name gives no hint.
-#
-# Adding an equation here means all three of: its forward.cu and backward.cu
-# implement the stepped range; its wavefield list matches the family geometry
-# declares a slot table and a DD schedule; and a DD-vs-single parity test
-# covers it (gate/ddgate.py, test/dd_corner_*).
-_DD_EQUATIONS = {
-    "Acoustic": "acoustic",             # csrc/cuda/equations/acoustic2d
-    "Acoustic3D": "acoustic",           # csrc/cuda/equations/acoustic3d
-    "AcousticVRZ3D": "acoustic",        # csrc/cuda/equations/acoustic_vrz3d
-    "Elastic": "elastic",               # elastic2d and elastic3d -- the 3-D
-                                        # class is also named ``Elastic``,
-                                        # exported as ``Elastic3D``
-}
+def check_dd_admission(equation, layout, spec):
+    """Refuse equations whose DECLARED capabilities cannot run ``spec``.
 
+    Replaces the retired ``_DD_EQUATIONS`` class-name whitelist.  Two
+    capabilities gate admission, both declared on ``cuda_layout``:
 
-def _family_of(equation) -> str:
-    # Walk the MRO so a subclass of a supported equation still works. Every
-    # equation in the library derives straight from First/SecondOrderEquation,
-    # never from a sibling, so this cannot smuggle in an unsupported one.
-    for klass in type(equation).__mro__:
-        family = _DD_EQUATIONS.get(klass.__name__)
-        if family is not None:
-            return family
-    raise NotImplementedError(
-        f"domain decomposition does not support {type(equation).__name__}. It "
-        f"needs an equation whose CUDA forward and backward implement the "
-        f"stepped range (it_begin/it_end): "
-        f"{', '.join(sorted(_DD_EQUATIONS))} -- Elastic covers 2-D and 3-D, "
-        f"and note AcousticVRZ3D is stepped while the 2-D AcousticVRZ is not. "
-        f"An equation without it would not raise, it would run the full record "
-        f"on every stepped call."
-    )
+    * ``stepped`` -- the compiled forward/backward_bs honour it_begin/it_end.
+      An equation without it would not raise; it would run the full record on
+      every stepped call and return zeros.  Silently wrong beats unsupported,
+      so this must be loud.
+    * ``dd_backward_phases`` -- required only when ``spec`` drives numbered
+      backward phases (the elastic physics split, the VRZ coupling exchange).
+      An unphased compiled backward ignores ``step_phase`` -- again silent.
+    """
+    name = type(equation).__name__
+    if not getattr(layout, "stepped", False):
+        raise NotImplementedError(
+            f"domain decomposition does not support {name}: its compiled "
+            f"drivers do not declare the stepped it_begin/it_end range "
+            f"(cuda_layout.stepped). Equations opt in by declaring "
+            f"stepped=True once their forward and backward_bs honour "
+            f"stepped segments -- joining the shared template drivers in "
+            f"csrc/cuda/common provides exactly that.")
+    bwd = spec.backward
+    needs_phases = any(
+        ph.step_phase is not None
+        for ph in tuple(getattr(bwd, "prologue", ()) or ()) + tuple(bwd.phases))
+    if needs_phases and not getattr(layout, "dd_backward_phases", False):
+        raise NotImplementedError(
+            f"domain decomposition does not support {name} yet: its schedule "
+            f"({spec.name}) drives numbered backward phases which the "
+            f"compiled backward does not declare "
+            f"(cuda_layout.dd_backward_phases). For the 2-D AcousticVRZ this "
+            f"is the coupling-exchange backward that only the 3-D sibling "
+            f"implements.")
 
 
 class _DDForward(torch.autograd.Function):
@@ -256,12 +244,6 @@ class ModelParallel:
         if self.ndim not in (2, 3):
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
-        # Accepted-equation check only, called for its refusal: nothing
-        # dispatches on the returned family any more (the schedule comes from
-        # the equation's own declarations -- see _spec below -- and the
-        # wavefield geometry from its slot table), but without this raise an
-        # unstepped equation would run the full record on every stepped call.
-        _family_of(equation)
         # Whether this equation's backward needs the coupling-field exchange
         # (a gradient that is a spatial DIVERGENCE rather than a pointwise
         # product; variable-density VRZ is the case in the tree). Read off the
@@ -314,7 +296,7 @@ class ModelParallel:
         # is always a concrete string. The old ``or ("cpmls" if elastic else
         # "cpmlr")`` was therefore unreachable, and the rule it encoded was
         # wrong anyway — it guessed the formulation from a substring of the
-        # class name (``_family_of``), which puts AcousticVTI1st in the
+        # class name (the retired family guess), which puts AcousticVTI1st in the
         # "acoustic" family and would have handed it 'cpmlr' when its staggered
         # step unpacks the 8 profiles of 'cpmls'. The equation's own
         # ``default_pml_type`` is the only thing that knows.
@@ -405,6 +387,8 @@ class ModelParallel:
         # coupling exchange; otherwise it is the plain second-order schedule.
         self._spec = (ELASTIC_DD if not table.u_blocks
                       else VRZ_DD if self._dd_coupling_nvar else ACOUSTIC_DD)
+        # Admission is DECLARED, not name-listed (see check_dd_admission).
+        check_dd_admission(equation, _layout, self._spec)
         self._nwf = table.n_forward
         # FORWARD and ADJOINT list lengths are different quantities for the
         # acoustic family (9/12 vs 11/15: the fused adjoint double-buffers zeta
