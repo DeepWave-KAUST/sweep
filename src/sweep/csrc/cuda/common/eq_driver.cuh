@@ -386,7 +386,8 @@ template <class Eq>
 void bind_backward_outputs(const BackwardInput& p,
                            torch::Tensor& grad_wavelet,
                            torch::Tensor& grad,
-                           RTMOutput& illumination)
+                           RTMOutput& illumination,
+                           bool want_adcig)
 {
     if (!p.grads_out.empty()) {
         TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
@@ -411,7 +412,7 @@ void bind_backward_outputs(const BackwardInput& p,
                     "single-segment backward instead.");
     } else {
         init_rtm_output(illumination, p.models[0],
-                        p.compute_adcig, 2 * p.adcig_max_lag + 1);
+                        want_adcig && p.compute_adcig, 2 * p.adcig_max_lag + 1);
     }
 }
 
@@ -424,8 +425,12 @@ BackwardOutput generic_backward(const BackwardInput& in)
     BackwardOutput out;
     torch::Tensor grad, grad_wavelet;
     RTMOutput illumination;
-    bind_backward_outputs<Eq>(in, grad_wavelet, grad, illumination);
-    RTMOutput* rtm_out = (in.compute_illumination || in.compute_adcig)
+    // 2-D acoustic serves ADCIG from every mode; 3-D only from backward_bs
+    // (the full/ckpt imaging there correlates vp^2*Lap(u), not raw pressure).
+    bind_backward_outputs<Eq>(in, grad_wavelet, grad, illumination,
+                              Eq::ADCIG_IN_FULL_MODES);
+    RTMOutput* rtm_out = (in.compute_illumination ||
+                          (Eq::ADCIG_IN_FULL_MODES && in.compute_adcig))
         ? &illumination : nullptr;
 
     const auto& p = in;
@@ -523,7 +528,11 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
 
     torch::Tensor grad, grad_wavelet;
     RTMOutput illumination;
-    bind_backward_outputs<Eq>(p, grad_wavelet, grad, illumination);
+    bind_backward_outputs<Eq>(p, grad_wavelet, grad, illumination,
+                              /*want_adcig=*/true);
+    RTMOutput* bs_rtm = (p.compute_illumination || p.compute_adcig)
+        ? &illumination : nullptr;
+    typename Eq::BsScratch bs_scratch = Eq::make_bs_scratch(p, vp);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -532,15 +541,24 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
     int save_width = Eq::save_width(p.abcn, p.M);
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+    // ``bs.last_two`` is never read in the backward -- the reverse seeds come
+    // straight from ``p.u_last_two``.  Passing {} made allocate_last_two take
+    // its self-allocating branch and build a full two-wavefield FP32 buffer on
+    // EVERY call, in HOST memory on the staged path.  Harmless for a monolithic
+    // backward, ruinous under DD/stepped (one call per time step): a production
+    // 3-D run went 1760 -> 166 s/iteration once the backward bound the tensor
+    // instead.  Bind it here for every equation on this skeleton.
+    // (dev 4290248, which fixed the pre-template acoustic3d/backward.cu.)
+    const torch::Tensor& last_two_bound = p.u_last_two;
     if (staged_boundary) {
         boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
                                 Eq::BS_LAST_TWO_NVAR, true, false,
                                 p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-                                {}, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
+                                last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
     } else {
         boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
                                 Eq::BS_LAST_TWO_NVAR, true, true, 1, {}, p.boundary_gpu,
-                                {}, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
+                                last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
     }
@@ -591,7 +609,8 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
 
         // Reconstruction + gradient imaging, in this equation's exact order.
         Eq::bs_reverse_step(state, ctx, forward, adjoint, boundary_runtime,
-                            bs, save_width, cpml, p, grad, it, bs_it0);
+                            bs, save_width, cpml, p, grad, bs_rtm, bs_scratch,
+                            it, bs_it0);
 
         boundary_runtime.prefetch_next_backward_chunk_if_needed(
             it - bs_it0, (int)p.nt - bs_it0);
@@ -650,8 +669,11 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
-    init_rtm_output(illumination, vp, in.compute_adcig, 2 * in.adcig_max_lag + 1);
-    RTMOutput* rtm_out = (in.compute_illumination || in.compute_adcig)
+    init_rtm_output(illumination, vp,
+                    Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
+                    2 * in.adcig_max_lag + 1);
+    RTMOutput* rtm_out = (in.compute_illumination ||
+                          (Eq::ADCIG_IN_FULL_MODES && in.compute_adcig))
         ? &illumination : nullptr;
 
     typename Eq::CPML cpml_tensor;
@@ -821,8 +843,11 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     auto grad = torch::zeros_like(vp);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
-    init_rtm_output(illumination, vp, in.compute_adcig, 2 * in.adcig_max_lag + 1);
-    RTMOutput* rtm_out = (in.compute_illumination || in.compute_adcig)
+    init_rtm_output(illumination, vp,
+                    Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
+                    2 * in.adcig_max_lag + 1);
+    RTMOutput* rtm_out = (in.compute_illumination ||
+                          (Eq::ADCIG_IN_FULL_MODES && in.compute_adcig))
         ? &illumination : nullptr;
 
     typename Eq::CPML cpml_tensor;
