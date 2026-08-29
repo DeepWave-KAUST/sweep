@@ -6,7 +6,7 @@ Two things were wrong with that:
 * the fallback was unreachable — ``PropBase.__init__`` resolves a ``None``
   ``pml_type`` to ``equation.default_pml_type`` before ``ModelParallel`` reads
   ``prop.pml_type``, so the right-hand side never ran;
-* the rule it encoded was wrong. ``_family_of`` classifies by a substring of
+* the rule it encoded was wrong. The retired family guess classified by a substring of
   the class name, so ``AcousticVTI1st`` — whose staggered step unpacks the 8
   profiles of ``cpmls`` — lands in the "acoustic" family and would have been
   handed ``cpmlr`` (6 profiles). The profile list is bound positionally, so
@@ -51,18 +51,19 @@ def test_acoustic_vti1st_is_refused_outright():
     profiles of ``cpmlr`` where its step unpacks the 8 of ``cpmls`` -- bound
     positionally, hence silently wrong physics rather than a crash.
 
-    It can no longer reach that code at all: ``_family_of`` is an explicit
-    whitelist now, and this equation has no stepped CUDA forward, so DD
-    refuses it. Keep the case pinned -- if someone ever adds it back to
-    ``_DD_EQUATIONS``, the pml_type it receives is what to check first.
+    It can no longer reach that code at all: admission is declared on
+    cuda_layout now, and this equation declares no stepped drivers, so DD
+    refuses it. Keep the case pinned -- if it is ever admitted, the pml_type
+    it receives is what to check first.
     """
     from sweep.equations import AcousticVTI1st
-    from sweep.parallel.dd_propagator import _family_of
+    from sweep.parallel.dd_propagator import check_dd_admission
+    from sweep.parallel.dd_spec import ACOUSTIC_DD
 
     eq = AcousticVTI1st(device=DEV, backend="torch")
     assert eq.default_pml_type == "cpmls"
-    with pytest.raises(NotImplementedError, match="stepped range"):
-        _family_of(eq)
+    with pytest.raises(NotImplementedError, match="stepped"):
+        check_dd_admission(eq, eq.cuda_layout, ACOUSTIC_DD)
 
 
 def test_source_has_no_family_based_pml_fallback():

@@ -218,11 +218,13 @@ class AcousticVRZ(SecondOrderEquation):
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
             slots=slot_table.ACOUSTIC_VRZ2D,
+            stepped=True,
             grads_out_has_wavelet=True,
             illum_nvar=2,
-            # Same divergence-form gradient as the 3-D sibling; declared
-            # for the physics, not for DD (which refuses this class today
-            # because its CUDA kernels are not stepped).
+            # Same divergence-form gradient as the 3-D sibling.  DD still
+            # refuses this class -- no longer for want of stepped kernels
+            # (the template driver made it stepped), but because its backward
+            # lacks the coupling-exchange phases (dd_backward_phases).
             dd_coupling_nvar=6,
             dd_adjoint_coeff_nvar=4,
         )
@@ -330,6 +332,8 @@ class AcousticVRZ3D(SecondOrderEquation):
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
             slots=slot_table.ACOUSTIC_VRZ3D,
+            stepped=True,
+            dd_backward_phases=True,
             grads_out_has_wavelet=True,
             illum_nvar=2,
             # DD: the variable-density gradient is div(c/e) with
