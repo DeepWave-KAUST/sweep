@@ -656,8 +656,11 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     typename Eq::Wavefield start_state;
     Eq::alloc_recursive_start_state(start_state, p, vp);
     Eq::check_ckpt_aux_layout(start_state, adjoint);
+    // Equations whose imaging has no velocity(t+1) term (NEXT_V == false)
+    // skip the cross-segment velocity carriers entirely; their seg_vel_ptrs
+    // hands the imaging null next-pointers instead.
     std::vector<torch::Tensor> next_segment_v, prev_segment_next_v;
-    for (int c = 0; c < Eq::N_VEL; ++c) {
+    for (int c = 0; Eq::NEXT_V && c < Eq::N_VEL; ++c) {
         next_segment_v.push_back(torch::zeros_like(vp));
         prev_segment_next_v.push_back(torch::zeros_like(vp));
     }
@@ -676,7 +679,7 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
                                 checkpoint_runtime, start, end, cpml_view, solver,
                                 source_fields, receiver_fields,
                                 next_segment_v, grads, prev_segment_next_v);
-        for (int c = 0; c < Eq::N_VEL; ++c)
+        for (int c = 0; Eq::NEXT_V && c < Eq::N_VEL; ++c)
             next_segment_v[c].copy_(prev_segment_next_v[c]);
     }
 
@@ -715,8 +718,14 @@ void sg_replay_forward_to_time(
     SolverContext& solver,
     const torch::Tensor& source_fields)
 {
-    for (auto& t : current_v) t.zero_();
-    for (auto& t : next_v) t.zero_();
+    // next_v must be zero when target_index + 1 == nt (never captured below).
+    // NEXT_V == false equations skip both zeroings like their hand-written
+    // replay did: next_v is empty and current_v is always overwritten at the
+    // capture.
+    if (Eq::NEXT_V) {
+        for (auto& t : current_v) t.zero_();
+        for (auto& t : next_v) t.zero_();
+    }
 
     const int checkpoint_idx = sg_find_previous_checkpoint_idx(
         checkpoint_steps, num_saved_checkpoints, target_index + 1);
@@ -733,8 +742,13 @@ void sg_replay_forward_to_time(
         Eq::velocity_substep(state, for_view, cpml_view, solver);
         Eq::stress_substep(state, for_view, cpml_view, solver, nullptr);
 
-        if (it == target_index)
+        if (it == target_index) {
             Eq::capture_velocities(current_v, forward);
+            // No velocity(t+1) imaging term: stop before this step's source
+            // injection, exactly like the hand-written replay.
+            if (!Eq::NEXT_V)
+                break;
+        }
         if (it == target_index + 1) {
             Eq::capture_velocities(next_v, forward);
             break;
@@ -807,7 +821,8 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     std::vector<torch::Tensor> current_v, next_v;
     for (int c = 0; c < Eq::N_VEL; ++c) {
         current_v.push_back(torch::zeros_like(vp));
-        next_v.push_back(torch::zeros_like(vp));
+        if (Eq::NEXT_V)
+            next_v.push_back(torch::zeros_like(vp));
     }
     const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
 

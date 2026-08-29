@@ -60,6 +60,7 @@ struct Driver {
     static constexpr const char* RECON_LIST_DESC =
         "(the full 18-tensor DAS-Mu wavefield list)";
     static constexpr int N_VEL = 2;
+    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Wavefield = DasMuWavefieldTensor2D;
     using CPML = ElasticCPMLTensor;

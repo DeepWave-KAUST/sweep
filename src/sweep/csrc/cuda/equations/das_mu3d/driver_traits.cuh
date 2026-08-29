@@ -58,6 +58,7 @@ struct Driver {
         "(the 15 base DAS-Mu field tensors; the reconstruction carries no "
         "CPML memory)";
     static constexpr int N_VEL = 3;
+    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Wavefield = DasMuWavefieldTensor3D;
     using CPML = ElasticCPMLTensor;
