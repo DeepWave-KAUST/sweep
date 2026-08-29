@@ -222,6 +222,623 @@ struct Driver {
         saver.last_two_t.select(0, 3).select(0, 0).copy_(wf.szz_t);
         saver.last_two_t.select(0, 4).select(0, 0).copy_(wf.sxz_t);
     }
+
+    static constexpr int CUT_MASK_BITS = 0xF;
+    static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
+    static constexpr int ADJ_WF_COUNT = 15;
+    static constexpr int RECON_WF_COUNT = 7;
+    static constexpr const char* RECON_LIST_DESC =
+        "[vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]";
+    static constexpr const char* CKPT_RECURSIVE_COUNT_MSG =
+        "Elastic 2D recursive checkpointing expects 15 checkpoint tensors";
+    static constexpr int N_VEL = 2;
+
+    using Workspace = ElasticAdjointWorkspaceTensor;
+
+    static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
+    {
+        Workspace workspace;
+        init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
+        return workspace;
+    }
+
+    static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
+                                      const torch::Tensor& vp)
+    {
+        if (!p.adjoint_wavefields.empty())
+            wf.bind(p.adjoint_wavefields, true);
+        else
+            wf.allocate(vp, 2);
+    }
+
+    // Bind the model-gradient accumulators from Python when provided
+    // (stepped), else fall back to internal zero allocation.  Bound tensors
+    // are accumulated "+=" and NOT zeroed here — Python zeroes them once
+    // before the first segment.
+    static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
+    {
+        if (!p.grads_out.empty()) {
+            TORCH_CHECK(p.grads_out.size() == 3,
+                        "elastic grads_out must hold exactly {grad_vp, grad_vs, "
+                        "grad_rho}");
+            grads = {p.grads_out[0], p.grads_out[1], p.grads_out[2]};
+        } else {
+            alloc_grads(p.models[0], grads);
+        }
+    }
+
+    static void alloc_grads(const torch::Tensor& vp, std::vector<torch::Tensor>& grads)
+    {
+        grads = {torch::zeros_like(vp), torch::zeros_like(vp), torch::zeros_like(vp)};
+    }
+
+    static std::vector<torch::Tensor> signed_adjoint_sources(
+        const BackwardInput& p, const torch::Tensor& receiver_fields)
+    {
+        return elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+    }
+
+    struct VelPtrs {
+        const float* vx_now;
+        const float* vz_now;
+        const float* vx_next;
+        const float* vz_next;
+    };
+
+    static VelPtrs select_forward_velocities(const BackwardInput& p, int it,
+                                             const torch::Tensor& zero_velocity)
+    {
+        VelPtrs v;
+        v.vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
+        v.vz_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
+        v.vx_next = (it + 1 < p.nt) ? p.u_forward.select(0, it + 1).select(0, 0).data_ptr<float>()
+                                    : zero_velocity.data_ptr<float>();
+        v.vz_next = (it + 1 < p.nt) ? p.u_forward.select(0, it + 1).select(0, 1).data_ptr<float>()
+                                    : zero_velocity.data_ptr<float>();
+        return v;
+    }
+
+    // Body-force (velocity) sources: the rho imaging correlates the adjoint
+    // velocity with v(it) - v(it+1), which at a source cell still contains the
+    // raw injected amplitude; the true derivative has no such term.  Must run
+    // BEFORE this step's receiver residuals are injected (see the hand-written
+    // driver's comment about source+receiver-on-one-cell overshoot).
+    static void undo_body_force(const State& s, const SolverContext& solver,
+                                WfView& adj_view, const BackwardInput& p,
+                                const torch::Tensor& source_fields, int it,
+                                std::vector<torch::Tensor>& grads)
+    {
+        if (it < 0 || it >= p.nt) return;
+        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+            const int sfield = source_fields[isrc].item<int>();
+            if (sfield > 1) continue;                       // vx = 0, vz = 1
+            float* adj_field = elastic_field_ptr(adj_view, 2, sfield);
+            if (adj_field == nullptr) continue;
+            add_body_force_rho_grad_correction<<<s.source_config.grid, s.source_config.block>>>(
+                grads[2].data_ptr<float>(),
+                adj_field,
+                s.models.rho.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                (int)p.forward_sources_loc.size(1),
+                2,
+                solver
+            );
+        }
+    }
+
+    static void inject_residuals(const State& s, const SolverContext& solver,
+                                 WfView& adj_view, const BackwardInput& p,
+                                 const torch::Tensor& receiver_fields,
+                                 const std::vector<torch::Tensor>& adj_source_signed,
+                                 int it, int adjoint_nsrc)
+    {
+        for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
+            float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<s.record_config.grid, s.record_config.block>>>(
+                field,
+                adj_source_signed[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(),
+                it,
+                adjoint_nsrc,
+                solver
+            );
+        }
+    }
+
+    static void uninject_forward_source(const State& s, const SolverContext& solver,
+                                        WfView& for_view, const BackwardInput& p,
+                                        const torch::Tensor& source_fields,
+                                        const torch::Tensor& neg_forward_source,
+                                        int it, int forward_nsrc)
+    {
+        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<s.source_config.grid, s.source_config.block>>>(
+                field,
+                neg_forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                solver
+            );
+        }
+    }
+
+    static void inject_sources_fwd_bw(const State& s, const SolverContext& solver,
+                                      WfView& for_view, const BackwardInput& p,
+                                      const torch::Tensor& source_fields, int it)
+    {
+        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<s.source_config.grid, s.source_config.block>>>(
+                field,
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                (int)p.forward_sources_loc.size(1),
+                solver
+            );
+        }
+    }
+
+    static void image_standalone(const State& s, const SolverContext& solver,
+                                 WfView& adj_view, const VelPtrs& v,
+                                 std::vector<torch::Tensor>& grads)
+    {
+        LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            adj_view,
+            v.vx_now,
+            v.vz_now,
+            v.vx_next,
+            v.vz_next,
+            s.models.vp.data_ptr<float>(),
+            s.models.vs.data_ptr<float>(),
+            s.models.rho.data_ptr<float>(),
+            grads[0].data_ptr<float>(),
+            grads[1].data_ptr<float>(),
+            grads[2].data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    // Undo the just-injected receiver residual from this reverse step's rho
+    // imaging, at every velocity-receiver cell.  Stress receivers have no rho
+    // term to correct.
+    static void undo_receiver_rho(const State& s, const SolverContext& solver,
+                                  std::vector<torch::Tensor>& grads,
+                                  const VelPtrs& v, const BackwardInput& p,
+                                  const torch::Tensor& receiver_fields,
+                                  int it, int adjoint_nsrc)
+    {
+        for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
+            const int field = receiver_fields[irec].item<int>();
+            const float* fv_now  = (field == 0) ? v.vx_now  : (field == 1) ? v.vz_now  : nullptr;
+            const float* fv_next = (field == 0) ? v.vx_next : (field == 1) ? v.vz_next : nullptr;
+            if (fv_now == nullptr) continue;              // stress receiver: no rho term
+            sub_receiver_rho_grad_correction<<<s.record_config.grid, s.record_config.block>>>(
+                grads[2].data_ptr<float>(),
+                fv_now,
+                fv_next,
+                s.models.rho.data_ptr<float>(),
+                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(),
+                it,
+                adjoint_nsrc,
+                2,
+                solver.M,                                 // imaging halo (order/2 == M)
+                solver
+            );
+        }
+    }
+
+    // FULL-mode step: fold this reverse step's vp/vs/rho-gradient imaging
+    // into the stress-adjoint-prepare kernel (it reads the un-mutated
+    // post-source adjoint at entry, exactly what calculate_grad_elastic_nobs
+    // would correlate), then run the remaining three adjoint launches.
+    static void full_fused_step(const State& s, const SolverContext& solver,
+                                Wavefield& adjoint, Workspace& workspace,
+                                ElasticCPMLPointer cpml_view,
+                                const VelPtrs& v,
+                                std::vector<torch::Tensor>& grads)
+    {
+        auto adj_view = adjoint.view();
+        LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            adj_view,
+            s.models.lambda.data_ptr<float>(),
+            s.models.mu.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            v.vx_now, v.vz_now, v.vx_next, v.vz_next,
+            s.models.vp.data_ptr<float>(),
+            s.models.vs.data_ptr<float>(),
+            s.models.rho.data_ptr<float>(),
+            grads[0].data_ptr<float>(),
+            grads[1].data_ptr<float>(),
+            grads[2].data_ptr<float>()
+        );
+        LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+        LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.rho.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>()
+        );
+        LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    // Null imaging pointers => behaviour byte-for-byte identical to the
+    // hand-written apply_adjoint_step_2d without fusion arguments.
+    static void plain_adjoint_step(const State& s, const SolverContext& solver,
+                                   Wavefield& adjoint, Workspace& workspace,
+                                   ElasticCPMLPointer cpml_view)
+    {
+        auto adj_view = adjoint.view();
+        LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.lambda.data_ptr<float>(),
+            s.models.mu.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            nullptr, nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr
+        );
+        LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+        LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.rho.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>()
+        );
+        LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    struct ReconCarriers {
+        torch::Tensor fvx_prev, fvz_prev;
+    };
+
+    static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
+                                             const BackwardInput& p,
+                                             const torch::Tensor& vp)
+    {
+        ReconCarriers c;
+        if (!p.forward_wavefields.empty()) {
+            TORCH_CHECK(p.forward_wavefields.size() == 7,
+                        "elastic2d backward_bs reconstruction list must hold 7 "
+                        "tensors [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]; got ",
+                        p.forward_wavefields.size());
+            forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(),
+                                                    p.forward_wavefields.begin() + 5),
+                         /*use_pml=*/false);
+            c.fvx_prev = p.forward_wavefields[5];
+            c.fvz_prev = p.forward_wavefields[6];
+        } else {
+            forward.allocate(vp, 2, false);
+            c.fvx_prev = torch::zeros_like(vp);
+            c.fvz_prev = torch::zeros_like(vp);
+        }
+        return c;
+    }
+
+    static void bind_or_alloc_recon_ckpt(Wavefield& forward,
+                                         const BackwardInput& p,
+                                         const torch::Tensor& vp)
+    {
+        if (!p.forward_wavefields.empty())
+            forward.bind(p.forward_wavefields, true);
+        else
+            // Aux shapes must follow the Python-allocated checkpoint slots
+            // (possibly per-axis slabs).
+            forward.allocate_from_snapshots(vp, p.checkpoints, 2);
+    }
+
+    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput& p,
+                                            const torch::Tensor& vp)
+    {
+        wf.allocate_from_snapshots(vp, p.checkpoints, 2);
+    }
+
+    static void check_ckpt_aux_layout(const Wavefield& start_state,
+                                      const Wavefield& adjoint)
+    {
+        TORCH_CHECK(!adjoint.m_vxx_t.defined() ||
+                    start_state.m_vxx_t.sizes() == adjoint.m_vxx_t.sizes(),
+                    "checkpoint aux layout differs from adjoint aux layout");
+    }
+
+    static void seed_recon(Wavefield& forward, const BackwardInput& p)
+    {
+        forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
+        forward.vz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
+        forward.sxx_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
+        forward.szz_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
+        forward.sxz_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
+    }
+
+    // bs phase 1: stress reconstruction + restore + gradient imaging + the
+    // stress-adjoint half.
+    static void bs_phase1(const State& s, const SolverContext& solver,
+                          WfView& for_view, WfView& adj_view,
+                          Wavefield& adjoint, Workspace& workspace,
+                          ElasticCPMLPointer cpml_view,
+                          BoundaryRuntime& boundary_runtime,
+                          const GeneralBoundaryPointer& bs, int save_width,
+                          std::vector<torch::Tensor>& grads,
+                          ReconCarriers& carriers, const BackwardInput& p,
+                          const torch::Tensor& receiver_fields,
+                          int it, int adjoint_nsrc)
+    {
+        LAUNCH_ELASTIC_STRESS_NOPML(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            for_view,
+            s.models.lambda.data_ptr<float>(),
+            s.models.mu.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+
+        float* field2[3] = {for_view.sxx, for_view.szz, for_view.sxz};
+        for (int f = 2; f < 5; ++f) {
+            boundary_runtime.restore_backward_2d_field(
+                it,
+                field2[f - 2],
+                s.launch_config.grid,
+                s.launch_config.block,
+                bs,
+                save_width,
+                -solver.M,
+                solver,
+                f,
+                f == 2,
+                false
+            );
+        }
+
+        LAUNCH_CALCULATE_GRAD_ELASTIC_BS(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            for_view,
+            adj_view,
+            carriers.fvx_prev.data_ptr<float>(),
+            carriers.fvz_prev.data_ptr<float>(),
+            s.models.vp.data_ptr<float>(),
+            s.models.vs.data_ptr<float>(),
+            s.models.rho.data_ptr<float>(),
+            grads[0].data_ptr<float>(),
+            grads[1].data_ptr<float>(),
+            grads[2].data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+
+        // Same operands the imaging just correlated: for_view.v* is v(it),
+        // fv*_prev is v(it+1) (overwritten in phase 2).
+        VelPtrs v{for_view.vx, for_view.vz,
+                  carriers.fvx_prev.data_ptr<float>(),
+                  carriers.fvz_prev.data_ptr<float>()};
+        undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it, adjoint_nsrc);
+
+        LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.lambda.data_ptr<float>(),
+            s.models.mu.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            nullptr, nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr
+        );
+        LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    // bs phase 2: velocity-adjoint half, carrier capture, velocity
+    // reconstruction + restore, prefetch.
+    static void bs_phase2(const State& s, const SolverContext& solver,
+                          WfView& for_view, Wavefield& adjoint,
+                          Workspace& workspace, ElasticCPMLPointer cpml_view,
+                          BoundaryRuntime& boundary_runtime,
+                          const GeneralBoundaryPointer& bs, int save_width,
+                          ReconCarriers& carriers, Wavefield& forward,
+                          int it, int nt)
+    {
+        auto adj_view = adjoint.view();
+        LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.rho.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>()
+        );
+        LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+
+        carriers.fvz_prev.copy_(forward.vz_t);
+        carriers.fvx_prev.copy_(forward.vx_t);
+
+        LAUNCH_ELASTIC_VELOCITY_NOPML(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            for_view,
+            s.models.rho.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+
+        float* field1[2] = {for_view.vx, for_view.vz};
+        for (int f = 0; f < 2; ++f) {
+            boundary_runtime.restore_backward_2d_field(
+                it,
+                field1[f],
+                s.launch_config.grid,
+                s.launch_config.block,
+                bs,
+                save_width,
+                -solver.M,
+                solver,
+                f,
+                false,
+                f == 1
+            );
+        }
+
+        boundary_runtime.prefetch_next_backward_chunk_if_needed(it, nt);
+    }
+
+    // ---- seg / carrier plumbing (ckpt + recursive modes) ----
+
+    static std::vector<torch::Tensor> alloc_seg_buffers(const torch::Tensor& vp,
+                                                        int segment_len)
+    {
+        auto seg_vx = torch::zeros({segment_len + 1, vp.size(0) * vp.size(1), 1,
+                                    vp.size(2), vp.size(3)}, vp.options());
+        auto seg_vz = torch::zeros_like(seg_vx);
+        return {seg_vx, seg_vz};
+    }
+
+    static void capture_seg(std::vector<torch::Tensor>& seg, Wavefield& forward,
+                            int slot)
+    {
+        seg[0].select(0, slot).copy_(forward.vx_t);
+        seg[1].select(0, slot).copy_(forward.vz_t);
+    }
+
+    static VelPtrs seg_vel_ptrs(const std::vector<torch::Tensor>& seg,
+                                int now_offset, int next_offset,
+                                const std::vector<torch::Tensor>& next_segment_v)
+    {
+        VelPtrs v;
+        v.vx_now = seg[0].select(0, now_offset).data_ptr<float>();
+        v.vz_now = seg[1].select(0, now_offset).data_ptr<float>();
+        v.vx_next = (next_offset >= 0) ? seg[0].select(0, next_offset).data_ptr<float>()
+                                       : next_segment_v[0].data_ptr<float>();
+        v.vz_next = (next_offset >= 0) ? seg[1].select(0, next_offset).data_ptr<float>()
+                                       : next_segment_v[1].data_ptr<float>();
+        return v;
+    }
+
+    static void store_prev_segment(std::vector<torch::Tensor>& prev,
+                                   const std::vector<torch::Tensor>& seg)
+    {
+        prev[0].copy_(seg[0].select(0, 1));
+        prev[1].copy_(seg[1].select(0, 1));
+    }
+
+    static void capture_velocities(std::vector<torch::Tensor>& v, Wavefield& forward)
+    {
+        v[0].copy_(forward.vx_t);
+        v[1].copy_(forward.vz_t);
+    }
+
+    static VelPtrs carrier_vel_ptrs(const std::vector<torch::Tensor>& current_v,
+                                    const std::vector<torch::Tensor>& next_v)
+    {
+        VelPtrs v;
+        v.vx_now = current_v[0].data_ptr<float>();
+        v.vz_now = current_v[1].data_ptr<float>();
+        v.vx_next = next_v[0].data_ptr<float>();
+        v.vz_next = next_v[1].data_ptr<float>();
+        return v;
+    }
 };
 
 } // namespace elastic2d
