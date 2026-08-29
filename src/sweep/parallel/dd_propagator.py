@@ -249,6 +249,16 @@ class ModelParallel:
         # prop's config, which is what keeps the truncated reverse loop's stop
         # step globally consistent across ranks (see _run_adjoint).
         self._btail = int(_bcfg.get("tail_steps") or 0)
+        # Staging batch/overlap knobs, inherited the same way.  These used to be
+        # pinned at transfer_interval=1 with no ring, which turns storage='cpu'
+        # into one un-overlapped PCIe round trip PER TIME STEP: measured ~15x
+        # slower than boundary-in-VRAM on the 2-16 Hz band (29,475 steps), against
+        # +22% for the same staging on a single tile with interval=32/ring=4.
+        # The defaults below reproduce the old behaviour when the wrapped prop
+        # says nothing.
+        self._bti = int(_bcfg.get("transfer_interval") or 1)
+        self._bring = int(_bcfg.get("ring_buffers") or 1)
+        self._bpinned = bool(_bcfg.get("pinned_memory") or False)
 
         self.topo = model_parallel
         self.global_shape = tuple(int(s) for s in global_shape)
@@ -331,7 +341,11 @@ class ModelParallel:
                 # last tail_steps steps (None = full length); the C++ side
                 # indexes it in shifted saved-step coordinates either way.
                 "tail_steps": self._btail or None,
-                "transfer_interval": 1, "pinned_memory": False},
+                # batching + ring depth decide whether the staged copies can
+                # overlap compute at all; 1/1 serialises them per step.
+                "transfer_interval": self._bti,
+                "ring_buffers": self._bring,
+                "pinned_memory": self._bpinned},
             model_parallel=self.topo,
         )
 
