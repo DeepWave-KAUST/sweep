@@ -796,6 +796,18 @@ public:
         int chunk_len = buf_idx0 + 1;
         backward_nt_ = nt;
         backward_active_ = true;
+        // Nothing precedes step 0.  The monolithic backward primes the ring
+        // once with it_hi == nt, so chunk_start lands at nt-2 and this never
+        // trips.  The DD backward is driven one step per call, so the last
+        // call arrives with it_hi == 1: it0 is 0, and chunk_start goes to -1 --
+        // a staged copy from one chunk BEFORE the buffer, which segfaults the
+        // host thread inside cudaMemcpyAsync.  The step it primes for is
+        // already in the ring by then; there is nothing left to fetch.
+        if (chunk_start < 0) {
+            profile_compute_start_ = Clock::now();
+            profile_have_compute_start_ = true;
+            return;
+        }
         prefetch_backward_chunk(chunk_start, chunk_len, backward_slot_for_chunk(chunk_start));
         profile_compute_start_ = Clock::now();
     }
