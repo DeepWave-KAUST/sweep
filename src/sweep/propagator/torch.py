@@ -119,7 +119,7 @@ def _merge_option_dict(base, extra, *, label):
     return {**base, **extra}
 
 
-def _normalize_cuda_memory_kwargs(merged):
+def _normalize_cuda_memory_kwargs(merged, equation=None):
     memory = merged.pop("memory", None)
 
     # The gradient-memory mode is a three-way choice (full/boundary/ckpt),
@@ -131,6 +131,27 @@ def _normalize_cuda_memory_kwargs(merged):
     strategy = resolve_memory_strategy(
         "c", options_to_dict(memory) if memory is not None else None,
         merged.get("use_ckpt"), merged.get("boundary_saving_config"))
+
+    # Equations whose CUDA kernels cannot run boundary saving (e.g.
+    # ViscoAcoustic: the dissipative, global-FFT damping term is not
+    # reverse-time reconstructible from boundary strips) never take the
+    # 'boundary' default — they fall back to 'full' (exact, no recompute;
+    # ckpt stays available as an explicit request) — and an EXPLICIT
+    # boundary request raises instead of silently running a wrong
+    # reconstruction.
+    if strategy == "boundary" and equation is not None and \
+            not getattr(equation, "supports_boundary_saving_c", True):
+        mem_dict = options_to_dict(memory) if memory is not None else None
+        explicit = bool(
+            (mem_dict or {}).get("strategy") == "boundary"
+            or dict(merged.get("boundary_saving_config") or {}).get("enabled")
+        )
+        if explicit:
+            raise NotImplementedError(
+                f"{type(equation).__name__} does not support boundary saving "
+                "on impl='c'; use memory=MemoryOptions(strategy='ckpt') or "
+                "strategy='full'.")
+        strategy = "full"
 
     if strategy == "full":
         merged["use_ckpt"] = False
@@ -257,7 +278,7 @@ def _apply_eager_memory(backend_impl, memory):
     raise ValueError(f"Unsupported memory strategy '{strategy}' for impl='eager'.")
 
 
-def _resolve_backend_init_kwargs(*, impl, kwargs, backend_options, eager_options, cuda_options):
+def _resolve_backend_init_kwargs(*, impl, kwargs, backend_options, eager_options, cuda_options, equation=None):
     if eager_options is not None and impl != "eager":
         raise ValueError("eager_options can only be used with impl='eager'.")
     if cuda_options is not None and impl != "c":
@@ -281,7 +302,7 @@ def _resolve_backend_init_kwargs(*, impl, kwargs, backend_options, eager_options
         raise ValueError(f"Invalid {option_label} for impl='{impl}': {sorted(wrong_merged)}")
 
     if impl == "c":
-        merged = _normalize_cuda_memory_kwargs(merged)
+        merged = _normalize_cuda_memory_kwargs(merged, equation=equation)
     return merged
 
 
@@ -349,6 +370,7 @@ class PropTorch(torch.nn.Module):
             backend_options=backend_options,
             eager_options=eager_options,
             cuda_options=cuda_options,
+            equation=equation,
         )
         if impl == "eager":
             # memory= alongside a legacy knob is fine unless they disagree;

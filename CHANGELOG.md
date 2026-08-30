@@ -9,6 +9,46 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **ViscoAcoustic: Zhu & Harris (2014) nearly constant-Q equation, per-edge
+  free surface, and a CUDA backend (`impl='c'`).**  The equation now
+  implements the paper's decoupled fractional Laplacians (eq. 10/11,
+  doi:10.1190/geo2013-0245.1): Kjartansson power-law dispersion
+  `c_p = c0*(w/w0)^gamma` (measured exponent matches theory to 0.4% over the
+  band; the amplitude decay matches `exp(-pi f r/(Q vp))` to 2%) and a
+  `k^(2*gbar+1)` loss filter, replacing the legacy frequency-independent
+  effective-velocity coefficients.  Both terms ride on the CPML step as
+  spectral corrections that vanish identically at `gamma -> 0`, so both
+  switches off still reduces bit-exactly to `Acoustic`.  Heterogeneous media
+  freeze the fractional exponent at the average `gbar` (the paper's
+  freezing-unfreezing), including its Q-derivative, on every backend.  The
+  reference frequency `omega` is a real model parameter with a genuine
+  gradient.  Per-edge free surfaces: every `free_surface=` form the acoustic
+  solver accepts.  The CUDA backend reuses the acoustic2d CPML kernels with
+  the paper's velocity and applies both spectral terms per step through
+  ATen/cuFFT with a hand-derived exact adjoint — forward, full /
+  chunk-checkpoint / recursive-checkpoint backwards and RTM (closed-box
+  c-vs-eager gradients ~1e-6 for wavelet/vp/Q/omega; ckpt matches full
+  storage bitwise on the record).  Boundary saving is refused (the
+  dissipative global-FFT term is not reverse-reconstructible from boundary
+  strips): the impl='c' default memory strategy falls back to 'full', and an
+  explicit boundary request raises.  Note: gradient tests reference the
+  UNCOMPILED eager step — inductor's fused pow/ln backward perturbs the
+  Q-gradient cotangents enough to be amplified to ~5e-3 by the
+  `ln(vp/omega)`-weighted chain; the plain eager step matches the CUDA
+  adjoint at ~5e-7.
+- `ForwardInput/BackwardInput.eq_aux` — equation-specific auxiliary tensors
+  (opaque to the shared autograd wrapper); ViscoAcoustic uses it for its |k|
+  FFT grid.
+
+### Changed
+- `SecondOrderEquation._apply_free_surface` — the per-edge pressure-release
+  zeroing moved from `Acoustic` to the shared base (bit-identical) so
+  ViscoAcoustic reuses it.
+- `ViscoAcoustic.prepare_models` maps (vp, Q, omega) -> (vp_step, A) once per
+  forward (shared by the eager and CUDA paths; the eager step no longer
+  recomputes the dispersion/damping coefficients every time step).
+
 ## [0.2.0] - 2026-08-24
 
 ### Added

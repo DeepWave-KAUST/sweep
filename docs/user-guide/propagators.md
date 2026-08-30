@@ -94,6 +94,11 @@ Support matrix:
 - **2-D ``Acoustic`` / ``Elastic``** — full per-edge support on the eager
   and compiled CUDA backends, with adjoint gradients across every backward
   memory mode (full / boundary-saving / checkpointing).
+- **2-D ``ViscoAcoustic``** — full per-edge support on the eager and
+  compiled CUDA backends (full / checkpointing gradients; boundary saving
+  is refused — the dissipative spectral damping term cannot be
+  reverse-time reconstructed, and the ``impl='c'`` default falls back to
+  ``'full'``).
 - **3-D** — top face only (``free_surface=True``); per-edge lists raise.
 - **Topography** (irregular surface) — a separate top-only feature; it
   cannot be combined with per-edge faces.
