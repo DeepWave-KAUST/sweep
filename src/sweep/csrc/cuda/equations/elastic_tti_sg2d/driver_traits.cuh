@@ -20,6 +20,8 @@
 //     deliberately absent;
 //   * no DD cut support, no aux slabs (the CPML memory lives in the
 //     equation's own wavefield tensors).
+//
+// Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
 
 #include <torch/extension.h>
@@ -45,6 +47,15 @@
 namespace elastic_tti_sg2d {
 
 struct Driver {
+
+    // ===================================================================== //
+    // [1] IDENTITY & SHARED PLUMBING
+    //     Prologue of every entry (skeleton call order): validate_backward
+    //     (backward only), parse_models, setup_ctx, bind_or_alloc_* wavefields,
+    //     init_aux_slabs, alloc_cpml, bind_grads / alloc_grads, make_workspace,
+    //     make_state, signed_adjoint_sources.
+    // ===================================================================== //
+
     static constexpr int NDIM = 2;
     static constexpr const char* NAME = "elastic_tti_sg2d";
     static constexpr int CKPT_NVAR = 20;
@@ -112,8 +123,21 @@ struct Driver {
         return s;
     }
 
-    template <class P>
-    static void setup_ctx(SolverContext&, const P&) {}   // no per-edge / topo
+    // Six plain scratch tensors, always internal: the hand-written drivers
+    // never read p.adjoint_workspace.
+    using Workspace = std::array<torch::Tensor, 6>;
+
+    static Workspace make_workspace(const BackwardInput&, const torch::Tensor& rho)
+    {
+        return Workspace{
+            torch::zeros_like(rho),
+            torch::zeros_like(rho),
+            torch::zeros_like(rho),
+            torch::zeros_like(rho),
+            torch::zeros_like(rho),
+            torch::zeros_like(rho),
+        };
+    }
 
     static void validate_forward(const ForwardInput& p)
     {
@@ -142,16 +166,8 @@ struct Driver {
         }
     }
 
-    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
-                                      const torch::Tensor& rho)
-    {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields);
-        else
-            wf.allocate(rho);
-    }
-
-    static WfView view(Wavefield& wf) { return wf.view(); }
+    template <class P>
+    static void setup_ctx(SolverContext&, const P&) {}   // no per-edge / topo
 
     // The CPML memory variables live in the equation's own wavefield tensors;
     // no solver aux slabs are ever installed.
@@ -166,6 +182,29 @@ struct Driver {
     static std::vector<int64_t> allt_shape(const eqdrv::Dims& d, int64_t nt)
     {
         return {nt, 8, d.B, d.nz, d.nx};   // all 8 physical fields
+    }
+
+    static float* field_ptr(WfView& wf, int field_idx)
+    {
+        return elastic_tti_sg2d::field_ptr(wf, field_idx);
+    }
+
+    static WfView view(Wavefield& wf) { return wf.view(); }
+
+    // ===================================================================== //
+    // [2] FORWARD -- sg_generic_forward, per it in [it_begin, it_end):
+    //     velocity_substep -> stress_substep -> inject_source ->
+    //     <checkpoint save (shared runtime)> -> save_boundary_fields ->
+    //     record_field; after the loop: save_last_state.
+    // ===================================================================== //
+
+    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
+                                      const torch::Tensor& rho)
+    {
+        if (!p.wavefields.empty())
+            wf.bind(p.wavefields);
+        else
+            wf.allocate(rho);
     }
 
     static void velocity_substep(const State& s, WfView& wf,
@@ -199,11 +238,6 @@ struct Driver {
             cpml_view,
             solver
         );
-    }
-
-    static float* field_ptr(WfView& wf, int field_idx)
-    {
-        return elastic_tti_sg2d::field_ptr(wf, field_idx);
     }
 
     static void inject_source(const State& s, const SolverContext& solver,
@@ -273,23 +307,14 @@ struct Driver {
         saver.last_two_t.select(0, 7).select(0, 0).copy_(wf.sxy_t);
     }
 
+    // ===================================================================== //
+    // [3] BACKWARD SHARED + FULL MODE -- sg_generic_backward, per reverse it:
+    //     undo_body_force -> inject_residuals -> select_forward_velocities ->
+    //     it == 0: image_standalone + undo_receiver_rho (loop ends);
+    //     it  > 0: full_fused_step (imaging + receiver-rho + adjoint step).
+    // ===================================================================== //
+
     // ---- backward hooks -------------------------------------------------- //
-
-    // Six plain scratch tensors, always internal: the hand-written drivers
-    // never read p.adjoint_workspace.
-    using Workspace = std::array<torch::Tensor, 6>;
-
-    static Workspace make_workspace(const BackwardInput&, const torch::Tensor& rho)
-    {
-        return Workspace{
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-        };
-    }
 
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& rho)
@@ -301,7 +326,6 @@ struct Driver {
     }
 
     static void prep_adjoint(Wavefield&, bool) {}      // 2-D relies on Python-zeroed buffers
-    static void prep_adjoint_bs(Wavefield&, bool) {}
 
     // The hand-written drivers never read p.grads_out: gradients are always
     // freshly allocated, one per prepared model (rho + 15 stiffnesses).
@@ -381,44 +405,8 @@ struct Driver {
         }
     }
 
-    static void uninject_forward_source(const State& s, const SolverContext& solver,
-                                        WfView& for_view, const BackwardInput& p,
-                                        const torch::Tensor& source_fields,
-                                        const torch::Tensor& neg_forward_source,
-                                        int it, int forward_nsrc)
-    {
-        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
-            float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc].item<int>());
-            if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
-                field,
-                neg_forward_source.data_ptr<float>(),
-                p.forward_sources_loc.data_ptr<int>(),
-                it,
-                forward_nsrc,
-                solver
-            );
-        }
-    }
-
-    static void inject_sources_fwd_bw(const State& s, const SolverContext& solver,
-                                      WfView& for_view, const BackwardInput& p,
-                                      const torch::Tensor& source_fields, int it)
-    {
-        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
-            float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc].item<int>());
-            if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
-                field,
-                p.forward_source.data_ptr<float>(),
-                p.forward_sources_loc.data_ptr<int>(),
-                it,
-                (int)p.forward_sources_loc.size(1),
-                solver
-            );
-        }
-    }
-
+    // (image_standalone / undo_receiver_rho are also reused by bs_phase1 and
+    // the ckpt backward.)
     static void image_standalone(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const VelPtrs& v,
                                  std::vector<torch::Tensor>& grads)
@@ -542,6 +530,19 @@ struct Driver {
         );
     }
 
+    // ===================================================================== //
+    // [4] BACKWARD_BS -- sg_generic_backward_bs, per reverse it (floor
+    //     max(it_lo, 1)): undo_body_force / inject_residuals /
+    //     uninject_forward_source [inject_step], then bs_phase1 (stress recon
+    //     NOPML + strip restore + imaging + receiver-rho + stress-adjoint
+    //     half), then bs_phase2 (velocity-adjoint half + carrier capture +
+    //     velocity recon NOPML + strip restore + prefetch).
+    //     Before the loop (first segment): seed_recon from u_last_two.
+    // ===================================================================== //
+
+    // (no-op like prep_adjoint above: 2-D relies on Python-zeroed buffers)
+    static void prep_adjoint_bs(Wavefield&, bool) {}
+
     struct ReconCarriers {
         torch::Tensor fvx_next, fvy_next, fvz_next;
     };
@@ -560,24 +561,6 @@ struct Driver {
         return c;
     }
 
-    static void bind_or_alloc_recon_ckpt(Wavefield& forward,
-                                         const BackwardInput& p,
-                                         const torch::Tensor& rho)
-    {
-        if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields);
-        else
-            forward.allocate(rho);
-    }
-
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput&,
-                                            const torch::Tensor& rho)
-    {
-        wf.allocate(rho);
-    }
-
-    static void check_ckpt_aux_layout(const Wavefield&, const Wavefield&) {}
-
     static void seed_recon(Wavefield& forward, const BackwardInput& p)
     {
         forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
@@ -588,6 +571,26 @@ struct Driver {
         forward.syz_t.copy_(p.u_last_two.select(0, 5).select(0, 0));
         forward.sxz_t.copy_(p.u_last_two.select(0, 6).select(0, 0));
         forward.sxy_t.copy_(p.u_last_two.select(0, 7).select(0, 0));
+    }
+
+    static void uninject_forward_source(const State& s, const SolverContext& solver,
+                                        WfView& for_view, const BackwardInput& p,
+                                        const torch::Tensor& source_fields,
+                                        const torch::Tensor& neg_forward_source,
+                                        int it, int forward_nsrc)
+    {
+        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+            float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<s.source_config.grid, s.source_config.block>>>(
+                field,
+                neg_forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                solver
+            );
+        }
     }
 
     static void bs_phase1(const State& s, const SolverContext& solver,
@@ -766,7 +769,35 @@ struct Driver {
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, nt);
     }
 
+    // ===================================================================== //
+    // [5] CKPT + RECURSIVE PLUMBING -- sg_generic_backward_ckpt, per chunk:
+    //     replay: velocity_substep / stress_substep / capture_seg /
+    //     inject_sources_fwd_bw; reverse: undo_body_force / inject_residuals /
+    //     seg_vel_ptrs / image_standalone / undo_receiver_rho /
+    //     (it > 0) plain_adjoint_step; after each chunk: store_prev_segment.
+    //     (No recursive checkpointing in this equation: capture_velocities /
+    //     carrier_vel_ptrs are deliberately absent -- see the header note.)
+    // ===================================================================== //
+
     // ---- seg / carrier plumbing (ckpt mode) ----
+
+    static void bind_or_alloc_recon_ckpt(Wavefield& forward,
+                                         const BackwardInput& p,
+                                         const torch::Tensor& rho)
+    {
+        if (!p.forward_wavefields.empty())
+            forward.bind(p.forward_wavefields);
+        else
+            forward.allocate(rho);
+    }
+
+    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput&,
+                                            const torch::Tensor& rho)
+    {
+        wf.allocate(rho);
+    }
+
+    static void check_ckpt_aux_layout(const Wavefield&, const Wavefield&) {}
 
     static std::vector<torch::Tensor> alloc_seg_buffers(const torch::Tensor& rho,
                                                         int segment_len)
@@ -785,6 +816,24 @@ struct Driver {
         seg[0].select(0, slot).copy_(forward.vx_t);
         seg[1].select(0, slot).copy_(forward.vy_t);
         seg[2].select(0, slot).copy_(forward.vz_t);
+    }
+
+    static void inject_sources_fwd_bw(const State& s, const SolverContext& solver,
+                                      WfView& for_view, const BackwardInput& p,
+                                      const torch::Tensor& source_fields, int it)
+    {
+        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
+            float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc].item<int>());
+            if (field == nullptr) continue;
+            add_source<<<s.source_config.grid, s.source_config.block>>>(
+                field,
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                (int)p.forward_sources_loc.size(1),
+                solver
+            );
+        }
     }
 
     static VelPtrs seg_vel_ptrs(const std::vector<torch::Tensor>& seg,

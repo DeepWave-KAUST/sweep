@@ -22,6 +22,58 @@
 // ddgate).  Physics kernels are not touched by the migration.  Where another
 // equation's copy disagreed with acoustic2d in loop structure, the difference
 // lives in that equation's hooks, never in a per-equation branch here.
+//
+// ---------------------------------------------------------------------------
+// HOOK TIMING MAP — read this before any equation's driver_traits.cuh.
+// Per entry point, the traits hooks fire in exactly this order; everything
+// not named here is shared runtime (checkpoint / boundary machinery).
+// Prologue of every entry (in call order): validate_forward / (backward:
+// check_stepped + validate_backward + bind_backward_outputs / alloc_grads +
+// rtm gate), bind_or_alloc_* wavefields, alloc_cpml, setup_ctx,
+// init_aux_slabs, make_state, make_bwd_workspace.
+//
+// generic_forward — per it in [it_begin, it_end):
+//   launch_step_range          the whole per-range stencil step (air-clear
+//                              prepass included); DD phase 1 = the cut-side
+//                              M-wide strips, phase 2 = strict complement,
+//                              unphased = (0, nx)
+//   save_boundary_fwd          BS strips (when use_boundary_saving)
+//   inject_source_fwd          source injection
+//   record                     receiver sampling
+//   end_of_step                u_pre/u_now buffer-role rotation
+//   capture_allt               deferred u_allt snapshot (only 3-D uses it)
+//   <checkpoint save>          shared runtime, not a hook
+//   after the loop: save_last_state (final u pair for backward_bs)
+//
+// generic_backward (full storage) — per reverse it:
+//   adjoint_step               adjoint stencil; with HAS_FUSED_FULL_IMG the
+//                              imaging of u_forward[it+1] fuses into it
+//   inject_adjoint_source      residual injection
+//   post_adjoint               adjoint buffer-role rotation
+//   accumulate_source_grad     grad_wavelet sampling
+//   image_step                 standalone imaging / RTM+illumination taps
+//                              (skipped when fused, except for RTM)
+//   after the loop (fused only): one trailing image_step at it == 0.
+//
+// generic_backward_bs — per reverse it, floor max(max(it_lo, 1), bs_stop):
+//   adjoint_step / inject_adjoint_source / post_adjoint /
+//   accumulate_source_grad     same four as full mode
+//   bs_reverse_step            reconstruction (un-inject, NOPML reverse,
+//                              strip restore) + gradient imaging, in the
+//                              equation's exact order
+//   bs_image_step              RTM / illumination tap
+//   before the loop (first segment): seed_reconstruction from u_last_two;
+//   after the loop (HAS_BS_T0_TAIL): the four adjoint hooks once at it == 0.
+//
+// generic_backward_ckpt — per chunk: replay then reverse:
+//   replay:  replay_step / inject_source_fwd / swap_recon
+//   reverse: adjoint_step / inject_adjoint_source / post_adjoint /
+//            accumulate_source_grad / image_step
+//
+// generic_backward_recursive_ckpt — bisection over each ckpt segment; a
+//   leaf runs one replay triple, then the reverse-five of ckpt mode with
+//   the imaging fed from the leaf's scratch u.
+// ---------------------------------------------------------------------------
 #pragma once
 
 #include <torch/extension.h>

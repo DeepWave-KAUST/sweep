@@ -18,6 +18,57 @@
 // A/B/C/T and ddgate).  das2d/das3d (derivative-buffer shape) and
 // elastic_tti_2nd2d (second-order displacement — acoustic-shaped) are NOT this
 // family.
+//
+// ---------------------------------------------------------------------------
+// HOOK TIMING MAP — read this before any equation's driver_traits.cuh.
+// Per entry point, the traits hooks fire in exactly this order; everything
+// not named here is shared runtime (checkpoint / boundary machinery).
+// Prologue of every entry (in call order): validate_backward (backward only),
+// parse_models, setup_ctx, bind_or_alloc_* wavefields, init_aux_slabs,
+// alloc_cpml, bind_grads / alloc_grads, make_workspace, make_state,
+// signed_adjoint_sources.
+//
+// sg_generic_forward — per it in [it_begin, it_end):
+//   velocity_substep           v: t -> t+1/2           (DD step_phase 1)
+//   stress_substep             s: t -> t+1, u_allt[it] (DD step_phase 2 from here)
+//   inject_source              per source field
+//   <checkpoint save>          shared runtime, not a hook
+//   save_boundary_fields       BS strips (when use_boundary_saving)
+//   record_field               per receiver field
+//   after the loop: save_last_state (final 5-field snapshot for backward_bs)
+//
+// sg_generic_backward (full storage) — per reverse it:
+//   undo_body_force            body-force rho correction (pre-residual)
+//   inject_residuals           signed residuals into the adjoint fields
+//   select_forward_velocities  v(it) / v(it+1) pointers from u_forward
+//   it == 0: image_standalone + undo_receiver_rho, loop ends
+//   it  > 0: full_fused_step   imaging + receiver-rho + adjoint step, in
+//                              the equation's exact fused order
+//
+// sg_generic_backward_bs — per reverse it, floor max(it_lo, 1):
+//   undo_body_force / inject_residuals / uninject_forward_source  [inject_step]
+//   bs_phase1                  stress recon (NOPML) + strip restore +
+//                              imaging + receiver-rho + stress-adjoint half
+//   bs_phase2                  velocity-adjoint half + carrier capture +
+//                              velocity recon (NOPML) + strip restore + prefetch
+//   before the loop (first segment): seed_recon from u_last_two.
+//   (DD runs step_phase 3 = injections, then 1, then 2 — same op order.)
+//
+// sg_generic_backward_ckpt — per chunk (sg_backward_segment):
+//   replay:  velocity_substep / stress_substep / capture_seg /
+//            inject_sources_fwd_bw
+//   reverse: undo_body_force / inject_residuals / seg_vel_ptrs /
+//            image_standalone / undo_receiver_rho /
+//            (it > 0) plain_adjoint_step
+//   after each chunk: store_prev_segment hands v(start+1) to the older chunk.
+//
+// sg_generic_backward_recursive_ckpt — per reverse it:
+//   undo_body_force / inject_residuals
+//   sg_replay_forward_to_time: velocity/stress substeps + capture_velocities
+//                              (NEXT_V eqs also capture v at it+1)
+//   carrier_vel_ptrs / image_standalone / undo_receiver_rho /
+//   (it > 0) plain_adjoint_step
+// ---------------------------------------------------------------------------
 #pragma once
 
 #include <torch/extension.h>

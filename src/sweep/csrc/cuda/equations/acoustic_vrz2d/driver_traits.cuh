@@ -12,6 +12,8 @@
 // domain decomposition needs.  NOT added: phase-split (these kernels are not
 // ranged -- launch_step_range refuses sub-ranges loudly) and the VRZ coupling
 // exchange phases of the 3-D sibling's backward (declared absent Python-side).
+//
+// Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
 
 #include <torch/extension.h>
@@ -35,6 +37,16 @@
 namespace acoustic_vrz2d {
 
 struct Driver {
+    // ===================================================================== //
+    // [1] IDENTITY & SHARED PLUMBING
+    //     Constants, type aliases, State/BwdWorkspace/BsScratch types with
+    //     their factories, validation, and allocation helpers.
+    //     Prologue call order (timing map): validate_forward / (backward:
+    //     validate_backward + bind_backward_outputs + rtm gate),
+    //     bind_or_alloc_* wavefields, alloc_cpml, setup_ctx, init_aux_slabs,
+    //     make_state, make_bwd_workspace.
+    // ===================================================================== //
+
     static constexpr int NDIM = 2;
     static constexpr const char* NAME = "acoustic_vrz2d";
     static constexpr int CKPT_NVAR = 6;
@@ -108,8 +120,59 @@ struct Driver {
         return s;
     }
 
-    template <class P>
-    static void setup_ctx(SolverContext&, const P&) {}   // no per-edge / topo
+    struct BwdWorkspace {
+        torch::Tensor neg_adjoint_source;
+        torch::Tensor C0, Cx, Cz;           // time-invariant adjoint coeffs
+        torch::Tensor c_x, c_z, e_x, e_z;   // split gradient scratch (order>=6)
+    };
+
+    // (helper: fired inside make_bwd_workspace)
+    static void zero_wavefield_state(Wavefield& wf)
+    {
+        wf.u_prev_t.zero_();
+        wf.u_now_t.zero_();
+        wf.u_next_t.zero_();
+        wf.psix_t.zero_();
+        wf.psiz_t.zero_();
+        wf.zetax_t.zero_();
+        wf.zetaz_t.zero_();
+    }
+
+    static BwdWorkspace make_bwd_workspace(const BackwardInput& p,
+                                           const State& s,
+                                           const SolverContext& ctx,
+                                           Wavefield& adjoint)
+    {
+        zero_wavefield_state(adjoint);
+        BwdWorkspace ws;
+        ws.neg_adjoint_source = -p.adjoint_source;
+        ws.C0 = torch::zeros_like(s.vp_t);
+        ws.Cx = torch::zeros_like(s.vp_t);
+        ws.Cz = torch::zeros_like(s.vp_t);
+        ws.c_x = torch::zeros_like(s.vp_t);
+        ws.c_z = torch::zeros_like(s.vp_t);
+        ws.e_x = torch::zeros_like(s.vp_t);
+        ws.e_z = torch::zeros_like(s.vp_t);
+        // Time-invariant adjoint transpose coefficients (vp², ∂ₓb·κ, ∂_z b·κ),
+        // computed once so the fused adjoint kernel only multiplies by λ per step.
+        BUILD_VRZ_ADJOINT_COEFFS(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            s.vp,
+            s.z,
+            s.inv_z,
+            ws.C0.data_ptr<float>(),
+            ws.Cx.data_ptr<float>(),
+            ws.Cz.data_ptr<float>(),
+            s.grad_ctx,
+            ctx
+        );
+        return ws;
+    }
+
+    // (factory make_bs_scratch lives in section [4])
+    struct BsScratch {};
 
     static void validate_forward(const ForwardInput& p)
     {
@@ -137,14 +200,8 @@ struct Driver {
         }
     }
 
-    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
-                                      const torch::Tensor& vp)
-    {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields, 2, true);
-        else
-            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
-    }
+    template <class P>
+    static void setup_ctx(SolverContext&, const P&) {}   // no per-edge / topo
 
     static void init_aux_slabs(SolverContext&, Wavefield&) {}   // legacy full-grid aux
 
@@ -160,6 +217,22 @@ struct Driver {
     }
 
     static int save_width(int /*abcn*/, int M) { return M + 1; }
+
+    // ===================================================================== //
+    // [2] FORWARD (generic_forward) — per it in [it_begin, it_end):
+    //     launch_step_range -> save_boundary_fwd -> inject_source_fwd ->
+    //     record -> end_of_step -> capture_allt; after the loop:
+    //     save_last_state.
+    // ===================================================================== //
+
+    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
+                                      const torch::Tensor& vp)
+    {
+        if (!p.wavefields.empty())
+            wf.bind(p.wavefields, 2, true);
+        else
+            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    }
 
     static void launch_step_range(const State& s, const SolverContext& ctx,
                                   int xb, int xe,
@@ -213,6 +286,7 @@ struct Driver {
         );
     }
 
+    // (also used by the ckpt/recursive replay)
     static void inject_source_fwd(const State& s, const SolverContext& ctx,
                                   const AcousticWavefieldPointer& view,
                                   const ForwardInput& p, int it, int nsrc)
@@ -262,73 +336,11 @@ struct Driver {
 
     // ---- backward hooks -------------------------------------------------- //
 
-    static void zero_wavefield_state(Wavefield& wf)
-    {
-        wf.u_prev_t.zero_();
-        wf.u_now_t.zero_();
-        wf.u_next_t.zero_();
-        wf.psix_t.zero_();
-        wf.psiz_t.zero_();
-        wf.zetax_t.zero_();
-        wf.zetaz_t.zero_();
-    }
-
-    struct BwdWorkspace {
-        torch::Tensor neg_adjoint_source;
-        torch::Tensor C0, Cx, Cz;           // time-invariant adjoint coeffs
-        torch::Tensor c_x, c_z, e_x, e_z;   // split gradient scratch (order>=6)
-    };
-
-    static BwdWorkspace make_bwd_workspace(const BackwardInput& p,
-                                           const State& s,
-                                           const SolverContext& ctx,
-                                           Wavefield& adjoint)
-    {
-        zero_wavefield_state(adjoint);
-        BwdWorkspace ws;
-        ws.neg_adjoint_source = -p.adjoint_source;
-        ws.C0 = torch::zeros_like(s.vp_t);
-        ws.Cx = torch::zeros_like(s.vp_t);
-        ws.Cz = torch::zeros_like(s.vp_t);
-        ws.c_x = torch::zeros_like(s.vp_t);
-        ws.c_z = torch::zeros_like(s.vp_t);
-        ws.e_x = torch::zeros_like(s.vp_t);
-        ws.e_z = torch::zeros_like(s.vp_t);
-        // Time-invariant adjoint transpose coefficients (vp², ∂ₓb·κ, ∂_z b·κ),
-        // computed once so the fused adjoint kernel only multiplies by λ per step.
-        BUILD_VRZ_ADJOINT_COEFFS(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            s.vp,
-            s.z,
-            s.inv_z,
-            ws.C0.data_ptr<float>(),
-            ws.Cx.data_ptr<float>(),
-            ws.Cz.data_ptr<float>(),
-            s.grad_ctx,
-            ctx
-        );
-        return ws;
-    }
-
-    static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
-                                      const torch::Tensor& vp)
-    {
-        if (!p.adjoint_wavefields.empty())
-            wf.bind(p.adjoint_wavefields, 2, true);
-        else
-            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
-    }
-
-    static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
-                                    const torch::Tensor& vp)
-    {
-        if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 2, false);
-        else
-            wf.allocate(vp, 2, false);
-    }
+    // ===================================================================== //
+    // [3] BACKWARD SHARED + FULL MODE (generic_backward) — per reverse it:
+    //     adjoint_step -> inject_adjoint_source -> post_adjoint ->
+    //     accumulate_source_grad -> image_step.
+    // ===================================================================== //
 
     static void bind_backward_outputs(const BackwardInput& p,
                                       std::vector<torch::Tensor>& grads,
@@ -358,15 +370,21 @@ struct Driver {
     static RTMOutput* full_rtm_gate(const BackwardInput&, RTMOutput&)
     { return nullptr; }
 
-    static RTMOutput* bs_rtm_gate(const BackwardInput&, RTMOutput&)
-    { return nullptr; }
-
     static float* fused_grad_ptr(std::vector<torch::Tensor>&)
     { return nullptr; }   // HAS_FUSED_FULL_IMG == false: never consulted
 
     static const float* full_store_ptr(const BackwardInput& p, int it)
     {
         return p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
+    }
+
+    static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
+                                      const torch::Tensor& vp)
+    {
+        if (!p.adjoint_wavefields.empty())
+            wf.bind(p.adjoint_wavefields, 2, true);
+        else
+            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     }
 
     static void adjoint_step(const State& s, const SolverContext& ctx,
@@ -420,6 +438,7 @@ struct Driver {
                                        std::vector<torch::Tensor>&, int, int)
     {}   // VRZ computes no grad_wavelet
 
+    // (also used by the ckpt/recursive imaging)
     static void image_step(const State& s, const SolverContext& ctx,
                            const float* forward_ptr, Wavefield& adjoint,
                            std::vector<torch::Tensor>* grads,
@@ -447,6 +466,25 @@ struct Driver {
         );
     }
 
+    // ===================================================================== //
+    // [4] BACKWARD_BS (generic_backward_bs) — per reverse it: the four
+    //     shared adjoint hooks of section [3], then bs_reverse_step ->
+    //     bs_image_step; before the loop (first segment):
+    //     seed_reconstruction from u_last_two.
+    // ===================================================================== //
+
+    static RTMOutput* bs_rtm_gate(const BackwardInput&, RTMOutput&)
+    { return nullptr; }
+
+    static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
+                                    const torch::Tensor& vp)
+    {
+        if (!p.forward_wavefields.empty())
+            wf.bind(p.forward_wavefields, 2, false);
+        else
+            wf.allocate(vp, 2, false);
+    }
+
     // Seed from last_two, zero u_next, and zero the boundary/PML band so stale
     // PML values carried in u_last_two don't leak inward during reverse
     // propagation (see the hand-written driver's accuracy note).
@@ -465,7 +503,6 @@ struct Driver {
             ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
     }
 
-    struct BsScratch {};
     static BsScratch make_bs_scratch(const BackwardInput&, const torch::Tensor&)
     { return {}; }
 
@@ -540,6 +577,12 @@ struct Driver {
     static void bs_image_step(const State&, const SolverContext&,
                               Wavefield&, Wavefield&, RTMOutput&, bool)
     {}   // no illumination/ADCIG kernels
+
+    // ===================================================================== //
+    // [5] CKPT + RECURSIVE PLUMBING
+    //     No hooks here: the chunk/recursive checkpoint backward keeps its
+    //     hand-written form in backward.cu (see the header comment above).
+    // ===================================================================== //
 };
 
 } // namespace acoustic_vrz2d
