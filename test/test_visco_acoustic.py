@@ -191,25 +191,6 @@ def test_amplitude_damping_removes_energy():
 
 
 @requires_torch
-def test_phase_shift_is_an_effective_velocity():
-    """The dispersion term is exactly a rescale of the Laplacian term, i.e.
-    vp -> vp*sqrt(1-c).  Pins the folding of the term into ``vp_step``."""
-    c = (1.0 - np.sqrt(Q_VAL**2 + 1.0)) * Q_VAL**-2
-    vp_eff = VP * np.sqrt(1.0 - c)
-
-    _, p_on = _build(phase_shift=True, amplitude_damping=False)
-    d_on = _run(p_on)
-
-    _, p_off = _build(phase_shift=False, amplitude_damping=False)
-    d_eff = _run(p_off, models=_models(vp=vp_eff))
-    assert _rel_l2(d_on, d_eff) == 0.0
-
-    # control: the term must actually do something
-    _, p_plain = _build(phase_shift=False, amplitude_damping=False)
-    assert _rel_l2(d_on, _run(p_plain)) > 1e-3
-
-
-@requires_torch
 def test_free_surface_is_applied():
     """Regression: ``func`` returned the step output unchanged, so
     ``free_surface=True`` was silently ignored."""

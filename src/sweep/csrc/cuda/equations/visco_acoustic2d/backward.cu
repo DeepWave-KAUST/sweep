@@ -18,7 +18,9 @@ namespace visco_acoustic2d {
 namespace {
 
 // ---------------------------------------------------------------------------
-// Amplitude damping (Zhu & Harris 2014, decoupled) — adjoint machinery.
+// Spectral terms (Zhu & Harris 2014, decoupled) — adjoint machinery.
+// The ViscoSpectral bundle (kernels.cuh) carries the damping filter and the
+// fractional-Laplacian dispersion remainder.
 //
 // Forward, step j (buffers):  u_next -= Gp ⊙ L(u_now - u_prev),  Gp = dt*A,
 // followed by the halo zeroing Z.  With λ_j := adjoint of the fully-updated
@@ -30,34 +32,22 @@ namespace {
 // accumulation into λ, preserving the "λ halo == 0" invariant the reused
 // stencil kernels rely on.
 // ---------------------------------------------------------------------------
-struct Damping {
-    bool active = false;
-    torch::Tensor kmul;   // (nz, nx) |k| grid
-    torch::Tensor Gp;     // (N, C, nz, nx) dt * A
-};
-
-Damping make_damping(const BackwardInput& p, int nz, int nx)
+// The spectral terms of the adjoint recursion; call between the fused adjoint
+// kernel (which wrote u_next = λ_it^{S^T}) and swap_aux().  Damping reads the
+// lag pair (λ_{it+2} - λ_{it+1}); the dispersion term is memoryless in u_now,
+// so its transpose reads λ_{it+1} alone (adj.u_now_t) through the SAME
+// self-adjoint operators with the coefficient maps moved inside.
+void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d, int M)
 {
-    Damping d;
-    if (p.eq_aux.empty())
-        return d;
-    d.active = true;
-    d.kmul = p.eq_aux[0];
-    TORCH_CHECK(d.kmul.dim() == 2 && d.kmul.size(0) == nz && d.kmul.size(1) == nx,
-                "visco eq_aux[0] (|k| grid) must be (nz_runtime, nx_runtime) = (",
-                nz, ", ", nx, "), got ", d.kmul.sizes());
-    TORCH_CHECK(d.kmul.is_cuda() && d.kmul.scalar_type() == torch::kFloat32,
-                "visco eq_aux[0] must be a float32 CUDA tensor");
-    d.Gp = p.models[1] * p.dt;
-    return d;
-}
-
-// The damping term of the adjoint recursion; call between the fused adjoint
-// kernel (which wrote u_next = λ_it^{S^T}) and swap_aux().
-void adjoint_damping_extra(AcousticWavefieldTensor& adj, const Damping& d, int M)
-{
-    if (!d.active) return;
-    auto m = visco_acoustic2d_Lop(d.Gp * (adj.u_prev_t - adj.u_now_t), d.kmul);
+    if (!(d.active || d.disp)) return;
+    torch::Tensor m;
+    if (d.active)
+        m = visco_acoustic2d_Lop(d.Gp * (adj.u_prev_t - adj.u_now_t), d.kmul);
+    if (d.disp) {
+        auto e = visco_acoustic2d_Lop(d.Gd1 * adj.u_now_t, d.Dk2)
+               - visco_acoustic2d_Lop(d.Gd2 * adj.u_now_t, d.Dfrac);
+        m = d.active ? m + e : e;
+    }
     visco_acoustic2d_zero_halo(m, M);
     adj.u_next_t.add_(m);
 }
@@ -69,11 +59,26 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const Damping& d, int M
 void accumulate_grad_A(torch::Tensor& grad_A,
                        const torch::Tensor& lam,
                        const torch::Tensor& du,
-                       const Damping& d, float dt)
+                       const ViscoSpectral& d, float dt)
 {
     if (!d.active) return;
     auto Ld = visco_acoustic2d_Lop(du.view(lam.sizes()), d.kmul);
     grad_A.add_(lam * Ld, -static_cast<double>(dt));
+}
+
+// grad_B1 += dt^2 * λ ⊙ L_{D_k2}(u[it]);  grad_B2 -= dt^2 * λ ⊙ L_{D_frac}(u[it]).
+// Same (λ, u[it]) index pairing as grad_A's u_now slot; valid from it = 0
+// (the dispersion term needs no u[it-1]).
+void accumulate_grad_disp(torch::Tensor* grad_B1, torch::Tensor* grad_B2,
+                          const torch::Tensor& lam,
+                          const torch::Tensor& u_it,
+                          const ViscoSpectral& d, float dt)
+{
+    if (!d.disp || grad_B1 == nullptr) return;
+    auto uv = u_it.view(lam.sizes());
+    const double dt2 = static_cast<double>(dt) * static_cast<double>(dt);
+    grad_B1->add_(lam * visco_acoustic2d_Lop(uv, d.Dk2), dt2);
+    grad_B2->add_(lam * visco_acoustic2d_Lop(uv, d.Dfrac), -dt2);
 }
 
 void init_rtm_output_visco_2d(RTMOutput& out, const torch::Tensor& vp)
@@ -139,9 +144,9 @@ void image_step_from_raw(
 
 void check_visco_backward(const BackwardInput& p)
 {
-    TORCH_CHECK(p.models.size() == 2,
-                "visco_acoustic2d expects prepared models (vp_step, A); got ",
-                p.models.size());
+    TORCH_CHECK(p.models.size() == 4,
+                "visco_acoustic2d expects the prepared models "
+                "(vp_step, B1, B2, A); got ", p.models.size());
     TORCH_CHECK(!p.bw_stepped() && p.grads_out.empty() && p.step_phase == 0,
                 "visco_acoustic2d does not support stepped backward segments");
     TORCH_CHECK(p.cut_face_mask == 0,
@@ -158,6 +163,8 @@ void run_full_imaging_visco(
     const BackwardInput& p,
     torch::Tensor* grad,
     torch::Tensor* grad_A,
+    torch::Tensor* grad_B1,
+    torch::Tensor* grad_B2,
     torch::Tensor* grad_wavelet,
     RTMOutput* rtm_out)
 {
@@ -205,7 +212,7 @@ void run_full_imaging_visco(
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    Damping damping = make_damping(p, nz, nx);
+    ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
     auto carrier = torch::zeros({B, nz, nx}, vp.options());
 
     for (int it = p.nt - 1; it >= 0; --it) {
@@ -255,6 +262,8 @@ void run_full_imaging_visco(
                               p.u_forward[it] - p.u_forward[it - 1],
                               damping, dt);
         }
+        accumulate_grad_disp(grad_B1, grad_B2, adjoint.u_now_t,
+                             p.u_forward[it], damping, dt);
     }
 }
 
@@ -269,13 +278,16 @@ BackwardOutput backward(const BackwardInput& in)
                 "wavefield history");
     BackwardOutput out;
     auto grad = torch::zeros_like(in.models[0]);
-    auto grad_A = torch::zeros_like(in.models[1]);
+    auto grad_A = torch::zeros_like(in.models[3]);
+    auto grad_B1 = torch::zeros_like(in.models[1]);
+    auto grad_B2 = torch::zeros_like(in.models[2]);
     auto grad_wavelet = torch::zeros_like(in.forward_source);
     RTMOutput illumination;
     init_rtm_output_visco_2d(illumination, in.models[0]);
-    run_full_imaging_visco(in, &grad, &grad_A, &grad_wavelet,
+    run_full_imaging_visco(in, &grad, &grad_A, &grad_B1, &grad_B2,
+                           &grad_wavelet,
                            in.compute_illumination ? &illumination : nullptr);
-    out.grads = {grad_wavelet, grad, grad_A};
+    out.grads = {grad_wavelet, grad, grad_B1, grad_B2, grad_A};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
     out.adcig = illumination.adcig;
@@ -297,7 +309,7 @@ RTMOutput rtm(const BackwardInput& in)
 
     RTMOutput out;
     init_rtm_output_visco_2d(out, in.models[0]);
-    run_full_imaging_visco(in, nullptr, nullptr, nullptr, &out);
+    run_full_imaging_visco(in, nullptr, nullptr, nullptr, nullptr, nullptr, &out);
     return out;
 }
 
@@ -372,7 +384,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     acoustic_init_aux_slabs(ctx, forward);
 
     auto grad = torch::zeros_like(vp);
-    auto grad_A = torch::zeros_like(p.models[1]);
+    auto grad_A = torch::zeros_like(p.models[3]);
+    auto grad_B1 = torch::zeros_like(p.models[1]);
+    auto grad_B2 = torch::zeros_like(p.models[2]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_visco_2d(illumination, vp);
@@ -390,10 +404,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    Damping damping = make_damping(p, nz, nx);
-    torch::Tensor dt2A;
-    if (damping.active)
-        dt2A = p.models[1] * (dt * dt);
+    ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
     auto carrier = torch::zeros({B, nz, nx}, vp.options());
     RTMOutput* rtm_out = in.compute_illumination ? &illumination : nullptr;
 
@@ -436,10 +447,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 ctx
             );
 
-            if (damping.active) {
-                visco_acoustic2d_apply_damping(forward, damping.kmul, dt2A, dt);
-                visco_acoustic2d_zero_halo(forward.u_next_t, M);
-            }
+            visco_acoustic2d_apply_spectral(forward, damping, dt, M);
 
             add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
                 for_view.u_next,
@@ -499,10 +507,13 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                                                   : u_prev_chunk),
                                   damping, dt);
             }
+            accumulate_grad_disp(&grad_B1, &grad_B2,
+                                 adjoint.u_now_t, chunk_raw[it - start],
+                                 damping, dt);
         }
     }
 
-    out.grads = {grad_wavelet, grad, grad_A};
+    out.grads = {grad_wavelet, grad, grad_B1, grad_B2, grad_A};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
     out.adcig = illumination.adcig;
@@ -549,8 +560,7 @@ void advance_forward_interval_visco_2d(
     const AcousticCPMLPointer& cpml,
     const SolverContext& ctx,
     int forward_nsrc,
-    const Damping& damping,
-    const torch::Tensor& dt2A)
+    const ViscoSpectral& damping)
 {
     for (int it = start; it < end; ++it) {
         auto view = forward.view();
@@ -571,10 +581,7 @@ void advance_forward_interval_visco_2d(
             ctx
         );
 
-        if (damping.active) {
-            visco_acoustic2d_apply_damping(forward, damping.kmul, dt2A, ctx.dt);
-            visco_acoustic2d_zero_halo(forward.u_next_t, ctx.M);
-        }
+        visco_acoustic2d_apply_spectral(forward, damping, ctx.dt, ctx.M);
 
         add_source<<<source_grid, source_block>>>(
             view.u_next,
@@ -598,6 +605,8 @@ void process_recursive_interval_visco_2d(
     const torch::Tensor& vp,
     torch::Tensor* grad,
     torch::Tensor* grad_A,
+    torch::Tensor* grad_B1,
+    torch::Tensor* grad_B2,
     torch::Tensor* grad_wavelet,
     RTMOutput* rtm_out,
     int order,
@@ -619,8 +628,7 @@ void process_recursive_interval_visco_2d(
     std::vector<AcousticWavefieldTensor>& scratch_states,
     int scratch_depth,
     torch::Tensor& carrier_scratch,
-    const Damping& damping,
-    const torch::Tensor& dt2A,
+    const ViscoSpectral& damping,
     int nx,
     int nz)
 {
@@ -633,6 +641,13 @@ void process_recursive_interval_visco_2d(
         torch::Tensor du;
         if (damping.active && start >= 1)
             du = start_state.u_now_t - start_state.u_prev_t;
+        // Dispersion gradient bases from the pre-step u(start) (the state
+        // rotates before the accumulation point below).
+        torch::Tensor Pb, Rb;
+        if (damping.disp && grad_B1 != nullptr) {
+            Pb = visco_acoustic2d_Lop(start_state.u_now_t, damping.Dk2);
+            Rb = visco_acoustic2d_Lop(start_state.u_now_t, damping.Dfrac);
+        }
         VISCO_ACOUSTIC2D_CARRIER(order, wave_grid, wave_block,
             start_state.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
@@ -657,10 +672,7 @@ void process_recursive_interval_visco_2d(
             ctx
         );
 
-        if (damping.active) {
-            visco_acoustic2d_apply_damping(start_state, damping.kmul, dt2A, ctx.dt);
-            visco_acoustic2d_zero_halo(start_state.u_next_t, ctx.M);
-        }
+        visco_acoustic2d_apply_spectral(start_state, damping, ctx.dt, ctx.M);
 
         add_source<<<forward_source_grid, forward_source_block>>>(
             fwd_view.u_next,
@@ -725,6 +737,11 @@ void process_recursive_interval_visco_2d(
 
         if (grad_A != nullptr && damping.active && start >= 1)
             accumulate_grad_A(*grad_A, adjoint.u_now_t, du, damping, ctx.dt);
+        if (damping.disp && grad_B1 != nullptr) {
+            const double dt2 = static_cast<double>(ctx.dt) * static_cast<double>(ctx.dt);
+            grad_B1->add_(adjoint.u_now_t * Pb, dt2);
+            grad_B2->add_(adjoint.u_now_t * Rb, -dt2);
+        }
         return;
     }
 
@@ -741,29 +758,29 @@ void process_recursive_interval_visco_2d(
         wave_grid, wave_block,
         forward_source_grid, forward_source_block,
         p, vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
-        cpml, ctx, forward_nsrc, damping, dt2A);
+        cpml, ctx, forward_nsrc, damping);
 
     process_recursive_interval_visco_2d(
         mid, end, mid_state, adjoint, p, vp,
-        grad, grad_A, grad_wavelet, rtm_out,
+        grad, grad_A, grad_B1, grad_B2, grad_wavelet, rtm_out,
         order, wave_grid, wave_block,
         forward_source_grid, forward_source_block,
         adj_source_grid, adj_source_block,
         lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
         cpml, ctx, forward_nsrc, adjoint_nsrc,
         checkpoint_runtime, scratch_states, scratch_depth + 1,
-        carrier_scratch, damping, dt2A, nx, nz);
+        carrier_scratch, damping, nx, nz);
 
     process_recursive_interval_visco_2d(
         start, mid, start_state, adjoint, p, vp,
-        grad, grad_A, grad_wavelet, rtm_out,
+        grad, grad_A, grad_B1, grad_B2, grad_wavelet, rtm_out,
         order, wave_grid, wave_block,
         forward_source_grid, forward_source_block,
         adj_source_grid, adj_source_block,
         lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
         cpml, ctx, forward_nsrc, adjoint_nsrc,
         checkpoint_runtime, scratch_states, scratch_depth + 1,
-        carrier_scratch, damping, dt2A, nx, nz);
+        carrier_scratch, damping, nx, nz);
 }
 
 } // namespace
@@ -826,7 +843,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     auto grad = torch::zeros_like(vp);
-    auto grad_A = torch::zeros_like(p.models[1]);
+    auto grad_A = torch::zeros_like(p.models[3]);
+    auto grad_B1 = torch::zeros_like(p.models[1]);
+    auto grad_B2 = torch::zeros_like(p.models[2]);
     auto grad_wavelet = torch::zeros_like(p.forward_source);
     RTMOutput illumination;
     init_rtm_output_visco_2d(illumination, vp);
@@ -844,10 +863,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    Damping damping = make_damping(p, nz, nx);
-    torch::Tensor dt2A;
-    if (damping.active)
-        dt2A = p.models[1] * (dt * dt);
+    ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
     TORCH_CHECK(
@@ -892,17 +908,18 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
         process_recursive_interval_visco_2d(
             start, end, start_state, adjoint, p, vp,
-            &grad, &grad_A, &grad_wavelet, rtm_out,
+            &grad, &grad_A, &grad_B1, &grad_B2,
+            &grad_wavelet, rtm_out,
             order, launch_config.grid, launch_config.block,
             fwd_source_config.grid, fwd_source_config.block,
             adj_source_config.grid, adj_source_config.block,
             lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
             cpml, ctx, forward_nsrc, adjoint_nsrc,
             checkpoint_runtime, scratch_states, 0,
-            carrier_scratch, damping, dt2A, nx, nz);
+            carrier_scratch, damping, nx, nz);
     }
 
-    out.grads = {grad_wavelet, grad, grad_A};
+    out.grads = {grad_wavelet, grad, grad_B1, grad_B2, grad_A};
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
     out.adcig = illumination.adcig;
