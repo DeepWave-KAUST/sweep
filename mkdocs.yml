@@ -163,6 +163,7 @@ nav:
           - AcousticVRZ: api/equations/acoustic_vrz.md
           - AcousticLSRTM: api/equations/acoustic_lsrtm.md
           - AcousticLSRTM3D: api/equations/acoustic_lsrtm3d.md
+          - ViscoAcoustic: api/equations/visco_acoustic.md
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md
           - ElasticTTI: api/equations/elastic_tti.md
