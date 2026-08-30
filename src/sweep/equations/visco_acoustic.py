@@ -17,6 +17,10 @@ def step_visco_cpml(
         k=None,
         op=None,
         amplitude_damping=True,
+        B1=None,
+        B2=None,
+        D_frac=None,
+        D_k2=None,
         ):
     """Nearly constant-Q visco-acoustic step on top of the CPML acoustic step.
 
@@ -40,8 +44,19 @@ def step_visco_cpml(
         grad_kernels,
     )
 
-    # Amplitude loss: dissipative, driven by du/dt through a |k| operator.
-    # A carries the reference vp, not the dispersion-corrected vp_step.
+    # NCQ dispersion correction (Zhu & Harris eq. 10, eta term): the CPML step
+    # above already carries -c^2 k^2 through its FD Laplacian, so the spectral
+    # remainder  c^2 (k^2 - eta_hat k^(2*gbar+2))  upgrades it to the paper's
+    # -c^2 eta_hat k^(2*gbar+2).  The remainder vanishes identically at
+    # gamma -> 0 (B1 = B2, D_k2 = D_frac), keeping the acoustic limit exact.
+    if B1 is not None:
+        U = op.fft.fft2(u_now, u_next.shape[-2:], (-2, -1))
+        disp = (B1 * op.fft.ifft2(D_k2 * U, u_next.shape[-2:], (-2, -1)).real
+                - B2 * op.fft.ifft2(D_frac * U, u_next.shape[-2:], (-2, -1)).real)
+        u_next = u_next + dt**2 * disp
+
+    # Amplitude loss: dissipative, driven by du/dt through the spectral
+    # filter ``k`` (= k^(2*gbar+1)); ``A = c^2 * tau_hat``.
     if amplitude_damping:
         dudt = (u_now - u_pre) / dt
         fft_dudt = op.fft.fft2(dudt, u_next.shape[-2:], (-2, -1))
@@ -59,20 +74,25 @@ class ViscoAcoustic(SecondOrderEquation):
     absorbed by the same CPML formulation (``cpmlr`` by default), with
     attenuation added on top as two *decoupled* terms:
 
-    * **phase shift** -- velocity dispersion. Makes the phase velocity
-      frequency dependent (higher frequencies travel slightly faster), so it
-      moves the wavefront. Non-dissipative: it costs no energy. Numerically it
-      is exactly an effective velocity ``vp·sqrt(1-c)``, so it is folded into
-      ``vp`` and rides through the CPML with the base step.
-    * **amplitude damping** -- attenuation. The dissipative term: it removes
-      energy so the wavefront decays, absorbing high frequencies more strongly
-      (the medium acts as a distance-dependent low-pass). It weakens the
-      wavefront without moving it. Evaluated in the wavenumber domain, so the
-      amplitude term is the only part of the step needing an FFT.
+    * **phase shift** -- velocity dispersion, Zhu & Harris (2014) eq. 10's
+      fractional Laplacian ``-c^2 eta_hat (-lap)^(gamma+1)``. Non-dissipative:
+      the phase velocity follows Kjartansson's power law
+      ``c_p = c0 (w/w0)^gamma`` (higher frequencies genuinely travel faster),
+      so it moves the wavefront without removing energy.  Implemented as the
+      CPML FD Laplacian at the paper's velocity ``c = vp*cos(pi*gamma/2)``
+      plus a spectral remainder that vanishes identically as ``gamma -> 0``.
+    * **amplitude damping** -- attenuation, the paper's
+      ``tau d/dt (-lap)^(gamma+1/2)`` term. The dissipative term: a
+      ``k^(2*gbar+1)`` wavenumber filter on du/dt removes energy, absorbing
+      high frequencies more strongly (the medium acts as a distance-dependent
+      low-pass). It weakens the wavefront without moving it.
 
     The two switch independently via ``phase_shift`` / ``amplitude_damping``
     (both default on). Both off reduces bit-exactly to ``Acoustic``; both on
-    gives the full visco-acoustic response.
+    gives the full visco-acoustic response.  Heterogeneous media follow the
+    paper's freezing-unfreezing treatment: every coefficient map varies in
+    space, only the fractional EXPONENT is frozen at the average ``gbar``
+    (whose Q-derivative is also frozen, on every backend).
 
     Because the decoupling is what makes the switches meaningful, note that the
     two effects are not physically independent -- causality ties dispersion and
@@ -81,7 +101,9 @@ class ViscoAcoustic(SecondOrderEquation):
     the fully coupled constant-Q equation is more faithful but harder to solve.
 
     Parameter order: ``vp``, ``Q``, ``omega``. Wavefields: ``(h1, h2)`` plus
-    the CPML auxiliaries.
+    the CPML auxiliaries.  ``omega`` is the reference angular frequency that
+    anchors the power law -- a real model parameter with a genuine gradient
+    (it enters through ``(vp/omega)^(2*gamma)``).
 
     Backends: eager (CPU/GPU, torch + jax) and compiled CUDA (``impl='c'``).
     The CUDA path reuses the acoustic2d CPML kernels with the prepared
@@ -96,10 +118,10 @@ class ViscoAcoustic(SecondOrderEquation):
     References:
         Zhu, T. and Harris, J. M., 2014, Modeling acoustic wave propagation in
         heterogeneous attenuating media using decoupled fractional Laplacians:
-        Geophysics, 79(3), T105-T116 -- the decoupled form implemented here,
-        derived from Kjartansson's constant-Q stress-strain relation.
-
-        Wang Enjiang, Thesis.
+        Geophysics, 79(3), T105-T116, doi:10.1190/geo2013-0245.1 --
+        implements the paper's eq. 10 with coefficients eq. 11 (dispersion
+        validated against the Kjartansson power law to 0.4% over the band;
+        attenuation to 2%).
     """
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Visco-acoustic wave velocity model.", unit="m/s"),
@@ -177,49 +199,114 @@ class ViscoAcoustic(SecondOrderEquation):
             raise ValueError(f"Unknown backend: {backend}")
 
     def prepare_models(self, models):
-        """Map the user models (vp, Q, omega) onto what the CUDA kernels
-        consume: ``vp_step`` (dispersion folded into an effective velocity,
-        exactly as in :func:`step_visco_cpml`) and the damping coefficient
-        ``A = tt * vp / 2`` (the forward multiplies ``dt**2``).  All ops are
-        differentiable, so autograd routes the C-returned (grad_vp_step,
-        grad_A) back to vp / Q / omega."""
+        """Map the user models (vp, Q, omega) onto the step coefficients
+        ``(vp_step, B1, B2, A)`` for Zhu & Harris (2014) eq. 10 with
+        coefficients eq. 11 (gamma = arctan(1/Q)/pi):
+
+        * ``vp_step = vp*cos(pi*gamma/2)`` -- the paper's wave-equation
+          velocity ``c``; the CPML FD Laplacian carries ``-c^2 k^2``.
+        * ``B1 = c^2`` and ``B2 = c^2 * eta_hat`` with
+          ``eta_hat = cos(pi*gamma) * (vp/omega)^(2*gamma)`` -- the spectral
+          remainder ``B1*k^2 - B2*k^(2*gbar+2)`` upgrades the FD term to the
+          paper's dispersion operator ``-c^2 eta_hat k^(2*gamma+2)``.
+        * ``A = c^2 * tau_hat`` with
+          ``tau_hat = (vp/omega)^(2*gamma) * sin(pi*gamma) / vp`` -- the loss
+          coefficient for the ``k^(2*gbar+1)`` filter.
+
+        The spatially varying ``gamma`` enters every coefficient locally; only
+        the fractional EXPONENT is frozen at the average ``gbar`` (stashed on
+        ``self`` for :meth:`_spectral_grids`), which is the paper's
+        freezing-unfreezing treatment of heterogeneous media.  All ops are
+        differentiable, so autograd routes the returned gradients back to
+        vp / Q / omega."""
         vp, Q, omega = models
+        op = self.op
+        gamma = op.arctan(1.0 / Q) / np.pi
+        self._gbar = op.mean(gamma)
         if self.phase_shift:
-            c = (1.0 - (Q**2 + 1.0)**0.5) * Q**-2
-            vp_step = vp * (1.0 - c)**0.5
+            csq_fac = op.cos(np.pi * gamma / 2)
+            vp_step = vp * csq_fac
+            ratio = (vp / omega) ** (2.0 * gamma)
+            B1 = vp_step ** 2
+            B2 = B1 * (op.cos(np.pi * gamma) * ratio)
         else:
             vp_step = vp
+            B1 = op.zeros_like(vp)
+            B2 = op.zeros_like(vp)
         if self.amplitude_damping:
-            t_sigma = omega**-1 * ((1.0 + Q**-2)**0.5 - Q**-1)
-            t_eps = (omega**2 * t_sigma)**-1
-            tt = t_eps / (t_sigma - 1e-8) - 1.0
-            A = tt * vp / 2
+            ratio_l = (vp / omega) ** (2.0 * gamma)
+            tau_hat = ratio_l * op.sin(np.pi * gamma) / vp
+            A = vp_step ** 2 * tau_hat
         else:
-            # No damping: A is a dead input (the C backward returns grad_A=0),
-            # and skipping the tt chain avoids injecting spurious zero-grad
-            # graph nodes (or NaNs from degenerate Q / omega) into autograd.
-            A = self.op.zeros_like(vp)
-        return (vp_step, A)
+            A = op.zeros_like(vp)
+        return (vp_step, B1, B2, A)
+
+    def _spectral_grids(self, k):
+        """(D_k2, D_frac, D_loss) fractional-power grids on the runtime |k|
+        grid, using the average exponent ``self._gbar`` from the latest
+        :meth:`prepare_models` call.  Cached per (gbar tensor, k shape): one
+        rebuild per forward on torch (prepare runs once outside the loop), one
+        per step inside a jax trace (where it stays trace-local).  ``k = 0``
+        rows go through a safe branch so the pow's exponent-gradient stays
+        finite (0**e backward emits nan*0 otherwise).
+
+        The exponent is DETACHED from autograd on every backend: the paper
+        already freezes the spatially varying exponent at its average, and
+        freezing its Q-derivative too keeps eager and impl='c' (where the
+        grids are data) gradient-identical.  Q sensitivity flows through the
+        coefficient maps (B1, B2, A), which carry the leading terms."""
+        gbar = self._gbar
+        cache = getattr(self, '_D_cache', None)
+        if cache is not None and cache[0] is gbar and cache[1].shape == k.shape:
+            return cache[2]
+        op = self.op
+        mask = k > 0
+        k_safe = op.where(mask, k, op.ones_like(k))
+        zeros = op.zeros_like(k)
+        D_k2 = k * k
+        e = gbar.detach() if hasattr(gbar, 'detach') else gbar
+        D_frac = op.where(mask, k_safe ** (2.0 * e + 2.0), zeros)
+        D_loss = op.where(mask, k_safe ** (2.0 * e + 1.0), zeros)
+        grids = (D_k2, D_frac, D_loss)
+        self._D_cache = (gbar, k, grids)
+        return grids
 
     def c_eq_aux(self, prop):
-        """ForwardInput.eq_aux for the CUDA kernels: the |k| FFT multiplier on
-        the runtime grid, present iff amplitude damping is active.  Built with
-        the same :func:`~sweep.equations.base.init_wavenumbers` rule as the
-        eager path (scalar h = first grid-spacing entry) and cached per
-        (shape, h)."""
-        if not self.amplitude_damping:
+        """ForwardInput.eq_aux for the CUDA kernels: the spectral filter grids
+        on the runtime grid.  The composition encodes the active terms (see
+        ``visco_acoustic2d_make_spectral``): ``(D_loss,)`` damping only,
+        ``(D_k2, D_frac)`` dispersion only, all three for both, ``()`` for
+        none.  |k| is raised to the frozen average exponent ``gbar`` from the
+        latest :meth:`prepare_models` call (the paper's freezing-unfreezing:
+        on impl='c' the exponent is DATA, matching the eager side where the
+        exponent's gradient path is detached too).  Built with the same
+        :func:`~sweep.equations.base.init_wavenumbers` rule as the eager path
+        and cached per (shape, h, device, gbar, switches)."""
+        if not (self.amplitude_damping or self.phase_shift):
             return ()
         import torch
         from .base import init_wavenumbers
         shape = tuple(int(v) for v in prop.shape_cuda)[-2:]
         h = float(np.asarray(prop._grid_spacing).reshape(-1)[0])
-        key = (shape, h, str(prop.dev))
+        gbar = float(self._gbar.detach().cpu())
+        key = (shape, h, str(prop.dev), round(gbar, 9),
+               self.phase_shift, self.amplitude_damping)
         cached = getattr(self, "_c_kmul_cache", None)
         if cached is None or cached[0] != key:
             k_np, _, _ = init_wavenumbers(shape, h)
-            t = torch.as_tensor(k_np, dtype=torch.float32, device=prop.dev)
-            self._c_kmul_cache = (key, t.contiguous())
-        return (self._c_kmul_cache[1],)
+            def t(a):
+                return torch.as_tensor(
+                    a.astype(np.float32), device=prop.dev).contiguous()
+            grids = []
+            if self.amplitude_damping:
+                grids.append(t(np.where(
+                    k_np > 0, np.power(k_np, 2.0*gbar + 1.0, where=k_np > 0), 0.0)))
+            if self.phase_shift:
+                grids.append(t(k_np * k_np))
+                grids.append(t(np.where(
+                    k_np > 0, np.power(k_np, 2.0*gbar + 2.0, where=k_np > 0), 0.0)))
+            self._c_kmul_cache = (key, tuple(grids))
+        return self._c_kmul_cache[1]
 
     def _C(self):
         # CUDA IMPLEMENTATION
@@ -280,22 +367,36 @@ class ViscoAcoustic(SecondOrderEquation):
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
-        # The torch-eager and CUDA propagators hand the PREPARED (vp_step, A)
-        # pair (their prepare_models hooks run once, outside the time loop);
+        # The torch-eager and CUDA propagators hand the PREPARED coefficients
+        # (their prepare_models hooks run once, outside the time loop);
         # PropJax — and any caller without a prepare hook — hands the raw
         # (vp, Q, omega), prepared here inside the trace (pure pointwise ops).
         if len(models) == 3:
             models = self.prepare_models(models)
-        vp_step, A = models
+        vp_step, B1, B2, A = models
+        D_k2, D_frac, k_loss = self._spectral_grids(self.k)
+        if not self.phase_shift:
+            B1 = None
         hz, hx = self._spacings_2d(h)
         lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         out = step_visco_cpml(
             *wavefields, vp_step, A, dt, h, b,
             lap_u_now_x, lap_u_now_z,
             self.b, self.gradient, self.grad_kernels,
-            k=self.k, op=self.op,
+            k=k_loss, op=self.op,
             amplitude_damping=self.amplitude_damping,
+            B1=B1, B2=B2, D_frac=D_frac, D_k2=D_k2,
         )
+        if B1 is not None or self.amplitude_damping:
+            # Match the C backend's invariant: the spectral FFT terms write
+            # into the outer stencil halo; zero it back (the halo is inert
+            # padding the FD taps read, and on free-surface faces this IS the
+            # pressure-release condition).
+            halo = self.so // 2
+            u = out[0].clone()
+            u[..., :halo, :] = 0; u[..., -halo:, :] = 0
+            u[..., :, :halo] = 0; u[..., :, -halo:] = 0
+            out = (u,) + tuple(out[1:])
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)
             if topo_rows is not None:

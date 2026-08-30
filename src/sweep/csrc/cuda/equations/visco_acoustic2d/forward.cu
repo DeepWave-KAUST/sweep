@@ -32,9 +32,9 @@ ForwardOutput forward(const ForwardInput& in) {
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 2,
-                "visco_acoustic2d expects prepared models (vp_step, A); got ",
-                p.models.size());
+    TORCH_CHECK(p.models.size() == 4,
+                "visco_acoustic2d expects the prepared models "
+                "(vp_step, B1, B2, A); got ", p.models.size());
     TORCH_CHECK(p.models[0].is_cuda(),
                 "visco_acoustic2d impl='c' is CUDA-only; use impl='eager' on CPU");
     TORCH_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
@@ -113,18 +113,10 @@ ForwardOutput forward(const ForwardInput& in) {
         0
     );
 
-    // Amplitude damping: active iff the |k| grid rode in via eq_aux.
-    const bool damp = !p.eq_aux.empty();
-    torch::Tensor kmul, dt2A;
-    if (damp) {
-        kmul = p.eq_aux[0];
-        TORCH_CHECK(kmul.dim() == 2 && kmul.size(0) == nz && kmul.size(1) == nx,
-                    "visco eq_aux[0] (|k| grid) must be (nz_runtime, nx_runtime) = (",
-                    nz, ", ", nx, "), got ", kmul.sizes());
-        TORCH_CHECK(kmul.is_cuda() && kmul.scalar_type() == torch::kFloat32,
-                    "visco eq_aux[0] must be a float32 CUDA tensor");
-        dt2A = p.models[1] * (p.dt * p.dt);
-    }
+    // Spectral terms (damping / NCQ dispersion): selected by the eq_aux
+    // composition, see visco_acoustic2d_make_spectral (kernels.cuh).
+    ViscoSpectral spectral =
+        visco_acoustic2d_make_spectral(p.eq_aux, p.models, p.dt, nz, nx);
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -159,12 +151,10 @@ ForwardOutput forward(const ForwardInput& in) {
             ctx
         );
 
-        if (damp) {
-            visco_acoustic2d_apply_damping(wavefield, kmul, dt2A, p.dt);
-            // The FFT wrote into the halo bands; restore the stencil-kernel
-            // invariant (halo == 0 == the free-surface image condition).
-            visco_acoustic2d_zero_halo(wavefield.u_next_t, p.M);
-        }
+        // Dispersion + damping corrections; the FFTs write into the halo
+        // bands, so the helper restores the stencil-kernel invariant
+        // (halo == 0 == the free-surface image condition) afterwards.
+        visco_acoustic2d_apply_spectral(wavefield, spectral, p.dt, p.M);
 
         add_source<<<source_config.grid, source_config.block>>>(
             view.u_next,

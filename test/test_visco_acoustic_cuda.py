@@ -12,11 +12,8 @@ stencil + FFT damping from the pre-existing eager-vs-c PML-region divergence:
 there c must match eager to ~1e-5, while PML configs sit at the same ~2e-3
 level as plain Acoustic.
 
-``omega``'s gradient is NOT compared against eager: in the nearly-constant-Q
-parametrization ``tt = 1/(omega*t_sigma)**2 - 1`` is omega-independent by
-construction (only the 1e-8 guard breaks the cancellation), so its true
-gradient is ~0 and any comparison is roundoff-vs-roundoff.  It is asserted
-small relative to Q's instead.
+``omega`` is a real model parameter ((vp/omega)^(2*gamma) anchors the power
+law); its gradient is compared like every other model gradient.
 """
 import numpy as np
 import pytest
@@ -68,7 +65,13 @@ def _prop(fs, mode, phase=True, amp=True):
                        phase_shift=phase, amplitude_damping=amp)
     common = dict(shape=(NZ, NX), free_surface=fs, abcn=ABCN, dh=DH, dt=DT)
     if mode == "eager":
-        return PropTorch(eq, backend="torch", impl="eager", use_ckpt=False, **common)
+        # use_compile=False: the compiled eager step is the IMPRECISE side —
+        # inductor's fused pow/ln backward perturbs the Q-gradient cotangents
+        # at ~1e-6, which the ln(vp/omega)-weighted dB2/dQ chain amplifies to
+        # ~5e-3 (NCQ).  The plain eager step matches the hand-written CUDA
+        # adjoint at ~5e-7, so it is the reference.
+        return PropTorch(eq, backend="torch", impl="eager", use_ckpt=False,
+                         use_compile=False, **common)
     if mode == "full":
         return PropTorch(eq, backend="torch", impl="c", use_ckpt=False,
                          boundary_saving_config={"enabled": False}, **common)
@@ -137,14 +140,12 @@ def test_forward_discriminates():
 def test_gradients_match_eager(fs, tag):
     ge = _grads(fs, "eager")
     gc = _grads(fs, "full")
-    for name, a, b in zip(["wavelet", "vp", "Q"], gc[:3], ge[:3]):
+    # NCQ: the reference frequency omega is a REAL parameter of the
+    # constant-Q model ((vp/omega)^(2*gamma)); its gradient is genuine, so it
+    # is compared like every other model gradient.
+    for name, a, b in zip(["wavelet", "vp", "Q", "omega"], gc, ge[:4]):
         assert _cos(a, b) > 0.9999, (tag, name, _cos(a, b))
         assert _rel(a, b) < 6e-3, (tag, name, _rel(a, b))
-    # omega: physically ~zero gradient (see module docstring) — assert small,
-    # scale-compared against Q's on comparable |param| footing.
-    scale_q = ge[2].norm() * _models()[1].norm()
-    scale_om = ge[3].norm() * _models()[2].norm()
-    assert scale_om < 1e-2 * scale_q
 
 
 @pytest.mark.parametrize("mode", ["ckpt", "rec", "default"])
@@ -206,13 +207,11 @@ def test_gradients_match_eager_toggles(phase, amp):
         assert _rel(a, b) < 6e-3, (phase, amp, name, _rel(a, b))
     if phase or amp:
         assert _cos(gc[2], ge[2]) > 0.9999 and _rel(gc[2], ge[2]) < 6e-3
+        # NCQ: the reference frequency is a REAL parameter — (vp/omega)^(2g)
+        # gives omega a genuine gradient; compare it like the others.
+        assert _cos(gc[3], ge[3]) > 0.9999 and _rel(gc[3], ge[3]) < 6e-3
     else:
         assert ge[2].norm() == 0 and gc[2].norm() == 0      # Q dead
-    if amp:
-        scale_q = ge[2].norm() * _models()[1].norm()
-        scale_om = max(ge[3].norm(), gc[3].norm()) * _models()[2].norm()
-        assert scale_om < 1e-2 * scale_q
-    else:
         assert ge[3].norm() == 0 and gc[3].norm() == 0      # omega dead
 
 
@@ -250,3 +249,15 @@ def test_toggles_off_matches_acoustic_c():
     (ra ** 2).sum().backward()
     assert torch.equal(wv.grad, wa.grad)
     assert torch.equal(m[0].grad, va.grad)
+
+
+def test_ncq_closed_box_grads_tight():
+    """The sharp NCQ assertion: with no PML (closed box) the hand-written CUDA
+    adjoint must match the UNCOMPILED eager autograd at float precision for
+    every gradient including Q (wavelet/vp ~1e-6, Q ~1e-6; the compiled eager
+    step would sit ~5e-3 away on Q — see _prop)."""
+    ge = _grads(ALL4, "eager")
+    gc = _grads(ALL4, "full")
+    for name, a, b in zip(["wavelet", "vp", "Q"], gc[:3], ge[:3]):
+        assert _cos(a, b) > 0.999999, (name, _cos(a, b))
+        assert _rel(a, b) < 5e-5, (name, _rel(a, b))
