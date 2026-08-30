@@ -2,6 +2,7 @@
 // shared skeleton in ``common/eq_driver.cuh``.  Everything here is a
 // line-faithful transcription of the launches the hand-written drivers made;
 // the physics kernels are untouched.
+// Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
 
 #include <torch/extension.h>
@@ -25,12 +26,32 @@
 namespace acoustic2d {
 
 struct Driver {
+    // ===================================================================== //
+    // [1] IDENTITY & SHARED PLUMBING
+    // Constants, type aliases, State/workspace types, validation, and the
+    // prologue hooks.  Skeleton prologue, in call order (every entry point):
+    //   validate_forward / (backward: check_stepped + validate_backward +
+    //   bind_backward_outputs / alloc_grads + rtm gate), bind_or_alloc_*
+    //   wavefields, alloc_cpml, setup_ctx, init_aux_slabs, make_state,
+    //   make_bwd_workspace.
+    // ===================================================================== //
+
     static constexpr int NDIM = 2;
     static constexpr const char* NAME = "acoustic2d";
     static constexpr int CKPT_NVAR = 6;
     static constexpr int BS_NVAR = 1;           // the saver stores u only
     static constexpr int BS_LAST_TWO_NVAR = 2;  // u_prev, u_now
     static constexpr int TANGENT_PAD = 0;       // (x TANGENT_PAD*M; VRZ uses 1)
+    static constexpr int CUT_MASK_BITS = 0xF;
+    static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
+    static constexpr int ADJ_WF_COUNT = 11;     // u triple + psi/zeta double-buffer
+    static constexpr int RECON_WF_COUNT = 3;
+    // Full mode folds the lagged vp-gradient imaging into the adjoint kernel.
+    static constexpr bool HAS_FUSED_FULL_IMG = true;
+    // 2-D serves ADCIG from full/ckpt modes too (raw-pressure imaging).
+    static constexpr bool ADCIG_IN_FULL_MODES = true;
+    // The bs reverse loop runs an it==0 adjoint-only tail (grad_wavelet).
+    static constexpr bool HAS_BS_T0_TAIL = true;
 
     using Wavefield = AcousticWavefieldTensor;
     using CPML = AcousticCPMLTensor;
@@ -79,6 +100,17 @@ struct Driver {
         return s;
     }
 
+    struct BwdWorkspace {};   // fused adjoint keeps scratch in psi/zeta buffers
+    static BwdWorkspace make_bwd_workspace(const BackwardInput&, const State&,
+                                           const SolverContext&, Wavefield&)
+    { return {}; }
+
+    struct BsScratch {};   // 2-D NOPML writes no per-step scratch field
+    // (its factory make_bs_scratch lives in section [4], at its firing point)
+
+    static void validate_forward(const ForwardInput&) {}
+    static void validate_backward(const BackwardInput&, bool) {}
+
     template <class P>
     static void setup_ctx(SolverContext& ctx, const P& p)
     {
@@ -87,15 +119,6 @@ struct Driver {
         ctx.topo_category = nullptr;
         ctx.use_apm      = false;
         ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
-    }
-
-    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
-                                      const torch::Tensor& vp)
-    {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields, 2, true);
-        else
-            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     }
 
     static void init_aux_slabs(SolverContext& ctx, Wavefield& wf)
@@ -115,6 +138,22 @@ struct Driver {
     }
 
     static int save_width(int abcn, int M) { return abcn > 0 ? M + 1 : M; }
+
+    // ===================================================================== //
+    // [2] FORWARD — generic_forward, per it in [it_begin, it_end):
+    //   launch_step_range -> save_boundary_fwd -> inject_source_fwd ->
+    //   record -> end_of_step -> capture_allt -> <checkpoint save (shared)>;
+    //   after the loop: save_last_state (final u pair for backward_bs).
+    // ===================================================================== //
+
+    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
+                                      const torch::Tensor& vp)
+    {
+        if (!p.wavefields.empty())
+            wf.bind(p.wavefields, 2, true);
+        else
+            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    }
 
     // One forward step over x in [xb, xe).
     // Pre-pass: clear air cells in a separate kernel launch so the
@@ -183,6 +222,8 @@ struct Driver {
         );
     }
 
+    // (also fired by the ckpt/recursive replay loops; the BackwardInput
+    // overload for those lives in section [5])
     static void inject_source_fwd(const State& s, const SolverContext& ctx,
                                   const AcousticWavefieldPointer& view,
                                   const ForwardInput& p, int it, int nsrc)
@@ -217,31 +258,22 @@ struct Driver {
         wf.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
     }
 
+    static void capture_allt(torch::Tensor&, Wavefield&, int) {}
+
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
     {
         saver.last_two_t.select(1, 0).copy_(wf.u_prev_t);
         saver.last_two_t.select(1, 1).copy_(wf.u_now_t);
     }
 
-    static constexpr int CUT_MASK_BITS = 0xF;
-    static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
-    static constexpr int ADJ_WF_COUNT = 11;     // u triple + psi/zeta double-buffer
-    static constexpr int RECON_WF_COUNT = 3;
-    // 2-D serves ADCIG from full/ckpt modes too (raw-pressure imaging).
-    static constexpr bool ADCIG_IN_FULL_MODES = true;
-    // Full mode folds the lagged vp-gradient imaging into the adjoint kernel.
-    static constexpr bool HAS_FUSED_FULL_IMG = true;
-    // The bs reverse loop runs an it==0 adjoint-only tail (grad_wavelet).
-    static constexpr bool HAS_BS_T0_TAIL = true;
-
-    struct BwdWorkspace {};   // fused adjoint keeps scratch in psi/zeta buffers
-    static BwdWorkspace make_bwd_workspace(const BackwardInput&, const State&,
-                                           const SolverContext&, Wavefield&)
-    { return {}; }
-
-    static void validate_forward(const ForwardInput&) {}
-    static void validate_backward(const BackwardInput&, bool) {}
-    static void capture_allt(torch::Tensor&, Wavefield&, int) {}
+    // ===================================================================== //
+    // [3] BACKWARD SHARED + FULL MODE — generic_backward, per reverse it:
+    //   adjoint_step -> inject_adjoint_source -> post_adjoint ->
+    //   accumulate_source_grad -> image_step;
+    //   after the loop (fused only): one trailing image_step at it == 0.
+    //   (adjoint_step .. accumulate_source_grad also fire per reverse it in
+    //   the bs / ckpt / recursive modes of sections [4] and [5].)
+    // ===================================================================== //
 
     static void bind_backward_outputs(const BackwardInput& p,
                                       std::vector<torch::Tensor>& grads,
@@ -275,14 +307,6 @@ struct Driver {
             ? &illumination : nullptr;
     }
 
-    static RTMOutput* bs_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
-    {
-        // 2-D images after the prefetch (bs_image_step); the gated pointer is
-        // consumed by the 3-D twin's in-step imaging and ignored here.
-        return (p.compute_illumination || p.compute_adcig)
-            ? &illumination : nullptr;
-    }
-
     static float* fused_grad_ptr(std::vector<torch::Tensor>& grads)
     {
         return grads[1].data_ptr<float>();
@@ -293,10 +317,6 @@ struct Driver {
         return p.u_forward[it].data_ptr<float>();
     }
 
-    struct BsScratch {};   // 2-D NOPML writes no per-step scratch field
-    static BsScratch make_bs_scratch(const BackwardInput&, const torch::Tensor&)
-    { return {}; }
-
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
@@ -304,33 +324,6 @@ struct Driver {
             wf.bind(p.adjoint_wavefields, 2, true);
         else
             wf.allocate(vp, 2, true);
-    }
-
-    static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
-                                    const torch::Tensor& vp)
-    {
-        if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 2, false);
-        else
-            wf.allocate(vp, 2, false);
-    }
-
-    static void bind_or_alloc_recon_ckpt(Wavefield& wf, const BackwardInput& p,
-                                         const torch::Tensor& vp)
-    {
-        if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 2, true);
-        else
-            // Aux shapes must follow the Python-allocated checkpoint slots
-            // (possibly per-axis slabs); a plain allocate() would build
-            // full-domain aux and break the snapshot copies.
-            wf.allocate_from_snapshots(vp, p.checkpoints, 2);
-    }
-
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput& p,
-                                            const torch::Tensor& vp)
-    {
-        wf.allocate_from_snapshots(vp, p.checkpoints, 2);
     }
 
     // FUSED single-kernel exact adjoint: recompute the per-cell g_* inline at
@@ -372,8 +365,6 @@ struct Driver {
     {
         wf.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
     }
-
-    static void swap_recon(Wavefield& wf) { wf.swap(); }
 
     static void accumulate_source_grad(const State& s, const SolverContext& ctx,
                                        Wavefield& adjoint, const BackwardInput& p,
@@ -420,42 +411,31 @@ struct Driver {
         // reconstructed raw pressure is co-resident.
     }
 
-    static void replay_step(const State& s, const SolverContext& ctx,
-                            AcousticWavefieldPointer view,
-                            AcousticCPMLPointer cpml,
-                            bool save_all, float* u_this)
+    // ===================================================================== //
+    // [4] BACKWARD_BS — generic_backward_bs, per reverse it (floor
+    // max(max(it_lo, 1), bs_stop)):
+    //   adjoint_step / inject_adjoint_source / post_adjoint /
+    //   accumulate_source_grad (section [3]) -> bs_reverse_step ->
+    //   bs_image_step;
+    //   before the loop (first segment): seed_reconstruction from u_last_two;
+    //   after the loop (HAS_BS_T0_TAIL): the four adjoint hooks once at it == 0.
+    // ===================================================================== //
+
+    static RTMOutput* bs_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
     {
-        ACOUSTIC2D(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            view,
-            save_all,
-            u_this,
-            s.vp,
-            s.lap_ctx,
-            s.grad_ctx,
-            s.grad_ctx_x,
-            s.grad_ctx_z,
-            cpml,
-            ctx
-        );
+        // 2-D images after the prefetch (bs_image_step); the gated pointer is
+        // consumed by the 3-D twin's in-step imaging and ignored here.
+        return (p.compute_illumination || p.compute_adcig)
+            ? &illumination : nullptr;
     }
 
-    // Overload for ckpt replay: BackwardInput spells the forward source fields
-    // differently from ForwardInput.
-    static void inject_source_fwd(const State& s, const SolverContext& ctx,
-                                  const AcousticWavefieldPointer& view,
-                                  const BackwardInput& p, int it, int nsrc)
+    static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
+                                    const torch::Tensor& vp)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
-            view.u_next,
-            p.forward_source.data_ptr<float>(),
-            p.forward_sources_loc.data_ptr<int>(),
-            it,
-            nsrc,
-            ctx
-        );
+        if (!p.forward_wavefields.empty())
+            wf.bind(p.forward_wavefields, 2, false);
+        else
+            wf.allocate(vp, 2, false);
     }
 
     // Seed the reverse reconstruction from the saved last two snapshots, then
@@ -473,6 +453,9 @@ struct Driver {
             for_view.u_now, ctx.abcn + ctx.M, s.nx, s.nz,
             ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask());
     }
+
+    static BsScratch make_bs_scratch(const BackwardInput&, const torch::Tensor&)
+    { return {}; }
 
     // One boundary-saving reverse-reconstruction step, in THIS equation's
     // bit-load-bearing order: NOPML step, strip restore, u_tt gradient
@@ -561,6 +544,74 @@ struct Driver {
             );
         }
     }
+
+    // ===================================================================== //
+    // [5] CKPT + RECURSIVE PLUMBING — generic_backward_ckpt, per chunk:
+    //   replay:  replay_step -> inject_source_fwd -> swap_recon
+    //   reverse: adjoint_step / inject_adjoint_source / post_adjoint /
+    //            accumulate_source_grad / image_step (section [3]).
+    //   generic_backward_recursive_ckpt bisects each ckpt segment; a leaf
+    //   runs one replay triple, then the reverse-five of ckpt mode with the
+    //   imaging fed from the leaf's scratch u.
+    // ===================================================================== //
+
+    static void bind_or_alloc_recon_ckpt(Wavefield& wf, const BackwardInput& p,
+                                         const torch::Tensor& vp)
+    {
+        if (!p.forward_wavefields.empty())
+            wf.bind(p.forward_wavefields, 2, true);
+        else
+            // Aux shapes must follow the Python-allocated checkpoint slots
+            // (possibly per-axis slabs); a plain allocate() would build
+            // full-domain aux and break the snapshot copies.
+            wf.allocate_from_snapshots(vp, p.checkpoints, 2);
+    }
+
+    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput& p,
+                                            const torch::Tensor& vp)
+    {
+        wf.allocate_from_snapshots(vp, p.checkpoints, 2);
+    }
+
+    static void replay_step(const State& s, const SolverContext& ctx,
+                            AcousticWavefieldPointer view,
+                            AcousticCPMLPointer cpml,
+                            bool save_all, float* u_this)
+    {
+        ACOUSTIC2D(
+            s.order,
+            s.launch_config.grid,
+            s.launch_config.block,
+            view,
+            save_all,
+            u_this,
+            s.vp,
+            s.lap_ctx,
+            s.grad_ctx,
+            s.grad_ctx_x,
+            s.grad_ctx_z,
+            cpml,
+            ctx
+        );
+    }
+
+    // Overload for ckpt replay: BackwardInput spells the forward source fields
+    // differently from ForwardInput.
+    static void inject_source_fwd(const State& s, const SolverContext& ctx,
+                                  const AcousticWavefieldPointer& view,
+                                  const BackwardInput& p, int it, int nsrc)
+    {
+        add_source<<<s.source_config.grid, s.source_config.block>>>(
+            view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            nsrc,
+            ctx
+        );
+    }
+
+    static void swap_recon(Wavefield& wf) { wf.swap(); }
 };
 
 } // namespace acoustic2d
