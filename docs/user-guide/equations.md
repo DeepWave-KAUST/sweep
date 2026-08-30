@@ -20,6 +20,7 @@ is supported for every class.
 | `Acoustic` | `['vp']` | 2D | Second-order acoustic wave equation with CPML | ✅ |
 | `Acoustic3D` | `['vp']` | 3D | 3D counterpart of `Acoustic` | ✅ |
 | `Acoustic1st` | `['vp', 'rho']` | 2D | First-order velocity-pressure formulation | ❌ |
+| `ViscoAcoustic` | `['vp', 'Q', 'omega']` | 2D | Nearly constant-Q attenuation (Zhu & Harris 2014); decoupled dispersion / damping switches | ✅ |
 | `AcousticVRZ` | `['vp', 'z']` | 2D | Variable-density acoustic, impedance-style parameterization (``z`` = impedance) | ✅ |
 | `AcousticVRZ3D` | `['vp', 'z']` | 3D | 3D counterpart of `AcousticVRZ` | ✅ |
 | `AcousticLSRTM` | `['vp', 'mp']` | 2D | LSRTM-oriented variant (``mp`` = reflectivity perturbation) | ✅ |

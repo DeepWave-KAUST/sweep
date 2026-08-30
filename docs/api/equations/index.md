@@ -202,6 +202,7 @@ wavefields, and backend / binding behavior:
 - [AcousticVRZ](acoustic_vrz.md)
 - [AcousticLSRTM](acoustic_lsrtm.md)
 - [AcousticLSRTM3D](acoustic_lsrtm3d.md)
+- [ViscoAcoustic](visco_acoustic.md)
 
 **Elastic family**
 
