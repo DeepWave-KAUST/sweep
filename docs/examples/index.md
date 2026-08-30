@@ -257,6 +257,19 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/24_wavefield_per_edge_free_surface.ipynb)
 
+-   ![Wavefield visco-acoustic](../figures/gallery/29_wavefield_visco_acoustic.png){ loading=lazy }
+
+    **Wavefield · Visco-acoustic · constant-Q**
+
+    ---
+
+    `ViscoAcoustic`: the acoustic solver plus Zhu & Harris (2014) decoupled
+    attenuation — a dispersion switch that moves the front and a damping
+    switch that decays it, each demonstrated alone, with the measured decay
+    checked against constant-Q theory.
+
+    [:material-notebook-outline: Open notebook](../notebooks/29_wavefield_visco_acoustic.ipynb)
+
 -   ![Domain decomposition](../figures/gallery/25_domain_decomposition.png){ loading=lazy }
 
     **HPC · Domain decomposition**

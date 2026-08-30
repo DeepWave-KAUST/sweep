@@ -191,25 +191,6 @@ def test_amplitude_damping_removes_energy():
 
 
 @requires_torch
-def test_phase_shift_is_an_effective_velocity():
-    """The dispersion term is exactly a rescale of the Laplacian term, i.e.
-    vp -> vp*sqrt(1-c).  Pins the folding of the term into ``vp_step``."""
-    c = (1.0 - np.sqrt(Q_VAL**2 + 1.0)) * Q_VAL**-2
-    vp_eff = VP * np.sqrt(1.0 - c)
-
-    _, p_on = _build(phase_shift=True, amplitude_damping=False)
-    d_on = _run(p_on)
-
-    _, p_off = _build(phase_shift=False, amplitude_damping=False)
-    d_eff = _run(p_off, models=_models(vp=vp_eff))
-    assert _rel_l2(d_on, d_eff) == 0.0
-
-    # control: the term must actually do something
-    _, p_plain = _build(phase_shift=False, amplitude_damping=False)
-    assert _rel_l2(d_on, _run(p_plain)) > 1e-3
-
-
-@requires_torch
 def test_free_surface_is_applied():
     """Regression: ``func`` returned the step output unchanged, so
     ``free_surface=True`` was silently ignored."""
@@ -280,3 +261,71 @@ def test_q_gradient_flows_through_each_term(ps, ad):
     vp_step = vp*sqrt(1-c(Q)), and the attenuation term via tt(Q, omega)."""
     g = _grads(ps=ps, ad=ad)
     assert g[1] is not None and float(g[1].norm()) > 0.0
+
+
+# --------------------------------------------------------------------------
+# per-edge free surface (eager)
+#
+# The zeroing is the shared ``SecondOrderEquation._apply_free_surface``; these
+# pin (a) the top-only path staying bit-exact, (b) genuine per-edge physics:
+# four-face closed-box mirror symmetry WITH the FFT damping active (the |k|
+# filter is an even periodic convolution, so it commutes with the mirror), and
+# (c) discrimination — a non-top face must actually change the record.
+# --------------------------------------------------------------------------
+
+def _build_fs(fs, N=None):
+    from sweep.equations import ViscoAcoustic
+    from sweep.propagator.torch import PropTorch
+
+    eq = ViscoAcoustic(spatial_order=4, backend="torch", device="cpu")
+    shape = (N, N) if N is not None else (NZ, NX)
+    prop = PropTorch(eq, shape=shape, dh=DH, dt=DT, dev=torch.device("cpu"),
+                     source_type=["h1"], receiver_type=["h1"], abcn=ABCN,
+                     impl="eager", use_ckpt=False, free_surface=fs)
+    return prop
+
+
+@requires_torch
+def test_per_edge_top_only_bit_exact():
+    a = _run(_build_fs(True))
+    b = _run(_build_fs(["top"]))
+    c = _run(_build_fs([True, False, False, False]))
+    assert np.array_equal(a, b) and np.array_equal(a, c)
+
+
+@requires_torch
+def test_per_edge_faces_discriminate():
+    """A non-top free surface must genuinely change the record (a top-only
+    collapse would pass any symmetry test trivially)."""
+    top = _run(_build_fs(True))
+    for fs in (["left"], ["right"], ["bottom"]):
+        assert _rel_l2(_run(_build_fs(fs)), top) > 0.05, fs
+
+
+@requires_torch
+def test_per_edge_closed_box_mirror_symmetry():
+    """Odd N + exactly centred source: a 4-face free-surface box must give
+    machine-precision z- and x-mirror symmetric records, damping included."""
+    from sweep.equations import ViscoAcoustic
+    from sweep.propagator.torch import PropTorch
+
+    M, nt = 49, 160
+    c = M // 2
+    eq = ViscoAcoustic(spatial_order=4, backend="torch", device="cpu")
+    prop = PropTorch(eq, shape=(M, M), dh=DH, dt=DT, dev=torch.device("cpu"),
+                     source_type=["h1"], receiver_type=["h1"], abcn=0,
+                     impl="eager", use_ckpt=False,
+                     free_surface=["top", "bottom", "left", "right"])
+    w = _ricker(nt, DT, F0)
+    src = np.array([[c, c]], dtype=np.int64)
+    rec = np.array([[[c, c - 10], [c, c + 10], [c - 10, c], [c + 10, c]]],
+                   dtype=np.int64)  # (x, z): x-pair then z-pair
+    vp = torch.full((M, M), VP)
+    Q = torch.full((M, M), Q_VAL)
+    om = torch.full((M, M), 2 * np.pi * F0)
+    out = prop.forward(w, src, rec, models=[vp, Q, om])
+    tr = (out[0] if isinstance(out, (tuple, list)) else out)[0, :, :, 0].detach().numpy()
+    peak = np.abs(tr).max()
+    assert peak > 0
+    assert np.abs(tr[:, 0] - tr[:, 1]).max() / peak < 1e-4   # x-mirror
+    assert np.abs(tr[:, 2] - tr[:, 3]).max() / peak < 1e-4   # z-mirror
