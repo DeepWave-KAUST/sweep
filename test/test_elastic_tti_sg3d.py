@@ -11,6 +11,11 @@ tight thresholds).  theta / phi backgrounds are nonzero so the Bond-rotation
 autograd path is exercised away from its |theta|<1e-7 VTI fallback branch.
 """
 
+import functools
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -374,3 +379,172 @@ def test_cuda_backward_mode_matches_full(mode):
         if not ok:
             failures.append((name, rel_l2, cos))
     assert not failures, f"{mode} gradient mismatch vs full: {failures}"
+
+
+# ---------------------------------------------------------------------------
+# Physics: check against the Christoffel equation, not against ourselves
+# ---------------------------------------------------------------------------
+# Every other test in this file compares one implementation against another, and
+# both consume the SAME 21 stiffnesses out of prepare_models -- so a wrong Bond
+# rotation, Voigt index or angle convention passes all of them. These compare
+# against an analytic reference written independently of sweep.
+
+# ``test`` is a package here, so pytest puts the repo root on sys.path rather
+# than this directory; add it so the reference module imports by plain name.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+CHRISTOFFEL_MEDIUM = dict(vp0=2400.0, vs0=1200.0, rho=2200.0,
+                          epsilon=0.30, delta=0.05, gamma=0.15)
+
+
+@pytest.mark.parametrize("theta,phi", [(0.0, 0.0), (25.0, 0.0), (40.0, 45.0),
+                                       (90.0, 30.0), (-35.0, 200.0)],
+                         ids=lambda v: f"{v:g}")
+def test_bond_rotation_matches_independent_tensor_rotation(theta, phi):
+    """prepare_models' 21 stiffnesses must equal a rank-4 rotation of the VTI
+    tensor done independently.
+
+    The solver builds them with a 6x6 Voigt-space Bond matrix (cheap, but easy to
+    get wrong in a way nothing else here would notice). The reference applies
+    R R R R : C directly, from the documented meaning of theta and phi, so this
+    pins the rotation, the Voigt index map and the angle convention at once.
+    """
+    from christoffel_reference import rotation, vti_stiffness, vti_tensor, _VOIGT
+
+    m = CHRISTOFFEL_MEDIUM
+    eq = ElasticTTISG3D(spatial_order=4, device="cpu")
+    tiny = lambda v: torch.full((1,), float(v), dtype=torch.float64)
+    prepared = eq.prepare_models(
+        [tiny(m["vp0"]), tiny(m["vs0"]), tiny(m["rho"]), tiny(m["epsilon"]),
+         tiny(m["delta"]), tiny(m["gamma"]),
+         tiny(np.deg2rad(theta)), tiny(np.deg2rad(phi))])
+    got = {k: float(v.reshape(-1)[0]) for k, v in
+           zip(STIFFNESS_KEYS_3D, prepared[1:])}
+
+    c = vti_tensor(*vti_stiffness(m["vp0"], m["vs0"], m["rho"],
+                                  m["epsilon"], m["delta"], m["gamma"]))
+    R = rotation(np.deg2rad(theta), np.deg2rad(phi))
+    c_rot = np.einsum("ip,jq,kr,ls,pqrs->ijkl", R, R, R, R, c)
+    ref6 = np.zeros((6, 6))
+    for i in range(3):
+        for j in range(3):
+            for k in range(3):
+                for l in range(3):
+                    ref6[_VOIGT[i, j], _VOIGT[k, l]] = c_rot[i, j, k, l]
+
+    scale = max(abs(v) for v in got.values())
+    bad = []
+    for key, value in got.items():
+        a, b = (int(key[1]) - 1, int(key[2]) - 1)
+        ref = ref6[a, b]
+        if abs(value - ref) > 1e-9 * scale:
+            bad.append(f"{key}: got {value:.6e} ref {ref:.6e}")
+    assert not bad, "Bond rotation disagrees with R R R R : C\n" + "\n".join(bad)
+
+
+# The wavefront comparison below needs the front to be several wavelengths clear
+# of the source, which means a grid far larger than the rest of this file uses
+# (~1 min per case). It is the end-to-end check -- rotation AND stencil AND
+# source -- so it is kept, but opt-in: SWEEP_TEST_WAVEFRONT=1.
+WAVEFRONT_GRID = dict(n=220, dh=10.0, dt=1.2e-3, abcn=16, order=4,
+                      freq=8.0, delay=0.12, it_snap=292)
+
+wavefront_mark = pytest.mark.skipif(
+    not os.environ.get("SWEEP_TEST_WAVEFRONT"),
+    reason="slow end-to-end wavefront check; set SWEEP_TEST_WAVEFRONT=1")
+
+
+def _qp_snapshot(theta_deg, phi_deg, medium=None):
+    """Stress trace of a homogeneous TTI medium at one snapshot, x-z plane."""
+    g = WAVEFRONT_GRID
+    med = dict(CHRISTOFFEL_MEDIUM, **(medium or {}))
+    n, dev = g["n"], "cuda"
+    shape = (n, n, n)
+    eq = ElasticTTISG3D(spatial_order=g["order"], device=dev)
+    solver = PropTorch(eq, shape=shape, dh=g["dh"], dt=g["dt"], dev=dev,
+                       nt=g["it_snap"] + 1, abcn=g["abcn"],
+                       source_type=["sxx", "syy", "szz"], receiver_type=["vz"],
+                       impl="eager", use_ckpt=False,
+                       eager_options=EagerOptions(use_compile=False))
+    c = n // 2
+    src = np.array([[[c, c, c]]], dtype=np.int64)          # (x, y, z)
+    t = np.arange(g["it_snap"] + 1, dtype=np.float32) * g["dt"] - g["delay"]
+    wav = (1e3 * _ricker(t, g["freq"])).astype(np.float32)
+
+    # The per-cell Bond rotation would materialise (..., 6, 6) fields on the
+    # padded grid; the medium is uniform, so rotate once and broadcast.
+    tiny = lambda v: torch.full((1, 1, 1), float(v), dtype=torch.float32, device=dev)
+    raw = [tiny(med["vp0"]), tiny(med["vs0"]), tiny(med["rho"]),
+           tiny(med["epsilon"]), tiny(med["delta"]), tiny(med["gamma"]),
+           tiny(np.deg2rad(theta_deg)), tiny(np.deg2rad(phi_deg))]
+    models = [m.expand(shape) for m in eq.prepare_models(raw)]
+    eq.prepare_models = lambda m: m
+
+    with torch.no_grad():
+        _, snaps = solver(wav, src, src, models=models, return_wavefield=True,
+                          snapshot_times=[g["it_snap"]])
+    a = g["abcn"]
+    idx = [eq.wavefields.index(k) for k in ("sxx", "syy", "szz")]
+    trace = sum(snaps[0, i, 0, 0] for i in idx)
+    cube = trace[a:a + n, a:a + n, a:a + n].cpu().numpy()
+    del snaps
+    torch.cuda.empty_cache()
+    return cube[:, n // 2, :]                              # slice through source
+
+
+@functools.lru_cache(maxsize=1)
+def _isotropic_floor(psi, travel, r_max):
+    """Shape rms of the same measurement on an isotropic medium: whatever it
+    reports is the noise of the picker on this grid, not an anisotropy error.
+    Cached so the parametrised cases do not re-simulate it."""
+    from christoffel_reference import pick_front, qp_radius, shape_error
+
+    g = WAVEFRONT_GRID
+    flat = dict(epsilon=0.0, delta=0.0, gamma=0.0)
+    sl = _qp_snapshot(0.0, 0.0, medium=flat)
+    psi = np.asarray(psi)
+    pred = qp_radius(psi, travel, **dict(CHRISTOFFEL_MEDIUM, **flat,
+                                         theta=0.0, phi=0.0))
+    return shape_error(pick_front(sl, g["dh"], psi, r_max_cells=r_max), pred)[1]
+
+
+@cuda_mark
+@wavefront_mark
+@pytest.mark.parametrize("theta,phi", [(0.0, 0.0), (40.0, 45.0)],
+                         ids=lambda v: f"{v:g}")
+def test_qp_wavefront_matches_christoffel(theta, phi):
+    """A point source in a homogeneous medium radiates the group-velocity
+    surface, so the picked qP front must have the shape Christoffel predicts.
+
+    Only the ANGULAR variation is asserted. A common radial offset is grid
+    dispersion plus the finite-bandwidth bias of an envelope pick and is there
+    for an isotropic medium too; the isotropic run is measured here as the floor
+    so the threshold is not a guess.
+    """
+    from christoffel_reference import pick_front, qp_radius, shape_error
+
+    g = WAVEFRONT_GRID
+    travel = g["it_snap"] * g["dt"] - g["delay"]
+    psi = np.arange(0.0, 360.0, 4.0)
+    r_max = 0.38 * g["n"]
+
+    floor = _isotropic_floor(tuple(psi), travel, r_max)
+
+    med = dict(CHRISTOFFEL_MEDIUM, theta=np.deg2rad(theta), phi=np.deg2rad(phi))
+    meas = pick_front(_qp_snapshot(theta, phi), g["dh"], psi, r_max_cells=r_max)
+    pred = qp_radius(psi, travel, **med)
+    bias, rms, dev = shape_error(meas, pred)
+    print(f"[christoffel {theta}/{phi}] bias {100 * bias:+.2f}%  "
+          f"shape rms {100 * rms:.2f}%  max dev {100 * dev:.2f}%  "
+          f"(isotropic floor {100 * floor:.2f}%)")
+    assert rms < max(3.0 * floor, 0.01), (
+        f"qP front shape is off: rms {100 * rms:.2f}% against a "
+        f"{100 * floor:.2f}% measurement floor")
+
+    # Discrimination: the same data against a prediction that drops the
+    # anisotropy must fail badly, otherwise the assertion above is vacuous.
+    flat = dict(med, epsilon=0.0, delta=0.0, gamma=0.0)
+    _, rms_flat, _ = shape_error(meas, qp_radius(psi, travel, **flat))
+    assert rms_flat > 8.0 * max(rms, 1e-3), (
+        f"the test cannot see the anisotropy: isotropic prediction gives "
+        f"rms {100 * rms_flat:.2f}% vs {100 * rms:.2f}%")
