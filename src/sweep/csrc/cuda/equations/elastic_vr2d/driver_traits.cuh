@@ -360,6 +360,70 @@ struct Driver {
     //   it  > 0: full_fused_step (imaging + adjoint step, fused order).
     // ===================================================================== //
 
+private:
+    // Shared adjoint-step halves (stress: prepare + apply; momentum: prepare
+    // + apply).  Fired by plain_adjoint_step (full / ckpt / recursive modes)
+    // and by the backward_bs hooks bs_phase1 (stress) / bs_phase2 (momentum).
+    static void stress_adjoint_half(const State& s, const SolverContext& solver,
+                                    WfView& adj_view, Workspace& w,
+                                    ElasticCPMLPointer cpml_view)
+    {
+        LAUNCH_EVR_STRESS_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.vp.data_ptr<float>(),
+            s.models.vs.data_ptr<float>(),
+            s.models.Rp_x.data_ptr<float>(),
+            s.models.Rp_z.data_ptr<float>(),
+            s.models.Rs_x.data_ptr<float>(),
+            s.models.Rs_z.data_ptr<float>(),
+            s.grad_ctx,
+            cpml_view,
+            solver,
+            w.qxx.data_ptr<float>(),
+            w.qzz.data_ptr<float>(),
+            w.qxz.data_ptr<float>(),
+            w.qzx.data_ptr<float>(),
+            w.pt_px.data_ptr<float>(),
+            w.pt_pz.data_ptr<float>()
+        );
+        LAUNCH_EVR_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            w.qxx.data_ptr<float>(),
+            w.qzz.data_ptr<float>(),
+            w.qxz.data_ptr<float>(),
+            w.qzx.data_ptr<float>(),
+            w.pt_px.data_ptr<float>(),
+            w.pt_pz.data_ptr<float>(),
+            s.grad_ctx, solver
+        );
+    }
+
+    static void momentum_adjoint_half(const State& s, const SolverContext& solver,
+                                      WfView& adj_view, Workspace& w,
+                                      ElasticCPMLPointer cpml_view)
+    {
+        LAUNCH_EVR_MOMENTUM_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view, cpml_view, solver,
+            w.pxx.data_ptr<float>(),
+            w.pzz.data_ptr<float>(),
+            w.pxz.data_ptr<float>(),
+            w.pzx.data_ptr<float>()
+        );
+        LAUNCH_EVR_MOMENTUM_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            w.pxx.data_ptr<float>(),
+            w.pzz.data_ptr<float>(),
+            w.pxz.data_ptr<float>(),
+            w.pzx.data_ptr<float>(),
+            s.grad_ctx, solver
+        );
+    }
+
+public:
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
@@ -528,53 +592,8 @@ struct Driver {
                                    ElasticCPMLPointer cpml_view)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_EVR_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.Rp_x.data_ptr<float>(),
-            s.models.Rp_z.data_ptr<float>(),
-            s.models.Rs_x.data_ptr<float>(),
-            s.models.Rs_z.data_ptr<float>(),
-            s.grad_ctx,
-            cpml_view,
-            solver,
-            w.qxx.data_ptr<float>(),
-            w.qzz.data_ptr<float>(),
-            w.qxz.data_ptr<float>(),
-            w.qzx.data_ptr<float>(),
-            w.pt_px.data_ptr<float>(),
-            w.pt_pz.data_ptr<float>()
-        );
-        LAUNCH_EVR_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            w.qxx.data_ptr<float>(),
-            w.qzz.data_ptr<float>(),
-            w.qxz.data_ptr<float>(),
-            w.qzx.data_ptr<float>(),
-            w.pt_px.data_ptr<float>(),
-            w.pt_pz.data_ptr<float>(),
-            s.grad_ctx, solver
-        );
-        LAUNCH_EVR_MOMENTUM_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view, cpml_view, solver,
-            w.pxx.data_ptr<float>(),
-            w.pzz.data_ptr<float>(),
-            w.pxz.data_ptr<float>(),
-            w.pzx.data_ptr<float>()
-        );
-        LAUNCH_EVR_MOMENTUM_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            w.pxx.data_ptr<float>(),
-            w.pzz.data_ptr<float>(),
-            w.pxz.data_ptr<float>(),
-            w.pzx.data_ptr<float>(),
-            s.grad_ctx, solver
-        );
+        stress_adjoint_half(s, solver, adj_view, w, cpml_view);
+        momentum_adjoint_half(s, solver, adj_view, w, cpml_view);
     }
 
     // ===================================================================== //
@@ -669,36 +688,7 @@ struct Driver {
         VelPtrs v{for_view.vx, for_view.vz, nullptr, nullptr};
         image_standalone(s, solver, adj_view, v, grads);
 
-        LAUNCH_EVR_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.Rp_x.data_ptr<float>(),
-            s.models.Rp_z.data_ptr<float>(),
-            s.models.Rs_x.data_ptr<float>(),
-            s.models.Rs_z.data_ptr<float>(),
-            s.grad_ctx,
-            cpml_view,
-            solver,
-            w.qxx.data_ptr<float>(),
-            w.qzz.data_ptr<float>(),
-            w.qxz.data_ptr<float>(),
-            w.qzx.data_ptr<float>(),
-            w.pt_px.data_ptr<float>(),
-            w.pt_pz.data_ptr<float>()
-        );
-        LAUNCH_EVR_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            w.qxx.data_ptr<float>(),
-            w.qzz.data_ptr<float>(),
-            w.qxz.data_ptr<float>(),
-            w.qzx.data_ptr<float>(),
-            w.pt_px.data_ptr<float>(),
-            w.pt_pz.data_ptr<float>(),
-            s.grad_ctx, solver
-        );
+        stress_adjoint_half(s, solver, adj_view, w, cpml_view);
     }
 
     // bs phase 2: momentum-adjoint half, momentum reconstruction + restore,
@@ -711,23 +701,7 @@ struct Driver {
                           ReconCarriers&, Wavefield&, int it, int nt)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_EVR_MOMENTUM_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view, cpml_view, solver,
-            w.pxx.data_ptr<float>(),
-            w.pzz.data_ptr<float>(),
-            w.pxz.data_ptr<float>(),
-            w.pzx.data_ptr<float>()
-        );
-        LAUNCH_EVR_MOMENTUM_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            w.pxx.data_ptr<float>(),
-            w.pzz.data_ptr<float>(),
-            w.pxz.data_ptr<float>(),
-            w.pzx.data_ptr<float>(),
-            s.grad_ctx, solver
-        );
+        momentum_adjoint_half(s, solver, adj_view, w, cpml_view);
 
         // Reverse the momentum update (p^{it} -> p^{it-1}) in the interior.
         LAUNCH_EVR_MOMENTUM_NOPML(

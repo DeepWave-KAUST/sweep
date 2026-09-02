@@ -300,6 +300,123 @@ struct Driver {
     //            the equation's exact fused order).
     // ===================================================================== //
 
+    // ---- shared adjoint launches ----------------------------------------- //
+    // The four adjoint launches shared by full_fused_step, plain_adjoint_step
+    // (ckpt/recursive, section [5]) and bs_phase1 / bs_phase2 (section [4]);
+    // the bodies are those hooks' former inline launch statements, verbatim.
+private:
+    static void stress_adjoint_prepare(const State& s, const SolverContext& solver,
+                                       WfView& adj_view, Workspace& workspace,
+                                       ElasticCPMLPointer cpml_view,
+                                       const float* vx_now, const float* vy_now,
+                                       const float* vz_now,
+                                       const float* vx_next, const float* vy_next,
+                                       const float* vz_next,
+                                       const float* vp, const float* vs,
+                                       const float* rho,
+                                       float* g_vp, float* g_vs, float* g_rho)
+    {
+        LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.lambda.data_ptr<float>(),
+            s.models.mu.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qxy_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qyx_t.data_ptr<float>(),
+            workspace.qyy_t.data_ptr<float>(),
+            workspace.qyz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            workspace.qzy_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            s.grad_ctx,
+            vx_now, vy_now, vz_now,
+            vx_next, vy_next, vz_next,
+            vp,
+            vs,
+            rho,
+            g_vp,
+            g_vs,
+            g_rho
+        );
+    }
+
+    static void stress_adjoint_apply(const State& s, const SolverContext& solver,
+                                     WfView& adj_view, Workspace& workspace)
+    {
+        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qxy_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qyx_t.data_ptr<float>(),
+            workspace.qyy_t.data_ptr<float>(),
+            workspace.qyz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            workspace.qzy_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    static void velocity_adjoint_prepare(const State& s, const SolverContext& solver,
+                                         WfView& adj_view, Workspace& workspace,
+                                         ElasticCPMLPointer cpml_view)
+    {
+        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.rho.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pxy_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pyx_t.data_ptr<float>(),
+            workspace.pyy_t.data_ptr<float>(),
+            workspace.pyz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            workspace.pzy_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>()
+        );
+    }
+
+    static void velocity_adjoint_apply(const State& s, const SolverContext& solver,
+                                       WfView& adj_view, Workspace& workspace)
+    {
+        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pxy_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pyx_t.data_ptr<float>(),
+            workspace.pyy_t.data_ptr<float>(),
+            workspace.pyz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            workspace.pzy_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    // Velocity-adjoint half (prepare then apply): full_fused_step,
+    // plain_adjoint_step and bs_phase2 run it back to back.
+    static void velocity_adjoint_half(const State& s, const SolverContext& solver,
+                                      WfView& adj_view, Workspace& workspace,
+                                      ElasticCPMLPointer cpml_view)
+    {
+        velocity_adjoint_prepare(s, solver, adj_view, workspace, cpml_view);
+        velocity_adjoint_apply(s, solver, adj_view, workspace);
+    }
+public:
+
     // ---- backward hooks -------------------------------------------------- //
 
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
@@ -505,78 +622,17 @@ struct Driver {
                                 int it, int adjoint_nsrc)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            v.now[0], v.now[1], v.now[2],
-            v.next[0], v.next[1], v.next[2],
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.rho.data_ptr<float>(),
-            grads[0].data_ptr<float>(),
-            grads[1].data_ptr<float>(),
-            grads[2].data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_prepare(s, solver, adj_view, workspace, cpml_view,
+                               v.now[0], v.now[1], v.now[2],
+                               v.next[0], v.next[1], v.next[2],
+                               s.models.vp.data_ptr<float>(),
+                               s.models.vs.data_ptr<float>(),
+                               s.models.rho.data_ptr<float>(),
+                               grads[0].data_ptr<float>(),
+                               grads[1].data_ptr<float>(),
+                               grads[2].data_ptr<float>());
+        stress_adjoint_apply(s, solver, adj_view, workspace);
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
 
         undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
                           adjoint_nsrc);
@@ -588,74 +644,13 @@ struct Driver {
                                    ElasticCPMLPointer cpml_view)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr
-        );
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_prepare(s, solver, adj_view, workspace, cpml_view,
+                               nullptr, nullptr, nullptr,
+                               nullptr, nullptr, nullptr,
+                               nullptr, nullptr, nullptr,
+                               nullptr, nullptr, nullptr);
+        stress_adjoint_apply(s, solver, adj_view, workspace);
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
     }
 
     // ===================================================================== //
@@ -782,38 +777,22 @@ struct Driver {
         // pass is gone.  for_view.v* = v(it) and the carriers = v(it+1) are
         // final here, and prepare touches nothing the imaging reads.
 
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            for_view.vx, for_view.vy, for_view.vz,
-            carriers.fvx_prev.data_ptr<float>(),
-            carriers.fvy_prev.data_ptr<float>(),
-            carriers.fvz_prev.data_ptr<float>(),
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.rho.data_ptr<float>(),
-            grads[0].data_ptr<float>(),
-            grads[1].data_ptr<float>(),
-            grads[2].data_ptr<float>()
-        );
+        stress_adjoint_prepare(s, solver, adj_view, workspace, cpml_view,
+                               for_view.vx, for_view.vy, for_view.vz,
+                               carriers.fvx_prev.data_ptr<float>(),
+                               carriers.fvy_prev.data_ptr<float>(),
+                               carriers.fvz_prev.data_ptr<float>(),
+                               s.models.vp.data_ptr<float>(),
+                               s.models.vs.data_ptr<float>(),
+                               s.models.rho.data_ptr<float>(),
+                               grads[0].data_ptr<float>(),
+                               grads[1].data_ptr<float>(),
+                               grads[2].data_ptr<float>());
 
         {
             // Receiver-cell rho correction AFTER the imaging '+=' (same per-cell
             // accumulation order as the standalone pass); operands unchanged.
+            // Sits BETWEEN the stress prepare and apply launches on purpose.
             VelPtrs v;
             v.now[0] = for_view.vx;
             v.now[1] = for_view.vy;
@@ -824,21 +803,7 @@ struct Driver {
             undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
                               adjoint_nsrc);
         }
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_apply(s, solver, adj_view, workspace);
     }
 
     static void bs_phase2(const State& s, const SolverContext& solver,
@@ -850,37 +815,7 @@ struct Driver {
                           int it, int nt)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
 
         // Carrier capture v(it+1); see the 2-D twin.
         {
