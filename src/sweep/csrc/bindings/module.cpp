@@ -315,5 +315,43 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("compute_adcig", &BackwardInput::compute_adcig)
         .def_readwrite("adcig_max_lag", &BackwardInput::adcig_max_lag);
 
+    // ---- Persistent stepped runners (CUDA only) ----
+    // Construct once from a populated input struct (prologue: validation,
+    // binding, runtime construction), then run(it_begin, it_end, step_phase)
+    // per segment.  Same output tuple layout as the plain entries.
+    py::class_<IForwardRunner, ForwardRunnerPtr>(m, "ForwardRunner")
+        .def("run", [](IForwardRunner& r, int it_begin, int it_end, int step_phase) {
+            auto out = r.run(it_begin, it_end, step_phase);
+            return std::make_tuple(out.wavefield, out.last_two, out.record);
+        });
+    py::class_<IBackwardRunner, BackwardRunnerPtr>(m, "BackwardRunner")
+        .def("run", [](IBackwardRunner& r, int bw_it_begin, int bw_it_end, int step_phase) {
+            auto out = r.run(bw_it_begin, bw_it_end, step_phase);
+            return std::make_tuple(out.checkpoints, out.grads,
+                                   out.source_illumination,
+                                   out.receiver_illumination,
+                                   out.adcig);
+        });
+    m.def("acoustic2d_forward_runner", acoustic2d::forward_runner);
+    m.def("acoustic2d_backward_bs_runner", acoustic2d::backward_bs_runner);
+    m.def("acoustic3d_forward_runner", acoustic3d::forward_runner);
+    m.def("acoustic3d_backward_bs_runner", acoustic3d::backward_bs_runner);
+    m.def("acoustic_vrz2d_forward_runner", acoustic_vrz2d::forward_runner);
+    m.def("acoustic_vrz2d_backward_bs_runner", acoustic_vrz2d::backward_bs_runner);
+    m.def("elastic2d_forward_runner", elastic2d::forward_runner);
+    m.def("elastic2d_backward_bs_runner", elastic2d::backward_bs_runner);
+    m.def("elastic3d_forward_runner", elastic3d::forward_runner);
+    m.def("elastic3d_backward_bs_runner", elastic3d::backward_bs_runner);
+    m.def("das_mu2d_forward_runner", das_mu2d::forward_runner);
+    m.def("das_mu2d_backward_bs_runner", das_mu2d::backward_bs_runner);
+    m.def("das_mu3d_forward_runner", das_mu3d::forward_runner);
+    m.def("das_mu3d_backward_bs_runner", das_mu3d::backward_bs_runner);
+    m.def("elastic_tti_sg2d_forward_runner", elastic_tti_sg2d::forward_runner);
+    m.def("elastic_tti_sg2d_backward_bs_runner", elastic_tti_sg2d::backward_bs_runner);
+    m.def("elastic_tti_sg3d_forward_runner", elastic_tti_sg3d::forward_runner);
+    m.def("elastic_tti_sg3d_backward_bs_runner", elastic_tti_sg3d::backward_bs_runner);
+    m.def("elastic_vr2d_forward_runner", elastic_vr2d::forward_runner);
+    m.def("elastic_vr2d_backward_bs_runner", elastic_vr2d::backward_bs_runner);
+
 
 }

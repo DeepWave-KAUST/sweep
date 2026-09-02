@@ -255,4 +255,9 @@ ForwardOutput apm_forward(const ForwardInput& in)
 
 // apm_backward / apm_backward_bs are implemented in backward.cu.
 
+ForwardRunnerPtr forward_runner(const ForwardInput& in)
+{
+    return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
+}
+
 }

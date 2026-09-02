@@ -26,4 +26,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     return eqdrv::sg_generic_backward_recursive_ckpt<Driver>(in);
 }
 
+BackwardRunnerPtr backward_bs_runner(const BackwardInput& in)
+{
+    return std::make_shared<eqdrv::SgBackwardBsRunner<Driver>>(in);
+}
+
 } // namespace das_mu3d

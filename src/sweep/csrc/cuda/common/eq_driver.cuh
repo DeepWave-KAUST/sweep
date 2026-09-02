@@ -81,6 +81,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "common.cuh"
 #include "context.h"
@@ -158,233 +159,294 @@ inline int stencil_order(int M)
 // generic_forward
 // ------------------------------------------------------------------------- //
 
+// Persistent forward runner: the whole prologue (validation, binding,
+// runtime construction) runs ONCE in the constructor; run() is only the
+// time loop.  The monolithic generic_forward below is construct + one run,
+// so this is the exact code path the bit gates exercise.  Reuse (a second
+// run() call) requires gpu-direct boundary storage and no checkpointing --
+// the only modes whose cross-call state lives entirely in Python-bound
+// buffers.
+template <class Eq>
+class GenericForwardRunner final : public IForwardRunner {
+public:
+    explicit GenericForwardRunner(const ForwardInput& in)
+        : p(in)
+    {
+        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+
+        auto vp = p.models[0];
+        d = read_dims<Eq::NDIM>(vp);
+
+        nsrc = p.sources_loc.size(1);
+        nrec = p.receivers_loc.size(1);
+
+        ctx_.emplace(make_ctx<Eq>(p, d));
+        SolverContext& ctx = *ctx_;
+        Eq::setup_ctx(ctx, p);
+        // Cut-aware physical bounds (0 = single domain → legacy per-edge pad + M).
+        ctx.set_cut_mask(p.cut_face_mask);
+
+        const int it0 = p.it_begin;
+        const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+        check_run_args(it0, it1, p.step_phase);
+        const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
+
+        cut_x_lo = (p.cut_face_mask & 1) != 0;
+        cut_x_hi = (p.cut_face_mask & 2) != 0;
+
+        // On a continuation call the internal allocate() would silently zero the
+        // propagation state — the caller must keep binding the same tensors.
+        TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
+                    "stepped continuation (it_begin>0) requires Python-bound wavefields");
+        Eq::bind_or_alloc_forward(wavefield, p, vp);
+        Eq::init_aux_slabs(ctx, wavefield);
+
+        Eq::alloc_cpml(cpml_tensor, p);
+        cpml = cpml_tensor.view();
+
+        TORCH_CHECK(!stepped || p.record_out.defined(),
+                    "stepped forward requires record_out bound from Python");
+        record = p.record_out.defined()
+            ? p.record_out
+            : torch::zeros({d.N, p.receivers_loc.size(1), p.nt}, vp.options());
+        if (p.record_out.defined())
+            TORCH_CHECK(record.is_contiguous() &&
+                        record.size(-1) == static_cast<long>(p.nt),
+                        "record_out must be contiguous with trailing dim nt");
+
+        // Wavefields for all timestep
+        if (p.save_all_wavefields) {
+            TORCH_CHECK(!stepped || p.u_allt_out.defined(),
+                        "stepped + save_all_wavefields requires u_allt_out bound from Python");
+            u_allt = p.u_allt_out.defined()
+                ? p.u_allt_out
+                : torch::zeros(Eq::allt_shape(d, p.nt), vp.options());
+        }
+
+        Eq::validate_forward(p);
+
+        checkpoint_runtime.emplace(
+            p.checkpoints,
+            Eq::CKPT_NVAR,
+            p.use_checkpoint,
+            p.use_recursive_checkpoint,
+            p.checkpoint_interval,
+            p.checkpoint_steps,
+            p.checkpoint_on_cpu,
+            "forward",
+            Eq::NAME,
+            it0
+        );
+
+        save_width = Eq::save_width(p.abcn, p.M);
+        // The internal full-storage fallback ring is per-call; segments after the
+        // first would lose everything saved before them.
+        if (stepped && p.use_boundary_saving)
+            TORCH_CHECK(!p.boundary_gpu.empty(),
+                        "stepped forward with boundary saving requires Python-bound boundary_gpu");
+        staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+        if (staged_boundary)
+            boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, ctx, vp,
+                                    save_width, Eq::BS_LAST_TWO_NVAR, true, false,
+                                    p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
+                                    p.last_two, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
+        else
+            boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, ctx, vp,
+                                    save_width, Eq::BS_LAST_TWO_NVAR, true, true,
+                                    1, {}, p.boundary_gpu,
+                                    p.last_two, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
+        bs = boundary_saver.view();
+
+        launch_config = wave_config<Eq::NDIM>(d);
+        source_config = fdtd::Geom::make(nsrc, d.B);
+        record_config = fdtd::Geom::make(nrec, d.B);
+
+        state.emplace(Eq::make_state(p, d, ctx, launch_config,
+                                     source_config, record_config));
+
+        async_copy.emplace(staged_boundary && p.use_boundary_saving);
+        // Boundary tail truncation: with boundary_tail_steps = K > 0 only the
+        // last K steps' boundary strips are saved; the runtime and the Python
+        // buffers work in shifted "saved-step" coordinates [0, K).  bs_it0 = 0
+        // when disabled, making every shift below a no-op (bit-exact legacy).
+        // Stepped/DD segments compose transparently: ``it`` is the GLOBAL step
+        // index, so the save guard and shift never look at the segment bounds;
+        // the Python-bound boundary_gpu ring (mandatory under stepped) is
+        // allocated tail-shrunk by _ensure_boundary_buffers(nt_saved=...).
+        bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
+            ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
+        boundary_runtime.emplace(
+            boundary_saver,
+            Eq::NDIM,
+            p.use_boundary_saving,
+            p.boundary_on_cpu,
+            p.boundary_on_disk,
+            p.boundary_disk_async_read,
+            p.transfer_interval,
+            p.boundary_ring_buffers,
+            p.boundary_disk_files,
+            async_copy->compute_stream,
+            async_copy->copy_stream
+        );
+    }
+
+    ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
+    {
+        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+        SolverContext& ctx = *ctx_;
+        ForwardOutput out;
+
+        const int it0 = run_it_begin;
+        const int it1 = (run_it_end < 0) ? static_cast<int>(p.nt) : run_it_end;
+        check_run_args(it0, it1, run_step_phase);
+        const int phase = run_step_phase;
+        if (run_calls++ > 0)
+            TORCH_CHECK(!p.use_checkpoint && !staged_boundary,
+                        "persistent stepped runner reuse requires gpu-direct "
+                        "boundary storage and no checkpointing");
+
+        float* u_thist = nullptr;
+
+        for (int it = it0; it < it1; ++it) {
+
+            auto view = wavefield.view();
+
+            u_thist = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+
+            // Ranged stencil launch over x in [xb, xe); (0, nx) reproduces the
+            // legacy full launch bit-identically (same grid dims, x_base = 0).
+            // The hook owns the equation's whole per-range step (air-clear
+            // prepass included where the equation has one).
+            if (phase == 1) {
+                // Boundary phase: ONLY the cut-adjacent M-wide physical edge
+                // strips — exactly what the halo exchange sends.
+                if (cut_x_lo)
+                    Eq::launch_step_range(*state, ctx, ctx.phys_x0(), ctx.phys_x0() + p.M,
+                                          view, p.save_all_wavefields, u_thist, cpml);
+                if (cut_x_hi)
+                    Eq::launch_step_range(*state, ctx, ctx.phys_x1() - p.M, ctx.phys_x1(),
+                                          view, p.save_all_wavefields, u_thist, cpml);
+            } else if (phase == 2) {
+                // Interior phase: the strict complement of the phase-1 strips
+                // (no overlap — re-running a strip cell would double-advance
+                // its CPML psi double-buffer write).
+                Eq::launch_step_range(*state, ctx,
+                                      cut_x_lo ? ctx.phys_x0() + p.M : 0,
+                                      cut_x_hi ? ctx.phys_x1() - p.M : d.nx,
+                                      view, p.save_all_wavefields, u_thist, cpml);
+            } else {
+                Eq::launch_step_range(*state, ctx, 0, d.nx,
+                                      view, p.save_all_wavefields, u_thist, cpml);
+            }
+
+            if (phase == 1)
+                continue;   // no boundary saving / source / record / swap / ckpt
+
+            if (p.use_boundary_saving && it >= bs_it0) {
+                Eq::save_boundary_fwd(*boundary_runtime, *state, ctx, view,
+                                      it - bs_it0, (int)p.nt - bs_it0,
+                                      bs, save_width);
+            }
+
+            Eq::inject_source_fwd(*state, ctx, view, p, it, nsrc);
+
+            Eq::record(*state, ctx, view, record, p, it, nrec);
+
+            Eq::end_of_step(wavefield);
+
+            Eq::capture_allt(u_allt, wavefield, it);
+
+            checkpoint_runtime->save_forward(it, static_cast<int>(p.nt),
+                                             wavefield.checkpoint_tensors());
+
+        }
+
+        // Save the last state for backward (only once the final segment has run;
+        // mid-run segments leave it untouched).  Phase 1 has not swapped yet —
+        // roles would be wrong; phase 2 of the same step does the copy.
+        if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
+            Eq::save_last_state(boundary_saver, wavefield);
+        }
+
+        boundary_runtime->synchronize();
+
+        out.wavefield = u_allt;
+        out.last_two = boundary_saver.last_two_t;
+        out.record = record;
+
+        return out;
+    }
+
+private:
+    void check_run_args(int it0, int it1, int phase) const
+    {
+        const SolverContext& ctx = *ctx_;
+        TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                    "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                    it0, ", ", it1, ") with nt=", p.nt);
+        // ---- DD phase-split step (comm/compute overlap) ----
+        if (phase != 0) {
+            TORCH_CHECK(phase == 1 || phase == 2,
+                        "step_phase must be 0 (legacy), 1 (boundary strips) or 2 (interior)");
+            TORCH_CHECK(it1 == it0 + 1,
+                        "phased forward (step_phase != 0) drives a single step: "
+                        "require it_end == it_begin + 1, got [", it0, ", ", it1, ")");
+            TORCH_CHECK(p.cut_face_mask != 0,
+                        "phased forward requires cut_face_mask != 0");
+            TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
+                        "phased forward v1 supports x-face cuts only (bits 0/1), got ",
+                        p.cut_face_mask);
+            TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
+                        "tile too narrow for phase-split strips: nx_phys=",
+                        ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
+        }
+    }
+
+    // Declaration order == construction order; destruction runs in reverse,
+    // matching the hand-written function's stack unwind.
+    ForwardInput p;
+    Dims d;
+    int nsrc = 0, nrec = 0;
+    std::optional<SolverContext> ctx_;
+    bool cut_x_lo = false, cut_x_hi = false;
+    typename Eq::Wavefield wavefield;
+    typename Eq::CPML cpml_tensor;
+    decltype(std::declval<typename Eq::CPML>().view()) cpml;
+    torch::Tensor record;
+    torch::Tensor u_allt;
+    std::optional<CheckpointRuntime> checkpoint_runtime;
+    int save_width = 0;
+    bool staged_boundary = false;
+    EffectiveBoundarySaver boundary_saver;
+    GeneralBoundaryPointer bs{};
+    fdtd::LaunchConfig launch_config{}, source_config{}, record_config{};
+    std::optional<typename Eq::State> state;
+    std::optional<AsyncCopyContext> async_copy;
+    int bs_it0 = 0;
+    std::optional<BoundaryRuntime> boundary_runtime;
+    int run_calls = 0;
+};
+
 template <class Eq>
 ForwardOutput generic_forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-
-    const auto& p = in;
-    ForwardOutput out;
-
-    auto vp = p.models[0];
-    const Dims d = read_dims<Eq::NDIM>(vp);
-
-    int nsrc = p.sources_loc.size(1);
-    int nrec = p.receivers_loc.size(1);
-
-    const int order = stencil_order(p.M);
-
-    SolverContext ctx = make_ctx<Eq>(p, d);
-    Eq::setup_ctx(ctx, p);
-    // Cut-aware physical bounds (0 = single domain → legacy per-edge pad + M).
-    ctx.set_cut_mask(p.cut_face_mask);
-
-    const int it0 = p.it_begin;
-    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
-    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
-                "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
-                it0, ", ", it1, ") with nt=", p.nt);
-    const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
-
-    // ---- DD phase-split step (comm/compute overlap) ----
-    const int phase = p.step_phase;
-    const bool cut_x_lo = (p.cut_face_mask & 1) != 0;
-    const bool cut_x_hi = (p.cut_face_mask & 2) != 0;
-    if (phase != 0) {
-        TORCH_CHECK(phase == 1 || phase == 2,
-                    "step_phase must be 0 (legacy), 1 (boundary strips) or 2 (interior)");
-        TORCH_CHECK(it1 == it0 + 1,
-                    "phased forward (step_phase != 0) drives a single step: "
-                    "require it_end == it_begin + 1, got [", it0, ", ", it1, ")");
-        TORCH_CHECK(p.cut_face_mask != 0,
-                    "phased forward requires cut_face_mask != 0");
-        TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
-                    "phased forward v1 supports x-face cuts only (bits 0/1), got ",
-                    p.cut_face_mask);
-        TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
-                    "tile too narrow for phase-split strips: nx_phys=",
-                    ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
-    }
-
-    typename Eq::Wavefield wavefield;
-    // On a continuation call the internal allocate() would silently zero the
-    // propagation state — the caller must keep binding the same tensors.
-    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
-                "stepped continuation (it_begin>0) requires Python-bound wavefields");
-    Eq::bind_or_alloc_forward(wavefield, p, vp);
-    Eq::init_aux_slabs(ctx, wavefield);
-
-    typename Eq::CPML cpml_tensor;
-    Eq::alloc_cpml(cpml_tensor, p);
-    auto cpml = cpml_tensor.view();
-
-    TORCH_CHECK(!stepped || p.record_out.defined(),
-                "stepped forward requires record_out bound from Python");
-    auto record = p.record_out.defined()
-        ? p.record_out
-        : torch::zeros({d.N, p.receivers_loc.size(1), p.nt}, vp.options());
-    if (p.record_out.defined())
-        TORCH_CHECK(record.is_contiguous() &&
-                    record.size(-1) == static_cast<long>(p.nt),
-                    "record_out must be contiguous with trailing dim nt");
-
-    // Wavefields for all timestep
-    torch::Tensor u_allt;
-    if (p.save_all_wavefields) {
-        TORCH_CHECK(!stepped || p.u_allt_out.defined(),
-                    "stepped + save_all_wavefields requires u_allt_out bound from Python");
-        u_allt = p.u_allt_out.defined()
-            ? p.u_allt_out
-            : torch::zeros(Eq::allt_shape(d, p.nt), vp.options());
-    }
-
-    Eq::validate_forward(p);
-
-    CheckpointRuntime checkpoint_runtime(
-        p.checkpoints,
-        Eq::CKPT_NVAR,
-        p.use_checkpoint,
-        p.use_recursive_checkpoint,
-        p.checkpoint_interval,
-        p.checkpoint_steps,
-        p.checkpoint_on_cpu,
-        "forward",
-        Eq::NAME,
-        it0
-    );
-
-    int save_width = Eq::save_width(p.abcn, p.M);
-    // The internal full-storage fallback ring is per-call; segments after the
-    // first would lose everything saved before them.
-    if (stepped && p.use_boundary_saving)
-        TORCH_CHECK(!p.boundary_gpu.empty(),
-                    "stepped forward with boundary saving requires Python-bound boundary_gpu");
-    EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
-    if (staged_boundary)
-        boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, ctx, vp,
-                                save_width, Eq::BS_LAST_TWO_NVAR, true, false,
-                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-                                p.last_two, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
-    else
-        boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, ctx, vp,
-                                save_width, Eq::BS_LAST_TWO_NVAR, true, true,
-                                1, {}, p.boundary_gpu,
-                                p.last_two, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
-    auto bs = boundary_saver.view();
-
-    auto launch_config = wave_config<Eq::NDIM>(d);
-    auto source_config = fdtd::Geom::make(nsrc, d.B);
-    auto record_config = fdtd::Geom::make(nrec, d.B);
-
-    float* u_thist = nullptr;
-
-    typename Eq::State state = Eq::make_state(p, d, ctx, launch_config,
-                                              source_config, record_config);
-
-    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
-    // Boundary tail truncation: with boundary_tail_steps = K > 0 only the
-    // last K steps' boundary strips are saved; the runtime and the Python
-    // buffers work in shifted "saved-step" coordinates [0, K).  bs_it0 = 0
-    // when disabled, making every shift below a no-op (bit-exact legacy).
-    // Stepped/DD segments compose transparently: ``it`` is the GLOBAL step
-    // index, so the save guard and shift never look at the segment bounds;
-    // the Python-bound boundary_gpu ring (mandatory under stepped) is
-    // allocated tail-shrunk by _ensure_boundary_buffers(nt_saved=...).
-    const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
-        ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
-    BoundaryRuntime boundary_runtime(
-        boundary_saver,
-        Eq::NDIM,
-        p.use_boundary_saving,
-        p.boundary_on_cpu,
-        p.boundary_on_disk,
-        p.boundary_disk_async_read,
-        p.transfer_interval,
-        p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
-    );
-    for (int it = it0; it < it1; ++it) {
-
-        auto view = wavefield.view();
-
-        u_thist = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
-
-        // Ranged stencil launch over x in [xb, xe); (0, nx) reproduces the
-        // legacy full launch bit-identically (same grid dims, x_base = 0).
-        // The hook owns the equation's whole per-range step (air-clear
-        // prepass included where the equation has one).
-        if (phase == 1) {
-            // Boundary phase: ONLY the cut-adjacent M-wide physical edge
-            // strips — exactly what the halo exchange sends.
-            if (cut_x_lo)
-                Eq::launch_step_range(state, ctx, ctx.phys_x0(), ctx.phys_x0() + p.M,
-                                      view, p.save_all_wavefields, u_thist, cpml);
-            if (cut_x_hi)
-                Eq::launch_step_range(state, ctx, ctx.phys_x1() - p.M, ctx.phys_x1(),
-                                      view, p.save_all_wavefields, u_thist, cpml);
-        } else if (phase == 2) {
-            // Interior phase: the strict complement of the phase-1 strips
-            // (no overlap — re-running a strip cell would double-advance
-            // its CPML psi double-buffer write).
-            Eq::launch_step_range(state, ctx,
-                                  cut_x_lo ? ctx.phys_x0() + p.M : 0,
-                                  cut_x_hi ? ctx.phys_x1() - p.M : d.nx,
-                                  view, p.save_all_wavefields, u_thist, cpml);
-        } else {
-            Eq::launch_step_range(state, ctx, 0, d.nx,
-                                  view, p.save_all_wavefields, u_thist, cpml);
-        }
-
-        if (phase == 1)
-            continue;   // no boundary saving / source / record / swap / ckpt
-
-        if (p.use_boundary_saving && it >= bs_it0) {
-            Eq::save_boundary_fwd(boundary_runtime, state, ctx, view,
-                                  it - bs_it0, (int)p.nt - bs_it0,
-                                  bs, save_width);
-        }
-
-        Eq::inject_source_fwd(state, ctx, view, p, it, nsrc);
-
-        Eq::record(state, ctx, view, record, p, it, nrec);
-
-        Eq::end_of_step(wavefield);
-
-        Eq::capture_allt(u_allt, wavefield, it);
-
-        checkpoint_runtime.save_forward(it, static_cast<int>(p.nt),
-                                        wavefield.checkpoint_tensors());
-
-    }
-
-    // Save the last state for backward (only once the final segment has run;
-    // mid-run segments leave it untouched).  Phase 1 has not swapped yet —
-    // roles would be wrong; phase 2 of the same step does the copy.
-    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
-        Eq::save_last_state(boundary_saver, wavefield);
-    }
-
-    boundary_runtime.synchronize();
-
-    out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
-    out.record = record;
-
-    return out;
+    GenericForwardRunner<Eq> runner(in);
+    return runner.run(in.it_begin, in.it_end, in.step_phase);
 }
 
 
 // Validate the stepped-backward segment fields (bw_it_begin/bw_it_end).
 // ``need_recon`` is true for boundary-saving mode, where the reconstruction
 // wavefield list must be Python-owned to survive segments.
+// ``bw_it_begin``/``bw_it_end``/``step_phase`` are explicit so a persistent
+// runner can re-validate each run() with that call's range; the monolithic
+// entries pass the input-struct fields, reproducing the legacy behaviour.
 template <class Eq>
-void check_stepped_backward(const BackwardInput& p, bool need_recon)
+void check_stepped_backward(const BackwardInput& p, bool need_recon,
+                            int bw_it_begin, int bw_it_end, int step_phase)
 {
-    const int it_hi = p.bw_begin();
-    const int it_lo = p.bw_it_end;
+    const int it_hi = (bw_it_begin < 0) ? static_cast<int>(p.nt) : bw_it_begin;
+    const int it_lo = bw_it_end;
     TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
                 "stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
                 it_lo, ", ", it_hi, ") with nt=", p.nt);
@@ -394,9 +456,9 @@ void check_stepped_backward(const BackwardInput& p, bool need_recon)
     // No second-order backward in this family implements a phase split; a
     // phased schedule (e.g. the VRZ coupling exchange) reaching an equation
     // without one must fail loudly, not run un-phased.
-    TORCH_CHECK(p.step_phase == 0,
+    TORCH_CHECK(step_phase == 0,
                 Eq::NAME, " backward does not implement step_phase (got ",
-                p.step_phase, ")");
+                step_phase, ")");
     TORCH_CHECK(need_recon || p.cut_face_mask == 0,
                 "domain-decomposed backward (cut_face_mask) is boundary-saving "
                 "only; the full-storage path does not support DD (use backward_bs)");
@@ -406,7 +468,8 @@ void check_stepped_backward(const BackwardInput& p, bool need_recon)
                     "gpu-direct or cpu boundary storage only "
                     "(boundary_on_disk unsupported in v1)");
     }
-    if (!p.bw_stepped())
+    const bool stepped = (it_hi < static_cast<int>(p.nt)) || (it_lo > 0);   // == bw_stepped()
+    if (!stepped)
         return;
     TORCH_CHECK((int)p.adjoint_wavefields.size() == Eq::ADJ_WF_COUNT,
                 "stepped backward requires the ", Eq::ADJ_WF_COUNT,
@@ -488,7 +551,8 @@ template <class Eq>
 BackwardOutput generic_backward(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    check_stepped_backward<Eq>(in, /*need_recon=*/false);
+    check_stepped_backward<Eq>(in, /*need_recon=*/false,
+                               in.bw_it_begin, in.bw_it_end, in.step_phase);
     Eq::validate_backward(in, /*need_recon=*/false);
     BackwardOutput out;
     std::vector<torch::Tensor> grads;
@@ -553,140 +617,195 @@ BackwardOutput generic_backward(const BackwardInput& in)
 }
 
 // ---- generic_backward_bs ----
+// Persistent boundary-saving backward runner: prologue once in the
+// constructor, run(bw_it_begin, bw_it_end, step_phase) is the reverse loop.
+// seed_reconstruction stays in run() gated on that run's range (first
+// segment only), exactly like the hand-written per-call gating; moving it
+// past the scratch/runtime construction crosses ops that never touch the
+// reconstruction wavefield, so the value sequence is identical.  Reuse (a
+// second run()) requires gpu-direct boundary storage.
+template <class Eq>
+class GenericBackwardBsRunner final : public IBackwardRunner {
+public:
+    explicit GenericBackwardBsRunner(const BackwardInput& in)
+        : p(in)
+    {
+        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+
+        check_stepped_backward<Eq>(p, /*need_recon=*/true,
+                                   p.bw_it_begin, p.bw_it_end, p.step_phase);
+        Eq::validate_backward(p, /*need_recon=*/true);
+
+        auto vp = p.models[0];
+        d = read_dims<Eq::NDIM>(vp);
+        adjoint_nsrc = p.adjoint_sources_loc.size(1);
+        forward_nsrc = p.forward_sources_loc.size(1);
+
+        ctx_.emplace(make_ctx<Eq>(p, d));
+        SolverContext& ctx = *ctx_;
+        Eq::setup_ctx(ctx, p);
+        // DD: skip cut faces in the strip restore, the seed rim-zeroing, the
+        // NOPML exclusion band and the fused-adjoint pure_interior test.
+        ctx.set_cut_mask(p.cut_face_mask);
+
+        Eq::bind_or_alloc_adjoint(adjoint, p, vp);
+        Eq::bind_or_alloc_recon(forward, p, vp);
+        Eq::init_aux_slabs(ctx, adjoint);
+
+        Eq::bind_backward_outputs(p, grads, illumination, /*want_adcig=*/true);
+        bs_rtm = Eq::bs_rtm_gate(p, illumination);
+
+        Eq::alloc_cpml(cpml_tensor, p);
+        cpml = cpml_tensor.view();
+
+        save_width = Eq::save_width(p.abcn, p.M);
+        staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+        // ``bs.last_two`` is never read in the backward -- the reverse seeds come
+        // straight from ``p.u_last_two``.  Passing {} made allocate_last_two take
+        // its self-allocating branch and build a full two-wavefield FP32 buffer on
+        // EVERY call, in HOST memory on the staged path.  Harmless for a monolithic
+        // backward, ruinous under DD/stepped (one call per time step): a production
+        // 3-D run went 1760 -> 166 s/iteration once the backward bound the tensor
+        // instead.  Bind it here for every equation on this skeleton.
+        // (dev 4290248, which fixed the pre-template acoustic3d/backward.cu.)
+        const torch::Tensor& last_two_bound = p.u_last_two;
+        if (staged_boundary) {
+            boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
+                                    Eq::BS_LAST_TWO_NVAR, true, false,
+                                    p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
+                                    last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
+        } else {
+            boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
+                                    Eq::BS_LAST_TWO_NVAR, true, true, 1, {}, p.boundary_gpu,
+                                    last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
+            if (p.boundary_gpu.empty())
+                boundary_saver.load_from_vector(p.u_boundary, vp);
+        }
+        bs = boundary_saver.view();
+
+        launch_config = wave_config<Eq::NDIM>(d);
+        fwd_source_config = fdtd::Geom::make(forward_nsrc, d.B);
+        adj_source_config = fdtd::Geom::make(adjoint_nsrc, d.B);
+
+        state.emplace(Eq::make_state(p, d, ctx, launch_config,
+                                     fwd_source_config,
+                                     adj_source_config));
+        ws.emplace(Eq::make_bwd_workspace(p, *state, ctx, adjoint));
+
+        bs_scratch.emplace(Eq::make_bs_scratch(p, vp));
+
+        async_copy.emplace(staged_boundary);
+        boundary_runtime.emplace(
+            boundary_saver,
+            Eq::NDIM,
+            true,
+            p.boundary_on_cpu,
+            p.boundary_on_disk,
+            p.boundary_disk_async_read,
+            p.transfer_interval,
+            p.boundary_ring_buffers,
+            p.boundary_disk_files,
+            async_copy->compute_stream,
+            async_copy->copy_stream
+        );
+        TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
+        bs_it0 = (p.boundary_tail_steps > 0)
+            ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
+        bs_stop = bs_it0 > 0 ? bs_it0 + 1 : 0;
+    }
+
+    BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
+    {
+        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+        SolverContext& ctx = *ctx_;
+        BackwardOutput out;
+
+        check_stepped_backward<Eq>(p, /*need_recon=*/true,
+                                   bw_it_begin, bw_it_end, run_step_phase);
+        const int it_hi = (bw_it_begin < 0) ? static_cast<int>(p.nt) : bw_it_begin;
+        const int it_lo = bw_it_end;
+        const bool first_segment = (it_hi == static_cast<int>(p.nt));
+
+        if (run_calls++ > 0)
+            TORCH_CHECK(!staged_boundary,
+                        "persistent stepped runner reuse requires gpu-direct "
+                        "boundary storage");
+
+        // FIRST segment only: re-running the seeding (last-state copy + any
+        // rim-zeroing) mid-stream would clobber the carried reconstruction state.
+        if (first_segment)
+            Eq::seed_reconstruction(*state, ctx, forward, p);
+
+        boundary_runtime->prefetch_initial_backward_chunk((int)p.nt - bs_it0,
+                                                          it_hi - bs_it0);
+
+        for (int it = it_hi - 1; it >= std::max(std::max(it_lo, 1), bs_stop); --it) {
+            auto adj_view = adjoint.view();
+
+            Eq::adjoint_step(*state, ctx, adj_view, cpml, *ws, nullptr, nullptr);
+            Eq::inject_adjoint_source(*state, ctx, adj_view, p, it, adjoint_nsrc, *ws);
+            Eq::post_adjoint(adjoint);
+            Eq::accumulate_source_grad(*state, ctx, adjoint, p, grads,
+                                       it, forward_nsrc);
+
+            // Reconstruction + gradient imaging, in this equation's exact order.
+            Eq::bs_reverse_step(*state, ctx, forward, adjoint, *boundary_runtime,
+                                bs, save_width, cpml, p, grads, bs_rtm, *ws,
+                                *bs_scratch, it, bs_it0);
+
+            boundary_runtime->prefetch_next_backward_chunk_if_needed(
+                it - bs_it0, (int)p.nt - bs_it0);
+
+            Eq::bs_image_step(*state, ctx, forward, adjoint, illumination,
+                              p.compute_illumination);
+        }
+
+        if (Eq::HAS_BS_T0_TAIL && it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
+            auto adj_view = adjoint.view();
+            Eq::adjoint_step(*state, ctx, adj_view, cpml, *ws, nullptr, nullptr);
+            Eq::inject_adjoint_source(*state, ctx, adj_view, p, 0, adjoint_nsrc, *ws);
+            Eq::post_adjoint(adjoint);
+            Eq::accumulate_source_grad(*state, ctx, adjoint, p, grads,
+                                       0, forward_nsrc);
+        }
+
+        Eq::pack_outputs(out, grads, illumination);
+        return out;
+    }
+
+private:
+    // Declaration order == construction order; destruction runs in reverse,
+    // matching the hand-written function's stack unwind.
+    BackwardInput p;
+    Dims d;
+    int adjoint_nsrc = 0, forward_nsrc = 0;
+    std::optional<SolverContext> ctx_;
+    typename Eq::Wavefield adjoint;
+    typename Eq::Wavefield forward;
+    std::vector<torch::Tensor> grads;
+    RTMOutput illumination;
+    RTMOutput* bs_rtm = nullptr;
+    typename Eq::CPML cpml_tensor;
+    decltype(std::declval<typename Eq::CPML>().view()) cpml;
+    int save_width = 0;
+    bool staged_boundary = false;
+    EffectiveBoundarySaver boundary_saver;
+    GeneralBoundaryPointer bs{};
+    fdtd::LaunchConfig launch_config{}, fwd_source_config{}, adj_source_config{};
+    std::optional<typename Eq::State> state;
+    std::optional<typename Eq::BwdWorkspace> ws;
+    std::optional<typename Eq::BsScratch> bs_scratch;
+    std::optional<AsyncCopyContext> async_copy;
+    std::optional<BoundaryRuntime> boundary_runtime;
+    int bs_it0 = 0, bs_stop = 0;
+    int run_calls = 0;
+};
+
 template <class Eq>
 BackwardOutput generic_backward_bs(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    const auto& p = in;
-    BackwardOutput out;
-
-    check_stepped_backward<Eq>(p, /*need_recon=*/true);
-    Eq::validate_backward(p, /*need_recon=*/true);
-    const int it_hi = p.bw_begin();
-    const int it_lo = p.bw_it_end;
-    const bool first_segment = (it_hi == static_cast<int>(p.nt));
-
-    auto vp = p.models[0];
-    const Dims d = read_dims<Eq::NDIM>(vp);
-    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
-    int forward_nsrc = p.forward_sources_loc.size(1);
-
-    SolverContext ctx = make_ctx<Eq>(p, d);
-    Eq::setup_ctx(ctx, p);
-    // DD: skip cut faces in the strip restore, the seed rim-zeroing, the
-    // NOPML exclusion band and the fused-adjoint pure_interior test.
-    ctx.set_cut_mask(p.cut_face_mask);
-
-    typename Eq::Wavefield adjoint;
-    Eq::bind_or_alloc_adjoint(adjoint, p, vp);
-    typename Eq::Wavefield forward;
-    Eq::bind_or_alloc_recon(forward, p, vp);
-    Eq::init_aux_slabs(ctx, adjoint);
-
-    std::vector<torch::Tensor> grads;
-    RTMOutput illumination;
-    Eq::bind_backward_outputs(p, grads, illumination, /*want_adcig=*/true);
-    RTMOutput* bs_rtm = Eq::bs_rtm_gate(p, illumination);
-
-    typename Eq::CPML cpml_tensor;
-    Eq::alloc_cpml(cpml_tensor, p);
-    auto cpml = cpml_tensor.view();
-
-    int save_width = Eq::save_width(p.abcn, p.M);
-    EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
-    // ``bs.last_two`` is never read in the backward -- the reverse seeds come
-    // straight from ``p.u_last_two``.  Passing {} made allocate_last_two take
-    // its self-allocating branch and build a full two-wavefield FP32 buffer on
-    // EVERY call, in HOST memory on the staged path.  Harmless for a monolithic
-    // backward, ruinous under DD/stepped (one call per time step): a production
-    // 3-D run went 1760 -> 166 s/iteration once the backward bound the tensor
-    // instead.  Bind it here for every equation on this skeleton.
-    // (dev 4290248, which fixed the pre-template acoustic3d/backward.cu.)
-    const torch::Tensor& last_two_bound = p.u_last_two;
-    if (staged_boundary) {
-        boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
-                                Eq::BS_LAST_TWO_NVAR, true, false,
-                                p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-                                last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
-    } else {
-        boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
-                                Eq::BS_LAST_TWO_NVAR, true, true, 1, {}, p.boundary_gpu,
-                                last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M);
-        if (p.boundary_gpu.empty())
-            boundary_saver.load_from_vector(p.u_boundary, vp);
-    }
-    auto bs = boundary_saver.view();
-
-    auto launch_config = wave_config<Eq::NDIM>(d);
-    auto fwd_source_config = fdtd::Geom::make(forward_nsrc, d.B);
-    auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, d.B);
-
-    typename Eq::State state = Eq::make_state(p, d, ctx, launch_config,
-                                              fwd_source_config,
-                                              adj_source_config);
-    typename Eq::BwdWorkspace ws = Eq::make_bwd_workspace(p, state, ctx, adjoint);
-
-    // FIRST segment only: re-running the seeding (last-state copy + any
-    // rim-zeroing) mid-stream would clobber the carried reconstruction state.
-    if (first_segment)
-        Eq::seed_reconstruction(state, ctx, forward, p);
-
-    typename Eq::BsScratch bs_scratch = Eq::make_bs_scratch(p, vp);
-
-    AsyncCopyContext async_copy(staged_boundary);
-    BoundaryRuntime boundary_runtime(
-        boundary_saver,
-        Eq::NDIM,
-        true,
-        p.boundary_on_cpu,
-        p.boundary_on_disk,
-        p.boundary_disk_async_read,
-        p.transfer_interval,
-        p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
-    );
-    TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
-    const int bs_it0 = (p.boundary_tail_steps > 0)
-        ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
-    const int bs_stop = bs_it0 > 0 ? bs_it0 + 1 : 0;
-    boundary_runtime.prefetch_initial_backward_chunk((int)p.nt - bs_it0,
-                                                     it_hi - bs_it0);
-
-    for (int it = it_hi - 1; it >= std::max(std::max(it_lo, 1), bs_stop); --it) {
-        auto adj_view = adjoint.view();
-
-        Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
-        Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc, ws);
-        Eq::post_adjoint(adjoint);
-        Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
-                                   it, forward_nsrc);
-
-        // Reconstruction + gradient imaging, in this equation's exact order.
-        Eq::bs_reverse_step(state, ctx, forward, adjoint, boundary_runtime,
-                            bs, save_width, cpml, p, grads, bs_rtm, ws,
-                            bs_scratch, it, bs_it0);
-
-        boundary_runtime.prefetch_next_backward_chunk_if_needed(
-            it - bs_it0, (int)p.nt - bs_it0);
-
-        Eq::bs_image_step(state, ctx, forward, adjoint, illumination,
-                          in.compute_illumination);
-    }
-
-    if (Eq::HAS_BS_T0_TAIL && it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
-        auto adj_view = adjoint.view();
-        Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
-        Eq::inject_adjoint_source(state, ctx, adj_view, p, 0, adjoint_nsrc, ws);
-        Eq::post_adjoint(adjoint);
-        Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
-                                   0, forward_nsrc);
-    }
-
-    Eq::pack_outputs(out, grads, illumination);
-    return out;
+    GenericBackwardBsRunner<Eq> runner(in);
+    return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
 }
 
 // ---- generic_backward_ckpt (uniform chunks; acoustic-family shape) ----

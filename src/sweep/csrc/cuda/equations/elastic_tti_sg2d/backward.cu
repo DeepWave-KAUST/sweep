@@ -23,4 +23,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     return eqdrv::sg_generic_backward_ckpt<Driver>(in);
 }
 
+BackwardRunnerPtr backward_bs_runner(const BackwardInput& in)
+{
+    return std::make_shared<eqdrv::SgBackwardBsRunner<Driver>>(in);
+}
+
 } // namespace elastic_tti_sg2d
