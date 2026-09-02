@@ -10,4 +10,9 @@ ForwardOutput forward(const ForwardInput& in)
     return eqdrv::sg_generic_forward<Driver>(in);
 }
 
+ForwardRunnerPtr forward_runner(const ForwardInput& in)
+{
+    return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
+}
+
 } // namespace elastic_tti_sg2d

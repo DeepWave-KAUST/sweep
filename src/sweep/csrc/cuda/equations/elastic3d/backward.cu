@@ -568,4 +568,9 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     return out;
 }
 
+BackwardRunnerPtr backward_bs_runner(const BackwardInput& in)
+{
+    return std::make_shared<eqdrv::SgBackwardBsRunner<Driver>>(in);
+}
+
 }

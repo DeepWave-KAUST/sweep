@@ -10,4 +10,9 @@ ForwardOutput forward(const ForwardInput& in)
     return eqdrv::generic_forward<Driver>(in);
 }
 
+ForwardRunnerPtr forward_runner(const ForwardInput& in)
+{
+    return std::make_shared<eqdrv::GenericForwardRunner<Driver>>(in);
+}
+
 } // namespace acoustic2d

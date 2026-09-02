@@ -274,4 +274,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     return backward_ckpt(in);
 }
 
+BackwardRunnerPtr backward_bs_runner(const BackwardInput& in)
+{
+    return std::make_shared<eqdrv::GenericBackwardBsRunner<Driver>>(in);
+}
+
 } // namespace acoustic_vrz2d

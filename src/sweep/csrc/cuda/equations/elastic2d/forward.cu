@@ -195,4 +195,9 @@ ForwardOutput apm_forward(const ForwardInput& in)
     return out;
 }
 
+ForwardRunnerPtr forward_runner(const ForwardInput& in)
+{
+    return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
+}
+
 }

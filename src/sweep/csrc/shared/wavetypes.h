@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include "boundary_session.h"
@@ -150,6 +151,37 @@ struct BackwardOutput {
     // undefined unless compute_adcig was requested.  See BackwardInput below.
     torch::Tensor adcig;
 };
+
+// ---------------------------------------------------------------------------
+// Persistent stepped runners.
+//
+// A stepped/DD driver calls the compiled entry once per time step, and each
+// call re-pays the whole prologue (validation, model parsing, wavefield/CPML
+// binding, boundary/checkpoint runtime construction, launch configs) -- about
+// 1-2 ms/step against a 10-30 us launch floor.  A runner performs that
+// prologue ONCE at construction and exposes only the time loop:
+//
+//     run(it_begin, it_end, step_phase)          (forward)
+//     run(bw_it_begin, bw_it_end, step_phase)    (backward_bs)
+//
+// The monolithic entries are thin wrappers (construct + one run), so the
+// runner path is the SAME code the bit gates exercise, not a second copy.
+// Reuse contract: a second run() on one runner requires gpu-direct boundary
+// storage and no checkpointing (the only combinations whose cross-call state
+// lives entirely in Python-bound buffers).
+// ---------------------------------------------------------------------------
+struct IForwardRunner {
+    virtual ~IForwardRunner() = default;
+    virtual ForwardOutput run(int it_begin, int it_end, int step_phase) = 0;
+};
+
+struct IBackwardRunner {
+    virtual ~IBackwardRunner() = default;
+    virtual BackwardOutput run(int bw_it_begin, int bw_it_end, int step_phase) = 0;
+};
+
+using ForwardRunnerPtr = std::shared_ptr<IForwardRunner>;
+using BackwardRunnerPtr = std::shared_ptr<IBackwardRunner>;
 
 struct RTMOutput {
 
