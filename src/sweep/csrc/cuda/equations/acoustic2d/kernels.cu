@@ -80,6 +80,54 @@ __global__ void calculate_grad_utt(
 
 }
 
+__global__ void calculate_grad_utt_band(
+    const float* __restrict__ u_forward_next,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward_now,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward_prev,  // (nt, B, nz, nx)
+    const float* __restrict__ u_backward, // (nt, B, nz, nx)
+    const float* __restrict__ vp,        // (B, nz, nx)
+    float* __restrict__ grad,             // (B, nz, nx)
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1,
+    int wxl, int wxh, int wzl, int wzh
+) {
+    // Strip cell enumeration: top rows, bottom rows (full box width), then
+    // left / right columns over the inner z range (corners counted once).
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b  = blockIdx.y;
+    const int bw = x1 - x0;
+    const int zi0 = z0 + wzl, zi1 = z1 - wzh;
+    const int bh = zi1 - zi0;
+    const int n_top = wzl * bw, n_bot = wzh * bw;
+    const int n_left = wxl * bh, n_right = wxh * bh;
+    int ix, iz;
+    if (t < n_top) { iz = z0 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_top) < n_bot) { iz = zi1 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_bot) < n_left) { ix = x0 + t / bh; iz = zi0 + t % bh; }
+    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t / bh; iz = zi0 + t % bh; }
+    else return;
+
+    int spatial_size = nx * nz;
+    int idx = iz * nx + ix;
+
+    const float* u_next_b  = u_forward_next  + b * spatial_size;
+    const float* u_now_b = u_forward_now + b * spatial_size;
+    const float* u_prev_b = u_forward_prev + b * spatial_size;
+    const float* u_backward_b = u_backward + b * spatial_size;
+    float*       grad_b       = grad       + b * spatial_size;
+    const float* vp_b         = vp         + b * spatial_size;
+
+    // After the forward.swap() in backward_bs the buffer roles are rotated so
+    // that this expression evaluates to the centered second time derivative
+    // (u(t-1) - 2 u(t) + u(t+1)) / dt^2 at the physical middle time.
+    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
+
+    // u_tt = vp^2 * Lap(u) in the interior, same form as calculate_grad:
+    //   dL/dvp += (2 dt^2 / vp) * u_tt * u_adj
+    grad_b[idx] += 2.f * dt * dt * u_tt * u_backward_b[idx] / vp_b[idx];
+
+}
+
 __global__ void accumulate_rtm_image_2d(
     const float* __restrict__ u_forward,
     const float* __restrict__ u_backward,

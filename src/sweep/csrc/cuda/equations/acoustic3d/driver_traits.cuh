@@ -468,7 +468,10 @@ struct Driver {
             (float*)nullptr,   // f_this was a dead per-step store (nothing reads it)
             s.vp,
             s.lap_ctx,
-            ctx
+            ctx,
+            adjoint.u_now_t.data_ptr<float>(),   // fused vp-gradient imaging
+            grads[1].data_ptr<float>(),
+            save_width
         );
         boundary_runtime.restore_backward_3d(
             it - bs_it0,
@@ -480,17 +483,37 @@ struct Driver {
             0,
             ctx
         );
-        calculate_grad_utt_3d<<<s.launch_config.grid, s.launch_config.block>>>(
-            forward.u_prev_t.data_ptr<float>(),
-            for_view.u_next,
-            forward.u_now_t.data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            s.vp,
-            grads[1].data_ptr<float>(),
-            s.B, s.nx, s.ny, s.nz, ctx.dt,
-            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
-            ctx.phys_z0(), ctx.phys_z1()
-        );
+        {
+            // Restore strips: the only box cells the fused imaging skipped.
+            const int wxl = ctx.cut_x_lo() ? 0 : save_width;
+            const int wxh = ctx.cut_x_hi() ? 0 : save_width;
+            const int wyl = ctx.cut_y_lo() ? 0 : save_width;
+            const int wyh = ctx.cut_y_hi() ? 0 : save_width;
+            const int wzl = ctx.cut_z_lo() ? 0 : save_width;
+            const int wzh = ctx.cut_z_hi() ? 0 : save_width;
+            const int bx = ctx.phys_x1() - ctx.phys_x0();
+            const int by = ctx.phys_y1() - ctx.phys_y0();
+            const int bzi = ctx.phys_z1() - ctx.phys_z0() - wzl - wzh;
+            const int byi = by - wyl - wyh;
+            const int n_strip = (wzl + wzh) * bx * by
+                              + (wyl + wyh) * bx * (bzi > 0 ? bzi : 0)
+                              + (wxl + wxh) * (byi > 0 ? byi : 0) * (bzi > 0 ? bzi : 0);
+            if (n_strip > 0) {
+                dim3 band_grid((n_strip + 255) / 256, s.B);
+                calculate_grad_utt_3d_band<<<band_grid, 256>>>(
+                    forward.u_prev_t.data_ptr<float>(),
+                    for_view.u_next,
+                    forward.u_now_t.data_ptr<float>(),
+                    adjoint.u_now_t.data_ptr<float>(),
+                    s.vp,
+                    grads[1].data_ptr<float>(),
+                    s.nx, s.ny, s.nz, ctx.dt,
+                    ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
+                    ctx.phys_z0(), ctx.phys_z1(),
+                    wxl, wxh, wyl, wyh, wzl, wzh
+                );
+            }
+        }
         if (rtm_out != nullptr) {
             accumulate_rtm_image_3d<<<s.launch_config.grid, s.launch_config.block>>>(
                 for_view.u_next,

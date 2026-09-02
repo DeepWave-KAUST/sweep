@@ -476,6 +476,10 @@ struct Driver {
                                 int it, int bs_it0)
     {
         auto for_view = forward.view();
+        // Reconstruction with the vp-gradient imaging fused in (every computed
+        // cell the restore below will not overwrite); the restore strips are
+        // imaged by the band kernel after the restore.  Same per-cell
+        // expression and operands as the former standalone calculate_grad_utt.
         ACOUSTIC2D_NOPML(
             s.order,
             s.launch_config.grid,
@@ -483,7 +487,10 @@ struct Driver {
             for_view,
             s.vp,
             s.lap_ctx,
-            ctx
+            ctx,
+            adjoint.u_now_t.data_ptr<float>(),
+            grads[1].data_ptr<float>(),
+            save_width
         );
         boundary_runtime.restore_backward_2d(
             it - bs_it0,
@@ -495,16 +502,29 @@ struct Driver {
             0,
             ctx
         );
-        calculate_grad_utt<<<s.launch_config.grid, s.launch_config.block>>>(
-            forward.u_prev_t.data_ptr<float>(),
-            for_view.u_next,
-            forward.u_now_t.data_ptr<float>(),
-            adjoint.u_now_t.data_ptr<float>(),
-            s.vp,
-            grads[1].data_ptr<float>(),
-            s.nx, s.nz, ctx.dt,
-            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
-        );
+        {
+            const int wxl = ctx.cut_x_lo() ? 0 : save_width;
+            const int wxh = ctx.cut_x_hi() ? 0 : save_width;
+            const int wzl = ctx.cut_z_lo() ? 0 : save_width;
+            const int wzh = ctx.cut_z_hi() ? 0 : save_width;
+            const int bw = ctx.phys_x1() - ctx.phys_x0();
+            const int bh = ctx.phys_z1() - ctx.phys_z0() - wzl - wzh;
+            const int n_strip = (wzl + wzh) * bw + (wxl + wxh) * (bh > 0 ? bh : 0);
+            if (n_strip > 0) {
+                dim3 band_grid((n_strip + 255) / 256, s.B);
+                calculate_grad_utt_band<<<band_grid, 256>>>(
+                    forward.u_prev_t.data_ptr<float>(),
+                    for_view.u_next,
+                    forward.u_now_t.data_ptr<float>(),
+                    adjoint.u_now_t.data_ptr<float>(),
+                    s.vp,
+                    grads[1].data_ptr<float>(),
+                    s.nx, s.nz, ctx.dt,
+                    ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1(),
+                    wxl, wxh, wzl, wzh
+                );
+            }
+        }
         add_source<<<s.source_config.grid, s.source_config.block>>>(
             for_view.u_next,
             p.forward_source.data_ptr<float>(),

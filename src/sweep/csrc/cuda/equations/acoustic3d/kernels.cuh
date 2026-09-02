@@ -485,7 +485,12 @@ __global__ void acoustic_nopml_3d(
     const float* __restrict__ vp,
 
     LaplaceParam lap_ctx,
-    SolverContext solver
+    SolverContext solver,
+    // Fused boundary-saving vp-gradient imaging (nullptr = reconstruction
+    // only); see the 2-D twin.
+    const float* __restrict__ adj,
+    float* __restrict__ grad,
+    int save_width
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
     int iy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -543,14 +548,32 @@ __global__ void acoustic_nopml_3d(
 
     float u0 = f.u_now[idx];
     float v  = vp_b[idx];
+    const float up = f.u_prev[idx];
 
-    f.u_next[idx] =
+    const float un =
         2.0f * u0 -
-        f.u_prev[idx] +
+        up +
         (v * v) * solver.dt * solver.dt * w_sum;
+    f.u_next[idx] = un;
 
     if (u_this_b != nullptr)
         u_this_b[idx] = (v * v) * w_sum;
+
+    if (grad != nullptr) {
+        const int ix0 = solver.cut_x_lo() ? solver.phys_x0() : solver.phys_x0() + save_width;
+        const int ix1 = solver.cut_x_hi() ? solver.phys_x1() : solver.phys_x1() - save_width;
+        const int iy0 = solver.cut_y_lo() ? solver.phys_y0() : solver.phys_y0() + save_width;
+        const int iy1 = solver.cut_y_hi() ? solver.phys_y1() : solver.phys_y1() - save_width;
+        const int iz0 = solver.cut_z_lo() ? solver.phys_z0() : solver.phys_z0() + save_width;
+        const int iz1 = solver.cut_z_hi() ? solver.phys_z1() : solver.phys_z1() - save_width;
+        if (ix >= ix0 && ix < ix1 && iy >= iy0 && iy < iy1 && iz >= iz0 && iz < iz1) {
+            const float* adj_b  = adj  + b * spatial_size;
+            float*       grad_b = grad + b * spatial_size;
+            // Verbatim calculate_grad_utt_3d with this step's operands.
+            float u_tt = (un - 2*u0 + up) / (solver.dt*solver.dt);
+            grad_b[idx] += 2.f * solver.dt * solver.dt * u_tt * adj_b[idx] / v;
+        }
+    }
 }
 
 __global__ void calculate_grad_3d(
@@ -571,6 +594,20 @@ __global__ void calculate_grad_utt_3d(
     float* __restrict__ grad,             // (B, nz, nx)
     int B, int nx, int ny, int nz, float dt,
     int x0, int x1, int y0, int y1, int z0, int z1
+);
+
+// Strip-only twin of calculate_grad_utt_3d (see the 2-D band kernel): the six
+// restore slabs of the physical box, each cell once.  grid = (ceil(n/block), B).
+__global__ void calculate_grad_utt_3d_band(
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,
+    const float* __restrict__ u_forward_prev,
+    const float* __restrict__ u_backward,
+    const float* __restrict__ vp,
+    float* __restrict__ grad,
+    int nx, int ny, int nz, float dt,
+    int x0, int x1, int y0, int y1, int z0, int z1,
+    int wxl, int wxh, int wyl, int wyh, int wzl, int wzh
 );
 
 __global__ void accumulate_rtm_image_3d(
