@@ -882,9 +882,35 @@ struct Driver {
             solver
         );
 
-        carriers.fvz_prev.copy_(forward.vz_t);
-        carriers.fvy_prev.copy_(forward.vy_t);
-        carriers.fvx_prev.copy_(forward.vx_t);
+        // Carrier capture v(it+1); see the 2-D twin.
+        {
+            const int wxl = solver.cut_x_lo() ? 0 : save_width;
+            const int wxh = solver.cut_x_hi() ? 0 : save_width;
+            const int wyl = solver.cut_y_lo() ? 0 : save_width;
+            const int wyh = solver.cut_y_hi() ? 0 : save_width;
+            const int wzl = solver.cut_z_lo() ? 0 : save_width;
+            const int wzh = solver.cut_z_hi() ? 0 : save_width;
+            const int bx = solver.phys_x1() - solver.phys_x0();
+            const int by = solver.phys_y1() - solver.phys_y0();
+            const int bzi = solver.phys_z1() - solver.phys_z0() - wzl - wzh;
+            const int byi = by - wyl - wyh;
+            const int n_strip = (wzl + wzh) * bx * by
+                              + (wyl + wyh) * bx * (bzi > 0 ? bzi : 0)
+                              + (wxl + wxh) * (byi > 0 ? byi : 0) * (bzi > 0 ? bzi : 0);
+            if (n_strip > 0) {
+                dim3 strip_grid((n_strip + 255) / 256, solver.B);
+                elastic_capture_strips_3d<<<strip_grid, 256>>>(
+                    for_view.vx, for_view.vy, for_view.vz,
+                    carriers.fvx_prev.data_ptr<float>(),
+                    carriers.fvy_prev.data_ptr<float>(),
+                    carriers.fvz_prev.data_ptr<float>(),
+                    solver.nx, solver.ny, solver.nz,
+                    solver.phys_x0(), solver.phys_x1(), solver.phys_y0(), solver.phys_y1(),
+                    solver.phys_z0(), solver.phys_z1(),
+                    wxl, wxh, wyl, wyh, wzl, wzh
+                );
+            }
+        }
 
         LAUNCH_3DELASTIC_VELOCITY_NOPML(
             s.order,
@@ -893,7 +919,10 @@ struct Driver {
             for_view,
             s.models.rho.data_ptr<float>(),
             s.grad_ctx,
-            solver
+            solver,
+            carriers.fvx_prev.data_ptr<float>(),
+            carriers.fvy_prev.data_ptr<float>(),
+            carriers.fvz_prev.data_ptr<float>()
         );
 
         float* field1[3] = {for_view.vx, for_view.vy, for_view.vz};

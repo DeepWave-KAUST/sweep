@@ -749,8 +749,30 @@ struct Driver {
             solver
         );
 
-        carriers.fvz_prev.copy_(forward.vz_t);
-        carriers.fvx_prev.copy_(forward.vx_t);
+        // Carrier capture v(it+1): the NOPML kernel stores every cell it
+        // computes into the carriers before updating it; the restore strips
+        // (the only other box cells the imaging reads) are copied here
+        // first.  Replaces two full-field memcpys.
+        {
+            const int wxl = solver.cut_x_lo() ? 0 : save_width;
+            const int wxh = solver.cut_x_hi() ? 0 : save_width;
+            const int wzl = solver.cut_z_lo() ? 0 : save_width;
+            const int wzh = solver.cut_z_hi() ? 0 : save_width;
+            const int bw = solver.phys_x1() - solver.phys_x0();
+            const int bh = solver.phys_z1() - solver.phys_z0() - wzl - wzh;
+            const int n_strip = (wzl + wzh) * bw + (wxl + wxh) * (bh > 0 ? bh : 0);
+            if (n_strip > 0) {
+                dim3 strip_grid((n_strip + 255) / 256, solver.B);
+                elastic_capture_strips_2d<<<strip_grid, 256>>>(
+                    for_view.vx, for_view.vz,
+                    carriers.fvx_prev.data_ptr<float>(),
+                    carriers.fvz_prev.data_ptr<float>(),
+                    solver.nx, solver.nz,
+                    solver.phys_x0(), solver.phys_x1(), solver.phys_z0(), solver.phys_z1(),
+                    wxl, wxh, wzl, wzh
+                );
+            }
+        }
 
         LAUNCH_ELASTIC_VELOCITY_NOPML(
             s.order,
@@ -759,7 +781,9 @@ struct Driver {
             for_view,
             s.models.rho.data_ptr<float>(),
             s.grad_ctx,
-            solver
+            solver,
+            carriers.fvx_prev.data_ptr<float>(),
+            carriers.fvz_prev.data_ptr<float>()
         );
 
         float* field1[2] = {for_view.vx, for_view.vz};
