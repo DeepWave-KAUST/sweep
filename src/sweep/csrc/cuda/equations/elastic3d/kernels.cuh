@@ -14,11 +14,13 @@
 // — ELASTIC3D_LB_MINBLOCKS lets the build pick a milder bound (6/7) without a
 // source edit.  Math-identical: forward-only, adjoint/gradient unaffected.
 // 3D kernels are heavy (9 fields + CPML aux); minBlocks=8 forced 32 regs but
-// SPILLED (STACK:88) and regressed elastic3d forward 1.1x->0.6x on V100.  3D
-// already beats deepwave unbounded, so disable the bound for 3D (minBlocks=1 =>
-// 256-reg cap => no constraint => natural ~48 regs).  2D keeps (256,8) (a win).
+// SPILLED (STACK:88) and regressed elastic3d forward 1.1x->0.6x on V100.
+// minBlocks=4 (64-reg cap) does NOT spill and measured: V100 stress kernel
+// 6765 -> 5887 us/step (-13%, fwd+bwd_bs -2.5%), Ada 3272 -> 3142 us (-4%),
+// velocity (already 64 regs) unchanged, outputs bit-identical on both GPUs
+// (2026-09-02, ibex 51231798 + Ada isolated worktree).  2D keeps (256,8).
 #ifndef ELASTIC3D_LB_MINBLOCKS
-#define ELASTIC3D_LB_MINBLOCKS 1
+#define ELASTIC3D_LB_MINBLOCKS 4
 #endif
 
 #define LAUNCH_3DELASTIC_VELOCITY(order, grid, block, ...)                     \
