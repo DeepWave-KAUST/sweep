@@ -5,7 +5,8 @@ __global__ void calculate_grad(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz, float dt
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -13,6 +14,11 @@ __global__ void calculate_grad(
     int b  = blockIdx.z;
 
     if (ix >= nx || iz >= nz)
+        return;
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < x0 || ix >= x1 || iz < z0 || iz >= z1)
         return;
 
     long long spatial_size = (long long)nx * nz;
@@ -37,7 +43,8 @@ __global__ void calculate_grad_utt(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz, float dt
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -45,6 +52,11 @@ __global__ void calculate_grad_utt(
     int b  = blockIdx.z;
 
     if (ix >= nx || iz >= nz)
+        return;
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < x0 || ix >= x1 || iz < z0 || iz >= z1)
         return;
 
     long long spatial_size = (long long)nx * nz;

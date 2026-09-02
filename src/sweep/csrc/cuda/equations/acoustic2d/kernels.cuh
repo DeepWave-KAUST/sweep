@@ -353,7 +353,10 @@ __global__ void acoustic2nd_adjoint_fused(
     // for that step here instead of a separate calculate_grad pass.  Bit-identical
     // to calculate_grad (same operands, same op order); halo/air cells skipped above
     // carry adjoint==0, so omitting their imaging contributes exactly 0.
-    if (grad_out != nullptr)
+    // Physical-box guard: cells outside it are cropped by EdgePadding.backward.
+    if (grad_out != nullptr &&
+        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+        iz >= solver.phys_z0() && iz < solver.phys_z1())
         grad_out[oidx] += 2.f * solver.dt * solver.dt
                         * grad_forward_img[oidx] * gun / vpb[idx];
 
@@ -510,7 +513,8 @@ __global__ void calculate_grad(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz, float dt
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1        // physical box (imaging skipped outside)
 );
 
 __global__ void calculate_grad_utt(
@@ -520,7 +524,8 @@ __global__ void calculate_grad_utt(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz, float dt
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 );
 
 __global__ void accumulate_rtm_image_2d(

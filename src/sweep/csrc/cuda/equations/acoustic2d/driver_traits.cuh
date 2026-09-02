@@ -392,7 +392,8 @@ struct Driver {
                 forward_ptr, adjoint_ptr,
                 s.vp,
                 (*grads)[1].data_ptr<float>(),
-                s.nx, s.nz, ctx.dt
+                s.nx, s.nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
             );
         }
         if (rtm_out != nullptr) {
@@ -501,7 +502,8 @@ struct Driver {
             adjoint.u_now_t.data_ptr<float>(),
             s.vp,
             grads[1].data_ptr<float>(),
-            s.nx, s.nz, ctx.dt
+            s.nx, s.nz, ctx.dt,
+            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
         );
         add_source<<<s.source_config.grid, s.source_config.block>>>(
             for_view.u_next,
