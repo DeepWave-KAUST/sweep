@@ -310,8 +310,6 @@ struct Driver {
         saver.last_two_t.select(0, 14).select(0, 0).copy_(wf.eyz_t);
     }
 
-    // ---- backward hooks -------------------------------------------------- //
-
     // ===================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — sg_generic_backward, per reverse it:
     //   undo_body_force / inject_residuals / select_forward_velocities;
@@ -319,6 +317,89 @@ struct Driver {
     //   it  > 0: full_fused_step (imaging + receiver-rho + adjoint step, in
     //   the equation's exact fused order).
     // ===================================================================== //
+
+    // The two adjoint halves (DAS stress/strain PREPARE + elastic STRESS
+    // APPLY; elastic VELOCITY PREPARE + APPLY).  Shared by plain_adjoint_step
+    // ([3], also ckpt/recursive) and by bs_phase1 / bs_phase2 ([4]).
+private:
+    static void stress_adjoint_half(const State& s, const SolverContext& solver,
+                                    Wavefield& adjoint, Workspace& workspace,
+                                    ElasticCPMLPointer cpml_view)
+    {
+        auto adj_view = adjoint.view();
+        auto elastic_adj_view = adjoint.elastic_view();
+        LAUNCH_DAS_MU3D_STRESS_STRAIN_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.models.lambda.data_ptr<float>(),
+            s.models.mu.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qxy_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qyx_t.data_ptr<float>(),
+            workspace.qyy_t.data_ptr<float>(),
+            workspace.qyz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            workspace.qzy_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>()
+        );
+        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            elastic_adj_view,
+            workspace.qxx_t.data_ptr<float>(),
+            workspace.qxy_t.data_ptr<float>(),
+            workspace.qxz_t.data_ptr<float>(),
+            workspace.qyx_t.data_ptr<float>(),
+            workspace.qyy_t.data_ptr<float>(),
+            workspace.qyz_t.data_ptr<float>(),
+            workspace.qzx_t.data_ptr<float>(),
+            workspace.qzy_t.data_ptr<float>(),
+            workspace.qzz_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    static void velocity_adjoint_half(const State& s, const SolverContext& solver,
+                                      Wavefield& adjoint, Workspace& workspace,
+                                      ElasticCPMLPointer cpml_view)
+    {
+        auto elastic_adj_view = adjoint.elastic_view();
+        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            elastic_adj_view,
+            s.models.rho.data_ptr<float>(),
+            cpml_view,
+            solver,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pxy_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pyx_t.data_ptr<float>(),
+            workspace.pyy_t.data_ptr<float>(),
+            workspace.pyz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            workspace.pzy_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>()
+        );
+        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            elastic_adj_view,
+            workspace.pxx_t.data_ptr<float>(),
+            workspace.pxy_t.data_ptr<float>(),
+            workspace.pxz_t.data_ptr<float>(),
+            workspace.pyx_t.data_ptr<float>(),
+            workspace.pyy_t.data_ptr<float>(),
+            workspace.pyz_t.data_ptr<float>(),
+            workspace.pzx_t.data_ptr<float>(),
+            workspace.pzy_t.data_ptr<float>(),
+            workspace.pzz_t.data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+public:
 
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
@@ -542,71 +623,8 @@ struct Driver {
                                    Wavefield& adjoint, Workspace& workspace,
                                    ElasticCPMLPointer cpml_view)
     {
-        auto adj_view = adjoint.view();
-        auto elastic_adj_view = adjoint.elastic_view();
-        LAUNCH_DAS_MU3D_STRESS_STRAIN_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            elastic_adj_view,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            elastic_adj_view,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            elastic_adj_view,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_half(s, solver, adjoint, workspace, cpml_view);
+        velocity_adjoint_half(s, solver, adjoint, workspace, cpml_view);
     }
 
     // ===================================================================== //
@@ -754,40 +772,7 @@ struct Driver {
         // Stress-adjoint half (the hand-written monolithic runs all four
         // adjoint launches back to back; the p1/p2 split reproduces exactly
         // that sequence when both phases run).
-        auto adjd = adjoint.view();
-        auto adje = adjoint.elastic_view();
-        LAUNCH_DAS_MU3D_STRESS_STRAIN_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adjd,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adje,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qxy_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qyx_t.data_ptr<float>(),
-            workspace.qyy_t.data_ptr<float>(),
-            workspace.qyz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            workspace.qzy_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_half(s, solver, adjoint, workspace, cpml_view);
     }
 
     static void bs_phase2(const State& s, const SolverContext& solver,
@@ -798,38 +783,7 @@ struct Driver {
                           ReconCarriers& carriers, Wavefield& forward,
                           int it, int nt)
     {
-        auto adje = adjoint.elastic_view();
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adje,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>()
-        );
-        LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adje,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pxy_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pyx_t.data_ptr<float>(),
-            workspace.pyy_t.data_ptr<float>(),
-            workspace.pyz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            workspace.pzy_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        velocity_adjoint_half(s, solver, adjoint, workspace, cpml_view);
 
         carriers.fvz_prev.copy_(forward.vz_t);
         carriers.fvy_prev.copy_(forward.vy_t);

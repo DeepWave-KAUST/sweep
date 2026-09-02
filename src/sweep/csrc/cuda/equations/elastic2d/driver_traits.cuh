@@ -4,6 +4,40 @@
 // The APM (Cao & Chen 2018) entry points stay hand-written in
 // forward.cu/backward.cu — they refuse stepping/phasing and carry their own
 // kernel variants, so there is nothing for the skeleton to share yet.
+//
+// REFERENCE EQUATION of the staggered family.  The other staggered-family
+// members (elastic3d, das_mu2d, das_mu3d, elastic_tti_sg2d, elastic_tti_sg3d,
+// elastic_vr2d) describe their deltas against this baseline; the properties
+// below are what "same as elastic2d" means:
+//   * constants: NDIM = 2, CKPT_NVAR = 15 (CKPT_COUNT_MSG / CKPT_RECURSIVE_COUNT_MSG), BS_NVAR = 5 (vx, vz, sxx, szz, sxz), CUT_MASK_BITS = 0xF (x_lo, x_hi, z_lo, z_hi);
+//   * ADJ_WF_COUNT = 15, RECON_WF_COUNT = 7 (RECON_LIST_DESC = [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]), N_VEL = 2, NEXT_V = true (imaging consumes the v(t+1) carriers);
+//   * models: parse_models reads {vp, vs, rho} and derives mu = rho*vs^2 and lambda = rho*(vp^2 - 2*vs^2) as torch tensors kept alive in Models (kernels hold raw pointers into them);
+//   * State = Models + one SGradParam grad_ctx + launch/source/record configs + order + nx/nz/B; Workspace = ElasticAdjointWorkspaceTensor via init_adjoint_workspace(p.adjoint_workspace, vp, 2);
+//   * validate_forward / validate_backward and prep_adjoint / prep_adjoint_bs are no-ops (the adjoint buffers arrive Python-zeroed);
+//   * setup_ctx installs the per-edge free surface (set_per_edge(fs_faces, pad_lo, pad_hi)) and topo_rows / has_topo when p.has_topo;
+//   * init_aux_slabs = elastic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.allocate(pml_vals, 2);
+//   * allt_shape = (nt, 2, B, nz, nx): u_allt stores the velocities only (Vx, Vz);
+//   * field_ptr = elastic_field_ptr(wf, 2, idx); view = wf.view();
+//   * forward: bind(p.wavefields, true) or allocate(vp, 2); velocity_substep = LAUNCH_ELASTIC_VELOCITY (rho), stress_substep = LAUNCH_ELASTIC_STRESS (lambda, mu, u_this_t); both also replay in the ckpt/recursive modes;
+//   * inject_source / record_field are plain add_source / record_kernel on the field selected by index; record_field writes record[irec];
+//   * save_boundary_fields = save_forward_2d_field for the five fields at offset -M (field index f, flag f == 4); save_last_state copies the five into last_two[0..4];
+//   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here) or alloc_grads zeros; signed_adjoint_sources = elastic_signed_adjoint_sources(adjoint_source, receiver_fields, 2);
+//   * bind_or_alloc_adjoint binds p.adjoint_wavefields or allocate(vp, 2);
+//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; select_forward_velocities reads u_forward[it] and u_forward[it + 1] (zero_velocity when it + 1 == nt);
+//   * undo_body_force (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source of the signed residual per receiver field;
+//   * undo_receiver_rho = sub_receiver_rho_grad_correction at velocity receivers (stress receivers skipped) with imaging halo M;
+//   * image_standalone = LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS (it == 0 in full mode; every reverse it in the ckpt/recursive modes);
+//   * adjoint launch helpers: stress_adjoint_prepare (10 explicit imaging pointers) / stress_adjoint_apply / velocity_adjoint_prepare / velocity_adjoint_apply, with velocity_adjoint_half = the last two;
+//   * full_fused_step: the vp/vs/rho imaging is fused into the STRESS_ADJOINT_PREPARE launch, then STRESS_ADJOINT_APPLY, VELOCITY_ADJOINT_PREPARE, VELOCITY_ADJOINT_APPLY, and the receiver-rho fix (undo_receiver_rho) after the four launches;
+//   * plain_adjoint_step = the same four launches with all-null imaging pointers (ckpt/recursive reverse sweeps);
+//   * bs: ReconCarriers {fvx_prev, fvz_prev}; bind_or_alloc_recon takes the 7-tensor list (five fields bound with use_pml = false + two carriers) or allocate(vp, 2, false) + zero carriers;
+//   * seed_recon copies the five fields from u_last_two[0..4]; uninject_forward_source adds neg_forward_source at the source fields;
+//   * bs_phase1 order: STRESS_NOPML -> restore sxx/szz/sxz (fields 2..4, offset -M) -> STRESS_ADJOINT_PREPARE with the imaging fused (v(it) = for_view.v*, v(it+1) = carriers) -> undo_receiver_rho -> STRESS_ADJOINT_APPLY;
+//   * bs_phase2 order: VELOCITY_ADJOINT_PREPARE -> VELOCITY_ADJOINT_APPLY -> elastic_capture_strips_2d (restore strips into the carriers) -> VELOCITY_NOPML (carrier write of every computed cell, then the velocity update) -> restore vx/vz (fields 0..1, offset -M) -> prefetch_next_backward_chunk_if_needed;
+//   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots; check_ckpt_aux_layout compares the m_vxx aux shapes;
+//   * seg buffers: alloc_seg_buffers = two zero tensors of shape (segment_len + 1, vp.size(0) * vp.size(1), 1, nz, nx) for vx / vz; capture_seg fills a slot, store_prev_segment keeps slot 1, seg_vel_ptrs picks now / next (next_segment_v past the end);
+//   * recursive: inject_sources_fwd_bw replays the forward source per source field; capture_velocities / carrier_vel_ptrs feed the imaging from the captured v(it) / v(it+1) pair.
+//
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
 
@@ -434,20 +468,20 @@ struct Driver {
         }
     }
 
-    // FULL-mode step: fold this reverse step's vp/vs/rho-gradient imaging
-    // into the stress-adjoint-prepare kernel (it reads the un-mutated
-    // post-source adjoint at entry, exactly what calculate_grad_elastic_nobs
-    // would correlate), then run the remaining three adjoint launches.
-    static void full_fused_step(const State& s, const SolverContext& solver,
-                                Wavefield& adjoint, Workspace& workspace,
-                                ElasticCPMLPointer cpml_view,
-                                const VelPtrs& v,
-                                std::vector<torch::Tensor>& grads,
-                                const BackwardInput& p,
-                                const torch::Tensor& receiver_fields,
-                                int it, int adjoint_nsrc)
+    // Adjoint-step launch helpers shared by full_fused_step,
+    // plain_adjoint_step (full / ckpt / recursive modes) and bs_phase1 /
+    // bs_phase2 (bs mode).  Bodies are the launch statements verbatim; the
+    // stress prepare takes the 10 imaging pointers explicitly (all-null for
+    // plain_adjoint_step).
+    static void stress_adjoint_prepare(const State& s, const SolverContext& solver,
+                                       WfView& adj_view, Workspace& workspace,
+                                       ElasticCPMLPointer cpml_view,
+                                       const float* vx_now, const float* vz_now,
+                                       const float* vx_next, const float* vz_next,
+                                       const float* vp, const float* vs,
+                                       const float* rho,
+                                       float* g_vp, float* g_vs, float* g_rho)
     {
-        auto adj_view = adjoint.view();
         LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
             s.order,
             s.launch_config.grid,
@@ -462,14 +496,19 @@ struct Driver {
             workspace.qxz_t.data_ptr<float>(),
             workspace.qzx_t.data_ptr<float>(),
             s.grad_ctx,
-            v.vx_now, v.vz_now, v.vx_next, v.vz_next,
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.rho.data_ptr<float>(),
-            grads[0].data_ptr<float>(),
-            grads[1].data_ptr<float>(),
-            grads[2].data_ptr<float>()
+            vx_now, vz_now, vx_next, vz_next,
+            vp,
+            vs,
+            rho,
+            g_vp,
+            g_vs,
+            g_rho
         );
+    }
+
+    static void stress_adjoint_apply(const State& s, const SolverContext& solver,
+                                     WfView& adj_view, Workspace& workspace)
+    {
         LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
             s.order, s.launch_config.grid, s.launch_config.block,
             adj_view,
@@ -480,6 +519,12 @@ struct Driver {
             s.grad_ctx,
             solver
         );
+    }
+
+    static void velocity_adjoint_prepare(const State& s, const SolverContext& solver,
+                                         WfView& adj_view, Workspace& workspace,
+                                         ElasticCPMLPointer cpml_view)
+    {
         LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
             s.order, s.launch_config.grid, s.launch_config.block,
             adj_view,
@@ -491,6 +536,11 @@ struct Driver {
             workspace.pxz_t.data_ptr<float>(),
             workspace.pzx_t.data_ptr<float>()
         );
+    }
+
+    static void velocity_adjoint_apply(const State& s, const SolverContext& solver,
+                                       WfView& adj_view, Workspace& workspace)
+    {
         LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(
             s.order, s.launch_config.grid, s.launch_config.block,
             adj_view,
@@ -501,6 +551,40 @@ struct Driver {
             s.grad_ctx,
             solver
         );
+    }
+
+    static void velocity_adjoint_half(const State& s, const SolverContext& solver,
+                                      WfView& adj_view, Workspace& workspace,
+                                      ElasticCPMLPointer cpml_view)
+    {
+        velocity_adjoint_prepare(s, solver, adj_view, workspace, cpml_view);
+        velocity_adjoint_apply(s, solver, adj_view, workspace);
+    }
+
+    // FULL-mode step: fold this reverse step's vp/vs/rho-gradient imaging
+    // into the stress-adjoint-prepare kernel (it reads the un-mutated
+    // post-source adjoint at entry, exactly what calculate_grad_elastic_nobs
+    // would correlate), then run the remaining three adjoint launches.
+    static void full_fused_step(const State& s, const SolverContext& solver,
+                                Wavefield& adjoint, Workspace& workspace,
+                                ElasticCPMLPointer cpml_view,
+                                const VelPtrs& v,
+                                std::vector<torch::Tensor>& grads,
+                                const BackwardInput& p,
+                                const torch::Tensor& receiver_fields,
+                                int it, int adjoint_nsrc)
+    {
+        auto adj_view = adjoint.view();
+        stress_adjoint_prepare(s, solver, adj_view, workspace, cpml_view,
+                               v.vx_now, v.vz_now, v.vx_next, v.vz_next,
+                               s.models.vp.data_ptr<float>(),
+                               s.models.vs.data_ptr<float>(),
+                               s.models.rho.data_ptr<float>(),
+                               grads[0].data_ptr<float>(),
+                               grads[1].data_ptr<float>(),
+                               grads[2].data_ptr<float>());
+        stress_adjoint_apply(s, solver, adj_view, workspace);
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
 
         undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
                           adjoint_nsrc);
@@ -514,53 +598,12 @@ struct Driver {
                                    ElasticCPMLPointer cpml_view)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            s.grad_ctx,
-            nullptr, nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr
-        );
-        LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
-        LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>()
-        );
-        LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_prepare(s, solver, adj_view, workspace, cpml_view,
+                               nullptr, nullptr, nullptr, nullptr,
+                               nullptr, nullptr, nullptr,
+                               nullptr, nullptr, nullptr);
+        stress_adjoint_apply(s, solver, adj_view, workspace);
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
     }
 
     // ===================================================================== //
@@ -675,45 +718,25 @@ struct Driver {
         // pass (18 field passes) is gone.  for_view.v* = v(it) and the
         // carriers = v(it+1) are final here, and prepare touches nothing the
         // imaging reads.
-        LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.lambda.data_ptr<float>(),
-            s.models.mu.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            s.grad_ctx,
-            for_view.vx, for_view.vz,
-            carriers.fvx_prev.data_ptr<float>(),
-            carriers.fvz_prev.data_ptr<float>(),
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.rho.data_ptr<float>(),
-            grads[0].data_ptr<float>(),
-            grads[1].data_ptr<float>(),
-            grads[2].data_ptr<float>()
-        );
+        stress_adjoint_prepare(s, solver, adj_view, workspace, cpml_view,
+                               for_view.vx, for_view.vz,
+                               carriers.fvx_prev.data_ptr<float>(),
+                               carriers.fvz_prev.data_ptr<float>(),
+                               s.models.vp.data_ptr<float>(),
+                               s.models.vs.data_ptr<float>(),
+                               s.models.rho.data_ptr<float>(),
+                               grads[0].data_ptr<float>(),
+                               grads[1].data_ptr<float>(),
+                               grads[2].data_ptr<float>());
 
         // Receiver-cell rho correction AFTER the imaging '+=' (same per-cell
         // accumulation order as the standalone pass); operands unchanged.
+        // Must stay BETWEEN the stress prepare and the stress apply.
         VelPtrs v{for_view.vx, for_view.vz,
                   carriers.fvx_prev.data_ptr<float>(),
                   carriers.fvz_prev.data_ptr<float>()};
         undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it, adjoint_nsrc);
-        LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.qxx_t.data_ptr<float>(),
-            workspace.qzz_t.data_ptr<float>(),
-            workspace.qxz_t.data_ptr<float>(),
-            workspace.qzx_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_apply(s, solver, adj_view, workspace);
     }
 
     // bs phase 2: velocity-adjoint half, carrier capture, velocity
@@ -727,27 +750,7 @@ struct Driver {
                           int it, int nt)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.models.rho.data_ptr<float>(),
-            cpml_view,
-            solver,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>()
-        );
-        LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace.pxx_t.data_ptr<float>(),
-            workspace.pzz_t.data_ptr<float>(),
-            workspace.pxz_t.data_ptr<float>(),
-            workspace.pzx_t.data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
 
         // Carrier capture v(it+1): the NOPML kernel stores every cell it
         // computes into the carriers before updating it; the restore strips

@@ -192,7 +192,7 @@ struct Driver {
     static WfView view(Wavefield& wf) { return wf.view(); }
 
     // ===================================================================== //
-    // [2] FORWARD -- sg_generic_forward, per it in [it_begin, it_end):
+    // [2] FORWARD — sg_generic_forward, per it in [it_begin, it_end):
     //     velocity_substep -> stress_substep -> inject_source ->
     //     <checkpoint save (shared runtime)> -> save_boundary_fields ->
     //     record_field; after the loop: save_last_state.
@@ -308,11 +308,79 @@ struct Driver {
     }
 
     // ===================================================================== //
-    // [3] BACKWARD SHARED + FULL MODE -- sg_generic_backward, per reverse it:
+    // [3] BACKWARD SHARED + FULL MODE — sg_generic_backward, per reverse it:
     //     undo_body_force -> inject_residuals -> select_forward_velocities ->
     //     it == 0: image_standalone + undo_receiver_rho (loop ends);
     //     it  > 0: full_fused_step (imaging + receiver-rho + adjoint step).
     // ===================================================================== //
+
+    // ---- shared adjoint halves (internal helpers, not skeleton hooks) ---- //
+    // stress_adjoint_half / velocity_adjoint_half are shared by
+    // plain_adjoint_step (full + ckpt modes, both halves), bs_phase1 (stress
+    // half) and bs_phase2 (velocity half).
+private:
+    static void stress_adjoint_half(const State& s, const SolverContext& solver,
+                                    WfView& adj_view, Workspace& workspace,
+                                    ElasticCPMLPointer cpml_view)
+    {
+        LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.model,
+            cpml_view,
+            solver,
+            workspace[0].data_ptr<float>(),
+            workspace[1].data_ptr<float>(),
+            workspace[2].data_ptr<float>(),
+            workspace[3].data_ptr<float>(),
+            workspace[4].data_ptr<float>(),
+            workspace[5].data_ptr<float>()
+        );
+        LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace[0].data_ptr<float>(),
+            workspace[1].data_ptr<float>(),
+            workspace[2].data_ptr<float>(),
+            workspace[3].data_ptr<float>(),
+            workspace[4].data_ptr<float>(),
+            workspace[5].data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+
+    static void velocity_adjoint_half(const State& s, const SolverContext& solver,
+                                      WfView& adj_view, Workspace& workspace,
+                                      ElasticCPMLPointer cpml_view)
+    {
+        LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_PREPARE(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            s.model,
+            cpml_view,
+            solver,
+            workspace[0].data_ptr<float>(),
+            workspace[1].data_ptr<float>(),
+            workspace[2].data_ptr<float>(),
+            workspace[3].data_ptr<float>(),
+            workspace[4].data_ptr<float>(),
+            workspace[5].data_ptr<float>()
+        );
+        LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_APPLY(
+            s.order, s.launch_config.grid, s.launch_config.block,
+            adj_view,
+            workspace[0].data_ptr<float>(),
+            workspace[1].data_ptr<float>(),
+            workspace[2].data_ptr<float>(),
+            workspace[3].data_ptr<float>(),
+            workspace[4].data_ptr<float>(),
+            workspace[5].data_ptr<float>(),
+            s.grad_ctx,
+            solver
+        );
+    }
+public:
 
     // ---- backward hooks -------------------------------------------------- //
 
@@ -478,60 +546,12 @@ struct Driver {
                                    ElasticCPMLPointer cpml_view)
     {
         auto adj_view = adjoint.view();
-        LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.model,
-            cpml_view,
-            solver,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>()
-        );
-        LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
-        LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            s.model,
-            cpml_view,
-            solver,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>()
-        );
-        LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_half(s, solver, adj_view, workspace, cpml_view);
+        velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
     }
 
     // ===================================================================== //
-    // [4] BACKWARD_BS -- sg_generic_backward_bs, per reverse it (floor
+    // [4] BACKWARD_BS — sg_generic_backward_bs, per reverse it (floor
     //     max(it_lo, 1)): undo_body_force / inject_residuals /
     //     uninject_forward_source [inject_step], then bs_phase1 (stress recon
     //     NOPML + strip restore + imaging + receiver-rho + stress-adjoint
@@ -633,28 +653,8 @@ struct Driver {
             );
         }
 
-        {
-            auto grad_view = stiffness_grad_view(grads);
-            LAUNCH_CALCULATE_GRAD_ELASTIC_TTI_SG_NOBS(
-                s.order,
-                s.launch_config.grid,
-                s.launch_config.block,
-                adj_view,
-                s.model,
-                grad_view,
-                for_view.vx,
-                for_view.vy,
-                for_view.vz,
-                carriers.fvx_next.data_ptr<float>(),
-                carriers.fvy_next.data_ptr<float>(),
-                carriers.fvz_next.data_ptr<float>(),
-                s.grad_ctx,
-                solver
-            );
-        }
-
-        // Same operands the imaging just correlated: for_view v* is v(it),
-        // fv*_next is v(it+1) (overwritten in phase 2).
+        // Imaging and the receiver-rho correction share the same operands:
+        // for_view v* is v(it), fv*_next is v(it+1) (overwritten in phase 2).
         {
             VelPtrs v;
             v.now[0] = for_view.vx;
@@ -663,6 +663,7 @@ struct Driver {
             v.next[0] = carriers.fvx_next.data_ptr<float>();
             v.next[1] = carriers.fvy_next.data_ptr<float>();
             v.next[2] = carriers.fvz_next.data_ptr<float>();
+            image_standalone(s, solver, adj_view, v, grads);
             undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
                               adjoint_nsrc);
         }
@@ -671,31 +672,7 @@ struct Driver {
         // adjoint launches back to back; the p1/p2 split reproduces exactly
         // that sequence when both phases run).
         auto adjv = adjoint.view();
-        LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adjv,
-            s.model,
-            cpml_view,
-            solver,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>()
-        );
-        LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adjv,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        stress_adjoint_half(s, solver, adjv, workspace, cpml_view);
     }
 
     static void bs_phase2(const State& s, const SolverContext& solver,
@@ -707,31 +684,7 @@ struct Driver {
                           int it, int nt)
     {
         auto adjv = adjoint.view();
-        LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_PREPARE(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adjv,
-            s.model,
-            cpml_view,
-            solver,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>()
-        );
-        LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_APPLY(
-            s.order, s.launch_config.grid, s.launch_config.block,
-            adjv,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
+        velocity_adjoint_half(s, solver, adjv, workspace, cpml_view);
 
         carriers.fvx_next.copy_(forward.vx_t);
         carriers.fvy_next.copy_(forward.vy_t);
@@ -770,7 +723,7 @@ struct Driver {
     }
 
     // ===================================================================== //
-    // [5] CKPT + RECURSIVE PLUMBING -- sg_generic_backward_ckpt, per chunk:
+    // [5] CKPT + RECURSIVE PLUMBING — sg_generic_backward_ckpt, per chunk:
     //     replay: velocity_substep / stress_substep / capture_seg /
     //     inject_sources_fwd_bw; reverse: undo_body_force / inject_residuals /
     //     seg_vel_ptrs / image_standalone / undo_receiver_rho /
@@ -778,8 +731,6 @@ struct Driver {
     //     (No recursive checkpointing in this equation: capture_velocities /
     //     carrier_vel_ptrs are deliberately absent -- see the header note.)
     // ===================================================================== //
-
-    // ---- seg / carrier plumbing (ckpt mode) ----
 
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInput& p,
