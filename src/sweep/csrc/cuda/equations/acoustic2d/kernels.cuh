@@ -454,7 +454,13 @@ __global__ void acoustic2nd_nopml(
     AcousticWavefieldPointer wf,
     const float* __restrict__ vp,
     LaplaceParam lap_ctx,
-    SolverContext solver
+    SolverContext solver,
+    // Fused boundary-saving vp-gradient imaging (nullptr = reconstruction
+    // only).  Images the computed cells the strip restore will not overwrite;
+    // the strips themselves are imaged by calculate_grad_utt_band afterwards.
+    const float* __restrict__ adj,
+    float* __restrict__ grad,
+    int save_width
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
@@ -500,11 +506,32 @@ __global__ void acoustic2nd_nopml(
     w_sum = lap_x + lap_z;
 
     float v  = vp_b[idx];
+    const float u0 = f.u_now[idx];
+    const float up = f.u_prev[idx];
 
-    f.u_next[idx] =
-        2.0f * f.u_now[idx] -
-        f.u_prev[idx] +
+    const float un =
+        2.0f * u0 -
+        up +
         (v * v) * solver.dt * solver.dt * w_sum;
+    f.u_next[idx] = un;
+
+    if (grad != nullptr) {
+        // Physical box minus the restore strips [phys0, phys0 + save_width)
+        // of every non-cut face (cut faces: no strip, box starts at M).
+        const int ix0 = solver.cut_x_lo() ? solver.phys_x0() : solver.phys_x0() + save_width;
+        const int ix1 = solver.cut_x_hi() ? solver.phys_x1() : solver.phys_x1() - save_width;
+        const int iz0 = solver.cut_z_lo() ? solver.phys_z0() : solver.phys_z0() + save_width;
+        const int iz1 = solver.cut_z_hi() ? solver.phys_z1() : solver.phys_z1() - save_width;
+        if (ix >= ix0 && ix < ix1 && iz >= iz0 && iz < iz1) {
+            const float* adj_b  = adj  + b * spatial_size;
+            float*       grad_b = grad + b * spatial_size;
+            // Verbatim calculate_grad_utt with this step's operands:
+            // u_forward_now = un (w(it-1)), u_forward_prev = u0 (w(it)),
+            // u_forward_next = up (w(it+1)).
+            float u_tt = (un - 2*u0 + up) / (solver.dt*solver.dt);
+            grad_b[idx] += 2.f * solver.dt * solver.dt * u_tt * adj_b[idx] / v;
+        }
+    }
 
 }
 
@@ -526,6 +553,22 @@ __global__ void calculate_grad_utt(
     float* __restrict__ grad,             // (B, nz, nx)
     int nx, int nz, float dt,
     int x0, int x1, int z0, int z1
+);
+
+// Strip-only twin of calculate_grad_utt: images the per-face restore strips
+// of the physical box (width w* per face, 0 on a DD cut face) -- the cells the
+// fused acoustic2nd_nopml imaging leaves to the post-restore pass.  One thread
+// per strip cell; grid = (ceil(n_strip / block), B).
+__global__ void calculate_grad_utt_band(
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,
+    const float* __restrict__ u_forward_prev,
+    const float* __restrict__ u_backward,
+    const float* __restrict__ vp,
+    float* __restrict__ grad,
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1,
+    int wxl, int wxh, int wzl, int wzh
 );
 
 __global__ void accumulate_rtm_image_2d(

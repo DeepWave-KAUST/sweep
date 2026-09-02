@@ -91,6 +91,60 @@ __global__ void calculate_grad_utt_3d(
 
 }
 
+__global__ void calculate_grad_utt_3d_band(
+    const float* __restrict__ u_forward_next,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward_now,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward_prev,  // (nt, B, nz, nx)
+    const float* __restrict__ u_backward, // (nt, B, nz, nx)
+    const float* __restrict__ vp,        // (B, nz, nx)
+    float* __restrict__ grad,             // (B, nz, nx)
+    int nx, int ny, int nz, float dt,
+    int x0, int x1, int y0, int y1, int z0, int z1,
+    int wxl, int wxh, int wyl, int wyh, int wzl, int wzh
+) {
+    // Slab enumeration: z-low / z-high (full x,y box), y-low / y-high (full x,
+    // inner z), x-low / x-high (inner y, inner z); every cell exactly once.
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b  = blockIdx.y;
+    const int bx = x1 - x0, by = y1 - y0;
+    const int zi0 = z0 + wzl, zi1 = z1 - wzh, bzi = zi1 - zi0;
+    const int yi0 = y0 + wyl, yi1 = y1 - wyh, byi = yi1 - yi0;
+    const int n_zl = wzl * bx * by, n_zh = wzh * bx * by;
+    const int n_yl = wyl * bx * bzi, n_yh = wyh * bx * bzi;
+    const int n_xl = wxl * byi * bzi, n_xh = wxh * byi * bzi;
+    int ix, iy, iz;
+    if (t < n_zl) { iz = z0 + t / (bx * by); t %= bx * by; iy = y0 + t / bx; ix = x0 + t % bx; }
+    else if ((t -= n_zl) < n_zh) { iz = zi1 + t / (bx * by); t %= bx * by; iy = y0 + t / bx; ix = x0 + t % bx; }
+    else if ((t -= n_zh) < n_yl) { iy = y0 + t / (bx * bzi); t %= bx * bzi; iz = zi0 + t / bx; ix = x0 + t % bx; }
+    else if ((t -= n_yl) < n_yh) { iy = yi1 + t / (bx * bzi); t %= bx * bzi; iz = zi0 + t / bx; ix = x0 + t % bx; }
+    else if ((t -= n_yh) < n_xl) { ix = x0 + t / (byi * bzi); t %= byi * bzi; iz = zi0 + t / byi; iy = yi0 + t % byi; }
+    else if ((t -= n_xl) < n_xh) { ix = (x1 - wxh) + t / (byi * bzi); t %= byi * bzi; iz = zi0 + t / byi; iy = yi0 + t % byi; }
+    else return;
+
+    int stride_y = nx;
+    int stride_z = nx * ny;
+    int spatial_size = nx * ny * nz;
+
+    int idx = iz * stride_z + iy * stride_y + ix;
+
+    const float* u_next_b  = u_forward_next  + b * spatial_size;
+    const float* u_now_b = u_forward_now + b * spatial_size;
+    const float* u_prev_b = u_forward_prev + b * spatial_size;
+    const float* u_backward_b = u_backward + b * spatial_size;
+    float*       grad_b       = grad       + b * spatial_size;
+    const float* vp_b         = vp         + b * spatial_size;
+
+    // After the forward.swap() in backward_bs the buffer roles are rotated so
+    // that this expression evaluates to the centered second time derivative
+    // (u(t-1) - 2 u(t) + u(t+1)) / dt^2 at the physical middle time.
+    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
+
+    // u_tt = vp^2 * Lap(u) in the interior, same form as calculate_grad_3d:
+    //   dL/dvp += (2 dt^2 / vp) * u_tt * u_adj
+    grad_b[idx] += 2.f * dt * dt * u_tt * u_backward_b[idx] / vp_b[idx];
+
+}
+
 __global__ void accumulate_rtm_image_3d(
     const float* __restrict__ u_forward,
     const float* __restrict__ u_backward,
