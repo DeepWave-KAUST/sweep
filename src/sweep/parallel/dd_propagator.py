@@ -1159,10 +1159,12 @@ class ModelParallel:
         because the source injection atomically adds into the very buffer the
         comm stream would be packing. Both variants are bit-identical.
         """
+        ffac, _ = self.prop.equation._compiled_runner_factories()
         runner = SteppedBindingRunner(
             self.f_func, self.fp, self.L_fwd,
             psi_pairs=self._table.pairs(adjoint=False),
-            u_blocks=self._table.u_blocks)
+            u_blocks=self._table.u_blocks,
+            c_factory=ffac)
         ov = self._spec.forward_overlapped
         if ov is not None and self._overlap_ok and self._src_away_from_cuts(sg):
             self._run_dd_loop_overlapped(ov, runner, fhalo)
@@ -1204,11 +1206,17 @@ class ModelParallel:
             # are both the table's u_blocks, which is (0,) for the rotating
             # acoustic/VRZ lists and () for elastic's fixed slots -- exactly
             # what the three branches passed by hand.
+            # The vrz coupling schedule drives extra phases the C runner's
+            # validation rejects; it keeps the per-call path.
+            _, bfac = self.prop.equation._compiled_runner_factories()
+            if self._dd_coupling_nvar:
+                bfac = None
             br = SteppedBackwardRunner(
                 self.b_func, self.bp, self.L_adj, self.recon,
                 adj_pairs=self._table.pairs(adjoint=True),
                 adj_u_blocks=self._table.u_blocks,
-                recon_u_blocks=self._table.u_blocks)
+                recon_u_blocks=self._table.u_blocks,
+                c_factory=bfac)
             # Runtime predicates a schedule may gate a shipment on. Only the
             # elastic backward declares one; an unused key costs nothing.
             _vel = ("vx", "vy", "vz")

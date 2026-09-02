@@ -158,13 +158,30 @@ class SteppedBindingRunner:
     SAME wavefield list is then bound for every segment.
     """
 
-    def __init__(self, func, params, wavefields, psi_pairs=(), u_blocks=(0,)):
+    def __init__(self, func, params, wavefields, psi_pairs=(), u_blocks=(0,),
+                 c_factory=None):
         self.func = func
         self.p = params
         self.L = list(wavefields)
         self.psi_pairs = tuple(psi_pairs)
         self.u_blocks = tuple(u_blocks)
         self.k = 0
+        # Persistent C++ runner (prologue once, ~us per step instead of ~ms):
+        # constructed at k == 0 with the ORIGINAL list order; the buffer-role
+        # rotation then lives in the C++ wavefield object, so the per-call
+        # re-binding below is skipped entirely (self.k keeps counting for the
+        # u_now/u_next role resolution the DD driver reads).  Only gpu-direct,
+        # checkpoint-free runs qualify -- the same contract the C++ side
+        # enforces on reuse.  A None factory (or staged storage) keeps the
+        # legacy per-call path.
+        self._cr = None
+        if (c_factory is not None
+                and not params.use_checkpoint
+                and not params.boundary_on_cpu
+                and not params.boundary_on_disk):
+            params.it_begin, params.it_end, params.step_phase = 0, -1, 0
+            params.wavefields = list(self.L)
+            self._cr = c_factory(params)
         # The bound order depends only on (k % 3, k % 2) — the u-triple phase
         # and the psi-pair swap parity — so there are at most 6 distinct lists.
         # Cache them (keyed on that pair) instead of re-allocating a fresh
@@ -183,6 +200,10 @@ class SteppedBindingRunner:
         return out
 
     def run_to(self, it_end: int) -> None:
+        if self._cr is not None:
+            self._cr.run(self.k, int(it_end), 0)
+            self.k = int(it_end)
+            return
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
         p.wavefields = self._bound_wavefields()
@@ -207,6 +228,11 @@ class SteppedBindingRunner:
                 f"run_phase drives exactly one step: it_end={it_end} but "
                 f"k={self.k}"
             )
+        if self._cr is not None:
+            self._cr.run(self.k, int(it_end), int(phase))
+            if phase == 2:
+                self.k = int(it_end)
+            return
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
         p.step_phase = int(phase)
@@ -234,6 +260,11 @@ class SteppedBindingRunner:
             raise ValueError(
                 f"phased forward drives exactly one step: it_end={it_end} "
                 f"but k={self.k}")
+        if self._cr is not None:
+            self._cr.run(self.k, int(it_end), int(phase))
+            if advance:
+                self.k = int(it_end)
+            return
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
         p.step_phase = int(phase)
@@ -313,7 +344,8 @@ class SteppedBackwardRunner:
 
     def __init__(self, func, params, adjoint_wavefields,
                  recon_wavefields=None, adj_pairs=(),
-                 adj_u_blocks=(0,), recon_u_blocks=(0,)):
+                 adj_u_blocks=(0,), recon_u_blocks=(0,),
+                 c_factory=None):
         self.func = func
         self.p = params
         self.L_adj = list(adjoint_wavefields)
@@ -323,6 +355,19 @@ class SteppedBackwardRunner:
         self.recon_u_blocks = tuple(recon_u_blocks)
         self.k_adj = 0
         self.k_f = 0
+        # Persistent C++ runner -- same contract as the forward one: original
+        # list order at construction, rotation state lives in C++, gpu-direct
+        # only.  The vrz coupling schedule keeps the per-call path (its extra
+        # phases have their own semantics; the caller passes c_factory=None).
+        self._cr = None
+        if (c_factory is not None
+                and not params.boundary_on_cpu
+                and not params.boundary_on_disk):
+            params.bw_it_begin, params.bw_it_end, params.step_phase = -1, 0, 0
+            params.adjoint_wavefields = list(self.L_adj)
+            if self.L_recon is not None:
+                params.forward_wavefields = list(self.L_recon)
+            self._cr = c_factory(params)
         # Both rotations depend only on (k % 3, k % 2) -> <=6 distinct lists
         # each; cache instead of re-allocating per segment (see the forward
         # runner's _rot_cache note).
@@ -354,6 +399,11 @@ class SteppedBackwardRunner:
         """Run the segment [bw_it_end, bw_it_begin); segments must be issued
         in descending order and partition [0, nt) exactly."""
         b, e = int(bw_it_begin), int(bw_it_end)
+        if self._cr is not None:
+            out = self._cr.run(b, e, 0)
+            self.k_adj += b - e
+            self.k_f += b - max(e, 1)
+            return out
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         self._bind_lists()
@@ -387,6 +437,12 @@ class SteppedBackwardRunner:
             raise ValueError(
                 f"run_phase drives exactly one step: got segment [{e}, {b})"
             )
+        if self._cr is not None:
+            out = self._cr.run(b, e, int(phase))
+            if phase == 2:
+                self.k_adj += 1
+                self.k_f += 1 if e >= 1 else 0
+            return out
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         p.step_phase = int(phase)
@@ -423,6 +479,10 @@ class SteppedBackwardRunner:
         """
         if phase not in (1, 2, 3, 4):
             raise ValueError(f"phase must be 1, 2, 3 or 4, got {phase}")
+        if self._cr is not None:
+            raise RuntimeError(
+                "vrz coupling phases use the per-call path; construct the "
+                "runner with c_factory=None")
         b, e = int(bw_it_begin), int(bw_it_end)
         if b != e + 1:
             raise ValueError(
@@ -456,6 +516,12 @@ class SteppedBackwardRunner:
         if b != e + 1:
             raise ValueError(
                 f"phased backward drives exactly one step: got segment [{e}, {b})")
+        if self._cr is not None:
+            out = self._cr.run(b, e, int(phase))
+            if advance:
+                self.k_adj += b - e
+                self.k_f += b - max(e, 1)
+            return out
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         p.step_phase = int(phase)
