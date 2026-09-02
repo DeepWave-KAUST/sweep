@@ -256,6 +256,22 @@ class WaveEquation:
             else None,
         )
 
+    def _compiled_runner_factories(self):
+        """(forward_runner, backward_bs_runner) persistent-runner factories.
+
+        Same ``C_NAME`` convention as :meth:`_compiled_funcs`; returns
+        ``(None, None)`` when the equation has no compiled bindings or the
+        compiled module predates the runner entries, so callers can fall back
+        to the per-call stepped path.
+        """
+        import sweep._C as _C
+
+        name = self.C_NAME
+        if not name:
+            return (None, None)
+        return (getattr(_C, f"{name}_forward_runner", None),
+                getattr(_C, f"{name}_backward_bs_runner", None))
+
     @classmethod
     def supports_torch_binding(cls):
         """Return True when the equation class exposes a compiled ``_C`` binding hook."""
