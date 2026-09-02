@@ -351,12 +351,43 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
 
 }
 
+// Compact copy of the physical box's restore strips (width w* per non-cut
+// face) of vx/vz into the boundary-saving carriers: the box cells the NOPML
+// kernel below does not compute.  Launched BEFORE the reverse update.
+static __global__ void elastic_capture_strips_2d(
+    const float* __restrict__ vx, const float* __restrict__ vz,
+    float* __restrict__ fvx, float* __restrict__ fvz,
+    int nx, int nz, int x0, int x1, int z0, int z1,
+    int wxl, int wxh, int wzl, int wzh)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b  = blockIdx.y;
+    const int bw = x1 - x0;
+    const int zi0 = z0 + wzl, zi1 = z1 - wzh;
+    const int bh = zi1 - zi0;
+    const int n_top = wzl * bw, n_bot = wzh * bw;
+    const int n_left = wxl * bh, n_right = wxh * bh;
+    int ix, iz;
+    if (t < n_top) { iz = z0 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_top) < n_bot) { iz = zi1 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_bot) < n_left) { ix = x0 + t % wxl; iz = zi0 + t / wxl; }
+    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t % wxh; iz = zi0 + t / wxh; }
+    else return;
+    const int idx = b * nx * nz + iz * nx + ix;
+    fvx[idx] = vx[idx];
+    fvz[idx] = vz[idx];
+}
+
 template<int Order>
 __global__ void elastic_velocity_kernel_nopml(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
     SGradParam grad_ctx,
-    SolverContext solver
+    SolverContext solver,
+    // Boundary-saving carriers: receive v(it+1) (the value loaded below)
+    // before the in-place reverse update.  nullptr = plain reconstruction.
+    float* __restrict__ fvx_prev = nullptr,
+    float* __restrict__ fvz_prev = nullptr
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -401,6 +432,11 @@ __global__ void elastic_velocity_kernel_nopml(
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
+
+    if (fvx_prev != nullptr) {
+        fvx_prev[b * spatial_size + idx] = f.vx[idx];
+        fvz_prev[b * spatial_size + idx] = f.vz[idx];
+    }
 
     f.vx[idx] -= solver.dt * inv_rho *
         (dsxx_dx + dsxz_dz);
