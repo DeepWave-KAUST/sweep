@@ -103,8 +103,9 @@ __global__ void calculate_grad_utt_band(
     int ix, iz;
     if (t < n_top) { iz = z0 + t / bw; ix = x0 + t % bw; }
     else if ((t -= n_top) < n_bot) { iz = zi1 + t / bw; ix = x0 + t % bw; }
-    else if ((t -= n_bot) < n_left) { ix = x0 + t / bh; iz = zi0 + t % bh; }
-    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t / bh; iz = zi0 + t % bh; }
+    // Side strips: x offset innermost so a warp's threads share memory sectors.
+    else if ((t -= n_bot) < n_left) { ix = x0 + t % wxl; iz = zi0 + t / wxl; }
+    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t % wxh; iz = zi0 + t / wxh; }
     else return;
 
     int spatial_size = nx * nz;

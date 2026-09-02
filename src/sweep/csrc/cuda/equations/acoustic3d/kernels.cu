@@ -117,8 +117,9 @@ __global__ void calculate_grad_utt_3d_band(
     else if ((t -= n_zl) < n_zh) { iz = zi1 + t / (bx * by); t %= bx * by; iy = y0 + t / bx; ix = x0 + t % bx; }
     else if ((t -= n_zh) < n_yl) { iy = y0 + t / (bx * bzi); t %= bx * bzi; iz = zi0 + t / bx; ix = x0 + t % bx; }
     else if ((t -= n_yl) < n_yh) { iy = yi1 + t / (bx * bzi); t %= bx * bzi; iz = zi0 + t / bx; ix = x0 + t % bx; }
-    else if ((t -= n_yh) < n_xl) { ix = x0 + t / (byi * bzi); t %= byi * bzi; iz = zi0 + t / byi; iy = yi0 + t % byi; }
-    else if ((t -= n_xl) < n_xh) { ix = (x1 - wxh) + t / (byi * bzi); t %= byi * bzi; iz = zi0 + t / byi; iy = yi0 + t % byi; }
+    // x slabs: x offset innermost so a warp's threads share memory sectors.
+    else if ((t -= n_yh) < n_xl) { ix = x0 + t % wxl; t /= wxl; iy = yi0 + t % byi; iz = zi0 + t / byi; }
+    else if ((t -= n_xl) < n_xh) { ix = (x1 - wxh) + t % wxh; t /= wxh; iy = yi0 + t % byi; iz = zi0 + t / byi; }
     else return;
 
     int stride_y = nx;
