@@ -776,38 +776,11 @@ struct Driver {
             );
         }
 
-        LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            for_view,
-            adj_view,
-            carriers.fvx_prev.data_ptr<float>(),
-            carriers.fvy_prev.data_ptr<float>(),
-            carriers.fvz_prev.data_ptr<float>(),
-            s.models.vp.data_ptr<float>(),
-            s.models.vs.data_ptr<float>(),
-            s.models.rho.data_ptr<float>(),
-            grads[0].data_ptr<float>(),
-            grads[1].data_ptr<float>(),
-            grads[2].data_ptr<float>(),
-            s.grad_ctx,
-            solver
-        );
-
-        // Same operands the imaging just correlated: for_view.v* is v(it),
-        // fv*_prev is v(it+1) (overwritten in phase 2).
-        {
-            VelPtrs v;
-            v.now[0] = for_view.vx;
-            v.now[1] = for_view.vy;
-            v.now[2] = for_view.vz;
-            v.next[0] = carriers.fvx_prev.data_ptr<float>();
-            v.next[1] = carriers.fvy_prev.data_ptr<float>();
-            v.next[2] = carriers.fvz_prev.data_ptr<float>();
-            undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
-                              adjoint_nsrc);
-        }
+        // Imaging folded into the stress-adjoint-prepare kernel (as in FULL
+        // mode): it carries the calculate_grad_elastic3d_bs block verbatim and
+        // already streams the adjoint stresses, so the standalone imaging
+        // pass is gone.  for_view.v* = v(it) and the carriers = v(it+1) are
+        // final here, and prepare touches nothing the imaging reads.
 
         LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(
             s.order, s.launch_config.grid, s.launch_config.block,
@@ -826,11 +799,31 @@ struct Driver {
             workspace.qzy_t.data_ptr<float>(),
             workspace.qzz_t.data_ptr<float>(),
             s.grad_ctx,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr
+            for_view.vx, for_view.vy, for_view.vz,
+            carriers.fvx_prev.data_ptr<float>(),
+            carriers.fvy_prev.data_ptr<float>(),
+            carriers.fvz_prev.data_ptr<float>(),
+            s.models.vp.data_ptr<float>(),
+            s.models.vs.data_ptr<float>(),
+            s.models.rho.data_ptr<float>(),
+            grads[0].data_ptr<float>(),
+            grads[1].data_ptr<float>(),
+            grads[2].data_ptr<float>()
         );
+
+        {
+            // Receiver-cell rho correction AFTER the imaging '+=' (same per-cell
+            // accumulation order as the standalone pass); operands unchanged.
+            VelPtrs v;
+            v.now[0] = for_view.vx;
+            v.now[1] = for_view.vy;
+            v.now[2] = for_view.vz;
+            v.next[0] = carriers.fvx_prev.data_ptr<float>();
+            v.next[1] = carriers.fvy_prev.data_ptr<float>();
+            v.next[2] = carriers.fvz_prev.data_ptr<float>();
+            undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
+                              adjoint_nsrc);
+        }
         LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(
             s.order, s.launch_config.grid, s.launch_config.block,
             adj_view,
