@@ -2,6 +2,39 @@
 // shared skeleton in ``common/eq_driver.cuh``.  Everything here is a
 // line-faithful transcription of the launches the hand-written drivers made;
 // the physics kernels are untouched.
+//
+// REFERENCE EQUATION of the acoustic family.  The other acoustic-family
+// members (acoustic3d, acoustic_vrz2d) describe their deltas against this
+// baseline; the properties below are what "same as acoustic2d" means:
+//   * constants: NDIM = 2, CKPT_NVAR = 6, BS_NVAR = 1 (the saver stores u only), BS_LAST_TWO_NVAR = 2 (u_prev, u_now);
+//   * TANGENT_PAD = 0 (no tangential pad on the boundary strips); CUT_MASK_BITS = 0xF (x_lo, x_hi, z_lo, z_hi);
+//   * ADJ_WF_COUNT = 11 (u triple + psi/zeta double-buffer), RECON_WF_COUNT = 3;
+//   * HAS_FUSED_FULL_IMG = true: full mode folds the lagged vp-gradient imaging into the adjoint kernel (fused_grad_ptr = grads[1]; one trailing image_step at it == 0);
+//   * ADCIG_IN_FULL_MODES = true: the flag opens full_rtm_gate on compute_adcig as well as on compute_illumination;
+//   * HAS_BS_T0_TAIL = true: the bs reverse loop runs an it == 0 adjoint-only tail (grad_wavelet);
+//   * one model, vp = p.models[0], held as a raw pointer in State beside the Laplace/gradient parameter blocks, the launch configs, order/M, nx/nz/B and has_topo;
+//   * BwdWorkspace and BsScratch are empty: the fused adjoint keeps its scratch in the psi/zeta buffers and the NOPML kernel writes no per-step scratch field;
+//   * validate_forward / validate_backward are no-ops;
+//   * setup_ctx installs topo_rows / has_topo (topo_category = nullptr, use_apm = false) and the per-edge free surface via ctx.set_per_edge(fs_faces, pad_lo, pad_hi);
+//   * init_aux_slabs = acoustic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.allocate(pml_vals, 2);
+//   * allt_shape = (nt, B, nz, nx): u only, written in-kernel through u_thist (capture_allt is a no-op);
+//   * save_width = abcn > 0 ? M + 1 : M; boundary save/restore offset 0;
+//   * bind_or_alloc_forward binds p.wavefields or allocates with double_buffer_psi = true; bind_or_alloc_adjoint binds p.adjoint_wavefields or allocate(vp, 2, true); bind_or_alloc_recon binds/allocates WITHOUT CPML (use_pml = false);
+//   * launch_step_range: an air-clear prepass (has_topo only, x range widened by M) then the ACOUSTIC2D kernel ranged over x in [xb, xe) via ctx.x_base / x_limit (phase-split capable);
+//   * forward loop: inject_source_fwd and record act on u_next; end_of_step = swap_pml (u triple AND psi<->psin); save_last_state stores (u_prev, u_now) in last_two;
+//   * backward outputs: alloc_grads = {grad_wavelet, grad_vp}; bind_backward_outputs = eqdrv::acoustic_bind_backward_outputs; pack_outputs returns grads + source/receiver illumination + adcig;
+//   * full_store_ptr = u_forward[it] (vp^2 * Lap(u), the vp-gradient operand, NOT raw pressure);
+//   * adjoint_step = ACOUSTIC2D_ADJOINT_FUSED: single-kernel exact adjoint, g_* recomputed at each tap, next-step psi/zeta written to the double-buffer out-tensors, grad_forward_img / grad_out fused in;
+//   * inject_adjoint_source adds p.adjoint_source into u_next with the record_config slot (the adjoint source config in backward states); post_adjoint = swap_aux (u + psi + zeta rotation);
+//   * accumulate_source_grad = accumulate_source_grad_2d from the adjoint u_now into grads[0];
+//   * image_step = calculate_grad (vp gradient) + accumulate_rtm_image_2d; no ADCIG launch here (the full store is not raw pressure);
+//   * bs_rtm_gate opens on compute_illumination || compute_adcig (consumed in-step by the 3-D twin; 2-D images after the prefetch in bs_image_step);
+//   * seed_reconstruction: u_prev <- u_last_two[:, 1], u_now <- u_last_two[:, 0], then set_boundary_zeros on both over the abcn + M rim with the cut faces excluded (ctx.cut_mask()); make_bs_scratch returns {};
+//   * bs_reverse_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
+//   * bs_image_step, after the prefetch: accumulate_rtm_image_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
+//   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots;
+//   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> swap_recon = swap().
+//
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
 

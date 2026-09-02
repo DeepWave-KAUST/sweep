@@ -5,6 +5,26 @@
 // backward keeps its hand-written form in backward.cu (it is a linear
 // segment sweep, not the acoustic bisection this skeleton templates).
 //
+// Deltas from acoustic2d (the acoustic-family REFERENCE EQUATION; anything
+// not listed here is the same as in acoustic2d/driver_traits.cuh):
+//   * two models, [vp, z] (make_state checks the count); State keeps z and the derived inv_z = 1/z alive as tensors beside their raw pointers;
+//   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
+//   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): post_adjoint rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
+//   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, HAS_BS_T0_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
+//   * BwdWorkspace is non-empty: neg_adjoint_source, the time-invariant adjoint coefficients C0/Cx/Cz, and the split-gradient scratch c_x/c_z/e_x/e_z; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
+//   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
+//   * setup_ctx and init_aux_slabs are empty: no per-edge free surface, no topography, legacy full-grid CPML aux;
+//   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (end_of_step); the in-kernel u_thist stays disabled (false, nullptr);
+//   * save_width = M + 1 regardless of abcn; boundary save/restore offset -M (strips sit M inside the pad) instead of 0;
+//   * launch_step_range refuses sub-ranges (the kernels ignore ctx.x_base / x_limit), so there are no phase-split strips and no air-clear prepass;
+//   * grads = the two model gradients {grad_vp, grad_z} (grads_out slot 0, the wavelet, is unused): no grad_wavelet (accumulate_source_grad is empty), no illumination/ADCIG (full_rtm_gate / bs_rtm_gate return nullptr, fused_grad_ptr is nullptr, bs_image_step is empty, pack_outputs sets grads only);
+//   * full_store_ptr = the u slice u_forward[it][0];
+//   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (ws.neg_adjoint_source);
+//   * image_step = CALCULATE_GRAD_VRZ2D_AUTO (two gradients, split scratch from the workspace; returns early without grads), no RTM kernel;
+//   * seed_reconstruction also zeroes u_next, and its set_boundary_zeros calls do not pass the cut_mask;
+//   * bs_reverse_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on the post-swap u_now (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
+//   * no ckpt/recursive hooks (section [5] is empty): backward.cu keeps the hand-written chunk/recursive checkpoint backward.
+//
 // What the skeleton ADDS for this equation (dormant on legacy calls, all
 // defaults reproduce the monolithic drivers bit-for-bit): the stepped
 // it_begin/it_end range on forward and on the full/bs backwards, Python-bound
@@ -219,7 +239,7 @@ struct Driver {
     static int save_width(int /*abcn*/, int M) { return M + 1; }
 
     // ===================================================================== //
-    // [2] FORWARD (generic_forward) — per it in [it_begin, it_end):
+    // [2] FORWARD — generic_forward, per it in [it_begin, it_end):
     //     launch_step_range -> save_boundary_fwd -> inject_source_fwd ->
     //     record -> end_of_step -> capture_allt; after the loop:
     //     save_last_state.
@@ -334,10 +354,8 @@ struct Driver {
         saver.last_two_t.select(1, 1).copy_(wf.u_now_t);
     }
 
-    // ---- backward hooks -------------------------------------------------- //
-
     // ===================================================================== //
-    // [3] BACKWARD SHARED + FULL MODE (generic_backward) — per reverse it:
+    // [3] BACKWARD SHARED + FULL MODE — generic_backward, per reverse it:
     //     adjoint_step -> inject_adjoint_source -> post_adjoint ->
     //     accumulate_source_grad -> image_step.
     // ===================================================================== //
@@ -467,7 +485,7 @@ struct Driver {
     }
 
     // ===================================================================== //
-    // [4] BACKWARD_BS (generic_backward_bs) — per reverse it: the four
+    // [4] BACKWARD_BS — generic_backward_bs, per reverse it: the four
     //     shared adjoint hooks of section [3], then bs_reverse_step ->
     //     bs_image_step; before the loop (first segment):
     //     seed_reconstruction from u_last_two.

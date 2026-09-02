@@ -266,8 +266,6 @@ struct Driver {
         saver.last_two_t.select(1, 1).copy_(wf.u_now_t);
     }
 
-    // ---- backward hooks -------------------------------------------------- //
-
     // ===================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — generic_backward, per reverse it:
     //   adjoint_step -> inject_adjoint_source -> post_adjoint ->
