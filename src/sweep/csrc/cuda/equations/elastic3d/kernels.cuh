@@ -1277,9 +1277,9 @@ __global__ void elastic_stress_adjoint_prepare_3d(
         constexpr int  M_static_g   = is_runtime_g ? 0 : (Order / 2);
         int halo_g = is_runtime_g ? solver.M : M_static_g;
         if (grad_vp_out != nullptr &&
-            ix >= halo_g && ix < solver.nx - halo_g &&
-            iy >= halo_g && iy < solver.ny - halo_g &&
-            iz >= halo_g && iz < solver.nz - halo_g) {
+            ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+            iy >= solver.phys_y0() && iy < solver.phys_y1() &&
+            iz >= solver.phys_z0() && iz < solver.phys_z1()) {   // physical box only
             const float* fvx_b      = grad_fvx      + b * spatial_size;
             const float* fvy_b      = grad_fvy      + b * spatial_size;
             const float* fvz_b      = grad_fvz      + b * spatial_size;
@@ -1547,9 +1547,12 @@ __global__ void calculate_grad_elastic3d_bs(
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo)
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iy < solver.phys_y0() || iy >= solver.phys_y1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;

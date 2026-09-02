@@ -388,7 +388,9 @@ struct Driver {
                 forward_ptr, adjoint_ptr,
                 s.vp,
                 (*grads)[1].data_ptr<float>(),
-                s.B, s.nx, s.ny, s.nz, ctx.dt
+                s.B, s.nx, s.ny, s.nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
+                ctx.phys_z0(), ctx.phys_z1()
             );
         }
         if (rtm_out != nullptr) {
@@ -439,7 +441,7 @@ struct Driver {
     static BsScratch make_bs_scratch(const BackwardInput& /*p*/,
                                      const torch::Tensor& vp)
     {
-        return {torch::zeros_like(vp)};
+        return {torch::Tensor()};   // f_this retired: nothing consumed the field
     }
 
     // 3-D bs reverse step: NOPML(f_this) -> strip restore -> u_tt gradient +
@@ -463,7 +465,7 @@ struct Driver {
             s.launch_config.grid,
             s.launch_config.block,
             for_view,
-            scratch.f_this.data_ptr<float>(),
+            (float*)nullptr,   // f_this was a dead per-step store (nothing reads it)
             s.vp,
             s.lap_ctx,
             ctx
@@ -485,7 +487,9 @@ struct Driver {
             adjoint.u_now_t.data_ptr<float>(),
             s.vp,
             grads[1].data_ptr<float>(),
-            s.B, s.nx, s.ny, s.nz, ctx.dt
+            s.B, s.nx, s.ny, s.nz, ctx.dt,
+            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
+            ctx.phys_z0(), ctx.phys_z1()
         );
         if (rtm_out != nullptr) {
             accumulate_rtm_image_3d<<<s.launch_config.grid, s.launch_config.block>>>(

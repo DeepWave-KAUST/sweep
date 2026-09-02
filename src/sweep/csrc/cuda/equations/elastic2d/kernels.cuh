@@ -553,8 +553,8 @@ __global__ void elastic_stress_adjoint_prepare(
     // calculate_grad's a.sxx[idx] / bar_szz / bar_sxz (same FS-row zeroing), and
     // f.vx[idx]/f.vz[idx] are the un-mutated post-source adjoint velocities.
     if (grad_vp_out != nullptr &&
-        ix >= halo && ix < solver.nx - halo &&
-        iz >= halo && iz < solver.nz - halo) {
+        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+        iz >= solver.phys_z0() && iz < solver.phys_z1()) {   // physical box only
         const float* fvx_b      = grad_fvx      + b * spatial_size;
         const float* fvz_b      = grad_fvz      + b * spatial_size;
         const float* fvx_prev_b = grad_fvx_prev + b * spatial_size;
@@ -896,8 +896,11 @@ __global__ void calculate_grad_elastic_bs(
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
     // Even cells strictly above the per-column surface row ("air") can carry
@@ -998,8 +1001,11 @@ __global__ void calculate_grad_elastic_nobs(
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
     // Even cells strictly above the per-column surface row ("air") can carry
