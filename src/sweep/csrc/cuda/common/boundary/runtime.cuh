@@ -578,10 +578,10 @@ public:
 
         cudaEventRecord(copy_ready_[chunk.ring_slot], copy_stream_);
         copy_pending_[chunk.ring_slot] = 1;
-        if (profile_enabled_ && boundary_on_disk_) {
+        if (profile_enabled_ && staged_)
             ++profile_forward_chunks_;
+        if (profile_enabled_ && boundary_on_disk_)
             forward_copy_profile_pending_[chunk.ring_slot] = 1;
-        }
     }
 
     inline void save_forward_2d(
@@ -872,7 +872,7 @@ public:
         int chunk_start = it - 1 - buf_idx;
         int slot_start = backward_slot_for_chunk(chunk_start) * transfer_interval_;
         int gpu_idx = slot_start + buf_idx;
-        if (!boundary_disk_async_read_)
+        if (boundary_on_disk_ && !boundary_disk_async_read_)
             gpu_idx = buf_idx;
 
         GeneralBoundaryPointer ptr{};
@@ -1295,8 +1295,20 @@ public:
             return;
 
         int buf_idx = (it - 1) % transfer_interval_;
-        if (buf_idx != 0)
-            return;
+        int cur_start = it - 1 - buf_idx;
+        // ring>=2: issue the next chunk on entry to the current one -- the same
+        // point as wait_before_backward_restore -- so the copy overlaps this
+        // chunk's transfer_interval steps of compute. ring==1 has a single slot
+        // where issuing early would overwrite data still being read, so it keeps
+        // the original "compute, then issue" (no overlap, but correct).
+        const bool early = (ring_buffers_ >= 2);
+        if (early) {
+            if (buf_idx != backward_chunk_len(cur_start) - 1)
+                return;
+        } else {
+            if (buf_idx != 0)
+                return;
+        }
 
         int chunk_id = (it - 1) / transfer_interval_;
         int next_chunk = chunk_id - 1;
@@ -1306,7 +1318,8 @@ public:
         int next_start = next_chunk * transfer_interval_;
         int remain = nt - next_start;
         int next_len = remain < transfer_interval_ ? remain : transfer_interval_;
-        prefetch_backward_chunk(next_start, next_len, 0);
+        prefetch_backward_chunk(next_start, next_len,
+                                backward_slot_for_chunk(next_start));
     }
 
     inline void synchronize()
@@ -1406,7 +1419,12 @@ private:
 
     inline int backward_slot_for_chunk(int chunk_start) const
     {
-        if (!boundary_disk_async_read_)
+        // The SYNCHRONOUS disk path has to stay single-slot: its
+        // load_disk_to_cpu_* and load_cpu_to_gpu(0, ...) both hard-code the
+        // staging offset to 0 and reuse one CPU scratch block. Host staging has
+        // no such constraint, and allowing several slots there is exactly what
+        // lets the backward H2D overlap compute.
+        if (boundary_on_disk_ && !boundary_disk_async_read_)
             return 0;
         int chunk_id = chunk_start / transfer_interval_;
         return chunk_id % ring_buffers_;
@@ -1451,14 +1469,31 @@ private:
                     backward_copy_profile_pending_[slot] = 1;
             }
         } else {
-            saver_->load_cpu_to_gpu(start, len, copy_stream_);
+            // write-after-read: this slot's previous contents may still be
+            // under read by compute. With ring>=2 the next chunk lands in a
+            // different slot, so this event has long completed -- no stall, real
+            // overlap; with ring==1 it correctly orders the H2D after the read
+            // (no overlap, but no corruption).
+            cudaStreamWaitEvent(copy_stream_, compute_ready_[slot], 0);
+            // ...into that slot's own GPU ring interval; the old default
+            // gpu_start=0 packed every chunk into slot 0, which left
+            // ring_buffers doing nothing at all on the backward path.
+            saver_->load_cpu_to_gpu(start, len, copy_stream_, slot * transfer_interval_);
             cudaEventRecord(copy_ready_[slot], copy_stream_);
+            if (profile_enabled_ && staged_)
+                ++profile_chunks_;
         }
     }
 
     inline void record_backward_restore_done(int it)
     {
-        if (!boundary_disk_async_read_)
+        // With a non-blocking copy_stream the write-after-read must be stated
+        // explicitly: compute has to finish reading this slot before the next
+        // H2D may write into it. Host staging used to just return here and lean
+        // on the implicit sync between a blocking cudaStreamCreate stream and
+        // the default stream -- that cover is gone once the stream is
+        // NonBlocking.
+        if (!enabled_ || !staged_)
             return;
         int buf_idx = (it - 1) % transfer_interval_;
         int chunk_start = it - 1 - buf_idx;
@@ -1643,7 +1678,7 @@ private:
 
     inline void print_profile_if_needed()
     {
-        if (!profile_enabled_ || profile_printed_ || !boundary_on_disk_)
+        if (!profile_enabled_ || profile_printed_ || !staged_)
             return;
         profile_printed_ = true;
         accumulate_all_forward_copy_time();

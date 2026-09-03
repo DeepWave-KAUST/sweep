@@ -43,9 +43,20 @@ PY, PX = int(os.environ.get("MESH_PY", 2)), int(os.environ.get("MESH_PX", world 
 assert PY * PX == world, (PY, PX, world)
 # Keep nt large: the staging cost scales with the step count, and 140 steps
 # is too few to show a trend.
-dh, dt, nt, abcn, order = 10.0, 0.001, int(os.environ.get("NT", 1200)), 12, 8
-nz, ny, nx = 48, int(os.environ.get("MESH_NY", 96)), 48 * PX
+_e = lambda k, d, f=int: f(os.environ.get(k, d))
+# The whole geometry is an env knob: only at production's boundary-bytes per
+# grid-point ratio does the measured staging cost match what production sees.
+# The original bench (48x96x48PX, order 8) is ~55 kB of boundary per step over
+# 110 k points = 0.5; production (384x518x240, order 4) is 1.66 MB over 47.5 M
+# = 0.035, a factor of 14 -- the small case AMPLIFIES the staging cost.
+dh, dt = _e("DH", 10.0, float), _e("DT", 0.001, float)
+nt, abcn, order = _e("NT", 1200), _e("ABCN", 12), _e("ORDER", 8)
+nz = _e("MESH_NZ", 48)
+ny = _e("MESH_NY", 96)
+nx = _e("MESH_NX_PER", 48) * PX
 shape = (nz, ny, nx)
+BDTYPE = os.environ.get("BDTYPE", "fp32")
+PINNED = os.environ.get("PINNED", "1") == "1"   # default matches production
 
 zramp = np.linspace(0, 1, nz, dtype=np.float32)
 vp_true = (2000.0 + 700.0 * np.linspace(0, 1, int(np.prod(shape)), dtype=np.float32)
@@ -63,8 +74,16 @@ rec = np.stack([gx.ravel(), gy.ravel(), np.ones(gx.size, np.int32)], -1)[None].a
 def run(storage, interval=1, ring=1):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    cfg = {"enabled": True, "storage": storage, "storage_dtype": "fp32",
-           "transfer_interval": interval, "ring_buffers": ring}
+    # PINNED has to be passed explicitly: dd_propagator.py:261 reads
+    #   self._bpinned = bool(_bcfg.get("pinned_memory") or False)
+    # straight off the raw dict, so a missing key is False and sweep's
+    # cpu_pinned_memory=True default is bypassed. An unpinned cudaMemcpyAsync is
+    # synchronous, so no overlap is possible at all. Production sets
+    # pinned_memory: True, which is why earlier benches were not comparable to
+    # production along this axis.
+    cfg = {"enabled": True, "storage": storage, "storage_dtype": BDTYPE,
+           "transfer_interval": interval, "ring_buffers": ring,
+           "pinned_memory": PINNED}
     prop = PropTorch(Acoustic3D(spatial_order=order, device=dev), backend="torch",
                      impl="c", shape=shape, dh=dh, dt=dt, nt=nt, abcn=abcn,
                      source_type=["h1"], receiver_type=["h1"], dev=dev,
@@ -92,11 +111,18 @@ def agree(ga, gb):
 
 P = (lambda *a: print(*a, flush=True)) if rank == 0 else (lambda *a: None)
 P(f"tree = {os.path.dirname(os.path.dirname(__import__('sweep').__file__))}")
-P(f"mesh {PY}x{PX}  shape {shape}  nt {nt}  world {world}")
+P(f"mesh {PY}x{PX}  shape {shape}  nt {nt}  order {order}  abcn {abcn}  "
+  f"dtype {BDTYPE}  pinned {PINNED}  world {world}")
+_cells = (shape[0] * (shape[1] // PY) * (shape[2] // PX))
+P(f"points per rank {_cells/1e6:.1f}M   (production 2-14 Hz band is 47.7M)")
+_steps = 3 * nt   # obs forward + gradient forward + backward
+P(f"~{_steps} steps per run; production measures 27.7 ms/step -> at the same\n"
+  f"   scale one run is ~{_steps*0.0277:.0f} s")
 
 gref, pref, tref, _ = run("gpu")
 P(f"\n{'config':>26} {'sec':>8} {'vs gpu':>8} {'peak GB':>8} {'bitex':>6} {'session.used':>13}")
-P(f"{'gpu (baseline)':>26} {tref:>8.2f} {1.0:>8.2f} {pref:>8.2f} {'-':>6} {'-':>13}")
+P(f"{'gpu (baseline)':>26} {tref:>8.2f} {1.0:>8.2f} {pref:>8.2f} {'-':>6} {'-':>13}"
+  f"   {tref/_steps*1e3:>6.2f} ms/step")
 
 rows, fail = [], []
 for interval, ring in ((1, 1), (32, 1), (32, 4), (64, 4)):
@@ -105,7 +131,8 @@ for interval, ring in ((1, 1), (32, 1), (32, 4), (64, 4)):
     g2, _, _, _ = run("cpu", interval, ring)
     bit2, mad2 = agree(g, g2)
     tag = f"cpu interval={interval} ring={ring}"
-    P(f"{tag:>26} {el:>8.2f} {el/tref:>7.2f}x {pk:>8.2f} {str(bit):>6} {str(used):>13}")
+    P(f"{tag:>26} {el:>8.2f} {el/tref:>7.2f}x {pk:>8.2f} {str(bit):>6} {str(used):>13}"
+      f"   {el/_steps*1e3:>6.2f} ms/step")
     if not bit:
         fail.append(f"{tag}: not bit-exact vs gpu, max|d|={mad:.3e}")
     if not bit2:
