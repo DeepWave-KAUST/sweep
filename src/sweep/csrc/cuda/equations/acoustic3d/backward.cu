@@ -850,18 +850,30 @@ void run_bs_imaging(
     auto cpml = cpml_tensor.view();
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
+    // bs.last_two is never read anywhere in the backward -- the adjoint seeds
+    // are taken straight from p.u_last_two a few lines below. This used to pass
+    // {}, so the saver allocated its OWN {1,2,B,1,nz,ny,nx} FP32 two-wavefield
+    // buffer on every call; and on the staged (storage=cpu) path its options are
+    // HOST memory (saver.cuh:558, store_on_gpu ? gpu : pinned), so torch::zeros
+    // memset ~380 MB on the host every step. DD calls in once per time step, so
+    // this one line was ~20 ms/step of pure host stall -- the GPU idle with no
+    // kernel and no communication. forward.cu:189/194 has always passed
+    // p.last_two (bound, not allocated); the backward now does the same.
+    torch::Tensor last_two_scratch = (p.u_last_two.defined() && p.u_last_two.numel() > 0)
+        ? p.u_last_two
+        : torch::zeros({1, 2, B, 1, nz, ny, nx}, vp.options().dtype(torch::kFloat32));
     EffectiveBoundarySaver boundary_saver;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            {}, p.use_pinned_memory
+            last_two_scratch, p.use_pinned_memory
         );
     } else {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, {}, p.use_pinned_memory
+            true, true, 1, {}, p.boundary_gpu, last_two_scratch, p.use_pinned_memory
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
