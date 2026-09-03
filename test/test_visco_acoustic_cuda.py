@@ -175,14 +175,10 @@ def test_explicit_boundary_raises():
                       boundary=BoundaryOptions(storage="gpu"))))
 
 
-def test_rtm_runs_on_full_storage():
-    src, rec = _src_rec()
-    m = _models(False)
-    p = _prop(True, "full")
-    obs = p(_wav(), src, rec, models=m).detach()
-    syn, image, src_illum, rec_illum = p.rtm(_wav(), src, rec, obs, models=m)
-    assert torch.isfinite(image).all() and image.abs().max() > 0
-    assert torch.isfinite(src_illum).all()
+# ``test_rtm_runs_on_full_storage`` removed with the rtm() API itself
+# (295858c on this branch): solver.rtm() had no caller left, production RTM
+# runs forward+backward with compute_illumination, and no bit-exact gate ever
+# covered it.  The same commit deleted acoustic2d_rtm_layered_smoke.py.
 
 
 # --------------------------------------------------------------------------
