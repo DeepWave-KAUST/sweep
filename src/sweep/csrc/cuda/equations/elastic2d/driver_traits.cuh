@@ -10,10 +10,10 @@
 // elastic_vr2d) describe their deltas against this baseline; the properties
 // below are what "same as elastic2d" means:
 //   * constants: NDIM = 2, CKPT_NVAR = 15 (CKPT_COUNT_MSG / CKPT_RECURSIVE_COUNT_MSG), BS_NVAR = 5 (vx, vz, sxx, szz, sxz), CUT_MASK_BITS = 0xF (x_lo, x_hi, z_lo, z_hi);
-//   * ADJ_WF_COUNT = 15, RECON_WF_COUNT = 7 (RECON_LIST_DESC = [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]), N_VEL = 2, NEXT_V = true (imaging consumes the v(t+1) carriers);
+//   * ADJ_WF_COUNT = 15, RECON_WF_COUNT = 7 (RECON_LIST_DESC = [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]), N_VEL = 2, IMAGING_USES_NEXT_V = true (imaging consumes the v(t+1) carriers);
 //   * models: parse_models reads {vp, vs, rho} and derives mu = rho*vs^2 and lambda = rho*(vp^2 - 2*vs^2) as torch tensors kept alive in Models (kernels hold raw pointers into them);
 //   * State = Models + one SGradParam grad_ctx + launch/source/record configs + order + nx/nz/B; Workspace = ElasticAdjointWorkspaceTensor via init_adjoint_workspace(p.adjoint_workspace, vp, 2);
-//   * validate_forward / validate_backward and prep_adjoint / prep_adjoint_bs are no-ops (the adjoint buffers arrive Python-zeroed);
+//   * validate_forward / validate_backward and zero_adjoint_if_first_segment / zero_adjoint_if_first_segment_bs are no-ops (the adjoint buffers arrive Python-zeroed);
 //   * setup_ctx installs the per-edge free surface (set_per_edge(fs_faces, pad_lo, pad_hi)) and topo_rows / has_topo when p.has_topo;
 //   * init_aux_slabs = elastic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.allocate(pml_vals, 2);
 //   * allt_shape = (nt, 2, B, nz, nx): u_allt stores the velocities only (Vx, Vz);
@@ -23,20 +23,20 @@
 //   * save_boundary_fields = save_forward_2d_field for the five fields at offset -M (field index f, flag f == 4); save_last_state copies the five into last_two[0..4];
 //   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here) or alloc_grads zeros; signed_adjoint_sources = elastic_signed_adjoint_sources(adjoint_source, receiver_fields, 2);
 //   * bind_or_alloc_adjoint binds p.adjoint_wavefields or allocate(vp, 2);
-//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; select_forward_velocities reads u_forward[it] and u_forward[it + 1] (zero_velocity when it + 1 == nt);
-//   * undo_body_force (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source of the signed residual per receiver field;
-//   * undo_receiver_rho = sub_receiver_rho_grad_correction at velocity receivers (stress receivers skipped) with imaging halo M;
+//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; vel_ptrs_from_u_forward reads u_forward[it] and u_forward[it + 1] (zero_velocity when it + 1 == nt);
+//   * fix_rho_grad_at_sources (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source of the signed residual per receiver field;
+//   * fix_rho_grad_at_receivers = sub_receiver_rho_grad_correction at velocity receivers (stress receivers skipped) with imaging halo M;
 //   * image_standalone = LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS (it == 0 in full mode; every reverse it in the ckpt/recursive modes);
 //   * adjoint launch helpers: stress_adjoint_prepare (10 explicit imaging pointers) / stress_adjoint_apply / velocity_adjoint_prepare / velocity_adjoint_apply, with velocity_adjoint_half = the last two;
-//   * full_fused_step: the vp/vs/rho imaging is fused into the STRESS_ADJOINT_PREPARE launch, then STRESS_ADJOINT_APPLY, VELOCITY_ADJOINT_PREPARE, VELOCITY_ADJOINT_APPLY, and the receiver-rho fix (undo_receiver_rho) after the four launches;
+//   * full_mode_step: the vp/vs/rho imaging is fused into the STRESS_ADJOINT_PREPARE launch, then STRESS_ADJOINT_APPLY, VELOCITY_ADJOINT_PREPARE, VELOCITY_ADJOINT_APPLY, and the receiver-rho fix (fix_rho_grad_at_receivers) after the four launches;
 //   * plain_adjoint_step = the same four launches with all-null imaging pointers (ckpt/recursive reverse sweeps);
 //   * bs: ReconCarriers {fvx_prev, fvz_prev}; bind_or_alloc_recon takes the 7-tensor list (five fields bound with use_pml = false + two carriers) or allocate(vp, 2, false) + zero carriers;
 //   * seed_recon copies the five fields from u_last_two[0..4]; uninject_forward_source adds neg_forward_source at the source fields;
-//   * bs_phase1 order: STRESS_NOPML -> restore sxx/szz/sxz (fields 2..4, offset -M) -> STRESS_ADJOINT_PREPARE with the imaging fused (v(it) = for_view.v*, v(it+1) = carriers) -> undo_receiver_rho -> STRESS_ADJOINT_APPLY;
-//   * bs_phase2 order: VELOCITY_ADJOINT_PREPARE -> VELOCITY_ADJOINT_APPLY -> elastic_capture_strips_2d (restore strips into the carriers) -> VELOCITY_NOPML (carrier write of every computed cell, then the velocity update) -> restore vx/vz (fields 0..1, offset -M) -> prefetch_next_backward_chunk_if_needed;
+//   * bs_stress_half order: STRESS_NOPML -> restore sxx/szz/sxz (fields 2..4, offset -M) -> STRESS_ADJOINT_PREPARE with the imaging fused (v(it) = for_view.v*, v(it+1) = carriers) -> fix_rho_grad_at_receivers -> STRESS_ADJOINT_APPLY;
+//   * bs_velocity_half order: VELOCITY_ADJOINT_PREPARE -> VELOCITY_ADJOINT_APPLY -> elastic_capture_strips_2d (restore strips into the carriers) -> VELOCITY_NOPML (carrier write of every computed cell, then the velocity update) -> restore vx/vz (fields 0..1, offset -M) -> prefetch_next_backward_chunk_if_needed;
 //   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots; check_ckpt_aux_layout compares the m_vxx aux shapes;
-//   * seg buffers: alloc_seg_buffers = two zero tensors of shape (segment_len + 1, vp.size(0) * vp.size(1), 1, nz, nx) for vx / vz; capture_seg fills a slot, store_prev_segment keeps slot 1, seg_vel_ptrs picks now / next (next_segment_v past the end);
-//   * recursive: inject_sources_fwd_bw replays the forward source per source field; capture_velocities / carrier_vel_ptrs feed the imaging from the captured v(it) / v(it+1) pair.
+//   * seg buffers: alloc_seg_buffers = two zero tensors of shape (segment_len + 1, vp.size(0) * vp.size(1), 1, nz, nx) for vx / vz; save_seg_velocities fills a slot, export_seg_next_v keeps slot 1, vel_ptrs_from_seg picks now / next (next_segment_v past the end);
+//   * recursive: inject_forward_sources replays the forward source per source field; capture_velocities / vel_ptrs_from_carriers feed the imaging from the captured v(it) / v(it+1) pair.
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
@@ -86,7 +86,7 @@ struct Driver {
     static constexpr const char* CKPT_RECURSIVE_COUNT_MSG =
         "Elastic 2D recursive checkpointing expects 15 checkpoint tensors";
     static constexpr int N_VEL = 2;
-    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
+    static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Wavefield = ElasticWavefieldTensor;
     using WfView = ElasticWavefieldPointer;
@@ -301,9 +301,9 @@ struct Driver {
     // ===================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — sg_generic_backward (full storage),
     // per reverse it:
-    //   undo_body_force -> inject_residuals -> select_forward_velocities ->
-    //   it == 0: image_standalone + undo_receiver_rho, loop ends;
-    //   it  > 0: full_fused_step (imaging + receiver-rho + adjoint step).
+    //   fix_rho_grad_at_sources -> inject_residuals -> vel_ptrs_from_u_forward ->
+    //   it == 0: image_standalone + fix_rho_grad_at_receivers, loop ends;
+    //   it  > 0: full_mode_step (imaging + receiver-rho + adjoint step).
     // ===================================================================== //
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
@@ -314,7 +314,7 @@ struct Driver {
             wf.allocate(vp, 2);
     }
 
-    static void prep_adjoint(Wavefield&, bool) {}
+    static void zero_adjoint_if_first_segment(Wavefield&, bool) {}
 
     // Bind the model-gradient accumulators from Python when provided
     // (stepped), else fall back to internal zero allocation.  Bound tensors
@@ -351,7 +351,7 @@ struct Driver {
         const float* vz_next;
     };
 
-    static VelPtrs select_forward_velocities(const BackwardInput& p, int it,
+    static VelPtrs vel_ptrs_from_u_forward(const BackwardInput& p, int it,
                                              const torch::Tensor& zero_velocity)
     {
         VelPtrs v;
@@ -369,7 +369,7 @@ struct Driver {
     // raw injected amplitude; the true derivative has no such term.  Must run
     // BEFORE this step's receiver residuals are injected (see the hand-written
     // driver's comment about source+receiver-on-one-cell overshoot).
-    static void undo_body_force(const State& s, const SolverContext& solver,
+    static void fix_rho_grad_at_sources(const State& s, const SolverContext& solver,
                                 WfView& adj_view, const BackwardInput& p,
                                 const torch::Tensor& source_fields, int it,
                                 std::vector<torch::Tensor>& grads)
@@ -441,7 +441,7 @@ struct Driver {
     // Undo the just-injected receiver residual from this reverse step's rho
     // imaging, at every velocity-receiver cell.  Stress receivers have no rho
     // term to correct.
-    static void undo_receiver_rho(const State& s, const SolverContext& solver,
+    static void fix_rho_grad_at_receivers(const State& s, const SolverContext& solver,
                                   std::vector<torch::Tensor>& grads,
                                   const VelPtrs& v, const BackwardInput& p,
                                   const torch::Tensor& receiver_fields,
@@ -468,9 +468,9 @@ struct Driver {
         }
     }
 
-    // Adjoint-step launch helpers shared by full_fused_step,
-    // plain_adjoint_step (full / ckpt / recursive modes) and bs_phase1 /
-    // bs_phase2 (bs mode).  Bodies are the launch statements verbatim; the
+    // Adjoint-step launch helpers shared by full_mode_step,
+    // plain_adjoint_step (full / ckpt / recursive modes) and bs_stress_half /
+    // bs_velocity_half (bs mode).  Bodies are the launch statements verbatim; the
     // stress prepare takes the 10 imaging pointers explicitly (all-null for
     // plain_adjoint_step).
     static void stress_adjoint_prepare(const State& s, const SolverContext& solver,
@@ -565,7 +565,7 @@ struct Driver {
     // into the stress-adjoint-prepare kernel (it reads the un-mutated
     // post-source adjoint at entry, exactly what calculate_grad_elastic_nobs
     // would correlate), then run the remaining three adjoint launches.
-    static void full_fused_step(const State& s, const SolverContext& solver,
+    static void full_mode_step(const State& s, const SolverContext& solver,
                                 Wavefield& adjoint, Workspace& workspace,
                                 ElasticCPMLPointer cpml_view,
                                 const VelPtrs& v,
@@ -586,7 +586,7 @@ struct Driver {
         stress_adjoint_apply(s, solver, adj_view, workspace);
         velocity_adjoint_half(s, solver, adj_view, workspace, cpml_view);
 
-        undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
+        fix_rho_grad_at_receivers(s, solver, grads, v, p, receiver_fields, it,
                           adjoint_nsrc);
     }
 
@@ -609,11 +609,11 @@ struct Driver {
     // ===================================================================== //
     // [4] BACKWARD_BS — sg_generic_backward_bs, per reverse it (floor
     // max(it_lo, 1)):
-    //   undo_body_force / inject_residuals / uninject_forward_source
-    //   [inject_step] -> bs_phase1 -> bs_phase2;
+    //   fix_rho_grad_at_sources / inject_residuals / uninject_forward_source
+    //   [inject_step] -> bs_stress_half -> bs_velocity_half;
     //   before the loop (first segment): seed_recon from u_last_two.
     // ===================================================================== //
-    static void prep_adjoint_bs(Wavefield&, bool) {}
+    static void zero_adjoint_if_first_segment_bs(Wavefield&, bool) {}
 
     struct ReconCarriers {
         torch::Tensor fvx_prev, fvz_prev;
@@ -673,7 +673,7 @@ struct Driver {
 
     // bs phase 1: stress reconstruction + restore + gradient imaging + the
     // stress-adjoint half.
-    static void bs_phase1(const State& s, const SolverContext& solver,
+    static void bs_stress_half(const State& s, const SolverContext& solver,
                           WfView& for_view, WfView& adj_view,
                           Wavefield& adjoint, Workspace& workspace,
                           ElasticCPMLPointer cpml_view,
@@ -735,13 +735,13 @@ struct Driver {
         VelPtrs v{for_view.vx, for_view.vz,
                   carriers.fvx_prev.data_ptr<float>(),
                   carriers.fvz_prev.data_ptr<float>()};
-        undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it, adjoint_nsrc);
+        fix_rho_grad_at_receivers(s, solver, grads, v, p, receiver_fields, it, adjoint_nsrc);
         stress_adjoint_apply(s, solver, adj_view, workspace);
     }
 
     // bs phase 2: velocity-adjoint half, carrier capture, velocity
     // reconstruction + restore, prefetch.
-    static void bs_phase2(const State& s, const SolverContext& solver,
+    static void bs_velocity_half(const State& s, const SolverContext& solver,
                           WfView& for_view, Wavefield& adjoint,
                           Workspace& workspace, ElasticCPMLPointer cpml_view,
                           BoundaryRuntime& boundary_runtime,
@@ -812,16 +812,16 @@ struct Driver {
     // ===================================================================== //
     // [5] CKPT + RECURSIVE PLUMBING
     // sg_generic_backward_ckpt — per chunk (sg_backward_segment):
-    //   replay: velocity_substep / stress_substep / capture_seg /
-    //           inject_sources_fwd_bw;
-    //   reverse: undo_body_force / inject_residuals / seg_vel_ptrs /
-    //            image_standalone / undo_receiver_rho /
+    //   replay: velocity_substep / stress_substep / save_seg_velocities /
+    //           inject_forward_sources;
+    //   reverse: fix_rho_grad_at_sources / inject_residuals / vel_ptrs_from_seg /
+    //            image_standalone / fix_rho_grad_at_receivers /
     //            (it > 0) plain_adjoint_step;
-    //   after each chunk: store_prev_segment.
+    //   after each chunk: export_seg_next_v.
     // sg_generic_backward_recursive_ckpt — per reverse it:
-    //   undo_body_force / inject_residuals ->
+    //   fix_rho_grad_at_sources / inject_residuals ->
     //   sg_replay_forward_to_time (substeps + capture_velocities) ->
-    //   carrier_vel_ptrs / image_standalone / undo_receiver_rho /
+    //   vel_ptrs_from_carriers / image_standalone / fix_rho_grad_at_receivers /
     //   (it > 0) plain_adjoint_step.
     // ===================================================================== //
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
@@ -861,14 +861,14 @@ struct Driver {
         return {seg_vx, seg_vz};
     }
 
-    static void capture_seg(std::vector<torch::Tensor>& seg, Wavefield& forward,
+    static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,
                             int slot)
     {
         seg[0].select(0, slot).copy_(forward.vx_t);
         seg[1].select(0, slot).copy_(forward.vz_t);
     }
 
-    static void inject_sources_fwd_bw(const State& s, const SolverContext& solver,
+    static void inject_forward_sources(const State& s, const SolverContext& solver,
                                       WfView& for_view, const BackwardInput& p,
                                       const torch::Tensor& source_fields, int it)
     {
@@ -886,7 +886,7 @@ struct Driver {
         }
     }
 
-    static VelPtrs seg_vel_ptrs(const std::vector<torch::Tensor>& seg,
+    static VelPtrs vel_ptrs_from_seg(const std::vector<torch::Tensor>& seg,
                                 int now_offset, int next_offset,
                                 const std::vector<torch::Tensor>& next_segment_v)
     {
@@ -900,7 +900,7 @@ struct Driver {
         return v;
     }
 
-    static void store_prev_segment(std::vector<torch::Tensor>& prev,
+    static void export_seg_next_v(std::vector<torch::Tensor>& prev,
                                    const std::vector<torch::Tensor>& seg)
     {
         prev[0].copy_(seg[0].select(0, 1));
@@ -913,7 +913,7 @@ struct Driver {
         v[1].copy_(forward.vz_t);
     }
 
-    static VelPtrs carrier_vel_ptrs(const std::vector<torch::Tensor>& current_v,
+    static VelPtrs vel_ptrs_from_carriers(const std::vector<torch::Tensor>& current_v,
                                     const std::vector<torch::Tensor>& next_v)
     {
         VelPtrs v;

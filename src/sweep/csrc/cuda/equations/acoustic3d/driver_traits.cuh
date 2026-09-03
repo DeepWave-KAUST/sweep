@@ -60,7 +60,7 @@ struct Driver {
     static constexpr int RECON_WF_COUNT = 3;
     static constexpr bool HAS_FUSED_FULL_IMG = true;
     static constexpr bool ADCIG_IN_FULL_MODES = false;
-    static constexpr bool HAS_BS_T0_TAIL = true;
+    static constexpr bool BS_HAS_IT0_ADJOINT_TAIL = true;
     using Wavefield = AcousticWavefieldTensor;
     using CPML = AcousticCPMLTensor;
 
@@ -154,7 +154,7 @@ struct Driver {
     // ===================================================================== //
     // [2] FORWARD — generic_forward, per it in [it_begin, it_end):
     //   launch_step_range -> save_boundary_fwd -> inject_source_fwd ->
-    //   record -> end_of_step -> capture_allt -> <checkpoint save>;
+    //   record -> rotate_buffers -> capture_allt -> <checkpoint save>;
     //   after the loop: save_last_state.
     // ===================================================================== //
 
@@ -256,7 +256,7 @@ struct Driver {
         );
     }
 
-    static void end_of_step(Wavefield& wf) { wf.swap_pml(); }
+    static void rotate_buffers(Wavefield& wf) { wf.swap_pml(); }
 
     static void capture_allt(torch::Tensor&, Wavefield&, int) {}
 
@@ -268,7 +268,7 @@ struct Driver {
 
     // ===================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — generic_backward, per reverse it:
-    //   adjoint_step -> inject_adjoint_source -> post_adjoint ->
+    //   adjoint_step -> inject_adjoint_source -> rotate_adjoint_buffers ->
     //   accumulate_source_grad -> image_step (fused here, so image_step is
     //   skipped in-loop except for RTM; one trailing image_step at it == 0
     //   after the loop).
@@ -299,7 +299,7 @@ struct Driver {
         out.adcig = illumination.adcig;
     }
 
-    static RTMOutput* full_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    static RTMOutput* rtm_out_full(const BackwardInput& p, RTMOutput& illumination)
     {
         return (p.compute_illumination ||
                 (ADCIG_IN_FULL_MODES && p.compute_adcig))
@@ -311,7 +311,7 @@ struct Driver {
         return grads[1].data_ptr<float>();
     }
 
-    static const float* full_store_ptr(const BackwardInput& p, int it)
+    static const float* u_forward_ptr(const BackwardInput& p, int it)
     {
         return p.u_forward[it].data_ptr<float>();
     }
@@ -358,7 +358,7 @@ struct Driver {
         );
     }
 
-    static void post_adjoint(Wavefield& wf) { wf.swap_aux(); }
+    static void rotate_adjoint_buffers(Wavefield& wf) { wf.swap_aux(); }
 
     static void accumulate_source_grad(const State& s, const SolverContext& ctx,
                                        Wavefield& adjoint, const BackwardInput& p,
@@ -406,14 +406,14 @@ struct Driver {
     // ===================================================================== //
     // [4] BACKWARD_BS — generic_backward_bs, per reverse it (floor
     // max(max(it_lo, 1), bs_stop)):
-    //   adjoint_step / inject_adjoint_source / post_adjoint /
+    //   adjoint_step / inject_adjoint_source / rotate_adjoint_buffers /
     //   accumulate_source_grad (the four from section [3]) ->
-    //   bs_reverse_step -> bs_image_step;
+    //   bs_recon_step -> bs_rtm_tap;
     //   before the loop (first segment): seed_reconstruction; after the loop
-    //   (HAS_BS_T0_TAIL): the four adjoint hooks once at it == 0.
+    //   (BS_HAS_IT0_ADJOINT_TAIL): the four adjoint hooks once at it == 0.
     // ===================================================================== //
 
-    static RTMOutput* bs_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    static RTMOutput* rtm_out_bs(const BackwardInput& p, RTMOutput& illumination)
     {
         return (p.compute_illumination || p.compute_adcig)
             ? &illumination : nullptr;
@@ -445,7 +445,7 @@ struct Driver {
     // 3-D bs reverse step: NOPML(f_this) -> strip restore -> u_tt gradient +
     // rtm + ADCIG imaging (BEFORE the forward source injection — the 2-D twin
     // images after injection + swap) -> inject -> swap.
-    static void bs_reverse_step(const State& s, const SolverContext& ctx,
+    static void bs_recon_step(const State& s, const SolverContext& ctx,
                                 Wavefield& forward, Wavefield& adjoint,
                                 BoundaryRuntime& boundary_runtime,
                                 const GeneralBoundaryPointer& bs, int save_width,
@@ -544,16 +544,16 @@ struct Driver {
         forward.swap();
     }
 
-    static void bs_image_step(const State& /*s*/, const SolverContext& /*ctx*/,
+    static void bs_rtm_tap(const State& /*s*/, const SolverContext& /*ctx*/,
                               Wavefield& /*forward*/, Wavefield& /*adjoint*/,
                               RTMOutput& /*illumination*/, bool /*compute_illumination*/)
     {
-        // no-op: 3-D images inside bs_reverse_step, before the injection.
+        // no-op: 3-D images inside bs_recon_step, before the injection.
     }
 
     // ===================================================================== //
     // [5] CKPT + RECURSIVE PLUMBING — generic_backward_ckpt, per chunk:
-    //   replay: replay_step -> inject_source_fwd -> swap_recon;
+    //   replay: replay_step -> inject_source_fwd -> rotate_recon_buffers;
     //   reverse: the five full-mode hooks of section [3].
     // generic_backward_recursive_ckpt bisects each ckpt segment; a leaf runs
     // one replay triple, then the reverse-five with imaging fed from the
@@ -613,7 +613,7 @@ struct Driver {
         );
     }
 
-    static void swap_recon(Wavefield& wf) { wf.swap(); }
+    static void rotate_recon_buffers(Wavefield& wf) { wf.swap(); }
 };
 
 } // namespace acoustic3d

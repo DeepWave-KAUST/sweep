@@ -72,7 +72,7 @@ struct Driver {
     static constexpr const char* RECON_LIST_DESC =
         "(the full 18-tensor DAS-Mu wavefield list)";
     static constexpr int N_VEL = 2;
-    static constexpr bool NEXT_V = true;   // imaging consumes v(t+1) carriers
+    static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
 
     using Wavefield = DasMuWavefieldTensor2D;
     using CPML = ElasticCPMLTensor;
@@ -303,14 +303,14 @@ struct Driver {
 
     // =================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — sg_generic_backward, per reverse it:
-    //   undo_body_force / inject_residuals / select_forward_velocities /
-    //   it == 0: image_standalone + undo_receiver_rho, loop ends;
-    //   it  > 0: full_fused_step (imaging + receiver-rho + adjoint step).
+    //   fix_rho_grad_at_sources / inject_residuals / vel_ptrs_from_u_forward /
+    //   it == 0: image_standalone + fix_rho_grad_at_receivers, loop ends;
+    //   it  > 0: full_mode_step (imaging + receiver-rho + adjoint step).
     // =================================================================== //
 
     // Adjoint-step halves shared by plain_adjoint_step (full / ckpt /
     // recursive modes run both back to back) and the BS split
-    // (bs_phase1 -> stress_adjoint_half, bs_phase2 -> velocity_adjoint_half).
+    // (bs_stress_half -> stress_adjoint_half, bs_velocity_half -> velocity_adjoint_half).
 private:
     static void stress_adjoint_half(const State& s, const SolverContext& solver,
                                     Wavefield& adjoint, Workspace& workspace,
@@ -382,7 +382,7 @@ public:
             wf.allocate(vp, true);
     }
 
-    static void prep_adjoint(Wavefield&, bool) {}
+    static void zero_adjoint_if_first_segment(Wavefield&, bool) {}
 
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
@@ -414,7 +414,7 @@ public:
         const float* vz_next;
     };
 
-    static VelPtrs select_forward_velocities(const BackwardInput& p, int it,
+    static VelPtrs vel_ptrs_from_u_forward(const BackwardInput& p, int it,
                                              const torch::Tensor& zero_velocity)
     {
         VelPtrs v;
@@ -427,7 +427,7 @@ public:
         return v;
     }
 
-    static void undo_body_force(const State& s, const SolverContext& solver,
+    static void fix_rho_grad_at_sources(const State& s, const SolverContext& solver,
                                 WfView& adj_view, const BackwardInput& p,
                                 const torch::Tensor& source_fields, int it,
                                 std::vector<torch::Tensor>& grads)
@@ -472,7 +472,7 @@ public:
         }
     }
 
-    // (image_standalone / undo_receiver_rho / plain_adjoint_step are also
+    // (image_standalone / fix_rho_grad_at_receivers / plain_adjoint_step are also
     // fired by the ckpt/recursive backward, section [5])
     static void image_standalone(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const VelPtrs& v,
@@ -498,7 +498,7 @@ public:
         );
     }
 
-    static void undo_receiver_rho(const State& s, const SolverContext& solver,
+    static void fix_rho_grad_at_receivers(const State& s, const SolverContext& solver,
                                   std::vector<torch::Tensor>& grads,
                                   const VelPtrs& v, const BackwardInput& p,
                                   const torch::Tensor& receiver_fields,
@@ -527,7 +527,7 @@ public:
 
     // No grad fusion: standalone imaging, then the receiver-rho correction,
     // THEN the adjoint step -- the hand-written order.
-    static void full_fused_step(const State& s, const SolverContext& solver,
+    static void full_mode_step(const State& s, const SolverContext& solver,
                                 Wavefield& adjoint, Workspace& workspace,
                                 ElasticCPMLPointer cpml_view,
                                 const VelPtrs& v,
@@ -538,7 +538,7 @@ public:
     {
         auto adj = view(adjoint);
         image_standalone(s, solver, adj, v, grads);
-        undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it,
+        fix_rho_grad_at_receivers(s, solver, grads, v, p, receiver_fields, it,
                           adjoint_nsrc);
         plain_adjoint_step(s, solver, adjoint, workspace, cpml_view);
     }
@@ -553,14 +553,14 @@ public:
 
     // =================================================================== //
     // [4] BACKWARD_BS — sg_generic_backward_bs, per reverse it:
-    //   undo_body_force / inject_residuals / uninject_forward_source /
-    //   bs_phase1 (stress recon NOPML + strip restore + imaging +
-    //   receiver-rho + stress-adjoint half) / bs_phase2 (velocity-adjoint
+    //   fix_rho_grad_at_sources / inject_residuals / uninject_forward_source /
+    //   bs_stress_half (stress recon NOPML + strip restore + imaging +
+    //   receiver-rho + stress-adjoint half) / bs_velocity_half (velocity-adjoint
     //   half + carrier capture + velocity recon NOPML + strip restore +
     //   prefetch); before the loop (first segment): seed_recon.
     // =================================================================== //
 
-    static void prep_adjoint_bs(Wavefield&, bool) {}
+    static void zero_adjoint_if_first_segment_bs(Wavefield&, bool) {}
 
     struct ReconCarriers {
         torch::Tensor fvx_prev, fvz_prev;
@@ -616,7 +616,7 @@ public:
         }
     }
 
-    static void bs_phase1(const State& s, const SolverContext& solver,
+    static void bs_stress_half(const State& s, const SolverContext& solver,
                           WfView& for_view, WfView& adj_view,
                           Wavefield& adjoint, Workspace& workspace,
                           ElasticCPMLPointer cpml_view,
@@ -676,7 +676,7 @@ public:
         VelPtrs v{for_view.das.vx, for_view.das.vz,
                   carriers.fvx_prev.data_ptr<float>(),
                   carriers.fvz_prev.data_ptr<float>()};
-        undo_receiver_rho(s, solver, grads, v, p, receiver_fields, it, adjoint_nsrc);
+        fix_rho_grad_at_receivers(s, solver, grads, v, p, receiver_fields, it, adjoint_nsrc);
 
         // Stress-adjoint half (the hand-written monolithic runs all four
         // adjoint launches back to back; the p1/p2 split reproduces exactly
@@ -684,7 +684,7 @@ public:
         stress_adjoint_half(s, solver, adjoint, workspace, cpml_view);
     }
 
-    static void bs_phase2(const State& s, const SolverContext& solver,
+    static void bs_velocity_half(const State& s, const SolverContext& solver,
                           WfView& for_view, Wavefield& adjoint,
                           Workspace& workspace, ElasticCPMLPointer cpml_view,
                           BoundaryRuntime& boundary_runtime,
@@ -729,14 +729,14 @@ public:
 
     // =================================================================== //
     // [5] CKPT + RECURSIVE PLUMBING — sg_generic_backward_ckpt, per chunk:
-    //   replay: velocity_substep / stress_substep / capture_seg /
-    //     inject_sources_fwd_bw;
-    //   reverse: undo_body_force / inject_residuals / seg_vel_ptrs /
-    //     image_standalone / undo_receiver_rho / (it > 0) plain_adjoint_step;
-    //   after each chunk: store_prev_segment.
+    //   replay: velocity_substep / stress_substep / save_seg_velocities /
+    //     inject_forward_sources;
+    //   reverse: fix_rho_grad_at_sources / inject_residuals / vel_ptrs_from_seg /
+    //     image_standalone / fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step;
+    //   after each chunk: export_seg_next_v.
     //   sg_generic_backward_recursive_ckpt, per reverse it: replay with
-    //   capture_velocities, then carrier_vel_ptrs / image_standalone /
-    //   undo_receiver_rho / (it > 0) plain_adjoint_step.
+    //   capture_velocities, then vel_ptrs_from_carriers / image_standalone /
+    //   fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step.
     // =================================================================== //
 
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
@@ -768,14 +768,14 @@ public:
         return {seg_vx, seg_vz};
     }
 
-    static void capture_seg(std::vector<torch::Tensor>& seg, Wavefield& forward,
+    static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,
                             int slot)
     {
         seg[0].select(0, slot).copy_(forward.vx_t);
         seg[1].select(0, slot).copy_(forward.vz_t);
     }
 
-    static void inject_sources_fwd_bw(const State& s, const SolverContext& solver,
+    static void inject_forward_sources(const State& s, const SolverContext& solver,
                                       WfView& for_view, const BackwardInput& p,
                                       const torch::Tensor& source_fields, int it)
     {
@@ -793,7 +793,7 @@ public:
         }
     }
 
-    static VelPtrs seg_vel_ptrs(const std::vector<torch::Tensor>& seg,
+    static VelPtrs vel_ptrs_from_seg(const std::vector<torch::Tensor>& seg,
                                 int now_offset, int next_offset,
                                 const std::vector<torch::Tensor>& next_segment_v)
     {
@@ -807,7 +807,7 @@ public:
         return v;
     }
 
-    static void store_prev_segment(std::vector<torch::Tensor>& prev,
+    static void export_seg_next_v(std::vector<torch::Tensor>& prev,
                                    const std::vector<torch::Tensor>& seg)
     {
         prev[0].copy_(seg[0].select(0, 1));
@@ -820,7 +820,7 @@ public:
         v[1].copy_(forward.vz_t);
     }
 
-    static VelPtrs carrier_vel_ptrs(const std::vector<torch::Tensor>& current_v,
+    static VelPtrs vel_ptrs_from_carriers(const std::vector<torch::Tensor>& current_v,
                                     const std::vector<torch::Tensor>& next_v)
     {
         VelPtrs v;

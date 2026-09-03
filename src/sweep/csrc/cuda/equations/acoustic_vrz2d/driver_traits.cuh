@@ -9,20 +9,20 @@
 // not listed here is the same as in acoustic2d/driver_traits.cuh):
 //   * two models, [vp, z] (make_state checks the count); State keeps z and the derived inv_z = 1/z alive as tensors beside their raw pointers;
 //   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
-//   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): post_adjoint rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
-//   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, HAS_BS_T0_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
+//   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): rotate_adjoint_buffers rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
+//   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
 //   * BwdWorkspace is non-empty: neg_adjoint_source, the time-invariant adjoint coefficients C0/Cx/Cz, and the split-gradient scratch c_x/c_z/e_x/e_z; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
 //   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
 //   * setup_ctx and init_aux_slabs are empty: no per-edge free surface, no topography, legacy full-grid CPML aux;
-//   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (end_of_step); the in-kernel u_thist stays disabled (false, nullptr);
+//   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (rotate_buffers); the in-kernel u_thist stays disabled (false, nullptr);
 //   * save_width = M + 1 regardless of abcn; boundary save/restore offset -M (strips sit M inside the pad) instead of 0;
 //   * launch_step_range refuses sub-ranges (the kernels ignore ctx.x_base / x_limit), so there are no phase-split strips and no air-clear prepass;
-//   * grads = the two model gradients {grad_vp, grad_z} (grads_out slot 0, the wavelet, is unused): no grad_wavelet (accumulate_source_grad is empty), no illumination/ADCIG (full_rtm_gate / bs_rtm_gate return nullptr, fused_grad_ptr is nullptr, bs_image_step is empty, pack_outputs sets grads only);
-//   * full_store_ptr = the u slice u_forward[it][0];
+//   * grads = the two model gradients {grad_vp, grad_z} (grads_out slot 0, the wavelet, is unused): no grad_wavelet (accumulate_source_grad is empty), no illumination/ADCIG (rtm_out_full / rtm_out_bs return nullptr, fused_grad_ptr is nullptr, bs_rtm_tap is empty, pack_outputs sets grads only);
+//   * u_forward_ptr = the u slice u_forward[it][0];
 //   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (ws.neg_adjoint_source);
 //   * image_step = CALCULATE_GRAD_VRZ2D_AUTO (two gradients, split scratch from the workspace; returns early without grads), no RTM kernel;
 //   * seed_reconstruction also zeroes u_next, and its set_boundary_zeros calls do not pass the cut_mask;
-//   * bs_reverse_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on the post-swap u_now (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
+//   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on the post-swap u_now (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
 //   * no ckpt/recursive hooks (section [5] is empty): backward.cu keeps the hand-written chunk/recursive checkpoint backward.
 //
 // What the skeleton ADDS for this equation (dormant on legacy calls, all
@@ -85,7 +85,7 @@ struct Driver {
     static constexpr int RECON_WF_COUNT = 3;
     static constexpr bool ADCIG_IN_FULL_MODES = false;   // no RTM/ADCIG kernels
     static constexpr bool HAS_FUSED_FULL_IMG = false;    // per-step grad, no lag fusion
-    static constexpr bool HAS_BS_T0_TAIL = false;        // bs floor is it == 1
+    static constexpr bool BS_HAS_IT0_ADJOINT_TAIL = false;        // bs floor is it == 1
 
     using Wavefield = AcousticWavefieldTensor;
     using CPML = AcousticCPMLTensor;
@@ -241,7 +241,7 @@ struct Driver {
     // ===================================================================== //
     // [2] FORWARD — generic_forward, per it in [it_begin, it_end):
     //     launch_step_range -> save_boundary_fwd -> inject_source_fwd ->
-    //     record -> end_of_step -> capture_allt; after the loop:
+    //     record -> rotate_buffers -> capture_allt; after the loop:
     //     save_last_state.
     // ===================================================================== //
 
@@ -336,7 +336,7 @@ struct Driver {
         );
     }
 
-    static void end_of_step(Wavefield& wf) { wf.swap_pml(); }
+    static void rotate_buffers(Wavefield& wf) { wf.swap_pml(); }
 
     static void capture_allt(torch::Tensor& u_allt, Wavefield& wf, int it)
     {
@@ -356,7 +356,7 @@ struct Driver {
 
     // ===================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — generic_backward, per reverse it:
-    //     adjoint_step -> inject_adjoint_source -> post_adjoint ->
+    //     adjoint_step -> inject_adjoint_source -> rotate_adjoint_buffers ->
     //     accumulate_source_grad -> image_step.
     // ===================================================================== //
 
@@ -385,13 +385,13 @@ struct Driver {
         out.grads = {grads[0], grads[1]};   // {grad_vp, grad_z}
     }
 
-    static RTMOutput* full_rtm_gate(const BackwardInput&, RTMOutput&)
+    static RTMOutput* rtm_out_full(const BackwardInput&, RTMOutput&)
     { return nullptr; }
 
     static float* fused_grad_ptr(std::vector<torch::Tensor>&)
     { return nullptr; }   // HAS_FUSED_FULL_IMG == false: never consulted
 
-    static const float* full_store_ptr(const BackwardInput& p, int it)
+    static const float* u_forward_ptr(const BackwardInput& p, int it)
     {
         return p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
     }
@@ -446,7 +446,7 @@ struct Driver {
         );
     }
 
-    static void post_adjoint(Wavefield& wf)
+    static void rotate_adjoint_buffers(Wavefield& wf)
     {
         wf.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
     }
@@ -486,12 +486,12 @@ struct Driver {
 
     // ===================================================================== //
     // [4] BACKWARD_BS — generic_backward_bs, per reverse it: the four
-    //     shared adjoint hooks of section [3], then bs_reverse_step ->
-    //     bs_image_step; before the loop (first segment):
+    //     shared adjoint hooks of section [3], then bs_recon_step ->
+    //     bs_rtm_tap; before the loop (first segment):
     //     seed_reconstruction from u_last_two.
     // ===================================================================== //
 
-    static RTMOutput* bs_rtm_gate(const BackwardInput&, RTMOutput&)
+    static RTMOutput* rtm_out_bs(const BackwardInput&, RTMOutput&)
     { return nullptr; }
 
     static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
@@ -527,7 +527,7 @@ struct Driver {
     // VRZ bs reverse order: NOPML step, forward-source injection, strip
     // restore, swap, THEN the gradient on the post-swap u_now (both operands
     // co-resident at time it).
-    static void bs_reverse_step(const State& s, const SolverContext& ctx,
+    static void bs_recon_step(const State& s, const SolverContext& ctx,
                                 Wavefield& forward, Wavefield& adjoint,
                                 BoundaryRuntime& boundary_runtime,
                                 const GeneralBoundaryPointer& bs, int save_width,
@@ -592,7 +592,7 @@ struct Driver {
         );
     }
 
-    static void bs_image_step(const State&, const SolverContext&,
+    static void bs_rtm_tap(const State&, const SolverContext&,
                               Wavefield&, Wavefield&, RTMOutput&, bool)
     {}   // no illumination/ADCIG kernels
 

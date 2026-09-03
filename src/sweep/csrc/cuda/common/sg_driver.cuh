@@ -38,35 +38,35 @@
 //   after the loop: save_last_state (final 5-field snapshot for backward_bs)
 //
 // sg_generic_backward (full storage) — per reverse it:
-//   undo_body_force            body-force rho correction (pre-residual)
+//   fix_rho_grad_at_sources    body-force rho correction (pre-residual)
 //   inject_residuals           signed residuals into the adjoint fields
-//   select_forward_velocities  v(it) / v(it+1) pointers from u_forward
-//   it == 0: image_standalone + undo_receiver_rho, loop ends
-//   it  > 0: full_fused_step   imaging + receiver-rho + adjoint step, in
+//   vel_ptrs_from_u_forward    v(it) / v(it+1) pointers from u_forward
+//   it == 0: image_standalone + fix_rho_grad_at_receivers, loop ends
+//   it  > 0: full_mode_step    imaging + receiver-rho + adjoint step, in
 //                              the equation's exact fused order
 //
 // sg_generic_backward_bs — per reverse it, floor max(it_lo, 1):
-//   undo_body_force / inject_residuals / uninject_forward_source  [inject_step]
-//   bs_phase1                  stress recon (NOPML) + strip restore +
+//   fix_rho_grad_at_sources / inject_residuals / uninject_forward_source  [inject_step]
+//   bs_stress_half             stress recon (NOPML) + strip restore +
 //                              imaging + receiver-rho + stress-adjoint half
-//   bs_phase2                  velocity-adjoint half + carrier capture +
+//   bs_velocity_half           velocity-adjoint half + carrier capture +
 //                              velocity recon (NOPML) + strip restore + prefetch
 //   before the loop (first segment): seed_recon from u_last_two.
 //   (DD runs step_phase 3 = injections, then 1, then 2 — same op order.)
 //
 // sg_generic_backward_ckpt — per chunk (sg_backward_segment):
-//   replay:  velocity_substep / stress_substep / capture_seg /
-//            inject_sources_fwd_bw
-//   reverse: undo_body_force / inject_residuals / seg_vel_ptrs /
-//            image_standalone / undo_receiver_rho /
+//   replay:  velocity_substep / stress_substep / save_seg_velocities /
+//            inject_forward_sources
+//   reverse: fix_rho_grad_at_sources / inject_residuals / vel_ptrs_from_seg /
+//            image_standalone / fix_rho_grad_at_receivers /
 //            (it > 0) plain_adjoint_step
-//   after each chunk: store_prev_segment hands v(start+1) to the older chunk.
+//   after each chunk: export_seg_next_v hands v(start+1) to the older chunk.
 //
 // sg_generic_backward_recursive_ckpt — per reverse it:
-//   undo_body_force / inject_residuals
+//   fix_rho_grad_at_sources / inject_residuals
 //   sg_replay_forward_to_time: velocity/stress substeps + capture_velocities
-//                              (NEXT_V eqs also capture v at it+1)
-//   carrier_vel_ptrs / image_standalone / undo_receiver_rho /
+//                              (IMAGING_USES_NEXT_V eqs also capture v at it+1)
+//   vel_ptrs_from_carriers / image_standalone / fix_rho_grad_at_receivers /
 //   (it > 0) plain_adjoint_step
 // ---------------------------------------------------------------------------
 #pragma once
@@ -447,7 +447,7 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     // A continuation segment must keep the carried adjoint state; the 3-D
     // twin zeroes it on the FIRST segment only (2-D relies on Python-zeroed
     // buffers and no-ops here).
-    Eq::prep_adjoint(adjoint, first_segment);
+    Eq::zero_adjoint_if_first_segment(adjoint, first_segment);
 
     auto adj_view = Eq::view(adjoint);
 
@@ -471,18 +471,18 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     // it_hi == nt and it_lo == 0 without DD, so this is dev's full
     // reverse loop verbatim in the single-domain case.
     for (int it = it_hi - 1; it >= it_lo; --it) {
-        Eq::undo_body_force(state, solver, adj_view, p, source_fields, it, grads);
+        Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
                              adj_source_signed, it, adjoint_nsrc);
 
         typename Eq::VelPtrs vptrs =
-            Eq::select_forward_velocities(p, it, zero_velocity);
+            Eq::vel_ptrs_from_u_forward(p, it, zero_velocity);
 
         // Reverse step 0 has no adjoint apply kernel, so its gradient imaging
         // cannot be folded — emit it as a standalone calculate_grad pass.
         if (it == 0) {
             Eq::image_standalone(state, solver, adj_view, vptrs, grads);
-            Eq::undo_receiver_rho(state, solver, grads, vptrs, p,
+            Eq::fix_rho_grad_at_receivers(state, solver, grads, vptrs, p,
                                   receiver_fields, it, adjoint_nsrc);
             continue;
         }
@@ -492,7 +492,7 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
         // after; das_mu images standalone, corrects rho, THEN steps the
         // adjoint.  The receiver-rho correction position is bit-load-bearing,
         // so the whole compound lives in the hook.
-        Eq::full_fused_step(state, solver, adjoint, workspace, cpml_view,
+        Eq::full_mode_step(state, solver, adjoint, workspace, cpml_view,
                             vptrs, grads, p, receiver_fields, it, adjoint_nsrc);
     }
 
@@ -503,9 +503,9 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
 // ---- sg_generic_backward_bs ----
 // Persistent boundary-saving backward runner: prologue once in the
 // constructor, run(bw_it_begin, bw_it_end, step_phase) is the reverse loop.
-// The first-segment hooks (prep_adjoint_bs, seed_recon) stay in run() gated
+// The first-segment hooks (zero_adjoint_if_first_segment_bs, seed_recon) stay in run() gated
 // on that run's range, exactly like the hand-written per-call gating.
-// prep_adjoint_bs runs at the head of run() instead of right after the
+// zero_adjoint_if_first_segment_bs runs at the head of run() instead of right after the
 // adjoint bind: every construction op in between touches other tensors
 // only, so the value sequence is identical.  Reuse (a second run()) requires
 // gpu-direct boundary storage.
@@ -627,7 +627,7 @@ public:
         // Equations whose hand-written backward_bs zeroed the adjoint state after
         // binding hook it here (FIRST segment only — a continuation segment must
         // keep the carried adjoint state); the rest no-op.
-        Eq::prep_adjoint_bs(adjoint, first_segment);
+        Eq::zero_adjoint_if_first_segment_bs(adjoint, first_segment);
 
         // Seed the reverse reconstruction from the saved last snapshot — FIRST
         // segment only (and not on a phase-2 re-entry).  In phased mode the seed
@@ -643,7 +643,7 @@ public:
         // body-force source-cell rho correction, signed receiver residuals,
         // reconstruction un-injection of the forward source.
         auto inject_step = [&](int jt) {
-            Eq::undo_body_force(*state, solver, adj_view, p, source_fields, jt, grads);
+            Eq::fix_rho_grad_at_sources(*state, solver, adj_view, p, source_fields, jt, grads);
             Eq::inject_residuals(*state, solver, adj_view, p, receiver_fields,
                                  adj_source_signed, jt, adjoint_nsrc);
             Eq::uninject_forward_source(*state, solver, for_view, p, source_fields,
@@ -661,12 +661,12 @@ public:
                 continue;
 
             if (do_p1)
-                Eq::bs_phase1(*state, solver, for_view, adj_view, adjoint, *workspace,
+                Eq::bs_stress_half(*state, solver, for_view, adj_view, adjoint, *workspace,
                               cpml_view, *boundary_runtime, bs, save_width,
                               grads, carriers, p, receiver_fields, it, adjoint_nsrc);
 
             if (do_p2)
-                Eq::bs_phase2(*state, solver, for_view, adjoint, *workspace, cpml_view,
+                Eq::bs_velocity_half(*state, solver, for_view, adjoint, *workspace, cpml_view,
                               *boundary_runtime, bs, save_width, carriers, forward,
                               it, (int)p.nt);
         }
@@ -743,31 +743,31 @@ void sg_backward_segment(
 
     checkpoint_runtime.copy_state(forward.state_tensors(), start_state.state_tensors());
 
-    Eq::capture_seg(seg, forward, 0);
+    Eq::save_seg_velocities(seg, forward, 0);
     auto for_view = Eq::view(forward);
 
     for (int it = start; it < end; ++it) {
         Eq::velocity_substep(state, for_view, cpml_view, solver);
         Eq::stress_substep(state, for_view, cpml_view, solver, nullptr);
-        Eq::capture_seg(seg, forward, it - start + 1);
-        Eq::inject_sources_fwd_bw(state, solver, for_view, p, source_fields, it);
+        Eq::save_seg_velocities(seg, forward, it - start + 1);
+        Eq::inject_forward_sources(state, solver, for_view, p, source_fields, it);
     }
 
     auto adj_view = Eq::view(adjoint);
     for (int it = end - 1; it >= start; --it) {
-        Eq::undo_body_force(state, solver, adj_view, p, source_fields, it, grads);
+        Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
                              adj_source_signed, it, adjoint_nsrc);
 
         const int now_offset = it - start + 1;
         const int next_offset = now_offset + 1;
-        typename Eq::VelPtrs vptrs = Eq::seg_vel_ptrs(
+        typename Eq::VelPtrs vptrs = Eq::vel_ptrs_from_seg(
             seg, now_offset,
             next_offset <= segment_len ? next_offset : -1,
             next_segment_v);
 
         Eq::image_standalone(state, solver, adj_view, vptrs, grads);
-        Eq::undo_receiver_rho(state, solver, grads, vptrs, p,
+        Eq::fix_rho_grad_at_receivers(state, solver, grads, vptrs, p,
                               receiver_fields, it, adjoint_nsrc);
 
         if (it == 0)
@@ -776,7 +776,7 @@ void sg_backward_segment(
         Eq::plain_adjoint_step(state, solver, adjoint, workspace, cpml_view);
     }
 
-    Eq::store_prev_segment(prev_segment_next_v, seg);
+    Eq::export_seg_next_v(prev_segment_next_v, seg);
 }
 
 template <class Eq>
@@ -832,11 +832,11 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     typename Eq::Wavefield start_state;
     Eq::alloc_recursive_start_state(start_state, p, vp);
     Eq::check_ckpt_aux_layout(start_state, adjoint);
-    // Equations whose imaging has no velocity(t+1) term (NEXT_V == false)
-    // skip the cross-segment velocity carriers entirely; their seg_vel_ptrs
+    // Equations whose imaging has no velocity(t+1) term (IMAGING_USES_NEXT_V == false)
+    // skip the cross-segment velocity carriers entirely; their vel_ptrs_from_seg
     // hands the imaging null next-pointers instead.
     std::vector<torch::Tensor> next_segment_v, prev_segment_next_v;
-    for (int c = 0; Eq::NEXT_V && c < Eq::N_VEL; ++c) {
+    for (int c = 0; Eq::IMAGING_USES_NEXT_V && c < Eq::N_VEL; ++c) {
         next_segment_v.push_back(torch::zeros_like(vp));
         prev_segment_next_v.push_back(torch::zeros_like(vp));
     }
@@ -855,7 +855,7 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
                                 checkpoint_runtime, start, end, cpml_view, solver,
                                 source_fields, receiver_fields,
                                 next_segment_v, grads, prev_segment_next_v);
-        for (int c = 0; Eq::NEXT_V && c < Eq::N_VEL; ++c)
+        for (int c = 0; Eq::IMAGING_USES_NEXT_V && c < Eq::N_VEL; ++c)
             next_segment_v[c].copy_(prev_segment_next_v[c]);
     }
 
@@ -895,10 +895,10 @@ void sg_replay_forward_to_time(
     const torch::Tensor& source_fields)
 {
     // next_v must be zero when target_index + 1 == nt (never captured below).
-    // NEXT_V == false equations skip both zeroings like their hand-written
+    // IMAGING_USES_NEXT_V == false equations skip both zeroings like their hand-written
     // replay did: next_v is empty and current_v is always overwritten at the
     // capture.
-    if (Eq::NEXT_V) {
+    if (Eq::IMAGING_USES_NEXT_V) {
         for (auto& t : current_v) t.zero_();
         for (auto& t : next_v) t.zero_();
     }
@@ -922,7 +922,7 @@ void sg_replay_forward_to_time(
             Eq::capture_velocities(current_v, forward);
             // No velocity(t+1) imaging term: stop before this step's source
             // injection, exactly like the hand-written replay.
-            if (!Eq::NEXT_V)
+            if (!Eq::IMAGING_USES_NEXT_V)
                 break;
         }
         if (it == target_index + 1) {
@@ -930,7 +930,7 @@ void sg_replay_forward_to_time(
             break;
         }
 
-        Eq::inject_sources_fwd_bw(state, solver, for_view, p, source_fields, it);
+        Eq::inject_forward_sources(state, solver, for_view, p, source_fields, it);
 
         if (it == target_index && target_index + 1 >= p.nt)
             break;
@@ -997,14 +997,14 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     std::vector<torch::Tensor> current_v, next_v;
     for (int c = 0; c < Eq::N_VEL; ++c) {
         current_v.push_back(torch::zeros_like(vp));
-        if (Eq::NEXT_V)
+        if (Eq::IMAGING_USES_NEXT_V)
             next_v.push_back(torch::zeros_like(vp));
     }
     const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
 
     auto adj_view = Eq::view(adjoint);
     for (int it = p.nt - 1; it >= 0; --it) {
-        Eq::undo_body_force(state, solver, adj_view, p, source_fields, it, grads);
+        Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
                              adj_source_signed, it, (int)p.adjoint_sources_loc.size(1));
 
@@ -1013,9 +1013,9 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
                                       checkpoint_runtime, cpml_view, solver,
                                       source_fields);
 
-        typename Eq::VelPtrs vptrs = Eq::carrier_vel_ptrs(current_v, next_v);
+        typename Eq::VelPtrs vptrs = Eq::vel_ptrs_from_carriers(current_v, next_v);
         Eq::image_standalone(state, solver, adj_view, vptrs, grads);
-        Eq::undo_receiver_rho(state, solver, grads, vptrs, p, receiver_fields,
+        Eq::fix_rho_grad_at_receivers(state, solver, grads, vptrs, p, receiver_fields,
                               it, (int)p.adjoint_sources_loc.size(1));
 
         if (it == 0)
