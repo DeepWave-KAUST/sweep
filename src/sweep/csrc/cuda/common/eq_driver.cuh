@@ -40,7 +40,7 @@
 //   save_boundary_fwd          BS strips (when use_boundary_saving)
 //   inject_source_fwd          source injection
 //   record                     receiver sampling
-//   end_of_step                u_pre/u_now buffer-role rotation
+//   rotate_buffers             u_pre/u_now buffer-role rotation
 //   capture_allt               deferred u_allt snapshot (only 3-D uses it)
 //   <checkpoint save>          shared runtime, not a hook
 //   after the loop: save_last_state (final u pair for backward_bs)
@@ -49,25 +49,25 @@
 //   adjoint_step               adjoint stencil; with HAS_FUSED_FULL_IMG the
 //                              imaging of u_forward[it+1] fuses into it
 //   inject_adjoint_source      residual injection
-//   post_adjoint               adjoint buffer-role rotation
+//   rotate_adjoint_buffers     adjoint buffer-role rotation
 //   accumulate_source_grad     grad_wavelet sampling
 //   image_step                 standalone imaging / RTM+illumination taps
 //                              (skipped when fused, except for RTM)
 //   after the loop (fused only): one trailing image_step at it == 0.
 //
 // generic_backward_bs — per reverse it, floor max(max(it_lo, 1), bs_stop):
-//   adjoint_step / inject_adjoint_source / post_adjoint /
+//   adjoint_step / inject_adjoint_source / rotate_adjoint_buffers /
 //   accumulate_source_grad     same four as full mode
-//   bs_reverse_step            reconstruction (un-inject, NOPML reverse,
+//   bs_recon_step              reconstruction (un-inject, NOPML reverse,
 //                              strip restore) + gradient imaging, in the
 //                              equation's exact order
-//   bs_image_step              RTM / illumination tap
+//   bs_rtm_tap                 RTM / illumination tap
 //   before the loop (first segment): seed_reconstruction from u_last_two;
-//   after the loop (HAS_BS_T0_TAIL): the four adjoint hooks once at it == 0.
+//   after the loop (BS_HAS_IT0_ADJOINT_TAIL): the four adjoint hooks once at it == 0.
 //
 // generic_backward_ckpt — per chunk: replay then reverse:
-//   replay:  replay_step / inject_source_fwd / swap_recon
-//   reverse: adjoint_step / inject_adjoint_source / post_adjoint /
+//   replay:  replay_step / inject_source_fwd / rotate_recon_buffers
+//   reverse: adjoint_step / inject_adjoint_source / rotate_adjoint_buffers /
 //            accumulate_source_grad / image_step
 //
 // generic_backward_recursive_ckpt — bisection over each ckpt segment; a
@@ -352,7 +352,7 @@ public:
 
             Eq::record(*state, ctx, view, record, p, it, nrec);
 
-            Eq::end_of_step(wavefield);
+            Eq::rotate_buffers(wavefield);
 
             Eq::capture_allt(u_allt, wavefield, it);
 
@@ -559,7 +559,7 @@ BackwardOutput generic_backward(const BackwardInput& in)
     RTMOutput illumination;
     Eq::bind_backward_outputs(in, grads, illumination,
                               /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
-    RTMOutput* rtm_out = Eq::full_rtm_gate(in, illumination);
+    RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
 
     const auto& p = in;
     auto vp = p.models[0];
@@ -595,20 +595,20 @@ BackwardOutput generic_backward(const BackwardInput& in)
     for (int it = p.bw_begin() - 1; it >= p.bw_it_end; --it) {
         auto adj_view = adjoint.view();
         const float* img_fwd = (fused_img && fuse_grad != nullptr && it + 1 < p.nt)
-                             ? Eq::full_store_ptr(p, it + 1) : nullptr;
+                             ? Eq::u_forward_ptr(p, it + 1) : nullptr;
         Eq::adjoint_step(state, ctx, adj_view, cpml, ws,
                          img_fwd, img_fwd ? fuse_grad : nullptr);
         Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc, ws);
-        Eq::post_adjoint(adjoint);
+        Eq::rotate_adjoint_buffers(adjoint);
         Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    it, forward_nsrc);
         if (!fused_img || rtm_out != nullptr) {
-            Eq::image_step(state, ctx, Eq::full_store_ptr(p, it), adjoint,
+            Eq::image_step(state, ctx, Eq::u_forward_ptr(p, it), adjoint,
                            fused_img ? nullptr : &grads, rtm_out, ws);
         }
     }
     if (fused_img && fuse_grad != nullptr) {
-        Eq::image_step(state, ctx, Eq::full_store_ptr(p, 0), adjoint,
+        Eq::image_step(state, ctx, Eq::u_forward_ptr(p, 0), adjoint,
                        &grads, nullptr, ws);
     }
 
@@ -653,7 +653,7 @@ public:
         Eq::init_aux_slabs(ctx, adjoint);
 
         Eq::bind_backward_outputs(p, grads, illumination, /*want_adcig=*/true);
-        bs_rtm = Eq::bs_rtm_gate(p, illumination);
+        bs_rtm = Eq::rtm_out_bs(p, illumination);
 
         Eq::alloc_cpml(cpml_tensor, p);
         cpml = cpml_tensor.view();
@@ -744,27 +744,27 @@ public:
 
             Eq::adjoint_step(*state, ctx, adj_view, cpml, *ws, nullptr, nullptr);
             Eq::inject_adjoint_source(*state, ctx, adj_view, p, it, adjoint_nsrc, *ws);
-            Eq::post_adjoint(adjoint);
+            Eq::rotate_adjoint_buffers(adjoint);
             Eq::accumulate_source_grad(*state, ctx, adjoint, p, grads,
                                        it, forward_nsrc);
 
             // Reconstruction + gradient imaging, in this equation's exact order.
-            Eq::bs_reverse_step(*state, ctx, forward, adjoint, *boundary_runtime,
+            Eq::bs_recon_step(*state, ctx, forward, adjoint, *boundary_runtime,
                                 bs, save_width, cpml, p, grads, bs_rtm, *ws,
                                 *bs_scratch, it, bs_it0);
 
             boundary_runtime->prefetch_next_backward_chunk_if_needed(
                 it - bs_it0, (int)p.nt - bs_it0);
 
-            Eq::bs_image_step(*state, ctx, forward, adjoint, illumination,
+            Eq::bs_rtm_tap(*state, ctx, forward, adjoint, illumination,
                               p.compute_illumination);
         }
 
-        if (Eq::HAS_BS_T0_TAIL && it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
+        if (Eq::BS_HAS_IT0_ADJOINT_TAIL && it_lo == 0 && p.nt > 0 && bs_it0 == 0) {
             auto adj_view = adjoint.view();
             Eq::adjoint_step(*state, ctx, adj_view, cpml, *ws, nullptr, nullptr);
             Eq::inject_adjoint_source(*state, ctx, adj_view, p, 0, adjoint_nsrc, *ws);
-            Eq::post_adjoint(adjoint);
+            Eq::rotate_adjoint_buffers(adjoint);
             Eq::accumulate_source_grad(*state, ctx, adjoint, p, grads,
                                        0, forward_nsrc);
         }
@@ -845,7 +845,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     init_rtm_output(illumination, vp,
                     Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
                     2 * in.adcig_max_lag + 1);
-    RTMOutput* rtm_out = Eq::full_rtm_gate(in, illumination);
+    RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -875,14 +875,14 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
             float* u_this = chunk_forward[it - start].template data_ptr<float>();
             Eq::replay_step(state, ctx, for_view, cpml, true, u_this);
             Eq::inject_source_fwd(state, ctx, for_view, p, it, forward_nsrc);
-            Eq::swap_recon(forward);
+            Eq::rotate_recon_buffers(forward);
         }
 
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
             Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
             Eq::inject_adjoint_source(state, ctx, adj_view, p, it, adjoint_nsrc, ws);
-            Eq::post_adjoint(adjoint);
+            Eq::rotate_adjoint_buffers(adjoint);
             Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                        it, forward_nsrc);
             Eq::image_step(state, ctx,
@@ -917,7 +917,7 @@ void advance_forward_interval(typename Eq::Wavefield& forward, int start, int en
         auto view = forward.view();
         Eq::replay_step(state, ctx, view, cpml, false, nullptr);
         Eq::inject_source_fwd(state, ctx, view, p, it, forward_nsrc);
-        Eq::swap_recon(forward);
+        Eq::rotate_recon_buffers(forward);
     }
 }
 
@@ -946,12 +946,12 @@ void process_recursive_interval(int start, int end,
         auto fwd_view = start_state.view();
         Eq::replay_step(state, ctx, fwd_view, cpml, true, u_this);
         Eq::inject_source_fwd(state, ctx, fwd_view, p, start, forward_nsrc);
-        Eq::swap_recon(start_state);
+        Eq::rotate_recon_buffers(start_state);
 
         auto adj_view = adjoint.view();
         Eq::adjoint_step(state, ctx, adj_view, cpml, ws, nullptr, nullptr);
         Eq::inject_adjoint_source(state, ctx, adj_view, p, start, adjoint_nsrc, ws);
-        Eq::post_adjoint(adjoint);
+        Eq::rotate_adjoint_buffers(adjoint);
         Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    start, forward_nsrc);
         Eq::image_step(state, ctx, u_this, adjoint, &grads, rtm_out, ws);
@@ -1012,7 +1012,7 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     init_rtm_output(illumination, vp,
                     Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
                     2 * in.adcig_max_lag + 1);
-    RTMOutput* rtm_out = Eq::full_rtm_gate(in, illumination);
+    RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);

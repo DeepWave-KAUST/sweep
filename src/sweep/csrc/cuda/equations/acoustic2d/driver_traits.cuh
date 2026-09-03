@@ -10,8 +10,8 @@
 //   * TANGENT_PAD = 0 (no tangential pad on the boundary strips); CUT_MASK_BITS = 0xF (x_lo, x_hi, z_lo, z_hi);
 //   * ADJ_WF_COUNT = 11 (u triple + psi/zeta double-buffer), RECON_WF_COUNT = 3;
 //   * HAS_FUSED_FULL_IMG = true: full mode folds the lagged vp-gradient imaging into the adjoint kernel (fused_grad_ptr = grads[1]; one trailing image_step at it == 0);
-//   * ADCIG_IN_FULL_MODES = true: the flag opens full_rtm_gate on compute_adcig as well as on compute_illumination;
-//   * HAS_BS_T0_TAIL = true: the bs reverse loop runs an it == 0 adjoint-only tail (grad_wavelet);
+//   * ADCIG_IN_FULL_MODES = true: the flag opens rtm_out_full on compute_adcig as well as on compute_illumination;
+//   * BS_HAS_IT0_ADJOINT_TAIL = true: the bs reverse loop runs an it == 0 adjoint-only tail (grad_wavelet);
 //   * one model, vp = p.models[0], held as a raw pointer in State beside the Laplace/gradient parameter blocks, the launch configs, order/M, nx/nz/B and has_topo;
 //   * BwdWorkspace and BsScratch are empty: the fused adjoint keeps its scratch in the psi/zeta buffers and the NOPML kernel writes no per-step scratch field;
 //   * validate_forward / validate_backward are no-ops;
@@ -21,19 +21,19 @@
 //   * save_width = abcn > 0 ? M + 1 : M; boundary save/restore offset 0;
 //   * bind_or_alloc_forward binds p.wavefields or allocates with double_buffer_psi = true; bind_or_alloc_adjoint binds p.adjoint_wavefields or allocate(vp, 2, true); bind_or_alloc_recon binds/allocates WITHOUT CPML (use_pml = false);
 //   * launch_step_range: an air-clear prepass (has_topo only, x range widened by M) then the ACOUSTIC2D kernel ranged over x in [xb, xe) via ctx.x_base / x_limit (phase-split capable);
-//   * forward loop: inject_source_fwd and record act on u_next; end_of_step = swap_pml (u triple AND psi<->psin); save_last_state stores (u_prev, u_now) in last_two;
+//   * forward loop: inject_source_fwd and record act on u_next; rotate_buffers = swap_pml (u triple AND psi<->psin); save_last_state stores (u_prev, u_now) in last_two;
 //   * backward outputs: alloc_grads = {grad_wavelet, grad_vp}; bind_backward_outputs = eqdrv::acoustic_bind_backward_outputs; pack_outputs returns grads + source/receiver illumination + adcig;
-//   * full_store_ptr = u_forward[it] (vp^2 * Lap(u), the vp-gradient operand, NOT raw pressure);
+//   * u_forward_ptr = u_forward[it] (vp^2 * Lap(u), the vp-gradient operand, NOT raw pressure);
 //   * adjoint_step = ACOUSTIC2D_ADJOINT_FUSED: single-kernel exact adjoint, g_* recomputed at each tap, next-step psi/zeta written to the double-buffer out-tensors, grad_forward_img / grad_out fused in;
-//   * inject_adjoint_source adds p.adjoint_source into u_next with the record_config slot (the adjoint source config in backward states); post_adjoint = swap_aux (u + psi + zeta rotation);
+//   * inject_adjoint_source adds p.adjoint_source into u_next with the record_config slot (the adjoint source config in backward states); rotate_adjoint_buffers = swap_aux (u + psi + zeta rotation);
 //   * accumulate_source_grad = accumulate_source_grad_2d from the adjoint u_now into grads[0];
 //   * image_step = calculate_grad (vp gradient) + accumulate_rtm_image_2d; no ADCIG launch here (the full store is not raw pressure);
-//   * bs_rtm_gate opens on compute_illumination || compute_adcig (consumed in-step by the 3-D twin; 2-D images after the prefetch in bs_image_step);
+//   * rtm_out_bs opens on compute_illumination || compute_adcig (consumed in-step by the 3-D twin; 2-D images after the prefetch in bs_rtm_tap);
 //   * seed_reconstruction: u_prev <- u_last_two[:, 1], u_now <- u_last_two[:, 0], then set_boundary_zeros on both over the abcn + M rim with the cut faces excluded (ctx.cut_mask()); make_bs_scratch returns {};
-//   * bs_reverse_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
-//   * bs_image_step, after the prefetch: accumulate_rtm_image_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
+//   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
+//   * bs_rtm_tap, after the prefetch: accumulate_rtm_image_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
 //   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots;
-//   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> swap_recon = swap().
+//   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
@@ -84,7 +84,7 @@ struct Driver {
     // 2-D serves ADCIG from full/ckpt modes too (raw-pressure imaging).
     static constexpr bool ADCIG_IN_FULL_MODES = true;
     // The bs reverse loop runs an it==0 adjoint-only tail (grad_wavelet).
-    static constexpr bool HAS_BS_T0_TAIL = true;
+    static constexpr bool BS_HAS_IT0_ADJOINT_TAIL = true;
 
     using Wavefield = AcousticWavefieldTensor;
     using CPML = AcousticCPMLTensor;
@@ -175,7 +175,7 @@ struct Driver {
     // ===================================================================== //
     // [2] FORWARD — generic_forward, per it in [it_begin, it_end):
     //   launch_step_range -> save_boundary_fwd -> inject_source_fwd ->
-    //   record -> end_of_step -> capture_allt -> <checkpoint save (shared)>;
+    //   record -> rotate_buffers -> capture_allt -> <checkpoint save (shared)>;
     //   after the loop: save_last_state (final u pair for backward_bs).
     // ===================================================================== //
 
@@ -286,7 +286,7 @@ struct Driver {
         );
     }
 
-    static void end_of_step(Wavefield& wf)
+    static void rotate_buffers(Wavefield& wf)
     {
         wf.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
     }
@@ -301,7 +301,7 @@ struct Driver {
 
     // ===================================================================== //
     // [3] BACKWARD SHARED + FULL MODE — generic_backward, per reverse it:
-    //   adjoint_step -> inject_adjoint_source -> post_adjoint ->
+    //   adjoint_step -> inject_adjoint_source -> rotate_adjoint_buffers ->
     //   accumulate_source_grad -> image_step;
     //   after the loop (fused only): one trailing image_step at it == 0.
     //   (adjoint_step .. accumulate_source_grad also fire per reverse it in
@@ -333,7 +333,7 @@ struct Driver {
         out.adcig = illumination.adcig;
     }
 
-    static RTMOutput* full_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    static RTMOutput* rtm_out_full(const BackwardInput& p, RTMOutput& illumination)
     {
         return (p.compute_illumination ||
                 (ADCIG_IN_FULL_MODES && p.compute_adcig))
@@ -345,7 +345,7 @@ struct Driver {
         return grads[1].data_ptr<float>();
     }
 
-    static const float* full_store_ptr(const BackwardInput& p, int it)
+    static const float* u_forward_ptr(const BackwardInput& p, int it)
     {
         return p.u_forward[it].data_ptr<float>();
     }
@@ -394,7 +394,7 @@ struct Driver {
         );
     }
 
-    static void post_adjoint(Wavefield& wf)
+    static void rotate_adjoint_buffers(Wavefield& wf)
     {
         wf.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
     }
@@ -441,23 +441,23 @@ struct Driver {
         // NOTE: ADCIG is NOT accumulated here.  This hook's ``forward_ptr`` is
         // the full/checkpoint forward store, which for acoustic is vp^2*Lap(u)
         // (kept for the vp gradient), NOT the raw pressure the space-lag imaging
-        // condition needs.  ADCIG is launched only from bs_image_step, where the
+        // condition needs.  ADCIG is launched only from bs_rtm_tap, where the
         // reconstructed raw pressure is co-resident.
     }
 
     // ===================================================================== //
     // [4] BACKWARD_BS — generic_backward_bs, per reverse it (floor
     // max(max(it_lo, 1), bs_stop)):
-    //   adjoint_step / inject_adjoint_source / post_adjoint /
-    //   accumulate_source_grad (section [3]) -> bs_reverse_step ->
-    //   bs_image_step;
+    //   adjoint_step / inject_adjoint_source / rotate_adjoint_buffers /
+    //   accumulate_source_grad (section [3]) -> bs_recon_step ->
+    //   bs_rtm_tap;
     //   before the loop (first segment): seed_reconstruction from u_last_two;
-    //   after the loop (HAS_BS_T0_TAIL): the four adjoint hooks once at it == 0.
+    //   after the loop (BS_HAS_IT0_ADJOINT_TAIL): the four adjoint hooks once at it == 0.
     // ===================================================================== //
 
-    static RTMOutput* bs_rtm_gate(const BackwardInput& p, RTMOutput& illumination)
+    static RTMOutput* rtm_out_bs(const BackwardInput& p, RTMOutput& illumination)
     {
-        // 2-D images after the prefetch (bs_image_step); the gated pointer is
+        // 2-D images after the prefetch (bs_rtm_tap); the gated pointer is
         // consumed by the 3-D twin's in-step imaging and ignored here.
         return (p.compute_illumination || p.compute_adcig)
             ? &illumination : nullptr;
@@ -495,7 +495,7 @@ struct Driver {
     // bit-load-bearing order: NOPML step, strip restore, u_tt gradient
     // imaging, forward source injection, swap.  (The 3-D twin images before
     // the injection; VRZ injects before the restore — order lives here.)
-    static void bs_reverse_step(const State& s, const SolverContext& ctx,
+    static void bs_recon_step(const State& s, const SolverContext& ctx,
                                 Wavefield& forward, Wavefield& adjoint,
                                 BoundaryRuntime& boundary_runtime,
                                 const GeneralBoundaryPointer& bs, int save_width,
@@ -503,7 +503,7 @@ struct Driver {
                                 const BackwardInput& p,
                                 std::vector<torch::Tensor>& grads,
                                 RTMOutput* /*rtm_out: 2-D images after the
-                                             prefetch, in bs_image_step*/,
+                                             prefetch, in bs_rtm_tap*/,
                                 BwdWorkspace& /*ws*/,
                                 BsScratch& /*scratch*/,
                                 int it, int bs_it0)
@@ -569,7 +569,7 @@ struct Driver {
         forward.swap();
     }
 
-    static void bs_image_step(const State& s, const SolverContext& /*ctx*/,
+    static void bs_rtm_tap(const State& s, const SolverContext& /*ctx*/,
                               Wavefield& forward, Wavefield& adjoint,
                               RTMOutput& illumination, bool compute_illumination)
     {
@@ -602,8 +602,8 @@ struct Driver {
 
     // ===================================================================== //
     // [5] CKPT + RECURSIVE PLUMBING — generic_backward_ckpt, per chunk:
-    //   replay:  replay_step -> inject_source_fwd -> swap_recon
-    //   reverse: adjoint_step / inject_adjoint_source / post_adjoint /
+    //   replay:  replay_step -> inject_source_fwd -> rotate_recon_buffers
+    //   reverse: adjoint_step / inject_adjoint_source / rotate_adjoint_buffers /
     //            accumulate_source_grad / image_step (section [3]).
     //   generic_backward_recursive_ckpt bisects each ckpt segment; a leaf
     //   runs one replay triple, then the reverse-five of ckpt mode with the
@@ -666,7 +666,7 @@ struct Driver {
         );
     }
 
-    static void swap_recon(Wavefield& wf) { wf.swap(); }
+    static void rotate_recon_buffers(Wavefield& wf) { wf.swap(); }
 };
 
 } // namespace acoustic2d
