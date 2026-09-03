@@ -437,6 +437,16 @@ class ModelParallel:
             self._halo_sl_cache[(field.ndim, ax)] = sl
         return field[sl]
 
+    def _finish_boundary_phase(self):
+        """Let the phase's outstanding boundary copies land.
+
+        Belt and braces: ``BoundarySession::bind`` already synchronizes when the
+        phase flips (forward -> backward), so forgetting this cannot corrupt the
+        reconstruction -- it only leaves the last copies in flight a bit longer.
+        """
+        if getattr(self, "_bsession", None) is not None:
+            self._bsession.finish()
+
     def _exchange(self, halo, tensor):
         if halo is not None:
             for ax, hs in halo.items():
@@ -633,6 +643,26 @@ class ModelParallel:
             impl.forward_func, impl.backward_bs_func = f_orig, b_orig
 
         self.fp, self.bp = cap["fp"], cap.get("bp")
+        # Persistent boundary-staging session.  Under DD every time step is a
+        # separate call into the extension, so a per-call copy stream can never
+        # keep a transfer in flight across steps -- transfer_interval /
+        # ring_buffers then overlap nothing and storage='cpu' degenerates into
+        # one un-overlapped PCIe round trip per step.  Handing the SAME session
+        # to every step lets the copy issued in step ``it`` still be in flight
+        # while step ``it+1`` computes.  Only built for staged storage; the
+        # VRAM path is untouched (session stays None -> old behaviour).
+        self._bsession = None
+        if self._bstorage != "gpu":
+            try:
+                from sweep import _C as _sweep_C
+                self._bsession = _sweep_C.BoundarySession()
+            except AttributeError:
+                # Extension predates the session API: fall back silently to the
+                # per-call path, which is correct, just not overlapped.
+                self._bsession = None
+        for _p in (self.fp, self.bp):
+            if _p is not None and self._bsession is not None:
+                _p.boundary_session = self._bsession
         self.f_func, self.b_func = f_orig, b_orig
         self._cuda_ndim = cap["fraw"][2].ndim
 

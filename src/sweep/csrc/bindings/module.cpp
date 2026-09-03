@@ -61,6 +61,18 @@ auto dispatch_backward(Func cuda_func, sweep_cpu::EquationKind kind, sweep_cpu::
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    // Persistent boundary-staging session.  Python owns it and hands the SAME
+    // object to every per-step call of a DD time loop, so the copy stream and
+    // the ring events survive between steps and a transfer can actually overlap
+    // the next step's compute.  Leaving it unset keeps the per-call behaviour.
+    py::class_<BoundarySession, std::shared_ptr<BoundarySession>>(m, "BoundarySession")
+        .def(py::init<>())
+        .def("finish", &BoundarySession::finish,
+             "Let every outstanding copy land and close the current phase.")
+        .def_property_readonly("used", &BoundarySession::used,
+             "False means no call site ever bound it (staging fell back to the "
+             "per-call path).");
+
     using EK = sweep_cpu::EquationKind;
     using BM = sweep_cpu::BackwardMode;
     m.def("acoustic2d_forward", wrap_forward(dispatch_forward(acoustic2d::forward, EK::Acoustic2D)));
@@ -229,6 +241,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("spacing", &ForwardInput::spacing)
         .def_readwrite("transfer_interval", &ForwardInput::transfer_interval)
         .def_readwrite("boundary_ring_buffers", &ForwardInput::boundary_ring_buffers)
+        .def_readwrite("boundary_session", &ForwardInput::boundary_session)
         .def_readwrite("boundary_tail_steps", &ForwardInput::boundary_tail_steps)
         .def_readwrite("checkpoint_interval", &ForwardInput::checkpoint_interval)
         .def_readwrite("checkpoint_count", &ForwardInput::checkpoint_count)
@@ -282,6 +295,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("use_pinned_memory", &BackwardInput::use_pinned_memory)
         .def_readwrite("transfer_interval", &BackwardInput::transfer_interval)
         .def_readwrite("boundary_ring_buffers", &BackwardInput::boundary_ring_buffers)
+        .def_readwrite("boundary_session", &BackwardInput::boundary_session)
         .def_readwrite("boundary_tail_steps", &BackwardInput::boundary_tail_steps)
         .def_readwrite("checkpoint_interval", &BackwardInput::checkpoint_interval)
         .def_readwrite("checkpoint_count", &BackwardInput::checkpoint_count)

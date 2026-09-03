@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 #include <string>
 #include <vector>
+#include "boundary_session.h"
 
 
 struct ForwardInput {
@@ -87,6 +88,11 @@ struct ForwardInput {
     // shrinks.  0 = disabled (bit-exact legacy behaviour).  Both directions
     // MUST share the same value or the reconstruction misaligns.
     int boundary_tail_steps = 0;
+    // Optional persistent staging session.  Null (the default) keeps the
+    // per-call copy stream + BoundaryRuntime, i.e. exactly the old
+    // behaviour.  DD sets it so a transfer can stay in flight across the
+    // per-step calls.
+    std::shared_ptr<BoundarySession> boundary_session;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
@@ -230,6 +236,11 @@ struct BackwardInput {
     int transfer_interval = 1; // Transfer every time step by default
     int boundary_ring_buffers = 1;
     int boundary_tail_steps = 0;   // see ForwardInput::boundary_tail_steps
+    // Optional persistent staging session.  Null (the default) keeps the
+    // per-call copy stream + BoundaryRuntime, i.e. exactly the old
+    // behaviour.  DD sets it so a transfer can stay in flight across the
+    // per-step calls.
+    std::shared_ptr<BoundarySession> boundary_session;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 

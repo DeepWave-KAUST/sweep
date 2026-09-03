@@ -10,6 +10,7 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/checkpoint_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/cudautils.h"
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
@@ -185,12 +186,9 @@ ForwardOutput forward(const ForwardInput& in)
     GradParam grad_ctx_y{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
-    // Boundary tail truncation -- see acoustic2d/forward.cu (stepped/DD
-    // segments compose: global ``it``, tail-shrunk Python-bound ring).
-    const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
-        ? std::max(0, (int)nt - p.boundary_tail_steps) : 0;
-    BoundaryRuntime boundary_runtime(
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Forward,
         boundary_saver,
         3,
         p.use_boundary_saving,
@@ -199,10 +197,13 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
-    );
+        p.boundary_disk_files);
+    AsyncCopyContext& async_copy = boundary_scope.async();
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
+    // Boundary tail truncation -- see acoustic2d/forward.cu (stepped/DD
+    // segments compose: global ``it``, tail-shrunk Python-bound ring).
+    const int bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
+        ? std::max(0, (int)nt - p.boundary_tail_steps) : 0;
     // ============================================================
     // time stepping
     // ============================================================
@@ -321,7 +322,10 @@ ForwardOutput forward(const ForwardInput& in)
         boundary_saver.last_two_t.select(1,1).copy_(wavefield.u_now_t);
     }
 
-    boundary_runtime.synchronize();
+    // With a persistent session the trailing sync belongs to the phase,
+    // not to this one step -- Python calls session.finish().
+    if (boundary_scope.owns())
+        boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
     out.last_two = boundary_saver.last_two_t;

@@ -104,7 +104,19 @@ struct AsyncCopyContext {
           enabled(enable)
     {
         if (!enabled) return;
-        cudaStreamCreate(&copy_stream);
+        // cudaStreamCreate makes a BLOCKING stream, which is implicitly
+        // synchronised against the legacy default stream. compute_stream is
+        // at::cuda::getCurrentCUDAStream(), and PyTorch's default IS the legacy
+        // default stream -- so every operation on copy_stream serialised against
+        // all compute and this "async copy stream" was never concurrent.
+        // The real dependencies are stated explicitly by ready_event /
+        // wait_for_compute / wait_for_copy below, so dropping the implicit sync
+        // does not affect correctness (checked by the bit-exact gates).
+        // This is also why non-DD gains only +22% while DD gains 15x: non-DD runs
+        // the whole time loop inside one extension call and hits few
+        // serialisation points, whereas DD calls in once per time step and hits
+        // this implicit sync on every one of them.
+        cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking);
         cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming);
     }
 
