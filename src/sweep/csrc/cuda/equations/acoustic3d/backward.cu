@@ -7,6 +7,7 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/checkpoint_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/cudautils.h"
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
@@ -890,8 +891,9 @@ void run_bs_imaging(
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary);
-    BoundaryRuntime boundary_runtime(
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Backward,
         boundary_saver,
         3,
         true,
@@ -900,10 +902,9 @@ void run_bs_imaging(
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
-    );
+        p.boundary_disk_files);
+    AsyncCopyContext& async_copy = boundary_scope.async();
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
     // Boundary tail truncation -- see acoustic2d/backward.cu (stepped/DD
     // segments and cut faces compose; the driver must not issue segments
     // entirely below bs_stop).
