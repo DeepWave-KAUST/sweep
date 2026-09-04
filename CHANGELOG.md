@@ -48,6 +48,41 @@ and this project adheres to
 - `ViscoAcoustic.prepare_models` maps (vp, Q, omega) -> (vp_step, A) once per
   forward (shared by the eager and CUDA paths; the eager step no longer
   recomputes the dispersion/damping coefficients every time step).
+- **Unknown keyword arguments are rejected instead of ignored.**  Both the
+  propagator constructor and the call now raise `TypeError` naming the
+  offending keywords.  A misspelled option previously did nothing at all and
+  the run silently used the default, which is how `full_mode=` survived as a
+  dead parameter for as long as it did.
+- **Configurations that used to fail silently, late, or not at all now refuse
+  at construction**, each with a message saying what is unsupported: recursive
+  checkpointing when the compiled binding is absent; image-method topography on
+  an equation that does not implement it; a free surface on any anisotropic
+  equation (those branches were unreachable and are now an explicit refusal);
+  and the legacy dict/flag memory spellings, which now go through the same
+  capability check as the typed options.  Illumination/ADCIG crop failures warn
+  instead of silently returning zeros.
+
+### Removed
+- **`solver.rtm()` and its three compiled bindings** (`acoustic2d_rtm`,
+  `acoustic3d_rtm`, `visco_acoustic2d_rtm`), together with `_C_rtm` on the
+  equations and the 2-D host wrapper, the four 3-D `rtm_*_impl` wrappers and
+  their dispatcher.  The entry had no caller left: the RTM notebook computes
+  the image as the gradient of an inner-product loss, sweep-tasks' production
+  RTM migrated to forward+backward with `compute_illumination`, and no
+  bit-exact gate ever covered it.  **Migration:** run the ordinary forward and
+  backward with `compute_illumination=True` and read the image off the
+  illumination path — that is what `rtm()` did internally.  `RTMOutput`,
+  `accumulate_rtm_image_*`, `init_rtm_output_*` and the `run_*_imaging`
+  machinery are deliberately KEPT: despite the names they are the illumination
+  path of the ordinary backward, which production RTM uses.  An old script
+  calling `rtm()` now gets a plain `AttributeError` rather than a tombstone,
+  so it cannot quietly return the wrong thing.
+- **`full_mode=` propagator keyword** (and `PropagatorDefaults.full_mode`).  It
+  was stored on the instance and never read by anything — a dead parameter.
+  Because unknown keywords are now rejected, passing it raises `TypeError`
+  instead of being silently ignored; delete it from the call.  Nothing replaces
+  it; the memory strategy is chosen with `memory=Full()` / `BoundarySaving(...)`
+  / `Ckpt(...)`.
 
 ### Fixed
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
