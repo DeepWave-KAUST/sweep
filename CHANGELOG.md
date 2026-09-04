@@ -50,6 +50,36 @@ and this project adheres to
 - `ForwardInput/BackwardInput.eq_aux` — equation-specific auxiliary tensors
   (opaque to the shared autograd wrapper); ViscoAcoustic uses it for its |k|
   FFT grid.
+- **Equation registry.**  `@register_equation(name=..., aliases=..., method=...)`
+  co-locates an equation's public export names with its class, replacing the
+  hand-maintained import wall and `globals()` scan in `sweep.equations`.
+  `get_equation(name)`, `list_equations()`, `equation_classes()` and
+  `equation_method(cls)` are the lookup side.  Adding an equation is now "write
+  the module, decorate the class".  Declaring `C_NAME = "<binding prefix>"` is
+  what gives a class its compiled bindings: the base derives `_C` from it as
+  `{C_NAME}_forward` plus the four backward variants, so the per-equation `_C`
+  boilerplate is gone.  Both are OPTIONAL — subclassing `SecondOrderEquation`
+  and writing `_C` by hand still works, which is what notebook 18 does.
+- **Persistent stepped runners** (`sweep._C.ForwardRunner` / `BackwardRunner`,
+  plus `<equation>_forward_runner` / `<equation>_backward_bs_runner` factories
+  for all ten templated equations).  A stepped or domain-decomposed propagation
+  used to re-enter the extension every time step and rebuild the entire
+  prologue; the runner constructs once per propagation and each step is a
+  `run(it_begin, it_end, phase)` call.  Reuse requires gpu-direct boundary
+  storage and no checkpointing; anything else keeps the per-call path.
+  Measured against dev on DD (median of 5 interleaved rounds, Ada): the runner
+  alone is worth 3.99x on 2-D elastic 600x900, 1.56x on 3-D elastic, and
+  1.04-1.06x on acoustic, because what it removes is a roughly constant ~0.2-1.4
+  ms of host cost per step — so the ratio is set by how much GPU work one step
+  does, and equations with more fields to rebind gain most.
+- **Typed gradient-memory strategies** — `Full()`, `BoundarySaving(...)`,
+  `Ckpt(...)` under `sweep.propagator.options`, passed as `memory=`.  The old
+  dict/flag spellings still work and are read exactly as before.
+- **Declared capabilities instead of inferred ones.**  `C_NAME`,
+  `C_HAS_RECURSIVE_CKPT`, `supports_image_topography[_c]`, the CUDA wavefield
+  slot table and the DD admission / tail-truncation eligibility are now class
+  attributes an equation declares.  Nothing infers behaviour from the class
+  name any more.
 
 ### Changed
 - `SecondOrderEquation._apply_free_surface` — the per-edge pressure-release
@@ -71,6 +101,56 @@ and this project adheres to
   and the legacy dict/flag memory spellings, which now go through the same
   capability check as the typed options.  Illumination/ADCIG crop failures warn
   instead of silently returning zeros.
+- **The CUDA drivers are two shared skeletons instead of ten hand-written
+  pairs.**  `common/eq_driver.cuh` (acoustic family) and `common/sg_driver.cuh`
+  (staggered family) hold the forward and the four backward modes; each
+  equation supplies a `driver_traits.cuh` of hooks and a thin forward.cu /
+  backward.cu.  All ten templated equations are on it.  Contributor-facing
+  only — every mode is bit-identical to the code it replaced, and each skeleton
+  carries a HOOK TIMING MAP listing the hooks in call order.  See
+  `docs/dev/cuda_drivers.md`.
+- **Domain decomposition is declarative.**  A `DDSpec` interpreter drives the
+  forward and backward loops from the equation's declared wavefield roles,
+  grads layout and coupling exchange; the per-family branches and the
+  name-sniffing `_FAMILIES` table are gone.
+- `PropBase.__init__` is decomposed into grid geometry, IO validation,
+  topography, argument resolution, boundary spec and the two DD blocks, and
+  exposes `memory_strategy` and `use_ckpt` as read-only properties.
+- **Kernel-level performance, all bit-exact** (measured on RTX 6000 Ada, and
+  the direction re-checked on V100): imaging is computed over the physical box
+  only rather than the padded box, acoustic boundary-saving imaging is fused
+  into the reverse reconstruction, the band imaging kernels put the x offset
+  innermost, elastic boundary-saving imaging folds into `stress_adjoint_prepare`,
+  the elastic velocity carriers are captured inside the NOPML kernel, and the
+  elastic3d forward kernels take `__launch_bounds__(256, 4)` (V100 stress kernel
+  -13%, Ada -4%, no register spill).  Together with the runner these are worth
+  1.20-1.34x on DD acoustic end-to-end, on top of what the runner itself gives.
+
+### Deprecated
+- `boundary_saving_config={...}` and `MemoryOptions(strategy=..., boundary=...,
+  ckpt=...)`, in favour of `memory=Full()` / `BoundarySaving(...)` / `Ckpt(...)`.
+  Both still work, are still read exactly as before, and now emit a
+  `DeprecationWarning`; the removal criterion is written next to the shim.
+  (`use_ckpt=` is NOT deprecated — it is still a plain supported keyword.)
+
+### Fixed
+- **Disk-staged boundary saving reconstructed the wrong chunk**, so every
+  `storage='disk'` run produced a wrong model gradient (13% relative divergence
+  from `storage='gpu'` in 2-D, 67% in 3-D; all eleven `bs_disk` gate cases and
+  three cases in `test_boundary_storage_dtype_validation.py`).  Two causes, the
+  second only visible once the first was fixed.  (a) The backward decided to
+  issue the next chunk's transfer early based on `ring_buffers >= 2`, while the
+  synchronous-disk path is pinned to a single ring slot whatever `ring_buffers`
+  says and defaults to 3 (2-D) / 2 (3-D) — so the early transfer overwrote the
+  slot the current chunk was still being restored from.  The predicate is now
+  the slot assignment itself.  (b) The copy stream became non-blocking, and the
+  synchronous-disk branch was the one staged enqueue site that never got the
+  matching `cudaStreamWaitEvent` write-after-read fence; its existing
+  `cudaStreamSynchronize` guards the CPU staging buffer, not the GPU slot.
+  Also fixed alongside: the slot-0 override guard was narrowed in the
+  single-field reader but not in the two `nvar > 1` readers, so host staging
+  with `ring_buffers >= 2` read slot 0 while the prefetch staged into slot k
+  (latent — `cpu_ring_buffers` defaults to 1).
 
 ### Removed
 - **`solver.rtm()` and its three compiled bindings** (`acoustic2d_rtm`,
