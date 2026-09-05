@@ -123,25 +123,6 @@ and this project adheres to
   `DeprecationWarning`; the removal criterion is written next to the shim.
   (`use_ckpt=` is NOT deprecated — it is still a plain supported keyword.)
 
-### Fixed
-- **Disk-staged boundary saving reconstructed the wrong chunk**, so every
-  `storage='disk'` run produced a wrong model gradient (13% relative divergence
-  from `storage='gpu'` in 2-D, 67% in 3-D; all eleven `bs_disk` gate cases and
-  three cases in `test_boundary_storage_dtype_validation.py`).  Two causes, the
-  second only visible once the first was fixed.  (a) The backward decided to
-  issue the next chunk's transfer early based on `ring_buffers >= 2`, while the
-  synchronous-disk path is pinned to a single ring slot whatever `ring_buffers`
-  says and defaults to 3 (2-D) / 2 (3-D) — so the early transfer overwrote the
-  slot the current chunk was still being restored from.  The predicate is now
-  the slot assignment itself.  (b) The copy stream became non-blocking, and the
-  synchronous-disk branch was the one staged enqueue site that never got the
-  matching `cudaStreamWaitEvent` write-after-read fence; its existing
-  `cudaStreamSynchronize` guards the CPU staging buffer, not the GPU slot.
-  Also fixed alongside: the slot-0 override guard was narrowed in the
-  single-field reader but not in the two `nvar > 1` readers, so host staging
-  with `ring_buffers >= 2` read slot 0 while the prefetch staged into slot k
-  (latent — `cpu_ring_buffers` defaults to 1).
-
 ### Removed
 - **`solver.rtm()` and its three compiled bindings** (`acoustic2d_rtm`,
   `acoustic3d_rtm`, `visco_acoustic2d_rtm`), together with `_C_rtm` on the
