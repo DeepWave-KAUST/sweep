@@ -89,6 +89,7 @@
 #include "cudautils.h"
 #include "boundarysaver.cuh"
 #include "boundary_runtime.cuh"
+#include "boundary/session.cuh"
 #include "wavetypes.h"
 #include "../launch/config.h"
 
@@ -264,7 +265,6 @@ public:
         state.emplace(Eq::make_state(p, d, ctx, launch_config,
                                      source_config, record_config));
 
-        async_copy.emplace(staged_boundary && p.use_boundary_saving);
         // Boundary tail truncation: with boundary_tail_steps = K > 0 only the
         // last K steps' boundary strips are saved; the runtime and the Python
         // buffers work in shifted "saved-step" coordinates [0, K).  bs_it0 = 0
@@ -275,7 +275,15 @@ public:
         // allocated tail-shrunk by _ensure_boundary_buffers(nt_saved=...).
         bs_it0 = (p.use_boundary_saving && p.boundary_tail_steps > 0)
             ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
-        boundary_runtime.emplace(
+        // A Python-owned BoundarySession, when bound, keeps the copy stream and
+        // the ring events alive ACROSS calls.  Under DD every time step is a
+        // separate entry into the extension, so a per-call copy stream can never
+        // hold a transfer in flight and transfer_interval/ring_buffers overlap
+        // nothing.  Without a session BoundaryScope builds both locally and the
+        // behaviour is exactly the old per-call path.  (dev 848a100.)
+        boundary_scope.emplace(
+            p.boundary_session ? p.boundary_session->impl() : nullptr,
+            BoundarySessionImpl::Phase::Forward,
             boundary_saver,
             Eq::NDIM,
             p.use_boundary_saving,
@@ -284,10 +292,9 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files,
-            async_copy->compute_stream,
-            async_copy->copy_stream
+            p.boundary_disk_files
         );
+        boundary_runtime = &boundary_scope->runtime();
     }
 
     ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
@@ -368,7 +375,10 @@ public:
             Eq::save_last_state(boundary_saver, wavefield);
         }
 
-        boundary_runtime->synchronize();
+        // With a persistent session the trailing sync belongs to the phase, not
+        // to this one call -- Python drives it via session.finish(). (dev 848a100.)
+        if (boundary_scope->owns())
+            boundary_runtime->synchronize();
 
         out.wavefield = u_allt;
         out.last_two = boundary_saver.last_two_t;
@@ -421,9 +431,9 @@ private:
     GeneralBoundaryPointer bs{};
     fdtd::LaunchConfig launch_config{}, source_config{}, record_config{};
     std::optional<typename Eq::State> state;
-    std::optional<AsyncCopyContext> async_copy;
+    std::optional<BoundaryScope> boundary_scope;
     int bs_it0 = 0;
-    std::optional<BoundaryRuntime> boundary_runtime;
+    BoundaryRuntime* boundary_runtime = nullptr;
     int run_calls = 0;
 };
 
@@ -694,8 +704,10 @@ public:
 
         bs_scratch.emplace(Eq::make_bs_scratch(p, vp));
 
-        async_copy.emplace(staged_boundary);
-        boundary_runtime.emplace(
+        // Same persistent-session handling as the forward; see there. (dev 848a100.)
+        boundary_scope.emplace(
+            p.boundary_session ? p.boundary_session->impl() : nullptr,
+            BoundarySessionImpl::Phase::Backward,
             boundary_saver,
             Eq::NDIM,
             true,
@@ -704,10 +716,9 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files,
-            async_copy->compute_stream,
-            async_copy->copy_stream
+            p.boundary_disk_files
         );
+        boundary_runtime = &boundary_scope->runtime();
         TORCH_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
         bs_it0 = (p.boundary_tail_steps > 0)
             ? std::max(0, (int)p.nt - p.boundary_tail_steps) : 0;
@@ -795,8 +806,8 @@ private:
     std::optional<typename Eq::State> state;
     std::optional<typename Eq::BwdWorkspace> ws;
     std::optional<typename Eq::BsScratch> bs_scratch;
-    std::optional<AsyncCopyContext> async_copy;
-    std::optional<BoundaryRuntime> boundary_runtime;
+    std::optional<BoundaryScope> boundary_scope;
+    BoundaryRuntime* boundary_runtime = nullptr;
     int bs_it0 = 0, bs_stop = 0;
     int run_calls = 0;
 };
