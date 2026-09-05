@@ -124,7 +124,7 @@ __global__ void calculate_grad_utt_3d_band(
 
     int stride_y = nx;
     int stride_z = nx * ny;
-    int spatial_size = nx * ny * nz;
+    long long spatial_size = (long long)nx * ny * nz;
 
     int idx = iz * stride_z + iy * stride_y + ix;
 

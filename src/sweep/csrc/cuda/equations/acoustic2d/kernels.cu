@@ -108,7 +108,7 @@ __global__ void calculate_grad_utt_band(
     else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t % wxh; iz = zi0 + t / wxh; }
     else return;
 
-    int spatial_size = nx * nz;
+    long long spatial_size = (long long)nx * nz;
     int idx = iz * nx + ix;
 
     const float* u_next_b  = u_forward_next  + b * spatial_size;
