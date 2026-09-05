@@ -145,24 +145,6 @@ class Acoustic(SecondOrderEquation):
                 out = self._apply_free_surface(out)
         return out
 
-    def _apply_free_surface(self, fields):
-        """Enforce ``p = 0`` (pressure release) at every active free-surface face
-        by zeroing that face's ``so//2`` halo band.  ``self.fs_faces`` (set by the
-        propagator) selects the faces; for the top-only default the single
-        iteration is bit-identical to ``zero_top_halo_fields(..., axis=-2)``."""
-        halo = self.so // 2
-        fs_faces = getattr(self, "fs_faces", None)
-        if not fs_faces:
-            return zero_top_halo_fields(fields, halo, axis=-2)
-        for face, active in enumerate(fs_faces):
-            if not active:
-                continue
-            shape_axis, side = face_axis_side(face, self.ndim)
-            field_axis = field_z_like_axis(shape_axis, self.ndim)
-            fields = zero_edge_halo_fields(
-                fields, halo, axis=field_axis, side=("low" if side == 0 else "high")
-            )
-        return fields
 
     @property
     def cuda_layout(self):

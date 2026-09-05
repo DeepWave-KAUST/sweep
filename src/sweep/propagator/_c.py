@@ -1703,6 +1703,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         
         return syn
 
+
     def _build_recursive_checkpoint_steps(self, nt, checkpoint_count):
         checkpoint_count = int(max(0, checkpoint_count))
         if checkpoint_count == 0 or nt <= 1:

@@ -127,10 +127,14 @@ void image_step_from_raw(
         u_raw_ptr, vp.data_ptr<float>(), carrier.data_ptr<float>(),
         lap_ctx, ctx);
     if (grad != nullptr) {
+        // Imaging runs over the PHYSICAL box only: EdgePadding.backward crops the
+        // pad gradients, so the skipped cells never reach the model. (This
+        // branch's acoustic2d change; the shared kernel now takes the box.)
         calculate_grad<<<grid, block>>>(
             carrier.data_ptr<float>(), lam_ptr,
             vp.data_ptr<float>(), grad->data_ptr<float>(),
-            nx, nz, dt);
+            nx, nz, dt,
+            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
     }
     if (rtm_out != nullptr) {
         accumulate_rtm_image_2d<<<grid, block>>>(
@@ -723,7 +727,8 @@ void process_recursive_interval_visco_2d(
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 grad->data_ptr<float>(),
-                nx, nz, ctx.dt);
+                nx, nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
         }
         if (rtm_out != nullptr) {
             accumulate_rtm_image_2d<<<wave_grid, wave_block>>>(

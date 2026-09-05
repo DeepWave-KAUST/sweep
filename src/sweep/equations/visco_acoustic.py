@@ -329,11 +329,6 @@ class ViscoAcoustic(SecondOrderEquation):
             visco_acoustic2d_backward_recursive_ckpt,
         )
 
-    def _C_rtm(self):
-        from sweep._C import visco_acoustic2d_rtm
-
-        return visco_acoustic2d_rtm
-
     @property
     def cuda_layout(self):
         # Identical to Acoustic: same wavefield state (the damping correction
