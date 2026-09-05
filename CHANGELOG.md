@@ -49,6 +49,23 @@ and this project adheres to
   forward (shared by the eager and CUDA paths; the eager step no longer
   recomputes the dispersion/damping coefficients every time step).
 
+### Fixed
+- **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
+  persistent staging session / non-blocking copy stream (PR #81), every
+  `storage='disk'` gradient was wrong: max|disk-gpu|/scale 0.2-0.5 for acoustic
+  2-D/3-D and 0.8-5.0 for nvar>1 3-D (Elastic3D, DASMu3D); cpu staging with
+  `ring_buffers >= 2` was off by 1.4-2.4x on the same equations.  Three defects in
+  `boundary/runtime.cuh`: (1) `prefetch_next_backward_chunk_if_needed` issued
+  the next chunk early on `ring_buffers >= 2`, but the synchronous disk path is
+  pinned to slot 0 whatever `ring_buffers` says (and defaults to 3 / 2), so the
+  early H2D overwrote the chunk still being restored -- the predicate is now the
+  slot assignment; (2) the synchronous-disk enqueue never got the
+  `cudaStreamWaitEvent(compute_ready_)` write-after-read fence the host-staging
+  branch has; (3) the two nvar>1 restore readers kept the slot-0 override for
+  cpu staging with `ring_buffers >= 2`.  Regression test
+  `test/test_boundary_disk_staging_slot.py`: disk (default knobs and short
+  chunks) and cpu ring 2 must be bit-exact against gpu-direct.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added
@@ -135,21 +152,6 @@ and this project adheres to
   support Material grid-card layouts.
 
 ### Fixed
-- **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
-  persistent staging session / non-blocking copy stream (PR #81), every
-  `storage='disk'` gradient was wrong: max|disk-gpu|/scale 0.2-0.5 for acoustic
-  2-D/3-D and 0.8-5.0 for nvar>1 3-D (Elastic3D, DASMu3D); cpu staging with
-  `ring_buffers >= 2` was off by 1.4-2.4x on the same equations.  Three defects in
-  `boundary/runtime.cuh`: (1) `prefetch_next_backward_chunk_if_needed` issued
-  the next chunk early on `ring_buffers >= 2`, but the synchronous disk path is
-  pinned to slot 0 whatever `ring_buffers` says (and defaults to 3 / 2), so the
-  early H2D overwrote the chunk still being restored -- the predicate is now the
-  slot assignment; (2) the synchronous-disk enqueue never got the
-  `cudaStreamWaitEvent(compute_ready_)` write-after-read fence the host-staging
-  branch has; (3) the two nvar>1 restore readers kept the slot-0 override for
-  cpu staging with `ring_buffers >= 2`.  Regression test
-  `test/test_boundary_disk_staging_slot.py`: disk (default knobs and short
-  chunks) and cpu ring 2 must be bit-exact against gpu-direct.
 - **CPML aux writes on a domain-decomposition cut tile.**  With the strip
   allocation, the per-axis PML compute band reaches columns on a cut face that
   carry no slab storage; the unclamped index produced a negative offset and the
