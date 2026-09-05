@@ -921,7 +921,14 @@ public:
                 int chunk_start = it - 1 - buf_idx;
                 int slot_start = backward_slot_for_chunk(chunk_start) * transfer_interval_;
                 int gpu_idx = slot_start + buf_idx;
-                if (!boundary_disk_async_read_)
+                // Only the SYNCHRONOUS DISK path is pinned to slot 0 (see
+                // backward_slot_for_chunk); host staging rotates slots and must
+                // read the one the prefetch wrote.  76505cc narrowed this guard
+                // in backward_restore_ptrs but missed the two nvar>1 readers,
+                // which made cpu staging with ring_buffers>=2 read slot 0 while
+                // the H2D landed in slot k.  Latent only because
+                // cpu_ring_buffers defaults to 1.
+                if (boundary_on_disk_ && !boundary_disk_async_read_)
                     gpu_idx = buf_idx;
 
                 ptr.dtype = boundary_dtype_from_tensor(saver_->top_gpu);
@@ -1006,7 +1013,9 @@ public:
             int chunk_start = it - 1 - buf_idx;
             int slot_start = backward_slot_for_chunk(chunk_start) * transfer_interval_;
             time_idx = slot_start + buf_idx;
-            if (!boundary_disk_async_read_)
+            // See backward_restore_ptrs_field (2-D): only synchronous disk is
+            // slot-0 pinned.
+            if (boundary_on_disk_ && !boundary_disk_async_read_)
                 time_idx = buf_idx;
         }
         int64_t flat_idx = static_cast<int64_t>(time_idx) * saver_->nvar + field_idx;
@@ -1296,19 +1305,6 @@ public:
 
         int buf_idx = (it - 1) % transfer_interval_;
         int cur_start = it - 1 - buf_idx;
-        // ring>=2: issue the next chunk on entry to the current one -- the same
-        // point as wait_before_backward_restore -- so the copy overlaps this
-        // chunk's transfer_interval steps of compute. ring==1 has a single slot
-        // where issuing early would overwrite data still being read, so it keeps
-        // the original "compute, then issue" (no overlap, but correct).
-        const bool early = (ring_buffers_ >= 2);
-        if (early) {
-            if (buf_idx != backward_chunk_len(cur_start) - 1)
-                return;
-        } else {
-            if (buf_idx != 0)
-                return;
-        }
 
         int chunk_id = (it - 1) / transfer_interval_;
         int next_chunk = chunk_id - 1;
@@ -1316,6 +1312,33 @@ public:
             return;
 
         int next_start = next_chunk * transfer_interval_;
+
+        // Issue the next chunk on ENTRY to the current one -- the same point as
+        // wait_before_backward_restore -- so the copy overlaps this chunk's
+        // transfer_interval steps of compute.  That is only safe when the next
+        // chunk lands in a DIFFERENT ring slot; when it reuses this slot the
+        // early H2D would overwrite boundary data the current chunk's restore
+        // is still reading, so fall back to "compute, then issue" (no overlap,
+        // but correct).
+        //
+        // The predicate must be the slot assignment itself, not ring_buffers_.
+        // backward_slot_for_chunk() pins the SYNCHRONOUS disk path to slot 0
+        // whatever ring_buffers_ says, and that path defaults to
+        // disk_ring_buffers_2d = 3 / _3d = 2 (options.py) -- so keying off
+        // ring_buffers_ >= 2 turned early issue on for a single-slot path whose
+        // prefetch_backward_chunk() has no compute_ready_ write-after-read guard
+        // (only the host-staging branch got one).  Every bs_disk gate case and
+        // the three disk cases in test_boundary_storage_dtype_validation.py
+        // reconstructed a wrong gradient as a result.
+        const bool early =
+            backward_slot_for_chunk(cur_start) != backward_slot_for_chunk(next_start);
+        if (early) {
+            if (buf_idx != backward_chunk_len(cur_start) - 1)
+                return;
+        } else {
+            if (buf_idx != 0)
+                return;
+        }
         int remain = nt - next_start;
         int next_len = remain < transfer_interval_ ? remain : transfer_interval_;
         prefetch_backward_chunk(next_start, next_len,
@@ -1448,8 +1471,10 @@ private:
                 // it to finish before clobbering it — otherwise the host races
                 // ahead of the (possibly backlogged) copy stream and the
                 // in-flight H2D picks up this chunk's freshly-read bytes,
-                // scrambling the restored boundary for nvar>1.  (ring_buffers
-                // is 1 on this path, so the staging buffer is reused verbatim.)
+                // scrambling the restored boundary for nvar>1.  This path is
+                // pinned to a single slot by backward_slot_for_chunk(), so the
+                // staging buffer is reused verbatim -- note that ring_buffers_
+                // itself is NOT 1 here (disk defaults are 3 in 2-D, 2 in 3-D).
                 cudaStreamSynchronize(copy_stream_);
                 auto read_start = Clock::now();
                 if (dim_ == 2)
@@ -1461,6 +1486,16 @@ private:
                     cudaEventRecord(backward_copy_start_[slot], copy_stream_);
                     cudaEventRecord(backward_h2d_start_[slot], copy_stream_);
                 }
+                // Write-after-read, the same fence the host-staging branch
+                // below carries.  copy_stream_ is NON-BLOCKING since 76505cc, so
+                // it is no longer implicitly ordered behind the default stream
+                // PyTorch computes on: without this, the H2D can start
+                // overwriting slot 0 while the current chunk's last restore
+                // kernels are still reading it.  nvar>1 3-D lost that race
+                // deterministically (elastic3d / das_mu3d bs_disk); nvar=1 won it
+                // by having a smaller H2D, which is exactly how the earlier
+                // CPU-staging race in this function presented too.
+                cudaStreamWaitEvent(copy_stream_, compute_ready_[slot], 0);
                 auto enqueue_start = Clock::now();
                 saver_->load_cpu_to_gpu(0, len, copy_stream_);
                 add_backward_h2d_enqueue_time(elapsed_seconds(enqueue_start, Clock::now()));
