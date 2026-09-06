@@ -284,6 +284,17 @@ public:
                                   it, nsrc);
             }
 
+            // Deferred u_allt snapshot, AFTER the injection.  Every equation on
+            // this skeleton today writes u_allt from inside its stress kernel
+            // (through u_this_t) and leaves this a no-op -- the acoustic
+            // skeleton has the same hook for the same reason (eq_driver.cuh).
+            // It exists because the pseudo-acoustic VTI family cannot: it needs
+            // the POST-inject state, since u_forward[it-1].sH is the sH INPUT to
+            // step it's velocity substep and the rho gradient reads it as
+            // fsH_prev.  Capturing before the injection changes grad[rho]
+            // whenever the source lands on sH/sV, which is that family's default.
+            Eq::capture_allt(u_allt, wf, solver, it);
+
             checkpoint_runtime->save_forward(static_cast<int>(it), static_cast<int>(p.nt),
                                              wavefield.checkpoint_tensors());
 
