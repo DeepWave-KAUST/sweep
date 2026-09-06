@@ -10,6 +10,16 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
+  repository ran the tests before, and nothing could: `pytest test/` was unable
+  to return 0.  With that fixed, every push and pull request to `dev` runs the
+  suite on a hosted runner -- 313 tests in about three minutes; the rest skip
+  for want of a GPU or a compiled binding.  A skip is not a failure, so the job
+  also asserts a floor on the number of tests that actually EXECUTED
+  (`.github/scripts/assert_executed_floor.py`): without it, "the tests passed"
+  and "the tests did not run" print the same summary.  The bit-exactness gate
+  stays where the GPUs are.
+
 - **ViscoAcoustic: Zhu & Harris (2014) nearly constant-Q equation, per-edge
   free surface, and a CUDA backend (`impl='c'`).**  The equation now
   implements the paper's decoupled fractional Laplacians (eq. 10/11,

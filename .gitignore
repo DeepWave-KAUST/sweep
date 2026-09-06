@@ -25,7 +25,12 @@ test/test_outputs/
 test/outputs/
 slurm_logs/
 dcgm/
-scripts/
+# Anchored to the repo root on purpose. Unanchored, `scripts/` matches a
+# directory at ANY depth, which silently swallowed .github/scripts -- the
+# workflow added in this very commit calls a script from there, and `git add`
+# only warns when a path is ignored, so the CI would have failed on a missing
+# file with nothing in the diff to explain it.
+/scripts/
 site/
 .cache/
 
