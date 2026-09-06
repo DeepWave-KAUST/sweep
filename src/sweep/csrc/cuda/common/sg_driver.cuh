@@ -559,13 +559,25 @@ public:
 
         save_width = solver.M + 1;
         staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+        // ``bs.last_two`` is dead in the BACKWARD: ``save_last_state`` writes it
+        // in the forward only, and ``seed_recon`` reads ``p.u_last_two``
+        // directly.  Passing {} sent allocate_last_two down its self-allocating
+        // branch and built a {BS_NVAR, 1, B, 1, nz[, ny], nx} FP32 buffer that
+        // nothing ever touches -- 9 padded 3-D grids for elastic3d and
+        // elastic_tti_sg3d, 15 for das_mu3d -- on the GPU, or in PINNED HOST
+        // memory on the staged path.  Binding the tensor Python already owns
+        // costs nothing and returns all of it.  Same defect and same fix as the
+        // acoustic skeleton (eq_driver.cuh, dev 4290248); allocate_last_two
+        // still self-allocates if the tensor is undefined.
+        const torch::Tensor& last_two_bound = p.u_last_two;
         if (staged_boundary) {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
                                     1, true, false, p.transfer_interval,
-                                    p.boundary_cpu, p.boundary_gpu, {}, p.use_pinned_memory);
+                                    p.boundary_cpu, p.boundary_gpu, last_two_bound,
+                                    p.use_pinned_memory);
         } else {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
-                                    1, true, true, 1, {}, p.boundary_gpu, {},
+                                    1, true, true, 1, {}, p.boundary_gpu, last_two_bound,
                                     p.use_pinned_memory);
             if (p.boundary_gpu.empty())
                 boundary_saver.load_from_vector(p.u_boundary, vp);

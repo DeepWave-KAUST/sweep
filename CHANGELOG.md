@@ -189,6 +189,43 @@ and this project adheres to
   killed a 2-rank domain-decomposition benchmark before it measured
   anything.  The regression test asserts on work rather than timing:
   staging from two processes must copy no more than staging from one.
+- **The staggered backward allocated a dead wavefield buffer per call.**
+  `SgBackwardBsRunner` passed `{}` for the saver's `last_two`, so
+  `allocate_last_two` took its self-allocating branch and built a
+  `{BS_NVAR, 1, B, 1, nz[, ny], nx}` FP32 buffer -- 9 padded 3-D grids for
+  `Elastic3D` and `ElasticTTI_SG3D`, 15 for `DASMu3D` -- on the GPU, or in
+  PINNED HOST memory on the staged path.  Nothing touches it: `save_last_state`
+  writes `last_two` in the FORWARD, and the backward seeds from
+  `p.u_last_two` directly.  Binding the tensor Python already owns returns all
+  of it.  Measured at a 180^3 padded grid, backward-phase peak: `Elastic3D`
+  2.737 -> 2.527 GB and `DASMu3D` 4.278 -> 3.928 GB, i.e. exactly the 210 MB /
+  350 MB the buffer occupied, with records and every model gradient bit-exact.
+  Same defect and same fix the acoustic skeleton already had.
+- **Domain decomposition re-emitted staging knobs the storage rejects.**
+  `ModelParallel` rebuilt the wrapped propagator's boundary strategy as a typed
+  `BoundarySaving` carrying whatever it inherited, including
+  `transfer_interval` / `ring_buffers` / `pinned_memory` for `storage='gpu'`,
+  which `BoundaryOptions.__post_init__` refuses -- so a configuration the legacy
+  dict route accepted became a construction error, including the gpu baseline
+  of `test/dd_session_bench.py` at that file's own default, which is the
+  reference its bit-exactness gates compare against.  Only the knobs that apply
+  to the chosen storage are passed on now.
+
+- **3-D DAS boundary saving cost more than full storage, and was the default.**
+  `das3d::backward_bs` is three lines that re-run the forward and allocate the
+  entire `{nt, 3, B, nz, ny, nx}` strain history -- exactly what full storage
+  holds -- while the forward writes no boundary strips at all (it returns an
+  empty `last_two`).  On top of that the Python side allocated a 13-field
+  boundary ring and a 13-grid `last_two` that nothing writes and nothing reads.
+  Since boundary saving is the implicit `impl='c'` strategy, every plain 3-D DAS
+  gradient paid strictly MORE than `'full'` for a "memory-saving" mode, and
+  every gradient test passed because the answer was right and nothing asserted
+  on memory.  `DASZhao3D.supports_boundary_saving_c = False` now routes the
+  default to `'full'` and makes an explicit boundary request raise, the contract
+  `ViscoAcoustic` already had.  This is "not implemented", not "impossible":
+  `das2d` writes real strips and `DASMu` / `DASMu3D` get them from the shared
+  staggered skeleton.  `test/solver_gradient_mode_suite.py` drops the 14 `bs_*`
+  entries that all ran the same code as `full`.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
