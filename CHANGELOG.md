@@ -189,6 +189,16 @@ and this project adheres to
   killed a 2-rank domain-decomposition benchmark before it measured
   anything.  The regression test asserts on work rather than timing:
   staging from two processes must copy no more than staging from one.
+- **A demoted `impl='c'` lost the memory strategy the caller asked for.**  When
+  the compiled binding is unavailable, or the equation has no `_C`, `impl='c'`
+  falls back to eager and the cuda-only knobs are dropped with it.  The
+  gradient-memory strategy is not a cuda-only knob, though -- it just travels
+  inside `cuda_options` -- so dropping the object took the request with it and
+  the eager backend fell back to its own default, checkpointing.  A caller who
+  asked for boundary saving got `'ckpt'`, silently.  The request is now carried
+  across the demotion (an explicit `memory=` still wins), so it reaches
+  `check_memory_supported` and the backend actually runs what was asked for.
+
 - **The staggered backward allocated a dead wavefield buffer per call.**
   `SgBackwardBsRunner` passed `{}` for the saver's `last_two`, so
   `allocate_last_two` took its self-allocating branch and built a
