@@ -38,7 +38,7 @@ def _iter_equation_rows():
     torch_binding_available = sweep.is_torch_binding_available()
     rows = []
 
-    for name, obj in sorted(eq._equation_classes().items()):
+    for name, obj in sorted(eq.equation_classes().items()):
         models = _read_class_metadata(obj, "models")
         binding_supported = eq.supports_torch_binding(obj)
         rows.append(
