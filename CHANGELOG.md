@@ -580,6 +580,12 @@ and this project adheres to
   shots were fired as one fused supershot, recorded at the first entry's
   receivers, and returned without an error.  Both arrays are now checked, with
   a message naming the three supported ways to run several shots.
+- **`downsample=` returned a view that pinned the full-resolution array.**
+  `decimate` ended in basic slicing, so the decimated model kept the array it
+  came from alive through `.base` for as long as the caller held it -- a few
+  megabytes pinning a few hundred on the 3-D benchmarks.  It returns a
+  C-contiguous copy now, matching `read_model`; the `factor == 1` path stays
+  zero-copy.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every

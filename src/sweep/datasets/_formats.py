@@ -51,7 +51,13 @@ def decimate(arr: np.ndarray, factor) -> tuple[np.ndarray, tuple[int, ...]]:
     if all(f == 1 for f in factor):
         return arr, factor
     sl = tuple(slice(None, None, f) for f in factor)
-    return arr[sl], factor
+    # A copy, not the strided view basic slicing gives: the view keeps the
+    # FULL-resolution array alive through its base for as long as the caller
+    # holds the decimated one, so ``load(..., downsample=4)`` handed back a
+    # small model that pinned the large one (a 3-D benchmark: 7.6 MB pinning
+    # 480 MB). It also matches ``read_model``, which already returns
+    # C-contiguous arrays.
+    return np.ascontiguousarray(arr[sl]), factor
 
 
 # --------------------------------------------------------------- decompress
