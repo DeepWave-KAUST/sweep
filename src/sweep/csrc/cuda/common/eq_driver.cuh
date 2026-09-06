@@ -549,7 +549,15 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
                     "(stepped / domain-decomposed) backward: the ADCIG cube "
                     "has no cross-segment accumulator. Run ADCIG on the "
                     "single-segment backward instead.");
-    } else {
+    } else if (p.compute_illumination || p.compute_adcig) {
+        // Only when something will read them.  ``rtm_out_full`` / ``rtm_out_bs``
+        // already return nullptr on exactly this predicate, so the three
+        // ``zeros_like(vp)`` fields were allocated and memset on EVERY backward
+        // -- a plain FWI gradient included -- for kernels that never ran and a
+        // Python side that drops them (``compute_illumination`` is itself
+        // derived from whether Python allocated a real buffer).  Left
+        // undefined, ``pack_outputs`` hands Python None and its
+        // ``isinstance(..., torch.Tensor)`` guards skip the copy.
         init_rtm_output(illumination, p.models[0],
                         want_adcig && p.compute_adcig, 2 * p.adcig_max_lag + 1);
     }

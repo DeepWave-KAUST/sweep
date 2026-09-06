@@ -189,6 +189,18 @@ and this project adheres to
   killed a 2-rank domain-decomposition benchmark before it measured
   anything.  The regression test asserts on work rather than timing:
   staging from two processes must copy no more than staging from one.
+- **Every backward allocated the RTM/illumination buffers, requested or not.**
+  `init_rtm_output` did three `torch::zeros_like(vp)` on the runtime-padded
+  grid unconditionally, while the kernels that read them are gated on
+  `compute_illumination || compute_adcig` -- and `compute_illumination` is
+  itself derived from whether Python allocated a real buffer.  So a plain FWI
+  gradient allocated and memset three full padded fields no kernel touched.
+  The allocation now takes the same predicate the launch already takes.
+  Measured backward-phase peak: `Acoustic` at 724x324 padded 0.024 -> 0.021 GB
+  and `Acoustic3D` at 212^3 padded 1.222 -> 1.108 GB, i.e. exactly the 3 MB /
+  114 MB the three fields occupied, with records and gradients bit-exact and
+  gate tiers A/C/dd1 unchanged.
+
 - **A demoted `impl='c'` lost the memory strategy the caller asked for.**  When
   the compiled binding is unavailable, or the equation has no `_C`, `impl='c'`
   falls back to eager and the cuda-only knobs are dropped with it.  The
