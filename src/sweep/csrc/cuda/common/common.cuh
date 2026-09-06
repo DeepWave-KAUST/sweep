@@ -102,11 +102,3 @@ __global__ void set_boundary_zeros(
     bool fs_right,
     int cut_mask = 0
 );
-
-__global__ void set_boundary_zeros_3d(
-    float* __restrict__ u,   // (B, nz, ny, nx)
-    int width,
-    int nx,
-    int ny,
-    int nz
-);
