@@ -40,7 +40,7 @@ def test_helical_response_weights_and_gauge_average():
 def test_das_equations_are_exported_with_cuda_binding():
     import sweep.equations as eq
 
-    classes = eq._equation_classes()
+    classes = eq.equation_classes()
     assert classes["DASElastic"] is DASElastic
     assert classes["DASElastic3D"] is DASElastic3D
     assert classes["DASMu"] is DASMu

@@ -95,8 +95,9 @@ globals().update(equation_classes())
 def _equation_classes():
     """Deprecated alias of :func:`equation_classes`.
 
-    Kept because companion repos (sweep-tasks, sweep-agent) and the CLI reach in
-    for it; new code should use the public name.
+    Kept only for companion repos (sweep-tasks, sweep-agent) that still import
+    it. Nothing inside sweep uses it -- ``test_equation_registry_public_api``
+    keeps it that way -- so this can go once those repos are updated.
     """
     return equation_classes()
 

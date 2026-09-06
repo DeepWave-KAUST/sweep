@@ -16,7 +16,7 @@ def test_import_and_backend_helpers():
 def test_equation_registry_contains_core_equations():
     import sweep.equations as eq
 
-    classes = eq._equation_classes()
+    classes = eq.equation_classes()
 
     for name in ("Acoustic", "Acoustic3D", "Elastic", "Elastic3D"):
         assert name in classes
