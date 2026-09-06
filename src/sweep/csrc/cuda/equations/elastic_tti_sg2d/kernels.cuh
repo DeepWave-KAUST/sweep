@@ -940,6 +940,14 @@ __global__ void calculate_grad_elastic_tti_sg_nobs(
     int b  = blockIdx.z;
 
     if (ix >= solver.nx || iz >= solver.nz) return;
+    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
+    // gradients on the way back to the model, so everything this kernel writes
+    // in the PML shell and the stencil halo is discarded -- it was read,
+    // multiplied and accumulated for nothing, once per time step.  The bounds
+    // come from the context and are CUT-AWARE: on a DD cut face phys_x0()
+    // collapses to the halo, so the cut-adjacent columns are still imaged.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
