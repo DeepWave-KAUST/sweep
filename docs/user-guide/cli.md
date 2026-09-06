@@ -111,13 +111,13 @@ The CLI is a thin wrapper around the introspection helpers in
 
 ```python
 from sweep.equations import (
-    _equation_classes,
+    equation_classes,
     supports_torch_binding,
     torch_binding_supported_equations,
     Acoustic,
 )
 
-print(sorted(_equation_classes().keys()))
+print(sorted(equation_classes().keys()))
 print(torch_binding_supported_equations())
 print(supports_torch_binding("ElasticTTISG"))      # True
 

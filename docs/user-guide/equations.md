@@ -72,9 +72,9 @@ sweep list equations
 Or from Python:
 
 ```python
-from sweep.equations import _equation_classes, torch_binding_supported_equations
+from sweep.equations import equation_classes, torch_binding_supported_equations
 
-print(sorted(_equation_classes().keys()))
+print(sorted(equation_classes().keys()))
 print(torch_binding_supported_equations())
 ```
 
@@ -226,9 +226,10 @@ solver = PropTorch(
 The equation classes above are plug-in units. The propagator owns the time
 loop and PML wiring, so a new equation is one Python file (eager) plus an
 optional CUDA equation directory and a five-line entry in `module.cpp`
-(`impl="c"`). The discovery is reflective: importing the class in
-`src/sweep/equations/__init__.py` makes it appear in `sweep list equations`
-and in `_equation_classes()`.
+(`impl="c"`). Registration is a decorator plus an import: `@register_equation()` on the
+class claims its public name, and importing the module in
+`src/sweep/equations/__init__.py` is what makes the decorator run. Both are
+needed before it appears in `sweep list equations` or `equation_classes()`.
 
 Two entry points:
 
