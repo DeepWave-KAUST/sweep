@@ -1,0 +1,271 @@
+[
+ {
+  "module": "sweep.equations.acoustic",
+  "cls": "Acoustic",
+  "canonical": "Acoustic",
+  "aliases": [],
+  "c_name": "acoustic2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic.py"
+ },
+ {
+  "module": "sweep.equations.acoustic1st",
+  "cls": "Acoustic1st",
+  "canonical": "Acoustic1st",
+  "aliases": [],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic1st.py"
+ },
+ {
+  "module": "sweep.equations.acoustic3d",
+  "cls": "Acoustic3D",
+  "canonical": "Acoustic3D",
+  "aliases": [],
+  "c_name": "acoustic3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic3d.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_curvilinear",
+  "cls": "AcousticCurvilinear",
+  "canonical": "AcousticCurvilinear",
+  "aliases": [],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": true,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_curvilinear.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_lsrtm",
+  "cls": "AcousticLSRTM",
+  "canonical": "AcousticLSRTM",
+  "aliases": [],
+  "c_name": "acoustic_lsrtm2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_lsrtm.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_lsrtm3d",
+  "cls": "AcousticLSRTM3D",
+  "canonical": "AcousticLSRTM3D",
+  "aliases": [],
+  "c_name": "acoustic_lsrtm3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_lsrtm3d.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_vrr",
+  "cls": "AcousticVRR",
+  "canonical": "AcousticVRR",
+  "aliases": [],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_vrr.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_vrz",
+  "cls": "AcousticVRZ",
+  "canonical": "AcousticVRZ",
+  "aliases": [],
+  "c_name": "acoustic_vrz2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_vrz.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_vrz",
+  "cls": "AcousticVRZ3D",
+  "canonical": "AcousticVRZ3D",
+  "aliases": [],
+  "c_name": "acoustic_vrz3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_vrz.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_vti_1st",
+  "cls": "AcousticVTI1st",
+  "canonical": "AcousticVTI1st",
+  "aliases": [
+   "AcousticVTIDuveneck"
+  ],
+  "c_name": "acoustic_vti_1st_2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_vti_1st.py"
+ },
+ {
+  "module": "sweep.equations.acoustic_vti_1st",
+  "cls": "AcousticVTI1st3D",
+  "canonical": "AcousticVTI1st3D",
+  "aliases": [
+   "AcousticVTIDefault3D",
+   "AcousticVTIDuveneck3D"
+  ],
+  "c_name": "acoustic_vti_1st_3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/acoustic_vti_1st.py"
+ },
+ {
+  "module": "sweep.equations.das",
+  "cls": "DASMu",
+  "canonical": "DASMu",
+  "aliases": [],
+  "c_name": "das_mu2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/das.py"
+ },
+ {
+  "module": "sweep.equations.das",
+  "cls": "DASMu3D",
+  "canonical": "DASMu3D",
+  "aliases": [],
+  "c_name": "das_mu3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/das.py"
+ },
+ {
+  "module": "sweep.equations.das",
+  "cls": "DASZhao",
+  "canonical": "DASZhao",
+  "aliases": [
+   "DASElastic"
+  ],
+  "c_name": "das2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/das.py"
+ },
+ {
+  "module": "sweep.equations.das",
+  "cls": "DASZhao3D",
+  "canonical": "DASZhao3D",
+  "aliases": [
+   "DASElastic3D"
+  ],
+  "c_name": "das3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/das.py"
+ },
+ {
+  "module": "sweep.equations.elastic",
+  "cls": "Elastic",
+  "canonical": "Elastic",
+  "aliases": [
+   "ElasticAPM"
+  ],
+  "c_name": "elastic2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/elastic.py"
+ },
+ {
+  "module": "sweep.equations.elastic3d",
+  "cls": "Elastic",
+  "canonical": "Elastic3D",
+  "aliases": [],
+  "c_name": "elastic3d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/elastic3d.py"
+ },
+ {
+  "module": "sweep.equations.elastic_curvilinear",
+  "cls": "ElasticCurvilinear",
+  "canonical": "ElasticCurvilinear",
+  "aliases": [],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": true,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/elastic_curvilinear.py"
+ },
+ {
+  "module": "sweep.equations.elastic_tti",
+  "cls": "ElasticTTI",
+  "canonical": "ElasticTTI",
+  "aliases": [],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/elastic_tti.py"
+ },
+ {
+  "module": "sweep.equations.elastic_tti_sg",
+  "cls": "ElasticTTISG",
+  "canonical": "ElasticTTISG",
+  "aliases": [],
+  "c_name": "elastic_tti_sg2d",
+  "no_recursive_ckpt": true,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/elastic_tti_sg.py"
+ },
+ {
+  "module": "sweep.equations.elastic_vrr",
+  "cls": "ElasticVRR",
+  "canonical": "ElasticVRR",
+  "aliases": [],
+  "c_name": "elastic_vr2d",
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/elastic_vrr.py"
+ },
+ {
+  "module": "sweep.equations.qP_tariq",
+  "cls": "AcousticTariq",
+  "canonical": "AcousticTariq",
+  "aliases": [
+   "AcousticTTIAlkhalifah",
+   "AcousticVTIAlkhalifah"
+  ],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/qP_tariq.py"
+ },
+ {
+  "module": "sweep.equations.qP_tti",
+  "cls": "AcousticTTI",
+  "canonical": "AcousticTTI",
+  "aliases": [
+   "AcousticTTILiang"
+  ],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/qP_tti.py"
+ },
+ {
+  "module": "sweep.equations.qP_vti",
+  "cls": "AcousticVTI",
+  "canonical": "AcousticVTI",
+  "aliases": [
+   "AcousticVTIDefault",
+   "AcousticVTILiang"
+  ],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/qP_vti.py"
+ },
+ {
+  "module": "sweep.equations.visco_acoustic",
+  "cls": "ViscoAcoustic",
+  "canonical": "ViscoAcoustic",
+  "aliases": [],
+  "c_name": null,
+  "no_recursive_ckpt": false,
+  "c_raises": false,
+  "file": "/home/wangs0j/sweep-local/dd-refactor/src/sweep/equations/visco_acoustic.py"
+ }
+]
