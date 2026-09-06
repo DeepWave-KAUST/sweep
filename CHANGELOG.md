@@ -84,6 +84,15 @@ and this project adheres to
   invalidates the object built from it.  The staged tree is byte-identical to
   what the previous implementation produced (150 files, the same 50 compiled
   sources); the manifest costs ~44 ms once per process.
+  The staging is also taken under `torch.utils.file_baton.FileBaton`, the
+  mechanism torch uses for concurrent extension builds.  `torchrun` starts
+  one process per GPU and they all stage before `cpp_extension.load` takes
+  its own lock, so nothing serialised them: two ranks copied the tree on
+  top of each other, and on a real 150-file tree over a shared filesystem
+  one lost with `FileExistsError` on the stage directory -- which is what
+  killed a 2-rank domain-decomposition benchmark before it measured
+  anything.  The regression test asserts on work rather than timing:
+  staging from two processes must copy no more than staging from one.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every

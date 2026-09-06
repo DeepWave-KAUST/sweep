@@ -118,3 +118,90 @@ def test_legacy_ok_sentinel_forces_a_full_restage(staged):
     sources, _ = stage()
     assert Path(sources[0]).read_text() == "v3\n"
     assert isinstance(json.loads(manifest.read_text()), dict)
+
+
+# --------------------------------------------------------------------------- #
+# concurrency
+# --------------------------------------------------------------------------- #
+def _count_copies(monkeypatch, counter):
+    """Count how many copy calls actually move bytes into the stage."""
+    import shutil
+
+    for name in ("copytree", "copyfile"):
+        original = getattr(shutil, name)
+
+        def counted(*a, __orig=original, **kw):
+            with counter.get_lock():
+                counter.value += 1
+            return __orig(*a, **kw)
+
+        monkeypatch.setattr(shutil, name, counted)
+
+
+def _stage_in_child(csrc, build, sources, barrier, result):
+    """Stage from a second process, as torchrun's second rank would."""
+    from sweep import _jit as jit
+
+    jit._CSRC = csrc
+    jit._sources = lambda: sources
+    barrier.wait()                      # both ranks enter the staging together
+    try:
+        jit._stage(build)
+        result.value = 0
+    except Exception as exc:            # noqa: BLE001 - the whole point
+        result.value = 1
+        print(f"child failed: {type(exc).__name__}: {exc}")
+
+
+def test_two_processes_stage_the_tree_once_between_them(tmp_path, monkeypatch):
+    """torchrun starts one process per GPU and they import together.
+
+    The staging runs BEFORE cpp_extension.load takes its own lock, so nothing
+    else serialises it. Two ranks used to copy the tree on top of each other,
+    and on a real 150-file tree over a shared filesystem one lost with
+    `FileExistsError` on the stage directory -- seen on a 2-rank DD benchmark,
+    where it killed the run before it measured anything.
+
+    The assertion is on WORK, not on timing: staging the same tree from two
+    processes must move no more bytes than staging it from one. A race is
+    visible as the copy happening twice whether or not it also raises.
+    """
+    import multiprocessing as mp
+
+    csrc = tmp_path / "csrc"
+    _make_csrc(csrc)
+    sources = [str(csrc / "cuda/equations/acoustic2d/forward.cu"),
+               str(csrc / "bindings/module.cpp")]
+    monkeypatch.setattr(_jit, "_CSRC", csrc)
+    monkeypatch.setattr(_jit, "_sources", lambda: sources)
+
+    ctx = mp.get_context("fork")
+    counter = ctx.Value("i", 0)
+    _count_copies(monkeypatch, counter)
+
+    alone = tmp_path / "build_alone"
+    alone.mkdir()
+    _jit._stage(alone)
+    expected = counter.value
+    assert expected > 0, "the fixture staged nothing, so the count means nothing"
+
+    build = tmp_path / "build"
+    build.mkdir()
+    counter.value = 0
+    barrier = ctx.Barrier(2)
+    result = ctx.Value("i", -1)
+    child = ctx.Process(target=_stage_in_child,
+                        args=(csrc, build, sources, barrier, result))
+    child.start()
+    barrier.wait()
+    staged, _ = _jit._stage(build)       # this process is the other rank
+    child.join(timeout=60)
+
+    assert child.exitcode == 0, "the second rank crashed while staging"
+    assert result.value == 0, "the second rank raised while staging"
+    assert counter.value == expected, (
+        f"the tree was copied {counter.value} times across two processes, "
+        f"{expected} from one: the ranks staged on top of each other"
+    )
+    assert Path(staged[0]).read_text() == "v1\n"
+    assert (_stage_dir(build) / ".staged").exists()

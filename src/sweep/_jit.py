@@ -244,6 +244,35 @@ def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
         _ver = "dev"
     stage = build_dir / f"csrc_stage_{_ver}"
     manifest_path = stage / ".staged"
+    # torchrun starts one process per GPU and they all import at once, so the
+    # staging runs concurrently. It happens BEFORE cpp_extension.load()'s own
+    # lock, so nothing else serialises it: two ranks used to race in
+    # rmtree+copytree and one lost with FileExistsError on the stage directory
+    # (seen on a 2-rank DD benchmark). Torch's own baton is the same mechanism
+    # its extension build uses -- the loser waits for the winner to finish
+    # rather than staging on top of it.
+    from torch.utils.file_baton import FileBaton
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+    baton = FileBaton(str(build_dir / "sweep_stage_lock"))
+    if not baton.try_acquire():
+        baton.wait()
+        return _staged_paths(stage)
+    try:
+        return _stage_locked(stage, manifest_path)
+    finally:
+        baton.release()
+
+
+def _staged_paths(stage: Path) -> tuple[list[str], list[str]]:
+    staged = [str(stage / _staged_name(Path(s).resolve().relative_to(_CSRC)))
+              for s in _sources()]
+    inc = [str(stage), str(stage / "bindings"), str(stage / "shared"),
+           str(stage / "cuda"), str(stage / "cuda/common"), str(stage / "cuda/equations")]
+    return staged, inc
+
+
+def _stage_locked(stage: Path, manifest_path: Path) -> tuple[list[str], list[str]]:
     try:
         previous = json.loads(manifest_path.read_text())
         if not isinstance(previous, dict):
@@ -268,12 +297,7 @@ def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
         (stage / key).unlink(missing_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, sort_keys=True))
-
-    staged = [str(stage / _staged_name(Path(s).resolve().relative_to(_CSRC)))
-              for s in _sources()]
-    inc = [str(stage), str(stage / "bindings"), str(stage / "shared"),
-           str(stage / "cuda"), str(stage / "cuda/common"), str(stage / "cuda/equations")]
-    return staged, inc
+    return _staged_paths(stage)
 
 
 def _will_build(build_dir: Path) -> bool:
