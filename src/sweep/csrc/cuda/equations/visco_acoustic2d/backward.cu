@@ -323,8 +323,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         "visco_acoustic2d does not support boundary saving: the amplitude "
         "damping is dissipative (reverse-time reconstruction amplifies) and "
         "global (the |k| filter reads the whole padded grid, which boundary "
-        "strips cannot restore).  Use memory=MemoryOptions(strategy='ckpt') "
-        "or strategy='full'.");
+        "strips cannot restore).  Use memory=Ckpt() or memory=Full().");
     return {};
 }
 

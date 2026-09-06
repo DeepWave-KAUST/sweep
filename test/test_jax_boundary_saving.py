@@ -120,7 +120,7 @@ def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT):
         abcn=ABCN, pml_type=eq.default_pml_type, nt=nt, B=1,
     )
     if mode is not None:
-        prop.use_ckpt = False
+        prop.memory_strategy = "boundary"
         prop.enable_boundary_saving(True, mode=mode)
     return prop
 
@@ -348,11 +348,14 @@ def test_cpu_ring_storage_rejected():
 
 
 def test_mutually_exclusive_with_ckpt():
-    prop = _build(CASES["acoustic2d"], memory=BOUNDARY)
-    prop.use_ckpt = True
-    init_m, wavelet, src, rec, _ = _setup(CASES["acoustic2d"])
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        prop(wavelet, src, rec, models=[jnp.asarray(init_m[0])])
+    """The conflict is rejected where it is stated, not carried to call time.
+
+    This used to build with boundary saving and then flip ``use_ckpt`` on, so
+    the propagator held two answers to one question until the forward noticed.
+    The strategy is now a single value, so the contradiction can only be
+    written at construction -- and that is where it is refused."""
+    with pytest.raises(ValueError, match="Conflicting gradient-memory"):
+        _build(CASES["acoustic2d"], memory=BOUNDARY, use_ckpt=True)
 
 
 def test_return_wavefield_rejected():

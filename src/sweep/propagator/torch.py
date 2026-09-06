@@ -154,8 +154,8 @@ def _normalize_cuda_memory_kwargs(merged, equation=None):
         if explicit:
             raise NotImplementedError(
                 f"{type(equation).__name__} does not support boundary saving "
-                "on impl='c'; use memory=MemoryOptions(strategy='ckpt') or "
-                "strategy='full'.")
+                "on impl='c'; use memory=Ckpt() or memory=Full() "
+                "(from sweep.propagator.options).")
         strategy = "full"
 
     if strategy == "full":

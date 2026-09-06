@@ -123,7 +123,7 @@ def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT, free_surface=F
     )
     if mode is not None:
         prop._backend_impl.enable_eager_boundary_saving(True, mode=mode)
-        prop._backend_impl.use_ckpt = False
+        prop._backend_impl.memory_strategy = "boundary"
     return prop
 
 
