@@ -306,20 +306,7 @@ class ModelParallel:
             dh=dh, dt=dt, source_type=list(source_type),
             receiver_type=list(receiver_type), abcn=abcn,
             free_surface=self.free_surface, pml_type=pml, nt=nt, B=B,
-            memory=BoundarySaving(
-                # inherited from the wrapped prop (PropTorch memory= API);
-                # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
-                storage=self._bstorage,
-                storage_dtype=self._bdtype,
-                # tail truncation shrinks each tile's boundary ring to the
-                # last tail_steps steps (None = full length); the C++ side
-                # indexes it in shifted saved-step coordinates either way.
-                tail_steps=self._btail or None,
-                # batching + ring depth decide whether the staged copies can
-                # overlap compute at all; 1/1 serialises them per step.
-                transfer_interval=self._bti,
-                ring_buffers=self._bring,
-                pinned_memory=self._bpinned),
+            memory=self._tile_memory_strategy(),
             model_parallel=self.topo,
         )
 
@@ -1250,6 +1237,35 @@ class ModelParallel:
             for g in out:
                 dist.all_reduce(g, op=dist.ReduceOp.SUM, group=self.mesh.shot_pg)
         return out
+
+    def _tile_memory_strategy(self):
+        """The wrapped propagator's boundary strategy, re-stated for one tile.
+
+        Only the knobs that apply to the chosen storage are passed on.  The
+        staging trio (transfer_interval / ring_buffers / pinned_memory) is
+        meaningless for ``storage='gpu'`` and ``BoundaryOptions.__post_init__``
+        rejects it there, so re-emitting whatever was inherited turned a config
+        the legacy dict route accepted into a construction error -- including
+        the gpu baseline of ``test/dd_session_bench.py`` at its own default.
+        """
+        kwargs = dict(
+            # inherited from the wrapped prop (PropTorch memory= API);
+            # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
+            storage=self._bstorage,
+            storage_dtype=self._bdtype,
+            # tail truncation shrinks each tile's boundary ring to the last
+            # tail_steps steps (None = full length); the C++ side indexes it in
+            # shifted saved-step coordinates either way.
+            tail_steps=self._btail or None,
+        )
+        if self._bstorage != "gpu":
+            # batching + ring depth decide whether the staged copies can
+            # overlap compute at all; 1/1 serialises them per step.
+            kwargs["transfer_interval"] = self._bti
+            kwargs["ring_buffers"] = self._bring
+        if self._bstorage == "cpu":
+            kwargs["pinned_memory"] = self._bpinned
+        return BoundarySaving(**kwargs)
 
     @property
     def own_receiver_indices(self):
