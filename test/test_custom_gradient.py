@@ -11,11 +11,7 @@ from sweep.equations import Acoustic
 from sweep.propagator import PropTorch
 
 
-def ricker(nt, dt, freq, delay):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    x = np.pi * freq * t
-    return ((1.0 - 2.0 * x * x) * np.exp(-(x * x))).astype(np.float32)
-
+from conftest import ricker
 
 def cosine(a, b):
     a = a.flatten().double(); b = b.flatten().double()

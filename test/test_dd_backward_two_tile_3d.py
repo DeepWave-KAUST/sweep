@@ -49,11 +49,7 @@ REC_Y, REC_Z = NY // 2, 2
 X_LO_BIT, X_HI_BIT = 1, 2
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def vp_global():
     vp = 1800.0 + 600.0 * np.linspace(0, 1, NZ, dtype=np.float32)[:, None, None]

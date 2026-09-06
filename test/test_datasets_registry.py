@@ -6,6 +6,8 @@ importing ``sweep.datasets`` does not pull in the optional download/parse
 dependencies.
 """
 
+import json
+import subprocess
 import sys
 
 import numpy as np
@@ -65,11 +67,29 @@ def test_backcompat_helpers():
     assert "vp_true" in datasets.available_marmousi()
 
 
+OPTIONAL_DEPS = ("requests", "tqdm", "sweep_io", "h5py")
+
+
 def test_import_does_not_pull_optional_deps():
-    # Importing the datasets package (and loading embedded demos) must not
-    # import requests/tqdm/sweep_io/h5py — those are lazy, download-only.
-    for mod in ("requests", "tqdm", "sweep_io", "h5py"):
-        assert mod not in sys.modules, f"{mod} imported eagerly by sweep.datasets"
+    """Importing the datasets package (and loading an embedded demo) must not
+    import requests/tqdm/sweep_io/h5py — those are lazy, download-only.
+
+    The check runs in a FRESH interpreter and asserts on *its* ``sys.modules``.
+    Asserting on this process's ``sys.modules`` made the test a statement about
+    everything the preceding ~600 tests had imported, so it failed on import
+    leakage from unrelated modules and the whole suite could never exit 0
+    (every recorded full-suite run ended "1 failed, 886 passed").
+    """
+    probe = (
+        "import sys, json;"
+        "import sweep.datasets as d;"
+        "d.load_marmousi('vp_true');"
+        f"print(json.dumps([m for m in {OPTIONAL_DEPS!r} if m in sys.modules]))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                         text=True, check=True)
+    eager = json.loads(out.stdout.strip().splitlines()[-1])
+    assert eager == [], f"{', '.join(eager)} imported eagerly by sweep.datasets"
 
 
 def test_catalog_lists_and_filters(capsys):

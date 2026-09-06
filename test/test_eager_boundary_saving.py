@@ -42,11 +42,7 @@ DT, DH, NT, SO, ABCN = 0.0015, 10.0, 64, 4, 20
 BOUNDARY = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage="gpu"))
 
 
-def _ricker(nt, dt, freq=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    x = np.pi * freq * t
-    return ((1.0 - 2.0 * x * x) * np.exp(-(x * x))).astype(np.float32)
-
+from conftest import ricker
 
 def _ramp(shape, top, bot):
     nz = shape[0]
@@ -138,7 +134,7 @@ def _first_grad(prop, cfg, init_models, observed, wavelet, src, rec, device="cud
 def _setup(cfg, nt=NT, free_surface=False, device="cuda"):
     shape = _shape(cfg["ndim"])
     true_m, init_m, _ = _models(cfg["kind"], shape)
-    wavelet = torch.tensor(_ricker(nt, DT), device=device)
+    wavelet = torch.tensor(ricker(nt, DT), device=device)
     src, rec = _geometry(cfg["ndim"])
     full = _build(cfg, nt=nt, free_surface=free_surface, device=device)
     with torch.no_grad():
@@ -383,7 +379,7 @@ def test_multifield_second_order_reconstructs_all_pairs():
             pml_type=eq.default_pml_type, free_surface=False, nt=NT, B=1,
         )
 
-    wavelet = torch.tensor(_ricker(NT, DT), device="cuda")
+    wavelet = torch.tensor(ricker(NT, DT), device="cuda")
     s = np.array([[shape[1] // 2, shape[0] // 4]], dtype=np.int32)
     rx = np.arange(2, shape[1] - 2, 6, dtype=np.int32)
     rec = np.stack([rx, np.full(rx.size, SO // 2, np.int32)], -1)[None]

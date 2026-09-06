@@ -40,11 +40,7 @@ DEV = torch.device("cuda")
 NT = 120
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def build(ndim, *, abcn=8, free_surface=False, bs=None, use_ckpt=False,
           ckpt_mode="chunk", ckpt_count=0, requires_grad=False, nt=NT):

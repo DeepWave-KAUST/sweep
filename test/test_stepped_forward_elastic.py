@@ -62,11 +62,7 @@ NWF = {2: 15, 3: 36}
 ELASTIC_ROTATE_KW = dict(u_blocks=(), psi_pairs=())  # no rotation
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return (scale * (1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def elastic_models(shape, requires_grad=False):
     """Smoke-test recipe: vp 2200+40g, vs 1200+20g, rho 2000+10g."""
