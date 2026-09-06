@@ -89,3 +89,29 @@ def requires_binding(*symbols):
             "tests skip, or fix the environment."
         )
     return pytest.mark.skipif(True, reason=reason)
+
+
+def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
+    """The sampled Ricker wavelet the suite uses, in one place.
+
+    Seventeen test modules carried their own copy of this under four different
+    signatures -- ``(nt, dt, fm, delay)``, ``(nt, dt, freq, delay)``,
+    ``(nt, dt, fm, delay, scale)``, ``(nt, dt, freq, delay, amp)``. Every one of
+    them was checked to produce a **bit-identical** array to this body before
+    being migrated (three parameter sets each); the ones that were not are still
+    local, because they are a different wavelet:
+
+    * ``ricker(t, fm)`` in test_sweep_pytorch / test_elastic_tti_2nd /
+      test_elastic_tti_sg3d takes a time ARRAY and uses the
+      ``(1 - 0.5 x^2) exp(-0.25 x^2)`` form with ``x = 2*pi*f*t``;
+    * ``_ricker(nt, dt, f0)`` in test_visco_acoustic has its own delay rule.
+
+    Do not "simplify" the expression. ``np.arange(nt, dtype=np.float32) * dt``
+    promotes to float64 and the cast at the end is what the callers' recorded
+    baselines were produced with, so the order of operations is load-bearing.
+    """
+    import numpy as np
+
+    t = np.arange(nt, dtype=np.float32) * dt - delay
+    arg = np.pi * fm * t
+    return (scale * (1.0 - 2.0 * arg ** 2) * np.exp(-arg ** 2)).astype(np.float32)

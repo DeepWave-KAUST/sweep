@@ -71,11 +71,7 @@ NPHYS = 9          # vx, vy, vz, sxx, syy, szz, sxy, sxz, syz = slots 0..8
 WAVELET_SCALE = 1.0e6
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return (scale * (1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def global_models():
     grid = np.linspace(0.0, 1.0, num=NZ * NY * NX, dtype=np.float32)

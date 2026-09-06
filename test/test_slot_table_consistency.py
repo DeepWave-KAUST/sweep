@@ -247,3 +247,42 @@ def test_grads_out_and_illum_declarations(eq_name, expected):
 
     spec = getattr(E, eq_name)(device="cpu", backend="torch").cuda_layout
     assert (spec.grads_out_has_wavelet, spec.illum_nvar) == expected
+
+
+# --------------------------------------------------------------------------- #
+# vs the shared test wavelet
+# --------------------------------------------------------------------------- #
+def test_the_local_ricker_copies_that_remain_are_genuinely_different():
+    """Sixteen modules were migrated onto ``conftest.ricker``; five were not.
+
+    Each of those five keeps its own because it is a DIFFERENT wavelet, not
+    because nobody got round to it -- and this test says which is which, so a
+    later reader does not "finish the job" and silently change those tests'
+    inputs. If one of them ever becomes equivalent, this fails and it can be
+    migrated deliberately.
+    """
+    import ast
+    import pathlib
+
+    import numpy as np
+
+    from conftest import ricker
+
+    keep = {"test_das_equations.py": "its own defaults (fm=12.0, delay=0.04)",
+            "test_elastic_tti_2nd.py": "array form ricker(t, f)",
+            "test_elastic_tti_sg3d.py": "array form ricker(t, f)",
+            "test_sweep_pytorch.py": "array form, (1-0.5x^2)exp(-0.25x^2)",
+            "test_visco_acoustic.py": "signature (nt, dt, f0), own delay rule"}
+    here = pathlib.Path(__file__).parent
+    still_local = {p.name for p in here.glob("test_*.py")
+                   if any(isinstance(n, ast.FunctionDef) and n.name in ("ricker", "_ricker")
+                          for n in ast.walk(ast.parse(p.read_text())))}
+    assert still_local == set(keep), (
+        f"the set of modules with a local ricker changed: "
+        f"unexpected {sorted(still_local - set(keep))}, "
+        f"gone {sorted(set(keep) - still_local)}")
+
+    # and the shared one still produces what the migrated modules were built on
+    expected = np.array([-0.1748605, -0.19641757, -0.21919768, -0.24298875],
+                        dtype=np.float32)
+    np.testing.assert_array_equal(ricker(4, 1.5e-3, 10.0, 0.06), expected)

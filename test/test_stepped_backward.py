@@ -47,11 +47,7 @@ NT2D = 120
 NT3D = 60
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def build(ndim, *, abcn=8, bs=None, use_ckpt=False, nt=NT2D):
     shape = (48, 56) if ndim == 2 else (24, 20, 24)

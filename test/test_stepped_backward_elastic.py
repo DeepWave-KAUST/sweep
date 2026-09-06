@@ -69,11 +69,7 @@ N_ADJ = {2: 15, 3: 36}
 N_RECON = {2: 7, 3: 12}
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return (scale * (1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def build(ndim, *, free_surface, bs=None, nt=NT2D):
     shape = (48, 56) if ndim == 2 else (24, 20, 24)
