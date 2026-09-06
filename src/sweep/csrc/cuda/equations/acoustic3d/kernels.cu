@@ -176,9 +176,18 @@ __global__ void accumulate_illumination_3d(
 
     int idx = iz * stride_z + iy * stride_y + ix;
 
-    const float* u_backward_b = u_backward + b * spatial_size;
     float* src_b = source_illumination + b * spatial_size;
-    float* rec_b = receiver_illumination + b * spatial_size;
+
+    if (receiver_illumination != nullptr) {
+        const float* u_backward_b2 = u_backward + b * spatial_size;
+        float ub2 = u_backward_b2[idx];
+        (receiver_illumination + b * spatial_size)[idx] += ub2 * ub2;
+    }
+    // Receiver-only is a real call: the it == 0 tail of the boundary-saving
+    // reverse loop has the adjoint field but no reconstructed forward, and the
+    // store-based paths DO accumulate lambda(0)^2 there.
+    if (source_illumination == nullptr)
+        return;
 
     const float* u_next_b = u_forward_next + b * spatial_size;
     float u_tt;
@@ -189,10 +198,7 @@ __global__ void accumulate_illumination_3d(
         const float* u_prev_b = u_forward_prev + b * spatial_size;
         u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
     }
-    float ub = u_backward_b[idx];
-
     src_b[idx] += u_tt * u_tt;
-    rec_b[idx] += ub * ub;
 }
 
 

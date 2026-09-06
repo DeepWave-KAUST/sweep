@@ -496,6 +496,20 @@ struct Driver {
     // bit-load-bearing order: NOPML step, strip restore, u_tt gradient
     // imaging, forward source injection, swap.  (The 3-D twin images before
     // the injection; VRZ injects before the restore — order lives here.)
+    // Receiver-only illumination for the it == 0 tail; see the call site.
+    static void bs_illum_tail(const State& s, const SolverContext& ctx,
+                              Wavefield& adjoint, RTMOutput& illumination)
+    {
+        accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+            nullptr, nullptr, nullptr,
+            adjoint.u_now_t.data_ptr<float>(),
+            /*source_illumination=*/nullptr,
+            illumination.receiver_illumination.data_ptr<float>(),
+            s.nx, s.nz, ctx.dt,
+            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
+        );
+    }
+
     static void bs_recon_step(const State& s, const SolverContext& ctx,
                                 Wavefield& forward, Wavefield& adjoint,
                                 BoundaryRuntime& boundary_runtime,

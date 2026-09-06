@@ -784,6 +784,16 @@ public:
             Eq::rotate_adjoint_buffers(adjoint);
             Eq::accumulate_source_grad(*state, ctx, adjoint, p, grads,
                                        0, forward_nsrc);
+            // The store-based loop accumulates illumination for it = nt-1 .. 0,
+            // right here in its own iteration order; this loop floors at it == 1,
+            // so it was one lambda(0)^2 short -- and lambda is largest at it == 0,
+            // straight after the last residual injection. Measured 1.7e-2 (2-D)
+            // / 1.8e-3 (3-D) against the full store. The forward field is NOT
+            // reconstructed at it == 0, so only the receiver term can be closed;
+            // the source term's it == 0 contribution is u_tt(0)^2, which the same
+            // comparison bounds below 2.7e-8.
+            if (bs_rtm != nullptr && p.compute_illumination)
+                Eq::bs_illum_tail(*state, ctx, adjoint, *bs_rtm);
         }
 
         Eq::pack_outputs(out, grads, illumination);
