@@ -5,6 +5,7 @@ package: `pip install sweep-tasks` and use `sweep-tasks run task.yaml`.
 """
 
 import argparse
+import difflib
 import inspect
 
 
@@ -85,26 +86,40 @@ def list_equations():
         )
 
 
+#: Not equations, but the names users most plausibly type at ``sweep show``:
+#: they live in ``sweep.equations`` and dispatch to real equation classes.
+_FACADES = ("DAS", "AcousticAniso")
+
+
 def list_wavefields(class_name):
+    """Print one equation's wavefields and models. Returns a process exit code.
+
+    Resolution goes through the registry, not ``getattr(sweep.equations, ...)``.
+    The module namespace also holds ``FieldSpec``, ``WaveEquation``, the facades
+    and every imported symbol, so the attribute lookup answered for names that
+    are not equations at all -- and then described them as facades.
+    """
     import sweep
     import sweep.equations as eq
 
-    if not hasattr(eq, class_name):
+    registry = eq.equation_classes()
+    cls = registry.get(class_name)
+
+    if cls is None:
+        if class_name in _FACADES:
+            print(f"\n=== {class_name} ===")
+            print(f"  {class_name} is a facade/dispatcher, not a wave equation:")
+            print(f"  it selects a raw equation class from its constructor "
+                  f"arguments.")
+            print(f"  Use `sweep show <RawClass>` on the one it dispatches to.")
+            return 1
         print(f"No such wave equation: {class_name}")
-        return
-
-    cls = getattr(eq, class_name)
-    if not inspect.isclass(cls):
-        print(f"{class_name} is not a valid wave equation")
-        return
-
-    # The `DAS` and `AcousticAniso` facades live in `sweep.equations` but are
-    # not `WaveEquation` subclasses — they dispatch to raw equation classes.
-    if not issubclass(cls, eq.WaveEquation):
-        print(f"\n=== {class_name} ===")
-        print(f"  {class_name} is a facade/dispatcher, not a raw wave equation.")
-        print(f"  Use `sweep show <RawClass>` to inspect the underlying equation.")
-        return
+        near = difflib.get_close_matches(class_name, sorted(registry), n=3)
+        if near:
+            print(f"  Did you mean: {', '.join(near)}?")
+        print("  `sweep list equations` names all "
+              f"{len(registry)} registered equations.")
+        return 1
 
     wavefields = _read_class_metadata(cls, "wavefields")
     models = _read_class_metadata(cls, "models")
@@ -125,6 +140,7 @@ def list_wavefields(class_name):
 
     print(f"  Torch binding support: {_format_yes_no(binding_supported)}")
     print(f"  Torch binding available: {_format_yes_no(binding_available)}")
+    return 0
 
 
 def main():
@@ -151,8 +167,7 @@ def main():
         list_equations()
         return 0
     if args.command == 'show':
-        list_wavefields(args.component)
-        return 0
+        return list_wavefields(args.component)
     if args.command == 'datasets':
         from sweep.datasets.cli import main as datasets_main
         return datasets_main(args.args)
