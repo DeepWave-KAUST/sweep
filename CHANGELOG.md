@@ -146,6 +146,19 @@ and this project adheres to
   / `Ckpt(...)`.
 
 ### Fixed
+- **Three test files turned a build failure into a green skip.**  They probed
+  the extension as `try: import sweep._C as _C; return hasattr(_C, "sym")
+  except Exception: return False`.  `sweep._C` is a lazy shim whose attribute
+  access triggers the JIT, so when nvcc failed torch raised, the `except`
+  swallowed it, the module-level `skipif` fired, and 38 collected items
+  reported green on a build that does not exist.  `test/conftest.py` now owns
+  the one decision: `requires_binding(*symbols)` answers from
+  `is_torch_binding_available()`, which compiles nothing; a binding that IS
+  present but lacks a named symbol raises, because that is a stale or partial
+  build rather than a missing capability; and `SWEEP_TEST_REQUIRE_CUDA=1` turns
+  the skip itself into a collection error, so a machine that is supposed to
+  have a GPU cannot report green over half the suite.
+
 - **The staggered family refused host-staged boundary storage under stepping
   and domain decomposition.**  `sg_check_stepped_backward` rejected
   `storage='cpu'` and `storage='disk'` for every stepped or DD `backward_bs`
