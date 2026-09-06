@@ -151,10 +151,15 @@ TIER_A = [
 # Every solver key in solver_gradient_mode_suite.SOLVERS.  NOTE: ElasticVRR
 # (csrc elastic_vr2d) has no entry there, so its compiled binding is NOT gated
 # by anything here -- the one equation with a CUDA kernel outside the suite.
+# Run gate/evr_ab.py for it; gate/verify_all.sh does.
 ALL_SOLVERS = (
     "acoustic2d", "acoustic3d", "vrz2d", "vrz3d", "lsrtm2d", "lsrtm3d",
     "das2d", "das3d", "das_mu2d", "das_mu3d", "elastic2d", "elastic3d",
     "acoustic_vti_1st_2d", "acoustic_vti_1st_3d", "elastic_tti_sg2d",
+    # The suite has had specs for these two since it was written; the list
+    # simply never picked them up, so two compiled equations -- one of them a
+    # whole displacement-based formulation -- had no bit-exact coverage at all.
+    "elastic_tti_sg3d", "elastic_tti_2nd2d",
 )
 
 # das2d / das3d declare supported_scenarios=('interior',); everything else takes
