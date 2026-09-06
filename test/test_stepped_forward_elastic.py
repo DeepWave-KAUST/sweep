@@ -131,23 +131,7 @@ def build(ndim, *, abcn=8, free_surface=False, bs=None, requires_grad=False,
     return prop, wavelet, sources, receivers, models
 
 
-def capture(prop):
-    """Wrap the compiled propagator's forward_func so the populated
-    ForwardInput is kept (PropTorch delegates to ``_backend_impl``)."""
-    cap = {}
-    impl = prop._backend_impl
-    orig = impl.forward_func
-
-    def wrapper(params):
-        out = orig(params)
-        cap["params"] = params
-        cap["raw_out"] = out
-        return out
-
-    impl.forward_func = wrapper
-    cap["func"] = orig
-    return cap
-
+from conftest import capture
 
 def _zero_state(p, L, *, record, u_allt=None, has_bs=False):
     for t in L:

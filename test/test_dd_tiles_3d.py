@@ -64,21 +64,7 @@ def make_prop(shape, topo=None):
     return PropTorch(equation, **kwargs)
 
 
-def capture(prop):
-    cap = {}
-    impl = prop._backend_impl
-    orig = impl.forward_func
-
-    def wrapper(params):
-        out = orig(params)
-        cap["params"] = params
-        cap["raw_out"] = out
-        return out
-
-    impl.forward_func = wrapper
-    cap["func"] = orig
-    return cap
-
+from conftest import capture
 
 def make_runner(prop, wavelet, sources, receivers, vp_np):
     cap = capture(prop)

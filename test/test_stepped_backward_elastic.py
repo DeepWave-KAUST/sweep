@@ -137,27 +137,7 @@ def build(ndim, *, free_surface, bs=None, nt=NT2D):
     return prop, wavelet, sources, receivers, models
 
 
-def capture_backward(prop):
-    cap = {}
-    impl = prop._backend_impl
-    for name in ("backward_func", "backward_bs_func", "backward_ckpt_func"):
-        orig = getattr(impl, name, None)
-        if orig is None:
-            continue
-
-        def make(orig, name):
-            def wrapper(params):
-                out = orig(params)
-                cap["params"] = params
-                cap["raw_out"] = out
-                cap["func"] = orig
-                cap["mode"] = name
-                return out
-            return wrapper
-
-        setattr(impl, name, make(orig, name))
-    return cap
-
+from conftest import capture_backward
 
 def run_public_once(prop, wavelet, sources, receivers, models):
     syn = prop(wavelet, sources, receivers, models=models)

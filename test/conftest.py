@@ -115,3 +115,98 @@ def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
     t = np.arange(nt, dtype=np.float32) * dt - delay
     arg = np.pi * fm * t
     return (scale * (1.0 - 2.0 * arg ** 2) * np.exp(-arg ** 2)).astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# Capturing the raw compiled-call inputs
+# --------------------------------------------------------------------------- #
+# Ten identical copies of `capture`, plus two each of `capture_backward` and
+# `capture_both`, were spread across the suite. They are here once now.
+#
+# NOT pytest fixtures, deliberately. A fixture's natural shape is
+# ``yield cap`` + restore, and these DO NOT RESTORE -- the wrapper stays on the
+# propagator for the rest of its life. That is load-bearing for two reasons:
+#
+#   * ``_c.py`` snapshots backward_func / backward_bs_func / backward_ckpt_func
+#     onto the autograd ctx at FORWARD time, so `capture_backward` only works if
+#     it is installed before the forward call, and a teardown that ran between
+#     forward and backward would put the unwrapped function back;
+#   * ``parallel/dd_propagator.py`` does its own save/wrap/restore of the same
+#     attributes for its one-time DD capture, so the two nest, and the order
+#     they unwind in is not something a fixture should start deciding.
+#
+# Making them fixtures would therefore be a behaviour change wearing the costume
+# of a refactor. Consolidating them as plain functions is not: the bodies are
+# closed -- no module globals -- so this is a textual move.
+
+
+def capture(prop):
+    """Wrap the compiled forward so the populated ForwardInput is kept."""
+    cap = {}
+    impl = prop._backend_impl
+    orig = impl.forward_func
+
+    def wrapper(params):
+        out = orig(params)
+        cap["params"] = params
+        cap["raw_out"] = out
+        return out
+
+    impl.forward_func = wrapper
+    cap["func"] = orig
+    return cap
+
+
+def capture_backward(prop):
+    """Wrap every compiled backward so the populated BackwardInput is kept.
+
+    ``Wrapper.apply`` reads the attributes at FORWARD time, so this has to be
+    installed before the forward call, not between it and ``.backward()``.
+    """
+    cap = {}
+    impl = prop._backend_impl
+    for name in ("backward_func", "backward_bs_func", "backward_ckpt_func"):
+        orig = getattr(impl, name, None)
+        if orig is None:
+            continue
+
+        def make(orig, name):
+            def wrapper(params):
+                out = orig(params)
+                cap["params"] = params
+                cap["raw_out"] = out
+                cap["func"] = orig
+                cap["mode"] = name
+                return out
+            return wrapper
+
+        setattr(impl, name, make(orig, name))
+    return cap
+
+
+def capture_both(prop):
+    """Wrap forward_func + backward_bs_func so both raw inputs survive one run."""
+    cap = {}
+    impl = prop._backend_impl
+
+    fwd_orig = impl.forward_func
+
+    def fwd_wrapper(params):
+        out = fwd_orig(params)
+        cap["fp"] = params
+        cap["fwd_raw_out"] = out
+        cap["fwd_func"] = fwd_orig
+        return out
+
+    impl.forward_func = fwd_wrapper
+
+    bwd_orig = impl.backward_bs_func
+
+    def bwd_wrapper(params):
+        out = bwd_orig(params)
+        cap["bp"] = params
+        cap["bwd_func"] = bwd_orig
+        return out
+
+    impl.backward_bs_func = bwd_wrapper
+    return cap
