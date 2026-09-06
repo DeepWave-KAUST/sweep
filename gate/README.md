@@ -15,6 +15,26 @@ gate/run_gate.sh A base_A.pt C base_C.pt        # tier/baseline pairs
 gate/run_gate.sh dd1 base_dd1.pt                # dd1/dd2 go through ddgate
 ```
 
+## The gate is not the whole story
+
+`gate/verify_all.sh` runs everything that protects the branch, because the gate
+has two **structural** blind spots that other instruments exist to cover:
+
+| blind spot | why it exists | what covers it |
+|---|---|---|
+| compares C against C | it cannot see a defect the full and boundary-saving paths **share** — the shape of the `acoustic_vti_1st` operator-adjoint bug | the eager leg of `test/backend_gradient_matrix.py` |
+| `ALL_SOLVERS` omits `elastic_vr2d` | the solver suite has no ElasticVRR entry | `gate/evr_ab.py`, 56 tensors |
+| also omits `elastic_tti_sg3d`, `elastic_tti_2nd2d`, `visco_acoustic2d` | never added | the matrix for the first two; `test/test_visco_acoustic_cuda.py` for visco |
+| no tier sets `compute_illumination` | the illumination path was never gated at all | `test/test_illumination_pin.py` |
+
+```bash
+. gate/env.sh && gate/verify_all.sh            # everything (~30 min)
+. gate/env.sh && gate/verify_all.sh --quick    # skips tier B and the full matrix
+```
+
+It prints, at the end, what **nothing** covers. Keep that list honest: an
+uncovered path that nobody has written down reads as a covered one.
+
 ## What is tracked, and what is not
 
 Tracked: the tooling (`bitgate.py`, `ddgate.py`, `check_equations_api.py`,

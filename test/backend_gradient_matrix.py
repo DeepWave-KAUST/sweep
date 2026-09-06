@@ -213,6 +213,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--expect", metavar="FILE",
+        help=(
+            "Compare the failing cells against a recorded set and EXIT NON-ZERO "
+            "if they differ. Without it this script always exits 0 -- it printed "
+            "'Failures:' and returned success, so nothing that ran it in a "
+            "pipeline could tell. A cell that stops failing is also a mismatch: "
+            "the file has to be updated deliberately, the same rule "
+            "KNOWN_MISSING_GRADIENTS already follows for declared gaps."),
+    )
+    parser.add_argument(
         "--reference-scope",
         choices=("cross", "within"),
         default="cross",
@@ -407,6 +417,32 @@ def main() -> None:
         print("Failures:")
         for failure in failures:
             print(f"- {failure}")
+
+    if not args.expect:
+        return
+    path = Path(args.expect)
+    # A failure line is "<case>/<mode>/<backend>: <reason>"; key on the cell,
+    # not the reason, so a reworded error message is not a false alarm while a
+    # newly failing cell still is.
+    seen = {line.split(":", 1)[0].strip() for line in failures}
+    if not path.exists():
+        path.write_text("\n".join(sorted(seen)) + "\n")
+        print(f"\nwrote {len(seen)} expected failures to {path}")
+        return
+    want = {l.strip() for l in path.read_text().splitlines()
+            if l.strip() and not l.startswith("#")}
+    new_fail, gone = sorted(seen - want), sorted(want - seen)
+    if new_fail:
+        print("\nNEW failing cells (not in %s):" % path)
+        for c in new_fail:
+            print(f"  + {c}")
+    if gone:
+        print("\nCells that no longer fail -- update %s deliberately:" % path)
+        for c in gone:
+            print(f"  - {c}")
+    if new_fail or gone:
+        raise SystemExit(1)
+    print(f"\nfailing cells match {path} ({len(seen)} of them)")
 
 
 if __name__ == "__main__":
