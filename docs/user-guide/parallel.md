@@ -154,11 +154,18 @@ but not every value is wired for the DD backward — which Python drives one
 step per kernel call, unlike the monolithic loop the staged paths were built
 for. What is refused, is refused loudly at the first backward:
 
-| `BoundaryOptions.storage` | Acoustic 2-D / 3-D | Elastic 2-D / 3-D |
+| `BoundaryOptions.storage` | Acoustic 2-D / 3-D, VRZ 2-D / 3-D | Elastic 2-D / 3-D, Elastic APM |
 | --- | --- | --- |
 | `"gpu"` (default, gpu-direct) | yes | yes |
-| `"cpu"` (pinned-host staging) | **yes** | no — raises |
+| `"cpu"` (pinned-host staging) | **yes** | **yes** — it used to raise |
 | `"disk"` | no — raises | no — raises |
+
+Those two columns are the whole DD-admissible set: admission is *declared* by
+the equation's `cuda_layout` (see `check_dd_admission`), and nothing else
+declares it today. The refusal was lifted in the shared staggered driver, so the
+rest of that family (DAS-mu, elastic TTI SG, elastic VR) is no longer blocked by
+*this* check — but each still has to declare DD admission before any of it is
+reachable under `ModelParallel`.
 
 `storage="cpu"` also needs a **real cut**: a single-tile `ModelParallel`
 (`world_size=1`) refuses it, because that path reaches a reconstruction
@@ -171,16 +178,28 @@ differ only within their own run-to-run quantisation floor, i.e. by no more
 than two runs of the *same* configuration differ from each other
 (`test/dd_offload_check.py` checks exactly that, on both counts).
 
-Staging trades PCIe traffic for GPU memory, and under DD it does so without
-the overlap the monolithic backward gets. The boundary runtime does own the
-machinery — a copy stream beside the compute stream, events either way, ring
-slots, and a prefetch of the next chunk issued while the current one is still
-being consumed — but it is constructed **per kernel call**, and the DD backward
-is driven one step per call from Python. Each call therefore builds a runtime,
-waits for its own copy, and destroys it, so a prefetch never survives to the
-step it was meant for. That is a lifetime problem, not a design limit: a
-runtime handle persisted across the reverse loop would restore the overlap.
-Until then, treat cpu staging as the escape hatch for a tile whose ring does
-not fit, not as a default.
+Staging trades PCIe traffic for GPU memory. The DD backward is driven one step
+per kernel call from Python, so the boundary runtime — a copy stream beside the
+compute stream, events either way, ring slots, and a prefetch of the next chunk
+issued while the current one is still being consumed — used to be built and
+destroyed inside every call, and a prefetch never survived to the step it was
+meant for. It is now owned by a **`BoundarySession` held on the Python side**
+for the whole reverse loop, so the stream and its ring events outlive the call
+that created them.
+
+What it costs, measured on 2×V100 with a 3-D elastic tile
+(`test/dd_elastic_staged_check.py`), every arm bit-exact against gpu-direct:
+
+| ring config | backward | vs gpu-direct | peak boundary memory |
+| --- | --- | --- | --- |
+| gpu-direct (baseline) | 0.85 s | 1.00× | 1.03 GB |
+| cpu, `transfer_interval=1`, `ring_buffers=1` | 2.28 s | 2.68× | **0.29 GB** |
+| cpu, `transfer_interval=8`, `ring_buffers=2` | 3.19 s | 3.75× | 0.37 GB |
+| cpu, `transfer_interval=32`, `ring_buffers=4` | 8.84 s | 10.38× | 0.81 GB |
+
+So it is still an escape hatch rather than a default — 3.5× less boundary memory
+for 2.68× the backward — but it is a working one, and **the knobs matter more
+than the switch**: the inherited `32`/`4` default is the worst point of the
+space here, not the best. Start at `1`/`1` and raise only if profiling asks.
 
 API details: [sweep.parallel reference](../api/parallel.md).
