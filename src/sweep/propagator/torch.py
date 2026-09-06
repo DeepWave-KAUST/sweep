@@ -405,6 +405,19 @@ class PropTorch(torch.nn.Module):
                 _normalize_impl(requested_impl) if requested_impl is not None else "auto"
             )
             if requested_norm in ("c", "auto"):
+                # impl='c' was demoted to eager (no binding, or the equation has
+                # no _C). The cuda-only knobs go, but the memory STRATEGY is not
+                # a cuda-only knob -- it just travelled inside cuda_options, and
+                # dropping the object took the request with it, leaving the
+                # eager backend on its own default ('ckpt'). So a caller asking
+                # for bf16 cpu-staged boundary saving quietly got checkpointing.
+                # Carry the request across instead: anything eager cannot honour
+                # then raises from check_memory_supported, naming the option.
+                carried = getattr(cuda_options, "memory", None)
+                if carried is not None and memory is None:
+                    # _caller_request too, or the resolution below still reads
+                    # None and disagrees with the backend it just built.
+                    memory = _caller_request = as_memory_strategy(carried)
                 cuda_options = None
                 kwargs = {k: v for k, v in kwargs.items() if k not in CUDA_OPTION_KEYS}
 
