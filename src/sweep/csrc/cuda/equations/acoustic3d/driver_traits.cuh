@@ -447,6 +447,21 @@ struct Driver {
     // 3-D bs reverse step: NOPML(f_this) -> strip restore -> u_tt gradient +
     // rtm + ADCIG imaging (BEFORE the forward source injection — the 2-D twin
     // images after injection + swap) -> inject -> swap.
+    // Receiver-only illumination for the it == 0 tail; see the call site.
+    static void bs_illum_tail(const State& s, const SolverContext& ctx,
+                              Wavefield& adjoint, RTMOutput& illumination)
+    {
+        accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            nullptr, nullptr, nullptr,
+            adjoint.u_now_t.data_ptr<float>(),
+            /*source_illumination=*/nullptr,
+            illumination.receiver_illumination.data_ptr<float>(),
+            s.B, s.nx, s.ny, s.nz, ctx.dt,
+            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
+            ctx.phys_z0(), ctx.phys_z1()
+        );
+    }
+
     static void bs_recon_step(const State& s, const SolverContext& ctx,
                                 Wavefield& forward, Wavefield& adjoint,
                                 BoundaryRuntime& boundary_runtime,

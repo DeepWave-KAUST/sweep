@@ -527,6 +527,11 @@ struct Driver {
     // VRZ bs reverse order: NOPML step, forward-source injection, strip
     // restore, swap, THEN the gradient on the post-swap u_now (both operands
     // co-resident at time it).
+    // No illumination on this equation (rtm_out_bs returns nullptr), and its bs
+    // loop has no it == 0 tail either -- present so the skeleton can call it.
+    static void bs_illum_tail(const State&, const SolverContext&,
+                              Wavefield&, RTMOutput&) {}
+
     static void bs_recon_step(const State& s, const SolverContext& ctx,
                                 Wavefield& forward, Wavefield& adjoint,
                                 BoundaryRuntime& boundary_runtime,

@@ -166,41 +166,35 @@ def test_illumination_does_not_depend_on_the_memory_strategy(name, cls, shape, n
 
 @requires_binding("acoustic2d_backward_bs", "acoustic3d_backward_bs")
 @pytest.mark.parametrize("name,cls,shape,ndim", CASES, ids=[c[0] for c in CASES])
-def test_receiver_illumination_is_short_by_exactly_the_it0_step(name, cls, shape, ndim):
-    """A separate, PRE-EXISTING gap, pinned so it cannot drift or be forgotten.
+def test_receiver_illumination_no_longer_misses_the_it0_step(name, cls, shape, ndim):
+    """It used to be short by exactly one term, and now it is short by none.
 
-    ``receiver_illumination`` is ``sum_t lambda^2``, and boundary saving sums one
-    term fewer than the store-based paths: its reverse loop floors at ``it == 1``
-    (`generic_backward_bs`), while the ``image_step`` loop runs down to
-    ``it == 0``. The missing term is ``lambda(0)^2``, which is not small --
-    ``it == 0`` is right after the last residual injection.
+    ``receiver_illumination`` is ``sum_t lambda^2``. The store-based loop
+    accumulates it for ``it = nt-1 .. 0``; the boundary-saving loop floors at
+    ``it == 1``, so it summed one ``lambda(0)^2`` fewer -- and ``it == 0`` sits
+    straight after the last residual injection, where lambda is largest.
+    Measured 1.66e-02 (2-D) and 1.80e-03 (3-D) against the full store.
 
-    Two things pin the diagnosis rather than merely the number:
+    ``eq_driver``'s it == 0 tail now calls ``bs_illum_tail``, which accumulates
+    the receiver term only: the forward field is not reconstructed at it == 0,
+    so the source term cannot be closed there -- but the same comparison bounds
+    its contribution below 2.7e-8, which is why only one half of this is fixable
+    and the other half does not matter.
 
-    * ``Full()`` and ``Ckpt()`` agree **bit for bit** -- both accumulate from
-      ``image_step``, so the difference is not about the store;
-    * ``full - bs`` is non-negative at **every** cell, which is what a missing
-      sum-of-squares term predicts and a numerical discrepancy would not respect.
-
-    The source illumination is unaffected because ``u_tt(0) ~ 0`` -- the source
-    has not fired at t=0 -- which is why that half could be made to agree to 1e-8
-    while this half is still short by percent.
+    The bar is **bit equality**, not a tolerance, and that is the point: if the
+    diagnosis had been wrong in any part, adding one term would have left a
+    residual instead of landing exactly on the store's value.
     """
     full = _run(cls, shape, ndim, Full(), illum=True)
     ckpt = _run(cls, shape, ndim, Ckpt(mode="chunk", chunks=4), illum=True)
     bs = _run(cls, shape, ndim, BoundarySaving(storage="gpu"), illum=True)
 
     assert torch.equal(full["rec_illum"], ckpt["rec_illum"]), (
-        f"{name}: Full() and Ckpt() no longer agree bit-for-bit on "
-        f"receiver_illumination -- they share image_step, so this says the "
-        f"difference below is no longer just the missing it==0 term")
-
-    d = full["rec_illum"] - bs["rec_illum"]
-    assert float(d.min()) >= 0.0, (
-        f"{name}: boundary saving's receiver_illumination EXCEEDS the store's "
-        f"somewhere (min {float(d.min()):.3e}). A missing sum-of-squares term "
-        f"can only make it smaller, so this is a different defect.")
-    short = float(d.max()) / max(float(full["rec_illum"].abs().max()), 1e-30)
-    assert short < 5e-2, (
-        f"{name}: boundary saving is short by rel {short:.3e}, far more than one "
-        f"time step of lambda^2 should account for")
+        f"{name}: Full() and Ckpt() disagree on receiver_illumination -- they "
+        f"share image_step, so this is a different defect from the one below")
+    assert torch.equal(full["rec_illum"], bs["rec_illum"]), (
+        f"{name}: boundary saving's receiver_illumination differs from the "
+        f"store's by max|d| "
+        f"{float((full['rec_illum'] - bs['rec_illum']).abs().max()):.3e}. It was "
+        f"short by exactly lambda(0)^2 before eq_driver grew its it == 0 tail; "
+        f"a residual here means that is no longer the whole story.")
