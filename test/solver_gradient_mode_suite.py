@@ -139,22 +139,14 @@ SOLVERS = {
         ("exx_t", "eyy_t", "ezz_t", "das35_t", "das54x_t", "das54y_t", "das54z_t"),
         "cpmls",
         elastic=True,
+        # No bs_* modes: das3d has no compiled boundary-saving path. Its
+        # forward writes no strips and backward_bs re-runs the forward and
+        # allocates the whole strain history, so the 14 bs_* entries that used
+        # to be listed here all exercised the SAME code as "full" -- and passed,
+        # because the gradient was right and nothing asserted on memory.
+        # DASZhao3D.supports_boundary_saving_c is False, so they now raise.
         supported_modes=(
             "full",
-            "bs_gpu",
-            "bs_gpu_fp16",
-            "bs_gpu_bf16",
-            "bs_gpu_int8",
-            "bs_cpu",
-            "bs_cpu_pinned",
-            "bs_cpu_fp16",
-            "bs_cpu_bf16",
-            "bs_cpu_int8",
-            "bs_disk",
-            "bs_disk_async",
-            "bs_disk_fp16",
-            "bs_disk_bf16",
-            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
             "ckpt_recursive",
