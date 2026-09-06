@@ -2,7 +2,7 @@ from typing import Any
 
 import torch
 
-from .options import CUDAOptions, EagerOptions
+from .options import CUDAOptions, EagerOptions, MemoryStrategy
 
 
 class PropTorch(torch.nn.Module):
@@ -17,6 +17,7 @@ class PropTorch(torch.nn.Module):
         backend_options: dict[str, Any] | None = ...,
         eager_options: dict[str, Any] | EagerOptions | None = ...,
         cuda_options: dict[str, Any] | CUDAOptions | None = ...,
+        memory: MemoryStrategy | dict[str, Any] | None = ...,
         **kwargs: Any,
     ) -> None: ...
 

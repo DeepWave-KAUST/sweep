@@ -71,4 +71,7 @@ exclude = ["sweep.csrc*"]
 sweep = [
     "csrc/**/*.cu", "csrc/**/*.cuh", "csrc/**/*.cpp",
     "csrc/**/*.h", "csrc/**/*.hpp", "csrc/**/CMakeLists.txt",
+    # PEP 561: without py.typed a checker ignores the package entirely, so the
+    # .pyi files shipped nothing and were never consulted by anyone.
+    "py.typed", "**/*.pyi",
 ]
