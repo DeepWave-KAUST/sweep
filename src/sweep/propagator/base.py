@@ -251,7 +251,6 @@ class PropBase:
         self.transfer_interval = self.boundary_saving_config["transfer_interval"]
         self.boundary_on_cpu = (self.boundary_saving_config["storage"] == "cpu")
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
-        self._abc_cache_key = None
 
         # Optional sweep.parallel.ModelParallelMesh; when set, init_abc routes
         # through rank-local PML widths and source/receiver / model tile work
@@ -852,7 +851,18 @@ class PropBase:
             rank_coord,
         )
 
-        if abc_key != self._abc_cache_key:
+        # The cached profiles live on the EQUATION (``equation.b``), so the
+        # freshness key has to live there too.  Keeping the key on the
+        # propagator made the pair incoherent: two propagators over one
+        # equation each start with their own ``None`` key, both build, and
+        # whichever ran last owns ``equation.b`` -- while the other's key still
+        # matches, so its rebuild is skipped and it hands the kernel profiles
+        # built for a DIFFERENT padded shape, with no length check on the way
+        # in.  Sharing an equation is a supported pattern (ModelParallel builds
+        # a second propagator over the wrapped one's equation), and a free
+        # surface changes the pad, so this fires in ordinary use: notebook 02
+        # builds ``solver``, then ``solver_fs``, then runs ``solver`` again.
+        if abc_key != getattr(self.equation, "_abc_cache_key", None):
             self.equation.init_abc(
                     type=self.pml_type,
                     pml_width=list(abc_key[1]),
@@ -865,7 +875,7 @@ class PropBase:
                     pml_freq=kwargs.get('pml_freq', 25.0),
                     shape=shape
             )
-            self._abc_cache_key = abc_key
+            self.equation._abc_cache_key = abc_key
         
     def crop(self, data):
         """Crop the data to the original shape

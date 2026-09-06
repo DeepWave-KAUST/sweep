@@ -352,6 +352,13 @@ class WaveEquation:
         self.device = device
         self.pml_type = kwargs.get('pml_type', 'cpmls')
 
+    # Freshness key for ``self.b``, written by ``PropBase.init_abc``. It lives
+    # here, with the value it describes: an equation may be shared by several
+    # propagators (ModelParallel does exactly that), and a key held per
+    # propagator cannot tell whether the profiles currently on the equation are
+    # the ones THIS propagator's padded shape needs.
+    _abc_cache_key = None
+
     def init_abc(self, type='cpml', **kwargs):
         pml_func = {'cpmls': set_cpml_profiles_s, 'cpmlr': set_cpml_profiles_r,'spml': set_spml_profiles}[type]
         self.b = pml_func(**kwargs)

@@ -300,5 +300,8 @@ def test_propbase_accepts_model_parallel_kwarg():
     assert prop.model_parallel is mesh
     prop.init_abc(max_vel=2000.0, pml_freq=10.0)
     # Cache key should be set; rank_coord should be in it.
-    assert prop._abc_cache_key is not None
-    assert prop._abc_cache_key[-1] == mesh.coord
+    # The key lives on the equation, with the profiles it describes: one
+    # equation can be shared by several propagators (ModelParallel builds a
+    # second one over the wrapped propagator's equation).
+    assert prop.equation._abc_cache_key is not None
+    assert prop.equation._abc_cache_key[-1] == mesh.coord

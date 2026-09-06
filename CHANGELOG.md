@@ -527,6 +527,21 @@ and this project adheres to
   `das2d` writes real strips and `DASMu` / `DASMu3D` get them from the shared
   staggered skeleton.  `test/solver_gradient_mode_suite.py` drops the 14 `bs_*`
   entries that all ran the same code as `full`.
+- **A propagator could step with another propagator's CPML profiles.**
+  `PropBase.init_abc` caches the profiles on the EQUATION (`equation.b`) but
+  held the freshness key on the PROPAGATOR.  Sharing one equation between
+  propagators is a supported pattern -- `ModelParallel` builds a second
+  propagator over the wrapped one's equation -- and anything that changes the
+  pad (a free surface, a different `abcn`, a DD tile) changes the profile
+  length.  Two propagators therefore each started with their own `None` key,
+  both built, and whichever ran last owned `equation.b` while the other's key
+  still matched, so its rebuild was skipped and it handed the kernel profiles
+  built for a different padded shape.  Nothing validates the length on the way
+  in.  Measured on a shared `Acoustic`: `abcn=10` (padded 60x70) then
+  `abcn=30` (padded 100x110), then the first propagator again -- its z profile
+  stayed 100 long instead of 60.  `docs/notebooks/02_fwi_elastic_marmousi.ipynb`
+  builds `solver`, then `solver_fs`, then runs `solver` again, so it hits this.
+  The key now lives on the equation next to the value it describes.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
