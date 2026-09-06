@@ -193,6 +193,11 @@ class ElasticTTISG3D(FirstOrderEquation):
     prepare_models_for_c = True
     default_pml_type = "cpmls"
 
+    C_NAME = "elastic_tti_sg3d"
+    # No ``elastic_tti_sg3d_backward_recursive_ckpt`` binding is compiled for this
+    # equation; the 5th slot of the binding tuple stays None.
+    C_HAS_RECURSIVE_CKPT = False
+
     MODEL_SPECS = (
         ModelSpec("vp0", description="VTI-frame vertical P velocity.", unit="m/s"),
         ModelSpec("vs0", description="VTI-frame vertical S velocity.", unit="m/s"),
@@ -420,17 +425,6 @@ class ElasticTTISG3D(FirstOrderEquation):
             pd=self.pd,
             pml=self.b,
             **kwargs,
-        )
-
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.elastic_tti_sg3d_forward,
-            _C.elastic_tti_sg3d_backward,
-            _C.elastic_tti_sg3d_backward_bs,
-            _C.elastic_tti_sg3d_backward_ckpt,
-            None,
         )
 
     @property

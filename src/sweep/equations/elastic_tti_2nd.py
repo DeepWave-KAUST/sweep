@@ -232,6 +232,11 @@ class ElasticTTI2nd(FirstOrderEquation):
     prepare_models_for_c = True
     default_pml_type = "cpmls"
 
+    C_NAME = "elastic_tti_2nd2d"
+    # No ``elastic_tti_2nd2d_backward_recursive_ckpt`` binding is compiled for this
+    # equation; the 5th slot of the binding tuple stays None.
+    C_HAS_RECURSIVE_CKPT = False
+
     MODEL_SPECS = (
         ModelSpec("vh", description="Horizontal P-wave velocity (VTI frame).", unit="m/s"),
         ModelSpec("vs", aliases=("s_velocity",), description="Vertical S-wave velocity.", unit="m/s"),
@@ -394,17 +399,6 @@ class ElasticTTI2nd(FirstOrderEquation):
             pd=self.pd,
             pml=self.b,
             **kwargs,
-        )
-
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.elastic_tti_2nd2d_forward,
-            _C.elastic_tti_2nd2d_backward,
-            _C.elastic_tti_2nd2d_backward_bs,
-            _C.elastic_tti_2nd2d_backward_ckpt,
-            None,
         )
 
     @property
