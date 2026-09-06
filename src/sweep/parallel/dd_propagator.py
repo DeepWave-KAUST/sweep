@@ -58,7 +58,10 @@ from sweep.propagator._c import (_canonical_to_cuda_record,
                                  _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
-from sweep.parallel.routing import partition_global_coords
+from sweep.parallel.routing import (
+    gather_tile_records,
+    partition_global_coords,
+)
 from sweep.propagator.options import BoundarySaving
 from sweep.parallel.pml import dd_cut_face_mask
 from sweep.propagator.torch import PropTorch
@@ -1466,7 +1469,14 @@ class ModelParallel:
 
     # ---------------------------------------------------------------- gather
     def gather_record(self, tile_record):
-        """Assemble the global record on rank 0 (returns None on other ranks).
+        """Assemble this shot group's record on the group root (None elsewhere).
+
+        The gather is per shot group, not world-wide: with ``shot_groups > 1``
+        every group runs a DIFFERENT shot through the same tile grid, so ranks
+        sharing a tile coordinate carry the same global receiver indices with
+        different shots' traces.  The root is global rank
+        ``shot_group * py * px``, which is rank 0 for the single-group case the
+        guides describe.  See :func:`sweep.parallel.gather_tile_records`.
 
         Layout-agnostic on purpose: nrec is axis -2 both in the raw CUDA record
         and in the canonical ``(B, nt, nrec, nfield)`` one, so this needs no
@@ -1474,22 +1484,4 @@ class ModelParallel:
         """
         if self.world == 1:
             return tile_record
-        import torch.distributed as dist
-        payload = (self._own_rec_idx, tile_record.detach().cpu())
-        gathered = [None] * self.world
-        dist.gather_object(payload, gathered if self.rank == 0 else None, dst=0)
-        if self.rank != 0:
-            return None
-        # place each tile's receiver columns at their global index
-        full = None
-        nrec_global = max(max(idx) for idx, _ in gathered if idx) + 1
-        for idx, rc in gathered:
-            if not idx:
-                continue
-            if full is None:
-                shape = list(rc.shape)
-                shape[-2] = nrec_global
-                full = torch.zeros(shape, dtype=rc.dtype)
-            for j, gi in enumerate(idx):
-                full[..., gi, :] = rc[..., j, :]
-        return full
+        return gather_tile_records(tile_record, self._own_rec_idx, self.mesh)

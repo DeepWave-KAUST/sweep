@@ -21,6 +21,10 @@ Top-level objects:
 :func:`partition_global_coords`
     Filter and shift global source / receiver coords into a rank's tile.
 
+:func:`gather_tile_records`
+    Its inverse: reassemble one shot group's record from its tiles, on that
+    group's root rank.
+
 :func:`exchange_halos`
     Convenience: call :class:`HaloExchange` for each field in a list.
 
@@ -35,7 +39,11 @@ from sweep.parallel.halo import HaloExchange, exchange_halos
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.padding import pad_to_mesh, unpad_from_mesh
 from sweep.parallel.pml import build_rank_pml_widths
-from sweep.parallel.routing import partition_global_coords
+from sweep.parallel.routing import (
+    assemble_tile_records,
+    gather_tile_records,
+    partition_global_coords,
+)
 
 __all__ = [
     "ModelParallel",
@@ -47,6 +55,8 @@ __all__ = [
     "exchange_halos",
     "pad_to_mesh",
     "partition_global_coords",
+    "gather_tile_records",
+    "assemble_tile_records",
     "unpad_from_mesh",
 ]
 

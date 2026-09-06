@@ -555,6 +555,21 @@ and this project adheres to
   gradient matrix and every test pass a scalar `dh`, though `normalise_spacing`
   has always accepted a per-axis sequence. Isotropic results are unchanged (the
   two values are equal, so the swap is a no-op there).
+- **`gather_record` crossed shot groups.**  The record gather ran over the
+  WORLD process group, but with `shot_groups > 1` every group propagates a
+  different shot through the same tile grid, so ranks sharing a tile
+  coordinate carry the same global receiver indices holding different shots'
+  traces.  Rank 0 wrote all of them into one array and whichever tile was
+  assembled last silently won, so the "global record" was spliced from several
+  shots and nothing raised.  The gather now runs over `mesh.model_pg` -- the
+  `py * px` ranks that decompose ONE shot -- and each group assembles its own
+  record on its own root (`shot_group * py * px`), which is rank 0 for the
+  `shot_groups == 1` case the guides describe.  The collective and the
+  index placement moved to `sweep.parallel.gather_tile_records` /
+  `assemble_tile_records` (the inverse of `partition_global_coords`), so the
+  regression test `test/test_dd_gather_record_shot_groups.py` exercises the
+  real collective on gloo/CPU without a GPU.
+
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
   `storage='disk'` gradient was wrong: max|disk-gpu|/scale 0.2-0.5 for acoustic

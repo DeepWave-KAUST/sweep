@@ -15,6 +15,11 @@ Both compose: `MeshTopology(py, px, shot_groups=...)` describes a
 coordinate run different shots and their gradients are all-reduced
 automatically after the backward.
 
+The gradient is shot-summed, but the *record* is not: each shot group holds a
+different shot, so `gather_record` assembles per group, on that group's root
+rank (`shot_group * py * px`). With the default `shot_groups=1` that root is
+rank 0 and every other rank gets `None`.
+
 Hands-on companions: notebook
 [25 · Domain decomposition](../notebooks/25_domain_decomposition.ipynb),
 notebook [26 · Overthrust 3-D](../notebooks/26_dd_overthrust_3d.ipynb), and
@@ -77,7 +82,7 @@ vp_tile = torch.tensor(vp_global[..., ddp.x0:ddp.x0 + ddp.nxp],
 rec_tile = ddp(wavelet, src_global, rec_global, models=[vp_tile])
 loss = misfit(rec_tile, obs_tile)
 loss.backward()                       # vp_tile.grad = this tile's gradient
-full_rec = ddp.gather_record(rec_tile)   # rank 0 assembles; others get None
+full_rec = ddp.gather_record(rec_tile)   # the shot group's root assembles
 ```
 
 Two equivalent leaf styles are in use:
