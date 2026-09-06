@@ -72,6 +72,26 @@ and this project adheres to
   name any more.
 
 ### Changed
+- **`source_illumination` means the same thing under every memory strategy.**
+  It was accumulated by one kernel that both backward paths call, but they
+  handed it different fields: `Full()` / `Ckpt()` passed the forward store,
+  which for acoustic *is* `u_tt = vp^2*Lap(u)`, while `BoundarySaving()` passed
+  the reconstructed raw pressure — so one attribute returned
+  `sum_t u_tt^2` or `sum_t u^2` depending on a knob that is supposed to be a
+  pure space/time trade, and the two differ by ~3e10 (measured: 5.24e18 vs
+  1.59e8 in 2-D, 4.94e18 vs 1.61e7 in 3-D, on a heterogeneous model).  Both are
+  legitimate quantities — the Shin (2001) pseudo-Hessian and the RTM
+  amplitude-compensation illumination — but nothing said which you were
+  getting, and nothing said it changed with `memory=`.  All strategies now
+  return the pseudo-Hessian `sum_t u_tt^2` (dimensionally paired with the
+  gradient `sum_t u_tt*lambda`, which is what makes `grad/(illum+eps)` sane),
+  accumulated over the physical box like the gradient kernels.  The boundary
+  path forms `u_tt` from the same three reconstruction time levels
+  `calculate_grad_utt_band` uses, in its **own** kernel: no gradient arithmetic
+  is touched, and `test/test_illumination_pin.py` pins that enabling
+  illumination cannot move the gradient.  `receiver_illumination` is unchanged
+  (`sum_t lambda^2` on both paths).  The contract is now written down in
+  `_CompiledPropagator.__init__`.
 - `SecondOrderEquation._apply_free_surface` — the per-edge pressure-release
   zeroing moved from `Acoustic` to the shared base (bit-identical) so
   ViscoAcoustic reuses it.

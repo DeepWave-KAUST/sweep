@@ -373,14 +373,18 @@ __global__ void calculate_grad_lsrtm3d_mp_utt(
 // Defined in acoustic3d/kernels.cu and shared across translation units -- LSRTM
 // re-declares it here rather than pulling in the whole acoustic3d header.
 __global__ void accumulate_illumination_3d(
-    const float* __restrict__ u_forward,
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,
+    const float* __restrict__ u_forward_prev,
     const float* __restrict__ u_backward,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
     int B,
     int nx,
     int ny,
-    int nz
+    int nz,
+    float dt,
+    int x0, int x1, int y0, int y1, int z0, int z1
 );
 
 __global__ void accumulate_source_grad_3d(

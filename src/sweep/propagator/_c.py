@@ -636,10 +636,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._workspace_cache_nt = None
         self.source_illumination = None
         self.receiver_illumination = None
-        # Source/receiver illumination (RTM image) is a ~1/3-of-backward extra
-        # grid pass.  Default OFF for speed; set ``solver.compute_illumination =
-        # True`` to compute it (then read it back from ``solver.source_illumination``
-        # / ``solver.receiver_illumination`` after backward).
+        # Source / receiver illumination: an extra per-timestep grid pass on the
+        # backward, ~1/3 of it. Default OFF; set ``solver.compute_illumination =
+        # True`` and read ``solver.source_illumination`` /
+        # ``solver.receiver_illumination`` back after backward().
+        #
+        # WHAT THEY ARE, precisely -- this used to be written down nowhere, which
+        # is how the two backward paths came to return different quantities under
+        # one name (full/ckpt summed u_tt^2, boundary saving summed u^2, ~3e10
+        # apart):
+        #
+        #     source_illumination[x]   = sum_t  u_tt(x,t)^2
+        #     receiver_illumination[x] = sum_t  lambda(x,t)^2
+        #
+        # where ``u_tt = vp^2 * Lap(u)`` is the same forward quantity the vp
+        # gradient is built from, and ``lambda`` is the adjoint field. So the
+        # source illumination is the Shin (2001) pseudo-Hessian: it is
+        # dimensionally paired with the gradient ``sum_t u_tt * lambda``, which
+        # is what makes ``grad / (illum + eps)`` a sane preconditioner.
+        # Both are accumulated over the PHYSICAL box only, the same cells the
+        # gradient kernels image -- outside it EdgePadding.backward crops
+        # everything anyway.
+        #
+        # Neither one feeds the gradient. Enabling them must not move it by one
+        # bit; ``test/test_illumination_pin.py`` asserts exactly that.
         self.compute_illumination = False
         # Space-lag ADCIG (angle-domain common-image gathers via the horizontal
         # subsurface-offset extended imaging condition).  Default OFF; set

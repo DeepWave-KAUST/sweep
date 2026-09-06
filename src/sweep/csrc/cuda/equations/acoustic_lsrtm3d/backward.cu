@@ -92,12 +92,17 @@ void accumulate_rtm_3d(
     int nz
 )
 {
+    // LSRTM keeps exactly what it had: its callers hand in the quantity they
+    // want squared (so the u_tt branch is off), and the box spans the whole
+    // padded grid, which is the region this kernel covered before it learnt
+    // about the physical box. dt is unused when u_forward_now is null.
     accumulate_illumination_3d<<<wave_grid, wave_block>>>(
-        forward_ptr,
+        forward_ptr, nullptr, nullptr,
         adjoint_ptr,
         out.source_illumination.data_ptr<float>(),
         out.receiver_illumination.data_ptr<float>(),
-        B, nx, ny, nz
+        B, nx, ny, nz, 0.0f,
+        0, nx, 0, ny, 0, nz
     );
 }
 

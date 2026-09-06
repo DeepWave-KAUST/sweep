@@ -393,10 +393,13 @@ struct Driver {
         }
         if (rtm_out != nullptr) {
             accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
-                forward_ptr, adjoint_ptr,
+                forward_ptr, nullptr, nullptr,   // the store IS u_tt
+                adjoint_ptr,
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
-                s.B, s.nx, s.ny, s.nz
+                s.B, s.nx, s.ny, s.nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
+                ctx.phys_z0(), ctx.phys_z1()
             );
         }
         // No ADCIG here: this forward store is vp^2*Lap(u), not raw pressure.
@@ -512,12 +515,19 @@ struct Driver {
             }
         }
         if (rtm_out != nullptr) {
+            // The three time levels calculate_grad_utt_3d_band just used, so
+            // boundary saving reports the same pseudo-Hessian the full store
+            // does. Its own kernel: no gradient arithmetic is touched.
             accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+                forward.u_prev_t.data_ptr<float>(),
                 for_view.u_next,
+                forward.u_now_t.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
-                s.B, s.nx, s.ny, s.nz
+                s.B, s.nx, s.ny, s.nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
+                ctx.phys_z0(), ctx.phys_z1()
             );
             if (rtm_out->adcig.defined() && rtm_out->adcig.numel() > 0) {
                 int nlag = rtm_out->adcig.size(0);

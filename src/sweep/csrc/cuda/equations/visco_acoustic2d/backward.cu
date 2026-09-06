@@ -136,11 +136,15 @@ void image_step_from_raw(
             ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
     }
     if (rtm_out != nullptr) {
+        // ``carrier`` is vp^2*Lap(u) = u_tt, so the u_tt branch stays off. Same
+        // physical box as the calculate_grad above: illumination and gradient
+        // now cover the same cells.
         accumulate_illumination_2d<<<grid, block>>>(
-            carrier.data_ptr<float>(), lam_ptr,
+            carrier.data_ptr<float>(), nullptr, nullptr, lam_ptr,
             rtm_out->source_illumination.data_ptr<float>(),
             rtm_out->receiver_illumination.data_ptr<float>(),
-            nx, nz);
+            nx, nz, dt,
+            ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
     }
 }
 
@@ -730,11 +734,12 @@ void process_recursive_interval_visco_2d(
         }
         if (rtm_out != nullptr) {
             accumulate_illumination_2d<<<wave_grid, wave_block>>>(
-                carrier_scratch.data_ptr<float>(),
+                carrier_scratch.data_ptr<float>(), nullptr, nullptr,
                 adjoint.u_now_t.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
-                nx, nz);
+                nx, nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
         }
 
         if (grad_A != nullptr && damping.active && start >= 1)

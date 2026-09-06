@@ -610,12 +610,17 @@ __global__ void calculate_grad_utt_3d_band(
     int wxl, int wxh, int wyl, int wyh, int wzl, int wzh
 );
 
+// 3-D twin; see accumulate_illumination_2d in acoustic2d/kernels.cuh for why
+// the forward operand comes in two shapes.
 __global__ void accumulate_illumination_3d(
-    const float* __restrict__ u_forward,
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,     // null => u_forward_next IS u_tt
+    const float* __restrict__ u_forward_prev,
     const float* __restrict__ u_backward,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
-    int B, int nx, int ny, int nz
+    int B, int nx, int ny, int nz, float dt,
+    int x0, int x1, int y0, int y1, int z0, int z1
 );
 
 __global__ void accumulate_adcig_3d(

@@ -571,12 +571,27 @@ __global__ void calculate_grad_utt_band(
     int wxl, int wxh, int wzl, int wzh
 );
 
+// Source illumination is the pseudo-Hessian sum_t u_tt^2 and receiver
+// illumination sum_t lambda^2, both over the PHYSICAL box -- the same quantity
+// and the same cells whichever memory strategy produced the wavefield.
+//
+// The full/checkpoint store already holds u_tt (``calculate_grad`` documents it
+// as "stored as vp^2 * Lap(u)"), so those callers pass it as ``u_forward_next``
+// and leave the other two null. Boundary saving holds the raw reconstructed
+// pressure at three time levels instead, and passes all three: this kernel then
+// forms u_tt itself, with the same expression and operand order as
+// ``calculate_grad_utt_band``. Before this, the two paths accumulated
+// sum_t u_tt^2 and sum_t u^2 respectively -- one attribute, two physical
+// quantities, ~3e10 apart, chosen by a memory knob.
 __global__ void accumulate_illumination_2d(
-    const float* __restrict__ u_forward,
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,     // null => u_forward_next IS u_tt
+    const float* __restrict__ u_forward_prev,
     const float* __restrict__ u_backward,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
-    int nx, int nz
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 );
 
 __global__ void accumulate_adcig_2d(

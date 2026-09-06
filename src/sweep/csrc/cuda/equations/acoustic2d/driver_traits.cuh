@@ -431,10 +431,12 @@ struct Driver {
         }
         if (rtm_out != nullptr) {
             accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
-                forward_ptr, adjoint_ptr,
+                forward_ptr, nullptr, nullptr,   // the store IS u_tt
+                adjoint_ptr,
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
-                s.nx, s.nz
+                s.nx, s.nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
             );
         }
         // NOTE: ADCIG is NOT accumulated here.  This hook's ``forward_ptr`` is
@@ -501,8 +503,8 @@ struct Driver {
                                 AcousticCPMLPointer /*cpml*/,
                                 const BackwardInput& p,
                                 std::vector<torch::Tensor>& grads,
-                                RTMOutput* /*rtm_out: 2-D images after the
-                                             prefetch, in bs_rtm_tap*/,
+                                RTMOutput* rtm_out,   // illumination rides here;
+                                                      // ADCIG stays in bs_rtm_tap
                                 BwdWorkspace& /*ws*/,
                                 BsScratch& /*scratch*/,
                                 int it, int bs_it0)
@@ -557,6 +559,23 @@ struct Driver {
                 );
             }
         }
+        // Illumination, on the same three time levels the gradient just used and
+        // after the restore, so it covers the whole physical box in one launch
+        // (the strip split is a property of the FUSED imaging, not of this).
+        // Deliberately its own kernel: the gradient arithmetic above is not
+        // touched, so nothing here can move a gradient.
+        if (rtm_out != nullptr && p.compute_illumination) {
+            accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+                forward.u_prev_t.data_ptr<float>(),
+                for_view.u_next,
+                forward.u_now_t.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                rtm_out->source_illumination.data_ptr<float>(),
+                rtm_out->receiver_illumination.data_ptr<float>(),
+                s.nx, s.nz, ctx.dt,
+                ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
+            );
+        }
         add_source<<<s.source_config.grid, s.source_config.block>>>(
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
@@ -572,18 +591,13 @@ struct Driver {
                               Wavefield& forward, Wavefield& adjoint,
                               RTMOutput& illumination, bool compute_illumination)
     {
-        // Gate illumination on compute_illumination (mirror FULL path). When
-        // off, skip the per-step RTM pass entirely; the FWI vp-gradient is
-        // produced by calculate_grad_utt and is unaffected.
-        if (compute_illumination) {
-            accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
-                forward.u_now_t.data_ptr<float>(),
-                adjoint.u_now_t.data_ptr<float>(),
-                illumination.source_illumination.data_ptr<float>(),
-                illumination.receiver_illumination.data_ptr<float>(),
-                s.nx, s.nz
-            );
-        }
+        // Illumination is NOT accumulated here any more: this hook runs after
+        // forward.swap() and sees the raw pressure, which made boundary saving
+        // report sum_t u^2 while the full store reported sum_t u_tt^2. It now
+        // rides bs_recon_step, where the three time levels the gradient uses are
+        // still in their pre-swap roles. ADCIG stays -- the space-lag imaging
+        // condition genuinely wants raw pressure.
+        (void)compute_illumination;
         // Space-lag ADCIG rides the same co-resident (u_s(t), u_r(t)) pair.
         if (illumination.adcig.defined() && illumination.adcig.numel() > 0) {
             int nlag = illumination.adcig.size(0);
