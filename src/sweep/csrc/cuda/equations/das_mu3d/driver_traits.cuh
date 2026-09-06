@@ -199,6 +199,10 @@ struct Driver {
 
     // (velocity_substep / stress_substep are also replayed by the ckpt and
     // recursive-ckpt backward modes.)
+    // No-op: this equation writes u_allt from inside its stress kernel.
+    // See the call site in sg_driver.cuh for why the hook exists.
+    static void capture_allt(torch::Tensor&, WfView&, const SolverContext&, int) {}
+
     static void velocity_substep(const State& s, WfView& wf,
                                  ElasticCPMLPointer cpml_view,
                                  const SolverContext& solver)
