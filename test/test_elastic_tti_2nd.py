@@ -124,20 +124,16 @@ def test_eager_all_six_grads_finite():
 # CUDA
 # ---------------------------------------------------------------------------
 
-def _binding_ready():
-    if not torch.cuda.is_available():
-        return False
-    try:
-        import sweep._C as _C  # noqa: F401
-        return hasattr(_C, "elastic_tti_2nd2d_forward")
-    except Exception:
-        return False
 
 
-cuda_mark = pytest.mark.skipif(
-    not _binding_ready(),
-    reason="CUDA + compiled sweep._C with elastic_tti_2nd2d kernels required",
-)
+# Not `try: import sweep._C; hasattr(...) except Exception` -- that spelling
+# turns a COMPILE FAILURE into a skip, because sweep._C is a lazy shim whose
+# attribute access triggers the JIT. requires_binding decides from a probe that
+# does not compile, and raises if the extension is there but this symbol is not
+# (a stale build, not a missing capability).
+from conftest import requires_binding
+
+cuda_mark = requires_binding("elastic_tti_2nd2d_forward")
 
 
 def _canonical_setup():
