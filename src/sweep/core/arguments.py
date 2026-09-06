@@ -214,12 +214,13 @@ def validate_memory_strategy(use_checkpoint, use_boundary_saving,
         raise ValueError(
             "boundary saving and checkpointing are both enabled; the "
             "gradient-memory mode is a three-way choice (full/boundary/"
-            "ckpt) -- pass memory=MemoryOptions(strategy=...) or disable "
+            "ckpt) -- pass memory=Full() / BoundarySaving(...) / Ckpt(...), or "
+            "disable "
             "one of use_ckpt/boundary_saving_config.")
     if boundary_tail_steps and use_checkpoint:
         raise NotImplementedError(
             "tail_steps requires the boundary-saving backward; pass "
-            "use_ckpt=False (or memory=MemoryOptions(strategy='boundary')).")
+            "use_ckpt=False (or memory=BoundarySaving()).")
 
 
 # ===========================================================================

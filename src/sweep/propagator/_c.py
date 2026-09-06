@@ -335,7 +335,7 @@ class Wrapper(torch.autograd.Function):
                 "full/checkpoint forward stores vp^2*Lap(u) for the vp gradient, "
                 "not the raw pressure the space-lag ADCIG imaging condition needs. "
                 "Enable boundary saving via boundary_saving_config={'enabled': True} "
-                "or memory=MemoryOptions(strategy='boundary')."
+                "or memory=BoundarySaving()."
             )
         params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
         params.adjoint_workspace = list(ctx.adjoint_workspace)
@@ -721,7 +721,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         property of the reconstruction, not of the elastic kernels.  Unaffected:
         ``free_surface=True`` with no topography, both checkpoint modes, the full
         path, and eager boundary saving (``impl='eager'`` +
-        ``MemoryOptions(strategy='boundary')``), which all agree to ~1e-6.
+        ``BoundarySaving()``), which all agree to ~1e-6.
 
         Fail loud rather than hand back a wrong gradient.
         """
@@ -744,12 +744,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             "which is why this is otherwise silent.\n"
             "NOTE: boundary saving is impl='c''s DEFAULT memory strategy, so you "
             "can hit this without having asked for it. Fixes:\n"
-            "  * cuda_options=CUDAOptions(memory=MemoryOptions(strategy='ckpt', "
-            "ckpt=CkptOptions(mode='chunk', chunks=N)))  — checkpointing, "
+            "  * memory=Ckpt(mode='chunk', chunks=N)  — checkpointing, "
             "gradient-consistent under topography\n"
-            "  * boundary_saving_config={'enabled': False}  — full wavefield, "
-            "also gradient-consistent, but stores every step\n"
-            "  * impl='eager' with MemoryOptions(strategy='boundary')  — the eager "
+            "  * memory=Full()  — full wavefield, also gradient-consistent, "
+            "but stores every step\n"
+            "  * impl='eager' with memory=BoundarySaving()  — the eager "
             "reconstruction is correct under topography\n"
             "A flat free surface (free_surface=True, no topography=) is unaffected."
         )

@@ -48,7 +48,7 @@ ForwardOutput forward(const ForwardInput& in) {
     TORCH_CHECK(!p.use_boundary_saving,
                 "visco_acoustic2d does not support boundary saving (dissipative "
                 "step is not reverse-time reconstructible); use "
-                "memory=MemoryOptions(strategy='ckpt') or 'full'");
+                "memory=Ckpt() or memory=Full()");
 
     auto vp = p.models[0];
 

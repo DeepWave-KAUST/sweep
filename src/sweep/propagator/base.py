@@ -100,7 +100,8 @@ class PropBase:
                 the checkpointing mode.  The gradient-memory mode is a
                 three-way choice (full / boundary / ckpt) resolved by
                 ``options.resolve_memory_strategy``; prefer
-                ``memory=MemoryOptions(strategy=...)``.  None (default) picks
+                ``memory=Full()`` / ``BoundarySaving(...)`` / ``Ckpt(...)``.
+                None (default) picks
                 the backend default: 'boundary' for impl='c', 'ckpt' for
                 eager/jax.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 100.
@@ -596,9 +597,21 @@ class PropBase:
         Read-only on purpose. It was a writable flag, and six places flipped it
         after construction while the boundary config stayed as it was, so the
         object could hold two answers to one question. Change the strategy with
-        :meth:`_set_memory_strategy`, which says which one it is becoming.
+        :attr:`memory_strategy`, which says which one it is becoming.
         """
         return self._memory_strategy == "ckpt"
+
+    @use_ckpt.setter
+    def use_ckpt(self, value):
+        # Python's own message for a getter-only property ("property has no
+        # setter") does not say what to write instead, and this one is reached
+        # from code that predates the read-only change.
+        raise AttributeError(
+            "use_ckpt is read-only: it reports the gradient-memory strategy "
+            "rather than setting it. Write `memory_strategy = "
+            f"{'ckpt' if value else 'full'!r}` (or 'boundary') instead, which "
+            "moves the boundary configuration with it."
+        )
 
     @property
     def memory_strategy(self):

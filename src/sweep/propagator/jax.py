@@ -34,7 +34,7 @@ class PropJax(PropBase):
     * default — differentiate through the scan tape (XLA stores the
       activations it needs; largest memory, fastest backward);
     * ``use_ckpt=True`` — chunked ``jax.checkpoint`` rematerialisation;
-    * ``memory=MemoryOptions(strategy='boundary', ...)`` — boundary saving:
+    * ``memory=BoundarySaving(...)`` — boundary saving:
       O(nt × ring) residuals with a reverse-time reconstructing custom VJP
       (see ``_jax_boundary_saving``; ~3x-forward backward cost, the right
       trade at large grids).
