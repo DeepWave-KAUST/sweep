@@ -112,15 +112,17 @@ loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
     dispatches to compiled C++/CUDA extension kernels.
 
     !!! info "Default memory strategy by impl"
-        - `impl="eager"`, `impl="jax"` → chunked checkpointing
-          (`use_ckpt=True`, `ckpt_chunks=100`).
-        - `impl="c"` → **boundary saving with GPU storage**
-          (`use_ckpt=False`, `boundary_saving_config={'enabled': True,
-          'storage': 'gpu'}`). To opt back into chunked checkpointing
-          on the C backend, pass
-          `cuda_options={"memory": {"strategy": "ckpt"}}`. 2-D RTM
-          silently falls back to full-wavefield mode regardless of the
-          configured strategy.
+        - `impl="eager"`, `impl="jax"` → chunked checkpointing, i.e.
+          `memory=Ckpt(mode="chunk", chunks=100)`.
+        - `impl="c"` → **boundary saving with GPU storage**, i.e.
+          `memory=BoundarySaving(storage="gpu")`. To opt back into chunked
+          checkpointing on the C backend, pass
+          `cuda_options=CUDAOptions(memory=Ckpt())`.
+
+        The three strategies are the types `Full`, `BoundarySaving` and `Ckpt`
+        from `sweep.propagator.options`; the older
+        `MemoryOptions(strategy=...)` and `boundary_saving_config={...}`
+        spellings still work and emit a `DeprecationWarning`.
 
     See [PropTorch](prop_torch.md) for parameter meanings.
 
