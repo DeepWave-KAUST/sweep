@@ -228,6 +228,12 @@ KNOWN_MISSING_GRADIENTS = {
     # NOTE lsrtm3d is deliberately absent from the wavelet list: it DOES return
     # one, and it is wrong (cos -0.005, rel 4.0 vs eager) — that must stay a
     # failure, not a declared gap.
+    # Verified by construction, not inferred from a mismatch: on impl='c'
+    # ``wavelet.grad`` comes back as None for both, while eager returns a real
+    # one (|g|max 1.07e-1 on the cuda-suite grid). The MODEL gradients (vp,
+    # epsilon, delta, rho) do match eager -- it is only the source-wavelet slot
+    # that the compiled backward never fills.
+    ("acoustic_vti_1st", "wavelet"): "impl='c' VTI-1st backward returns no source-wavelet gradient",
     ("acoustic_lsrtm2d", "vp"): "impl='c' LSRTM2D backward returns no vp gradient (mp only)",
     ("acoustic_lsrtm3d", "vp"): "impl='c' LSRTM3D backward returns no vp gradient (mp only)",
 }
