@@ -679,6 +679,17 @@ __global__ void calculate_grad_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
+    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
+    // gradients on the way back to the model, so everything this kernel writes
+    // in the PML shell is discarded -- read, multiplied and accumulated for
+    // nothing, once per time step.  The bounds come from the context and are
+    // CUT-AWARE: on a DD cut face phys_x0() collapses to the halo, so the
+    // cut-adjacent cells are still imaged.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iy < solver.phys_y0() || iy >= solver.phys_y1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
+        return;
+
     long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
