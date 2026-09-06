@@ -630,6 +630,17 @@ and this project adheres to
   never look at it.  So every encoded forward and every adjoint construction
   paid `prod(padded_shape) * 4` bytes plus the scatter and the convolution for
   a buffer nothing read.  It is built on the branch that reads it now.
+- **A SEG-Y read peaked at 7.3x its payload.**  `segy_to_array` made the whole
+  file's traces contiguous in one go -- the memmap rows are strided, so dropping
+  the 240-byte trace headers needs a copy -- and handed the result to
+  `_ibm_to_ieee`, which holds five temporaries the size of what it is given
+  (sign, exponent, mantissa, the `ldexp` result and the negation).  Both scaled
+  with the file rather than with a bound.  Measured on a synthetic IBM-float
+  file, resident growth over the read: 60 MB payload 440 MB (7.33x), 120 MB
+  payload 879 MB (7.33x).  Reading in blocks of ~16 MiB of samples caps the
+  temporaries: the same files now grow 224 MB (3.73x) and 356 MB (2.96x), and
+  the ratio keeps falling toward the inherent floor of the output array plus the
+  mapped pages, because the temporary budget no longer scales with the file.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
