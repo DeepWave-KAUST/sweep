@@ -286,3 +286,37 @@ def test_the_local_ricker_copies_that_remain_are_genuinely_different():
     expected = np.array([-0.1748605, -0.19641757, -0.21919768, -0.24298875],
                         dtype=np.float32)
     np.testing.assert_array_equal(ricker(4, 1.5e-3, 10.0, 0.06), expected)
+
+
+def test_the_local_capture_copies_that_remain_are_deliberate():
+    """Ten `capture` / `capture_backward` / `capture_both` bodies moved to
+    conftest; six definitions stay, and each stays for a stated reason.
+
+    Same rule as the ricker census above: the point is not the count, it is that
+    a later reader can tell "not yet migrated" from "must not be migrated".
+    """
+    import ast
+    import pathlib
+
+    keep = {
+        "conftest.py": "the shared home",
+        # torchrun entry points -- they run under `torch.distributed.run` from
+        # test/, so `from conftest import ...` would resolve via sys.path[0],
+        # but `python -m test.dd_nccl_check` would not. They need two GPUs, so
+        # a migration here could not be verified before landing.
+        "dd_nccl_bench.py": "torchrun script, 2 GPUs, unverifiable here",
+        "dd_nccl_check.py": "torchrun script, 2 GPUs, unverifiable here",
+        "dd_nccl_elastic_bench.py": "torchrun script, 2 GPUs, unverifiable here",
+        "dd_nccl_elastic_check.py": "torchrun script, 2 GPUs, unverifiable here",
+        # genuinely different bodies
+        "dd_cross_gpu_diag.py": "different body (takes `p`, not `prop`)",
+        "test_dd_backward_two_tile_3d.py": "a different capture_both",
+    }
+    here = pathlib.Path(__file__).parent
+    local = {p.name for p in here.glob("*.py")
+             if any(isinstance(n, ast.FunctionDef)
+                    and n.name in ("capture", "capture_backward", "capture_both")
+                    for n in ast.parse(p.read_text()).body)}
+    assert local == set(keep), (
+        f"the set of modules defining their own capture helper changed: "
+        f"unexpected {sorted(local - set(keep))}, gone {sorted(set(keep) - local)}")

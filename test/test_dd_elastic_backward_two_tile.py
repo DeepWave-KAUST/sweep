@@ -201,32 +201,7 @@ def make_prop(ndim, shape, free_surface, topo=None):
     return PropTorch(equation, **kwargs)
 
 
-def capture_both(prop):
-    cap = {}
-    impl = prop._backend_impl
-
-    fwd_orig = impl.forward_func
-
-    def fwd_wrapper(params):
-        out = fwd_orig(params)
-        cap["fp"] = params
-        cap["fwd_raw_out"] = out
-        cap["fwd_func"] = fwd_orig
-        return out
-
-    impl.forward_func = fwd_wrapper
-
-    bwd_orig = impl.backward_bs_func
-
-    def bwd_wrapper(params):
-        out = bwd_orig(params)
-        cap["bp"] = params
-        cap["bwd_func"] = bwd_orig
-        return out
-
-    impl.backward_bs_func = bwd_wrapper
-    return cap
-
+from conftest import capture_both
 
 def run_public_once(prop, wavelet, sources, receivers, model_arrays):
     models = [

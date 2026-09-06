@@ -141,34 +141,7 @@ def make_prop(shape, topo=None, storage="gpu", ti=1, ring=1):
     return PropTorch(equation, **kwargs)
 
 
-def capture_both(prop):
-    """Wrap forward_func + backward_bs_func so the populated raw inputs
-    survive the public forward+backward run."""
-    cap = {}
-    impl = prop._backend_impl
-
-    fwd_orig = impl.forward_func
-
-    def fwd_wrapper(params):
-        out = fwd_orig(params)
-        cap["fp"] = params
-        cap["fwd_raw_out"] = out
-        cap["fwd_func"] = fwd_orig
-        return out
-
-    impl.forward_func = fwd_wrapper
-
-    bwd_orig = impl.backward_bs_func
-
-    def bwd_wrapper(params):
-        out = bwd_orig(params)
-        cap["bp"] = params
-        cap["bwd_func"] = bwd_orig
-        return out
-
-    impl.backward_bs_func = bwd_wrapper
-    return cap
-
+from conftest import capture_both
 
 def run_public_once(prop, wavelet, sources, receivers, vp_np):
     models = [torch.tensor(vp_np, device=DEV, requires_grad=True)]
