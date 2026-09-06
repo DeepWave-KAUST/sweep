@@ -597,6 +597,16 @@ and this project adheres to
   shipped configuration.  Whichever name the installed Dynamo exposes is raised
   now, including the `accumulated_` secondary cap, and a Dynamo with neither
   warns once instead of passing in silence.
+- **The eager wavefield-snapshot buffer was cached forever and then copied.**
+  `return_wavefield=True` took its buffer from `_workspace_cache`, which has no
+  eviction policy, so a buffer sized
+  `nsnapshots x nwavefields x B x prod(padded_shape) x 4` -- and the default is
+  a snapshot at EVERY time step -- stayed pinned to the propagator for its
+  whole lifetime, long after the caller had finished with the snapshots.
+  Because it was workspace, it then had to be cloned on the way out, so the
+  path held two copies at once.  Measured on `Acoustic` at 136x176 padded with
+  `nt=200`: 115 MB per copy.  The buffer is allocated per call now and returned
+  directly.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every

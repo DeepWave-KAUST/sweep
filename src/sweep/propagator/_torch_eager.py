@@ -397,12 +397,16 @@ def _raise_dynamo_recompile_limit(target=32):
         if return_wavefield:
             has_aux = True
             snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
-            snapshots = self._get_cached_tensor(
-                "snapshots",
-                snapshot_shape,
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-            )
+            # NOT through _get_cached_tensor: that cache has no eviction policy,
+            # so the snapshot buffer -- whose size grows linearly in the number
+            # of snapshot steps, and which defaults to EVERY step -- would be
+            # pinned to this propagator for its whole lifetime, long after the
+            # caller stopped holding the snapshots. It is also the one workspace
+            # that is handed to the caller, so a fresh allocation is what lets
+            # it be returned without the defensive clone below, halving the host
+            # memory this path costs.
+            snapshots = torch.zeros(snapshot_shape, device=torch.device("cpu"),
+                                    dtype=torch.float32)
         else:
             snapshots = None
 
@@ -454,7 +458,8 @@ def _raise_dynamo_recompile_limit(target=32):
         record_out = record.clone()
         if not has_aux:
             return record_out
-        snapshots_out = snapshots.clone()
-        return record_out, snapshots_out
+        # ``snapshots`` is allocated per call above, so it aliases no workspace
+        # and needs no defensive copy.
+        return record_out, snapshots
 
     forward_base = forward
