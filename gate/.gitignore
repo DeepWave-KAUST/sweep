@@ -1,0 +1,15 @@
+# Run OUTPUT and per-GPU baselines. The .pt baselines are large (24 MB for tier
+# B), are only meaningful for the GPU model that produced them, and are
+# rewritten by every `--save`; the .out / .log files are one run's transcript.
+# The tooling that produces them IS tracked -- see gate/README.md.
+*.pt
+*.out
+*.log
+__pycache__/
+base_*.json
+noise_A.json
+noise_B.json
+noise_C.json
+noise_unstable4.json
+stale-*
+env.sh
