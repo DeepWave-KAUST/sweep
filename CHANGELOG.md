@@ -586,6 +586,17 @@ and this project adheres to
   megabytes pinning a few hundred on the 3-D benchmarks.  It returns a
   C-contiguous copy now, matching `read_model`; the `factor == 1` path stays
   zero-copy.
+- **The Dynamo recompile-cap bump did nothing on torch < 2.6.**  The eager step
+  raises Dynamo's cap before compiling, because each wavefield's
+  `requires_grad` flips on first use and the many-wavefield equations exhaust
+  the default of 8 before specialization settles -- at which point Dynamo falls
+  back to eager silently.  The knob was renamed (`cache_size_limit` up to torch
+  2.5, `recompile_limit` from 2.6) and the bump keyed on the new name behind a
+  `hasattr` guard, so on an older torch it was a no-op and the fallback it
+  exists to prevent happened anyway.  `torch` is unpinned here, so that is a
+  shipped configuration.  Whichever name the installed Dynamo exposes is raised
+  now, including the `accumulated_` secondary cap, and a Dynamo with neither
+  warns once instead of passing in silence.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
