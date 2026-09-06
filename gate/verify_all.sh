@@ -46,7 +46,8 @@ echo "       the compiled backward, so the only one that sees a shared defect ==
 if [ "$QUICK" = "--quick" ]; then
     run grad_matrix_short env PYTHONPATH=src OMP_NUM_THREADS=8 "$PY" \
         test/backend_gradient_matrix.py --scale cuda-suite --backends eager/gpu c-cuda \
-        --cases acoustic2d acoustic3d acoustic_vti_1st_2d acoustic_vti_1st_3d
+        --cases acoustic2d acoustic3d acoustic_vti_1st_2d acoustic_vti_1st_3d \
+        --expect gate/expected_matrix_failures_quick.txt
 else
     # --expect is what makes this step able to fail: without it the matrix
     # printed "Failures:" and still exited 0, so this line reported ok while

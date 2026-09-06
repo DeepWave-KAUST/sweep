@@ -1,0 +1,9 @@
+# The --quick subset of gate/verify_all.sh: acoustic2d, acoustic3d and the VTI
+# first-order pair. Same rule as the full file -- a cell that stops failing also
+# fails the run, so this is updated deliberately.
+#
+# Both entries are the equation refusing a mode it has no binding for
+# ("AcousticVTI1st{2D,3D} CUDA backward_recursive_ckpt is not yet implemented"),
+# which the harness counts as a failure.
+acoustic_vti_1st_2d/ckpt_recursive/c-cuda
+acoustic_vti_1st_3d/ckpt_recursive/c-cuda
