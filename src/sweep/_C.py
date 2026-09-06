@@ -12,14 +12,15 @@ from . import _jit
 _ready = False
 
 
-def _load():
+def _load(compile_only: bool = False):
     """Run the one-time JIT compile (cached) and expose the backend's functions
     on this module. Idempotent — used by both ``__getattr__`` (first use) and
-    ``sweep.precompile()`` (up-front)."""
+    ``sweep.precompile()`` (up-front). ``compile_only`` warms the cache on a
+    machine with no GPU; see ``_jit.can_compile``."""
     global _ready
     if _ready:
         return
-    mod = _jit.load()
+    mod = _jit.load(compile_only=compile_only)
     _ns = globals()
     for _k in dir(mod):
         if not _k.startswith("__"):

@@ -153,16 +153,26 @@ def _ensure_ninja_on_path() -> None:
         pass
 
 
-def can_build() -> tuple[bool, str]:
-    """(usable, reason) — True when torch+CUDA GPU+nvcc are present so the C
-    backend can be JIT-compiled. Does NOT compile. Used by
-    ``sweep.is_torch_binding_available()`` to avoid a surprise compile."""
+def can_compile() -> tuple[bool, str]:
+    """(usable, reason) — True when the backend can be COMPILED here.
+
+    Compiling needs torch, an nvcc, and a target architecture. It does **not**
+    need a visible device: ``TORCH_CUDA_ARCH_LIST`` names the target explicitly,
+    which is how wheels are cross-built, and it is what lets a CI job or a
+    CPU-partition allocation warm the cache a later GPU run reuses. Gating the
+    compile on a device forces every build to occupy a scarce GPU.
+
+    RUNNING the result still needs a device -- that is :func:`can_build`.
+    """
     try:
         import torch
     except Exception:
         return False, "PyTorch is not installed"
-    if not torch.cuda.is_available():
-        return False, "no CUDA GPU is visible"
+    if not torch.cuda.is_available() and not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        return False, (
+            "no CUDA GPU is visible and TORCH_CUDA_ARCH_LIST is unset, so there "
+            "is no target architecture to compile for (set e.g. "
+            "TORCH_CUDA_ARCH_LIST=8.9 to build for a card this machine has not got)")
     if _find_cuda_home() is None:
         return False, (
             "no suitable CUDA toolkit found (need nvcc >=12.4 matching your "
@@ -172,6 +182,22 @@ def can_build() -> tuple[bool, str]:
             "`conda install -c nvidia cuda-toolkit`. To try an older toolkit "
             "anyway, set SWEEP_JIT_ALLOW_OLD_CUDA=1)")
     return True, "ok"
+
+
+def can_build() -> tuple[bool, str]:
+    """(usable, reason) — True when the C backend can be compiled AND run here.
+
+    Does NOT compile. Used by ``sweep.is_torch_binding_available()`` to avoid a
+    surprise compile, so it keeps requiring a visible device: a machine that can
+    only cross-compile cannot serve ``impl='c'``.
+    """
+    try:
+        import torch
+    except Exception:
+        return False, "PyTorch is not installed"
+    if not torch.cuda.is_available():
+        return False, "no CUDA GPU is visible"
+    return can_compile()
 
 
 # --------------------------------------------------------------------------- #
@@ -329,8 +355,14 @@ def _will_build(build_dir: Path) -> bool:
 # --------------------------------------------------------------------------- #
 # the loader
 # --------------------------------------------------------------------------- #
-def load():
-    """Compile (first call, cached) and return the ``sweep._C`` module."""
+def load(compile_only: bool = False):
+    """Compile (first call, cached) and return the ``sweep._C`` module.
+
+    ``compile_only=True`` warms the cache without requiring a device, for CI and
+    for pre-building on a CPU allocation; ``TORCH_CUDA_ARCH_LIST`` must then name
+    the target arch. The returned module is not usable for kernels on a machine
+    with no GPU -- the point is the cached ``.so``.
+    """
     global _module
     if _module is not None:
         return _module
@@ -338,7 +370,7 @@ def load():
     import torch
     from torch.utils import cpp_extension
 
-    ok, why = can_build()
+    ok, why = can_compile() if compile_only else can_build()
     if not ok:
         raise RuntimeError(
             f"sweep's compiled backend (impl='c') is unavailable: {why}. "
@@ -360,10 +392,14 @@ def load():
                              os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
                  if os.path.isdir(p)]
 
-    cap = torch.cuda.get_device_capability()
     building = _will_build(build_dir)
     if building:
-        print(f"[sweep] compiling the CUDA backend for your GPU (sm_{cap[0]}{cap[1]}) — "
+        if torch.cuda.is_available():
+            cap = torch.cuda.get_device_capability()
+            target = f"your GPU (sm_{cap[0]}{cap[1]})"
+        else:
+            target = f"TORCH_CUDA_ARCH_LIST={os.environ.get('TORCH_CUDA_ARCH_LIST')}"
+        print(f"[sweep] compiling the CUDA backend for {target} — "
               f"one-time, ~2-5 min, then cached at {build_dir} ...",
               file=sys.stderr, flush=True)
 
