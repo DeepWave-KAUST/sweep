@@ -51,6 +51,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from sweep.equations import (  # noqa: E402
     Acoustic,
+    AcousticVTI1st,
+    AcousticVTI1st3D,
     ElasticTTI2nd,
     ElasticTTISG,
     ElasticTTISG3D,
@@ -162,6 +164,16 @@ CASES = (
     Case("elastic_tti_sg2d", ElasticTTISG, (14, 16), "cpmls"),
     Case("elastic_tti_sg3d", ElasticTTISG3D, (8, 8, 8), "cpmls"),
     Case("elastic_tti_2nd2d", ElasticTTI2nd, (14, 16), "cpmls", ["ux", "uz"], ["uz"]),
+    # Pseudo-acoustic VTI, first order.  The bit-exactness gate covers these,
+    # but the gate only compares C against C -- it cannot see a defect the full
+    # and boundary-saving paths share, which is exactly the shape of the
+    # operator-adjoint bug these two carried until 2026-08-17 (the material
+    # coefficient was multiplied OUTSIDE the derivative, so a homogeneous model
+    # hid it completely).  The eager leg is the only reference that can.
+    # Run with --scale cuda-suite: like the TTI cases, the tiny profile leaves
+    # the smallest gradient at the fp32 cancellation floor.
+    Case("acoustic_vti_1st_2d", AcousticVTI1st, (14, 16), "cpmls", ["sH", "sV"], ["sV"]),
+    Case("acoustic_vti_1st_3d", AcousticVTI1st3D, (8, 8, 8), "cpmls", ["sH", "sV"], ["sV"]),
     # ---- source / receiver loading axes -------------------------------------
     # Every case above rides on the equation defaults, which for Elastic means
     # an explosive stress source recorded on velocities.  These add the corners
