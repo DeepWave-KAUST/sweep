@@ -13,6 +13,8 @@ The C++ sources ship inside the wheel under ``sweep/csrc/`` (package data).
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -190,31 +192,85 @@ def _sources() -> list[str]:
     return cpu + cu + binding
 
 
+def _staged_name(rel: Path) -> Path:
+    """Staged path of a COMPILED source: cpp_extension.load() flattens object
+    names by basename and sweep has many forward.cu / backward.cu / kernels.cu,
+    so each one is renamed in place (its relative #includes still resolve)."""
+    slug = "_".join(rel.with_suffix("").parts)
+    return rel.parent / (slug + rel.suffix)
+
+
+def _stage_plan() -> dict[Path, Path]:
+    """Every file under csrc, mapped to where it is staged."""
+    renamed = {Path(s).resolve().relative_to(_CSRC) for s in _sources()}
+    plan: dict[Path, Path] = {}
+    for p in _CSRC.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(_CSRC)
+        plan[rel] = _staged_name(rel) if rel in renamed else rel
+    return plan
+
+
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
-    """cpp_extension.load() flattens object names by basename; sweep has many
-    forward.cu / backward.cu / kernels.cu. Copy csrc into a version-stamped
-    staging dir with UNIQUE compiled-source basenames (renamed in place so their
-    relative #includes still resolve). Idempotent across runs."""
+    """Mirror csrc into a staging dir with unique compiled-source basenames.
+
+    The sentinel is a MANIFEST of source digests, not a bare "I ran once" flag.
+    Keying staleness on the package version alone meant that editing a kernel
+    without bumping the version left the previous copy in place: ninja then
+    compiled the OLD source and produced a .so that silently did not contain
+    the edit, which is why the workflow around this was "delete the extension
+    directory after touching csrc". Re-staging only the files whose contents
+    changed keeps that from happening AND keeps the build incremental -- ninja
+    recompiles the affected translation units and, through its header
+    depfiles, whatever includes a changed .cuh.
+
+    The staged copy's mtime is set to now rather than inherited, so a source
+    that travels BACKWARDS in time (a `git checkout` of an older revision)
+    still invalidates the object built from it.
+    """
     try:
         from importlib.metadata import version
         _ver = version("sweep-solver")
     except Exception:
         _ver = "dev"
     stage = build_dir / f"csrc_stage_{_ver}"
-    done = stage / ".staged"
-    if not done.exists():
-        shutil.rmtree(stage, ignore_errors=True)
-        shutil.copytree(_CSRC, stage)
-        for s in _sources():
-            rel = Path(s).resolve().relative_to(_CSRC)
-            slug = "_".join(rel.with_suffix("").parts)
-            os.replace(stage / rel, stage / rel.parent / (slug + rel.suffix))
-        done.write_text("ok")
-    staged = []
-    for s in _sources():
-        rel = Path(s).resolve().relative_to(_CSRC)
-        slug = "_".join(rel.with_suffix("").parts)
-        staged.append(str(stage / rel.parent / (slug + rel.suffix)))
+    manifest_path = stage / ".staged"
+    try:
+        previous = json.loads(manifest_path.read_text())
+        if not isinstance(previous, dict):
+            previous = {}
+    except (OSError, ValueError):
+        previous = {}       # first run, or the pre-manifest "ok" sentinel
+
+    plan = _stage_plan()
+    manifest: dict[str, str] = {}
+    for rel, dst_rel in sorted(plan.items()):
+        key = str(dst_rel)
+        digest = _digest(_CSRC / rel)
+        manifest[key] = digest
+        dst = stage / dst_rel
+        if previous.get(key) != digest or not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_CSRC / rel, dst)
+            os.utime(dst, None)
+    # A source that was deleted (or renamed, or dropped by a build-mode switch)
+    # must not linger in the stage where it would still compile.
+    for key in set(previous) - set(manifest):
+        (stage / key).unlink(missing_ok=True)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+
+    staged = [str(stage / _staged_name(Path(s).resolve().relative_to(_CSRC)))
+              for s in _sources()]
     inc = [str(stage), str(stage / "bindings"), str(stage / "shared"),
            str(stage / "cuda"), str(stage / "cuda/common"), str(stage / "cuda/equations")]
     return staged, inc
