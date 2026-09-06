@@ -607,6 +607,20 @@ and this project adheres to
   path held two copies at once.  Measured on `Acoustic` at 136x176 padded with
   `nt=200`: 115 MB per copy.  The buffer is allocated per call now and returned
   directly.
+- **The eager record was built by `nt` in-place slice writes into a live
+  autograd tensor.**  That builds a chain of `nt` `CopySlices` nodes, and each
+  one allocates a full-record buffer and copies the incoming gradient through
+  it, so the record's own backward cost was `2 * nt * |record|` -- 64 GB per
+  shot at `nt=4000` with 500 receivers, 1.44 TB at OBN shapes.  The default
+  rollout collects the per-step gather and stacks once, making it
+  `2 * |record|` and removing `nt` full-record allocations.  Records and
+  gradients are bit-exact (`torch.equal`); the whole backward, on CPU with 500
+  receivers on a 40x60 grid, goes 136 -> 129 ms at `nt=250`, 280 -> 235 ms at
+  `nt=500` and 616 -> 497 ms at `nt=1000` -- the share grows with `nt` because
+  the removed term is the quadratic one.  The stacked record is already fresh,
+  so it is returned without the defensive clone the workspace buffer needed.
+  The checkpointing and eager-boundary-saving rollouts still fill a
+  preallocated record: their write is per CHUNK, not per step.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every

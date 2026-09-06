@@ -315,15 +315,16 @@ def _raise_dynamo_recompile_limit(target=32):
             record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
         return wavefield
 
-    def _rollout_full(self, wavefield, runtime_models, wavelet, src, rec, record,
+    def _rollout_full(self, wavefield, runtime_models, wavelet, src, rec,
                       receivers, nt, adj, return_wavefield, snapshots, snapshot_lookup):
         """Plain time loop recording the full autograd tape (the default path):
         PyTorch retains every step's activations and backward differentiates the
         whole graph.  This is the only path that supports ``return_wavefield``
-        (wavefield snapshots).  Writes the record (and snapshots, if requested) in
-        place and returns the final wavefield list.
+        (wavefield snapshots).  Returns ``(wavefield, record)``; the snapshots,
+        which are detached host copies, are still written in place.
         """
         multi_receiver = len(self.receiver_indices) > 1
+        columns = []
         for i in range(nt):
             wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None))
             time = i if not adj else nt - i - 1
@@ -335,11 +336,19 @@ def _raise_dynamo_recompile_limit(target=32):
                     0,
                 )
             if multi_receiver:
-                record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+                columns.append(rec.sample_fields(
+                    [wavefield[idx] for idx in self.receiver_indices]))
             else:
                 receiver_idx = self.receiver_indices[0]
-                record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
-        return wavefield
+                columns.append(rec(wavefield[receiver_idx])
+                               .view(*receivers.shape[:-1]).unsqueeze(-1))
+        # One stack instead of nt in-place slice writes. Writing into a live
+        # autograd tensor builds a chain of nt CopySlices nodes, and EACH of
+        # them allocates a full-record buffer and copies the incoming gradient
+        # through it, so the record alone cost O(nt^2) backward traffic:
+        # 2*nt*|record|, which is 64 GB per shot at nt=4000 with 500 receivers.
+        # Stacking makes it 2*|record|.
+        return wavefield, torch.stack(columns, dim=1)
 
     def forward(
         self,
@@ -410,12 +419,16 @@ def _raise_dynamo_recompile_limit(target=32):
         else:
             snapshots = None
 
-        record = self._get_cached_tensor(
-            "record",
-            (batch_size, nt, receivers.shape[1], len(self.receiver_type)),
-            device=self.dev,
-            dtype=torch.float32,
-        )
+        # Only the paths that still fill a record in place need one allocated
+        # up front; _rollout_full stacks its own (see there).
+        record = None
+        if self.use_ckpt or getattr(self, "_eager_bs", False):
+            record = self._get_cached_tensor(
+                "record",
+                (batch_size, nt, receivers.shape[1], len(self.receiver_type)),
+                device=self.dev,
+                dtype=torch.float32,
+            )
 
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
@@ -446,8 +459,8 @@ def _raise_dynamo_recompile_limit(target=32):
                 wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj
             )
         else:
-            wavefield = self._rollout_full(
-                wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj,
+            wavefield, record = self._rollout_full(
+                wavefield, runtime_models, wavelet, src, rec, receivers, nt, adj,
                 return_wavefield, snapshots, snapshot_lookup,
             )
 
@@ -455,7 +468,9 @@ def _raise_dynamo_recompile_limit(target=32):
         # The eager backend reuses internal workspace buffers across calls.
         # Return clones so previous outputs do not alias buffers that a later
         # forward pass will overwrite.
-        record_out = record.clone()
+        # A stacked record is already a fresh tensor; only the in-place paths
+        # hand back workspace that a later forward would overwrite.
+        record_out = record.clone() if (self.use_ckpt or getattr(self, "_eager_bs", False)) else record
         if not has_aux:
             return record_out
         # ``snapshots`` is allocated per call above, so it aliases no workspace
