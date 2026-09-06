@@ -127,6 +127,8 @@ class ViscoAcoustic(SecondOrderEquation):
     """
     supports_image_topography = True   # eager func applies the staircase
 
+    C_NAME = "visco_acoustic2d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Visco-acoustic wave velocity model.", unit="m/s"),
         ModelSpec("Q", description="Quality factor controlling attenuation."),
@@ -311,23 +313,6 @@ class ViscoAcoustic(SecondOrderEquation):
                     k_np > 0, np.power(k_np, 2.0*gbar + 2.0, where=k_np > 0), 0.0)))
             self._c_kmul_cache = (key, tuple(grids))
         return self._c_kmul_cache[1]
-
-    def _C(self):
-        # CUDA IMPLEMENTATION
-        from sweep._C import (
-            visco_acoustic2d_forward,
-            visco_acoustic2d_backward,
-            visco_acoustic2d_backward_bs,
-            visco_acoustic2d_backward_ckpt,
-            visco_acoustic2d_backward_recursive_ckpt,
-        )
-        return (
-            visco_acoustic2d_forward,
-            visco_acoustic2d_backward,
-            visco_acoustic2d_backward_bs,
-            visco_acoustic2d_backward_ckpt,
-            visco_acoustic2d_backward_recursive_ckpt,
-        )
 
     @property
     def cuda_layout(self):
