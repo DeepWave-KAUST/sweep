@@ -99,6 +99,30 @@ sweep show ElasticTTISG
   Torch binding available: yes
 ```
 
+### Unknown names, and the exit code
+
+`show` resolves the name through the **equation registry**, not the
+`sweep.equations` namespace, so only real equations answer. An unknown name
+exits **1** and offers the closest registered spellings:
+
+```bash
+sweep show Acoustic3d ; echo "exit=$?"
+```
+
+```text
+No such wave equation: Acoustic3d
+  Did you mean: Acoustic3D, Acoustic, AcousticVRZ3D?
+  `sweep list equations` names all 38 registered equations.
+exit=1
+```
+
+`DAS` and `AcousticAniso` are facades: they pick a raw equation class from
+their constructor arguments, so they have no wavefields of their own. `show`
+says so, and also exits 1 -- there is nothing to introspect.
+
+A successful `show` exits 0, so `sweep show <Eq> >/dev/null` is a usable
+"is this equation available here" probe in a script.
+
 The `Wavefields` list is the **full** internal state — it includes CPML memory
 variables and other auxiliary fields. The user-facing source / receiver field
 choices are a subset; use the equation's `available_fields(role="source")` or
