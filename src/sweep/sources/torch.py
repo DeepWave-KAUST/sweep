@@ -20,7 +20,6 @@ class SourceTorch(SourceBase, torch.nn.Module):
         """
         torch.nn.Module.__init__(self)
         super().__init__()
-        self.mask = torch.zeros(shape, dtype=torch.float32, device=dev)
         self.se = source_encoding
         self.coords = coords
         self.adj = adj
@@ -31,15 +30,23 @@ class SourceTorch(SourceBase, torch.nn.Module):
             k = torch.as_tensor(spread_kernel, dtype=torch.float32, device=dev)
             self.spread_kernel = k.view(1, 1, *k.shape)
 
-        flipped = torch.flip(coords, [-1])
-        batch_idx = torch.zeros(coords.shape[0], dtype=torch.long, device=coords.device)
-        if not source_encoding:
-            batch_idx = torch.arange(coords.shape[0], dtype=torch.long, device=coords.device)
-        index = (batch_idx, slice(None), *flipped.unbind(-1))
-        self.mask[index] = 1.
-        if self.spread_kernel is not None:
-            pad = self.spread_kernel.shape[-1] // 2
-            self.mask = F.conv2d(self.mask, self.spread_kernel, padding=pad)
+        # ``self.mask`` is read in exactly one place, ``SourceBase.forward``,
+        # which ``forward`` below reaches only when neither source encoding nor
+        # adjoint modelling is active -- both of those inject through
+        # ``_add_indexed_sources`` and never look at it.  Building it anyway
+        # cost a whole padded wavefield, an index_put_ over it and, with a
+        # spread kernel, a conv2d, on every encoded or adjoint source, for a
+        # buffer nothing reads.
+        self.mask = None
+        if not (source_encoding or adj):
+            self.mask = torch.zeros(shape, dtype=torch.float32, device=dev)
+            flipped = torch.flip(coords, [-1])
+            batch_idx = torch.arange(coords.shape[0], dtype=torch.long,
+                                     device=coords.device)
+            self.mask[(batch_idx, slice(None), *flipped.unbind(-1))] = 1.
+            if self.spread_kernel is not None:
+                pad = self.spread_kernel.shape[-1] // 2
+                self.mask = F.conv2d(self.mask, self.spread_kernel, padding=pad)
 
     def _source_values(self, wavelet, batch_size, nsrc):
         values = wavelet.reshape(-1)

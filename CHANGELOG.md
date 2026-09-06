@@ -621,6 +621,15 @@ and this project adheres to
   so it is returned without the defensive clone the workspace buffer needed.
   The checkpointing and eager-boundary-saving rollouts still fill a
   preallocated record: their write is per CHUNK, not per step.
+- **The source injection mask was built on paths that never read it.**
+  `SourceTorch` allocated a whole padded wavefield, filled it with an
+  `index_put_` and, with a spread kernel, convolved it -- on every
+  construction.  Exactly one place reads it, `SourceBase.forward`, which
+  `SourceTorch.forward` reaches only when neither source encoding nor adjoint
+  modelling is active; both of those inject through `_add_indexed_sources` and
+  never look at it.  So every encoded forward and every adjoint construction
+  paid `prod(padded_shape) * 4` bytes plus the scatter and the convolution for
+  a buffer nothing read.  It is built on the branch that reads it now.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
