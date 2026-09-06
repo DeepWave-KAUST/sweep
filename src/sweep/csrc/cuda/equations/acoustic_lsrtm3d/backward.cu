@@ -76,7 +76,6 @@ namespace {
 
 void init_rtm_output_3d(RTMOutput& out, const torch::Tensor& vp)
 {
-    out.image = torch::zeros_like(vp);
     out.source_illumination = torch::zeros_like(vp);
     out.receiver_illumination = torch::zeros_like(vp);
 }
@@ -93,10 +92,9 @@ void accumulate_rtm_3d(
     int nz
 )
 {
-    accumulate_rtm_image_3d<<<wave_grid, wave_block>>>(
+    accumulate_illumination_3d<<<wave_grid, wave_block>>>(
         forward_ptr,
         adjoint_ptr,
-        out.image.data_ptr<float>(),
         out.source_illumination.data_ptr<float>(),
         out.receiver_illumination.data_ptr<float>(),
         B, nx, ny, nz

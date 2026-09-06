@@ -27,11 +27,11 @@
 //   * adjoint_step = ACOUSTIC2D_ADJOINT_FUSED: single-kernel exact adjoint, g_* recomputed at each tap, next-step psi/zeta written to the double-buffer out-tensors, grad_forward_img / grad_out fused in;
 //   * inject_adjoint_source adds p.adjoint_source into u_next with the record_config slot (the adjoint source config in backward states); rotate_adjoint_buffers = swap_aux (u + psi + zeta rotation);
 //   * accumulate_source_grad = accumulate_source_grad_2d from the adjoint u_now into grads[0];
-//   * image_step = calculate_grad (vp gradient) + accumulate_rtm_image_2d; no ADCIG launch here (the full store is not raw pressure);
+//   * image_step = calculate_grad (vp gradient) + accumulate_illumination_2d; no ADCIG launch here (the full store is not raw pressure);
 //   * rtm_out_bs opens on compute_illumination || compute_adcig (consumed in-step by the 3-D twin; 2-D images after the prefetch in bs_rtm_tap);
 //   * seed_reconstruction: u_prev <- u_last_two[:, 1], u_now <- u_last_two[:, 0], then set_boundary_zeros on both over the abcn + M rim with the cut faces excluded (ctx.cut_mask()); make_bs_scratch returns {};
 //   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
-//   * bs_rtm_tap, after the prefetch: accumulate_rtm_image_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
+//   * bs_rtm_tap, after the prefetch: accumulate_illumination_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
 //   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots;
 //   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
 //
@@ -430,9 +430,8 @@ struct Driver {
             );
         }
         if (rtm_out != nullptr) {
-            accumulate_rtm_image_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+            accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
                 forward_ptr, adjoint_ptr,
-                rtm_out->image.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
                 s.nx, s.nz
@@ -577,10 +576,9 @@ struct Driver {
         // off, skip the per-step RTM pass entirely; the FWI vp-gradient is
         // produced by calculate_grad_utt and is unaffected.
         if (compute_illumination) {
-            accumulate_rtm_image_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+            accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
                 forward.u_now_t.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                illumination.image.data_ptr<float>(),
                 illumination.source_illumination.data_ptr<float>(),
                 illumination.receiver_illumination.data_ptr<float>(),
                 s.nx, s.nz

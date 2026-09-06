@@ -571,10 +571,9 @@ __global__ void calculate_grad_utt_band(
     int wxl, int wxh, int wzl, int wzh
 );
 
-__global__ void accumulate_rtm_image_2d(
+__global__ void accumulate_illumination_2d(
     const float* __restrict__ u_forward,
     const float* __restrict__ u_backward,
-    float* __restrict__ image,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
     int nx, int nz

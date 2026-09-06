@@ -146,10 +146,9 @@ __global__ void calculate_grad_utt_3d_band(
 
 }
 
-__global__ void accumulate_rtm_image_3d(
+__global__ void accumulate_illumination_3d(
     const float* __restrict__ u_forward,
     const float* __restrict__ u_backward,
-    float* __restrict__ image,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
     int B, int nx, int ny, int nz
@@ -173,14 +172,12 @@ __global__ void accumulate_rtm_image_3d(
 
     const float* u_forward_b = u_forward + b * spatial_size;
     const float* u_backward_b = u_backward + b * spatial_size;
-    float* image_b = image + b * spatial_size;
     float* src_b = source_illumination + b * spatial_size;
     float* rec_b = receiver_illumination + b * spatial_size;
 
     float uf = u_forward_b[idx];
     float ub = u_backward_b[idx];
 
-    image_b[idx] += uf * ub;
     src_b[idx] += uf * uf;
     rec_b[idx] += ub * ub;
 }

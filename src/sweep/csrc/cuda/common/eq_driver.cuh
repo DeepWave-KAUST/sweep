@@ -507,7 +507,6 @@ void check_stepped_backward(const BackwardInput& p, bool need_recon,
 inline void init_rtm_output(RTMOutput& out, const torch::Tensor& vp,
                             bool want_adcig, int nlag)
 {
-    out.image = torch::zeros_like(vp);
     out.source_illumination = torch::zeros_like(vp);
     out.receiver_illumination = torch::zeros_like(vp);
     if (want_adcig) {
@@ -541,7 +540,6 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
     if (!p.illum_out.empty()) {
         TORCH_CHECK(p.illum_out.size() == 2,
                     "illum_out must be {source_illumination, receiver_illumination}");
-        illumination.image = torch::zeros_like(p.models[0]);
         illumination.source_illumination = p.illum_out[0];
         illumination.receiver_illumination = p.illum_out[1];
         TORCH_CHECK(!p.compute_adcig,
