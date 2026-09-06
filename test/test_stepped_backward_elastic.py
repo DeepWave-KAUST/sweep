@@ -359,13 +359,19 @@ def test_stepped_backward_elastic_guards():
         func(p)
     p.step_phase = 0
 
-    # stepped + staged (cpu/disk) boundary storage is v1-unsupported
+    # Staged boundary storage: cpu is supported (the staggered skeleton takes
+    # the Python-owned BoundarySession, so the copy stream and its ring events
+    # outlive the per-step call); disk still is not.  This guard used to refuse
+    # both -- if it starts refusing cpu again, that capability has regressed.
     p.boundary_on_cpu = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    try:
         func(p)
+    except RuntimeError as exc:
+        assert "boundary storage" not in str(exc), (
+            f"cpu boundary staging is refused again: {exc}")
     p.boundary_on_cpu = False
     p.boundary_on_disk = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    with pytest.raises(RuntimeError, match="boundary_on_disk unsupported"):
         func(p)
     p.boundary_on_disk = False
 
