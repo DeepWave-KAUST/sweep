@@ -189,6 +189,22 @@ and this project adheres to
   killed a 2-rank domain-decomposition benchmark before it measured
   anything.  The regression test asserts on work rather than timing:
   staging from two processes must copy no more than staging from one.
+- **The staggered family refused host-staged boundary storage under stepping
+  and domain decomposition.**  `sg_check_stepped_backward` rejected
+  `storage='cpu'` and `storage='disk'` for every stepped or DD `backward_bs`
+  across the seven equations on that skeleton (elastic2d/3d, das_mu2d/3d,
+  elastic_tti_sg2d/3d, elastic_vr2d), which capped the largest elastic 3-D DD
+  tile at whatever boundary ring fits in VRAM.  Two things actually blocked it,
+  neither a design limit: the skeleton built its own copy stream per call
+  instead of taking the Python-owned `BoundarySession`, so under DD -- where
+  every time step is a separate entry into the extension -- the stream and its
+  ring events were destroyed and rebuilt every step and no transfer could stay
+  in flight; and it primed the TAIL chunk on every segment
+  (`prefetch_initial_backward_chunk` with no `it_hi`), so a stepped reverse
+  loop fetched the wrong slabs on all but its first call.  Both are fixed and
+  the refusal is narrowed to match the acoustic family: disk is still refused
+  under a cut mask, cpu is not.  Gate tiers A/C/B/dd1 unchanged.
+
 - **Every backward allocated the RTM/illumination buffers, requested or not.**
   `init_rtm_output` did three `torch::zeros_like(vp)` on the runtime-padded
   grid unconditionally, while the kernels that read them are gated on

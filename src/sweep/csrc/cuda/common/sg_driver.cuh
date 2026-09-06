@@ -85,6 +85,7 @@
 #include "cudautils.h"
 #include "boundarysaver.cuh"
 #include "boundary_runtime.cuh"
+#include "boundary/session.cuh"
 #include "wavetypes.h"
 #include "eq_driver.cuh"     // Dims / read_dims / make_ctx / stencil_order
 #include "../launch/config.h"
@@ -207,8 +208,18 @@ public:
         state.emplace(Eq::make_state(p, d, models, launch_config,
                                      source_config, record_config));
 
-        async_copy.emplace(staged_boundary && p.use_boundary_saving);
-        boundary_runtime.emplace(
+        // A Python-owned BoundarySession, when bound, keeps the copy stream and
+        // the ring events alive ACROSS calls.  Under DD every time step is a
+        // separate entry into the extension, so a per-call copy stream can never
+        // hold a transfer in flight and transfer_interval/ring_buffers overlap
+        // nothing -- it also destroys and recreates the stream and its events
+        // every step.  Without a session BoundaryScope builds both locally and
+        // the behaviour is exactly the old per-call path.  The acoustic
+        // skeleton has had this since dev 848a100; the staggered one had not,
+        // which is half of why staged storage was refused here.
+        boundary_scope.emplace(
+            p.boundary_session ? p.boundary_session->impl() : nullptr,
+            BoundarySessionImpl::Phase::Forward,
             boundary_saver,
             Eq::NDIM,
             p.use_boundary_saving,
@@ -217,10 +228,9 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files,
-            async_copy->compute_stream,
-            async_copy->copy_stream
+            p.boundary_disk_files
         );
+        boundary_runtime = &boundary_scope->runtime();
         checkpoint_runtime.emplace(
             p.checkpoints,
             Eq::CKPT_NVAR,
@@ -294,7 +304,10 @@ public:
         if (p.use_boundary_saving && it1 == static_cast<int>(p.nt))
             Eq::save_last_state(boundary_saver, wavefield);
 
-        boundary_runtime->synchronize();
+        // With a persistent session the trailing sync belongs to the phase, not
+        // to this one call -- Python drives it via session.finish().
+        if (boundary_scope->owns())
+            boundary_runtime->synchronize();
 
         ForwardOutput out;
         out.wavefield = u_allt;
@@ -334,8 +347,8 @@ private:
     GeneralBoundaryPointer bs{};
     fdtd::LaunchConfig launch_config{}, source_config{}, record_config{};
     std::optional<typename Eq::State> state;
-    std::optional<AsyncCopyContext> async_copy;
-    std::optional<BoundaryRuntime> boundary_runtime;
+    std::optional<BoundaryScope> boundary_scope;
+    BoundaryRuntime* boundary_runtime = nullptr;
     std::optional<CheckpointRuntime> checkpoint_runtime;
     int run_calls = 0;
 };
@@ -379,10 +392,10 @@ void sg_check_stepped_backward(const BackwardInput& p, bool need_recon,
                     "segment (bw_it_begin == bw_it_end + 1)");
     }
     if (need_recon && p.cut_face_mask != 0) {
-        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
+        TORCH_CHECK(!p.boundary_on_disk,
                     "domain-decomposed backward_bs (cut_face_mask) supports "
-                    "gpu-direct boundary storage only "
-                    "(boundary_on_cpu/boundary_on_disk unsupported in v1)");
+                    "gpu-direct or cpu boundary storage only "
+                    "(boundary_on_disk unsupported in v1)");
     }
     const bool stepped = (it_hi < static_cast<int>(p.nt)) || (it_lo > 0);   // == bw_stepped()
     if (!stepped && !phased)
@@ -402,9 +415,9 @@ void sg_check_stepped_backward(const BackwardInput& p, bool need_recon,
                     "stepped elastic backward_bs requires the ", Eq::RECON_WF_COUNT,
                     "-tensor reconstruction list ", Eq::RECON_LIST_DESC,
                     " bound from Python");
-        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
-                    "stepped backward_bs supports gpu-direct boundary storage "
-                    "only (boundary_on_cpu/boundary_on_disk unsupported in v1)");
+        TORCH_CHECK(!p.boundary_on_disk,
+                    "stepped backward_bs supports gpu-direct or cpu boundary "
+                    "storage only (boundary_on_disk unsupported in v1)");
     }
 }
 
@@ -590,8 +603,10 @@ public:
         state.emplace(Eq::make_state(p, d, models, launch_config,
                                      fwd_source_config, adj_source_config));
 
-        async_copy.emplace(staged_boundary);
-        boundary_runtime.emplace(
+        // Same persistent-session handling as the forward; see there.
+        boundary_scope.emplace(
+            p.boundary_session ? p.boundary_session->impl() : nullptr,
+            BoundarySessionImpl::Phase::Backward,
             boundary_saver,
             Eq::NDIM,
             true,
@@ -600,10 +615,9 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files,
-            async_copy->compute_stream,
-            async_copy->copy_stream
+            p.boundary_disk_files
         );
+        boundary_runtime = &boundary_scope->runtime();
 
         adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
     }
@@ -648,7 +662,10 @@ public:
         if (first_segment && (inject_only || (!phased && do_p1)))
             Eq::seed_recon(forward, p);
 
-        boundary_runtime->prefetch_initial_backward_chunk(p.nt);
+        // Without it_hi the default primes the chunk holding step nt-1 -- the
+        // TAIL chunk -- on every segment, so a stepped or domain-decomposed
+        // reverse loop fetched the wrong slabs on all but its first call.
+        boundary_runtime->prefetch_initial_backward_chunk((int)p.nt, it_hi);
 
         // Residual / source injections for reverse index jt, one unit (the rho
         // correction must read the adjoint velocity BEFORE jt's residuals land):
@@ -712,8 +729,8 @@ private:
     GeneralBoundaryPointer bs{};
     fdtd::LaunchConfig launch_config{}, fwd_source_config{}, adj_source_config{};
     std::optional<typename Eq::State> state;
-    std::optional<AsyncCopyContext> async_copy;
-    std::optional<BoundaryRuntime> boundary_runtime;
+    std::optional<BoundaryScope> boundary_scope;
+    BoundaryRuntime* boundary_runtime = nullptr;
     std::vector<torch::Tensor> adj_source_signed;
     int run_calls = 0;
 };
