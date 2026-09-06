@@ -83,7 +83,6 @@ void accumulate_grad_disp(torch::Tensor* grad_B1, torch::Tensor* grad_B2,
 
 void init_rtm_output_visco_2d(RTMOutput& out, const torch::Tensor& vp)
 {
-    out.image = torch::zeros_like(vp);
     out.source_illumination = torch::zeros_like(vp);
     out.receiver_illumination = torch::zeros_like(vp);
 }
@@ -109,7 +108,7 @@ inline void run_visco2d_adjoint_step(
 
 // Imaging for one reverse step: recompute the vp_step-gradient carrier
 // (vp^2 * Lap u) from the RAW pressure, then reuse the shared acoustic
-// calculate_grad / accumulate_rtm_image_2d kernels.
+// calculate_grad / accumulate_illumination_2d kernels.
 void image_step_from_raw(
     int order, dim3 grid, dim3 block,
     const float* u_raw_ptr,
@@ -137,9 +136,8 @@ void image_step_from_raw(
             ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
     }
     if (rtm_out != nullptr) {
-        accumulate_rtm_image_2d<<<grid, block>>>(
+        accumulate_illumination_2d<<<grid, block>>>(
             carrier.data_ptr<float>(), lam_ptr,
-            rtm_out->image.data_ptr<float>(),
             rtm_out->source_illumination.data_ptr<float>(),
             rtm_out->receiver_illumination.data_ptr<float>(),
             nx, nz);
@@ -162,7 +160,8 @@ void check_visco_backward(const BackwardInput& p)
                 "visco_acoustic2d does not support ADCIG yet");
 }
 
-// Full-storage reverse sweep, shared by backward() (grads) and rtm() (image).
+// Full-storage reverse sweep (the rtm() entry point it used to also serve
+// was removed in 295858c).
 void run_full_imaging_visco(
     const BackwardInput& p,
     torch::Tensor* grad,
@@ -730,10 +729,9 @@ void process_recursive_interval_visco_2d(
                 ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
         }
         if (rtm_out != nullptr) {
-            accumulate_rtm_image_2d<<<wave_grid, wave_block>>>(
+            accumulate_illumination_2d<<<wave_grid, wave_block>>>(
                 carrier_scratch.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                rtm_out->image.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
                 nx, nz);

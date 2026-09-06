@@ -392,9 +392,8 @@ struct Driver {
             );
         }
         if (rtm_out != nullptr) {
-            accumulate_rtm_image_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
                 forward_ptr, adjoint_ptr,
-                rtm_out->image.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
                 s.B, s.nx, s.ny, s.nz
@@ -513,10 +512,9 @@ struct Driver {
             }
         }
         if (rtm_out != nullptr) {
-            accumulate_rtm_image_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
                 for_view.u_next,
                 adjoint.u_now_t.data_ptr<float>(),
-                rtm_out->image.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
                 s.B, s.nx, s.ny, s.nz

@@ -185,7 +185,11 @@ using BackwardRunnerPtr = std::shared_ptr<IBackwardRunner>;
 
 struct RTMOutput {
 
-    torch::Tensor image;
+    // No ``image``: the zero-lag RTM image used to be accumulated here, but the
+    // only thing that ever returned it was the ``rtm()`` entry point, removed in
+    // 295858c along with ``wrap_rtm``.  ``pack_outputs`` hands Python the
+    // illuminations and the ADCIG cube; an image field would be written once per
+    // time step and read by nobody.
 
     torch::Tensor source_illumination;
 

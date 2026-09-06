@@ -19,7 +19,7 @@
 // The acoustic2d forward stores ``vp^2 * Lap(u)`` per step because that is
 // all its backward needs.  The visco forward must store RAW ``u`` instead
 // (the attenuation adjoint needs du/dt and its |k| filter), so the carrier
-// the shared ``calculate_grad`` / ``accumulate_rtm_image_2d`` kernels expect
+// the shared ``calculate_grad`` / ``accumulate_illumination_2d`` kernels expect
 // is recomputed here on the fly: ``carrier = vp^2 * (Lap_x + Lap_z)(u)``.
 // Halo cells are never written (the caller zeroes the scratch), matching the
 // acoustic store where halo cells stay 0.
