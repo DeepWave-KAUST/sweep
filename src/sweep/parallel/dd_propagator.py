@@ -1069,6 +1069,25 @@ class ModelParallel:
             tiles = [self._slice_tile(m) for m in models]
         sg = torch.as_tensor(np.asarray(sources_global), dtype=torch.int64)
         rg = torch.as_tensor(np.asarray(receivers_global), dtype=torch.int64)
+        # A 3-D coords array means source encoding, whose leading axis is 1.
+        # Anything longer is what a caller writes when they mean "several
+        # shots", and the single-domain propagator refuses it -- but the
+        # partitioning below unions the owned sources of EVERY leading entry
+        # into one array (``loc_s[mask_s]``, a boolean index that flattens) and
+        # reads receivers and their ownership from index 0 alone.  So DD used to
+        # accept the geometry and answer it as one fused supershot recorded at
+        # the first entry's receivers, with no error and a plausible-looking
+        # record.
+        for name, arr in (("sources_global", sg), ("receivers_global", rg)):
+            if arr.dim() == 3 and arr.shape[0] != 1:
+                raise NotImplementedError(
+                    f"{name} has {arr.shape[0]} leading entries; domain "
+                    "decomposition solves ONE shot (or one encoded supershot) "
+                    "per call, so it cannot answer this. Run the shots as "
+                    "separate calls, put them on separate shot groups with "
+                    "MeshTopology(shot_groups=...), or encode them into a "
+                    "single supershot (leading axis 1)."
+                )
         loc_s, mask_s = partition_global_coords(sg, self.topo, self.global_shape)
         loc_r, mask_r = partition_global_coords(rg, self.topo, self.global_shape)
         self._owns_src = bool(mask_s.any())

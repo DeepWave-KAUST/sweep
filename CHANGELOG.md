@@ -569,6 +569,17 @@ and this project adheres to
   `assemble_tile_records` (the inverse of `partition_global_coords`), so the
   regression test `test/test_dd_gather_record_shot_groups.py` exercises the
   real collective on gloo/CPU without a GPU.
+- **Domain decomposition silently answered a geometry it cannot solve.**  A
+  3-D source/receiver array means source encoding, whose leading axis is 1;
+  anything longer is what a caller writes when they mean "several shots", and
+  the single-domain propagator rejects it.  `ModelParallel._prepare_call` did
+  not: it boolean-indexes the owned sources of EVERY leading entry into one
+  flat array, and reads the receivers -- and their ownership, which
+  `own_receiver_indices` publishes and the parallel guide promises is a
+  partition of the global receiver list -- from index 0 alone.  So several
+  shots were fired as one fused supershot, recorded at the first entry's
+  receivers, and returned without an error.  Both arrays are now checked, with
+  a message naming the three supported ways to run several shots.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
