@@ -50,6 +50,15 @@ and this project adheres to
   recomputes the dispersion/damping coefficients every time step).
 
 ### Fixed
+- **`pytest test/` could never exit 0.**  `test_import_does_not_pull_optional_deps`
+  asserted `mod not in sys.modules`, which is process-global: by the time it
+  runs it is a statement about everything the preceding ~600 tests imported,
+  not about `sweep.datasets`.  Every recorded full-suite run ended
+  `1 failed, 886 passed`, so no script, hook or CI job could gate on the suite.
+  The check now runs the import in a fresh interpreter and asserts on *its*
+  `sys.modules`, which is both order-independent and what the test always meant
+  to say.
+
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
   `storage='disk'` gradient was wrong: max|disk-gpu|/scale 0.2-0.5 for acoustic
