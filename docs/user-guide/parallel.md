@@ -137,7 +137,7 @@ than an unpadded one, so compare like against like — the example scripts'
 - Free surface: top face only under DD (a cut face can never carry one).
 - Boundary storage and dtype: see the table below.
 - `BoundaryOptions.tail_steps`: Acoustic 2-D/3-D (see
-  [Propagators](propagators.md#boundary-tail-truncation-boundaryoptionstail_steps));
+  [Propagators](propagators.md#boundary-tail-truncation-boundarysavingtail_steps));
   it composes with cpu staging.
 - Not routed through DD: `rtm()` — use the gradient path (notebook
   [08](../notebooks/08_rtm_acoustic_marmousi.ipynb) shows how). Encoded
