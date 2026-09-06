@@ -1023,6 +1023,21 @@ class DASZhao3D(FirstOrderEquation):
 
     C_NAME = "das3d"
 
+    # The compiled 3-D backward has NO boundary-saving path.  The forward never
+    # writes boundary strips (it returns an empty ``last_two``), and
+    # ``backward_bs`` -- like ``backward_ckpt`` and
+    # ``backward_recursive_ckpt`` -- is three lines that re-run the whole
+    # forward and allocate the complete ``{nt, 3, B, nz, ny, nx}`` strain
+    # history, which is exactly what full storage holds.  Meanwhile the Python
+    # side still allocated a 13-field boundary ring and a 13-grid ``last_two``
+    # that nothing writes and nothing reads.  Asking for boundary saving here
+    # therefore cost strictly MORE memory than 'full', and it was the implicit
+    # impl='c' default, so every plain 3-D DAS gradient paid it.  Declaring the
+    # capability makes that default resolve to 'full' and an explicit request
+    # raise.  This is "not implemented", not "impossible": das2d writes real
+    # strips and DASMu / DASMu3D get them from the shared staggered skeleton.
+    supports_boundary_saving_c = False
+
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
         FieldSpec("exx_t", description="Normal strain-rate in the x direction.", supports_receiver=True),
