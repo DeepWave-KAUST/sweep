@@ -101,13 +101,26 @@ def test_guard_message_names_the_alternatives():
     with pytest.raises(NotImplementedError) as exc:
         _run(prop, topo)
     msg = str(exc.value)
-    # every escape hatch that is actually gradient-consistent must be named,
-    # and the message must say that boundary saving is the impl='c' DEFAULT —
+    # Every escape hatch that is actually gradient-consistent must be named, and
+    # the message must say that boundary saving is the impl='c' DEFAULT --
     # otherwise a user who never asked for it cannot tell why they got this.
-    assert "ckpt" in msg
-    assert "'enabled': False" in msg
-    assert "eager" in msg
-    assert "DEFAULT" in msg
+    #
+    # Asserted by MEANING, not by spelling. This test went red for four months
+    # of this refactor because it matched the literals of the old dict API
+    # ("ckpt", "'enabled': False") that d5e0df92 replaced with Ckpt()/Full().
+    # A guard message is allowed to be reworded; what it may not do is stop
+    # naming an escape hatch.
+    for what, alternatives in (
+        ("checkpointing", ("Ckpt(", "ckpt")),
+        ("the full store", ("Full()", "'enabled': False")),
+        ("the eager backend", ("impl='eager'", "eager")),
+    ):
+        assert any(a in msg for a in alternatives), (
+            f"the guard no longer points at {what}; a user who hits this has "
+            f"one fewer way out:\n{msg}")
+    assert "DEFAULT" in msg, (
+        "the message must say boundary saving is impl='c''s default -- without "
+        f"that, a user who never chose it cannot tell why they got this:\n{msg}")
 
 
 def test_flat_free_surface_with_boundary_saving_still_works():
