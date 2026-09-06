@@ -57,26 +57,32 @@ from typing import List, Sequence, Tuple
 
 import torch
 
-ACOUSTIC2D_PSI_PAIRS: Tuple[Tuple[int, int], ...] = ((3, 7), (4, 8))
-ACOUSTIC3D_PSI_PAIRS: Tuple[Tuple[int, int], ...] = ((3, 9), (4, 10), (7, 11))
+def _acoustic_table(ndim: int):
+    """The declared bind order for the acoustic family, 2-D or 3-D.
 
-# Adjoint (fused backward) wavefield pair sets: psi AND zeta double-buffers
-# are both swapped by ``swap_aux()``; rotating only the psi pairs (forward
-# habit) leaves the zeta roles flipped after odd-length segments.
-ACOUSTIC2D_ADJ_PAIRS: Tuple[Tuple[int, int], ...] = (
-    (3, 7), (4, 8), (5, 9), (6, 10),
-)
-ACOUSTIC3D_ADJ_PAIRS: Tuple[Tuple[int, int], ...] = (
-    (3, 9), (4, 10), (7, 11), (5, 12), (6, 13), (8, 14),
-)
+    Imported lazily: ``sweep.equations`` registers every equation class on
+    import, and ``_stepped`` sits on the propagator's import path.
+    """
+    from sweep.equations.slot_table import ACOUSTIC2D, ACOUSTIC3D
+
+    return ACOUSTIC2D if ndim == 2 else ACOUSTIC3D
 
 
 def acoustic_psi_pairs(ndim: int) -> Tuple[Tuple[int, int], ...]:
-    return ACOUSTIC2D_PSI_PAIRS if ndim == 2 else ACOUSTIC3D_PSI_PAIRS
+    """Forward ``(slot, shadow)`` pairs that ``swap_aux()`` exchanges."""
+    return _acoustic_table(ndim).pairs(adjoint=False)
 
 
 def acoustic_adj_pairs(ndim: int) -> Tuple[Tuple[int, int], ...]:
-    return ACOUSTIC2D_ADJ_PAIRS if ndim == 2 else ACOUSTIC3D_ADJ_PAIRS
+    """Adjoint pairs: psi AND zeta shadows.
+
+    The fused backward swaps both; rotating only the psi pairs (the forward
+    habit) leaves the zeta roles flipped after an odd-length segment. The 3-D
+    tuple is not sorted by its first component -- the bind order inserts the y
+    slots mid-list -- and deriving it by shadow index reproduces that for free
+    where a hand-written list had to remember it.
+    """
+    return _acoustic_table(ndim).pairs(adjoint=True)
 
 
 def rotate_wavefield_roles(
@@ -130,7 +136,7 @@ def rotate_adjoint_roles(
     """Adjoint wavefield list to bind for a backward continuation after
     ``k_adj`` completed adjoint steps (``swap_aux()`` calls, it==0 tail
     included).  ``pairs`` is the full psi+zeta pair set
-    (:data:`ACOUSTIC2D_ADJ_PAIRS` / :data:`ACOUSTIC3D_ADJ_PAIRS`)."""
+    (:func:`acoustic_adj_pairs`)."""
     return rotate_wavefield_roles(wavefields, k_adj, psi_pairs=pairs)
 
 

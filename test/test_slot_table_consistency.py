@@ -4,7 +4,8 @@
 bind order once, so that three separate hand-maintained copies of the same
 positional knowledge can be derived instead of transcribed:
 
-* ``propagator/_stepped.py`` -- the buffer-role rotation's index pairs;
+* ``propagator/_stepped.py`` -- the buffer-role rotation's index pairs
+  (**migrated**: it now derives them; the literals below are the pin);
 * ``parallel/dd_propagator.py`` -- ``_FAMILIES``' per-family counts;
 * ``equations/cuda_layout.py`` -- ``pml_slot_axes`` / ``base_nvar`` / ``pml_nvar``.
 
@@ -25,14 +26,26 @@ from sweep.equations import slot_table as ST
 # --------------------------------------------------------------------------- #
 # vs propagator/_stepped.py
 # --------------------------------------------------------------------------- #
-def test_psi_pairs_match_stepped():
+#: The values ``_stepped.py`` used to hard-code. It now derives them from the
+#: table, so the literals live HERE, as the expectation -- one source of truth
+#: in the library, and a pin in the suite so the derivation cannot drift.
+EXPECTED_PSI = {2: ((3, 7), (4, 8)),
+                3: ((3, 9), (4, 10), (7, 11))}
+EXPECTED_ADJ = {2: ((3, 7), (4, 8), (5, 9), (6, 10)),
+                3: ((3, 9), (4, 10), (7, 11), (5, 12), (6, 13), (8, 14))}
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_psi_pairs_match_stepped(ndim):
     from sweep.propagator import _stepped as S
 
-    assert ST.ACOUSTIC2D.pairs(adjoint=False) == S.ACOUSTIC2D_PSI_PAIRS
-    assert ST.ACOUSTIC3D.pairs(adjoint=False) == S.ACOUSTIC3D_PSI_PAIRS
+    table = ST.ACOUSTIC2D if ndim == 2 else ST.ACOUSTIC3D
+    assert S.acoustic_psi_pairs(ndim) == EXPECTED_PSI[ndim]
+    assert table.pairs(adjoint=False) == EXPECTED_PSI[ndim]
 
 
-def test_adjoint_pairs_match_stepped():
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_adjoint_pairs_match_stepped(ndim):
     """The 3-D adjoint tuple is NOT sorted by its first component.
 
     ``swap_aux`` shadows psi and zeta, and the 3-D bind order inserts the y
@@ -43,8 +56,17 @@ def test_adjoint_pairs_match_stepped():
     """
     from sweep.propagator import _stepped as S
 
-    assert ST.ACOUSTIC2D.pairs(adjoint=True) == S.ACOUSTIC2D_ADJ_PAIRS
-    assert ST.ACOUSTIC3D.pairs(adjoint=True) == S.ACOUSTIC3D_ADJ_PAIRS
+    table = ST.ACOUSTIC2D if ndim == 2 else ST.ACOUSTIC3D
+    assert S.acoustic_adj_pairs(ndim) == EXPECTED_ADJ[ndim]
+    assert table.pairs(adjoint=True) == EXPECTED_ADJ[ndim]
+
+
+def test_stepped_keeps_no_second_copy_of_the_pair_tables():
+    """The point of the migration: the literals must not come back."""
+    import sweep.propagator._stepped as S
+
+    leftovers = [n for n in dir(S) if n.endswith("_PSI_PAIRS") or n.endswith("_ADJ_PAIRS")]
+    assert not leftovers, f"_stepped.py hard-codes pair tables again: {leftovers}"
 
 
 def test_first_order_families_rotate_nothing():
