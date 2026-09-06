@@ -130,11 +130,14 @@ __global__ void calculate_grad_utt_band(
 }
 
 __global__ void accumulate_illumination_2d(
-    const float* __restrict__ u_forward,
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,     // null => u_forward_next IS u_tt
+    const float* __restrict__ u_forward_prev,
     const float* __restrict__ u_backward,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
-    int nx, int nz
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -143,19 +146,32 @@ __global__ void accumulate_illumination_2d(
 
     if (ix >= nx || iz >= nz)
         return;
+    // The same physical box the gradient kernels image: EdgePadding.backward
+    // crops the rest, and both paths must cover the same cells or the two
+    // illuminations would still not be comparable.
+    if (ix < x0 || ix >= x1 || iz < z0 || iz >= z1)
+        return;
 
     long long spatial_size = (long long)nx * nz;
     int idx = iz * nx + ix;
 
-    const float* u_forward_b = u_forward + b * spatial_size;
     const float* u_backward_b = u_backward + b * spatial_size;
     float* src_b = source_illumination + b * spatial_size;
     float* rec_b = receiver_illumination + b * spatial_size;
 
-    float uf = u_forward_b[idx];
+    // Same expression and operand order as calculate_grad_utt_band.
+    const float* u_next_b = u_forward_next + b * spatial_size;
+    float u_tt;
+    if (u_forward_now == nullptr) {
+        u_tt = u_next_b[idx];                    // the store already holds u_tt
+    } else {
+        const float* u_now_b  = u_forward_now  + b * spatial_size;
+        const float* u_prev_b = u_forward_prev + b * spatial_size;
+        u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
+    }
     float ub = u_backward_b[idx];
 
-    src_b[idx] += uf * uf;
+    src_b[idx] += u_tt * u_tt;
     rec_b[idx] += ub * ub;
 }
 
