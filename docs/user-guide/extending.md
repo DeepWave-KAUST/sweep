@@ -19,25 +19,41 @@ For a **runnable walkthrough** that builds a toy `MyScalar` from Part 1 end
 to end, see the
 [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb).
 
-## Discovery is automatic
+## Registration is two lines
 
-Both parts share the same registration mechanism. SWEEP discovers equations
-by reflecting over `sweep.equations`'s namespace — no whitelist, no factory
-dict:
+Both parts share the same registration mechanism: a decorator on the class,
+and an import that makes the decorator run.
+
+```python
+# src/sweep/equations/my_scalar.py
+from ._registry import register_equation
+
+@register_equation()                     # 1. claim the public name
+class MyScalar(SecondOrderEquation):
+    ...
+```
 
 ```python
 # src/sweep/equations/__init__.py
-from .my_scalar import MyScalar    # ← the only line you add
+from . import my_scalar                  # 2. import the module so it executes
 ```
 
-After this single import line, `MyScalar` appears in:
+`@register_equation()` takes the class name by default; pass `name=` to export
+it under a different one, `aliases=(...)` for extra names that resolve to the
+same class, and `method=` to tag a non finite-difference discretization
+(`"sem"`). A name may only be claimed once, so a clash raises at import rather
+than silently shadowing.
+
+After both lines, `MyScalar` appears in:
 
 - `sweep list equations` (CLI)
-- `sweep.equations._equation_classes()` (Python introspection)
+- `sweep.equations.equation_classes()` and `get_equation("MyScalar")`
 - `sweep.equations.torch_binding_supported_equations()` — only if `_C()` is
   also defined (Part 2)
 
-That is the entire registration cost. Everything else below describes what
+Importing the class without the decorator binds a name in the
+`sweep.equations` namespace and registers nothing: `equation_classes()` will
+not list it, `get_equation` raises `KeyError`, and the CLI does not show it. Everything else below describes what
 goes **inside** `my_scalar.py` (Part 1) and the CUDA directory (Part 2).
 
 ## Part 1 — Python-only (eager) equation
@@ -124,8 +140,8 @@ reaches the boundary. For a production-ready PML-coupled version, mirror
 and add the `psix / psiz / zetax / zetaz` CPML auxiliary fields to
 `FIELD_SPECS`.
 
-After your class is in place, add the one import line shown under
-[Discovery is automatic](#discovery-is-automatic). The
+After your class is in place, add the decorator and the module import shown
+under [Registration is two lines](#registration-is-two-lines). The
 [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb)
 runs exactly this class end-to-end against `PropTorch` and plots the
 propagating P-wave ring.
