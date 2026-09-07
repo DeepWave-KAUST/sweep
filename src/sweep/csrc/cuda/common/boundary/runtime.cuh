@@ -134,6 +134,11 @@ public:
 
         if (boundary_disk_async_read_)
             disk_reader_thread_ = std::thread(&BoundaryRuntime::disk_reader_loop, this);
+
+        // Start from a clean write-error slot. On the per-call path this
+        // runtime is a BoundaryScope local rebuilt every call, so this bounds a
+        // recorded-but-never-reported failure to the run that caused it.
+        reset_boundary_disk_write_error();
     }
 
     ~BoundaryRuntime()
