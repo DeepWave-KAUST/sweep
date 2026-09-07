@@ -83,6 +83,15 @@ def main() -> None:
                     "example in this tree passes shot_groups=1, so the "
                     "cross-group gradient sum has no single-card reference "
                     "anywhere.")
+    ap.add_argument("--shots", type=int, default=0,
+                    help="total distinct shots (default: one per shot group). "
+                    "Must be a multiple of shot_groups; group g runs shots "
+                    "g, g+G, g+2G, ... SEQUENTIALLY through one ModelParallel, "
+                    "which is what an FWI epoch does and what nothing in the "
+                    "tree compares against one card.")
+    ap.add_argument("--same-source", action="store_true", dest="same_source",
+                    help="put every shot at the SAME position -- a control that "
+                    "separates 'more shots' from 'shots in different places'.")
     ap.add_argument("--fs", type=int, default=0)
     ap.add_argument("--nt", type=int, default=1000)
     ap.add_argument("--abcn", type=int, default=12)
@@ -119,18 +128,25 @@ def main() -> None:
     wav = torch.as_tensor(((1 - 2 * a ** 2) * np.exp(-a ** 2) * 1e3).astype(np.float32),
                           device=dev)
 
-    # One shot per shot group, at DIFFERENT positions -- identical shots would
-    # make the cross-group sum indistinguishable from "one shot times G".
+    # One shot per shot group by default, at DIFFERENT positions -- identical
+    # shots would make the cross-group sum indistinguishable from "one shot
+    # times G".
     nz, G = shape[0], args.shot_groups
+    nshot = args.shots or G
+    assert nshot % G == 0, f"--shots {nshot} must be a multiple of shot_groups {G}"
+    S = nshot
     if ndim == 2:
         nx = shape[1]
-        srcs = [np.array([[[nx // 4 + g * (nx // (2 * G + 2)), nz // 4]]],
-                         dtype=np.int64) for g in range(G)]
+        srcs = [np.array([[[nx // 4 + (0 if args.same_source
+                                    else g * (nx // (2 * S + 2))), nz // 4]]],
+                         dtype=np.int64) for g in range(S)]
         rec = np.array([[[ix, 3] for ix in range(3, nx - 3, 4)]], dtype=np.int64)
     else:
         ny, nx = shape[1], shape[2]
-        srcs = [np.array([[[nx // 4 + g * (nx // (2 * G + 2)), ny // 3, nz // 4]]],
-                         dtype=np.int64) for g in range(G)]
+        srcs = [np.array([[[nx // 4 + (0 if args.same_source
+                                    else g * (nx // (2 * S + 2))),
+                            ny // 3, nz // 4]]],
+                         dtype=np.int64) for g in range(S)]
         rec = np.array([[[ix, iy, 3]
                          for iy in range(3, ny - 3, 5)
                          for ix in range(3, nx - 3, 5)]], dtype=np.int64)
@@ -146,7 +162,7 @@ def main() -> None:
 
     if rank == 0:
         print(f"{args.equation}  physical={shape}  padded={padded_shape}  "
-              f"mesh=py{args.py}xpx{args.px}xsg{args.shot_groups}  "
+              f"mesh=py{args.py}xpx{args.px}xsg{args.shot_groups}  nshot={S}  "
               f"world={world}  fs={args.fs}  "
               f"nt={args.nt}  models={[s.name for s in cls.MODEL_SPECS]}", flush=True)
 
@@ -154,10 +170,11 @@ def main() -> None:
     ref_leaves = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
     mono = build()
     r_ref = None
+    my_shots = list(range(mesh.shot_group, S, G))     # this group's shots
     for g, sg_src in enumerate(srcs):
         r = mono(wav, sg_src, rec, models=[pad_to_mesh(x, mesh) for x in ref_leaves])
         (r.double() ** 2).sum().backward()
-        if g == mesh.shot_group:
+        if g == my_shots[0]:
             # clone: a later shot through the same propagator may reuse the
             # record buffer, and the comparison must not read shot G-1's data.
             r_ref = r.detach().clone()
@@ -165,9 +182,13 @@ def main() -> None:
     # ---- domain decomposed, same physical leaves ---------------------------
     dd_leaves = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
     ddp = ModelParallel(build(), mesh)
-    r_dd = ddp(wav, srcs[mesh.shot_group], rec,
-               models=[pad_to_mesh(x, mesh) for x in dd_leaves])
-    (r_dd.double() ** 2).sum().backward()
+    r_dd = None
+    for g in my_shots:                 # sequential, ONE ModelParallel -- an epoch
+        r = ddp(wav, srcs[g], rec,
+                models=[pad_to_mesh(x, mesh) for x in dd_leaves])
+        (r.double() ** 2).sum().backward()
+        if r_dd is None:
+            r_dd = r.detach().clone()
     # _run_adjoint has ALREADY summed each tile's gradient across the shot
     # groups (its shot_pg all_reduce), so every rank now holds the shot-summed
     # gradient of ITS OWN tile and zeros elsewhere. Assembling the global
