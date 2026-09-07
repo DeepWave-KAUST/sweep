@@ -466,7 +466,7 @@ struct Driver {
 
     // (also used by the ckpt/recursive imaging)
     static void image_step(const State& s, const SolverContext& ctx,
-                           const float* forward_ptr, Wavefield& adjoint,
+                           const float* forward_ptr, int /*it*/, Wavefield& adjoint,
                            std::vector<torch::Tensor>* grads,
                            RTMOutput* /*rtm_out*/, BwdWorkspace& ws)
     {
