@@ -77,6 +77,12 @@ def main() -> None:
     ap.add_argument("--equation", required=True, choices=sorted(EQUATIONS))
     ap.add_argument("--py", type=int, default=1)
     ap.add_argument("--px", type=int, default=1)
+    ap.add_argument("--shot-groups", type=int, default=1,
+                    dest="shot_groups", help="shot-parallel groups; world = "
+                    "shot_groups*py*px. One shot per group. EVERY test and "
+                    "example in this tree passes shot_groups=1, so the "
+                    "cross-group gradient sum has no single-card reference "
+                    "anywhere.")
     ap.add_argument("--fs", type=int, default=0)
     ap.add_argument("--nt", type=int, default=1000)
     ap.add_argument("--abcn", type=int, default=12)
@@ -92,13 +98,16 @@ def main() -> None:
     li = int(os.environ.get("LOCAL_RANK", rank)) % max(1, torch.cuda.device_count())
     torch.cuda.set_device(li)
     dev = torch.device(f"cuda:{li}")
-    assert args.py * args.px == world, f"py*px must equal world size {world}"
+    tile = args.py * args.px
+    assert tile * args.shot_groups == world, (
+        f"shot_groups*py*px = {args.shot_groups}*{args.py}*{args.px} must equal "
+        f"world size {world}")
 
     cls, ndim, st, rt, bases = EQUATIONS[args.equation]
     n = args.n or (140 if ndim == 2 else 56)
     # deliberately NOT divisible by the mesh, so pad_to_mesh is exercised
     shape = (n, n + 3) if ndim == 2 else (n, n + 3, n + 5)
-    mesh = MeshTopology(py=args.py, px=args.px, shot_groups=1,
+    mesh = MeshTopology(py=args.py, px=args.px, shot_groups=args.shot_groups,
                         world_size=world, rank=rank)
 
     models_np = [_model(bases[s.name], shape, ndim) for s in cls.MODEL_SPECS]
@@ -110,14 +119,18 @@ def main() -> None:
     wav = torch.as_tensor(((1 - 2 * a ** 2) * np.exp(-a ** 2) * 1e3).astype(np.float32),
                           device=dev)
 
-    nz = shape[0]
+    # One shot per shot group, at DIFFERENT positions -- identical shots would
+    # make the cross-group sum indistinguishable from "one shot times G".
+    nz, G = shape[0], args.shot_groups
     if ndim == 2:
         nx = shape[1]
-        src = np.array([[[nx // 3, nz // 4]]], dtype=np.int64)
+        srcs = [np.array([[[nx // 4 + g * (nx // (2 * G + 2)), nz // 4]]],
+                         dtype=np.int64) for g in range(G)]
         rec = np.array([[[ix, 3] for ix in range(3, nx - 3, 4)]], dtype=np.int64)
     else:
         ny, nx = shape[1], shape[2]
-        src = np.array([[[nx // 3, ny // 3, nz // 4]]], dtype=np.int64)
+        srcs = [np.array([[[nx // 4 + g * (nx // (2 * G + 2)), ny // 3, nz // 4]]],
+                         dtype=np.int64) for g in range(G)]
         rec = np.array([[[ix, iy, 3]
                          for iy in range(3, ny - 3, 5)
                          for ix in range(3, nx - 3, 5)]], dtype=np.int64)
@@ -133,21 +146,38 @@ def main() -> None:
 
     if rank == 0:
         print(f"{args.equation}  physical={shape}  padded={padded_shape}  "
-              f"mesh=py{args.py}xpx{args.px}  world={world}  fs={args.fs}  "
+              f"mesh=py{args.py}xpx{args.px}xsg{args.shot_groups}  "
+              f"world={world}  fs={args.fs}  "
               f"nt={args.nt}  models={[s.name for s in cls.MODEL_SPECS]}", flush=True)
 
-    # ---- single domain -----------------------------------------------------
+    # ---- single domain: every shot, gradient accumulated over shots --------
     ref_leaves = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
-    r_ref = build()(wav, src, rec, models=[pad_to_mesh(x, mesh) for x in ref_leaves])
-    (r_ref.double() ** 2).sum().backward()
+    mono = build()
+    r_ref = None
+    for g, sg_src in enumerate(srcs):
+        r = mono(wav, sg_src, rec, models=[pad_to_mesh(x, mesh) for x in ref_leaves])
+        (r.double() ** 2).sum().backward()
+        if g == mesh.shot_group:
+            # clone: a later shot through the same propagator may reuse the
+            # record buffer, and the comparison must not read shot G-1's data.
+            r_ref = r.detach().clone()
 
     # ---- domain decomposed, same physical leaves ---------------------------
     dd_leaves = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
     ddp = ModelParallel(build(), mesh)
-    r_dd = ddp(wav, src, rec, models=[pad_to_mesh(x, mesh) for x in dd_leaves])
+    r_dd = ddp(wav, srcs[mesh.shot_group], rec,
+               models=[pad_to_mesh(x, mesh) for x in dd_leaves])
     (r_dd.double() ** 2).sum().backward()
-    for leaf in dd_leaves:
-        dist.all_reduce(leaf.grad)
+    # _run_adjoint has ALREADY summed each tile's gradient across the shot
+    # groups (its shot_pg all_reduce), so every rank now holds the shot-summed
+    # gradient of ITS OWN tile and zeros elsewhere. Assembling the global
+    # gradient therefore reduces over the TILE ranks of one shot group
+    # (model_pg) -- a world-wide all_reduce would count each tile once per shot
+    # group and inflate the gradient by exactly G.
+    pg = getattr(getattr(ddp, "mesh", None), "model_pg", None)
+    if world > 1:
+        for leaf in dd_leaves:
+            dist.all_reduce(leaf.grad, group=pg)
 
     # ---- compare -----------------------------------------------------------
     lines, bad = [], 0
