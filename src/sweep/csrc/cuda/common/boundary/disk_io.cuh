@@ -139,6 +139,22 @@ inline void boundary_disk_writer_record_error(std::exception_ptr error)
         boundary_disk_writer_error() = error;
 }
 
+// Drop a failure nobody observed. The slot lives for the whole process (these
+// are free functions), unlike the read side's disk_reader_exception_, which is
+// a BoundaryRuntime member and dies with its runtime -- so without this, a run
+// that unwound for some OTHER reason before reaching its barrier would hand its
+// write error to the next, unrelated run. Never touches a live batch: a nonzero
+// pending count means writer threads are still running and may be about to
+// record. It must NOT be done in boundary_disk_writer_begin() or on bind():
+// writes are launched per chunk, so the counter legitimately passes through
+// zero between chunks and a reset there would erase a real failure.
+inline void reset_boundary_disk_write_error()
+{
+    std::lock_guard<std::mutex> lock(boundary_disk_writer_mutex());
+    if (boundary_disk_writer_pending() == 0)
+        boundary_disk_writer_error() = nullptr;
+}
+
 inline void boundary_disk_writer_begin()
 {
     std::lock_guard<std::mutex> lock(boundary_disk_writer_mutex());
