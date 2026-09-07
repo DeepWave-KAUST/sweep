@@ -6,6 +6,7 @@
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
@@ -290,9 +291,21 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         TORCH_CHECK(!p.adjoint_wavefields.empty() && !p.forward_wavefields.empty(),
                     "AcousticVRZ3D stepped backward requires Python-bound adjoint "
                     "and forward (reconstruction) wavefields");
-        TORCH_CHECK(!p.boundary_on_cpu && !p.boundary_on_disk,
-                    "AcousticVRZ3D stepped backward supports gpu-direct boundary "
-                    "storage only");
+        TORCH_CHECK(!p.boundary_on_disk,
+                    "AcousticVRZ3D stepped backward supports gpu-direct or cpu "
+                    "boundary storage only (boundary_on_disk unsupported in v1)");
+        // The persistent runtime keeps a pointer to the saver, and this file's
+        // EffectiveBoundarySaver is a per-CALL local (the skeletons' is a runner
+        // member that outlives the segments). bind() re-points it before any use
+        // and synchronize() never touches it, so cpu staging is safe -- but the
+        // SYNCHRONOUS disk path calls saver_->load_disk_to_cpu_3d from
+        // prefetch_backward_chunk, i.e. through that pointer between calls. That
+        // is a second, independent reason disk stays refused here.
+        TORCH_CHECK(!p.boundary_on_cpu || p.cut_face_mask != 0,
+                    "AcousticVRZ3D stepped backward_bs cpu boundary staging "
+                    "requires a DD cut mask (cut_face_mask != 0); single-tile "
+                    "cpu staging is unsupported here (use gpu-direct or a "
+                    "monolithic backward)");
     }
 
     AcousticWavefieldTensor adjoint;
@@ -393,16 +406,26 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // staging matches the persistent int8 buffers' per-step stride; see the
     // forward.cu note.  Restore reads top_t.stride(0) cells from staging.
     const int boundary_tangent_pad = p.M;
+    // ``bs.last_two`` is never read in the backward -- the reverse seeds come
+    // straight from ``p.u_last_two``. Passing {} made allocate_last_two take its
+    // self-allocating branch and build a full two-wavefield FP32 buffer on EVERY
+    // call, in HOST memory on the staged path. Harmless for a monolithic
+    // backward, ruinous under DD/stepped, which enters once per time step: the
+    // skeleton records a production 3-D run going 1760 -> 166 s/iteration once
+    // the backward bound the tensor instead (dev 4290248 fixed the pre-template
+    // acoustic3d/backward.cu the same way; this hand-written driver never got it).
+    const torch::Tensor& last_two_bound = p.u_last_two;
     if (staged_boundary) {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            {}, p.use_pinned_memory, boundary_tangent_pad
+            last_two_bound, p.use_pinned_memory, boundary_tangent_pad
         );
     } else {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, {}, p.use_pinned_memory, boundary_tangent_pad
+            true, true, 1, {}, p.boundary_gpu, last_two_bound,
+            p.use_pinned_memory, boundary_tangent_pad
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);
@@ -419,8 +442,16 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary);
-    BoundaryRuntime boundary_runtime(
+    // A Python-owned BoundarySession, when bound, keeps the copy stream and its
+    // ring events alive ACROSS calls. Under DD every time step is a separate
+    // entry into the extension, so a per-call stream is destroyed and rebuilt
+    // nt times and no transfer can ever be in flight. With session == nullptr
+    // -- which is every gpu-direct run, since ModelParallel only builds a
+    // session when storage != 'gpu' -- BoundaryScope falls into its local branch
+    // and reproduces the AsyncCopyContext + BoundaryRuntime pair this replaces.
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Backward,
         boundary_saver,
         3,
         true,
@@ -429,12 +460,14 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
+        p.boundary_disk_files
     );
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
+    // it_hi, not nt: without it every stepped call primes the TAIL chunk instead
+    // of its own, which at ring_buffers=1 stamps the tail slab over the slot the
+    // current restore reads -- a wrong gradient, not a slow one.
     if (do_advance)
-        boundary_runtime.prefetch_initial_backward_chunk(p.nt);
+        boundary_runtime.prefetch_initial_backward_chunk((int)p.nt, it_hi);
 
     // Time-invariant adjoint transpose coefficients — computed ONCE per backward
     // (first DD segment / model change) into the reused scratch, not on every
