@@ -107,6 +107,38 @@ inline int& boundary_disk_writer_pending()
     return pending;
 }
 
+inline std::exception_ptr& boundary_disk_writer_error()
+{
+    static std::exception_ptr error;
+    return error;
+}
+
+// Neither writer can report a failure by propagating it: the write threads are
+// DETACHED, and the enqueue runs inside a cudaLaunchHostFunc callback, which
+// terminates the process if an exception escapes it. So a failure is recorded
+// here and raised by the barrier instead. Without that, a failed write still
+// decremented the pending counter, wait_for_boundary_disk_writes() returned as
+// if the data had landed, and the backward reconstructed from a boundary file
+// that _allocate_boundary_disk_files created SPARSE -- i.e. from zeros for
+// anything never written -- for a silently wrong gradient and no exception.
+// Measured on a read-only boundary file: every write failed, nothing raised,
+// and the gradient came back 1.46e-02 off (cosine 0.9935) against the same
+// problem on gpu-direct storage.
+//
+// The FIRST failure wins: later ones are almost always the same cause repeated
+// once per saved step, and the first is the one with the useful context.
+//
+// The slot is process-global, like the pending counter it sits beside, so two
+// propagators writing boundaries concurrently in one process share it -- one's
+// failure surfaces at the other's barrier. That is already true of the counter;
+// this does not widen it.
+inline void boundary_disk_writer_record_error(std::exception_ptr error)
+{
+    std::lock_guard<std::mutex> lock(boundary_disk_writer_mutex());
+    if (!boundary_disk_writer_error())
+        boundary_disk_writer_error() = error;
+}
+
 inline void boundary_disk_writer_begin()
 {
     std::lock_guard<std::mutex> lock(boundary_disk_writer_mutex());
@@ -124,10 +156,20 @@ inline void boundary_disk_writer_done()
 
 inline void wait_for_boundary_disk_writes()
 {
-    std::unique_lock<std::mutex> lock(boundary_disk_writer_mutex());
-    boundary_disk_writer_cv().wait(lock, []() {
-        return boundary_disk_writer_pending() == 0;
-    });
+    std::exception_ptr error;
+    {
+        std::unique_lock<std::mutex> lock(boundary_disk_writer_mutex());
+        boundary_disk_writer_cv().wait(lock, []() {
+            return boundary_disk_writer_pending() == 0;
+        });
+        // Taken, not copied: reporting a failure clears it, so it raises once
+        // and the next run starts from a clean slot rather than inheriting a
+        // stale error from a previous one.
+        error = boundary_disk_writer_error();
+        boundary_disk_writer_error() = nullptr;
+    }
+    if (error)
+        std::rethrow_exception(error);
 }
 
 inline void write_boundary_file_chunk(const std::string& path, size_t offset_elems, const void* data, size_t elems, size_t elem_size)
@@ -238,6 +280,7 @@ inline void launch_boundary_disk_write_2d(std::shared_ptr<BoundaryDisk2DWriteTas
                 write_boundary_disk_2d_task(*task);
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "Boundary disk async write failed: %s\n", e.what());
+                boundary_disk_writer_record_error(std::current_exception());
             }
             boundary_disk_writer_done();
         }).detach();
@@ -247,6 +290,9 @@ inline void launch_boundary_disk_write_2d(std::shared_ptr<BoundaryDisk2DWriteTas
             write_boundary_disk_2d_task(*task);
         } catch (const std::exception& write_error) {
             std::fprintf(stderr, "Boundary disk fallback write failed: %s\n", write_error.what());
+            // Only the FALLBACK failing loses data: a thread that could not be
+            // launched but whose write then succeeded inline has written it.
+            boundary_disk_writer_record_error(std::current_exception());
         }
         boundary_disk_writer_done();
     }
@@ -261,6 +307,7 @@ inline void launch_boundary_disk_write_3d(std::shared_ptr<BoundaryDisk3DWriteTas
                 write_boundary_disk_3d_task(*task);
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "Boundary disk async write failed: %s\n", e.what());
+                boundary_disk_writer_record_error(std::current_exception());
             }
             boundary_disk_writer_done();
         }).detach();
@@ -270,6 +317,9 @@ inline void launch_boundary_disk_write_3d(std::shared_ptr<BoundaryDisk3DWriteTas
             write_boundary_disk_3d_task(*task);
         } catch (const std::exception& write_error) {
             std::fprintf(stderr, "Boundary disk fallback write failed: %s\n", write_error.what());
+            // Only the FALLBACK failing loses data: a thread that could not be
+            // launched but whose write then succeeded inline has written it.
+            boundary_disk_writer_record_error(std::current_exception());
         }
         boundary_disk_writer_done();
     }
@@ -319,6 +369,10 @@ inline void CUDART_CB write_boundary_disk_2d_callback(void* user_data)
         launch_boundary_disk_write_2d(task);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Boundary disk write callback failed: %s\n", e.what());
+        // Thrown before launch_boundary_disk_write_* ran, so nothing incremented
+        // the pending counter and the whole chunk is simply gone -- the barrier
+        // would otherwise return immediately and call that success.
+        boundary_disk_writer_record_error(std::current_exception());
     }
 }
 
@@ -345,5 +399,9 @@ inline void CUDART_CB write_boundary_disk_3d_callback(void* user_data)
         launch_boundary_disk_write_3d(task);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Boundary disk write callback failed: %s\n", e.what());
+        // Thrown before launch_boundary_disk_write_* ran, so nothing incremented
+        // the pending counter and the whole chunk is simply gone -- the barrier
+        // would otherwise return immediately and call that success.
+        boundary_disk_writer_record_error(std::current_exception());
     }
 }
