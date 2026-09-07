@@ -2,6 +2,7 @@ import os
 import warnings
 import shutil
 import tempfile
+from dataclasses import replace
 
 import torch
 
@@ -231,57 +232,37 @@ class Wrapper(torch.autograd.Function):
                 cp.checkpoint_steps if cp.checkpoint_steps is not None else torch.empty(0, dtype=torch.int32),
                 *cp.checkpoint_buffers,
             )
-            ctx.transfer_interval = cp.transfer_interval
-            ctx.boundary_ring_buffers = cp.boundary_ring_buffers
-            ctx.boundary_tail_steps = cp.boundary_tail_steps
-            ctx.checkpoint_interval = cp.checkpoint_interval
-            ctx.checkpoint_count = cp.checkpoint_count
+            # The params object rides on ctx instead of being re-fanned into
+            # forty-four per-attribute writes. Twelve of the matching reads in
+            # backward were `getattr(ctx, name, default)`, so a missed rename
+            # gave a wrong-but-finite gradient -- the legacy z-min free surface
+            # instead of per-edge, a flat surface instead of topography -- and
+            # never an exception. Reading `cp.X` makes a typo an AttributeError
+            # on a non-field while a genuinely absent value still takes the
+            # dataclass default.
+            #
+            # replace(), not `cp` itself, and NOT tidiness: when
+            # save_all_wavefields is False, cp.forward_wavefields is the
+            # per-call transient scratch whose own docstring says it must not
+            # outlive the forward, and their backwards expect an empty list here
+            # (the ckpt recompute allocates its own legacy 7/9-slot state paired
+            # with the u-only swap()). Holding cp would keep
+            # (base_nvar + pml_nvar) tensors of shape (B, 1, *spatial) alive
+            # from forward-return through backward on EVERY boundary-saving and
+            # checkpoint call -- silently undoing the point of boundary saving,
+            # and green, because no gate measures memory.
+            ctx.cp = cp if save_all_wavefields else replace(cp, forward_wavefields=())
             ctx.models = models
-            ctx.boundary_on_cpu = cp.boundary_on_cpu
-            ctx.boundary_on_disk = cp.boundary_on_disk
-            ctx.boundary_disk_async_read = cp.boundary_disk_async_read
-            ctx.boundary_cpu = cp.boundary_cpu if cp.boundary_on_cpu else ()
-            ctx.boundary_gpu = cp.boundary_gpu if use_boundary_saving else ()
-            ctx.boundary_disk_files = tuple(cp.boundary_disk_files) if cp.boundary_on_disk else ()
-            ctx.pml_vals = cp.pml_vals
-            ctx.abcn = cp.abcn
-            ctx.M = cp.M
-            ctx.eq_aux = tuple(cp.eq_aux)
+            ctx.forward_source = wavelet
             ctx.nt = nt
             ctx.spacing = spacing
             ctx.dt = dt
-            ctx.free_surface = cp.free_surface
-            ctx.fs_faces = cp.fs_faces
-            ctx.cut_face_mask = cp.cut_face_mask
-            # Topography (image method): preserve runtime row-index tensor so
-            # the autograd backward can plumb it without referencing ``self``.
-            ctx.topo_rows_param = cp.topo_rows_param
-            ctx.has_topo_param  = cp.has_topo_param
-            ctx.topo_category_param = cp.topo_category_param
-            ctx.use_apm_param   = cp.use_apm_param
+            # The three refined flags stay on ctx: they are not cp's values.
+            # _normalize_cuda_memory_kwargs turns checkpointing off when the C
+            # binding is absent, so cp still says what was ASKED for.
             ctx.use_boundary_saving = use_boundary_saving
             ctx.use_checkpoint = use_checkpoint
             ctx.use_recursive_checkpoint = use_recursive_checkpoint
-            ctx.checkpoint_on_cpu = cp.checkpoint_on_cpu
-            ctx.use_pinned_memory = cp.use_pinned_memory
-            ctx.backward_func = cp.backward_func
-            ctx.backward_bs_func = cp.backward_bs_func
-            ctx.backward_ckpt_func = cp.backward_ckpt_func
-            ctx.backward_recursive_ckpt_func = cp.backward_recursive_ckpt_func
-            ctx.forward_source = wavelet
-            # save_all binds the propagator's persistent buffers; the other
-            # modes (BS/ckpt) pass per-call transient scratch that must NOT
-            # outlive the forward — and their backwards expect an empty list
-            # here (the ckpt recompute allocates its own legacy 7/9-slot
-            # state paired with the u-only swap()).
-            ctx.forward_wavefields = cp.forward_wavefields if save_all_wavefields else ()
-            ctx.adjoint_wavefields = cp.adjoint_wavefields
-            ctx.adjoint_workspace = cp.adjoint_workspace
-            ctx.source_illumination_buffer = cp.source_illumination_buffer
-            ctx.receiver_illumination_buffer = cp.receiver_illumination_buffer
-            ctx.illumination_padding = tuple(cp.illumination_padding)
-            ctx.adcig_buffer = cp.adcig_buffer
-            ctx.adcig_max_lag = int(cp.adcig_max_lag)
 
         return syn
     
@@ -301,34 +282,38 @@ class Wrapper(torch.autograd.Function):
             *checkpoint_tensors,
         ) = ctx.saved_tensors
 
-        abcn = ctx.abcn
-        M  = ctx.M
+        # `cp`, not `p`: the pml_vals comprehension below binds `p`, and
+        # `[p.contiguous() for p in p.pml_vals]` would work by accident.
+        cp = ctx.cp
+
+        abcn = cp.abcn
+        M  = cp.M
         nt = ctx.nt
         dt = ctx.dt
-        fs_faces = getattr(ctx, "fs_faces", -1)
-        cut_face_mask = getattr(ctx, "cut_face_mask", 0)
+        fs_faces = cp.fs_faces
+        cut_face_mask = cp.cut_face_mask
 
         _C = _get_C()
         params = _C.BackwardInput()
         # common
-        params.transfer_interval = ctx.transfer_interval
-        params.boundary_ring_buffers = ctx.boundary_ring_buffers
-        params.boundary_tail_steps = ctx.boundary_tail_steps
-        params.checkpoint_interval = ctx.checkpoint_interval
-        params.checkpoint_count = ctx.checkpoint_count
+        params.transfer_interval = cp.transfer_interval
+        params.boundary_ring_buffers = cp.boundary_ring_buffers
+        params.boundary_tail_steps = cp.boundary_tail_steps
+        params.checkpoint_interval = cp.checkpoint_interval
+        params.checkpoint_count = cp.checkpoint_count
         # Compute source/receiver illumination only if the caller requested it
         # (solver.compute_illumination=True allocates a real, non-empty buffer in
         # forward).  It is a ~1/3-of-backward extra grid pass; vp grad unaffected.
         def _wants_illum(b):
             return isinstance(b, torch.Tensor) and b.numel() > 0
         params.compute_illumination = (
-            _wants_illum(getattr(ctx, "source_illumination_buffer", None))
-            or _wants_illum(getattr(ctx, "receiver_illumination_buffer", None))
+            _wants_illum(cp.source_illumination_buffer)
+            or _wants_illum(cp.receiver_illumination_buffer)
         )
         # Space-lag ADCIG: a real, non-empty buffer allocated in forward is the
         # ON signal (mirrors illumination).  ``adcig_max_lag`` sizes the lag axis.
-        params.compute_adcig = _wants_illum(getattr(ctx, "adcig_buffer", None))
-        params.adcig_max_lag = int(getattr(ctx, "adcig_max_lag", 0))
+        params.compute_adcig = _wants_illum(cp.adcig_buffer)
+        params.adcig_max_lag = int(cp.adcig_max_lag)
         if params.compute_adcig and not ctx.use_boundary_saving:
             raise RuntimeError(
                 "compute_adcig=True currently requires boundary-saving mode. The "
@@ -337,10 +322,10 @@ class Wrapper(torch.autograd.Function):
                 "Enable boundary saving via boundary_saving_config={'enabled': True} "
                 "or memory=BoundarySaving()."
             )
-        params.adjoint_wavefields = [a.zero_() for a in ctx.adjoint_wavefields]
-        params.adjoint_workspace = list(ctx.adjoint_workspace)
+        params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]
+        params.adjoint_workspace = list(cp.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
-        params.eq_aux = [t.contiguous() for t in getattr(ctx, "eq_aux", ())]
+        params.eq_aux = [t.contiguous() for t in cp.eq_aux]
         # ``adjoint_source`` arrives in the canonical (B, nt, nrec, nfield)
         # layout that ``forward`` returned; permute it back to the raw CUDA
         # layout the C++ adjoint-source kernels expect.
@@ -358,18 +343,18 @@ class Wrapper(torch.autograd.Function):
         params.adjoint_sources_loc = adjoint_sources_loc.contiguous()
         params.source_field_indices = source_field_indices.contiguous()
         params.receiver_field_indices = receiver_field_indices.contiguous()
-        params.pml_vals = [p.contiguous() for p in ctx.pml_vals]
+        params.pml_vals = [p.contiguous() for p in cp.pml_vals]
         params.nt = nt
         params.dt = dt
         params.spacing = ctx.spacing
-        params.free_surface = ctx.free_surface
+        params.free_surface = cp.free_surface
         params.fs_faces = fs_faces
         params.cut_face_mask = cut_face_mask   # see the forward path
         # Topography plumbing (image method) — mirrors forward path.
         # ``ctx`` carries the runtime row tensor saved at forward time;
         # ``self`` doesn't exist here (Wrapper.backward is a staticmethod).
-        topo_rows_rt = getattr(ctx, "topo_rows_param", None)
-        has_topo     = bool(getattr(ctx, "has_topo_param", False))
+        topo_rows_rt = cp.topo_rows_param
+        has_topo     = bool(cp.has_topo_param)
         if has_topo and topo_rows_rt is not None:
             params.topo_rows = topo_rows_rt.to(torch.int32).contiguous()
             params.has_topo = True
@@ -379,8 +364,8 @@ class Wrapper(torch.autograd.Function):
             )
             params.has_topo = False
         # APM CUDA backward: forward saved the category + flag in ctx.
-        topo_cat_rt = getattr(ctx, "topo_category_param", None)
-        use_apm     = bool(getattr(ctx, "use_apm_param", False))
+        topo_cat_rt = cp.topo_category_param
+        use_apm     = bool(cp.use_apm_param)
         if use_apm and topo_cat_rt is not None:
             params.topo_category = topo_cat_rt.to(torch.int32).contiguous()
             params.use_apm = True
@@ -388,48 +373,48 @@ class Wrapper(torch.autograd.Function):
             params.topo_category = torch.empty(0, dtype=torch.int32,
                                                 device=adjoint_source.device)
             params.use_apm = False
-        params.boundary_on_cpu = ctx.boundary_on_cpu
-        params.boundary_on_disk = ctx.boundary_on_disk
-        params.boundary_disk_async_read = ctx.boundary_disk_async_read
-        params.use_pinned_memory = ctx.use_pinned_memory
-        params.checkpoint_on_cpu = ctx.checkpoint_on_cpu
+        params.boundary_on_cpu = cp.boundary_on_cpu
+        params.boundary_on_disk = cp.boundary_on_disk
+        params.boundary_disk_async_read = cp.boundary_disk_async_read
+        params.use_pinned_memory = cp.use_pinned_memory
+        params.checkpoint_on_cpu = cp.checkpoint_on_cpu
 
         if ctx.use_checkpoint:
             params.checkpoints = list(checkpoint_tensors)
             params.checkpoint_steps = checkpoint_steps.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
-            params.forward_wavefields = [f.zero_() for f in ctx.forward_wavefields]
+            params.forward_wavefields = [f.zero_() for f in cp.forward_wavefields]
             if ctx.use_recursive_checkpoint:
-                gradients = ctx.backward_recursive_ckpt_func(params)
+                gradients = cp.backward_recursive_ckpt_func(params)
             else:
-                gradients = ctx.backward_ckpt_func(params)
+                gradients = cp.backward_ckpt_func(params)
         elif not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
-            gradients = ctx.backward_func(params)
+            gradients = cp.backward_func(params)
         else:
-            params.boundary_cpu = list(ctx.boundary_cpu) if ctx.boundary_on_cpu else []
-            params.boundary_gpu = list(ctx.boundary_gpu) if ctx.use_boundary_saving else []
-            params.boundary_disk_files = list(ctx.boundary_disk_files) if ctx.boundary_on_disk else []
+            params.boundary_cpu = list(cp.boundary_cpu) if cp.boundary_on_cpu else []
+            params.boundary_gpu = list(cp.boundary_gpu) if ctx.use_boundary_saving else []
+            params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
             params.u_last_two = last.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
-            gradients = ctx.backward_bs_func(params)
+            gradients = cp.backward_bs_func(params)
 
         returned_grads = gradients[1] if len(gradients) >= 2 else gradients[-1]
         if len(gradients) >= 4:
             source_illumination, receiver_illumination = gradients[2], gradients[3]
-            source_buffer = getattr(ctx, "source_illumination_buffer", None)
-            receiver_buffer = getattr(ctx, "receiver_illumination_buffer", None)
+            source_buffer = cp.source_illumination_buffer
+            receiver_buffer = cp.receiver_illumination_buffer
 
             def fit_illumination_to_model(illumination, target):
                 while illumination.dim() > target.dim():
                     illumination = illumination.sum(dim=0)
 
                 slices = [slice(None)] * illumination.dim()
-                pad = getattr(ctx, "illumination_padding", ())
+                pad = cp.illumination_padding
                 pad_pairs = min(len(pad) // 2, illumination.dim(), target.dim())
                 for i in range(pad_pairs):
                     left = int(pad[2 * i])
@@ -469,7 +454,7 @@ class Wrapper(torch.autograd.Function):
         # runtime-padded grid.  Sum over the batch (N, C) — keeping the leading
         # lag axis — then crop the PML/halo padding, and copy into the
         # model-shaped buffer the user reads back as ``solver.adcig``.
-        adcig_buffer = getattr(ctx, "adcig_buffer", None)
+        adcig_buffer = cp.adcig_buffer
         if len(gradients) >= 5 and _wants_illum(adcig_buffer):
             adcig_returned = gradients[4]
             if isinstance(adcig_returned, torch.Tensor) and adcig_returned.numel() > 0:
@@ -478,7 +463,7 @@ class Wrapper(torch.autograd.Function):
                     while adcig.dim() > target.dim():
                         adcig = adcig.sum(dim=1)
                     slices = [slice(None)] * adcig.dim()
-                    pad = getattr(ctx, "illumination_padding", ())
+                    pad = cp.illumination_padding
                     # never crop the leading lag axis (dim 0)
                     pad_pairs = min(len(pad) // 2, adcig.dim() - 1)
                     for i in range(pad_pairs):
@@ -501,14 +486,9 @@ class Wrapper(torch.autograd.Function):
             wavelet_grad = returned_grads[0]
             model_grads = returned_grads[1:]
 
-        del ctx.backward_func, ctx.backward_bs_func, ctx.backward_ckpt_func, ctx.backward_recursive_ckpt_func
-        del ctx.pml_vals, ctx.forward_source
-        del ctx.forward_wavefields
-        del ctx.adjoint_workspace
-        del ctx.source_illumination_buffer, ctx.receiver_illumination_buffer
-        del ctx.illumination_padding
-        del ctx.adcig_buffer, ctx.adcig_max_lag
-        del ctx.models
+        # ctx.cp is the only reference to the params object, so this releases
+        # every field the per-attribute deletes released, at the same point.
+        del ctx.cp, ctx.forward_source, ctx.models
         # One gradient per forward input, in order: the params object (never
         # differentiable), the wavelet, then one per model. The 48-entry wall of
         # ``None``s this replaces had to be kept in lockstep with the signature
