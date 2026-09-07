@@ -7,6 +7,7 @@
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
@@ -179,8 +180,12 @@ ForwardOutput forward(const ForwardInput& in)
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
-    BoundaryRuntime boundary_runtime(
+    // Same persistent-session handling as the backward; see there. Without it
+    // the DD forward tears down and rebuilds the copy stream once per time step
+    // and the staged ring can never overlap compute.
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Forward,
         boundary_saver,
         3,
         p.use_boundary_saving,
@@ -189,10 +194,9 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
+        p.boundary_disk_files
     );
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
         8,
