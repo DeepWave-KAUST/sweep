@@ -226,6 +226,15 @@ def main() -> None:
     own = getattr(ddp, "_own_rec_idx", None)
     own = (np.arange(nrec_total) if not own
            else np.asarray(own, dtype=np.int64).ravel())
+    # Self-evidence that the run really decomposed: a green from a mesh that
+    # silently collapsed to one tile would prove nothing. Every rank prints its
+    # tile origin/extent and how many of the global receivers it owns.
+    print(f"    [rank {rank}] sg={mesh.shot_group} tile=(yi{mesh.yi},xi{mesh.xi}) "
+          f"x0={getattr(ddp, 'x0', 0)} nxp={getattr(ddp, 'nxp', '-')} "
+          f"y0={getattr(ddp, 'y0', 0)} nyp={getattr(ddp, 'nyp', '-')} "
+          f"owns {len(own)}/{nrec_total} receivers  src={srcs[mesh.shot_group].ravel().tolist()}",
+          flush=True)
+
     if D4.shape[2] != len(own) or R4.shape[2] != nrec_total:
         rbit, rrel = False, float("nan")
         rnote = (f"   <-- RECEIVER AXIS MISMATCH ref{R4.shape} dd{D4.shape} "
