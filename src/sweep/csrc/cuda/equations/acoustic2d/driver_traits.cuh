@@ -165,6 +165,14 @@ struct Driver {
         cpml.allocate(p.pml_vals, 2);
     }
 
+    // The record this equation writes: one field, {N, nrec, nt}.  Moved here
+    // verbatim from the skeleton -- same expression, same operands.
+    static std::vector<int64_t> record_shape(const eqdrv::Dims& d,
+                                             const ForwardInput& p)
+    {
+        return {d.N, p.receivers_loc.size(1), static_cast<int64_t>(p.nt)};
+    }
+
     static std::vector<int64_t> allt_shape(const eqdrv::Dims& d, int64_t nt)
     {
         return {nt, d.B, d.nz, d.nx};

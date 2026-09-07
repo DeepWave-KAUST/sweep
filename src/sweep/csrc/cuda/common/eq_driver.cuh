@@ -207,9 +207,18 @@ public:
 
         TORCH_CHECK(!stepped || p.record_out.defined(),
                     "stepped forward requires record_out bound from Python");
+        // Shape comes from the equation, like allt_shape two statements below.
+        // The three equations on this skeleton all return {N, nrec, nt}; the
+        // literal lived here because they were the only ones. A multi-field
+        // receiver record -- elastic_tti_2nd2d writes {nfield, B, nrec, nt},
+        // and sg_driver.cuh:151 already allocates that shape -- has no place to
+        // say so while the skeleton decides. Everything downstream is already
+        // shape-blind: the per-step Eq::record hook, out.record, the record_out
+        // check (contiguity and trailing nt only), and
+        // _c.py::_cuda_record_to_canonical, which dispatches on syn.ndim.
         record = p.record_out.defined()
             ? p.record_out
-            : torch::zeros({d.N, p.receivers_loc.size(1), p.nt}, vp.options());
+            : torch::zeros(Eq::record_shape(d, p), vp.options());
         if (p.record_out.defined())
             TORCH_CHECK(record.is_contiguous() &&
                         record.size(-1) == static_cast<long>(p.nt),
