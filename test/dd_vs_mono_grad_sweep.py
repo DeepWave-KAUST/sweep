@@ -47,6 +47,8 @@ from sweep.equations import (Acoustic, Acoustic3D, AcousticVRZ3D,  # noqa: E402
                              Elastic, Elastic3D)
 from sweep.parallel import MeshTopology, pad_to_mesh                # noqa: E402
 from sweep.parallel.dd_propagator import ModelParallel              # noqa: E402
+from sweep.propagator.options import (BoundarySaving, Ckpt,        # noqa: E402
+                                      Full)
 from sweep.propagator.torch import PropTorch                        # noqa: E402
 
 DH, DT = 10.0, 6e-4
@@ -92,6 +94,37 @@ def main() -> None:
     ap.add_argument("--same-source", action="store_true", dest="same_source",
                     help="put every shot at the SAME position -- a control that "
                     "separates 'more shots' from 'shots in different places'.")
+    ap.add_argument("--memory", default="default",
+                    choices=("default", "full", "ckpt",
+                             "bs-gpu", "bs-cpu", "bs-disk"),
+                    help="gradient-memory strategy for BOTH sides. 'default' is "
+                    "what PropTorch(impl='c') resolves with no knob at all, "
+                    "which is boundary saving on GPU in fp32 -- so a run "
+                    "without this flag has already covered bs-gpu and NOTHING "
+                    "else.")
+    ap.add_argument("--ref-memory", default="same", dest="ref_memory",
+                    choices=("same", "default", "full", "ckpt",
+                             "bs-gpu", "bs-cpu", "bs-disk"),
+                    help="strategy for the SINGLE-CARD reference only. 'same' "
+                    "(default) puts both sides on --memory, which isolates DD "
+                    "from the storage. Setting it differently asks the other "
+                    "question: does the storage itself move the gradient.")
+    ap.add_argument("--bs-interval", type=int, default=0, dest="bs_interval",
+                    help="staged transfer_interval (cpu/disk only; 0 = the "
+                    "storage's own default, 64 for cpu and 32 for disk)")
+    ap.add_argument("--bs-ring", type=int, default=0, dest="bs_ring",
+                    help="staged ring_buffers (cpu/disk only; 0 = default)")
+    ap.add_argument("--disk-dir", default="", dest="disk_dir",
+                    help="directory for storage='disk'. NOTE: ModelParallel's "
+                    "_tile_memory_strategy does not forward disk_dir to the "
+                    "tile propagators, so this reaches the single-card side "
+                    "only -- which is itself worth knowing.")
+    ap.add_argument("--expect-raise", default="", dest="expect_raise",
+                    help="the DD side is EXPECTED to refuse this configuration; "
+                    "pass a substring of the message. The arm passes only if it "
+                    "raises AND the message matches -- a silent success is then "
+                    "a failure, which is how a documented limitation stops being "
+                    "a comment and becomes a test.")
     ap.add_argument("--fs", type=int, default=0)
     ap.add_argument("--nt", type=int, default=1000)
     ap.add_argument("--abcn", type=int, default=12)
@@ -151,11 +184,42 @@ def main() -> None:
                          for iy in range(3, ny - 3, 5)
                          for ix in range(3, nx - 3, 5)]], dtype=np.int64)
 
-    def build():
+    def memory_of(name):
+        """The gradient-memory strategy, or None for "pass no knob at all".
+
+        None is NOT the same as Full(): with no knob, resolve_memory_strategy
+        gives impl='c' the 'boundary' default at storage='gpu'/fp32. Passing
+        None is what every run before --memory existed did, so it is kept as an
+        explicit choice rather than folded into bs-gpu -- if the resolver's
+        default ever moves, this arm follows it and bs-gpu does not."""
+        if name == "default":
+            return None
+        if name == "full":
+            return Full()
+        if name == "ckpt":
+            return Ckpt()
+        kw = {"storage": name.split("-", 1)[1]}
+        if kw["storage"] != "gpu":
+            # transfer_interval/ring_buffers are REJECTED for storage='gpu' by
+            # BoundaryOptions.__post_init__, so they are only set off-GPU.
+            if args.bs_interval:
+                kw["transfer_interval"] = args.bs_interval
+            if args.bs_ring:
+                kw["ring_buffers"] = args.bs_ring
+        if kw["storage"] == "disk" and args.disk_dir:
+            kw["disk_dir"] = args.disk_dir
+        return BoundarySaving(**kw)
+
+    ref_mem_name = args.memory if args.ref_memory == "same" else args.ref_memory
+
+    def build(mem_name):
         eq = cls(spatial_order=args.so, device=dev, backend="torch")
         kw = {}
         if st is not None:
             kw.update(source_type=st, receiver_type=rt)
+        mem = memory_of(mem_name)
+        if mem is not None:
+            kw["memory"] = mem
         return PropTorch(eq, backend="torch", impl="c", shape=padded_shape,
                          dh=DH, dt=DT, nt=args.nt, abcn=args.abcn, dev=dev,
                          free_surface=bool(args.fs), **kw)
@@ -164,11 +228,16 @@ def main() -> None:
         print(f"{args.equation}  physical={shape}  padded={padded_shape}  "
               f"mesh=py{args.py}xpx{args.px}xsg{args.shot_groups}  nshot={S}  "
               f"world={world}  fs={args.fs}  "
-              f"nt={args.nt}  models={[s.name for s in cls.MODEL_SPECS]}", flush=True)
+              f"nt={args.nt}  models={[s.name for s in cls.MODEL_SPECS]}\n"
+              f"    memory: dd={args.memory}  ref={ref_mem_name}"
+              + (f"  interval={args.bs_interval or 'default'}"
+                 f"  ring={args.bs_ring or 'default'}"
+                 if args.memory.startswith("bs-") and args.memory != "bs-gpu" else ""),
+              flush=True)
 
     # ---- single domain: every shot, gradient accumulated over shots --------
     ref_leaves = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
-    mono = build()
+    mono = build(ref_mem_name)
     r_ref = None
     my_shots = list(range(mesh.shot_group, S, G))     # this group's shots
     for g, sg_src in enumerate(srcs):
@@ -181,7 +250,33 @@ def main() -> None:
 
     # ---- domain decomposed, same physical leaves ---------------------------
     dd_leaves = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
-    ddp = ModelParallel(build(), mesh)
+    if args.expect_raise:
+        # The refusal is the assertion. It fires inside the backward (the
+        # one-time capture runs a real backward_bs), so the whole DD section
+        # has to be inside the guard, not just the constructor.
+        try:
+            _ddp = ModelParallel(build(args.memory), mesh)
+            _r = _ddp(wav, srcs[my_shots[0]], rec,
+                      models=[pad_to_mesh(x, mesh) for x in dd_leaves])
+            (_r.double() ** 2).sum().backward()
+        except Exception as exc:
+            got = str(exc)
+            hit = args.expect_raise in got
+            if rank == 0:
+                print(f"    expected refusal {'MATCHED' if hit else 'MISMATCHED'}: "
+                      f"looked for {args.expect_raise!r}\n      got: {got[:200]}",
+                      flush=True)
+                print(f"    -> {'PASS' if hit else 'FAIL'}", flush=True)
+            fail = torch.tensor([0 if hit else 1], device=dev)
+            dist.all_reduce(fail); dist.barrier(); dist.destroy_process_group()
+            sys.exit(1 if int(fail.item()) > 0 else 0)
+        if rank == 0:
+            print(f"    -> FAIL: expected a refusal matching "
+                  f"{args.expect_raise!r} and the run SUCCEEDED", flush=True)
+        dist.barrier(); dist.destroy_process_group()
+        sys.exit(1)
+
+    ddp = ModelParallel(build(args.memory), mesh)
     r_dd = None
     for g in my_shots:                 # sequential, ONE ModelParallel -- an epoch
         r = ddp(wav, srcs[g], rec,
