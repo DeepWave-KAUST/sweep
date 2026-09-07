@@ -231,8 +231,19 @@ def run_one(cfg: DDCfg, rank: int, dev: str) -> dict:
     syn = ddp(wav, src, rec, models=models)
     # A fixed pseudo-random adjoint source, so the backward is exercised
     # independently of whatever the forward happened to produce.
-    adj = (torch.randn(syn.shape, generator=gen) * 1e-3).to(dev)
-    syn.backward(gradient=adj)
+    #
+    # Drawn in the RAW record layout and converted, not drawn in syn's shape.
+    # ModelParallel now returns the single-card layout (B, nt, nrec, nfield)
+    # where it used to return (B, nrec, nt); torch.randn fills in MEMORY order,
+    # so drawing at the new shape would put the same flat stream at different
+    # (t, receiver) positions -- a different adjoint source, hence different
+    # gradients, hence every stored baseline invalidated. Re-baselining is how a
+    # real regression gets laundered, so the draw is pinned to the layout the
+    # baselines were recorded in and every base_dd*.pt stays valid.
+    from sweep.propagator._c import (_canonical_to_cuda_record,
+                                     _cuda_record_to_canonical)
+    adj_raw = (torch.randn(ddp.record.shape, generator=gen) * 1e-3).to(dev)
+    syn.backward(gradient=_cuda_record_to_canonical(adj_raw))
 
     # WHICH forward loop actually ran. Recorded in the baseline so a future
     # change that silently drops back to the serial path is a gate FAILURE
@@ -246,7 +257,11 @@ def run_one(cfg: DDCfg, rank: int, dev: str) -> dict:
 
     return {
         "forward_loop": "overlapped" if phased else "serial",
-        "record": syn.detach().float().cpu().contiguous(),
+        # Stored in the RAW layout for the same reason the adjoint source is
+        # drawn there: the baselines predate the layout change and must keep
+        # comparing bit-for-bit across it.
+        "record": _canonical_to_cuda_record(
+            syn.detach(), ddp.record.ndim).float().cpu().contiguous(),
         "grads": {f"m{i}": m.grad.detach().float().cpu().contiguous()
                   for i, m in enumerate(models)},
         "shape": tuple(int(s) for s in shape),

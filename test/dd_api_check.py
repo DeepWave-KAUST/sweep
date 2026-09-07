@@ -201,7 +201,14 @@ def main():
     if rank == 0:
         ref_rec, ref_g = reference(fam, ndim, shape, so, abcn, fs, nt, dev,
                                    models_np, src, rec, wav)
-        ref_rec = ref_rec.cpu()
+        # ``reference()`` drives the raw C params directly, so its record is in
+        # the raw CUDA layout. ModelParallel (and therefore gather_record) now
+        # returns the single-card layout, which is the whole point of the
+        # change, so the reference is converted rather than the DD side
+        # un-converted -- comparing them in the layout a USER sees is what this
+        # check is for.
+        from sweep.propagator._c import _cuda_record_to_canonical
+        ref_rec = _cuda_record_to_canonical(ref_rec).cpu()
         ztop = M if fs else pad
 
         # grade rel against the GLOBAL reference scale, not the per-tile max:

@@ -53,6 +53,8 @@ import torch
 
 from sweep.equations.slot_table import slot_table_of
 from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, VRZ_DD
+from sweep.propagator._c import (_canonical_to_cuda_record,
+                                 _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
 from sweep.parallel.routing import partition_global_coords
@@ -133,11 +135,20 @@ class _DDForward(torch.autograd.Function):
         with torch.enable_grad():
             rec = ddp.forward(wavelet, sources, receivers,
                               models=[m.detach() for m in models])
+        # The cotangent arrives in the canonical layout `rec` is in; backward has
+        # to put it back into the raw one _run_adjoint documents. Which inverse
+        # that is depends on the RAW ndim (3 = single-channel, 4 = multi-field),
+        # read off the live buffer here rather than in backward because
+        # _set_geometry may reallocate it in between.
+        ctx.cuda_record_ndim = ddp.record.ndim
         return rec.detach().clone()
 
     @staticmethod
     def backward(ctx, grad_record):
         ddp = ctx.ddp
+        # _run_adjoint's contract is the raw CUDA layout and stays that way; the
+        # conversion belongs at this boundary, mirroring _c.Wrapper.backward.
+        grad_record = _canonical_to_cuda_record(grad_record, ctx.cuda_record_ndim)
         tile_grads = ddp._run_adjoint(grad_record.contiguous())
         out = []
         for shp, g in zip(ctx.shapes, tile_grads):
@@ -857,7 +868,11 @@ class ModelParallel:
 
     # --------------------------------------------------------------- forward
     def forward(self, wavelet, sources_global, receivers_global, models):
-        """Run the DD forward; return this rank's tile record (raw CUDA layout).
+        """Run the DD forward; return this rank's tile record.
+
+        The record is in the SAME layout a single-domain ``PropTorch`` returns,
+        ``(B, nt, nrec, nfield)`` -- only this rank's receivers
+        (:attr:`own_receiver_indices`).
 
         ``models`` is a list of global or already-tiled physical arrays, OR
         ``None`` to REUSE the model already edge-padded and halo-exchanged by a
@@ -931,13 +946,26 @@ class ModelParallel:
         if self.bp is not None:
             self.bp.boundary_gpu = list(self.fp.boundary_gpu)
             self.bp.u_last_two = self.fp.last_two
-        # Clone: ``self.record`` is a live buffer that the NEXT call zeroes in
-        # _prepare_call, so handing it out aliases every shot of an observed-data
-        # loop to one tensor that goes to zero on the following iteration. Until
-        # now the autograd path masked this for grad-carrying models (it returns
-        # a detached clone), but no_grad calls are routed here on purpose, so the
-        # buffer must not escape. The record is small next to a wavefield.
-        return self.record.clone()
+        # Return the SINGLE-CARD layout, (B, nt, nrec, nfield). The raw buffer
+        # stays raw -- eq_driver.cuh TORCH_CHECKs record_out contiguous with
+        # trailing dim nt -- so the permute happens here, at the Python boundary,
+        # with the very helpers the single-card path uses (_c.Wrapper). Before
+        # this, DD handed back (B, nrec, nt) / (nfield, B, nrec, nt) while
+        # PropTorch returned (B, nt, nrec, nfield), so observed data from
+        # anywhere other than the same ModelParallel -- a single-card modelling
+        # run, a SEG-Y file -- did not line up, and the "two marked lines"
+        # drop-in in docs/user-guide/parallel.md was not true.
+        rec = _cuda_record_to_canonical(self.record)
+        # .contiguous() inside that helper is a NO-OP when the permuted view is
+        # already contiguous -- nrec == 1, i.e. a tile owning one real receiver,
+        # or only the dummy partition_global_coords inserts -- and then ``rec``
+        # is a VIEW of the live buffer that _prepare_call zeroes on the next
+        # shot. That is exactly the aliasing the clone below has always been
+        # here to prevent; it is now paid only when the permute did not already
+        # pay it.
+        if rec.data_ptr() == self.record.data_ptr():
+            rec = rec.clone()
+        return rec
 
     def _prepare_call(self, wavelet, sources_global, receivers_global, models):
         """Per-call forward setup shared by every step loop: slice the model (or
@@ -1300,7 +1328,12 @@ class ModelParallel:
 
     # ---------------------------------------------------------------- gather
     def gather_record(self, tile_record):
-        """Assemble the global record on rank 0 (returns None on other ranks)."""
+        """Assemble the global record on rank 0 (returns None on other ranks).
+
+        Layout-agnostic on purpose: nrec is axis -2 both in the raw CUDA record
+        and in the canonical ``(B, nt, nrec, nfield)`` one, so this needs no
+        change when :meth:`forward` hands back the latter.
+        """
         if self.world == 1:
             return tile_record
         import torch.distributed as dist
