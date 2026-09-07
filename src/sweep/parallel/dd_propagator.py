@@ -219,6 +219,28 @@ class ModelParallel:
         # compressing (fp16/bf16/int8) or offloading the DD boundary ring to fit
         # finer grids is a first-class API choice. Defaults (gpu/fp32) reproduce
         # the original v1 behaviour.
+        # DD reconstructs the forward wavefield from saved boundaries; there is
+        # no decomposed full-storage or checkpoint backward, and
+        # eq_driver.cuh's "domain-decomposed backward (cut_face_mask) is
+        # boundary-saving only" says so from the other side. Until now the
+        # request was SILENTLY REPLACED: nothing below reads 'enabled' or
+        # 'use_ckpt', and _tile_memory_strategy returns BoundarySaving
+        # unconditionally, so a caller who asked for Full() got reconstruction
+        # and a gradient 1.6e-07 away from the one they thought they were
+        # computing -- and the C-side check never fired, because Python had
+        # already swapped the strategy out from under it. Refuse the same way
+        # check_dd_admission refuses an equation: silently wrong is worse than
+        # unsupported.
+        _strategy = getattr(prop, "memory_strategy", "boundary")
+        if _strategy != "boundary":
+            raise NotImplementedError(
+                f"domain decomposition needs boundary saving, but the wrapped "
+                f"propagator's gradient-memory strategy is {_strategy!r}. DD "
+                f"reconstructs each tile's forward wavefield from saved "
+                f"boundaries; it has no full-storage or checkpoint backward. "
+                f"Build the propagator with "
+                f"memory=BoundarySaving(...) (storage='gpu' is the default, "
+                f"'cpu' stages the ring to the host) and wrap that.")
         _bcfg = getattr(prop, "boundary_saving_config", None) or {}
         self._bstorage = _bcfg.get("storage", "gpu")
         self._bdtype = _bcfg.get("storage_dtype", "fp32")
