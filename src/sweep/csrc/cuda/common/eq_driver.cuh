@@ -617,6 +617,13 @@ BackwardOutput generic_backward(const BackwardInput& in)
         && !p.bw_stepped() && p.cut_face_mask == 0;
     float* fuse_grad = fused_img ? Eq::fused_grad_ptr(grads) : nullptr;
 
+    // ``it`` goes to image_step as well as the pointer. One time level and one
+    // pointer is enough for an equation whose gradient is a pointwise product at
+    // step it, which is every equation on this skeleton today -- they all ignore
+    // the argument. It is not enough for a second-order ANISOTROPIC gradient,
+    // which reads three consecutive levels and has to substitute a zero field
+    // for the ones that do not exist yet at it < 2; deriving those by pointer
+    // arithmetic off u_forward is possible, but knowing WHEN to clamp is not.
     for (int it = p.bw_begin() - 1; it >= p.bw_it_end; --it) {
         auto adj_view = adjoint.view();
         const float* img_fwd = (fused_img && fuse_grad != nullptr && it + 1 < p.nt)
@@ -628,12 +635,12 @@ BackwardOutput generic_backward(const BackwardInput& in)
         Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    it, forward_nsrc);
         if (!fused_img || rtm_out != nullptr) {
-            Eq::image_step(state, ctx, Eq::u_forward_ptr(p, it), adjoint,
+            Eq::image_step(state, ctx, Eq::u_forward_ptr(p, it), it, adjoint,
                            fused_img ? nullptr : &grads, rtm_out, ws);
         }
     }
     if (fused_img && fuse_grad != nullptr) {
-        Eq::image_step(state, ctx, Eq::u_forward_ptr(p, 0), adjoint,
+        Eq::image_step(state, ctx, Eq::u_forward_ptr(p, 0), 0, adjoint,
                        &grads, nullptr, ws);
     }
 
@@ -923,7 +930,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
                                        it, forward_nsrc);
             Eq::image_step(state, ctx,
                            chunk_forward[it - start].template data_ptr<float>(),
-                           adjoint, &grads, rtm_out, ws);
+                           it, adjoint, &grads, rtm_out, ws);
         }
     }
 
@@ -990,7 +997,7 @@ void process_recursive_interval(int start, int end,
         Eq::rotate_adjoint_buffers(adjoint);
         Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                    start, forward_nsrc);
-        Eq::image_step(state, ctx, u_this, adjoint, &grads, rtm_out, ws);
+        Eq::image_step(state, ctx, u_this, start, adjoint, &grads, rtm_out, ws);
         return;
     }
 
