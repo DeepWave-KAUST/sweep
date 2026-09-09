@@ -23,10 +23,15 @@ without nvcc.
     `scikit-learn` → `import sklearn` pattern, because the bare name `sweep` is
     already taken on PyPI. `pip install sweep-solver` is equivalent.
 
-!!! warning "Windows"
-    Native Windows builds are new and lightly travelled. If `precompile()` fails,
-    run the **two-file probe** first — it puts the same toolchain through the same
-    flags and the same link in ~1.5 min instead of a full compile:
+!!! note "Windows"
+    Verified on Windows 10 22H2 with Visual Studio Build Tools 2022 (MSVC 14.44),
+    CUDA 12.8 and torch 2.9.1+cu128: the full backend builds in about 4 minutes on
+    32 cores. You need `cl.exe` on PATH — run from an **"x64 Native Tools Command
+    Prompt for VS 2022"**, not a plain `cmd`.
+
+    If `precompile()` fails, run the **two-file probe** first — it puts the same
+    toolchain through the same flags and the same link in well under a minute
+    instead of a full compile:
 
     ```bash
     python -c "import sweep; sweep.precompile(canary=True)"
