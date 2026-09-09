@@ -24,9 +24,13 @@
 // Some CUDA 12.x / libstdc++ header combinations emit a reference to this
 // glibc 2.32 symbol even when building on older glibc hosts. Defining the weak
 // fallback as 0 keeps libstdc++ on the conservative multi-threaded path.
+// glibc/libstdc++ only -- MSVC has neither the symbol nor the attribute, and
+// the guard keeps the GCC path byte-identical.
+#if defined(__GNUC__) && !defined(_WIN32)
 extern "C" {
 __attribute__((weak)) char __libc_single_threaded = 0;
 }
+#endif
 
 template <typename Func>
 auto dispatch_forward(Func cuda_func, sweep_cpu::EquationKind kind)
