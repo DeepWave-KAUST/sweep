@@ -227,7 +227,14 @@ def _compile_flags() -> tuple[list[str], list[str], list[str]]:
         return (
             ["/O2"],
             ["-O3", "--use_fast_math", "--expt-relaxed-constexpr",
-             "-Xcompiler=/wd4996"],          # MSVC's -Wno-deprecated-declarations
+             "-Xcompiler=/wd4996",           # MSVC's -Wno-deprecated-declarations
+             # nvcc's cudafe pass rewrites the translation unit in a way that
+             # makes ``::std`` ambiguous against <valarray> inside torch's
+             # compiled_autograd.h -- "error C2872: 'std': ambiguous symbol",
+             # which kills every CUDA extension build, sweep's or anyone's.
+             # /permissive- is MSVC's conformance mode (proper two-phase name
+             # lookup), so this is the standards-correct reading, not a mute.
+             "-Xcompiler=/permissive-"],
             [f"/LIBPATH:{d}" for d in lib_dirs],
         )
     return (

@@ -43,7 +43,11 @@ def host_compile_flags():
 
 def nvcc_host_flags():
     if sys.platform == "win32":
-        return ["-Xcompiler=/wd4996"]   # MSVC's -Wno-deprecated-declarations
+        # /permissive- : without MSVC's conformance mode, nvcc's cudafe pass
+        # trips "error C2872: 'std': ambiguous symbol" inside torch's
+        # compiled_autograd.h and no CUDA extension compiles at all.
+        return ["-Xcompiler=/wd4996",   # MSVC's -Wno-deprecated-declarations
+                "-Xcompiler=/permissive-"]
     return ["-Xcompiler=-Wno-deprecated-declarations"]
 
 

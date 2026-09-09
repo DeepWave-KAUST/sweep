@@ -86,6 +86,16 @@ class TestJitFlags:
         assert payloads, "the -Xcompiler warning suppression should survive"
         assert gnu_spellings(payloads) == []
 
+    def test_windows_keeps_msvc_conformance_mode(self, monkeypatch, fake_pip_cuda):
+        """Measured on Windows 10 / MSVC 14.44 / nvcc 12.8: without
+        ``/permissive-`` every CUDA extension build dies in nvcc's cudafe pass
+        with "error C2872: 'std': ambiguous symbol" from torch's
+        compiled_autograd.h -- a stock two-line torch extension fails too, so
+        this is not specific to sweep. Conformance mode fixes it outright."""
+        monkeypatch.setattr(_jit, "_WIN", True)
+        _, cuda_cflags, _ = _jit._compile_flags()
+        assert "-Xcompiler=/permissive-" in cuda_cflags
+
 
 class TestPlatformNames:
     """Names torch derives from the platform, which sweep has to agree with."""
