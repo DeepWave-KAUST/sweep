@@ -23,6 +23,21 @@ _CSRC = _PKG / "csrc"
 
 _module = None          # cached compiled module (process-local)
 
+# Windows is a *build-flag* platform difference, not a source one: torch's
+# cpp_extension already supplies /std:c++17, /MD, /EHsc and the MSVC warning
+# suppressions there (COMMON_MSVC_FLAGS), and passes whatever we hand it through
+# to cl.exe / link.exe verbatim. So every GNU spelling below must be branched.
+_WIN = sys.platform == "win32"
+
+
+def _lib_ext() -> str:
+    """Suffix torch gives the built module (``cpp_extension.LIB_EXT``)."""
+    return ".pyd" if _WIN else ".so"
+
+
+def _nvcc_name() -> str:
+    return "nvcc.exe" if _WIN else "nvcc"
+
 
 # --------------------------------------------------------------------------- #
 # CUDA toolkit (nvcc) discovery
@@ -101,7 +116,7 @@ def _find_cuda_home() -> str | None:
     # 1. explicit env (respect user config, but only if it matches torch's CUDA)
     for env in ("CUDA_HOME", "CUDA_PATH"):
         h = os.environ.get(env)
-        if h and match(Path(h) / "bin" / "nvcc"):
+        if h and match(Path(h) / "bin" / _nvcc_name()):
             result = h
             break
     # 2. pip nvidia-cuda-nvcc-cu12 (namespace pkg -> __path__; guaranteed cu12)
@@ -109,7 +124,7 @@ def _find_cuda_home() -> str | None:
         try:
             import nvidia.cuda_nvcc as _n  # type: ignore
             for base in getattr(_n, "__path__", []):
-                if match(Path(base) / "bin" / "nvcc"):
+                if match(Path(base) / "bin" / _nvcc_name()):
                     result = str(Path(base))
                     break
         except Exception:
@@ -132,9 +147,13 @@ def _nvidia_pip_libs() -> list[str]:
         import nvidia
     except Exception:
         return libs
+    # The Windows cu12 wheels keep the linker's import libraries one level
+    # deeper (``lib/x64``); their plain ``lib/`` holds no .lib at all.
+    pats = [("*", "lib", "x64"), ("*", "lib")] if _WIN else [("*", "lib")]
     for base in getattr(nvidia, "__path__", []):
-        for lib in sorted(glob.glob(os.path.join(base, "*", "lib"))):
-            libs.append(lib)
+        for pat in pats:
+            for lib in sorted(glob.glob(os.path.join(base, *pat))):
+                libs.append(lib)
     return libs
 
 
@@ -151,16 +170,17 @@ def _ensure_ninja_on_path() -> None:
         pass
 
 
-def can_build() -> tuple[bool, str]:
-    """(usable, reason) — True when torch+CUDA GPU+nvcc are present so the C
-    backend can be JIT-compiled. Does NOT compile. Used by
-    ``sweep.is_torch_binding_available()`` to avoid a surprise compile."""
+def toolchain_ready() -> tuple[bool, str]:
+    """(usable, reason) — torch and a suitable nvcc are present, i.e. the backend
+    can be **compiled** here. Deliberately says nothing about a GPU: nvcc needs
+    none to emit code for an arch you name (``TORCH_CUDA_ARCH_LIST``), which is
+    what makes a build-only box — a CI runner, a Windows VM, an HPC login node —
+    usable for shaking out build problems. Use :func:`can_build` when the result
+    also has to *run* here."""
     try:
-        import torch
+        import torch  # noqa: F401
     except Exception:
         return False, "PyTorch is not installed"
-    if not torch.cuda.is_available():
-        return False, "no CUDA GPU is visible"
     if _find_cuda_home() is None:
         return False, (
             "no suitable CUDA toolkit found (need nvcc >=12.4 matching your "
@@ -170,6 +190,52 @@ def can_build() -> tuple[bool, str]:
             "`conda install -c nvidia cuda-toolkit`. To try an older toolkit "
             "anyway, set SWEEP_JIT_ALLOW_OLD_CUDA=1)")
     return True, "ok"
+
+
+def can_build() -> tuple[bool, str]:
+    """(usable, reason) — True when torch+CUDA GPU+nvcc are present so the C
+    backend can be JIT-compiled *and loaded*. Does NOT compile. Used by
+    ``sweep.is_torch_binding_available()`` to avoid a surprise compile."""
+    try:
+        import torch
+    except Exception:
+        return False, "PyTorch is not installed"
+    if not torch.cuda.is_available():
+        return False, (
+            "no CUDA GPU is visible (to compile anyway — a build-only VM, a CI "
+            "runner, a login node — name the target arch, e.g. "
+            "TORCH_CUDA_ARCH_LIST=8.9)")
+    return toolchain_ready()
+
+
+# --------------------------------------------------------------------------- #
+# compile flags
+# --------------------------------------------------------------------------- #
+def _compile_flags() -> tuple[list[str], list[str], list[str]]:
+    """``(cflags, cuda_cflags, ldflags)`` to add on top of torch's own.
+
+    --expt-relaxed-constexpr: lets constexpr __host__ funcs call __device__
+    ones, which some CUDA toolkits' <cuda/std> bf16 headers (e.g. 12.4's
+    nvbf16.h) require to compile. Harmless on toolkits that don't need it.
+
+    The POSIX lists are pinned by ``test_build_flags_platform.py``: they feed
+    nvcc/gcc codegen, so editing them moves every bit-exact baseline. Windows
+    fixes belong in the ``_WIN`` branch only.
+    """
+    lib_dirs = _nvidia_pip_libs()
+    if _WIN:
+        return (
+            ["/O2"],
+            ["-O3", "--use_fast_math", "--expt-relaxed-constexpr",
+             "-Xcompiler=/wd4996"],          # MSVC's -Wno-deprecated-declarations
+            [f"/LIBPATH:{d}" for d in lib_dirs],
+        )
+    return (
+        ["-O3", "-Wno-attributes", "-fopenmp"],
+        ["-O3", "--use_fast_math", "--expt-relaxed-constexpr",
+         "-Xcompiler=-Wno-deprecated-declarations"],
+        ["-fopenmp"] + [f"-L{d}" for d in lib_dirs],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +295,7 @@ def _will_build(build_dir: Path) -> bool:
     drives the one-time "compiling…" notice + verbose output, so a genuine rebuild
     is never a silent 2-5 min hang that looks frozen. When we can't tell, assume a
     build so the user always sees *something*."""
-    so = build_dir / "sweep_C.so"
+    so = build_dir / ("sweep_C" + _lib_ext())
     ninja_file = build_dir / "build.ninja"
     if not so.exists() or not ninja_file.exists():
         return True                       # never built (no .so / no ninja graph yet)
@@ -249,6 +315,111 @@ def _will_build(build_dir: Path) -> bool:
 # --------------------------------------------------------------------------- #
 # the loader
 # --------------------------------------------------------------------------- #
+def _prepare_toolchain() -> str:
+    """Point the environment at the nvcc we picked and return its CUDA_HOME."""
+    cuda_home = _find_cuda_home()
+    os.environ["CUDA_HOME"] = cuda_home
+    os.environ["PATH"] = os.path.join(cuda_home, "bin") + os.pathsep + os.environ.get("PATH", "")
+    _ensure_ninja_on_path()
+    return cuda_home
+
+
+def _cuda_includes(cuda_home: str) -> list[str]:
+    """Use ONLY the selected CUDA toolkit's own headers (version-consistent with
+    its nvcc). Do NOT mix in the pip nvidia-*/include dirs: for a torch built
+    against an older CUDA (torch 2.5 = cu121 -> 12.1 headers) those clash with a
+    newer toolkit and break the <cuda/std> bf16 compile."""
+    return [p for p in (os.path.join(cuda_home, "include"),
+                        os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
+            if os.path.isdir(p)]
+
+
+_CANARY_CU = r"""// Generated by sweep._jit.canary(). Two files, same toolchain as the real
+// backend: nvcc + host compiler + pybind + the cudart link.
+#include <torch/extension.h>
+#include <cuda_runtime.h>
+#include <cuda_bf16.h>
+
+__global__ void sweep_canary_kernel(float *out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        __nv_bfloat16 h = __float2bfloat16(2.0f);   // the <cuda/std> bf16 path
+        out[i] = __bfloat162float(h) * static_cast<float>(i);
+    }
+}
+
+torch::Tensor sweep_canary_run(int64_t n) {
+    auto out = torch::zeros({n},
+        torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    const int threads = 128;
+    const int blocks = static_cast<int>((n + threads - 1) / threads);
+    sweep_canary_kernel<<<blocks, threads>>>(out.data_ptr<float>(),
+                                             static_cast<int>(n));
+    // Real cudart calls, so the linker has to resolve the CUDA runtime rather
+    // than quietly producing a module that fails at import.
+    cudaError_t err = cudaGetLastError();
+    TORCH_CHECK(err == cudaSuccess, "sweep canary kernel launch failed: ",
+                cudaGetErrorString(err));
+    return out;
+}
+"""
+
+_CANARY_CPP = r"""// Generated by sweep._jit.canary(). Host-compiler side of the probe.
+#include <torch/extension.h>
+#include "wavetypes.h"   // real sweep header, through the host compiler
+
+torch::Tensor sweep_canary_run(int64_t n);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &sweep_canary_run, "sweep build canary");
+    // Proof the sweep headers parsed, not just that they were found.
+    py::class_<ForwardInput>(m, "ForwardInput").def(py::init<>());
+}
+"""
+
+
+def canary(verbose: bool = True):
+    """Compile a **two-file** probe with the same toolchain and flags as the real
+    backend. Returns the loaded probe module.
+
+    The real backend is 49 translation units of a couple of CPU-minutes each, so
+    a full ``precompile()`` is a poor debugging loop. Every build problem we have
+    actually hit — a flag the host compiler rejects, a library search path the
+    linker ignores, a missing cudart, a header the toolkit can't parse — shows up
+    on two files in wall-clock seconds. Iterate here, then run the real
+    ``precompile()`` once this is green."""
+    from torch.utils import cpp_extension
+
+    arch = os.environ.get("TORCH_CUDA_ARCH_LIST", "").strip()
+    ok, why = toolchain_ready() if arch else can_build()
+    if not ok:
+        raise RuntimeError(f"sweep cannot build here: {why}")
+
+    cuda_home = _prepare_toolchain()
+    build_dir = Path(cpp_extension._get_build_directory("sweep_C_canary", verbose=False))
+    build_dir.mkdir(parents=True, exist_ok=True)
+    cu, cpp = build_dir / "sweep_canary.cu", build_dir / "sweep_canary_binding.cpp"
+    for path, text in ((cu, _CANARY_CU), (cpp, _CANARY_CPP)):
+        if not path.exists() or path.read_text() != text:
+            path.write_text(text)
+
+    cflags, cuda_cflags, ldflags = _compile_flags()
+    if verbose:
+        print(f"[sweep] canary: 2-file build probe in {build_dir}", file=sys.stderr,
+              flush=True)
+    return cpp_extension.load(
+        name="sweep_C_canary",
+        sources=[str(cpp), str(cu)],
+        extra_include_paths=[str(_CSRC), str(_CSRC / "shared"),
+                             str(_CSRC / "bindings")] + _cuda_includes(cuda_home),
+        extra_cflags=cflags,
+        extra_cuda_cflags=cuda_cflags,
+        extra_ldflags=ldflags,
+        build_directory=str(build_dir),
+        verbose=verbose,
+    )
+
+
 def load():
     """Compile (first call, cached) and return the ``sweep._C`` module."""
     global _module
@@ -258,16 +429,18 @@ def load():
     import torch
     from torch.utils import cpp_extension
 
-    ok, why = can_build()
+    # An explicit arch is exactly what a visible GPU would have told us, so it
+    # also unlocks compiling where none is visible. Without one we still demand a
+    # GPU: guessing the arch yields a module that loads and then dies with "no
+    # kernel image is available" at the first launch.
+    arch = os.environ.get("TORCH_CUDA_ARCH_LIST", "").strip()
+    ok, why = toolchain_ready() if arch else can_build()
     if not ok:
         raise RuntimeError(
             f"sweep's compiled backend (impl='c') is unavailable: {why}. "
             "Use impl='eager' for a pure-Python (slower) CPU/GPU path.")
 
-    cuda_home = _find_cuda_home()
-    os.environ["CUDA_HOME"] = cuda_home
-    os.environ["PATH"] = os.path.join(cuda_home, "bin") + os.pathsep + os.environ.get("PATH", "")
-    _ensure_ninja_on_path()
+    cuda_home = _prepare_toolchain()
 
     build_dir = Path(cpp_extension._get_build_directory("sweep_C", verbose=False))
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -276,28 +449,27 @@ def load():
     # its nvcc). Do NOT mix in the pip nvidia-*/include dirs: for a torch built
     # against an older CUDA (torch 2.5 = cu121 -> 12.1 headers) those clash with a
     # newer toolkit and break the <cuda/std> bf16 compile.
-    inc = inc + [p for p in (os.path.join(cuda_home, "include"),
-                             os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
-                 if os.path.isdir(p)]
+    inc = inc + _cuda_includes(cuda_home)
 
-    cap = torch.cuda.get_device_capability()
+    if arch:
+        target = f"arch {arch}"
+    else:
+        cap = torch.cuda.get_device_capability()
+        target = f"your GPU (sm_{cap[0]}{cap[1]})"
     building = _will_build(build_dir)
     if building:
-        print(f"[sweep] compiling the CUDA backend for your GPU (sm_{cap[0]}{cap[1]}) — "
+        print(f"[sweep] compiling the CUDA backend for {target} — "
               f"one-time, ~2-5 min, then cached at {build_dir} ...",
               file=sys.stderr, flush=True)
 
+    cflags, cuda_cflags, ldflags = _compile_flags()
     _module = cpp_extension.load(
         name="sweep_C",
         sources=sources,
         extra_include_paths=inc,
-        extra_cflags=["-O3", "-Wno-attributes", "-fopenmp"],
-        # --expt-relaxed-constexpr: lets constexpr __host__ funcs call __device__
-        # ones, which some CUDA toolkits' <cuda/std> bf16 headers (e.g. 12.4's
-        # nvbf16.h) require to compile. Harmless on toolkits that don't need it.
-        extra_cuda_cflags=["-O3", "--use_fast_math", "--expt-relaxed-constexpr",
-                           "-Xcompiler=-Wno-deprecated-declarations"],
-        extra_ldflags=["-fopenmp"] + [f"-L{d}" for d in _nvidia_pip_libs()],
+        extra_cflags=cflags,
+        extra_cuda_cflags=cuda_cflags,
+        extra_ldflags=ldflags,
         build_directory=str(build_dir),
         verbose=building,
     )

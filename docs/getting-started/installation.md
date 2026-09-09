@@ -23,6 +23,34 @@ without nvcc.
     `scikit-learn` → `import sklearn` pattern, because the bare name `sweep` is
     already taken on PyPI. `pip install sweep-solver` is equivalent.
 
+!!! warning "Windows"
+    Native Windows builds are new and lightly travelled. If `precompile()` fails,
+    run the **two-file probe** first — it puts the same toolchain through the same
+    flags and the same link in ~1.5 min instead of a full compile:
+
+    ```bash
+    python -c "import sweep; sweep.precompile(canary=True)"
+    ```
+
+    You need Visual Studio Build Tools 2022 (for `cl.exe`) plus a CUDA Toolkit
+    whose `nvcc.exe` matches your torch's CUDA major. If you would rather not
+    deal with MSVC at all, **WSL2 + the CUDA toolkit is the smoother path**, and
+    is what most Windows users of sweep run.
+
+### Building where no GPU is visible
+
+Compiling needs `nvcc`, not a GPU — but sweep reads the target architecture off
+your card, so it refuses by default when there is none. Name the architecture and
+the build works on a login node, a build-only VM, or a CI runner:
+
+```bash
+TORCH_CUDA_ARCH_LIST=8.9 python -c "import sweep; sweep.precompile()"
+```
+
+sweep will not guess it for you: a wrong architecture produces a module that
+imports fine and then dies with `no kernel image is available` at the first
+kernel launch.
+
 The rest of this page covers installing **from a clone** — for development, or to
 pre-build the compiled extension and skip the one-time first-use compile.
 

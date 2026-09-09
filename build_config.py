@@ -32,6 +32,30 @@ def openmp_flags():
     return ["-fopenmp"]
 
 
+def host_compile_flags():
+    """Extra host-compiler flags. torch's BuildExtension already supplies
+    /std:c++17 /MD /EHsc on MSVC and -fPIC -std=c++17 on POSIX, and passes these
+    through verbatim — so GNU spellings would reach cl.exe as-is."""
+    if sys.platform == "win32":
+        return ["/O2"]
+    return ["-O3", "-Wno-attributes", *openmp_flags()]
+
+
+def nvcc_host_flags():
+    if sys.platform == "win32":
+        return ["-Xcompiler=/wd4996"]   # MSVC's -Wno-deprecated-declarations
+    return ["-Xcompiler=-Wno-deprecated-declarations"]
+
+
+def link_flags():
+    if sys.platform == "win32":
+        return []                       # no rpath concept; DLLs resolve via PATH
+    # RPATH so the shipped wheel resolves libtorch/libc10 against the USER's
+    # torch (auditwheel --exclude keeps those libs external).
+    # Belt-and-suspenders: sweep always imports torch before sweep._C.
+    return [*openmp_flags(), "-Wl,-rpath,$ORIGIN/../torch/lib"]
+
+
 def configure_cuda_arch_list():
     """Avoid PyTorch's empty GPU-arch auto-detection on login/CPU nodes."""
     if os.environ.get("TORCH_CUDA_ARCH_LIST"):
@@ -217,7 +241,6 @@ def build_ext_kwargs(build_cuda=None):
         ) from exc
 
     SweepBuildExtension = make_build_extension(BuildExtension)
-    omp_flags = openmp_flags()
     configure_cuda_arch_list()
 
     # Optional extra nvcc flags (e.g. -DELASTIC3D_LB_MINBLOCKS=6 to retune a
@@ -237,19 +260,16 @@ def build_ext_kwargs(build_cuda=None):
                 os.path.join(ROOT_DIR, "src/sweep/csrc/cuda/equations"),
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-Wno-attributes", *omp_flags],
+                "cxx": host_compile_flags(),
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
                     "--threads=16",
-                    "-Xcompiler=-Wno-deprecated-declarations",
+                    *nvcc_host_flags(),
                     *extra_nvcc,
                 ],
             },
-            # RPATH so the shipped wheel resolves libtorch/libc10 against the
-            # USER's torch (auditwheel --exclude keeps those libs external).
-            # Belt-and-suspenders: sweep always imports torch before sweep._C.
-            extra_link_args=[*omp_flags, "-Wl,-rpath,$ORIGIN/../torch/lib"],
+            extra_link_args=link_flags(),
         )
     ]
     kwargs["cmdclass"] = {

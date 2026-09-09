@@ -131,7 +131,7 @@ def is_torch_binding_available() -> bool:
         return False
 
 
-def precompile() -> bool:
+def precompile(canary: bool = False) -> bool:
     """Build the compiled CUDA backend (``sweep._C``) now.
 
     Runs the one-time, per-GPU-arch JIT compile (~3-5 min) up front — e.g. right
@@ -140,7 +140,21 @@ def precompile() -> bool:
     GPU, or a suitable ``nvcc`` (>=12.6) is missing::
 
         python -c "import sweep; sweep.precompile()"
+
+    ``canary=True`` builds a **two-file** probe instead of the full backend —
+    same compiler, same flags, same link, seconds instead of minutes. That is the
+    loop to use when the build itself is what is broken (a new platform, a fresh
+    toolkit), before spending a full compile on it::
+
+        python -c "import sweep; sweep.precompile(canary=True)"
+
+    Set ``TORCH_CUDA_ARCH_LIST`` (e.g. ``8.9``) to compile where no GPU is
+    visible — a build-only VM, a CI runner, an HPC login node.
     """
+    if canary:
+        from . import _jit
+        _jit.canary()
+        return True
     import sweep._C as _C
     _C._load()
     return True
