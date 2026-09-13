@@ -362,7 +362,8 @@ class ModelParallel:
         self._fwd_halo = None
         self._bwd_halo = None
         self._model_halo = None
-        self._halo_sl_cache = {}     # (field.ndim, axis) -> crop slice tuple
+        self._halo_sl_cache = {}         # (field.ndim, axis) -> crop slice tuple
+        self._multi_group_cache = {}     # field data_ptrs -> cross-axis batched group
 
         # comm/compute overlap (acoustic + VRZ forward): a dedicated comm stream
         # runs step's halo exchange while step's interior computes. Eligible
@@ -477,14 +478,33 @@ class ModelParallel:
                 hs.exchange(self._halo_view(tensor, ax))
 
     def _exchange_group(self, halo, tensors):
-        """Halo-exchange a group of fields in ONE batched P2P per cut axis
-        (elastic velocity / stress groups). Collapses ``len(tensors)`` separate
-        NCCL rounds into one isend/irecv+wait per axis — the per-step latency
-        win for the multi-field elastic protocol (acoustic exchanges a single
-        field, so it uses :meth:`_exchange`/the overlap path instead)."""
-        if halo is not None:
+        """Halo-exchange a group of fields in ONE batched P2P for the WHOLE
+        shipment — every field, every cut axis.
+
+        Collapsing the fields of one axis into one isend/irecv+wait was the
+        original win (the multi-field elastic protocol). On a multi-axis mesh
+        one round per axis remained, and these strips are latency-bound: on a
+        production-size 3-D grid a six-field shipment is 3.3 MiB and took 486 us,
+        6.5 GiB/s on an NVLink that does 300+. So the axes are concatenated too,
+        via :class:`FastHaloMultiGroup` — same buffers, same pack/unpack order,
+        same peers, one wait. Single-axis meshes keep the previous path exactly.
+        """
+        if halo is None:
+            return
+        if len(halo) == 1:
             for ax, hs in halo.items():
                 hs.exchange_group([self._halo_view(t, ax) for t in tensors])
+            return
+        key = tuple(t.data_ptr() for t in tensors)
+        grp = self._multi_group_cache.get(key)
+        if grp is None:
+            from sweep.parallel.fast_halo import FastHaloMultiGroup
+            ex = []
+            for ax, hs in halo.items():
+                ex.extend(hs.group_exchangers([self._halo_view(t, ax) for t in tensors]))
+            grp = FastHaloMultiGroup(ex)
+            self._multi_group_cache[key] = grp
+        grp()
 
     def _src_away_from_cuts(self, sg) -> bool:
         """True when no source sits within M of an x-cut line (k*nxp). The

@@ -138,6 +138,41 @@ class FastHaloGroup:
                 rview.copy_(rbuf)
 
 
+class FastHaloMultiGroup:
+    """One batched isend/irecv across EVERY cut axis, not one per axis.
+
+    :class:`FastHaloGroup` already collapses the FIELDS of one axis into a
+    single P2P round, but the DD driver still issued one such round per cut
+    axis, so a 2x2 mesh paid two waits per shipment.  These strips are
+    latency-bound, not bandwidth-bound: on a production-size 3-D grid
+    (2x2 tiles, halo 2) a six-field shipment moves 3.3 MiB and took
+    486 us -- 6.5 GiB/s on an NVLink that does 300+, i.e. the synchronisation
+    rounds ARE the cost, not the bytes.  Concatenating both axes' op lists
+    makes it one wait.
+
+    Same buffers, same per-field pack/unpack order, same peers, same process
+    group: only the GROUPING of the P2P ops changes, so no value can move.
+    Every rank builds the list in the same (axis, field) order, which is what
+    keeps the sends and receives matched.
+    """
+
+    def __init__(self, exchangers) -> None:
+        self._ex = list(exchangers)
+        self._ops = [op for ex in self._ex for op in ex._ops]
+
+    def __call__(self) -> None:
+        if not self._ops:
+            return
+        for ex in self._ex:
+            for sbuf, sview in ex._send_views:
+                sbuf.copy_(sview)
+        for req in dist.batch_isend_irecv(self._ops):
+            req.wait()
+        for ex in self._ex:
+            for rview, rbuf in ex._recv_views:
+                rview.copy_(rbuf)
+
+
 class FastHaloSet:
     """Per-tensor exchanger cache for role-rotating wavefield lists.
 
@@ -169,12 +204,21 @@ class FastHaloSet:
     def exchange_group(self, fields: Sequence[torch.Tensor]) -> None:
         """Blocking exchange of several fixed-address fields in ONE batched P2P
         (elastic velocity / stress groups). Cached by the fields' data_ptrs."""
+        self._group(fields)()
+
+    def group_exchangers(self, fields: Sequence[torch.Tensor]):
+        """This axis's per-field exchangers, for a caller batching ACROSS axes
+        (:class:`FastHaloMultiGroup`). Same cache as :meth:`exchange_group`, so
+        the buffers and the op order are the single-axis path's exactly."""
+        return self._group(fields)._ex
+
+    def _group(self, fields: Sequence[torch.Tensor]) -> "FastHaloGroup":
         key = tuple(f.data_ptr() for f in fields)
         grp = self._group_cache.get(key)
         if grp is None:
             grp = FastHaloGroup(list(fields), self.mesh, self.halo, self.axes)
             self._group_cache[key] = grp
-        grp()
+        return grp
 
     def exchange_start(self, wavefield: torch.Tensor) -> None:
         """Phase A of an overlapped exchange (see FastHaloExchanger). Pair with

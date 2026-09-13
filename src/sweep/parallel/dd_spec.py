@@ -323,9 +323,18 @@ VRZ_DD = DDSpec(
         phases=(
             Phase(1, advances=True, label="advance adjoint + reconstruct",
                   after=(ExchangeGroup(
-                      (LAMBDA, RECON_U), batched=False,
+                      (LAMBDA, RECON_U), batched=True,
                       why="phase 2 builds the coupling from the POST-exchange "
-                          "lambda and p"),)),
+                          "lambda and p. BATCHED because these halo strips are "
+                          "latency-bound, not bandwidth-bound: on a production-size "
+                          "3-D grid (2x2 tiles, M=2) the two "
+                          "fields are 1.1 MiB of send+recv per step and took "
+                          "0.354 ms -- 3 GiB/s on an NVLink that does 300+, i.e. "
+                          "the round trips ARE the cost. One batched P2P per cut "
+                          "axis instead of two halves them. The flag is a "
+                          "statement about the wire, not the bits (see "
+                          "ExchangeGroup), so the DD bit-exact gate still holds "
+                          "it to rel=0 against one card."),)),
             Phase(2, advances=False, label="build coupling",
                   after=(ExchangeGroup(
                       (COUPLING,),
