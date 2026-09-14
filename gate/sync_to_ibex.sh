@@ -11,7 +11,7 @@
 # ibex-only, and the .pt baselines are per-GPU-model and per-run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-REMOTE=/ibex/user/wangs0j/dd-refactor-ibex/gate
+REMOTE=${SWEEP_IBEX_GATE:?set SWEEP_IBEX_GATE to the ibex worktree gate dir}
 
 FILES=(bitgate.py ddgate.py check_equations_api.py golden_equations_api.json
        run_gate.sh noise_floors.json)
