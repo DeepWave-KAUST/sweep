@@ -210,7 +210,7 @@ def main():
     # 3) optional dev pristine via subprocess
     if args.include_dev:
         snap_path = '/tmp/regression/_dev_snapshot.npz'
-        cmd = ['/home/wangs0j/miniconda3/envs/ifwitorch/bin/python', __file__,
+        cmd = [sys.executable, __file__,
                 '--snapshot-out', snap_path]
         if free_surface:
             cmd.append('--free-surface')

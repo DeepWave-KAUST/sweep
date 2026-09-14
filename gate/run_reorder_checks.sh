@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/wangs0j/sweep-local/dd-refactor
+cd "$(dirname "$0")/.."
 ./gate/run_gate.sh A base_A.pt C base_C.pt T base_T.pt dd1 base_dd1.pt
 echo GATES_RC=$?
 . gate/env.sh

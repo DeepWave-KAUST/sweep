@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/home/wangs0j/sweep-local")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srcrec_sweep import SHAPE_2D, SHAPE_3D, NT_2D, NT_3D, run_one   # noqa: E402
 
 

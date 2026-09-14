@@ -50,8 +50,9 @@ def generate_init_py(classes_dict, output_path):
     print(f"Generated {output_path} with {len(classes_dict)} classes.")
 
 if __name__ == '__main__':
-    module_dir = os.path.abspath("/ibex/user/wangs0j/geophyai/src/geophyai/equations")
-    module_pkg = "geophyai.equations"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    module_dir = os.path.join(repo_root, "src", "sweep", "equations")
+    module_pkg = "sweep.equations"
 
     classes = find_classes_with_models(module_dir, module_pkg)
     output_file = os.path.join(module_dir, '__init__.py')

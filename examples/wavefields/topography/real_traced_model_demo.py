@@ -29,6 +29,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -47,8 +48,11 @@ from sweep.signal import ricker
 # Paths / fixed grid + acquisition parameters
 # ---------------------------------------------------------------------------
 
-VP_PATH = Path("/ibex/user/wangs0j/sweep-stack/vp_traced.npy")
-TOPO_PATH = Path("/ibex/user/wangs0j/sweep-stack/topo_traced.npy")
+# The traced pair is a digitised field section, not something the repo ships.
+# Point SWEEP_TRACED_DIR at your own copy; the default is the working directory.
+TRACED_DIR = Path(os.environ.get("SWEEP_TRACED_DIR", "."))
+VP_PATH = TRACED_DIR / "vp_traced.npy"
+TOPO_PATH = TRACED_DIR / "topo_traced.npy"
 
 DH = 25.0          # grid spacing (m), from topo/first_solid_row regression
 DT = 1.5e-3        # CFL≈0.45 at vp_max=5300 m/s, 4th order spatial
@@ -84,6 +88,13 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_vp_and_topo():
+    missing = [p for p in (VP_PATH, TOPO_PATH) if not p.exists()]
+    if missing:
+        raise SystemExit(
+            f"{', '.join(str(p.name) for p in missing)} not found under "
+            f"{TRACED_DIR.resolve()}. This demo runs on a digitised field "
+            f"section that is not shipped with the repo; set SWEEP_TRACED_DIR "
+            f"to the directory holding vp_traced.npy and topo_traced.npy.")
     vp = np.load(VP_PATH).astype(np.float32)
     topo_m = np.load(TOPO_PATH).astype(np.float32)
     assert vp.ndim == 2 and topo_m.ndim == 1, (
