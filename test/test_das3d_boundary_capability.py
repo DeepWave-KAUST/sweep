@@ -40,8 +40,12 @@ def test_the_implicit_default_becomes_full_storage():
 def test_an_explicit_boundary_request_raises_and_names_the_alternative():
     with pytest.raises(NotImplementedError) as exc:
         _resolve(DASZhao3D(), boundary_saving_config={"enabled": True})
-    assert "DASZhao3D" in str(exc.value)
-    assert "ckpt" in str(exc.value) or "full" in str(exc.value)
+    msg = str(exc.value)
+    assert "DASZhao3D" in msg
+    # Match the spelling a caller would actually type. The message used to say
+    # "ckpt"/"full"; the typed strategies renamed those to Ckpt()/Full(), and a
+    # lowercase substring test kept passing for neither.
+    assert "Ckpt()" in msg or "Full()" in msg, msg
 
 
 def test_checkpointing_is_still_offered():
