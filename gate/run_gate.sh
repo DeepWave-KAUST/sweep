@@ -58,7 +58,13 @@ while [ $# -gt 0 ]; do
               | grep -oE "[0-9]+" | paste -sd+ | bc)
     echo "GATE $tier: exit=$exit_code  ran=$ran  $verdict"
     if [ "$exit_code" -ne 0 ]; then
-        grep -A3 "^FAIL" "$out" | head -40 | sed 's/^/    /'
+        # EVERY failing config by name first. The detail below is capped, and a
+        # capped log that does not say so reads as "these are all of them": a
+        # tier-B run with 22 failures printed 8 (8 x 5 lines = the cap), and the
+        # only hint was arithmetic on the verdict line.
+        grep -E "^(FAIL|MISSING|NEW) " "$out" | sed 's/^/    /'
+        echo "    -- detail for the first few; all of it is in $out"
+        grep -A3 "^FAIL" "$out" | head -40 | sed 's/^/      /'
         rc=1
     fi
     if [ -n "$counted" ] && [ "$counted" -ne "$ran" ]; then
