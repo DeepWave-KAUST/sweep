@@ -28,6 +28,12 @@ def _fake_binding(monkeypatch, *, available=True, symbols=()):
     for s in symbols:
         setattr(module, s, object())
     monkeypatch.setitem(sys.modules, "sweep._C", module)
+    # sys.modules alone is not enough. `from sweep import _C` only consults
+    # sys.modules while `sweep` has no cached `_C` attribute; once any earlier
+    # test has imported the real extension, the import machinery has bound it on
+    # the package and the fake is bypassed -- so this passed alone and failed in
+    # the full suite. Patch both lookup paths.
+    monkeypatch.setattr(sweep, "_C", module, raising=False)
 
 
 def test_a_missing_binding_skips(cuda_present, monkeypatch):
