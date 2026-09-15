@@ -32,17 +32,42 @@ def openmp_flags():
     return ["-fopenmp"]
 
 
+# Carries +PTX on purpose: a binary built for one architecture and nothing else
+# dies with "no kernel image is available for execution on the device" the
+# moment it meets a newer card, whereas PTX is JIT-ed by the driver and runs.
+FALLBACK_CUDA_ARCH_LIST = "7.0+PTX"
+
+
 def configure_cuda_arch_list():
-    """Avoid PyTorch's empty GPU-arch auto-detection on login/CPU nodes."""
+    """Give PyTorch a GPU-arch target when it cannot work one out itself.
+
+    A FALLBACK, not a default. When a device is visible, torch's own detection
+    targets exactly the card in front of it; overriding that with a fixed list
+    is how `SWEEP_BUILD_CUDA=1 pip install .` on an Ada workstation produced an
+    sm_70-only extension that could not run on the machine that built it.
+    """
     if os.environ.get("TORCH_CUDA_ARCH_LIST"):
         return
 
-    arch_list = os.environ.get("SWEEP_CUDA_ARCH_LIST", "7.0")
-    os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+    override = os.environ.get("SWEEP_CUDA_ARCH_LIST")
+    if override:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = override
+        return
+
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return          # torch detects the card it can actually see
+    except Exception:
+        pass                # no torch, or a torch that cannot answer: fall back
+
+    os.environ["TORCH_CUDA_ARCH_LIST"] = FALLBACK_CUDA_ARCH_LIST
     log.warn(
-        "TORCH_CUDA_ARCH_LIST is not set; defaulting to %s. "
-        "Set TORCH_CUDA_ARCH_LIST or SWEEP_CUDA_ARCH_LIST to target other GPUs.",
-        arch_list,
+        "no CUDA device is visible and TORCH_CUDA_ARCH_LIST is not set; "
+        "building for %s. The PTX makes it runnable on newer cards, but set "
+        "TORCH_CUDA_ARCH_LIST (or SWEEP_CUDA_ARCH_LIST) to target them natively.",
+        FALLBACK_CUDA_ARCH_LIST,
     )
 
 

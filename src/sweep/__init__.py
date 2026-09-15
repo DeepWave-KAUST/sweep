@@ -151,7 +151,16 @@ def precompile(require_gpu: bool = True) -> bool:
     forces every build to occupy a GPU it does not use.
     """
     import sweep._C as _C
-    _C._load(compile_only=not require_gpu)
+
+    loader = getattr(_C, "_load", None)
+    if loader is None:
+        # A prebuilt extension shadows _C.py: the import machinery tries the
+        # .so suffixes before .py, so `sweep._C` IS the compiled module and
+        # importing it has already loaded it. It has no _load to call, and
+        # calling one would be an AttributeError on exactly the install the
+        # README tells people to do (SWEEP_BUILD_CUDA=1 pip install).
+        return True
+    loader(compile_only=not require_gpu)
     return True
 
 
