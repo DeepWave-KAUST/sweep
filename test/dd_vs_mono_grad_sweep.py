@@ -318,11 +318,13 @@ def main() -> None:
     # transpose heuristic indexes that one instead -- which is what made the
     # first version of this script die with "index 2 out of bounds for axis 0
     # with size 2" on Elastic and never reach the comparison.
-    # The two paths hand back DIFFERENT record layouts -- PropTorch returns
-    # (B, nt, nrec, nfield), ModelParallel returns the raw CUDA layout, which is
-    # (B, nrec, nt) for the acoustic family and (nfield, B, nrec, nt) for the
-    # staggered one.  Same elements, so (r**2).sum() -- and therefore the
-    # gradient -- is layout-independent; only this comparison has to care.
+    # ModelParallel now returns the single-card layout (9833c813), so both paths
+    # normally hand back (B, nt, nrec, nfield).  canon() still accepts the raw
+    # CUDA layouts -- (B, nrec, nt) acoustic, (nfield, B, nrec, nt) staggered --
+    # because it dispatches on SHAPE, which is what lets this script compare an
+    # older tree against a newer one.  Same elements either way, so (r**2).sum()
+    # and therefore the gradient is layout-independent; only this comparison has
+    # to care.
     # Canonicalise both to (nfield, B, nrec, nt) rather than guess an
     # orientation: guessing is what made the first version index the elastic
     # record's FIELD axis and die with "index 2 out of bounds for axis 0".
