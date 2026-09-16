@@ -10,6 +10,16 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
+  repository ran the tests before, and nothing could: `pytest test/` was unable
+  to return 0.  With that fixed, every push and pull request to `dev` runs the
+  suite on a hosted runner -- 313 tests in about three minutes; the rest skip
+  for want of a GPU or a compiled binding.  A skip is not a failure, so the job
+  also asserts a floor on the number of tests that actually EXECUTED
+  (`.github/scripts/assert_executed_floor.py`): without it, "the tests passed"
+  and "the tests did not run" print the same summary.  The bit-exactness gate
+  stays where the GPUs are.
+
 - **ViscoAcoustic: Zhu & Harris (2014) nearly constant-Q equation, per-edge
   free surface, and a CUDA backend (`impl='c'`).**  The equation now
   implements the paper's decoupled fractional Laplacians (eq. 10/11,
@@ -50,6 +60,15 @@ and this project adheres to
   recomputes the dispersion/damping coefficients every time step).
 
 ### Fixed
+- **`pytest test/` could never exit 0.**  `test_import_does_not_pull_optional_deps`
+  asserted `mod not in sys.modules`, which is process-global: by the time it
+  runs it is a statement about everything the preceding ~600 tests imported,
+  not about `sweep.datasets`.  Every recorded full-suite run ended
+  `1 failed, 886 passed`, so no script, hook or CI job could gate on the suite.
+  The check now runs the import in a fresh interpreter and asserts on *its*
+  `sys.modules`, which is both order-independent and what the test always meant
+  to say.
+
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
   `storage='disk'` gradient was wrong: max|disk-gpu|/scale 0.2-0.5 for acoustic
