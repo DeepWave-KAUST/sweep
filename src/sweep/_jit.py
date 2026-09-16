@@ -13,6 +13,8 @@ The C++ sources ship inside the wheel under ``sweep/csrc/`` (package data).
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -151,16 +153,26 @@ def _ensure_ninja_on_path() -> None:
         pass
 
 
-def can_build() -> tuple[bool, str]:
-    """(usable, reason) — True when torch+CUDA GPU+nvcc are present so the C
-    backend can be JIT-compiled. Does NOT compile. Used by
-    ``sweep.is_torch_binding_available()`` to avoid a surprise compile."""
+def can_compile() -> tuple[bool, str]:
+    """(usable, reason) — True when the backend can be COMPILED here.
+
+    Compiling needs torch, an nvcc, and a target architecture. It does **not**
+    need a visible device: ``TORCH_CUDA_ARCH_LIST`` names the target explicitly,
+    which is how wheels are cross-built, and it is what lets a CI job or a
+    CPU-partition allocation warm the cache a later GPU run reuses. Gating the
+    compile on a device forces every build to occupy a scarce GPU.
+
+    RUNNING the result still needs a device -- that is :func:`can_build`.
+    """
     try:
         import torch
     except Exception:
         return False, "PyTorch is not installed"
-    if not torch.cuda.is_available():
-        return False, "no CUDA GPU is visible"
+    if not torch.cuda.is_available() and not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        return False, (
+            "no CUDA GPU is visible and TORCH_CUDA_ARCH_LIST is unset, so there "
+            "is no target architecture to compile for (set e.g. "
+            "TORCH_CUDA_ARCH_LIST=8.9 to build for a card this machine has not got)")
     if _find_cuda_home() is None:
         return False, (
             "no suitable CUDA toolkit found (need nvcc >=12.4 matching your "
@@ -170,6 +182,22 @@ def can_build() -> tuple[bool, str]:
             "`conda install -c nvidia cuda-toolkit`. To try an older toolkit "
             "anyway, set SWEEP_JIT_ALLOW_OLD_CUDA=1)")
     return True, "ok"
+
+
+def can_build() -> tuple[bool, str]:
+    """(usable, reason) — True when the C backend can be compiled AND run here.
+
+    Does NOT compile. Used by ``sweep.is_torch_binding_available()`` to avoid a
+    surprise compile, so it keeps requiring a visible device: a machine that can
+    only cross-compile cannot serve ``impl='c'``.
+    """
+    try:
+        import torch
+    except Exception:
+        return False, "PyTorch is not installed"
+    if not torch.cuda.is_available():
+        return False, "no CUDA GPU is visible"
+    return can_compile()
 
 
 # --------------------------------------------------------------------------- #
@@ -190,34 +218,112 @@ def _sources() -> list[str]:
     return cpu + cu + binding
 
 
+def _staged_name(rel: Path) -> Path:
+    """Staged path of a COMPILED source: cpp_extension.load() flattens object
+    names by basename and sweep has many forward.cu / backward.cu / kernels.cu,
+    so each one is renamed in place (its relative #includes still resolve)."""
+    slug = "_".join(rel.with_suffix("").parts)
+    return rel.parent / (slug + rel.suffix)
+
+
+def _stage_plan() -> dict[Path, Path]:
+    """Every file under csrc, mapped to where it is staged."""
+    renamed = {Path(s).resolve().relative_to(_CSRC) for s in _sources()}
+    plan: dict[Path, Path] = {}
+    for p in _CSRC.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(_CSRC)
+        plan[rel] = _staged_name(rel) if rel in renamed else rel
+    return plan
+
+
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
-    """cpp_extension.load() flattens object names by basename; sweep has many
-    forward.cu / backward.cu / kernels.cu. Copy csrc into a version-stamped
-    staging dir with UNIQUE compiled-source basenames (renamed in place so their
-    relative #includes still resolve). Idempotent across runs."""
+    """Mirror csrc into a staging dir with unique compiled-source basenames.
+
+    The sentinel is a MANIFEST of source digests, not a bare "I ran once" flag.
+    Keying staleness on the package version alone meant that editing a kernel
+    without bumping the version left the previous copy in place: ninja then
+    compiled the OLD source and produced a .so that silently did not contain
+    the edit, which is why the workflow around this was "delete the extension
+    directory after touching csrc". Re-staging only the files whose contents
+    changed keeps that from happening AND keeps the build incremental -- ninja
+    recompiles the affected translation units and, through its header
+    depfiles, whatever includes a changed .cuh.
+
+    The staged copy's mtime is set to now rather than inherited, so a source
+    that travels BACKWARDS in time (a `git checkout` of an older revision)
+    still invalidates the object built from it.
+    """
     try:
         from importlib.metadata import version
         _ver = version("sweep-solver")
     except Exception:
         _ver = "dev"
     stage = build_dir / f"csrc_stage_{_ver}"
-    done = stage / ".staged"
-    if not done.exists():
-        shutil.rmtree(stage, ignore_errors=True)
-        shutil.copytree(_CSRC, stage)
-        for s in _sources():
-            rel = Path(s).resolve().relative_to(_CSRC)
-            slug = "_".join(rel.with_suffix("").parts)
-            os.replace(stage / rel, stage / rel.parent / (slug + rel.suffix))
-        done.write_text("ok")
-    staged = []
-    for s in _sources():
-        rel = Path(s).resolve().relative_to(_CSRC)
-        slug = "_".join(rel.with_suffix("").parts)
-        staged.append(str(stage / rel.parent / (slug + rel.suffix)))
+    manifest_path = stage / ".staged"
+    # torchrun starts one process per GPU and they all import at once, so the
+    # staging runs concurrently. It happens BEFORE cpp_extension.load()'s own
+    # lock, so nothing else serialises it: two ranks used to race in
+    # rmtree+copytree and one lost with FileExistsError on the stage directory
+    # (seen on a 2-rank DD benchmark). Torch's own baton is the same mechanism
+    # its extension build uses -- the loser waits for the winner to finish
+    # rather than staging on top of it.
+    from torch.utils.file_baton import FileBaton
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+    baton = FileBaton(str(build_dir / "sweep_stage_lock"))
+    if not baton.try_acquire():
+        baton.wait()
+        return _staged_paths(stage)
+    try:
+        return _stage_locked(stage, manifest_path)
+    finally:
+        baton.release()
+
+
+def _staged_paths(stage: Path) -> tuple[list[str], list[str]]:
+    staged = [str(stage / _staged_name(Path(s).resolve().relative_to(_CSRC)))
+              for s in _sources()]
     inc = [str(stage), str(stage / "bindings"), str(stage / "shared"),
            str(stage / "cuda"), str(stage / "cuda/common"), str(stage / "cuda/equations")]
     return staged, inc
+
+
+def _stage_locked(stage: Path, manifest_path: Path) -> tuple[list[str], list[str]]:
+    try:
+        previous = json.loads(manifest_path.read_text())
+        if not isinstance(previous, dict):
+            previous = {}
+    except (OSError, ValueError):
+        previous = {}       # first run, or the pre-manifest "ok" sentinel
+
+    plan = _stage_plan()
+    manifest: dict[str, str] = {}
+    for rel, dst_rel in sorted(plan.items()):
+        key = str(dst_rel)
+        digest = _digest(_CSRC / rel)
+        manifest[key] = digest
+        dst = stage / dst_rel
+        if previous.get(key) != digest or not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_CSRC / rel, dst)
+            os.utime(dst, None)
+    # A source that was deleted (or renamed, or dropped by a build-mode switch)
+    # must not linger in the stage where it would still compile.
+    for key in set(previous) - set(manifest):
+        (stage / key).unlink(missing_ok=True)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+    return _staged_paths(stage)
 
 
 def _will_build(build_dir: Path) -> bool:
@@ -249,8 +355,14 @@ def _will_build(build_dir: Path) -> bool:
 # --------------------------------------------------------------------------- #
 # the loader
 # --------------------------------------------------------------------------- #
-def load():
-    """Compile (first call, cached) and return the ``sweep._C`` module."""
+def load(compile_only: bool = False):
+    """Compile (first call, cached) and return the ``sweep._C`` module.
+
+    ``compile_only=True`` warms the cache without requiring a device, for CI and
+    for pre-building on a CPU allocation; ``TORCH_CUDA_ARCH_LIST`` must then name
+    the target arch. The returned module is not usable for kernels on a machine
+    with no GPU -- the point is the cached ``.so``.
+    """
     global _module
     if _module is not None:
         return _module
@@ -258,7 +370,7 @@ def load():
     import torch
     from torch.utils import cpp_extension
 
-    ok, why = can_build()
+    ok, why = can_compile() if compile_only else can_build()
     if not ok:
         raise RuntimeError(
             f"sweep's compiled backend (impl='c') is unavailable: {why}. "
@@ -280,10 +392,14 @@ def load():
                              os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
                  if os.path.isdir(p)]
 
-    cap = torch.cuda.get_device_capability()
     building = _will_build(build_dir)
     if building:
-        print(f"[sweep] compiling the CUDA backend for your GPU (sm_{cap[0]}{cap[1]}) — "
+        if torch.cuda.is_available():
+            cap = torch.cuda.get_device_capability()
+            target = f"your GPU (sm_{cap[0]}{cap[1]})"
+        else:
+            target = f"TORCH_CUDA_ARCH_LIST={os.environ.get('TORCH_CUDA_ARCH_LIST')}"
+        print(f"[sweep] compiling the CUDA backend for {target} — "
               f"one-time, ~2-5 min, then cached at {build_dir} ...",
               file=sys.stderr, flush=True)
 

@@ -68,6 +68,31 @@ and this project adheres to
   The check now runs the import in a fresh interpreter and asserts on *its*
   `sys.modules`, which is both order-independent and what the test always meant
   to say.
+- **The JIT staging directory ignored edits to `csrc`.**  `_stage()` mirrors
+  the CUDA tree into the torch-extension build dir with unique compiled-source
+  basenames; the directory was named after the installed `sweep-solver`
+  version and the staleness check was "does `.staged` exist".  Editing a kernel
+  without bumping the version therefore left the previous copy in place, ninja
+  compiled the OLD source, and the `.so` silently did not contain the edit --
+  which is why working on `csrc` came with a "delete the extension directory
+  first" ritual.  The sentinel is now a manifest of per-file SHA-256 digests:
+  only files whose contents changed are re-staged (so ninja still rebuilds just
+  the affected translation units, and through its header depfiles whatever
+  includes a changed `.cuh`), files whose source disappeared are removed from
+  the stage, and a re-staged copy is stamped with the current time so a source
+  that moves BACKWARDS in time (`git checkout` of an older revision) still
+  invalidates the object built from it.  The staged tree is byte-identical to
+  what the previous implementation produced (150 files, the same 50 compiled
+  sources); the manifest costs ~44 ms once per process.
+  The staging is also taken under `torch.utils.file_baton.FileBaton`, the
+  mechanism torch uses for concurrent extension builds.  `torchrun` starts
+  one process per GPU and they all stage before `cpp_extension.load` takes
+  its own lock, so nothing serialised them: two ranks copied the tree on
+  top of each other, and on a real 150-file tree over a shared filesystem
+  one lost with `FileExistsError` on the stage directory -- which is what
+  killed a 2-rank domain-decomposition benchmark before it measured
+  anything.  The regression test asserts on work rather than timing:
+  staging from two processes must copy no more than staging from one.
 
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every

@@ -3,7 +3,10 @@ __pycache__
 .codex
 .pytest_cache
 dist
-build*
+# Anchored: an unanchored ``build*`` matches at every depth, so it also
+# swallowed src/sweep/build.py -- a shipped module -- silently.
+/build/
+/build.*
 src/sweep/*.so
 tests
 *.egg-info
