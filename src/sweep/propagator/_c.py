@@ -269,6 +269,21 @@ class Wrapper(torch.autograd.Function):
     @staticmethod
     def backward(ctx, adjoint_source):
 
+        if not hasattr(ctx, "cp"):
+            # The end of this function releases the params object -- wavefields,
+            # PML profiles, the forward source -- at the earliest point it can,
+            # which is what keeps impl='c' from holding a propagation's worth of
+            # buffers alive after the gradient is out. That release is one-way,
+            # so a second backward over the same graph has nothing to read.
+            # Without this check it surfaced as `AttributeError: 'WrapperBackward'
+            # object has no attribute 'cp'` from the middle of the unpack.
+            raise RuntimeError(
+                "impl='c' does not support a second backward over the same graph "
+                "(loss.backward(retain_graph=True) then backward() again): the "
+                "compiled path frees its propagation buffers as soon as the first "
+                "backward produces the gradient. Run the forward again for a second "
+                "gradient, or use impl='eager', which keeps its graph.")
+
         # -------- unpack --------
         (
             u_allt,
