@@ -328,7 +328,6 @@ class ViscoAcoustic(SecondOrderEquation):
             pml_slot_axes=("x", "z", "x", "z", "x", "z"),
             checkpoint_slot_axes=(None, None, "x", "z", "x", "z"),
             boundary_save_nvar=1,
-            backward_workspace_nvar=1,
         )
 
     def init_abc(self, type='cpml', **kwargs):

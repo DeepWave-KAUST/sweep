@@ -149,7 +149,6 @@ class Acoustic3D(SecondOrderEquation):
             pml_slot_axes=("x", "z", "x", "z", "y", "y", "x", "z", "y"),
             checkpoint_slot_axes=(None, None, "x", "y", "z", "x", "y", "z"),
             boundary_save_nvar=1,
-            backward_workspace_nvar=1,
             slots=slot_table.ACOUSTIC3D,
             grads_out_has_wavelet=True,
             supports_boundary_tail_steps=True,
