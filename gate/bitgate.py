@@ -160,6 +160,9 @@ ALL_SOLVERS = (
     # simply never picked them up, so two compiled equations -- one of them a
     # whole displacement-based formulation -- had no bit-exact coverage at all.
     "elastic_tti_sg3d", "elastic_tti_2nd2d",
+    # Added 2026-09-17: its CUDA backend (PR #78) had pytest coverage only --
+    # the gate stayed 187/187 green while every visco backward raised.
+    "visco2d",
 )
 
 # das2d / das3d declare supported_scenarios=('interior',); everything else takes

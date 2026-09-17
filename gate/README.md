@@ -24,7 +24,8 @@ has two **structural** blind spots that other instruments exist to cover:
 |---|---|---|
 | compares C against C | it cannot see a defect the full and boundary-saving paths **share** — the shape of the `acoustic_vti_1st` operator-adjoint bug | the eager leg of `test/backend_gradient_matrix.py` |
 | `ALL_SOLVERS` omits `elastic_vr2d` | the solver suite has no ElasticVRR entry | `gate/evr_ab.py`, 56 tensors |
-| also omits `elastic_tti_sg3d`, `elastic_tti_2nd2d`, `visco_acoustic2d` | never added | the matrix for the first two; `test/test_visco_acoustic_cuda.py` for visco |
+| `visco2d` joined `ALL_SOLVERS` only on 2026-09-17 | its CUDA backend had pytest coverage only: tier B stayed 187/187 green while every visco backward raised | `test/test_visco_acoustic_cuda.py`, and now tiers B/C |
+| `lsrtm2d/3d` started from a zero reflectivity until 2026-09-17 | the Born record was identically 0, so no record comparison could see a forward change (the gradient, the adjoint of the noise data, was non-zero) | `make_models` now starts from a 0.04 box; those baselines were re-recorded from `6b0d8306` |
 | no tier sets `compute_illumination` | the illumination path was never gated at all | `test/test_illumination_pin.py` |
 
 ```bash

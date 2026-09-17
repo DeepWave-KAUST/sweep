@@ -345,6 +345,31 @@
   "lsrtm3d|c|full|interior|canon": null,
   "lsrtm3d|eager|full|free_surface|canon": null,
   "lsrtm3d|eager|full|interior|canon": null,
+  "visco2d|c|bs_cpu|interior|canon": null,
+  "visco2d|c|bs_disk|interior|canon": null,
+  "visco2d|c|bs_gpu_int8|interior|canon": null,
+  "visco2d|c|bs_gpu|free_surface|canon": null,
+  "visco2d|c|bs_gpu|interior|canon": null,
+  "visco2d|c|bs_gpu|interior|phys": null,
+  "visco2d|c|ckpt_chunk|interior|canon": {
+   "grad_rel": 2.7941464308761004e-07,
+   "loss": "stable",
+   "passes": 4,
+   "record": "stable",
+   "source": "4pass",
+   "worst_grad": "Q"
+  },
+  "visco2d|c|ckpt_recursive|interior|canon": {
+   "grad_rel": 2.7941456501508907e-07,
+   "loss": "stable",
+   "passes": 4,
+   "record": "stable",
+   "source": "4pass",
+   "worst_grad": "Q"
+  },
+  "visco2d|c|full|interior|canon": null,
+  "visco2d|eager|full|free_surface|canon": null,
+  "visco2d|eager|full|interior|canon": null,
   "vrz2d|c|bs_cpu|interior|canon": null,
   "vrz2d|c|bs_disk|interior|canon": null,
   "vrz2d|c|bs_gpu_int8|interior|canon": null,
@@ -411,6 +436,13 @@
   "4pass": {
    "gpu": "NVIDIA RTX 6000 Ada Generation",
    "n": 28,
+   "passes": 4,
+   "torch": "2.9.1+cu128"
+  },
+  "4pass-B-visco2d": {
+   "gpu": "NVIDIA RTX 6000 Ada Generation",
+   "n": 11,
+   "note": "visco2d added 2026-09-17; measured on refactor/driver-template @ 6b0d8306",
    "passes": 4,
    "torch": "2.9.1+cu128"
   }
