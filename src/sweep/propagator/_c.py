@@ -138,6 +138,7 @@ class Wrapper(torch.autograd.Function):
         _C = _get_C()
         params = _C.ForwardInput()
         params.wavefields = cp.forward_wavefields
+        params.forward_workspace = list(cp.forward_workspace)
         params.last_two = cp.last_two
         if cp.boundary_on_disk:
             params.boundary_cpu = [b.zero_() for b in cp.boundary_cpu]
@@ -251,7 +252,10 @@ class Wrapper(torch.autograd.Function):
             # from forward-return through backward on EVERY boundary-saving and
             # checkpoint call -- silently undoing the point of boundary saving,
             # and green, because no gate measures memory.
-            ctx.cp = cp if save_all_wavefields else replace(cp, forward_wavefields=())
+            # The forward workspace is dropped in every mode: it is one call's
+            # scratch and no backward reads it.
+            ctx.cp = replace(cp, forward_workspace=(),
+                             forward_wavefields=cp.forward_wavefields if save_all_wavefields else ())
             ctx.models = models
             ctx.forward_source = wavelet
             ctx.nt = nt
@@ -1229,6 +1233,22 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             for shape in self._forward_wavefield_shapes()
         )
 
+    def _transient_forward_workspace(self, batch_size):
+        """Per-call scratch for the compiled forward, ``cuda_layout.forward_workspace_nvar``
+        padded grids per shot.
+
+        Transient for the same reason as the wavefields above: the forward's
+        scratch is dead once the forward returns, so a persistent pool would
+        sit idle at the backward's peak. One-call lifetime is exactly what the
+        C++-side ``zeros_like`` it replaces had, so the bytes and the zero-fill
+        per call are unchanged; what moves is only who allocates.
+        """
+        n = int(self._cuda_layout().forward_workspace_nvar)
+        return tuple(
+            torch.zeros([batch_size, 1, *self.shape_cuda], device=self.dev)
+            for _ in range(n)
+        )
+
     def _ensure_adjoint_workspace_buffers(self, batch_size):
         cuda_layout = self._cuda_layout()
         workspace_nvar = int(cuda_layout.backward_workspace_nvar)
@@ -1610,6 +1630,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         if not forward_wavefields:
             forward_wavefields = self._transient_forward_wavefields(batch_size)
+        forward_workspace = self._transient_forward_workspace(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
         checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_checkpoint else ()
 
@@ -1697,6 +1718,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     boundary_disk_async_read=boundary_disk_async_read,
                     boundary_tail_steps=boundary_tail_steps,
                     forward_wavefields=forward_wavefields,
+                    forward_workspace=forward_workspace,
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,
                     checkpoint_buffers=checkpoint_buffers,

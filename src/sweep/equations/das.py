@@ -1001,6 +1001,9 @@ class DASZhao(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=9,
             backward_workspace_nvar=0,
+            # The four per-step derivative scratch grids the compiled forward
+            # used to allocate itself (das2d/forward.cu ForwardWorkspaceSlot).
+            forward_workspace_nvar=4,
         )
 
 
@@ -1134,6 +1137,9 @@ class DASZhao3D(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=13,
             backward_workspace_nvar=0,
+            # The nine per-step derivative scratch grids the compiled forward
+            # used to allocate itself (das3d/forward.cu ForwardWorkspaceSlot).
+            forward_workspace_nvar=9,
         )
 
 

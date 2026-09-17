@@ -17,6 +17,12 @@
 
 namespace elastic_tti_2nd2d {
 
+// Layout of p.forward_workspace, declared on the Python side as
+// ElasticTTI2nd.cuda_layout.forward_workspace_nvar: the three stress
+// workspaces the stress kernel writes and the update kernel reads within one
+// step (one padded grid per shot each).
+enum ForwardWorkspaceSlot : int { SXX_WS = 0, SZZ_WS, SXZ_WS, N_FORWARD_SLOTS };
+
 ForwardOutput forward(const ForwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
@@ -77,9 +83,13 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
-    auto sxx_ws = torch::zeros_like(rho);
-    auto szz_ws = torch::zeros_like(rho);
-    auto sxz_ws = torch::zeros_like(rho);
+    TORCH_CHECK(p.forward_workspace.empty() || p.forward_workspace.size() == N_FORWARD_SLOTS,
+                "ElasticTTI2nd forward: forward_workspace must be empty or hold ",
+                static_cast<int>(N_FORWARD_SLOTS), " tensors, got ", p.forward_workspace.size());
+    const auto& ws = p.forward_workspace;
+    auto sxx_ws = pool_or_zeros(ws, SXX_WS, rho);
+    auto szz_ws = pool_or_zeros(ws, SZZ_WS, rho);
+    auto sxz_ws = pool_or_zeros(ws, SXZ_WS, rho);
 
     EffectiveBoundarySaver boundary_saver;
     const int save_width = solver.M + 1;

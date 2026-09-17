@@ -66,6 +66,7 @@ class CompiledCallParams:
     boundary_disk_async_read: bool = False
     boundary_tail_steps: int = 0
     forward_wavefields: tuple = ()
+    forward_workspace: tuple = ()
     adjoint_wavefields: tuple = ()
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()

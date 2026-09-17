@@ -416,4 +416,7 @@ class ElasticTTI2nd(FirstOrderEquation):
             last_two_storage_nvar=2,
             boundary_save_nvar=2,
             backward_workspace_nvar=8,
+            # The three stress workspaces of the compiled forward's step
+            # (elastic_tti_2nd2d/forward.cu ForwardWorkspaceSlot).
+            forward_workspace_nvar=3,
         )

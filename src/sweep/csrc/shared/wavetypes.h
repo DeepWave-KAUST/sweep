@@ -25,6 +25,7 @@ struct ForwardInput {
 
     std::vector<torch::Tensor> pml_vals;  // Bind from python
     std::vector<torch::Tensor> wavefields; // Bind from python
+    std::vector<torch::Tensor> forward_workspace; // Bind from python: per-call scratch, cuda_layout.forward_workspace_nvar
     torch::Tensor last_two; // Bind from python
 
     std::vector<torch::Tensor> boundary_cpu; // Bind from python

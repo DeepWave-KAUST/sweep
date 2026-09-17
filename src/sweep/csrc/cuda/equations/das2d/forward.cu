@@ -19,6 +19,12 @@
 
 namespace das2d {
 
+// Layout of p.forward_workspace, declared on the Python side as
+// DASZhao.cuda_layout.forward_workspace_nvar: the per-step derivative scratch
+// (one padded grid per shot each). The step loop zeroes every slot before it
+// is written, so nothing here relies on the pool's contents at entry.
+enum ForwardWorkspaceSlot : int { TMP_SXX_X = 0, TMP_SZZ_Z, TMP_TXX_Z, TMP_TZZ_X, N_FORWARD_SLOTS };
+
 ForwardOutput forward(const ForwardInput& in)
 {
     const auto& p = in;
@@ -59,10 +65,14 @@ ForwardOutput forward(const ForwardInput& in)
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
 
-    auto tmp_sxx_x = torch::zeros_like(vp);
-    auto tmp_szz_z = torch::zeros_like(vp);
-    auto tmp_txx_z = torch::zeros_like(vp);
-    auto tmp_tzz_x = torch::zeros_like(vp);
+    TORCH_CHECK(p.forward_workspace.empty() || p.forward_workspace.size() == N_FORWARD_SLOTS,
+                "DAS2D forward: forward_workspace must be empty or hold ",
+                static_cast<int>(N_FORWARD_SLOTS), " tensors, got ", p.forward_workspace.size());
+    const auto& ws = p.forward_workspace;
+    auto tmp_sxx_x = pool_or_zeros(ws, TMP_SXX_X, vp);
+    auto tmp_szz_z = pool_or_zeros(ws, TMP_SZZ_Z, vp);
+    auto tmp_txx_z = pool_or_zeros(ws, TMP_TXX_Z, vp);
+    auto tmp_tzz_x = pool_or_zeros(ws, TMP_TZZ_X, vp);
     torch::Tensor u_allt;
     if (p.save_all_wavefields) {
         u_allt = torch::zeros({p.nt, 2, B, nz, nx}, vp.options());

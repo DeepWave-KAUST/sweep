@@ -78,6 +78,14 @@ back to the per-call stepped path when a factory is missing.
   the full path calls `set_cut_mask(0)`, and both checkpoint modes refuse stepped,
   phased and cut inputs. Acoustic DD supports gpu-direct or cpu storage (not disk);
   staggered DD supports gpu-direct only.
+* Scratch is declared, not allocated: `forward_workspace_nvar` and
+  `backward_workspace_nvar` (or `backward_workspace_shapes`) in `cuda_layout` say how
+  many padded grids per shot the propagator hands the driver as `forward_workspace`
+  (transient, one call) and `adjoint_workspace` (persistent, zeroed before every
+  gradient-bearing forward). A driver takes each slot with `pool_or_zeros`
+  (`common/cudautils.h`), names the slots in an enum, checks the declared count at
+  entry, and allocates nothing of its own; an unbound pool still falls back to a
+  fresh zero tensor per slot.
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record

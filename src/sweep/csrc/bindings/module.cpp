@@ -251,6 +251,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("record_out", &ForwardInput::record_out)
         .def_readwrite("u_allt_out", &ForwardInput::u_allt_out)
         .def_readwrite("wavefields", &ForwardInput::wavefields)
+        .def_readwrite("forward_workspace", &ForwardInput::forward_workspace)
         .def_readwrite("boundary_cpu", &ForwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu)
         .def_readwrite("boundary_disk_files", &ForwardInput::boundary_disk_files)

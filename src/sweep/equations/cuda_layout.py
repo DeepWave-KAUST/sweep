@@ -18,6 +18,11 @@ class CUDALayoutSpec:
     checkpoint_nvar: int | None = None
     backward_workspace_nvar: int = 0
     backward_workspace_shapes: Callable | None = None
+    # Per-call scratch the compiled FORWARD takes from the propagator
+    # (``ForwardInput.forward_workspace``): one padded grid per shot each,
+    # allocated for the duration of one call, never re-zeroed -- a driver
+    # zeroes what it needs. 0 = the forward allocates nothing of its own.
+    forward_workspace_nvar: int = 0
     # Extra wavefield buffers allocated for the ADJOINT only (not the forward).
     # The fused single-kernel adjoint double-buffers zeta (the forward already
     # double-buffers psi via pml_nvar): adjoint gets base+pml+adjoint_extra
