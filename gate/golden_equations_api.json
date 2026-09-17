@@ -223,7 +223,8 @@
     "ElasticTTI2nd",
     "ElasticTTISG",
     "ElasticTTISG3D",
-    "ElasticVRR"
+    "ElasticVRR",
+    "ViscoAcoustic"
   ],
-  "_note": "Frozen at origin/dev. Updated 2026-08-28 for dev b895a93..4d025ea, which added exactly two equations (ElasticTTISG3D, ElasticTTI2nd). Verified by diffing the live surface against this file: nothing disappeared, no class changed owner. NOT regenerated wholesale -- the refactor's own additions stay in check_equations_api.py's ALLOWED_NEW, so that this file keeps describing DEV's surface rather than rubber-stamping ours."
+  "_note": "Frozen at origin/dev. Updated 2026-08-28 for dev b895a93..4d025ea, which added exactly two equations (ElasticTTISG3D, ElasticTTI2nd). Updated 2026-09-17 for dev cf588fb6 (ViscoAcoustic CUDA backend, PR #78): torch_binding gains ViscoAcoustic, nothing else moved. Verified by diffing the live surface against this file: nothing disappeared, no class changed owner. NOT regenerated wholesale -- the refactor's own additions stay in check_equations_api.py's ALLOWED_NEW, so that this file keeps describing DEV's surface rather than rubber-stamping ours."
 }
