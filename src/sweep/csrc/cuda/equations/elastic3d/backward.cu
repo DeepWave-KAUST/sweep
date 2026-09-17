@@ -432,6 +432,10 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     cpml.allocate(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
+    // last_two is bound but never read here: this backward seeds its
+    // reconstruction from p.u_last_two directly, and an unbound saver would
+    // allocate an nvar-wavefield copy on every call (in host memory on the
+    // staged path).
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
@@ -439,7 +443,7 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
         true, 3, 9, solver, vp, save_width, 1,
         true, !staged_boundary, staged_boundary ? p.transfer_interval : 1,
         staged_boundary ? p.boundary_cpu : std::vector<torch::Tensor>{},
-        p.boundary_gpu, {}, p.use_pinned_memory
+        p.boundary_gpu, p.u_last_two, p.use_pinned_memory
     );
     auto bs = boundary_saver.view();
 

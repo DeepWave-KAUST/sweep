@@ -295,6 +295,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto szz_ws = torch::zeros_like(rho);
     auto sxz_ws = torch::zeros_like(rho);
 
+    // last_two is bound but never read here: this backward seeds its
+    // reconstruction from p.u_last_two directly, and an unbound saver would
+    // allocate an nvar-wavefield copy on every call (in host memory on the
+    // staged path).
     EffectiveBoundarySaver boundary_saver;
     const int save_width = solver.M + 1;
     const bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
@@ -303,14 +307,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
             true, 2, 2, solver, rho, save_width, 2,
             true, false, p.transfer_interval,
             p.boundary_cpu, p.boundary_gpu,
-            {}, p.use_pinned_memory
+            p.u_last_two, p.use_pinned_memory
         );
     } else {
         boundary_saver.allocate(
             true, 2, 2, solver, rho, save_width, 2,
             true, true, 1,
             {}, p.boundary_gpu,
-            {}, p.use_pinned_memory
+            p.u_last_two, p.use_pinned_memory
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, rho);

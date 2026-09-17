@@ -440,6 +440,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
     // Boundary saver / runtime — mirror forward.cu's allocation but in
     // backward mode (data flows from saver → forward state, not the other
     // way around).
+    // last_two is bound but never read here: this backward seeds its
+    // reconstruction from p.u_last_two directly, and an unbound saver would
+    // allocate an nvar-wavefield copy on every call (in host memory on the
+    // staged path).
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
@@ -448,14 +452,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
             /*use_bs=*/true, /*dim=*/2, /*nvar=*/4, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/false, p.transfer_interval,
-            p.boundary_cpu, p.boundary_gpu, /*last_two=*/{},
+            p.boundary_cpu, p.boundary_gpu, /*last_two=*/p.u_last_two,
             p.use_pinned_memory);
     } else {
         boundary_saver.allocate(
             /*use_bs=*/true, /*dim=*/2, /*nvar=*/4, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/true, /*transfer_interval=*/1,
-            /*boundary_cpu=*/{}, p.boundary_gpu, /*last_two=*/{},
+            /*boundary_cpu=*/{}, p.boundary_gpu, /*last_two=*/p.u_last_two,
             p.use_pinned_memory);
         // If the propagator handed us an in-memory boundary tensor list
         // (legacy path), load it now.
