@@ -8,12 +8,24 @@
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
+#include "../../common/cudautils.h"
 #include "../../common/das.h"
 #include "../../common/elastic.h"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
 namespace das3d {
+
+// p.grads_out as the propagator binds it: {grad_vp, grad_vs, grad_rho}, in
+// BackwardOutput.grads order (zeroed per backward on the Python side and
+// accumulated here), or empty for an unbound caller, which then gets fresh
+// zeros per slot.
+static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 3,
+                "DAS3D backward: grads_out must be empty or hold 3 tensors ({grad_vp, grad_vs, grad_rho}), got ", p.grads_out.size());
+    return p.grads_out;
+}
 
 namespace {
 
@@ -199,9 +211,10 @@ BackwardOutput backward(const BackwardInput& in)
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_vs = torch::zeros_like(vp);
-    auto grad_rho = torch::zeros_like(vp);
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 0, vp, "grads_out");
+    auto grad_vs = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
 
     auto zero_exx = torch::zeros_like(vp);
     auto zero_eyy = torch::zeros_like(vp);

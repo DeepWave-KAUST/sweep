@@ -406,9 +406,19 @@ public:
 
     // The hand-written drivers never read p.grads_out: gradients are always
     // freshly allocated, one per prepared model (rho + 15 stiffnesses).
+    // grads_out from the propagator (one per prepared model, zeroed per
+    // backward on the Python side, accumulated here) or fresh zeros when
+    // unbound.
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        grads = zero_model_grads(p.models);
+        if (p.grads_out.empty()) {
+            grads = zero_model_grads(p.models);
+            return;
+        }
+        TORCH_CHECK(p.grads_out.size() == p.models.size(),
+                    "elastic_tti_sg2d backward: grads_out must hold one tensor per prepared model (",
+                    p.models.size(), "), got ", p.grads_out.size());
+        grads = p.grads_out;
     }
 
     static std::vector<torch::Tensor> signed_adjoint_sources(

@@ -40,6 +40,20 @@ namespace acoustic_vti_1st_3d {
 
 namespace {
 
+enum GradSlot : int { GRAD_VP = 0, GRAD_EPS, GRAD_DELTA, GRAD_RHO, N_GRADS };
+
+// p.grads_out as the propagator binds it: {grad_vp, grad_eps, grad_delta, grad_rho}, in
+// BackwardOutput.grads order (zeroed per backward on the Python side and
+// accumulated here), or empty for an unbound caller, which then gets fresh
+// zeros per slot.
+static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == N_GRADS,
+                "AcousticVTI1st3D backward: grads_out must be empty or hold ",
+                static_cast<int>(N_GRADS), " tensors ({grad_vp, grad_eps, grad_delta, grad_rho}), got ", p.grads_out.size());
+    return p.grads_out;
+}
+
 // Layout of p.adjoint_workspace, declared on the Python side as
 // AcousticVTI1st3D.cuda_layout.backward_workspace_nvar (one padded grid per
 // shot each). ZERO_PREV is read only: it stands in for the "previous stress"
@@ -230,10 +244,11 @@ BackwardOutput backward(const BackwardInput& in)
         adjoint.allocate(vp_t);
     auto adj_view = adjoint.view();
 
-    auto grad_vp    = torch::zeros_like(vp_t);
-    auto grad_eps   = torch::zeros_like(epsilon_t);
-    auto grad_delta = torch::zeros_like(delta_t);
-    auto grad_rho   = torch::zeros_like(rho_t);
+    const auto& gs  = grad_slots(p);
+    auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_or_zeros(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_or_zeros(gs, GRAD_RHO, rho_t, "grads_out");
 
     SolverContext solver{
         3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -416,10 +431,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     auto neg_forward_source = -p.forward_source;
 
-    auto grad_vp    = torch::zeros_like(vp_t);
-    auto grad_eps   = torch::zeros_like(epsilon_t);
-    auto grad_delta = torch::zeros_like(delta_t);
-    auto grad_rho   = torch::zeros_like(rho_t);
+    const auto& gs  = grad_slots(p);
+    auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_or_zeros(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_or_zeros(gs, GRAD_RHO, rho_t, "grads_out");
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 3);
@@ -663,10 +679,11 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     cpml.allocate(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
-    auto grad_vp    = torch::zeros_like(vp_t);
-    auto grad_eps   = torch::zeros_like(epsilon_t);
-    auto grad_delta = torch::zeros_like(delta_t);
-    auto grad_rho   = torch::zeros_like(rho_t);
+    const auto& gs  = grad_slots(p);
+    auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_or_zeros(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_or_zeros(gs, GRAD_RHO, rho_t, "grads_out");
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
 

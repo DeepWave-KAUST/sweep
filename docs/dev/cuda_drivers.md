@@ -86,6 +86,10 @@ back to the per-call stepped path when a factory is missing.
   (`common/cudautils.h`), names the slots in an enum, checks the declared count at
   entry, and allocates nothing of its own; an unbound pool still falls back to a
   fresh zero tensor per slot.
+  Gradient outputs follow the same rule: the propagator allocates `grads_out`
+  (zeroed; `grads_out_has_wavelet` decides whether slot 0 is `grad_wavelet`) on the
+  monolithic path as well as the stepped one, and every driver binds them
+  (`bind_grads`, or slot by slot with `pool_or_zeros`) rather than allocating.
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record

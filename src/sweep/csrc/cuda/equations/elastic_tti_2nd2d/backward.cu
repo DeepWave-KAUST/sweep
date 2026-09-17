@@ -19,6 +19,23 @@
 
 namespace elastic_tti_2nd2d {
 
+// p.grads_out when the propagator bound the gradient outputs (one per prepared
+// model, BackwardOutput.grads order, zeroed per backward on the Python side),
+// else fresh zeros for an unbound caller.
+static std::vector<torch::Tensor> model_grads_or_zeros(const BackwardInput& p)
+{
+    if (p.grads_out.empty())
+        return zero_model_grads(p.models);
+    TORCH_CHECK(p.grads_out.size() == p.models.size(),
+                "ElasticTTI2nd backward: grads_out must hold one tensor per model (",
+                p.models.size(), "), got ", p.grads_out.size());
+    for (size_t i = 0; i < p.models.size(); ++i)
+        TORCH_CHECK(p.grads_out[i].sizes() == p.models[i].sizes(),
+                    "grads_out[", i, "] has shape ", p.grads_out[i].sizes(),
+                    " but model ", i, " is ", p.models[i].sizes());
+    return p.grads_out;
+}
+
 namespace {
 
 struct AdjointWorkspace {
@@ -187,7 +204,7 @@ BackwardOutput backward(const BackwardInput& in)
         tsr.zero_();
 
     auto model = stiffness_view(p.models);
-    auto grads = zero_model_grads(p.models);
+    auto grads = model_grads_or_zeros(p);
     auto grad_view = stiffness_grad_view(grads);
 
     ElasticCPMLTensor cpml;
@@ -281,7 +298,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.uz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
 
     auto model = stiffness_view(p.models);
-    auto grads = zero_model_grads(p.models);
+    auto grads = model_grads_or_zeros(p);
     auto grad_view = stiffness_grad_view(grads);
 
     ElasticCPMLTensor cpml;
@@ -462,7 +479,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto model = stiffness_view(p.models);
-    auto grads = zero_model_grads(p.models);
+    auto grads = model_grads_or_zeros(p);
     auto grad_view = stiffness_grad_view(grads);
 
     WavefieldTensor adjoint;

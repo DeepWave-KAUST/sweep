@@ -882,12 +882,12 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     // the forward kernel); the adjoint aux stays full-domain.
     Eq::init_aux_slabs(ctx, forward);
 
+    // Same as full mode: gradients bound from grads_out (or allocated when
+    // unbound), illumination only when something will read it.
     std::vector<torch::Tensor> grads;
-    Eq::alloc_grads(p, grads);
     RTMOutput illumination;
-    init_rtm_output(illumination, vp,
-                    Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
-                    2 * in.adcig_max_lag + 1);
+    Eq::bind_backward_outputs(in, grads, illumination,
+                              /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
     RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
 
     typename Eq::CPML cpml_tensor;
@@ -1049,12 +1049,12 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     Eq::bind_or_alloc_adjoint(adjoint, p, vp);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
+    // Same as full mode: gradients bound from grads_out (or allocated when
+    // unbound), illumination only when something will read it.
     std::vector<torch::Tensor> grads;
-    Eq::alloc_grads(p, grads);
     RTMOutput illumination;
-    init_rtm_output(illumination, vp,
-                    Eq::ADCIG_IN_FULL_MODES && in.compute_adcig,
-                    2 * in.adcig_max_lag + 1);
+    Eq::bind_backward_outputs(in, grads, illumination,
+                              /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
     RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
 
     typename Eq::CPML cpml_tensor;

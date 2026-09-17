@@ -319,6 +319,9 @@ class ViscoAcoustic(SecondOrderEquation):
         # Identical to Acoustic: same wavefield state (the damping correction
         # is memoryless in (u_now, u_prev) and runs through ATen).
         return CUDALayoutSpec(
+            # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
+            # propagator sizes grads_out from this.
+            grads_out_has_wavelet=True,
             base_nvar=3,
             pml_nvar=6,
             adjoint_extra_nvar=2,

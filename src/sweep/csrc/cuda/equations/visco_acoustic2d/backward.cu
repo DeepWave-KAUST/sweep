@@ -17,6 +17,18 @@ namespace visco_acoustic2d {
 
 namespace {
 
+// p.grads_out as the propagator binds it: {grad_wavelet, grad, grad_B1,
+// grad_B2, grad_A} in BackwardOutput.grads order (zeroed per backward on the
+// Python side and accumulated here), or empty for an unbound caller, which
+// then gets fresh zeros per slot.
+const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 5,
+                "ViscoAcoustic backward: grads_out must be empty or hold 5 tensors "
+                "(grad_wavelet, grad, grad_B1, grad_B2, grad_A), got ", p.grads_out.size());
+    return p.grads_out;
+}
+
 // ---------------------------------------------------------------------------
 // Spectral terms (Zhu & Harris 2014, decoupled) — adjoint machinery.
 // The ViscoSpectral bundle (kernels.cuh) carries the damping filter and the
@@ -153,7 +165,7 @@ void check_visco_backward(const BackwardInput& p)
     TORCH_CHECK(p.models.size() == 4,
                 "visco_acoustic2d expects the prepared models "
                 "(vp_step, B1, B2, A); got ", p.models.size());
-    TORCH_CHECK(!p.bw_stepped() && p.grads_out.empty() && p.step_phase == 0,
+    TORCH_CHECK(!p.bw_stepped() && p.step_phase == 0,
                 "visco_acoustic2d does not support stepped backward segments");
     TORCH_CHECK(p.cut_face_mask == 0,
                 "visco_acoustic2d does not support domain decomposition");
@@ -284,11 +296,12 @@ BackwardOutput backward(const BackwardInput& in)
                 "visco_acoustic2d backward (full) requires the raw forward "
                 "wavefield history");
     BackwardOutput out;
-    auto grad = torch::zeros_like(in.models[0]);
-    auto grad_A = torch::zeros_like(in.models[3]);
-    auto grad_B1 = torch::zeros_like(in.models[1]);
-    auto grad_B2 = torch::zeros_like(in.models[2]);
-    auto grad_wavelet = torch::zeros_like(in.forward_source);
+    const auto& gs = grad_slots(in);
+    auto grad = pool_or_zeros(gs, 1, in.models[0], "grads_out");
+    auto grad_A = pool_or_zeros(gs, 4, in.models[3], "grads_out");
+    auto grad_B1 = pool_or_zeros(gs, 2, in.models[1], "grads_out");
+    auto grad_B2 = pool_or_zeros(gs, 3, in.models[2], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, in.forward_source, "grads_out");
     RTMOutput illumination;
     init_rtm_output_visco_2d(illumination, in.models[0]);
     run_full_imaging_visco(in, &grad, &grad_A, &grad_B1, &grad_B2,
@@ -389,11 +402,12 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // the forward kernel); the adjoint aux stays full-domain.
     acoustic_init_aux_slabs(ctx, forward);
 
-    auto grad = torch::zeros_like(vp);
-    auto grad_A = torch::zeros_like(p.models[3]);
-    auto grad_B1 = torch::zeros_like(p.models[1]);
-    auto grad_B2 = torch::zeros_like(p.models[2]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    const auto& gs = grad_slots(p);
+    auto grad = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_A = pool_or_zeros(gs, 4, p.models[3], "grads_out");
+    auto grad_B1 = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_B2 = pool_or_zeros(gs, 3, p.models[2], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     RTMOutput illumination;
     init_rtm_output_visco_2d(illumination, vp);
 
@@ -849,11 +863,12 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.allocate(vp, 2, true);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
-    auto grad = torch::zeros_like(vp);
-    auto grad_A = torch::zeros_like(p.models[3]);
-    auto grad_B1 = torch::zeros_like(p.models[1]);
-    auto grad_B2 = torch::zeros_like(p.models[2]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    const auto& gs = grad_slots(p);
+    auto grad = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_A = pool_or_zeros(gs, 4, p.models[3], "grads_out");
+    auto grad_B1 = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_B2 = pool_or_zeros(gs, 3, p.models[2], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     RTMOutput illumination;
     init_rtm_output_visco_2d(illumination, vp);
 

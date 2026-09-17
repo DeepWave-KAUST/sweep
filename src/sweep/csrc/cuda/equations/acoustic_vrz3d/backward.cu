@@ -51,6 +51,19 @@ static VrzBwdScratch& vrz_bwd_scratch() {
     return *s;
 }
 
+// p.grads_out as the propagator binds it for the acoustic family:
+// {grad_wavelet, grad_vp, grad_z}. Slot 0 is the family's wavelet slot, which
+// this equation never produces; slots 1 and 2 are accumulated here (Python
+// zeroes them once per backward, or once per stepped/DD segment sequence).
+// Empty for an unbound caller, which then gets fresh zeros.
+static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == p.models.size() + 1,
+                "AcousticVRZ3D grads_out must hold models.size()+1 tensors "
+                "(slot 0 = grad_wavelet, then one per model), got ", p.grads_out.size());
+    return p.grads_out;
+}
+
 BackwardOutput backward_full_impl(const BackwardInput& in)
 {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
@@ -96,8 +109,9 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
         adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz3d(adjoint);
 
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_z = torch::zeros_like(z);
+    const auto& gs = grad_slots(in);
+    auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
     auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
     auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
     auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
@@ -334,20 +348,11 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         forward.u_next_t.zero_();
     }
 
-    // Stepped/DD accumulate the gradient into Python-bound buffers across
-    // segments (calculate_grad does +=; Python zeroes them once before segment
-    // 1).  A monolithic call with no grads_out uses fresh per-call buffers.
-    torch::Tensor grad_vp, grad_z;
-    if (!p.grads_out.empty()) {
-        TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
-                    "AcousticVRZ3D grads_out must hold models.size()+1 tensors "
-                    "(slot 0 = grad_wavelet, then one per model)");
-        grad_vp = p.grads_out[1];
-        grad_z = p.grads_out[2];
-    } else {
-        grad_vp = torch::zeros_like(vp);
-        grad_z = torch::zeros_like(z);
-    }
+    // Stepped/DD accumulate the gradient into these across segments
+    // (calculate_grad does +=; Python zeroes them once before segment 1).
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
     // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*): allocate ONCE
     // and, for a DD per-step backward, recompute/zero only on the FIRST segment
     // (they depend only on the fixed-within-a-backward model).  See VrzBwdScratch.
@@ -717,8 +722,9 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     else
         forward.allocate(vp, 3, true);
 
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_z = torch::zeros_like(z);
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
     auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
     auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
     auto Cy = torch::zeros_like(vp);    // ∂_yb·κ

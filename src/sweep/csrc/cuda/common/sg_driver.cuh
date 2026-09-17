@@ -1022,7 +1022,7 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
                                               fwd_source_config, adj_source_config);
 
     std::vector<torch::Tensor> grads;
-    Eq::alloc_grads(vp, grads);
+    Eq::bind_grads(p, grads);
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());

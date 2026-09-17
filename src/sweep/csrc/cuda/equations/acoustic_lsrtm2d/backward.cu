@@ -17,6 +17,17 @@
 
 namespace acoustic_lsrtm2d {
 
+// p.grads_out as the propagator binds it: {grad_wavelet, grad_vp, grad_mp}, in
+// BackwardOutput.grads order (zeroed per backward on the Python side and
+// accumulated here), or empty for an unbound caller, which then gets fresh
+// zeros per slot.
+static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 3,
+                "AcousticLSRTM2D backward: grads_out must be empty or hold 3 tensors ({grad_wavelet, grad_vp, grad_mp}), got ", p.grads_out.size());
+    return p.grads_out;
+}
+
 namespace {
 
 // Proper transpose adjoint step for the lsrtm scattered field: v2_lambda =
@@ -342,9 +353,10 @@ BackwardOutput backward(const BackwardInput& in)
     BackwardOutput out;
     TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
 
-    auto grad_wavelet = torch::zeros_like(in.forward_source);
-    auto grad_vp = torch::zeros_like(in.models[0]);
-    auto grad_mp = torch::zeros_like(in.models[1]);
+    const auto& gs = grad_slots(in);
+    auto grad_wavelet = pool_or_zeros(gs, 0, in.forward_source, "grads_out");
+    auto grad_vp = pool_or_zeros(gs, 1, in.models[0], "grads_out");
+    auto grad_mp = pool_or_zeros(gs, 2, in.models[1], "grads_out");
 
     run_full_imaging(in, grad_mp);
 
@@ -394,9 +406,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
 
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad_mp = torch::zeros_like(p.models[1]);
+    const auto& gs = grad_slots(p);
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -575,9 +588,10 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     else
         forward.allocate(vp, 2, true);
 
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad_mp = torch::zeros_like(p.models[1]);
+    const auto& gs = grad_slots(p);
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -730,9 +744,10 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad_mp = torch::zeros_like(p.models[1]);
+    const auto& gs = grad_slots(p);
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);

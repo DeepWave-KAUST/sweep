@@ -92,6 +92,21 @@ def _canonical_to_cuda_record(grad: torch.Tensor, cuda_ndim: int) -> torch.Tenso
     raise ValueError(f"Unexpected cuda_ndim={cuda_ndim}; expected 3 or 4.")
 
 
+def _gradient_buffers(has_wavelet, forward_source, models):
+    """One zero tensor per gradient the compiled backward accumulates into, in
+    ``BackwardInput.grads_out`` order: ``grad_wavelet`` first when the equation
+    declares it (``cuda_layout.grads_out_has_wavelet``), then one per model.
+
+    The stepped/DD path has always bound these; the monolithic path let every
+    driver allocate its own. Allocating them here costs the same bytes and the
+    same zero-fill per backward as the ``zeros_like`` they replace -- what moves
+    is only who allocates, so the C++ side stops owning tensors.
+    """
+    grads = [torch.zeros_like(forward_source)] if has_wavelet else []
+    grads += [torch.zeros_like(m) for m in models]
+    return grads
+
+
 class Wrapper(torch.autograd.Function):
 
     @staticmethod
@@ -344,6 +359,7 @@ class Wrapper(torch.autograd.Function):
         params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]
         params.adjoint_workspace = list(cp.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
+        params.grads_out = _gradient_buffers(cp.grads_out_has_wavelet, ctx.forward_source, params.models)
         params.eq_aux = [t.contiguous() for t in cp.eq_aux]
         # ``adjoint_source`` arrives in the canonical (B, nt, nrec, nfield)
         # layout that ``forward`` returned; permute it back to the raw CUDA
@@ -1719,6 +1735,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     boundary_tail_steps=boundary_tail_steps,
                     forward_wavefields=forward_wavefields,
                     forward_workspace=forward_workspace,
+                    grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,
                     checkpoint_buffers=checkpoint_buffers,

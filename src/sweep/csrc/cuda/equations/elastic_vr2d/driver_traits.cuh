@@ -431,9 +431,19 @@ public:
 
     // The hand-written drivers never bound grads_out (elastic_vr2d has no
     // stepped/DD path); always allocate the six accumulators.
+    // grads_out from the propagator (one per model: vp, vs, Rp_x, Rp_z,
+    // Rs_x, Rs_z; zeroed per backward on the Python side, accumulated here)
+    // or fresh zeros when unbound.
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        alloc_grads(p.models[0], grads);
+        if (p.grads_out.empty()) {
+            alloc_grads(p.models[0], grads);
+            return;
+        }
+        TORCH_CHECK(p.grads_out.size() == 6,
+                    "elastic_vr2d backward: grads_out must hold 6 tensors "
+                    "(vp, vs, Rp_x, Rp_z, Rs_x, Rs_z), got ", p.grads_out.size());
+        grads = p.grads_out;
     }
 
     static void alloc_grads(const torch::Tensor& vp, std::vector<torch::Tensor>& grads)

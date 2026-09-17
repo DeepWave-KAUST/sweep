@@ -201,6 +201,9 @@ class AcousticLSRTM3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
+            # propagator sizes grads_out from this.
+            grads_out_has_wavelet=True,
             base_nvar=6,
             # 2 wavefields (bg+sc); each: psix,psiy,psiz,zetax,zetay,zetaz (6) +
             # psixn,psiyn,psizn (3) for the race-free forward double-buffer -> 2*9=18.

@@ -15,6 +15,17 @@
 
 namespace acoustic_lsrtm3d {
 
+// p.grads_out as the propagator binds it: {grad_wavelet, grad_vp, grad_mp}, in
+// BackwardOutput.grads order (zeroed per backward on the Python side and
+// accumulated here), or empty for an unbound caller, which then gets fresh
+// zeros per slot.
+static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 3,
+                "AcousticLSRTM3D backward: grads_out must be empty or hold 3 tensors ({grad_wavelet, grad_vp, grad_mp}), got ", p.grads_out.size());
+    return p.grads_out;
+}
+
 namespace {
 
 // Proper transpose adjoint step for the lsrtm 3D scattered field: v2_lambda =
@@ -565,9 +576,10 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
 {
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad = torch::zeros_like(p.models[1]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     run_full_imaging(p, &grad, &grad_wavelet, nullptr);
     out.grads = {grad_wavelet, grad_vp, grad};
     return out;
@@ -785,9 +797,10 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
 {
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad = torch::zeros_like(p.models[1]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     run_bs_imaging(p, &grad, &grad_wavelet, nullptr);
     out.grads = {grad_wavelet, grad_vp, grad};
     return out;
@@ -952,9 +965,10 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
 {
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad = torch::zeros_like(p.models[1]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     run_ckpt_imaging(p, &grad, &grad_wavelet, nullptr);
     out.grads = {grad_wavelet, grad_vp, grad};
     return out;
@@ -1085,9 +1099,10 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
 {
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
-    auto grad_vp = torch::zeros_like(p.models[0]);
-    auto grad = torch::zeros_like(p.models[1]);
-    auto grad_wavelet = torch::zeros_like(p.forward_source);
+    const auto& gs = grad_slots(p);
+    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
+    auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     run_recursive_imaging(p, &grad, &grad_wavelet, nullptr);
     out.grads = {grad_wavelet, grad_vp, grad};
     return out;

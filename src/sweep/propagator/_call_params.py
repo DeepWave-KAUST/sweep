@@ -67,6 +67,9 @@ class CompiledCallParams:
     boundary_tail_steps: int = 0
     forward_wavefields: tuple = ()
     forward_workspace: tuple = ()
+    # Whether the equation's BackwardOutput.grads starts with grad_wavelet
+    # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
+    grads_out_has_wavelet: bool = False
     adjoint_wavefields: tuple = ()
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()
