@@ -418,17 +418,20 @@ class AcousticVTI1st(FirstOrderEquation):
         base_nvar = 4   (vx, vz, sH, sV)
         pml_nvar  = 4   (m_sHx, m_sVz, m_vxx, m_vzz)
         last_two_storage_nvar = 4  (snapshot of vx, vz, sH, sV)
-        backward_workspace_nvar = 0  (Phase 1 backward doesn't need extra
-                                       adjoint scratch — the 8 standard
-                                       adjoint-wavefield tensors are passed
-                                       via ``adjoint_wavefields``).
+        backward_workspace_nvar = 5  (the compiled backward's scratch: two
+                                       pre-multiplication buffers, one
+                                       read-only zero "previous stress", and
+                                       the two chunk-boundary seeds of the
+                                       checkpoint mode; the 8 adjoint
+                                       wavefields are passed separately via
+                                       ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
             base_nvar=4,
             pml_nvar=4,
             last_two_nvar=1,
             last_two_storage_nvar=4,
-            backward_workspace_nvar=0,
+            backward_workspace_nvar=5,
         )
 
 
@@ -585,13 +588,18 @@ class AcousticVTI1st3D(FirstOrderEquation):
         base_nvar = 5   (vx, vy, vz, sH, sV)
         pml_nvar  = 6   (m_sHx, m_sHy, m_sVz, m_vxx, m_vyy, m_vzz)
         last_two_storage_nvar = 5  (snapshot of vx, vy, vz, sH, sV)
-        backward_workspace_nvar = 0 (the 11 standard adjoint-wavefield tensors
-                                     are passed via ``adjoint_wavefields``).
+        backward_workspace_nvar = 6 (the compiled backward's scratch: three
+                                     pre-multiplication buffers, one read-only
+                                     zero "previous stress", and the two
+                                     chunk-boundary seeds of the checkpoint
+                                     mode; the 11 adjoint wavefields are
+                                     passed separately via
+                                     ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
             base_nvar=5,
             pml_nvar=6,
             last_two_nvar=1,
             last_two_storage_nvar=5,
-            backward_workspace_nvar=0,
+            backward_workspace_nvar=6,
         )

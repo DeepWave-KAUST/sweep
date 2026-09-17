@@ -129,18 +129,19 @@ struct Driver {
     // bound one (cuda_layout.backward_workspace_shapes, 6 per shot), which is how this
     // equation stops allocating per backward call; a fresh zeros_like of the
     // same geometry otherwise, so an unbound caller sees no change.
-    using Workspace = std::array<torch::Tensor, 6>;
+    // Slot names follow the stress-adjoint kernels' parameter order.
+    enum WorkspaceSlot : int { Q_VXX = 0, Q_VYX, Q_VZX, Q_VXZ, Q_VYZ, Q_VZZ, N_WORKSPACE };
+    using Workspace = std::array<torch::Tensor, N_WORKSPACE>;
 
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& rho)
     {
-        return Workspace{
-            eqdrv::pool_or_zeros(p.adjoint_workspace, 0, rho),
-            eqdrv::pool_or_zeros(p.adjoint_workspace, 1, rho),
-            eqdrv::pool_or_zeros(p.adjoint_workspace, 2, rho),
-            eqdrv::pool_or_zeros(p.adjoint_workspace, 3, rho),
-            eqdrv::pool_or_zeros(p.adjoint_workspace, 4, rho),
-            eqdrv::pool_or_zeros(p.adjoint_workspace, 5, rho),
-        };
+        TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_WORKSPACE,
+                    "elastic_tti_sg2d backward: adjoint_workspace must be empty or hold ",
+                    static_cast<int>(N_WORKSPACE), " tensors, got ", p.adjoint_workspace.size());
+        Workspace w;
+        for (int i = 0; i < N_WORKSPACE; ++i)
+            w[i] = pool_or_zeros(p.adjoint_workspace, i, rho);
+        return w;
     }
 
     static void validate_forward(const ForwardInput& p)
@@ -337,22 +338,22 @@ private:
             s.model,
             cpml_view,
             solver,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>()
+            workspace[Q_VXX].data_ptr<float>(),
+            workspace[Q_VYX].data_ptr<float>(),
+            workspace[Q_VZX].data_ptr<float>(),
+            workspace[Q_VXZ].data_ptr<float>(),
+            workspace[Q_VYZ].data_ptr<float>(),
+            workspace[Q_VZZ].data_ptr<float>()
         );
         LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_APPLY(
             s.order, s.launch_config.grid, s.launch_config.block,
             adj_view,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>(),
+            workspace[Q_VXX].data_ptr<float>(),
+            workspace[Q_VYX].data_ptr<float>(),
+            workspace[Q_VZX].data_ptr<float>(),
+            workspace[Q_VXZ].data_ptr<float>(),
+            workspace[Q_VYZ].data_ptr<float>(),
+            workspace[Q_VZZ].data_ptr<float>(),
             s.grad_ctx,
             solver
         );
@@ -368,22 +369,22 @@ private:
             s.model,
             cpml_view,
             solver,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>()
+            workspace[Q_VXX].data_ptr<float>(),
+            workspace[Q_VYX].data_ptr<float>(),
+            workspace[Q_VZX].data_ptr<float>(),
+            workspace[Q_VXZ].data_ptr<float>(),
+            workspace[Q_VYZ].data_ptr<float>(),
+            workspace[Q_VZZ].data_ptr<float>()
         );
         LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_APPLY(
             s.order, s.launch_config.grid, s.launch_config.block,
             adj_view,
-            workspace[0].data_ptr<float>(),
-            workspace[1].data_ptr<float>(),
-            workspace[2].data_ptr<float>(),
-            workspace[3].data_ptr<float>(),
-            workspace[4].data_ptr<float>(),
-            workspace[5].data_ptr<float>(),
+            workspace[Q_VXX].data_ptr<float>(),
+            workspace[Q_VYX].data_ptr<float>(),
+            workspace[Q_VZX].data_ptr<float>(),
+            workspace[Q_VXZ].data_ptr<float>(),
+            workspace[Q_VYZ].data_ptr<float>(),
+            workspace[Q_VZZ].data_ptr<float>(),
             s.grad_ctx,
             solver
         );

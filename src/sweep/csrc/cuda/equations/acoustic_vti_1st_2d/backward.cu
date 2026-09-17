@@ -37,6 +37,23 @@ namespace acoustic_vti_1st_2d {
 
 namespace {
 
+// Layout of p.adjoint_workspace, declared on the Python side as
+// AcousticVTI1st.cuda_layout.backward_workspace_nvar (one padded grid per shot
+// each). ZERO_PREV is read only: it stands in for the "previous stress" at the
+// first reverse step and relies on the propagator zeroing the pool before every
+// gradient-bearing forward.
+enum WorkspaceSlot : int { SCRATCH_X = 0, SCRATCH_Z, ZERO_PREV, SEED_SH, SEED_SV, N_SLOTS };
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// N_SLOTS: a pool of any other size means the Python declaration drifted.
+const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
+                "AcousticVTI1st2D backward: adjoint_workspace must be empty or hold ",
+                static_cast<int>(N_SLOTS), " tensors, got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
 // Same wavefield-tensor helper as forward.cu, lives in an anonymous namespace
 // so the linker sees it once per TU only.
 struct AdjWavefieldTensor {
@@ -216,12 +233,15 @@ BackwardOutput backward(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
-    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
-    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+    const auto& ws = workspace_slots(p);
+    auto scratch_x = pool_or_zeros(ws, SCRATCH_X, vp_t);
+    auto scratch_z = pool_or_zeros(ws, SCRATCH_Z, vp_t);
 
     // Zero buffer the size of one wavefield component, used as the "previous"
     // stress at iter `it = 0` (no prior step exists; initial state is zero).
-    auto zero_state = torch::zeros({B, nz, nx}, vp_t.options());
+    // ZERO_PREV is never written, and the pool is zeroed before every
+    // gradient-bearing forward, so it is still zero here.
+    auto zero_state = pool_or_zeros(ws, ZERO_PREV, vp_t);
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
@@ -448,8 +468,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
-    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
-    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+    const auto& ws = workspace_slots(p);
+    auto scratch_x = pool_or_zeros(ws, SCRATCH_X, vp_t);
+    auto scratch_z = pool_or_zeros(ws, SCRATCH_Z, vp_t);
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
@@ -478,9 +499,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
         async_copy.copy_stream
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
-
-    auto zero_prev_sH = torch::zeros_like(vp_t);
-    auto zero_prev_sV = torch::zeros_like(vp_t);
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 1; --it) {
         // (a) adjoint source injection (receiver-side residual)
@@ -693,8 +711,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
-    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
-    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+    const auto& ws = workspace_slots(p);
+    auto scratch_x = pool_or_zeros(ws, SCRATCH_X, vp_t);
+    auto scratch_z = pool_or_zeros(ws, SCRATCH_Z, vp_t);
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
@@ -716,9 +735,11 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // 4 physical fields are needed for the gradient kernel.
     auto u_chunk = torch::zeros({chunk_size, 4, B, nz, nx}, vp_t.options());
 
-    auto zero_prev = torch::zeros({B, nz, nx}, vp_t.options());
-    auto seed_sH   = torch::zeros({B, nz, nx}, vp_t.options());
-    auto seed_sV   = torch::zeros({B, nz, nx}, vp_t.options());
+    // zero_prev is read-only (ZERO_PREV stays zero, see backward()); the two seed
+    // buffers are overwritten at every chunk boundary before they are read.
+    auto zero_prev = pool_or_zeros(ws, ZERO_PREV, vp_t);
+    auto seed_sH   = pool_or_zeros(ws, SEED_SH, vp_t);
+    auto seed_sV   = pool_or_zeros(ws, SEED_SV, vp_t);
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;

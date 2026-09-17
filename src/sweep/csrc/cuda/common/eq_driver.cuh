@@ -95,28 +95,6 @@
 
 namespace eqdrv {
 
-// A workspace tensor from the Python-side pool when one was bound, else a fresh
-// zero tensor of the same geometry. This is what lets an equation stop
-// allocating its per-backward scratch in C++: the propagator owns the pool's
-// lifetime and zeroes it before every gradient-bearing forward, which is the
-// same state a fresh zeros_like starts in. The two checks are what make a
-// mismatch LOUD -- consumers take data_ptr<float>() and index by the model's
-// geometry, so a pool tensor of the wrong shape or dtype would read as garbage
-// rather than fail.
-inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int idx,
-                                   const torch::Tensor& like)
-{
-    if (static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0) {
-        TORCH_CHECK(pool[idx].sizes() == like.sizes(),
-                    "adjoint_workspace[", idx, "] has shape ", pool[idx].sizes(),
-                    " but the workspace geometry is ", like.sizes());
-        TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat,
-                    "adjoint_workspace[", idx, "] must be float32, got ", pool[idx].scalar_type());
-        return pool[idx];
-    }
-    return torch::zeros_like(like);
-}
-
 // ------------------------------------------------------------------------- //
 // Small shared helpers
 // ------------------------------------------------------------------------- //

@@ -1,4 +1,4 @@
-"""ElasticTTISG's backward scratch comes from the Python pool, and provably so.
+"""The compiled backward's scratch comes from the Python pool, and provably so.
 
 A bit-exact gate cannot see this change: when the pool is NOT bound the C++
 side allocates a fresh zero tensor of the same geometry, and the numbers are
@@ -8,8 +8,10 @@ is direct: the backward writes its scratch into the workspace, so after a
 backward the Python-side pool must hold non-zero data. If the C++ side had
 fallen back to its own zeros_like, the pool would still be all zeros.
 
-One class serves both dimensions with different scratch (2-D: six plain
-tensors, 3-D: the shared 18-tensor elastic workspace), so both are checked.
+One further invariant rides along for the equations whose pool carries a
+read-only zero buffer (the "previous stress" at the first reverse step):
+that slot must still be zero afterwards, because nothing else guarantees it
+is zero the next time -- the pool is zeroed per forward, not per backward.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import solver_gradient_mode_suite as suite  # noqa: E402
 
 
-def _backward_once(key, nt):
+def _backward_once(key, mode, nt):
     dev = torch.device("cuda:0")
     ns = suite.build_parser().parse_args([])
     ns.nt = nt
@@ -36,7 +38,7 @@ def _backward_once(key, nt):
     _true, models_init, grad_flags = suite.make_models(spec, shape)
     sources, receivers = suite.make_geometry(spec, shape, scenario, ns)
     wavelet = torch.tensor(suite.ricker(ns.nt, ns.dt, ns.freq, ns.delay), device=dev)
-    solver = suite.build_solver(spec, "c", "full", scenario, shape, dev, ns,
+    solver = suite.build_solver(spec, "c", mode, scenario, shape, dev, ns,
                                 Path("/tmp"), "wspool")
 
     models = suite.tensors_from_models(models_init, grad_flags, dev)
@@ -46,21 +48,37 @@ def _backward_once(key, nt):
     return solver, models
 
 
-@pytest.mark.parametrize("key, expected_n", [
-    pytest.param("elastic_tti_sg2d", 6, marks=requires_binding("elastic_tti_sg2d_forward")),
-    pytest.param("elastic_tti_sg3d", 18, marks=requires_binding("elastic_tti_sg3d_forward")),
+# (suite key, declared pool size, index of the read-only zero slot or None)
+CASES = {
+    "elastic_tti_sg2d": (6, None),
+    "elastic_tti_sg3d": (18, None),
+    "acoustic_vti_1st_2d": (5, 2),
+    "acoustic_vti_1st_3d": (6, 3),
+}
+# Every C-side backward mode that reads the pool; the modes differ in which
+# slots they touch (the checkpoint seeds only exist in ckpt_chunk).
+MODES = ("full", "bs_gpu", "ckpt_chunk")
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("key", [
+    pytest.param(k, marks=requires_binding(f"{k}_forward")) for k in CASES
 ])
-def test_backward_writes_into_the_python_pool(key, expected_n):
-    solver, models = _backward_once(key, nt=60)
+def test_backward_writes_into_the_python_pool(key, mode):
+    expected_n, zero_slot = CASES[key]
+    solver, models = _backward_once(key, mode, nt=60)
 
     pool = solver.adjoint_workspace
     assert len(pool) == expected_n, (
         f"{key}: expected the {expected_n} declared workspace tensors, got {len(pool)}")
     touched = [bool((t != 0).any()) for t in pool]
     assert any(touched), (
-        f"{key}: every pool tensor is still all-zero after a backward: the C++ side "
-        "did not take the pool -- it fell back to its own zeros_like, and this "
-        "change is inert")
+        f"{key}/{mode}: every pool tensor is still all-zero after a backward: the "
+        "C++ side did not take the pool -- it fell back to its own zeros_like, and "
+        "this change is inert")
+    if zero_slot is not None:
+        assert not touched[zero_slot], (
+            f"{key}/{mode}: slot {zero_slot} is the read-only zero buffer and was written")
     # And the gradient is a real one, so the backward that wrote the pool did work.
     g = [m.grad for m in models if m.grad is not None]
     assert g and all(torch.isfinite(x).all() for x in g)
