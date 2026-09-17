@@ -1594,7 +1594,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         checkpoint_on_cpu = bool(use_checkpoint and self.ckpt_storage == "cpu")
         save_all_wavefields = bool(requires_backward and not use_boundary_saving and not use_checkpoint)
         self._ensure_wavefield_buffers(batch_size, persist_forward_state=save_all_wavefields, need_adjoint=requires_backward)
-        self._ensure_adjoint_workspace_buffers(batch_size)
+        # Same condition as the adjoint wavefields on the line above: the
+        # workspace is read by the backward only, so a forward-only call must
+        # not pay for it. Unconditional, this allocated Elastic's 8 (Elastic3D's
+        # 18) padded grids on the first call of a propagator that would never run
+        # a backward, and zeroed them on every call after.
+        if requires_backward:
+            self._ensure_adjoint_workspace_buffers(batch_size)
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
