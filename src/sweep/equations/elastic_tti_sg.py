@@ -179,6 +179,21 @@ def step(
     )
 
 
+def _adjoint_workspace_shapes(B, nt, shape):
+    """The compiled backward's scratch, owned by the propagator.
+
+    One class serves both dimensions, so the count depends on the grid: the
+    2-D driver's stress adjoint keeps six velocity-gradient scratch tensors
+    (``q_vxx`` ... ``q_vzz``), the 3-D driver the shared 18-tensor
+    ``ElasticAdjointWorkspaceTensor`` that elastic3d also binds. Each is one
+    padded grid per shot. Declaring them here is what lets the C++ side stop
+    allocating them on every backward call; the propagator allocates the pool
+    only for a gradient-bearing forward.
+    """
+    n = 6 if len(shape) == 2 else 18
+    return n * [[B, 1, *shape]]
+
+
 @register_equation()
 class ElasticTTISG(ElasticTTI):
     """First-order 2-D three-component elastic TTI wave equation (axis-aligned SG).
@@ -256,4 +271,5 @@ class ElasticTTISG(ElasticTTI):
             pml_nvar=12,
             last_two_nvar=1,
             last_two_storage_nvar=8,
+            backward_workspace_shapes=_adjoint_workspace_shapes,
         )

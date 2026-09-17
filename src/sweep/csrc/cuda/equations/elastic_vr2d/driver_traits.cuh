@@ -165,10 +165,10 @@ struct Driver {
         State s = make_state_common(p, d, models, launch_config, source_config,
                                     record_config);
         const auto& vp = p.models[0];
-        s.ws_lvpx = pool_or_zeros(p.adjoint_workspace, 10, vp);
-        s.ws_lvpz = pool_or_zeros(p.adjoint_workspace, 11, vp);
-        s.ws_lvsx = pool_or_zeros(p.adjoint_workspace, 12, vp);
-        s.ws_lvsz = pool_or_zeros(p.adjoint_workspace, 13, vp);
+        s.ws_lvpx = eqdrv::pool_or_zeros(p.adjoint_workspace, 10, vp);
+        s.ws_lvpz = eqdrv::pool_or_zeros(p.adjoint_workspace, 11, vp);
+        s.ws_lvsx = eqdrv::pool_or_zeros(p.adjoint_workspace, 12, vp);
+        s.ws_lvsz = eqdrv::pool_or_zeros(p.adjoint_workspace, 13, vp);
         // u_forward is bound in full mode only, where the imaging always has
         // real next-momentum pointers — allocate the zero buffer for the
         // other three modes, keeping the per-mode allocation count identical
@@ -188,27 +188,17 @@ struct Driver {
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
     {
         Workspace w;
-        w.qxx   = pool_or_zeros(p.adjoint_workspace, 0, vp);
-        w.qzz   = pool_or_zeros(p.adjoint_workspace, 1, vp);
-        w.qxz   = pool_or_zeros(p.adjoint_workspace, 2, vp);
-        w.qzx   = pool_or_zeros(p.adjoint_workspace, 3, vp);
-        w.pxx   = pool_or_zeros(p.adjoint_workspace, 4, vp);
-        w.pzz   = pool_or_zeros(p.adjoint_workspace, 5, vp);
-        w.pxz   = pool_or_zeros(p.adjoint_workspace, 6, vp);
-        w.pzx   = pool_or_zeros(p.adjoint_workspace, 7, vp);
-        w.pt_px = pool_or_zeros(p.adjoint_workspace, 8, vp);
-        w.pt_pz = pool_or_zeros(p.adjoint_workspace, 9, vp);
+        w.qxx   = eqdrv::pool_or_zeros(p.adjoint_workspace, 0, vp);
+        w.qzz   = eqdrv::pool_or_zeros(p.adjoint_workspace, 1, vp);
+        w.qxz   = eqdrv::pool_or_zeros(p.adjoint_workspace, 2, vp);
+        w.qzx   = eqdrv::pool_or_zeros(p.adjoint_workspace, 3, vp);
+        w.pxx   = eqdrv::pool_or_zeros(p.adjoint_workspace, 4, vp);
+        w.pzz   = eqdrv::pool_or_zeros(p.adjoint_workspace, 5, vp);
+        w.pxz   = eqdrv::pool_or_zeros(p.adjoint_workspace, 6, vp);
+        w.pzx   = eqdrv::pool_or_zeros(p.adjoint_workspace, 7, vp);
+        w.pt_px = eqdrv::pool_or_zeros(p.adjoint_workspace, 8, vp);
+        w.pt_pz = eqdrv::pool_or_zeros(p.adjoint_workspace, 9, vp);
         return w;
-    }
-
-    // 14 workspace tensors. Pull from pool when pre-allocated by propagator,
-    // else allocate fresh.
-    static torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool,
-                                       int idx, const torch::Tensor& like)
-    {
-        if (static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0)
-            return pool[idx];
-        return torch::zeros_like(like);
     }
 
     static void validate_forward(const ForwardInput&) {}

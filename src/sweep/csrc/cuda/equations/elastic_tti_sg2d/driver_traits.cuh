@@ -7,8 +7,10 @@
 //     take a StiffnessPointer, rebuilt on demand from p.models / grads;
 //   * three velocity components on a 2-D grid (TTI couples vy), so N_VEL = 3
 //     and the signed adjoint sources use the 3-D field layout;
-//   * the adjoint workspace is six plain scratch tensors, always allocated
-//     internally (the hand-written drivers never read p.adjoint_workspace);
+//   * the adjoint workspace is six plain scratch tensors, taken from
+//     p.adjoint_workspace when the propagator bound them (it declares them
+//     through cuda_layout.backward_workspace_shapes) and allocated internally
+//     otherwise;
 //   * u_allt stores all 8 physical fields, not just the velocities;
 //   * the boundary-saving reconstruction wavefield is always allocated
 //     internally (never bound from p.forward_wavefields);
@@ -123,19 +125,21 @@ struct Driver {
         return s;
     }
 
-    // Six plain scratch tensors, always internal: the hand-written drivers
-    // never read p.adjoint_workspace.
+    // Six scratch tensors. Taken from the Python-side pool when the propagator
+    // bound one (cuda_layout.backward_workspace_shapes, 6 per shot), which is how this
+    // equation stops allocating per backward call; a fresh zeros_like of the
+    // same geometry otherwise, so an unbound caller sees no change.
     using Workspace = std::array<torch::Tensor, 6>;
 
-    static Workspace make_workspace(const BackwardInput&, const torch::Tensor& rho)
+    static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& rho)
     {
         return Workspace{
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
-            torch::zeros_like(rho),
+            eqdrv::pool_or_zeros(p.adjoint_workspace, 0, rho),
+            eqdrv::pool_or_zeros(p.adjoint_workspace, 1, rho),
+            eqdrv::pool_or_zeros(p.adjoint_workspace, 2, rho),
+            eqdrv::pool_or_zeros(p.adjoint_workspace, 3, rho),
+            eqdrv::pool_or_zeros(p.adjoint_workspace, 4, rho),
+            eqdrv::pool_or_zeros(p.adjoint_workspace, 5, rho),
         };
     }
 
