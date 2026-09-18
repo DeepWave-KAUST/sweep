@@ -43,7 +43,8 @@ and the envelope decays for as long as float64 can resolve it.
 from __future__ import annotations
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
 
@@ -404,6 +405,7 @@ class ElasticTTI2nd(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(2),   # ux, uz
             # 6 displacement buffers (ux, uz) x (now, pre, next): the CUDA
             # leapfrog rotates a race-free triple buffer, mirroring the
             # acoustic2d second-order layout.

@@ -131,7 +131,7 @@ ForwardOutput forward(const ForwardInput& in)
                 "AcousticVRZ3D stepped forward does not support save_all_wavefields");
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 7, B, nz, ny, nx}, vp.options());
+        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 7, B, nz, ny, nx}, vp.options(), "u_allt_out");
 
     if (p.use_checkpoint)
         TORCH_CHECK(p.checkpoints.size() == 8, "AcousticVRZ3D checkpointing expects 8 checkpoint tensors");

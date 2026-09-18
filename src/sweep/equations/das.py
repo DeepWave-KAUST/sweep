@@ -7,7 +7,8 @@ import torch
 
 from ._free_surface import zero_top_row
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
 from .elastic3d import step as _elastic3d_step
@@ -996,6 +997,7 @@ class DASZhao(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(2),
             base_nvar=9,
             pml_nvar=8,
             last_two_nvar=1,
@@ -1132,6 +1134,7 @@ class DASZhao3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(3),
             base_nvar=13,
             pml_nvar=18,
             last_two_nvar=1,
@@ -1259,6 +1262,7 @@ class DASMu(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(2),   # vx, vz
             base_nvar=8,
             pml_nvar=10,
             last_two_nvar=1,
@@ -1393,6 +1397,7 @@ class DASMu3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(3),   # vx, vy, vz
             base_nvar=15,
             pml_nvar=18,
             last_two_nvar=1,

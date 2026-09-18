@@ -25,7 +25,8 @@ Thomsen, L. (1986), "Weak elastic anisotropy", Geophysics 51, 1954–1966.
 import warnings
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from .fields import FieldSpec, ModelSpec
 # Free-surface helpers from `_free_surface` are intentionally NOT imported:
 # the VTI free-surface BC requires a Mittet/Robertsson-style anisotropic
@@ -427,6 +428,7 @@ class AcousticVTI1st(FirstOrderEquation):
                                        ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
+            save_all_shape=history_fields(4),   # vx, vz, sH, sV
             base_nvar=4,
             pml_nvar=4,
             last_two_nvar=1,
@@ -597,6 +599,7 @@ class AcousticVTI1st3D(FirstOrderEquation):
                                      ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
+            save_all_shape=history_fields(5),   # vx, vy, vz, sH, sV
             base_nvar=5,
             pml_nvar=6,
             last_two_nvar=1,

@@ -1,6 +1,7 @@
 import numpy as np
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_plain
+
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
 from .utils import to_backend
@@ -319,6 +320,7 @@ class ViscoAcoustic(SecondOrderEquation):
         # Identical to Acoustic: same wavefield state (the damping correction
         # is memoryless in (u_now, u_prev) and runs through ATen).
         return CUDALayoutSpec(
+            save_all_shape=history_plain(),
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,

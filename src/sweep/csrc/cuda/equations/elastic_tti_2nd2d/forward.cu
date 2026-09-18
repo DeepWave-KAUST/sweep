@@ -69,7 +69,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 2, B, nz, nx}, rho.options());
+        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 2, B, nz, nx}, rho.options(), "u_allt_out");
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,

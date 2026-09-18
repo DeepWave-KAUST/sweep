@@ -84,7 +84,7 @@ ForwardOutput forward(const ForwardInput& in)
     auto tmp_tzz_y = pool_or_zeros(ws, TMP_TZZ_Y, vp);
     torch::Tensor u_allt;
     if (p.save_all_wavefields) {
-        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 3, B, nz, ny, nx}, vp.options(), "u_allt_out");
     }
 
     SolverContext solver{

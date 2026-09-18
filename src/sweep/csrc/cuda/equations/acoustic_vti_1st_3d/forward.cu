@@ -176,7 +176,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 5, B, nz, ny, nx}, vp_t.options());
+        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 5, B, nz, ny, nx}, vp_t.options(), "u_allt_out");
         // 5 components: vx, vy, vz, sH, sV
 
     SolverContext solver{

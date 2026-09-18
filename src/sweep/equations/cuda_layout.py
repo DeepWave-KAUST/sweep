@@ -23,6 +23,13 @@ class CUDALayoutSpec:
     # allocated for the duration of one call, never re-zeroed -- a driver
     # zeroes what it needs. 0 = the forward allocates nothing of its own.
     forward_workspace_nvar: int = 0
+    # Shape of the full-mode forward history (``u_allt``) the propagator
+    # allocates per call and hands the compiled forward as
+    # ``ForwardInput.u_allt_out``: ``fn(B, nt, shape_cuda) -> tuple``, in the
+    # driver's own layout (see ``history_fields`` / ``history_plain``). None =
+    # the compiled forward allocates its own (only equations without a
+    # compiled full mode are left there).
+    save_all_shape: Callable | None = None
     # Extra wavefield buffers allocated for the ADJOINT only (not the forward).
     # The fused single-kernel adjoint double-buffers zeta (the forward already
     # double-buffers psi via pml_nvar): adjoint gets base+pml+adjoint_extra
@@ -119,3 +126,19 @@ class CUDALayoutSpec:
         boundary tensors by a factor of ``base_nvar``.
         """
         return self.base_nvar if self.boundary_save_nvar is None else self.boundary_save_nvar
+
+
+def history_fields(n: int):
+    """``save_all_shape`` for the ``(nt, n, B, *grid)`` history layout: ``n``
+    physical fields per time step, batch inside."""
+    def shape(B, nt, grid):
+        return (nt, n, B, *grid)
+    return shape
+
+
+def history_plain():
+    """``save_all_shape`` for the acoustic-family ``(nt, B, *grid)`` layout: one
+    field per step and no field axis."""
+    def shape(B, nt, grid):
+        return (nt, B, *grid)
+    return shape

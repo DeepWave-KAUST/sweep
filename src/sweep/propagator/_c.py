@@ -92,6 +92,15 @@ def _canonical_to_cuda_record(grad: torch.Tensor, cuda_ndim: int) -> torch.Tenso
     raise ValueError(f"Unexpected cuda_ndim={cuda_ndim}; expected 3 or 4.")
 
 
+def _history_buffer(shape, device):
+    """The full-mode forward history (``u_allt``), allocated here and bound as
+    ``ForwardInput.u_allt_out`` so the compiled forward writes into it instead
+    of allocating its own. One call's lifetime either way: the forward returns
+    this very tensor and autograd keeps it until the backward, exactly as it
+    kept the driver-allocated one."""
+    return torch.zeros(shape, device=device)
+
+
 def _gradient_buffers(has_wavelet, forward_source, models):
     """One zero tensor per gradient the compiled backward accumulates into, in
     ``BackwardInput.grads_out`` order: ``grad_wavelet`` first when the equation
@@ -181,6 +190,8 @@ class Wrapper(torch.autograd.Function):
         params.receiver_field_indices = cp.receiver_field_indices.contiguous()
         params.pml_vals = [p.contiguous() for p in cp.pml_vals]
         params.save_all_wavefields = save_all_wavefields
+        if save_all_wavefields and cp.u_allt_shape is not None:
+            params.u_allt_out = _history_buffer(cp.u_allt_shape, models[0].device)
         params.use_boundary_saving = use_boundary_saving
         params.use_checkpoint = use_checkpoint
         params.use_recursive_checkpoint = use_recursive_checkpoint
@@ -1249,6 +1260,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             for shape in self._forward_wavefield_shapes()
         )
 
+    def _history_shape(self, batch_size):
+        """``cuda_layout.save_all_shape`` at this batch, or None."""
+        fn = self._cuda_layout().save_all_shape
+        return None if fn is None else tuple(int(x) for x in fn(batch_size, self.nt, self.shape_cuda))
+
     def _transient_forward_workspace(self, batch_size):
         """Per-call scratch for the compiled forward, ``cuda_layout.forward_workspace_nvar``
         padded grids per shot.
@@ -1735,6 +1751,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     boundary_tail_steps=boundary_tail_steps,
                     forward_wavefields=forward_wavefields,
                     forward_workspace=forward_workspace,
+                    u_allt_shape=self._history_shape(batch_size),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,

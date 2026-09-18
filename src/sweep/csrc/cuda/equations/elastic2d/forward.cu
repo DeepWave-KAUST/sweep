@@ -87,7 +87,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
     auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
 
     torch::Tensor u_allt;
-    if (p.save_all_wavefields) u_allt = torch::zeros({p.nt, 2, B, nz, nx}, vp.options());
+    if (p.save_all_wavefields) u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn,
                          /* free_surface */ false,

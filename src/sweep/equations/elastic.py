@@ -1,5 +1,6 @@
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._elastic_step_core import (
@@ -351,6 +352,7 @@ class Elastic(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(2),   # vx, vz
             base_nvar=5,
             pml_nvar=10,
             last_two_nvar=1,

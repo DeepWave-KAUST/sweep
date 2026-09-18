@@ -1,6 +1,7 @@
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from .utils import to_backend, zero_top_halo_fields
@@ -208,6 +209,9 @@ class AcousticVRZ(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            # u, psix, psiz, zetax, zetaz; the singleton channel axis is the
+            # driver's own layout (acoustic_vrz2d allt_shape).
+            save_all_shape=lambda B, nt, grid: (nt, 5, B, 1, *grid),
             base_nvar=3,
             # psix,psiz,zetax,zetaz (4) + psixn,psizn (2): race-free forward psi
             # double-buffer (read psi, write psi*n, swap_pml).
@@ -322,6 +326,7 @@ class AcousticVRZ3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(7),   # u + 3 psi + 3 zeta
             base_nvar=3,
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3): race-free
             # forward psi double-buffer (read psi, write psi*n, swap_pml).

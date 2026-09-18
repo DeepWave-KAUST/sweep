@@ -82,7 +82,7 @@ ForwardOutput forward(const ForwardInput& in) {
     auto record = torch::zeros({N, nrec, p.nt}, vp.options());
     torch::Tensor bg_utt_all;
     if (p.save_all_wavefields) {
-        bg_utt_all = torch::zeros({p.nt, B, nz, ny, nx}, vp.options());
+        bg_utt_all = bound_or_zeros(p.u_allt_out, {p.nt, B, nz, ny, nx}, vp.options(), "u_allt_out");
     }
 
     if (p.use_checkpoint) {

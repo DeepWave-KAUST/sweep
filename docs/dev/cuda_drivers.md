@@ -90,6 +90,10 @@ back to the per-call stepped path when a factory is missing.
   (zeroed; `grads_out_has_wavelet` decides whether slot 0 is `grad_wavelet`) on the
   monolithic path as well as the stepped one, and every driver binds them
   (`bind_grads`, or slot by slot with `pool_or_zeros`) rather than allocating.
+  The full-mode history is the same story: `cuda_layout.save_all_shape(B, nt, grid)`
+  declares the driver's own `u_allt` layout, the propagator allocates it per
+  gradient-bearing full-mode call and binds it as `u_allt_out`, and the driver
+  takes it through `bound_or_zeros` (shape-checked).
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record

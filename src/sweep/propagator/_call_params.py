@@ -67,6 +67,9 @@ class CompiledCallParams:
     boundary_tail_steps: int = 0
     forward_wavefields: tuple = ()
     forward_workspace: tuple = ()
+    # Full-mode history shape (cuda_layout.save_all_shape at this batch), or
+    # None when the compiled forward allocates its own.
+    u_allt_shape: tuple = None
     # Whether the equation's BackwardOutput.grads starts with grad_wavelet
     # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
     grads_out_has_wavelet: bool = False

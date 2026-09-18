@@ -1,6 +1,7 @@
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_plain
+
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
 from ._registry import register_equation
@@ -201,6 +202,7 @@ class AcousticLSRTM3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_plain(),   # bg_utt_all
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,

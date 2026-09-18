@@ -82,7 +82,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
     torch::Tensor bg_utt_all;
     if (p.save_all_wavefields)
-        bg_utt_all = torch::zeros({p.nt, B, nz, nx}, vp.options());
+        bg_utt_all = bound_or_zeros(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(), "u_allt_out");
 
     if (p.use_checkpoint)
         TORCH_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D checkpointing expects 6 checkpoint tensors.");

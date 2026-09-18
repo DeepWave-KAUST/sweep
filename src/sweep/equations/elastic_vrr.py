@@ -44,7 +44,8 @@ from __future__ import annotations
 import numpy as np
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
     zero_top_row,
@@ -470,6 +471,7 @@ class ElasticVRR(FirstOrderEquation):
         #                                     velocity gradients (4th-order
         #                                     central FD, transpose = -A)
         return CUDALayoutSpec(
+            save_all_shape=history_fields(2),   # px, pz
             base_nvar=5,
             pml_nvar=10,
             last_two_nvar=1,

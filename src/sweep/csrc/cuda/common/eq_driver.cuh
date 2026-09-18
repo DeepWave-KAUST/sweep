@@ -228,9 +228,7 @@ public:
         if (p.save_all_wavefields) {
             TORCH_CHECK(!stepped || p.u_allt_out.defined(),
                         "stepped + save_all_wavefields requires u_allt_out bound from Python");
-            u_allt = p.u_allt_out.defined()
-                ? p.u_allt_out
-                : torch::zeros(Eq::allt_shape(d, p.nt), vp.options());
+            u_allt = bound_or_zeros(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(), "u_allt_out");
         }
 
         Eq::validate_forward(p);

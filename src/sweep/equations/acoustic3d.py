@@ -1,6 +1,7 @@
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_plain
+
 from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
@@ -133,6 +134,7 @@ class Acoustic3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_plain(),
             base_nvar=3,
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3) for the
             # race-free forward psi double-buffer (read psi, write psi*n, swap_pml).

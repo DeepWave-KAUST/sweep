@@ -152,3 +152,18 @@ inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int i
     }
     return torch::zeros_like(like);
 }
+
+// A single Python-bound output buffer (u_allt_out, record_out) when it was
+// bound, else a fresh zero tensor of the driver's shape. The shape check is
+// what makes a Python/driver disagreement loud instead of a silent overrun.
+inline torch::Tensor bound_or_zeros(const torch::Tensor& bound, std::vector<int64_t> shape,
+                                    const torch::TensorOptions& options, const char* what)
+{
+    if (!bound.defined())
+        return torch::zeros(shape, options);
+    TORCH_CHECK(bound.sizes().vec() == shape, what, " has shape ", bound.sizes(),
+                " but the driver's layout is ", shape);
+    TORCH_CHECK(bound.scalar_type() == torch::kFloat && bound.is_contiguous(),
+                what, " must be a contiguous float32 tensor");
+    return bound;
+}

@@ -98,7 +98,7 @@ ForwardOutput forward(const ForwardInput& in) {
     // vp_step-gradient carrier is recomputed in backward (kernels.cuh).
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, B, nz, nx}, vp.options());
+        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(), "u_allt_out");
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,

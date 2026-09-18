@@ -114,7 +114,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 3, B, nz, ny, nx}, vp.options(), "u_allt_out");
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);

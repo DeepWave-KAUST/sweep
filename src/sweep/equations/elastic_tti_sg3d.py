@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields
+
 from .elastic_tti import ElasticTTI
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
@@ -430,6 +431,7 @@ class ElasticTTISG3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            save_all_shape=history_fields(3),   # velocities only
             base_nvar=9,
             pml_nvar=27,
             last_two_nvar=1,
