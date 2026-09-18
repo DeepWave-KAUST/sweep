@@ -205,7 +205,8 @@ public:
         Eq::alloc_cpml(cpml_tensor, p);
         cpml = cpml_tensor.view();
 
-        TORCH_CHECK(!stepped || p.record_out.defined(),
+        // An empty tensor counts as unbound: nothing could be recorded into it.
+        TORCH_CHECK(!stepped || (p.record_out.defined() && p.record_out.numel() > 0),
                     "stepped forward requires record_out bound from Python");
         // Shape comes from the equation, like allt_shape two statements below.
         // The three equations on this skeleton all return {N, nrec, nt}; the
@@ -216,13 +217,7 @@ public:
         // shape-blind: the per-step Eq::record hook, out.record, the record_out
         // check (contiguity and trailing nt only), and
         // _c.py::_cuda_record_to_canonical, which dispatches on syn.ndim.
-        record = p.record_out.defined()
-            ? p.record_out
-            : torch::zeros(Eq::record_shape(d, p), vp.options());
-        if (p.record_out.defined())
-            TORCH_CHECK(record.is_contiguous() &&
-                        record.size(-1) == static_cast<long>(p.nt),
-                        "record_out must be contiguous with trailing dim nt");
+        record = bound_or_zeros(p.record_out, Eq::record_shape(d, p), vp.options(), "record_out");
 
         // Wavefields for all timestep
         if (p.save_all_wavefields) {

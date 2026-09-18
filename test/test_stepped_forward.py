@@ -294,13 +294,17 @@ def test_stepped_guards():
         func(p)
     p.wavefields = L
 
-    # stepped without record_out: needs a params object whose record_out was
-    # never assigned (any tensor set through pybind, even empty, is defined)
+    # stepped without record_out: take a real params object and unbind its
+    # record (see below).
     prop2, wavelet2, sources2, receivers2, models2 = build(2, nt=8)
     cap2 = capture(prop2)
     with torch.no_grad():
         prop2(wavelet2, sources2, receivers2, models=models2)
     p2 = cap2["params"]
     p2.it_begin, p2.it_end = 0, 4
+    # The monolithic forward binds a record of its own now, so "unbound" is
+    # spelled as an empty tensor (a tensor assigned through pybind is always
+    # defined; the guard treats numel() == 0 as not bound).
+    p2.record_out = torch.empty(0, device=p2.record_out.device)
     with pytest.raises(RuntimeError, match="requires record_out"):
         cap2["func"](p2)

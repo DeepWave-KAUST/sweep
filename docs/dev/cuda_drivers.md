@@ -94,6 +94,9 @@ back to the per-call stepped path when a factory is missing.
   declares the driver's own `u_allt` layout, the propagator allocates it per
   gradient-bearing full-mode call and binds it as `u_allt_out`, and the driver
   takes it through `bound_or_zeros` (shape-checked).
+  The record is the same: `cuda_layout.record_shape(B, nrec, nfield, nt)` declares the
+  driver's layout (`record_single` / `record_multi`), the propagator allocates it per
+  call and binds it as `record_out` on the monolithic path as well as the stepped one.
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record

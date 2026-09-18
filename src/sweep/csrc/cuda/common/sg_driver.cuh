@@ -146,15 +146,10 @@ public:
         nrec_fields = p.receiver_field_indices.numel();
         source_fields = p.source_field_indices.to(torch::kCPU);
         receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-        TORCH_CHECK(!stepped || p.record_out.defined(),
+        // An empty tensor counts as unbound: nothing could be recorded into it.
+        TORCH_CHECK(!stepped || (p.record_out.defined() && p.record_out.numel() > 0),
                     "stepped forward requires record_out bound from Python");
-        record = p.record_out.defined()
-            ? p.record_out
-            : torch::zeros({nrec_fields, d.B, nrec, p.nt}, vp.options());
-        if (p.record_out.defined())
-            TORCH_CHECK(record.is_contiguous() &&
-                        record.size(-1) == static_cast<long>(p.nt),
-                        "record_out must be contiguous with trailing dim nt");
+        record = bound_or_zeros(p.record_out, {nrec_fields, d.B, nrec, p.nt}, vp.options(), "record_out");
 
         Eq::validate_forward(p);
 

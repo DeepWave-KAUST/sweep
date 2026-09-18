@@ -70,6 +70,9 @@ class CompiledCallParams:
     # Full-mode history shape (cuda_layout.save_all_shape at this batch), or
     # None when the compiled forward allocates its own.
     u_allt_shape: tuple = None
+    # Record shape (cuda_layout.record_shape at this batch/receiver count), or
+    # None when the compiled forward allocates its own.
+    record_shape: tuple = None
     # Whether the equation's BackwardOutput.grads starts with grad_wavelet
     # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
     grads_out_has_wavelet: bool = False

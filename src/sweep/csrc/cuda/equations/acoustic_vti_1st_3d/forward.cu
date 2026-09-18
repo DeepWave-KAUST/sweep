@@ -172,7 +172,7 @@ ForwardOutput forward(const ForwardInput& in)
     auto source_fields   = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
 
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp_t.options());
+    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, vp_t.options(), "record_out");
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields)

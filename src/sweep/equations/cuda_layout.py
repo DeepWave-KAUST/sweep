@@ -28,6 +28,12 @@ class CUDALayoutSpec:
     # allocated for the duration of one call, never re-zeroed -- a driver
     # zeroes what it needs. 0 = the forward allocates nothing of its own.
     forward_workspace_nvar: int = 0
+    # ``fn(B, nrec, nfield, nt) -> tuple``: the record the compiled forward
+    # writes, in the driver's own layout (``record_single`` for the
+    # ``(B, nrec, nt)`` acoustic family, ``record_multi`` for the
+    # ``(nfield, B, nrec, nt)`` staggered family); the propagator allocates it
+    # per call and binds it as ``record_out``. None = the forward allocates.
+    record_shape: Callable | None = None
     # ``fn(B, nt, shape_cuda, max_segment) -> list of shapes``: the replay
     # buffers a checkpoint-mode backward keeps (the recomputed forward of one
     # segment, ``max_segment`` steps long -- the chunk length, or the longest
@@ -153,4 +159,19 @@ def history_plain():
     field per step and no field axis."""
     def shape(B, nt, grid):
         return (nt, B, *grid)
+    return shape
+
+
+def record_single():
+    """``record_shape`` for the ``(B, nrec, nt)`` record of a single-field driver."""
+    def shape(B, nrec, nfield, nt):
+        return (B, nrec, nt)
+    return shape
+
+
+def record_multi():
+    """``record_shape`` for the ``(nfield, B, nrec, nt)`` record of a multi-field
+    driver (one receiver field per leading index, even when there is one)."""
+    def shape(B, nrec, nfield, nt):
+        return (nfield, B, nrec, nt)
     return shape

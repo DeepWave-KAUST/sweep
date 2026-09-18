@@ -7,7 +7,7 @@ import torch
 
 from ._free_surface import zero_top_row
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_fields
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
@@ -1008,6 +1008,7 @@ class DASZhao(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
             # The checkpoint modes recompute the whole strain history (nt steps);
             # the buffer is the same shape as the full-mode u_allt.
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(nt, 2, B, *grid)],
@@ -1148,6 +1149,7 @@ class DASZhao3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(nt, 3, B, *grid)],
             save_all_shape=history_fields(3),
             base_nvar=13,
@@ -1280,6 +1282,7 @@ class DASMu(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
             save_all_shape=history_fields(2),   # vx, vz
             base_nvar=8,
             pml_nvar=10,
@@ -1415,6 +1418,7 @@ class DASMu3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
             save_all_shape=history_fields(3),   # vx, vy, vz
             base_nvar=15,
             pml_nvar=18,

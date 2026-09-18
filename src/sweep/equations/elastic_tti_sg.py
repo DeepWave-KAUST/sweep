@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_fields
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
 from ._registry import register_equation
@@ -253,6 +253,7 @@ class ElasticTTISG(ElasticTTI):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
             save_all_shape=history_fields(8),   # all 8 physical fields
             base_nvar=8,
             pml_nvar=12,

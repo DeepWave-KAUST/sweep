@@ -88,10 +88,7 @@ ForwardOutput forward(const ForwardInput& in) {
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    auto record = torch::zeros(
-        {N, p.receivers_loc.size(1), p.nt},
-        vp.options()
-    );
+    auto record = bound_or_zeros(p.record_out, {N, p.receivers_loc.size(1), p.nt}, vp.options(), "record_out");
 
     // Full-mode store: RAW pressure u(t) (NOT the acoustic vp^2*Lap(u)
     // carrier) — the attenuation adjoint needs du/dt and its |k| filter; the

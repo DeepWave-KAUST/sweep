@@ -78,7 +78,7 @@ ForwardOutput forward(const ForwardInput& in) {
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    auto record = torch::zeros({N, nrec, p.nt}, vp.options());
+    auto record = bound_or_zeros(p.record_out, {N, nrec, p.nt}, vp.options(), "record_out");
 
     torch::Tensor bg_utt_all;
     if (p.save_all_wavefields)

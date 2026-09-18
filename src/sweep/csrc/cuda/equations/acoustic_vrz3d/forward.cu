@@ -116,9 +116,7 @@ ForwardOutput forward(const ForwardInput& in)
     // a per-call allocation would lose every prior segment.
     TORCH_CHECK(!stepped || p.record_out.defined(),
                 "AcousticVRZ3D stepped forward requires record_out bound from Python");
-    auto record = p.record_out.defined()
-        ? p.record_out
-        : torch::zeros({N, nrec, p.nt}, vp.options());
+    auto record = bound_or_zeros(p.record_out, {N, nrec, p.nt}, vp.options(), "record_out");
     if (p.record_out.defined())
         TORCH_CHECK(record.is_contiguous() &&
                     record.size(-1) == static_cast<long>(p.nt),

@@ -1,6 +1,6 @@
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_plain
+from .cuda_layout import CUDALayoutSpec, history_plain, record_single
 
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
@@ -154,6 +154,7 @@ class AcousticLSRTM(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
             # chunk_forward: the replayed chunk's background u_tt
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
             backward_workspace_shapes=_adjoint_workspace_shapes,

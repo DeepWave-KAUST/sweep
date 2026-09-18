@@ -1,6 +1,6 @@
 import numpy as np
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_plain
+from .cuda_layout import CUDALayoutSpec, history_plain, record_single
 
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
@@ -320,6 +320,7 @@ class ViscoAcoustic(SecondOrderEquation):
         # Identical to Acoustic: same wavefield state (the damping correction
         # is memoryless in (u_now, u_prev) and runs through ATen).
         return CUDALayoutSpec(
+            record_shape=record_single(),
             # chunk_raw: the replayed chunk's raw pressure
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
             # The reverse step's vp^2*Lap(u) carrier (visco_acoustic2d/backward.cu

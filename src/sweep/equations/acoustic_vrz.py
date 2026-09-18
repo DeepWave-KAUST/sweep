@@ -1,6 +1,6 @@
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_fields
+from .cuda_layout import CUDALayoutSpec, history_fields, record_single
 
 from . import slot_table
 from .fields import FieldSpec, ModelSpec
@@ -209,6 +209,7 @@ class AcousticVRZ(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
             # u, psix, psiz, zetax, zetaz; the singleton channel axis is the
             # driver's own layout (acoustic_vrz2d allt_shape).
             save_all_shape=lambda B, nt, grid: (nt, 5, B, 1, *grid),
@@ -326,6 +327,7 @@ class AcousticVRZ3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
             # chunk_forward: the replayed segment's pressure, (steps, B, 1, grid)
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, 1, *grid)],
             save_all_shape=history_fields(7),   # u + 3 psi + 3 zeta

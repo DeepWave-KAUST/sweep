@@ -110,7 +110,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
+    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields)

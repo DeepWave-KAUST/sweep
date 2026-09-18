@@ -43,7 +43,7 @@ and the envelope decays for as long as float64 can resolve it.
 from __future__ import annotations
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_fields
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
@@ -416,6 +416,7 @@ class ElasticTTI2nd(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
             # seg_ux, seg_uz: two history levels + one row per replayed step
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg + 2, B, 1, *grid)] * 2,
             save_all_shape=history_fields(2),   # ux, uz
