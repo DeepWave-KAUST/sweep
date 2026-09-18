@@ -48,29 +48,33 @@ def _backward_once(key, mode, nt):
     return solver, models
 
 
-# (suite key, declared pool size, index of the read-only zero slot or None)
+# suite key -> (declared pool size per suite mode, index of the read-only zero
+# slot or None, modes to run). The modes differ in which slots they touch (the
+# checkpoint seeds only exist in ckpt_chunk; DAS 2-D's boundary-saving mode is
+# the only one that needs its six extra grids).
+ALL = ("full", "bs_gpu", "ckpt_chunk")
 CASES = {
-    "elastic_tti_sg2d": (6, None),
-    "elastic_tti_sg3d": (18, None),
-    "acoustic_vti_1st_2d": (5, 2),
-    "acoustic_vti_1st_3d": (6, 3),
+    "elastic_tti_sg2d": (lambda mode: 6, None, ALL),
+    "elastic_tti_sg3d": (lambda mode: 18, None, ALL),
+    "acoustic_vti_1st_2d": (lambda mode: 5, 2, ALL),
+    "acoustic_vti_1st_3d": (lambda mode: 6, 3, ALL),
+    "das2d": (lambda mode: 15 if mode == "bs_gpu" else 9, 0, ALL),
+    "das3d": (lambda mode: 19, 0, ("full", "ckpt_chunk")),
 }
-# Every C-side backward mode that reads the pool; the modes differ in which
-# slots they touch (the checkpoint seeds only exist in ckpt_chunk).
-MODES = ("full", "bs_gpu", "ckpt_chunk")
 
 
-@pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("key", [
-    pytest.param(k, marks=requires_binding(f"{k}_forward")) for k in CASES
+@pytest.mark.parametrize("key, mode", [
+    pytest.param(k, m, marks=requires_binding(f"{k}_forward"))
+    for k, (_n, _z, modes) in CASES.items() for m in modes
 ])
 def test_backward_writes_into_the_python_pool(key, mode):
-    expected_n, zero_slot = CASES[key]
+    n_of, zero_slot, _modes = CASES[key]
+    expected_n = n_of(mode)
     solver, models = _backward_once(key, mode, nt=60)
 
     pool = solver.adjoint_workspace
     assert len(pool) == expected_n, (
-        f"{key}: expected the {expected_n} declared workspace tensors, got {len(pool)}")
+        f"{key}/{mode}: expected the {expected_n} declared workspace tensors, got {len(pool)}")
     touched = [bool((t != 0).any()) for t in pool]
     assert any(touched), (
         f"{key}/{mode}: every pool tensor is still all-zero after a backward: the "

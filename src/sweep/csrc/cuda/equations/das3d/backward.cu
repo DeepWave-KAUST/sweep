@@ -29,6 +29,31 @@ static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 
 namespace {
 
+// Layout of p.adjoint_workspace, declared on the Python side as
+// DASZhao3D.cuda_layout.backward_workspace_nvar (one padded grid per shot each).
+// ZERO is read only: the zero strain that stands in for the missing neighbour
+// step, kept zero by the propagator's per-forward zeroing of the pool. The
+// checkpoint replay (recompute_strain_history) finishes before the backward
+// touches Q_*, so its nine derivative temporaries alias those slots.
+enum WorkspaceSlot : int {
+    ZERO = 0,
+    Q_DXX_SXX, Q_DYY_SYY, Q_DZZ_SZZ, Q_DYY_TXX, Q_DZZ_TXX, Q_DXX_TYY, Q_DZZ_TYY, Q_DXX_TZZ, Q_DYY_TZZ,
+    BAR_SXX_X, BAR_SYY_Y, BAR_SZZ_Z, BAR_TXX_Y, BAR_TXX_Z, BAR_TYY_X, BAR_TYY_Z, BAR_TZZ_X, BAR_TZZ_Y,
+    N_SLOTS,
+    REPLAY_TMP_SXX_X = Q_DXX_SXX, REPLAY_TMP_SYY_Y = Q_DYY_SYY, REPLAY_TMP_SZZ_Z = Q_DZZ_SZZ, REPLAY_TMP_TXX_Y = Q_DYY_TXX, REPLAY_TMP_TXX_Z = Q_DZZ_TXX, REPLAY_TMP_TYY_X = Q_DXX_TYY, REPLAY_TMP_TYY_Z = Q_DZZ_TYY, REPLAY_TMP_TZZ_X = Q_DXX_TZZ, REPLAY_TMP_TZZ_Y = Q_DYY_TZZ,
+};
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// N_SLOTS: a pool of any other size means the Python declaration drifted.
+const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
+                "DAS3D backward: adjoint_workspace must be empty or hold ",
+                static_cast<int>(N_SLOTS), " tensors, got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
+
 torch::Tensor recompute_strain_history(const BackwardInput& p)
 {
     auto vp = p.models[0];
@@ -61,15 +86,16 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     cpml.allocate(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
-    auto tmp_sxx_x = torch::zeros_like(vp);
-    auto tmp_syy_y = torch::zeros_like(vp);
-    auto tmp_szz_z = torch::zeros_like(vp);
-    auto tmp_txx_y = torch::zeros_like(vp);
-    auto tmp_txx_z = torch::zeros_like(vp);
-    auto tmp_tyy_x = torch::zeros_like(vp);
-    auto tmp_tyy_z = torch::zeros_like(vp);
-    auto tmp_tzz_x = torch::zeros_like(vp);
-    auto tmp_tzz_y = torch::zeros_like(vp);
+    const auto& ws = workspace_slots(p);
+    auto tmp_sxx_x = pool_or_zeros(ws, REPLAY_TMP_SXX_X, vp);
+    auto tmp_syy_y = pool_or_zeros(ws, REPLAY_TMP_SYY_Y, vp);
+    auto tmp_szz_z = pool_or_zeros(ws, REPLAY_TMP_SZZ_Z, vp);
+    auto tmp_txx_y = pool_or_zeros(ws, REPLAY_TMP_TXX_Y, vp);
+    auto tmp_txx_z = pool_or_zeros(ws, REPLAY_TMP_TXX_Z, vp);
+    auto tmp_tyy_x = pool_or_zeros(ws, REPLAY_TMP_TYY_X, vp);
+    auto tmp_tyy_z = pool_or_zeros(ws, REPLAY_TMP_TYY_Z, vp);
+    auto tmp_tzz_x = pool_or_zeros(ws, REPLAY_TMP_TZZ_X, vp);
+    auto tmp_tzz_y = pool_or_zeros(ws, REPLAY_TMP_TZZ_Y, vp);
     auto history = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
 
     SolverContext solver{
@@ -216,29 +242,28 @@ BackwardOutput backward(const BackwardInput& in)
     auto grad_vs = pool_or_zeros(gs, 1, vp, "grads_out");
     auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
 
-    auto zero_exx = torch::zeros_like(vp);
-    auto zero_eyy = torch::zeros_like(vp);
-    auto zero_ezz = torch::zeros_like(vp);
+    const auto& ws = workspace_slots(p);
+    auto zero_strain = pool_or_zeros(ws, ZERO, vp);   // read only
 
-    auto q_dxx_sxx = torch::zeros_like(vp);
-    auto q_dyy_syy = torch::zeros_like(vp);
-    auto q_dzz_szz = torch::zeros_like(vp);
-    auto q_dyy_txx = torch::zeros_like(vp);
-    auto q_dzz_txx = torch::zeros_like(vp);
-    auto q_dxx_tyy = torch::zeros_like(vp);
-    auto q_dzz_tyy = torch::zeros_like(vp);
-    auto q_dxx_tzz = torch::zeros_like(vp);
-    auto q_dyy_tzz = torch::zeros_like(vp);
+    auto q_dxx_sxx = pool_or_zeros(ws, Q_DXX_SXX, vp);
+    auto q_dyy_syy = pool_or_zeros(ws, Q_DYY_SYY, vp);
+    auto q_dzz_szz = pool_or_zeros(ws, Q_DZZ_SZZ, vp);
+    auto q_dyy_txx = pool_or_zeros(ws, Q_DYY_TXX, vp);
+    auto q_dzz_txx = pool_or_zeros(ws, Q_DZZ_TXX, vp);
+    auto q_dxx_tyy = pool_or_zeros(ws, Q_DXX_TYY, vp);
+    auto q_dzz_tyy = pool_or_zeros(ws, Q_DZZ_TYY, vp);
+    auto q_dxx_tzz = pool_or_zeros(ws, Q_DXX_TZZ, vp);
+    auto q_dyy_tzz = pool_or_zeros(ws, Q_DYY_TZZ, vp);
 
-    auto bar_sxx_x = torch::zeros_like(vp);
-    auto bar_syy_y = torch::zeros_like(vp);
-    auto bar_szz_z = torch::zeros_like(vp);
-    auto bar_txx_y = torch::zeros_like(vp);
-    auto bar_txx_z = torch::zeros_like(vp);
-    auto bar_tyy_x = torch::zeros_like(vp);
-    auto bar_tyy_z = torch::zeros_like(vp);
-    auto bar_tzz_x = torch::zeros_like(vp);
-    auto bar_tzz_y = torch::zeros_like(vp);
+    auto bar_sxx_x = pool_or_zeros(ws, BAR_SXX_X, vp);
+    auto bar_syy_y = pool_or_zeros(ws, BAR_SYY_Y, vp);
+    auto bar_szz_z = pool_or_zeros(ws, BAR_SZZ_Z, vp);
+    auto bar_txx_y = pool_or_zeros(ws, BAR_TXX_Y, vp);
+    auto bar_txx_z = pool_or_zeros(ws, BAR_TXX_Z, vp);
+    auto bar_tyy_x = pool_or_zeros(ws, BAR_TYY_X, vp);
+    auto bar_tyy_z = pool_or_zeros(ws, BAR_TYY_Z, vp);
+    auto bar_tzz_x = pool_or_zeros(ws, BAR_TZZ_X, vp);
+    auto bar_tzz_y = pool_or_zeros(ws, BAR_TZZ_Y, vp);
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
@@ -280,13 +305,13 @@ BackwardOutput backward(const BackwardInput& in)
         const float* ezz_now = p.u_forward.select(0, it).select(0, 2).data_ptr<float>();
         const float* exx_prev = (it > 0)
             ? p.u_forward.select(0, it - 1).select(0, 0).data_ptr<float>()
-            : zero_exx.data_ptr<float>();
+            : zero_strain.data_ptr<float>();
         const float* eyy_prev = (it > 0)
             ? p.u_forward.select(0, it - 1).select(0, 1).data_ptr<float>()
-            : zero_eyy.data_ptr<float>();
+            : zero_strain.data_ptr<float>();
         const float* ezz_prev = (it > 0)
             ? p.u_forward.select(0, it - 1).select(0, 2).data_ptr<float>()
-            : zero_ezz.data_ptr<float>();
+            : zero_strain.data_ptr<float>();
 
         LAUNCH_DAS3D_PROJECT_MODEL_GRAD(
             order,

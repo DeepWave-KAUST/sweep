@@ -31,6 +31,39 @@ static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 
 namespace {
 
+// Layout of p.adjoint_workspace, declared on the Python side by
+// DASZhao.cuda_layout.backward_workspace_shapes (one padded grid per shot each).
+// ZERO is read only: the zero strain that stands in for the missing neighbour
+// step, kept zero by the propagator's per-forward zeroing of the pool. Full and
+// checkpoint modes use the first N_SLOTS_FULL; boundary saving also keeps the
+// two current strains and four derivative temporaries alive through its
+// adjoint loop and gets N_SLOTS_BS. The checkpoint replay
+// (recompute_strain_history) finishes before the full backward touches BAR_*,
+// so its four derivative temporaries alias those slots.
+enum WorkspaceSlot : int {
+    ZERO = 0,
+    BAR_DXX_SXX, BAR_DZZ_SZZ, BAR_DZZ_TXX, BAR_DXX_TZZ,
+    BAR_SXX_X, BAR_SZZ_Z, BAR_TXX_Z, BAR_TZZ_X,
+    N_SLOTS_FULL,
+    CURRENT_EXX = N_SLOTS_FULL, CURRENT_EZZ,
+    TMP_SXX_X, TMP_SZZ_Z, TMP_TXX_Z, TMP_TZZ_X,
+    N_SLOTS_BS,
+    REPLAY_TMP_SXX_X = BAR_DXX_SXX, REPLAY_TMP_SZZ_Z = BAR_DZZ_SZZ,
+    REPLAY_TMP_TXX_Z = BAR_DZZ_TXX, REPLAY_TMP_TZZ_X = BAR_DXX_TZZ,
+};
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// the count this mode declares: any other size means the Python declaration
+// drifted.
+const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "DAS2D backward: adjoint_workspace must be empty or hold ", n_slots,
+                " tensors for this mode, got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
+
 torch::Tensor recompute_strain_history(const BackwardInput& p)
 {
     auto vp = p.models[0];
@@ -61,10 +94,11 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     cpml.allocate(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
-    auto tmp_sxx_x = torch::zeros_like(vp);
-    auto tmp_szz_z = torch::zeros_like(vp);
-    auto tmp_txx_z = torch::zeros_like(vp);
-    auto tmp_tzz_x = torch::zeros_like(vp);
+    const auto& ws = workspace_slots(p, N_SLOTS_FULL);
+    auto tmp_sxx_x = pool_or_zeros(ws, REPLAY_TMP_SXX_X, vp);
+    auto tmp_szz_z = pool_or_zeros(ws, REPLAY_TMP_SZZ_Z, vp);
+    auto tmp_txx_z = pool_or_zeros(ws, REPLAY_TMP_TXX_Z, vp);
+    auto tmp_tzz_x = pool_or_zeros(ws, REPLAY_TMP_TZZ_X, vp);
     auto history = torch::zeros({p.nt, 2, B, nz, nx}, vp.options());
 
     SolverContext solver{
@@ -193,17 +227,17 @@ BackwardOutput backward(const BackwardInput& in)
     auto grad_vs = pool_or_zeros(gs, 1, vp, "grads_out");
     auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
 
-    auto zero_exx = torch::zeros_like(vp);
-    auto zero_ezz = torch::zeros_like(vp);
+    const auto& ws = workspace_slots(p, N_SLOTS_FULL);
+    auto zero_strain = pool_or_zeros(ws, ZERO, vp);   // read only
 
-    auto bar_dxx_sxx = torch::zeros_like(vp);
-    auto bar_dzz_szz = torch::zeros_like(vp);
-    auto bar_dzz_txx = torch::zeros_like(vp);
-    auto bar_dxx_tzz = torch::zeros_like(vp);
-    auto bar_sxx_x = torch::zeros_like(vp);
-    auto bar_szz_z = torch::zeros_like(vp);
-    auto bar_txx_z = torch::zeros_like(vp);
-    auto bar_tzz_x = torch::zeros_like(vp);
+    auto bar_dxx_sxx = pool_or_zeros(ws, BAR_DXX_SXX, vp);
+    auto bar_dzz_szz = pool_or_zeros(ws, BAR_DZZ_SZZ, vp);
+    auto bar_dzz_txx = pool_or_zeros(ws, BAR_DZZ_TXX, vp);
+    auto bar_dxx_tzz = pool_or_zeros(ws, BAR_DXX_TZZ, vp);
+    auto bar_sxx_x = pool_or_zeros(ws, BAR_SXX_X, vp);
+    auto bar_szz_z = pool_or_zeros(ws, BAR_SZZ_Z, vp);
+    auto bar_txx_z = pool_or_zeros(ws, BAR_TXX_Z, vp);
+    auto bar_tzz_x = pool_or_zeros(ws, BAR_TZZ_X, vp);
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
@@ -234,10 +268,10 @@ BackwardOutput backward(const BackwardInput& in)
         const float* ezz_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
         const float* exx_prev = (it > 0)
             ? p.u_forward.select(0, it - 1).select(0, 0).data_ptr<float>()
-            : zero_exx.data_ptr<float>();
+            : zero_strain.data_ptr<float>();
         const float* ezz_prev = (it > 0)
             ? p.u_forward.select(0, it - 1).select(0, 1).data_ptr<float>()
-            : zero_ezz.data_ptr<float>();
+            : zero_strain.data_ptr<float>();
 
         LAUNCH_DAS2D_PROJECT_MODEL_GRAD(
             order,
@@ -490,24 +524,24 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto grad_vs = pool_or_zeros(gs, 1, vp, "grads_out");
     auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
 
-    auto zero_exx = torch::zeros_like(vp);
-    auto zero_ezz = torch::zeros_like(vp);
-    auto current_exx = torch::zeros_like(vp);
-    auto current_ezz = torch::zeros_like(vp);
+    const auto& ws = workspace_slots(p, N_SLOTS_BS);
+    auto zero_strain = pool_or_zeros(ws, ZERO, vp);   // read only
+    auto current_exx = pool_or_zeros(ws, CURRENT_EXX, vp);
+    auto current_ezz = pool_or_zeros(ws, CURRENT_EZZ, vp);
 
-    auto tmp_sxx_x = torch::zeros_like(vp);
-    auto tmp_szz_z = torch::zeros_like(vp);
-    auto tmp_txx_z = torch::zeros_like(vp);
-    auto tmp_tzz_x = torch::zeros_like(vp);
+    auto tmp_sxx_x = pool_or_zeros(ws, TMP_SXX_X, vp);
+    auto tmp_szz_z = pool_or_zeros(ws, TMP_SZZ_Z, vp);
+    auto tmp_txx_z = pool_or_zeros(ws, TMP_TXX_Z, vp);
+    auto tmp_tzz_x = pool_or_zeros(ws, TMP_TZZ_X, vp);
 
-    auto bar_dxx_sxx = torch::zeros_like(vp);
-    auto bar_dzz_szz = torch::zeros_like(vp);
-    auto bar_dzz_txx = torch::zeros_like(vp);
-    auto bar_dxx_tzz = torch::zeros_like(vp);
-    auto bar_sxx_x = torch::zeros_like(vp);
-    auto bar_szz_z = torch::zeros_like(vp);
-    auto bar_txx_z = torch::zeros_like(vp);
-    auto bar_tzz_x = torch::zeros_like(vp);
+    auto bar_dxx_sxx = pool_or_zeros(ws, BAR_DXX_SXX, vp);
+    auto bar_dzz_szz = pool_or_zeros(ws, BAR_DZZ_SZZ, vp);
+    auto bar_dzz_txx = pool_or_zeros(ws, BAR_DZZ_TXX, vp);
+    auto bar_dxx_tzz = pool_or_zeros(ws, BAR_DXX_TZZ, vp);
+    auto bar_sxx_x = pool_or_zeros(ws, BAR_SXX_X, vp);
+    auto bar_szz_z = pool_or_zeros(ws, BAR_SZZ_Z, vp);
+    auto bar_txx_z = pool_or_zeros(ws, BAR_TXX_Z, vp);
+    auto bar_tzz_x = pool_or_zeros(ws, BAR_TZZ_X, vp);
 
     auto neg_forward_source = -p.forward_source;
 
@@ -810,8 +844,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
         adj_view,
         forward.exx_t.data_ptr<float>(),
         forward.ezz_t.data_ptr<float>(),
-        zero_exx.data_ptr<float>(),
-        zero_ezz.data_ptr<float>(),
+        zero_strain.data_ptr<float>(),
+        zero_strain.data_ptr<float>(),
         vp.data_ptr<float>(),
         vs.data_ptr<float>(),
         rho.data_ptr<float>(),

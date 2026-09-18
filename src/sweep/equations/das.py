@@ -896,6 +896,17 @@ def step_das_zhao_3d(
     )
 
 
+def _das2d_adjoint_workspace(B, nt, shape, mode):
+    """The compiled 2-D DAS backward's scratch (das2d/backward.cu WorkspaceSlot),
+    one padded grid per shot each: a read-only zero strain and eight adjoint
+    derivative grids in every mode; boundary saving also keeps the two current
+    strains and four derivative temporaries alive through its adjoint loop, so
+    that mode -- and only that mode -- gets six more.
+    """
+    n = 15 if mode == "bs" else 9
+    return n * [[B, 1, *shape]]
+
+
 @register_equation(aliases=('DASElastic',))
 class DASZhao(FirstOrderEquation):
     """First-order 2-D stress / normal-strain-rate DAS equation (Zhao 2022).
@@ -1002,7 +1013,7 @@ class DASZhao(FirstOrderEquation):
             pml_nvar=8,
             last_two_nvar=1,
             last_two_storage_nvar=9,
-            backward_workspace_nvar=0,
+            backward_workspace_shapes=_das2d_adjoint_workspace,
             # The four per-step derivative scratch grids the compiled forward
             # used to allocate itself (das2d/forward.cu ForwardWorkspaceSlot).
             forward_workspace_nvar=4,
@@ -1139,7 +1150,10 @@ class DASZhao3D(FirstOrderEquation):
             pml_nvar=18,
             last_two_nvar=1,
             last_two_storage_nvar=13,
-            backward_workspace_nvar=0,
+            # One read-only zero strain, nine adjoint derivative grids and nine
+            # gradient-projection grids of the compiled backward (das3d/backward.cu
+            # WorkspaceSlot); the checkpoint replay aliases the derivative grids.
+            backward_workspace_nvar=19,
             # The nine per-step derivative scratch grids the compiled forward
             # used to allocate itself (das3d/forward.cu ForwardWorkspaceSlot).
             forward_workspace_nvar=9,

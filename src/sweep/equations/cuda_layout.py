@@ -17,6 +17,11 @@ class CUDALayoutSpec:
     last_two_storage_nvar: int | None = None
     checkpoint_nvar: int | None = None
     backward_workspace_nvar: int = 0
+    # ``fn(B, nt, shape_cuda, mode) -> list of shapes`` for equations whose
+    # backward scratch is not simply N padded grids -- ``mode`` is the memory
+    # mode the propagator runs ("full", "bs", "ckpt", "recursive"), so a
+    # driver whose modes keep different scratch alive gets a pool sized for
+    # the mode in use, never the union.
     backward_workspace_shapes: Callable | None = None
     # Per-call scratch the compiled FORWARD takes from the propagator
     # (``ForwardInput.forward_workspace``): one padded grid per shot each,

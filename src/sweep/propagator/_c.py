@@ -671,6 +671,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._checkpoint_cache_pinned = None
         self._workspace_cache_batch = None
         self._workspace_cache_nt = None
+        self._workspace_cache_mode = None
         self.source_illumination = None
         self.receiver_illumination = None
         # Source / receiver illumination: an extra per-timestep grid pass on the
@@ -1292,7 +1293,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             for _ in range(n)
         )
 
-    def _ensure_adjoint_workspace_buffers(self, batch_size):
+    def _ensure_adjoint_workspace_buffers(self, batch_size, mode):
         cuda_layout = self._cuda_layout()
         workspace_nvar = int(cuda_layout.backward_workspace_nvar)
         custom_shapes_fn = cuda_layout.backward_workspace_shapes
@@ -1307,17 +1308,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self._workspace_cache_batch is not None
             and batch_size <= self._workspace_cache_batch
             and self._workspace_cache_nt == self.nt
+            and self._workspace_cache_mode == mode
         ):
             return
 
         self.workspace_allocator = Allocator(self.dev)
         if has_custom_shapes:
-            workspace_shapes = custom_shapes_fn(self.B, self.nt, self.shape_cuda)
+            workspace_shapes = custom_shapes_fn(self.B, self.nt, self.shape_cuda, mode)
         else:
             workspace_shapes = workspace_nvar * [[self.B, 1, *self.shape_cuda]]
         self.adjoint_workspace = self.workspace_allocator.zeros(workspace_shapes)
         self._workspace_cache_batch = self.B
         self._workspace_cache_nt = self.nt
+        self._workspace_cache_mode = mode
 
     def _slice_adjoint_workspace_buffers(self, batch_size):
         if not self.adjoint_workspace:
@@ -1663,7 +1666,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # 18) padded grids on the first call of a propagator that would never run
         # a backward, and zeroed them on every call after.
         if requires_backward:
-            self._ensure_adjoint_workspace_buffers(batch_size)
+            # The memory mode this backward will run in, in the backward's own
+            # precedence (checkpointing beats boundary saving).
+            workspace_mode = ("recursive" if use_recursive_checkpoint else "ckpt" if use_checkpoint
+                              else "bs" if use_boundary_saving else "full")
+            self._ensure_adjoint_workspace_buffers(batch_size, workspace_mode)
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
