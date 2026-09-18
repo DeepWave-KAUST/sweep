@@ -79,6 +79,7 @@ class CompiledCallParams:
     adjoint_wavefields: tuple = ()
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()
+    checkpoint_replay: tuple = ()
     last_two: torch.Tensor = None
     boundary_cpu: tuple = ()
     boundary_gpu: tuple = ()

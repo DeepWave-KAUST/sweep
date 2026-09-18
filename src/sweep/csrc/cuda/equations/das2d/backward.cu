@@ -99,7 +99,8 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     auto tmp_szz_z = pool_or_zeros(ws, REPLAY_TMP_SZZ_Z, vp);
     auto tmp_txx_z = pool_or_zeros(ws, REPLAY_TMP_TXX_Z, vp);
     auto tmp_tzz_x = pool_or_zeros(ws, REPLAY_TMP_TZZ_X, vp);
-    auto history = torch::zeros({p.nt, 2, B, nz, nx}, vp.options());
+    // Python-allocated with the checkpoint snapshots; every step is written before the backward reads it.
+    auto history = pool_or_zeros(p.checkpoint_replay, 0, {p.nt, 2, B, nz, nx}, vp.options(), "checkpoint_replay");
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,

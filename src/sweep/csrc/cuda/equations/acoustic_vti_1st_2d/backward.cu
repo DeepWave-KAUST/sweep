@@ -754,7 +754,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     // Per-chunk replay buffer: shape (chunk_size, 4, B, nz, nx) — only the
     // 4 physical fields are needed for the gradient kernel.
-    auto u_chunk = torch::zeros({chunk_size, 4, B, nz, nx}, vp_t.options());
+    // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
+    auto u_chunk = pool_or_zeros(p.checkpoint_replay, 0, {chunk_size, 4, B, nz, nx}, vp_t.options(), "checkpoint_replay");
 
     // zero_prev is read-only (ZERO_PREV stays zero, see backward()); the two seed
     // buffers are overwritten at every chunk boundary before they are read.

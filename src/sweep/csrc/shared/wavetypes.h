@@ -209,6 +209,7 @@ struct BackwardInput {
     std::vector<torch::Tensor> u_boundary;
     torch::Tensor u_last_two;
     std::vector<torch::Tensor> checkpoints;
+    std::vector<torch::Tensor> checkpoint_replay; // Bind from python: cuda_layout.checkpoint_replay_shapes
     torch::Tensor checkpoint_steps;
 
     // Wavefields

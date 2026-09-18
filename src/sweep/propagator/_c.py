@@ -438,6 +438,7 @@ class Wrapper(torch.autograd.Function):
 
         if ctx.use_checkpoint:
             params.checkpoints = list(checkpoint_tensors)
+            params.checkpoint_replay = list(cp.checkpoint_replay)
             params.checkpoint_steps = checkpoint_steps.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
@@ -652,6 +653,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.boundary_gpu_full = ()
         self.checkpoint_allocator = Allocator(self.dev)
         self.checkpoints = ()
+        self.checkpoint_replay = ()
         self.last_two = torch.empty(0, device=self.dev)
         self._buffer_capacity_batch = None
         self._boundary_cache_mode = None
@@ -669,6 +671,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._checkpoint_cache_batch = None
         self._checkpoint_cache_storage = None
         self._checkpoint_cache_pinned = None
+        self._checkpoint_cache_segment = None
         self._workspace_cache_batch = None
         self._workspace_cache_nt = None
         self._workspace_cache_mode = None
@@ -1337,7 +1340,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         batch_dim = 1 if self.ndim == 3 else 2
         return tuple(t.narrow(batch_dim, 0, batch_size) for t in tensors)
 
-    def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None, batch_size=None):
+    def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None, batch_size=None,
+                                  max_segment=None):
         if not self.use_ckpt or (self.backward_ckpt_func is None and self.backward_recursive_ckpt_func is None):
             return
 
@@ -1365,6 +1369,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._checkpoint_cache_nt == self.nt
             and self._checkpoint_cache_storage == checkpoint_storage
             and self._checkpoint_cache_pinned == checkpoint_pinned
+            and self._checkpoint_cache_segment == max_segment
         ):
             return
 
@@ -1397,12 +1402,22 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 pin_memory=checkpoint_pinned,
             )
         )
+        # The replay buffers live next to the snapshots: the same backward
+        # holds both at its peak, so keeping them costs no more than the
+        # per-call allocation they replace. Compute-side only; never re-zeroed.
+        replay_shapes = cuda_layout.checkpoint_replay_shapes
+        if replay_shapes is not None:
+            self.checkpoint_replay = tuple(Allocator(self.dev).zeros(
+                [list(s) for s in replay_shapes(active_batch, self.nt, self.shape_cuda, int(max_segment))]))
+        else:
+            self.checkpoint_replay = ()
         self._checkpoint_cache_batch = active_batch
         self._checkpoint_cache_interval = checkpoint_interval
         self._checkpoint_cache_count = n_checkpoints
         self._checkpoint_cache_nt = self.nt
         self._checkpoint_cache_storage = checkpoint_storage
         self._checkpoint_cache_pinned = checkpoint_pinned
+        self._checkpoint_cache_segment = max_segment
 
     def _slice_checkpoint_buffers(self, batch_size):
         # Checkpoints are allocated at the active batch size in
@@ -1674,15 +1689,18 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
-                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size)
+                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size,
+                                                max_segment=self._longest_segment(checkpoint_steps))
             elif self.backward_ckpt_func is not None:
-                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size)
+                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size,
+                                                max_segment=self.ckpt_chunks)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         if not forward_wavefields:
             forward_wavefields = self._transient_forward_wavefields(batch_size)
         forward_workspace = self._transient_forward_workspace(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
         checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_checkpoint else ()
+        checkpoint_replay = tuple(self.checkpoint_replay) if use_checkpoint else ()
 
         if self.forward_wavefields:
             self.forward_allocator.zero_()
@@ -1775,6 +1793,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,
                     checkpoint_buffers=checkpoint_buffers,
+                    checkpoint_replay=checkpoint_replay,
                     last_two=last_two,
                     boundary_cpu=boundary_cpu,
                     boundary_gpu=boundary_gpu,
@@ -1798,6 +1817,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         
         return syn
 
+
+    def _longest_segment(self, checkpoint_steps):
+        """Longest span between consecutive recursive checkpoints (the first
+        starts at 0, the last ends at nt): what a replay buffer must hold."""
+        bounds = [0, *(int(s) for s in checkpoint_steps.tolist()), int(self.nt)]
+        return max(b - a for a, b in zip(bounds, bounds[1:]))
 
     def _build_recursive_checkpoint_steps(self, nt, checkpoint_count):
         checkpoint_count = int(max(0, checkpoint_count))

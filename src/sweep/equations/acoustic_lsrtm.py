@@ -154,6 +154,8 @@ class AcousticLSRTM(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            # chunk_forward: the replayed chunk's background u_tt
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
             backward_workspace_shapes=_adjoint_workspace_shapes,
             save_all_shape=history_plain(),   # bg_utt_all
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the

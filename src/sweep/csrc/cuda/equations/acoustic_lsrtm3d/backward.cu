@@ -878,7 +878,8 @@ void run_ckpt_imaging(
         "acoustic_lsrtm3d"
     );
 
-    auto chunk_forward = torch::zeros({p.checkpoint_interval, B, nz, ny, nx}, vp.options());
+    // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
+    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, 0, {p.checkpoint_interval, B, nz, ny, nx}, vp.options(), "checkpoint_replay");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);

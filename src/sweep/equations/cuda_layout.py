@@ -28,6 +28,13 @@ class CUDALayoutSpec:
     # allocated for the duration of one call, never re-zeroed -- a driver
     # zeroes what it needs. 0 = the forward allocates nothing of its own.
     forward_workspace_nvar: int = 0
+    # ``fn(B, nt, shape_cuda, max_segment) -> list of shapes``: the replay
+    # buffers a checkpoint-mode backward keeps (the recomputed forward of one
+    # segment, ``max_segment`` steps long -- the chunk length, or the longest
+    # recursive segment). Allocated with the checkpoint snapshots, never
+    # re-zeroed: a driver writes every row it reads. None = the compiled
+    # backward allocates its own.
+    checkpoint_replay_shapes: Callable | None = None
     # Shape of the full-mode forward history (``u_allt``) the propagator
     # allocates per call and hands the compiled forward as
     # ``ForwardInput.u_allt_out``: ``fn(B, nt, shape_cuda) -> tuple``, in the

@@ -326,6 +326,8 @@ class AcousticVRZ3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            # chunk_forward: the replayed segment's pressure, (steps, B, 1, grid)
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, 1, *grid)],
             save_all_shape=history_fields(7),   # u + 3 psi + 3 zeta
             # The compiled backward's scratch (acoustic_vrz3d/backward.cu WorkspaceSlot):
             # six c/e coupling grids of the split gradient and the four adjoint

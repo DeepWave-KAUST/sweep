@@ -563,10 +563,15 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
         // seg[k] = W_{start-1+k}: two history levels + one entry per replayed
         // step, so the reverse pass below has all three time slices in-chunk.
+        // Python-allocated with the checkpoint snapshots, chunk_size + 2 rows;
+        // a shorter last chunk uses a prefix. Rows 0..seg_len+1 are all written
+        // below before the reverse pass reads them.
         std::vector<int64_t> seg_shape = rho.sizes().vec();
-        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(seg_len + 2));
-        auto seg_ux = torch::zeros(seg_shape, rho.options());
-        auto seg_uz = torch::zeros(seg_shape, rho.options());
+        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(chunk_size + 2));
+        auto seg_ux = pool_or_zeros(p.checkpoint_replay, 0, seg_shape, rho.options(), "checkpoint_replay")
+                          .narrow(0, 0, seg_len + 2);
+        auto seg_uz = pool_or_zeros(p.checkpoint_replay, 1, seg_shape, rho.options(), "checkpoint_replay")
+                          .narrow(0, 0, seg_len + 2);
         seg_ux.select(0, 0).copy_(replay.ux_pre_t);
         seg_uz.select(0, 0).copy_(replay.uz_pre_t);
         seg_ux.select(0, 1).copy_(replay.ux_t);

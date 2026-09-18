@@ -1008,6 +1008,9 @@ class DASZhao(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            # The checkpoint modes recompute the whole strain history (nt steps);
+            # the buffer is the same shape as the full-mode u_allt.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(nt, 2, B, *grid)],
             save_all_shape=history_fields(2),
             base_nvar=9,
             pml_nvar=8,
@@ -1145,6 +1148,7 @@ class DASZhao3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(nt, 3, B, *grid)],
             save_all_shape=history_fields(3),
             base_nvar=13,
             pml_nvar=18,

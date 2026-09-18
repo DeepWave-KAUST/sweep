@@ -320,6 +320,8 @@ class ViscoAcoustic(SecondOrderEquation):
         # Identical to Acoustic: same wavefield state (the damping correction
         # is memoryless in (u_now, u_prev) and runs through ATen).
         return CUDALayoutSpec(
+            # chunk_raw: the replayed chunk's raw pressure
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
             # The reverse step's vp^2*Lap(u) carrier (visco_acoustic2d/backward.cu
             # WorkspaceSlot), one padded grid per shot.
             backward_workspace_nvar=1,

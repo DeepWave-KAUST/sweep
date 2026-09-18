@@ -787,7 +787,8 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         );
     }
 
-    auto chunk_forward = torch::zeros({max_segment_length, N, C, nz, ny, nx}, vp.options());
+    // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
+    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, 0, {max_segment_length, N, C, nz, ny, nx}, vp.options(), "checkpoint_replay");
 
     // Time-invariant adjoint transpose coefficients, computed once for all segments.
     BUILD_VRZ_ADJOINT_COEFFS_3D(

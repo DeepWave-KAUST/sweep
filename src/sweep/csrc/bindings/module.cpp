@@ -264,6 +264,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("u_boundary", &BackwardInput::u_boundary)
         .def_readwrite("u_last_two", &BackwardInput::u_last_two)
         .def_readwrite("checkpoints", &BackwardInput::checkpoints)
+        .def_readwrite("checkpoint_replay", &BackwardInput::checkpoint_replay)
         .def_readwrite("models", &BackwardInput::models)
         .def_readwrite("adjoint_source", &BackwardInput::adjoint_source)
         .def_readwrite("forward_source", &BackwardInput::forward_source)

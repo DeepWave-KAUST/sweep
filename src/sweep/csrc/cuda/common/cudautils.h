@@ -153,6 +153,23 @@ inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int i
     return torch::zeros_like(like);
 }
 
+// The same for a pool whose slots are not model-shaped (checkpoint_replay):
+// the driver states the shape it lays out and a bound slot must match it.
+inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int idx,
+                                   std::vector<int64_t> shape, const torch::TensorOptions& options,
+                                   const char* what)
+{
+    if (static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0) {
+        TORCH_CHECK(pool[idx].sizes().vec() == shape,
+                    what, "[", idx, "] has shape ", pool[idx].sizes(),
+                    " but the driver's layout is ", shape);
+        TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat && pool[idx].is_contiguous(),
+                    what, "[", idx, "] must be a contiguous float32 tensor");
+        return pool[idx];
+    }
+    return torch::zeros(shape, options);
+}
+
 // A single Python-bound output buffer (u_allt_out, record_out) when it was
 // bound, else a fresh zero tensor of the driver's shape. The shape check is
 // what makes a Python/driver disagreement loud instead of a silent overrun.

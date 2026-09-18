@@ -447,7 +447,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     // RAW pressure store for the chunk (the acoustic twin stores the
     // vp^2*Lap(u) carrier; visco recomputes it from raw — see kernels.cuh).
-    auto chunk_raw = torch::zeros({chunk_size, B, nz, nx}, vp.options());
+    // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
+    auto chunk_raw = pool_or_zeros(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(), "checkpoint_replay");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;

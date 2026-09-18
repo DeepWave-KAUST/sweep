@@ -428,6 +428,8 @@ class AcousticVTI1st(FirstOrderEquation):
                                        ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
+            # u_chunk: the replayed chunk's vx, vz, sH, sV (acoustic_vti_1st_2d/backward.cu)
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, 4, B, *grid)],
             save_all_shape=history_fields(4),   # vx, vz, sH, sV
             base_nvar=4,
             pml_nvar=4,
@@ -599,6 +601,8 @@ class AcousticVTI1st3D(FirstOrderEquation):
                                      ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
+            # u_chunk: the replayed chunk's vx, vy, vz, sH, sV
+            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, 5, B, *grid)],
             save_all_shape=history_fields(5),   # vx, vy, vz, sH, sV
             base_nvar=5,
             pml_nvar=6,
