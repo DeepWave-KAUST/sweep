@@ -38,12 +38,38 @@ static std::vector<torch::Tensor> model_grads_or_zeros(const BackwardInput& p)
 
 namespace {
 
+// Layout of p.adjoint_workspace, declared on the Python side by
+// ElasticTTI2nd.cuda_layout.backward_workspace_shapes (one padded grid per shot
+// each). The first N_POOL are the adjoint stress/velocity workspace bound by
+// AdjointWorkspace::init. What follows depends on the mode -- the modes never
+// share a pool: full mode keeps one read-only zero field (the missing history
+// step), boundary saving and checkpointing keep the three stress workspaces of
+// the replayed forward step.
+enum WorkspaceSlot : int {
+    N_POOL = 8,
+    ZERO_FIELD = N_POOL,                          // full mode only, never written
+    SXX_WS = N_POOL, SZZ_WS, SXZ_WS,              // bs / ckpt modes
+    N_SLOTS_FULL = N_POOL + 1,
+    N_SLOTS_BS = N_POOL + 3,
+};
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// the count this mode declares: any other size means the Python declaration
+// drifted.
+const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "ElasticTTI2nd backward: adjoint_workspace must be empty or hold ", n_slots,
+                " tensors for this mode, got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
 struct AdjointWorkspace {
     std::array<torch::Tensor, 8> t;
 
     void init(const std::vector<torch::Tensor>& external, const torch::Tensor& like)
     {
-        if (external.size() == 8) {
+        if (external.size() >= N_POOL) {
             for (int i = 0; i < 8; ++i) {
                 t[i] = external[i];
                 t[i].zero_();
@@ -212,8 +238,9 @@ BackwardOutput backward(const BackwardInput& in)
     auto cpml_view = cpml.view();
 
     AdjointWorkspace ws;
-    ws.init(p.adjoint_workspace, rho);
-    auto zero_field = torch::zeros_like(rho);
+    const auto& slots = workspace_slots(p, N_SLOTS_FULL);
+    ws.init(slots, rho);
+    auto zero_field = pool_or_zeros(slots, ZERO_FIELD, rho);   // read only
 
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto source_fields = p.source_field_indices.to(torch::kCPU);
@@ -306,11 +333,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto cpml_view = cpml.view();
 
     AdjointWorkspace ws;
-    ws.init(p.adjoint_workspace, rho);
+    const auto& slots = workspace_slots(p, N_SLOTS_BS);
+    ws.init(slots, rho);
 
-    auto sxx_ws = torch::zeros_like(rho);
-    auto szz_ws = torch::zeros_like(rho);
-    auto sxz_ws = torch::zeros_like(rho);
+    auto sxx_ws = pool_or_zeros(slots, SXX_WS, rho);
+    auto szz_ws = pool_or_zeros(slots, SZZ_WS, rho);
+    auto sxz_ws = pool_or_zeros(slots, SXZ_WS, rho);
 
     // last_two is bound but never read here: this backward seeds its
     // reconstruction from p.u_last_two directly, and an unbound saver would
@@ -497,11 +525,12 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto cpml_view = cpml.view();
 
     AdjointWorkspace ws;
-    ws.init(p.adjoint_workspace, rho);
+    const auto& slots = workspace_slots(p, N_SLOTS_BS);
+    ws.init(slots, rho);
 
-    auto sxx_ws = torch::zeros_like(rho);
-    auto szz_ws = torch::zeros_like(rho);
-    auto sxz_ws = torch::zeros_like(rho);
+    auto sxx_ws = pool_or_zeros(slots, SXX_WS, rho);
+    auto szz_ws = pool_or_zeros(slots, SZZ_WS, rho);
+    auto sxz_ws = pool_or_zeros(slots, SXZ_WS, rho);
 
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto source_fields = p.source_field_indices.to(torch::kCPU);

@@ -204,6 +204,17 @@ def step(
     )
 
 
+
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled backward's scratch (elastic_tti_2nd2d/backward.cu
+    WorkspaceSlot), one padded grid per shot each: the eight-grid adjoint
+    workspace in every mode, plus one read-only zero field in full mode or the
+    three stress workspaces of the replayed step in the boundary-saving and
+    checkpoint modes.
+    """
+    n = 9 if mode == "full" else 11
+    return n * [[B, 1, *shape]]
+
 @register_equation()
 class ElasticTTI2nd(FirstOrderEquation):
     """Displacement-based 2-D elastic TTI wave equation (Oh et al. 2020).
@@ -417,7 +428,7 @@ class ElasticTTI2nd(FirstOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=2,
             boundary_save_nvar=2,
-            backward_workspace_nvar=8,
+            backward_workspace_shapes=_adjoint_workspace_shapes,
             # The three stress workspaces of the compiled forward's step
             # (elastic_tti_2nd2d/forward.cu ForwardWorkspaceSlot).
             forward_workspace_nvar=3,

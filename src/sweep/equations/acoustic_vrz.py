@@ -327,6 +327,10 @@ class AcousticVRZ3D(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             save_all_shape=history_fields(7),   # u + 3 psi + 3 zeta
+            # The compiled backward's scratch (acoustic_vrz3d/backward.cu WorkspaceSlot):
+            # six c/e coupling grids of the split gradient and the four adjoint
+            # coefficients C0/Cx/Cy/Cz -- the same ten the DD runner binds.
+            backward_workspace_nvar=10,
             base_nvar=3,
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3): race-free
             # forward psi double-buffer (read psi, write psi*n, swap_pml).

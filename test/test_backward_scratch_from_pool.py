@@ -60,16 +60,27 @@ CASES = {
     "acoustic_vti_1st_3d": (lambda mode: 6, 3, ALL),
     "das2d": (lambda mode: 15 if mode == "bs_gpu" else 9, 0, ALL),
     "das3d": (lambda mode: 19, 0, ("full", "ckpt_chunk")),
+    "vrz3d": (lambda mode: 10, None, ALL),
+    # slot 8 is the read-only zero field in full mode and a stress workspace
+    # in the others -- the modes never share a pool
+    "elastic_tti_2nd2d": (lambda mode: 9 if mode == "full" else 11,
+                          lambda mode: 8 if mode == "full" else None, ALL),
 }
 
 
+# suite keys whose compiled binding carries a family prefix
+BINDING = {"vrz3d": "acoustic_vrz3d"}
+
+
 @pytest.mark.parametrize("key, mode", [
-    pytest.param(k, m, marks=requires_binding(f"{k}_forward"))
+    pytest.param(k, m, marks=requires_binding(f"{BINDING.get(k, k)}_forward"))
     for k, (_n, _z, modes) in CASES.items() for m in modes
 ])
 def test_backward_writes_into_the_python_pool(key, mode):
     n_of, zero_slot, _modes = CASES[key]
     expected_n = n_of(mode)
+    if callable(zero_slot):
+        zero_slot = zero_slot(mode)
     solver, models = _backward_once(key, mode, nt=60)
 
     pool = solver.adjoint_workspace

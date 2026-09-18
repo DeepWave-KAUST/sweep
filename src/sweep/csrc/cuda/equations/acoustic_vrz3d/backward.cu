@@ -41,14 +41,31 @@ void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
 // within a backward, so they are computed ONCE (first segment) and reused.
 // Leaked singleton: never destroyed, so no torch-tensor teardown races with CUDA
 // context shutdown at process exit.
-struct VrzBwdScratch {
-    torch::Tensor inv_z, C0, Cx, Cy, Cz, c_x, c_y, c_z, e_x, e_y, e_z;
-    void* vp_ptr = nullptr;
-    void* z_ptr = nullptr;
+// Layout of p.adjoint_workspace, declared on the Python side as
+// AcousticVRZ3D.cuda_layout.backward_workspace_nvar and shared with the DD
+// runner's binding (one padded grid per shot each): the six c/e coupling
+// scratch grids of the split gradient, then the four time-invariant adjoint
+// coefficients C0/Cx/Cy/Cz, recomputed on the first segment of every backward
+// (under DD the driver halo-exchanges them once, which is why they are
+// Python-bound there). The pool is zero at backward entry -- the propagator
+// zeroes it before every gradient-bearing forward, the DD runner before
+// segment 1 -- which is what keeps the c/e halo cells at zero: each step
+// overwrites only their interior, and the divergence reads a zero halo.
+enum WorkspaceSlot : int {
+    C_X = 0, C_Y, C_Z, E_X, E_Y, E_Z,
+    COEF_C0, COEF_CX, COEF_CY, COEF_CZ,
+    N_SLOTS
 };
-static VrzBwdScratch& vrz_bwd_scratch() {
-    static VrzBwdScratch* s = new VrzBwdScratch();
-    return *s;
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// N_SLOTS: a pool of any other size means the Python declaration drifted.
+static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
+                "AcousticVRZ3D backward: adjoint_workspace must be empty or hold ",
+                static_cast<int>(N_SLOTS), " tensors ([0-5]=c_x..e_z coupling, "
+                "[6-9]=C0,Cx,Cy,Cz adjoint coeffs), got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
 }
 
 // p.grads_out as the propagator binds it for the acoustic family:
@@ -110,18 +127,19 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     zero_wavefield_state_vrz3d(adjoint);
 
     const auto& gs = grad_slots(in);
+    const auto& ws = workspace_slots(in);
     auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
     auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
-    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
-    auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
-    auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
-    auto Cz = torch::zeros_like(vp);    // ∂_z b·κ
-    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
-    auto c_y = torch::zeros_like(vp);
-    auto c_z = torch::zeros_like(vp);
-    auto e_x = torch::zeros_like(vp);
-    auto e_y = torch::zeros_like(vp);
-    auto e_z = torch::zeros_like(vp);
+    auto C0 = pool_or_zeros(ws, COEF_C0, vp);   // vp²       (time-invariant adjoint coeffs)
+    auto Cx = pool_or_zeros(ws, COEF_CX, vp);   // ∂ₓb·κ
+    auto Cy = pool_or_zeros(ws, COEF_CY, vp);   // ∂_yb·κ
+    auto Cz = pool_or_zeros(ws, COEF_CZ, vp);   // ∂_z b·κ
+    auto c_x = pool_or_zeros(ws, C_X, vp);      // split gradient scratch (order>=6 path)
+    auto c_y = pool_or_zeros(ws, C_Y, vp);
+    auto c_z = pool_or_zeros(ws, C_Z, vp);
+    auto e_x = pool_or_zeros(ws, E_X, vp);
+    auto e_y = pool_or_zeros(ws, E_Y, vp);
+    auto e_z = pool_or_zeros(ws, E_Z, vp);
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(in.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -351,53 +369,27 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // Stepped/DD accumulate the gradient into these across segments
     // (calculate_grad does +=; Python zeroes them once before segment 1).
     const auto& gs = grad_slots(p);
+    const auto& ws = workspace_slots(p);
     auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
     auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
-    // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*): allocate ONCE
-    // and, for a DD per-step backward, recompute/zero only on the FIRST segment
-    // (they depend only on the fixed-within-a-backward model).  See VrzBwdScratch.
-    // Bit-exact vs the old per-step alloc+zero: BUILD_VRZ_ADJOINT_COEFFS overwrites
-    // C0..Cz, and build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
-    // step while their halo stays at the once-zeroed 0 (the divergence reads a 0
-    // halo either way).  ``grads_out`` (grad_vp/grad_z) stays Python-bound.
-    auto& _sc = vrz_bwd_scratch();
-    const bool _sc_realloc = !_sc.C0.defined() || _sc.C0.sizes() != vp.sizes()
-                          || _sc.C0.device() != vp.device();
-    const bool _sc_recompute = first_segment || _sc_realloc
-                            || _sc.vp_ptr != vp.data_ptr() || _sc.z_ptr != z.data_ptr();
-    if (_sc_realloc) {
-        _sc.C0 = torch::empty_like(vp); _sc.Cx = torch::empty_like(vp);
-        _sc.Cy = torch::empty_like(vp); _sc.Cz = torch::empty_like(vp);
-        _sc.c_x = torch::zeros_like(vp); _sc.c_y = torch::zeros_like(vp);
-        _sc.c_z = torch::zeros_like(vp); _sc.e_x = torch::zeros_like(vp);
-        _sc.e_y = torch::zeros_like(vp); _sc.e_z = torch::zeros_like(vp);
-    } else if (_sc_recompute) {
-        _sc.c_x.zero_(); _sc.c_y.zero_(); _sc.c_z.zero_();
-        _sc.e_x.zero_(); _sc.e_y.zero_(); _sc.e_z.zero_();
-    }
-    _sc.vp_ptr = vp.data_ptr(); _sc.z_ptr = z.data_ptr();
-    // C0/Cx/Cy/Cz adjoint coeffs: DD (phased) uses the Python-bound adjoint_workspace
-    // [6-9] so the driver halo-exchanges them ONCE (model-only, constant within a
-    // backward) before the reverse loop; single-GPU reuses the persistent scratch.
-    torch::Tensor C0, Cx, Cy, Cz;
-    if (phased) {
-        C0 = p.adjoint_workspace[6]; Cx = p.adjoint_workspace[7];
-        Cy = p.adjoint_workspace[8]; Cz = p.adjoint_workspace[9];
-    } else {
-        C0 = _sc.C0; Cx = _sc.Cx; Cy = _sc.Cy; Cz = _sc.Cz;
-    }
-    // c/e coupling buffers: DD (phased) uses the Python-bound adjoint_workspace so
-    // the driver can halo-exchange them between build (phase 2) and divergence
-    // (phase 3); single-GPU (monolithic) reuses the persistent VrzBwdScratch.
-    // (torch::Tensor copies share storage, so .data_ptr() hits the right buffer.)
-    torch::Tensor c_x, c_y, c_z, e_x, e_y, e_z;
-    if (phased) {
-        c_x = p.adjoint_workspace[0]; c_y = p.adjoint_workspace[1]; c_z = p.adjoint_workspace[2];
-        e_x = p.adjoint_workspace[3]; e_y = p.adjoint_workspace[4]; e_z = p.adjoint_workspace[5];
-    } else {
-        c_x = _sc.c_x; c_y = _sc.c_y; c_z = _sc.c_z;
-        e_x = _sc.e_x; e_y = _sc.e_y; e_z = _sc.e_z;
-    }
+    // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*) come from the
+    // pool (WorkspaceSlot above): under DD (phased) the driver halo-exchanges
+    // the c/e grids between the build (phase 2) and divergence (phase 3) steps,
+    // so they are Python-bound there, and the monolithic path binds the same
+    // ten slots. BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first
+    // segment; build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
+    // step while their halo stays at the pool's zero. torch::Tensor copies share
+    // storage, so .data_ptr() hits the bound buffer either way.
+    auto C0 = pool_or_zeros(ws, COEF_C0, vp);
+    auto Cx = pool_or_zeros(ws, COEF_CX, vp);
+    auto Cy = pool_or_zeros(ws, COEF_CY, vp);
+    auto Cz = pool_or_zeros(ws, COEF_CZ, vp);
+    auto c_x = pool_or_zeros(ws, C_X, vp);
+    auto c_y = pool_or_zeros(ws, C_Y, vp);
+    auto c_z = pool_or_zeros(ws, C_Z, vp);
+    auto e_x = pool_or_zeros(ws, E_X, vp);
+    auto e_y = pool_or_zeros(ws, E_Y, vp);
+    auto e_z = pool_or_zeros(ws, E_Z, vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -480,7 +472,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // Adjoint coeffs: monolithic builds on the first segment; phased builds ONLY in the
     // pre-loop coeff phase (step_phase 4 -> do_coeff), after which the driver exchanges
     // their cut halo once and phases 1/2/3 reuse them (do_coeff false there).
-    if (do_coeff && _sc_recompute) {
+    if (do_coeff && first_segment) {
         BUILD_VRZ_ADJOINT_COEFFS_3D(
             order,
             launch_config.grid,
@@ -723,18 +715,19 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         forward.allocate(vp, 3, true);
 
     const auto& gs = grad_slots(p);
+    const auto& ws = workspace_slots(p);
     auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
     auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
-    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
-    auto Cx = torch::zeros_like(vp);    // ∂ₓb·κ
-    auto Cy = torch::zeros_like(vp);    // ∂_yb·κ
-    auto Cz = torch::zeros_like(vp);    // ∂_z b·κ
-    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
-    auto c_y = torch::zeros_like(vp);
-    auto c_z = torch::zeros_like(vp);
-    auto e_x = torch::zeros_like(vp);
-    auto e_y = torch::zeros_like(vp);
-    auto e_z = torch::zeros_like(vp);
+    auto C0 = pool_or_zeros(ws, COEF_C0, vp);   // vp²       (time-invariant adjoint coeffs)
+    auto Cx = pool_or_zeros(ws, COEF_CX, vp);   // ∂ₓb·κ
+    auto Cy = pool_or_zeros(ws, COEF_CY, vp);   // ∂_yb·κ
+    auto Cz = pool_or_zeros(ws, COEF_CZ, vp);   // ∂_z b·κ
+    auto c_x = pool_or_zeros(ws, C_X, vp);      // split gradient scratch (order>=6 path)
+    auto c_y = pool_or_zeros(ws, C_Y, vp);
+    auto c_z = pool_or_zeros(ws, C_Z, vp);
+    auto e_x = pool_or_zeros(ws, E_X, vp);
+    auto e_y = pool_or_zeros(ws, E_Y, vp);
+    auto e_z = pool_or_zeros(ws, E_Z, vp);
     auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
         ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
         : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
