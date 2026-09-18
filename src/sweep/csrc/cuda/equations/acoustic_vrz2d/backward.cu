@@ -18,6 +18,23 @@
 
 namespace acoustic_vrz2d {
 
+namespace {
+
+// The checkpoint replay state backward_ckpt steps, set 0 of
+// p.forward_wavefields (Python-zeroed per backward call): the Driver::CKPT_NVAR
+// snapshot slots u_prev, u_now, psix, psiz, zetax, zetaz plus u_next -- the
+// forward slot list without the psi double-buffer shadows -- in the struct's
+// bind order u_prev, u_now, u_next, psix, psiz, zetax, zetaz.
+constexpr int REPLAY_STATE_NVAR = Driver::CKPT_NVAR + 1;   // 7
+
+// p.checkpoint_replay (cuda_layout.checkpoint_replay_shapes): allocated by the
+// propagator next to the checkpoint snapshots, never re-zeroed.
+enum ReplaySlot : int {
+    CHUNK_FORWARD = 0   // the replayed segment's pressure, (max_segment, B, 1, nz, nx)
+};
+
+} // namespace
+
 BackwardOutput backward(const BackwardInput& in)
 {
     return eqdrv::generic_backward<Driver>(in);
@@ -68,28 +85,46 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
     Driver::zero_wavefield_state(adjoint);
 
+    // The replay state (REPLAY_STATE_NVAR above), bound through the struct's
+    // full PML bind: with no psi shadows in the set the replay writes psi in
+    // place -- the path allocate() gives (swap() rotates u only) -- and the
+    // propagator zeroed the set as allocate() started from.  An unbound
+    // caller keeps the allocation.
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields, 2, true);
+        forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
+                                   "acoustic_vrz2d ckpt replay state"), 2, true);
     else
         forward.allocate(vp, 2, true);
 
-    auto grad_vp = torch::zeros_like(vp);
-    auto grad_z = torch::zeros_like(z);
-    auto C0 = torch::zeros_like(vp);    // vp²       (time-invariant adjoint coeffs)
-    auto Cx = torch::zeros_like(vp);    // (∂ₓb·κ)
-    auto Cz = torch::zeros_like(vp);    // (∂_z b·κ)
-    auto c_x = torch::zeros_like(vp);   // split gradient scratch (order>=6 path)
-    auto c_z = torch::zeros_like(vp);
-    auto e_x = torch::zeros_like(vp);
-    auto e_z = torch::zeros_like(vp);
+    // {grad_vp, grad_z}: p.grads_out as the propagator binds it for the acoustic
+    // family ({grad_wavelet, grad_vp, grad_z}; slot 0 unused, VRZ computes no
+    // grad_wavelet), zeroed by Python once per backward -- the binding the
+    // full/bs skeleton takes (Driver::bind_backward_outputs).  Empty for an
+    // unbound caller, which then gets fresh zeros.
+    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == p.models.size() + 1,
+                "AcousticVRZ backward_ckpt: grads_out must be empty or hold models.size()+1 "
+                "tensors (slot 0 = grad_wavelet, unused for VRZ), got ", p.grads_out.size());
+    auto grad_vp = pool_or_zeros(p.grads_out, 1, vp, "grads_out");
+    auto grad_z  = pool_or_zeros(p.grads_out, 2, z, "grads_out");
+    // Model-shaped per-call scratch from the propagator's pool (Driver::
+    // WorkspaceSlot, the same seven slots the full/bs skeleton takes), zero at
+    // entry as the zeros_like it replaces; an unbound caller gets fresh zeros.
+    const auto& ws = Driver::workspace_slots(p);
+    auto C0  = pool_or_zeros(ws, Driver::COEF_C0, vp);   // vp²       (time-invariant adjoint coeffs)
+    auto Cx  = pool_or_zeros(ws, Driver::COEF_CX, vp);   // ∂ₓb·κ
+    auto Cz  = pool_or_zeros(ws, Driver::COEF_CZ, vp);   // ∂_z b·κ
+    auto c_x = pool_or_zeros(ws, Driver::C_X, vp);       // split gradient scratch (order>=6 path)
+    auto c_z = pool_or_zeros(ws, Driver::C_Z, vp);
+    auto e_x = pool_or_zeros(ws, Driver::E_X, vp);
+    auto e_z = pool_or_zeros(ws, Driver::E_Z, vp);
     auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
         ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
         : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
     const bool recursive_checkpoint = checkpoint_steps_cpu.numel() > 0;
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
-        6,
+        Driver::CKPT_NVAR,
         true,
         recursive_checkpoint,
         p.checkpoint_interval,
@@ -156,7 +191,14 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         );
     }
 
-    auto chunk_forward = torch::zeros({max_segment_length, N, C, nz, nx}, vp.options());
+    // The replayed segment's pressure history from p.checkpoint_replay
+    // (ReplaySlot above), taken once at the full max_segment rows and reused
+    // by every segment: each row the reverse pass reads was written by the
+    // replay earlier in the same segment, so it is never zeroed.  An unbound
+    // caller allocates it once per call, as before.
+    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, CHUNK_FORWARD,
+                                       {max_segment_length, N, C, nz, nx}, vp.options(),
+                                       "checkpoint_replay");
 
     for (int segment_id = num_segments - 1; segment_id >= 0; --segment_id) {
         int start;

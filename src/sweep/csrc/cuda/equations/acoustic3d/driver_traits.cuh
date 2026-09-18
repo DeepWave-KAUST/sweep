@@ -4,6 +4,8 @@
 //   * no ctx.set_per_edge anywhere — per-edge free surface is 2-D only;
 //   * the fused adjoint carries a psi AND zeta triple double-buffer
 //     (15 adjoint tensors, adjoint_extra_nvar=3);
+//   * CKPT_STATE_COUNT = 9 (u triple + the 6 CPML aux slabs) per checkpoint
+//     replay state set of p.forward_wavefields;
 //   * the boundary-saving reverse step images BEFORE the forward source
 //     injection (2-D images after injection + swap), and its NOPML kernel
 //     writes a per-step scratch field (BsScratch.f_this);
@@ -58,6 +60,9 @@ struct Driver {
         "bits 0..5 (x_lo, x_hi, z_lo, z_hi, y_lo, y_hi)";
     static constexpr int ADJ_WF_COUNT = 15;     // u triple + psi/zeta triple double-buffer
     static constexpr int RECON_WF_COUNT = 3;
+    // One checkpoint replay state set (ckpt / recursive backward), in bind
+    // order: u_prev, u_now, u_next + the 6 CPML aux slabs = CKPT_NVAR + u_next.
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR + 1;
     static constexpr bool HAS_FUSED_FULL_IMG = true;
     static constexpr bool ADCIG_IN_FULL_MODES = false;
     static constexpr bool BS_HAS_IT0_ADJOINT_TAIL = true;
@@ -591,19 +596,44 @@ struct Driver {
     // leaf's scratch u.
     // ===================================================================== //
 
+    // Replay state set ``set`` of p.forward_wavefields, which holds K sets of
+    // CKPT_STATE_COUNT tensors back to back (ckpt: K = 1; recursive: 1 + the
+    // bisection depth, cuda_layout.recursive_state_depth).  The 9-tensor bind
+    // is the in-place psi layout allocate_from_snapshots wires (use_pml, no
+    // psi double-buffer: the replay pairs with the u-only swap()).
+    static void bind_replay_state(Wavefield& wf, const BackwardInput& p,
+                                  const torch::Tensor& vp, int set)
+    {
+        wf.bind_replay_state(wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
+                                           "acoustic3d ckpt replay state"),
+                             vp, p.checkpoints, 3);
+    }
+
+    // Set 0: the chunk replay state (ckpt) / the segment start state
+    // (recursive).  The propagator zeroes the set per backward call -- the
+    // state the fallback allocation starts from.
     static void bind_or_alloc_recon_ckpt(Wavefield& wf, const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
         if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 3, true);
+            bind_replay_state(wf, p, vp, 0);
         else
+            // Aux shapes must follow the Python-allocated checkpoint slots
+            // (possibly per-axis slabs); a plain allocate() would build
+            // full-domain aux and break the snapshot copies.
             wf.allocate_from_snapshots(vp, p.checkpoints, 3);
     }
 
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput& p,
-                                            const torch::Tensor& vp)
+    // Sets 1..depth: the bisection's scratch states, each copy_state-filled
+    // from its parent interval before any read.
+    static void bind_or_alloc_recursive_scratch(Wavefield& wf, const BackwardInput& p,
+                                                const torch::Tensor& vp, int set,
+                                                const Wavefield& start_state)
     {
-        wf.allocate_from_snapshots(vp, p.checkpoints, 3);
+        if (!p.forward_wavefields.empty())
+            bind_replay_state(wf, p, vp, set);
+        else
+            wf.allocate_like(vp, start_state);
     }
 
     static void replay_step(const State& s, const SolverContext& ctx,

@@ -34,10 +34,30 @@ namespace {
 
 // Layout of p.adjoint_workspace, declared on the Python side by
 // AcousticLSRTM3D.cuda_layout.backward_workspace_shapes (one padded grid per
-// shot each): the vp^2*lambda scratch of every adjoint step, plus one grid the
-// modes use differently -- the replayed step's field in the recursive mode,
-// the forward step in the boundary-saving mode; the modes never share a pool.
-enum WorkspaceSlot : int { V2_LAMBDA = 0, U_THIS = 1, F_THIS = 1, N_SLOTS_PLAIN = 1, N_SLOTS_EXTRA = 2 };
+// shot each, zeroed by the propagator before every gradient-bearing forward):
+// the vp^2*lambda scratch of every adjoint step, then per mode --
+//   recursive: the replayed step's field;
+//   bs:        the forward step;
+//   ckpt:      the chunk replay state of the background field, one
+//              AcousticWavefieldTensor in its 3-D bind order (u_prev, u_now,
+//              u_next, psix, psiz, zetax, zetaz, psiy, zetay -- 9 tensors, no
+//              psi double-buffer shadow, so bind() keeps double_buffer_psi=false
+//              and the replay keeps its u-only swap()). It lives here rather
+//              than in forward_wavefields (checkpoint_state_nvar=0) because the
+//              LSRTM forward slot list is two acoustic layouts back to back.
+// The modes never share a pool, so the per-mode slots may overlap.
+enum WorkspaceSlot : int {
+    V2_LAMBDA = 0,
+    U_THIS = 1,                                        // recursive mode
+    F_THIS = 1,                                        // boundary-saving mode
+    REPLAY_U_PREV = 1, REPLAY_U_NOW, REPLAY_U_NEXT,    // ckpt mode, AcousticWavefieldTensor::bind order
+    REPLAY_PSIX, REPLAY_PSIZ, REPLAY_ZETAX, REPLAY_ZETAZ, REPLAY_PSIY, REPLAY_ZETAY,
+    N_SLOTS_PLAIN = 1,
+    N_SLOTS_EXTRA = 2,
+    N_SLOTS_CKPT = REPLAY_ZETAY + 1,                   // 10
+};
+static_assert(N_SLOTS_CKPT - REPLAY_U_PREV == 9,
+              "acoustic 3-D replay state is the 9-tensor AcousticWavefieldTensor (PML, no double buffer)");
 
 // Either unbound (every slot then falls back to a fresh zero tensor) or exactly
 // the count this mode declares: any other size means the Python declaration
@@ -48,6 +68,21 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p,
                 "AcousticLSRTM3D backward: adjoint_workspace must be empty or hold ", n_slots,
                 " tensors for this mode, got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
+}
+
+// The chunk replay state from its workspace slots, in AcousticWavefieldTensor's
+// bind order; an unbound caller gets fresh zeros per slot, byte-identical to
+// the allocate(vp, 3, true) this replaces. Every chunk re-seeds all 9 (load the
+// 8 checkpointed fields + zero u_next) before any read, so the pool's
+// per-forward zeroing is all the initialisation the state ever needs.
+static std::vector<torch::Tensor> ckpt_replay_state(const std::vector<torch::Tensor>& workspace,
+                                                    const torch::Tensor& vp)
+{
+    std::vector<torch::Tensor> state;
+    state.reserve(N_SLOTS_CKPT - REPLAY_U_PREV);
+    for (int slot = REPLAY_U_PREV; slot < N_SLOTS_CKPT; ++slot)
+        state.push_back(pool_or_zeros(workspace, slot, vp, "adjoint_workspace"));
+    return state;
 }
 
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
@@ -863,11 +898,15 @@ void run_ckpt_imaging(
     else
         adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
 
+    // The chunk replay state is the workspace's REPLAY_* slots (count checked
+    // by the caller, backward_ckpt_imaging_impl), not forward_wavefields
+    // (checkpoint_state_nvar=0): a caller that binds a state list here has the
+    // wrong layout.
+    TORCH_CHECK(p.forward_wavefields.empty(),
+                "Acoustic LSRTM 3D backward_ckpt keeps its replay state in adjoint_workspace; "
+                "forward_wavefields must be empty, got ", p.forward_wavefields.size());
     AcousticWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(slice_wavefields(p.forward_wavefields, 0, 9), 3, true);
-    else
-        forward.allocate(vp, 3, true);
+    forward.bind(ckpt_replay_state(p.adjoint_workspace, vp), 3, /*use_pml=*/true);
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -992,7 +1031,7 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     const auto& gs = grad_slots(p);
-    workspace_slots(p, N_SLOTS_PLAIN);
+    workspace_slots(p, N_SLOTS_CKPT);
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");

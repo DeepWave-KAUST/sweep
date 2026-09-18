@@ -63,8 +63,9 @@ SENTINEL = 1e-3
 # the only one that needs its six extra grids).
 ALL = ("full", "bs_gpu", "ckpt_chunk")
 CASES = {
-    "elastic_tti_sg2d": (lambda mode: 6, None, ALL),
-    "elastic_tti_sg3d": (lambda mode: 18, None, ALL),
+    # + 6 velocity carriers (next_segment_v / prev_segment_next_v) in ckpt mode (slice 13)
+    "elastic_tti_sg2d": (lambda mode: 12 if mode == "ckpt_chunk" else 6, None, ALL),
+    "elastic_tti_sg3d": (lambda mode: 24 if mode == "ckpt_chunk" else 18, None, ALL),
     "acoustic_vti_1st_2d": (lambda mode: 5, 2, ALL),
     "acoustic_vti_1st_3d": (lambda mode: 6, 3, ALL),
     "das2d": (lambda mode: 15 if mode == "bs_gpu" else 9, 0, ALL),
@@ -74,8 +75,9 @@ CASES = {
     # in the others -- the modes never share a pool
     "elastic_tti_2nd2d": (lambda mode: 9 if mode == "full" else 11,
                           lambda mode: 8 if mode == "full" else None, ALL),
-    "lsrtm2d": (lambda mode: 1, None, ALL),
-    "lsrtm3d": (lambda mode: 2 if mode == "bs_gpu" else 1, None, ALL),
+    # ckpt: + the 7-grid chunk replay state (LSRTM keeps it in the workspace, slice 13)
+    "lsrtm2d": (lambda mode: 8 if mode == "ckpt_chunk" else 1, None, ALL),
+    "lsrtm3d": (lambda mode: {"bs_gpu": 2, "ckpt_chunk": 10}.get(mode, 1), None, ALL),
     "visco2d": (lambda mode: 1, None, ("full", "ckpt_chunk")),
 }
 

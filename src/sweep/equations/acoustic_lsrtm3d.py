@@ -100,13 +100,24 @@ def step_cpml(
 
 
 
+# The chunk-checkpoint replay state of the background field: one 3-D
+# AcousticWavefieldTensor in its bind order (u_prev, u_now, u_next, psix, psiz,
+# zetax, zetaz, psiy, zetay). It rides in the adjoint workspace, not in
+# ``forward_wavefields`` (``checkpoint_state_nvar=0``), because the LSRTM
+# forward slot list is two acoustic layouts back to back and the generic
+# "forward slots minus shadows" state list does not fit it.
+_CKPT_REPLAY_STATE_NVAR = 9
+
+
 def _adjoint_workspace_shapes(B, nt, shape, mode):
     """The compiled backward's scratch (acoustic_lsrtm3d/backward.cu WorkspaceSlot),
     one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
     plus one grid in the boundary-saving mode (the forward step) and the
-    recursive-checkpoint mode (the replayed step's field).
+    recursive-checkpoint mode (the replayed step's field), or the
+    ``_CKPT_REPLAY_STATE_NVAR`` grids of the chunk replay state in the
+    chunk-checkpoint mode.
     """
-    n = 2 if mode in ("bs", "recursive") else 1
+    n = {"bs": 2, "recursive": 2, "ckpt": 1 + _CKPT_REPLAY_STATE_NVAR}.get(mode, 1)
     return n * [[B, 1, *shape]]
 
 @register_equation()
@@ -214,9 +225,10 @@ class AcousticLSRTM3D(SecondOrderEquation):
         return CUDALayoutSpec(
             record_shape=record_single(),
             # chunk_forward: the replayed chunk's background field
-            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)],
             backward_workspace_shapes=_adjoint_workspace_shapes,
             bs_reconstruction_nvar=3,   # u_prev, u_now, u_next of the background field
+            checkpoint_state_nvar=0,    # the ckpt replay state comes from workspace slots, not forward_wavefields
             save_all_shape=history_plain(),   # bg_utt_all
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.

@@ -32,7 +32,7 @@
 //   * seed_reconstruction: u_prev <- u_last_two[:, 1], u_now <- u_last_two[:, 0], then set_boundary_zeros on both over the abcn + M rim with the cut faces excluded (ctx.cut_mask()); make_bs_scratch returns {};
 //   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
 //   * bs_rtm_tap, after the prefetch: accumulate_illumination_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
-//   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots;
+//   * ckpt: CKPT_STATE_COUNT = 7 (u triple + the 4 CPML aux slabs, bind order) per replay state set of p.forward_wavefields; bind_or_alloc_recon_ckpt binds set 0 (bind_replay_state: wavefield_set + geometry check) or allocate_from_snapshots(vp, checkpoints, 2); bind_or_alloc_recursive_scratch binds set 1..depth or allocate_like(start_state);
 //   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
@@ -79,6 +79,9 @@ struct Driver {
     static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
     static constexpr int ADJ_WF_COUNT = 11;     // u triple + psi/zeta double-buffer
     static constexpr int RECON_WF_COUNT = 3;
+    // One checkpoint replay state set (ckpt / recursive backward), in bind
+    // order: u_prev, u_now, u_next + the 4 CPML aux slabs = CKPT_NVAR + u_next.
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR + 1;
     // Full mode folds the lagged vp-gradient imaging into the adjoint kernel.
     static constexpr bool HAS_FUSED_FULL_IMG = true;
     // 2-D serves ADCIG from full/ckpt modes too (raw-pressure imaging).
@@ -644,11 +647,27 @@ struct Driver {
     //   imaging fed from the leaf's scratch u.
     // ===================================================================== //
 
+    // Replay state set ``set`` of p.forward_wavefields, which holds K sets of
+    // CKPT_STATE_COUNT tensors back to back (ckpt: K = 1; recursive: 1 + the
+    // bisection depth, cuda_layout.recursive_state_depth).  The 7-tensor bind
+    // is the in-place psi layout allocate_from_snapshots wires (use_pml, no
+    // psi double-buffer: the replay pairs with the u-only swap()).
+    static void bind_replay_state(Wavefield& wf, const BackwardInput& p,
+                                  const torch::Tensor& vp, int set)
+    {
+        wf.bind_replay_state(wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
+                                           "acoustic2d ckpt replay state"),
+                             vp, p.checkpoints, 2);
+    }
+
+    // Set 0: the chunk replay state (ckpt) / the segment start state
+    // (recursive).  The propagator zeroes the set per backward call -- the
+    // state the fallback allocation starts from.
     static void bind_or_alloc_recon_ckpt(Wavefield& wf, const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
         if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 2, true);
+            bind_replay_state(wf, p, vp, 0);
         else
             // Aux shapes must follow the Python-allocated checkpoint slots
             // (possibly per-axis slabs); a plain allocate() would build
@@ -656,10 +675,16 @@ struct Driver {
             wf.allocate_from_snapshots(vp, p.checkpoints, 2);
     }
 
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput& p,
-                                            const torch::Tensor& vp)
+    // Sets 1..depth: the bisection's scratch states, each copy_state-filled
+    // from its parent interval before any read.
+    static void bind_or_alloc_recursive_scratch(Wavefield& wf, const BackwardInput& p,
+                                                const torch::Tensor& vp, int set,
+                                                const Wavefield& start_state)
     {
-        wf.allocate_from_snapshots(vp, p.checkpoints, 2);
+        if (!p.forward_wavefields.empty())
+            bind_replay_state(wf, p, vp, set);
+        else
+            wf.allocate_like(vp, start_state);
     }
 
     static void replay_step(const State& s, const SolverContext& ctx,

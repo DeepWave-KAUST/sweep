@@ -7,7 +7,13 @@
 //     profiles;
 //   * the wavefield/workspace are the SHARED elastic types
 //     (ElasticWavefieldTensor, 36 tensors; ElasticAdjointWorkspaceTensor via
-//     init_adjoint_workspace) -- no m_syzx backfill, unlike elastic3d;
+//     init_adjoint_workspace) -- no m_syzx backfill, unlike elastic3d; in
+//     ckpt mode the workspace pool continues past the struct's 18 with the
+//     velocity carriers the skeleton takes behind them (WS_CARRIERS);
+//   * ckpt: the replay state is set 0 of the Python-bound forward_wavefields
+//     (CKPT_STATE_COUNT = 36, the full bind with CPML memory) and the
+//     per-segment vx/vy/vz histories are the three checkpoint_replay slots
+//     (seg_buffers);
 //   * u_allt stores only the three velocities (2-D stores all 8 fields);
 //   * BOTH the full and the boundary-saving backward zero the adjoint state
 //     after binding (zero_adjoint_if_first_segment AND zero_adjoint_if_first_segment_bs; 2-D zeroes neither);
@@ -62,6 +68,10 @@ struct Driver {
     static constexpr int CKPT_NVAR = 36;
     static constexpr const char* CKPT_COUNT_MSG =
         "ElasticTTISG3D checkpointing expects 36 checkpoint tensors";
+    // Checkpoint replay state: one set of the Python-bound forward_wavefields,
+    // in the forward's full bind order -- 9 fields + 27 CPML memory tensors,
+    // all full-grid (no aux slabs in this equation).
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;
     static constexpr int BS_NVAR = 9;   // vx, vy, vz, sxx, syy, szz, sxy, sxz, syz
     static constexpr int CUT_MASK_BITS = 0x0;
     static constexpr const char* CUT_MASK_DESC =
@@ -131,6 +141,14 @@ struct Driver {
 
     // Backward-only adjoint workspace (used by the full, bs, and ckpt modes).
     using Workspace = ElasticAdjointWorkspaceTensor;
+
+    // Adjoint workspace pool (cuda_layout.backward_workspace_shapes): the 18
+    // elastic adjoint scratch grids the struct binds [q** x 9, p** x 9],
+    // then -- ckpt mode only -- the velocity carriers the skeleton takes at
+    // WS_CARRIERS + c (v(t): next_segment_v) and WS_CARRIERS + N_VEL + c
+    // (v(t+1): prev_segment_next_v), sg_driver.cuh SgCarrierSlots.  The
+    // struct's bind takes the head of the longer pool (elastic.h).
+    static constexpr int WS_CARRIERS = 18;
 
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& rho)
     {
@@ -792,35 +810,49 @@ public:
     //   deliberately absent.)
     // ===================================================================== //
 
+    // Replay state: set 0 of the Python-bound forward_wavefields (zeroed by
+    // the propagator per backward call), bound in FULL -- the 9 fields and
+    // the 27 CPML memory tensors the replay steps through the PML (the
+    // 36-tensor 3-D branch of ElasticWavefieldTensor::bind) -- exactly the
+    // allocate(rho, 3) layout an unbound caller still gets.  Every slot is a
+    // full grid here, so the geometry is checked as well.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInput& p,
                                          const torch::Tensor& rho)
     {
-        if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields, true);
-        else
+        if (!p.forward_wavefields.empty()) {
+            auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+                                       "elastic_tti_sg3d ckpt replay state");
+            for (int i = 0; i < CKPT_STATE_COUNT; ++i)
+                pool_slot_checked(state, i, rho, "elastic_tti_sg3d ckpt replay state");
+            forward.bind(state, true);
+        } else {
             forward.allocate(rho, 3);
-    }
-
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput&,
-                                            const torch::Tensor& rho)
-    {
-        wf.allocate(rho, 3);
+        }
     }
 
     static void check_ckpt_aux_layout(const Wavefield&, const Wavefield&) {}
 
     // ---- seg / carrier plumbing (ckpt mode) ----
 
-    static std::vector<torch::Tensor> alloc_seg_buffers(const torch::Tensor& rho,
-                                                        int segment_len)
+    // Per-segment velocity histories seg[c][k] = v_c(start + k), k in
+    // [0, segment_len]: the N_VEL checkpoint_replay slots [vx, vy, vz]
+    // (cuda_layout.checkpoint_replay_shapes, (chunk + 1, B, 1, nz, ny, nx)
+    // each, allocated once next to the snapshots and never re-zeroed --
+    // every row the reverse pass reads was written by save_seg_velocities
+    // earlier in the same segment), or that shape allocated once per call
+    // when unbound.  Taken once per call at the longest segment; the
+    // skeleton narrows the rows of a shorter last segment itself.
+    static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
+                                                  const torch::Tensor& rho, int max_rows)
     {
-        std::vector<int64_t> seg_shape = rho.sizes().vec();
-        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(segment_len + 1));
-        auto seg_vx = torch::zeros(seg_shape, rho.options());
-        auto seg_vy = torch::zeros(seg_shape, rho.options());
-        auto seg_vz = torch::zeros(seg_shape, rho.options());
-        return {seg_vx, seg_vy, seg_vz};
+        std::vector<int64_t> seg_shape = rho.sizes().vec();   // (max_rows, B, 1, nz, ny, nx)
+        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(max_rows));
+        std::vector<torch::Tensor> seg;
+        for (int c = 0; c < N_VEL; ++c)
+            seg.push_back(pool_or_zeros(p.checkpoint_replay, c, seg_shape, rho.options(),
+                                        "checkpoint_replay"));
+        return seg;
     }
 
     static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,

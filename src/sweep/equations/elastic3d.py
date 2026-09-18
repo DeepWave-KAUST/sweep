@@ -586,7 +586,25 @@ class Elastic(FirstOrderEquation):
             pml_nvar=27,
             last_two_nvar=1,
             last_two_storage_nvar=9,
+            # The compiled backward's scratch (common/elastic.h
+            # ElasticAdjointWorkspaceTensor), one padded grid per shot each:
+            # [0-17]  = the nine q* then the nine p*, the stress- /
+            #           velocity-adjoint prepare->apply scratch (every mode);
+            # [18-20] = next_segment_v (ckpt) / current_v (recursive): the v(it)
+            #           carriers the imaging reads, vx / vy / vz;
+            # [21-23] = prev_segment_next_v (ckpt) / next_v (recursive): the
+            #           v(it+1) carriers, vx / vy / vz
+            # -- [18-23] in the checkpoint modes only (sg_driver.cuh
+            # SgCarrierSlots after elastic3d WS_CARRIERS = 18).
             backward_workspace_nvar=18,
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                24 if mode in ("ckpt", "recursive") else 18),
+            # The chunked backward's replayed velocity histories (elastic3d
+            # driver_traits seg_buffers): vx, vy, vz of one chunk, (interval + 1,
+            # B, 1, grid) each -- row 0 = v(start), row k = v(start + k).  The
+            # recursive mode replays per step into the carriers above and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
             derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
             # CPML memory variables in C++ bind order: nine (x, y, z) triples
             # (m_vx*, m_vy*, m_vz*, m_sxx*, m_syy*, m_szz*, m_sxy*, m_sxz*,

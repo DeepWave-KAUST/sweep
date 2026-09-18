@@ -418,7 +418,7 @@ class ElasticTTI2nd(FirstOrderEquation):
         return CUDALayoutSpec(
             record_shape=record_multi(),
             # seg_ux, seg_uz: two history levels + one row per replayed step
-            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg + 2, B, 1, *grid)] * 2,
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg + 2, B, 1, *grid)] * 2,
             save_all_shape=history_fields(2),   # ux, uz
             # 6 displacement buffers (ux, uz) x (now, pre, next): the CUDA
             # leapfrog rotates a race-free triple buffer, mirroring the

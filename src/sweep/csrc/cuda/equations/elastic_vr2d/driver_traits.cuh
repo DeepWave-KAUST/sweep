@@ -16,10 +16,17 @@
 //   * the gradient kernel is followed by a chain-rule pass
 //     (LAUNCH_EVR_GRAD_CHAIN_APPLY) in every mode — both live in
 //     image_standalone;
-//   * the 14-slot adjoint workspace pool splits into the adjoint-step half
-//     (slots 0-9, the Workspace) and the imaging half (slots 10-13 plus the
-//     zero next-momentum buffer, carried in the State so image_standalone
-//     can reach them);
+//   * the 14-slot adjoint workspace pool (WorkspaceSlot) splits into the
+//     adjoint-step half (slots 0-9, the Workspace) and the imaging half
+//     (slots 10-13 plus the zero next-momentum buffer, carried in the State
+//     so image_standalone can reach them); in recursive mode the pool
+//     continues with the N_VEL captured-momentum carriers the skeleton takes
+//     behind them (WS_CARRIERS; ckpt takes none: no p(t+1) term, so no
+//     cross-chunk carriers either);
+//   * ckpt/recursive: the replay state is set 0 of the Python-bound
+//     forward_wavefields (CKPT_STATE_COUNT = 15, the full bind with CPML
+//     memory) and the per-segment px/pz histories are the two
+//     checkpoint_replay slots (seg_buffers);
 //   * bs: bind_or_alloc_recon binds the 5-tensor p.forward_wavefields list
 //     [px, pz, sxx, szz, sxz] with use_pml = false (no carriers: the imaging
 //     has no velocity(t+1) term) or allocate(vp, 2, false) when the list is
@@ -67,6 +74,11 @@ struct Driver {
         "elastic_vr2d checkpointing expects 15 checkpoint tensors";
     static constexpr const char* CKPT_RECURSIVE_COUNT_MSG =
         "elastic_vr2d checkpointing expects 15 checkpoint tensors";
+    // Checkpoint replay state (ckpt + recursive): one set of the Python-bound
+    // forward_wavefields, in the forward's full bind order -- 5 fields + 10
+    // CPML memory tensors, all full-grid (no aux slabs in this equation).
+    // One set only: the recursive backward keeps no per-level scratch here.
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;
     static constexpr int BS_NVAR = 5;   // px, pz, sxx, szz, sxz
     static constexpr int CUT_MASK_BITS = 0xF;
     static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
@@ -169,10 +181,10 @@ struct Driver {
         State s = make_state_common(p, d, models, launch_config, source_config,
                                     record_config);
         const auto& vp = p.models[0];
-        s.ws_lvpx = pool_or_zeros(p.adjoint_workspace, 10, vp);
-        s.ws_lvpz = pool_or_zeros(p.adjoint_workspace, 11, vp);
-        s.ws_lvsx = pool_or_zeros(p.adjoint_workspace, 12, vp);
-        s.ws_lvsz = pool_or_zeros(p.adjoint_workspace, 13, vp);
+        s.ws_lvpx = pool_or_zeros(p.adjoint_workspace, L_VP_X, vp);
+        s.ws_lvpz = pool_or_zeros(p.adjoint_workspace, L_VP_Z, vp);
+        s.ws_lvsx = pool_or_zeros(p.adjoint_workspace, L_VS_X, vp);
+        s.ws_lvsz = pool_or_zeros(p.adjoint_workspace, L_VS_Z, vp);
         // u_forward is bound in full mode only, where the imaging always has
         // real next-momentum pointers — allocate the zero buffer for the
         // other three modes, keeping the per-mode allocation count identical
@@ -182,7 +194,24 @@ struct Driver {
         return s;
     }
 
-    // Adjoint-step half of the 14-slot workspace pool (slots 0-9).
+    // The 14-slot adjoint workspace pool (cuda_layout.backward_workspace_shapes,
+    // elastic_vrr.py), one padded grid per shot each: the adjoint-step half
+    // (slots 0-9, the Workspace below) and the imaging half (slots 10-13,
+    // carried in the State).  In recursive mode the pool continues with the
+    // N_VEL captured-momentum carriers the skeleton takes at WS_CARRIERS + c
+    // (p(t): current_v), sg_driver.cuh SgCarrierSlots; IMAGING_USES_NEXT_V is
+    // false, so there are no p(t+1) carriers and the chunked ckpt mode (whose
+    // only carriers would be cross-chunk p(t+1)) takes none.
+    enum WorkspaceSlot : int {
+        Q_XX = 0, Q_ZZ, Q_XZ, Q_ZX,      // stress-adjoint scratch
+        P_XX, P_ZZ, P_XZ, P_ZX,          // momentum-adjoint scratch
+        PT_PX, PT_PZ,                    // point_p*: gamma multiplicative term
+        L_VP_X, L_VP_Z, L_VS_X, L_VS_Z,  // L_dV*: chain-rule sources (imaging)
+        N_WORKSPACE
+    };
+    static constexpr int WS_CARRIERS = N_WORKSPACE;   // 14
+
+    // Adjoint-step half of the workspace pool (slots 0-9).
     struct Workspace {
         torch::Tensor qxx, qzz, qxz, qzx;
         torch::Tensor pxx, pzz, pxz, pzx;
@@ -191,17 +220,20 @@ struct Driver {
 
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
     {
+        TORCH_CHECK(p.adjoint_workspace.empty() || (int)p.adjoint_workspace.size() >= N_WORKSPACE,
+                    "elastic_vr2d backward: adjoint_workspace must be empty or hold at least ",
+                    static_cast<int>(N_WORKSPACE), " tensors, got ", p.adjoint_workspace.size());
         Workspace w;
-        w.qxx   = pool_or_zeros(p.adjoint_workspace, 0, vp);
-        w.qzz   = pool_or_zeros(p.adjoint_workspace, 1, vp);
-        w.qxz   = pool_or_zeros(p.adjoint_workspace, 2, vp);
-        w.qzx   = pool_or_zeros(p.adjoint_workspace, 3, vp);
-        w.pxx   = pool_or_zeros(p.adjoint_workspace, 4, vp);
-        w.pzz   = pool_or_zeros(p.adjoint_workspace, 5, vp);
-        w.pxz   = pool_or_zeros(p.adjoint_workspace, 6, vp);
-        w.pzx   = pool_or_zeros(p.adjoint_workspace, 7, vp);
-        w.pt_px = pool_or_zeros(p.adjoint_workspace, 8, vp);
-        w.pt_pz = pool_or_zeros(p.adjoint_workspace, 9, vp);
+        w.qxx   = pool_or_zeros(p.adjoint_workspace, Q_XX, vp);
+        w.qzz   = pool_or_zeros(p.adjoint_workspace, Q_ZZ, vp);
+        w.qxz   = pool_or_zeros(p.adjoint_workspace, Q_XZ, vp);
+        w.qzx   = pool_or_zeros(p.adjoint_workspace, Q_ZX, vp);
+        w.pxx   = pool_or_zeros(p.adjoint_workspace, P_XX, vp);
+        w.pzz   = pool_or_zeros(p.adjoint_workspace, P_ZZ, vp);
+        w.pxz   = pool_or_zeros(p.adjoint_workspace, P_XZ, vp);
+        w.pzx   = pool_or_zeros(p.adjoint_workspace, P_ZX, vp);
+        w.pt_px = pool_or_zeros(p.adjoint_workspace, PT_PX, vp);
+        w.pt_pz = pool_or_zeros(p.adjoint_workspace, PT_PZ, vp);
         return w;
     }
 
@@ -748,20 +780,24 @@ public:
     //   (it > 0) plain_adjoint_step.
     // ===================================================================== //
 
+    // Replay state: set 0 of the Python-bound forward_wavefields (zeroed by
+    // the propagator per backward call), bound in FULL -- the 5 fields and
+    // the 10 CPML memory tensors the replay steps through the PML -- exactly
+    // the allocate(vp, 2, true) layout an unbound caller still gets.  Every
+    // slot is a full grid here, so the geometry is checked as well.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields, true);
-        else
+        if (!p.forward_wavefields.empty()) {
+            auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+                                       "elastic_vr2d ckpt replay state");
+            for (int i = 0; i < CKPT_STATE_COUNT; ++i)
+                pool_slot_checked(state, i, vp, "elastic_vr2d ckpt replay state");
+            forward.bind(state, true);
+        } else {
             forward.allocate(vp, 2, true);
-    }
-
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput&,
-                                            const torch::Tensor& vp)
-    {
-        wf.allocate(vp, 2, true);
+        }
     }
 
     // Plain full-shape allocations on both sides — nothing to cross-check.
@@ -769,13 +805,24 @@ public:
 
     // ---- seg / carrier plumbing (ckpt + recursive modes) ----
 
-    static std::vector<torch::Tensor> alloc_seg_buffers(const torch::Tensor& vp,
-                                                        int segment_len)
+    // Per-segment momentum histories seg[c][k] = p_c(start + k), k in
+    // [0, segment_len]: the N_VEL checkpoint_replay slots [px, pz]
+    // (cuda_layout.checkpoint_replay_shapes, (chunk + 1, B, 1, nz, nx) each,
+    // allocated once next to the snapshots and never re-zeroed -- every row
+    // the reverse pass reads was written by save_seg_velocities earlier in
+    // the same segment), or that shape allocated once per call when unbound.
+    // Taken once per call at the longest segment; the skeleton narrows the
+    // rows of a shorter last segment itself.
+    static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
+                                                  const torch::Tensor& vp, int max_rows)
     {
-        auto seg_px = torch::zeros({segment_len + 1, vp.size(0) * vp.size(1), 1,
-                                    vp.size(2), vp.size(3)}, vp.options());
-        auto seg_pz = torch::zeros_like(seg_px);
-        return {seg_px, seg_pz};
+        std::vector<int64_t> shape = vp.sizes().vec();   // (max_rows, B, 1, nz, nx)
+        shape.insert(shape.begin(), static_cast<int64_t>(max_rows));
+        std::vector<torch::Tensor> seg;
+        for (int c = 0; c < N_VEL; ++c)
+            seg.push_back(pool_or_zeros(p.checkpoint_replay, c, shape, vp.options(),
+                                        "checkpoint_replay"));
+        return seg;
     }
 
     static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,

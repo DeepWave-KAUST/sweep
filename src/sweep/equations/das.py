@@ -1019,7 +1019,7 @@ class DASZhao(FirstOrderEquation):
             record_shape=record_multi(),
             # The checkpoint modes recompute the whole strain history (nt steps);
             # the buffer is the same shape as the full-mode u_allt.
-            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(nt, 2, B, *grid)],
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(nt, 2, B, *grid)],
             save_all_shape=history_fields(2),
             base_nvar=9,
             pml_nvar=8,
@@ -1160,7 +1160,7 @@ class DASZhao3D(FirstOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             record_shape=record_multi(),
-            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(nt, 3, B, *grid)],
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(nt, 3, B, *grid)],
             save_all_shape=history_fields(3),
             base_nvar=13,
             pml_nvar=18,
@@ -1299,7 +1299,18 @@ class DASMu(FirstOrderEquation):
             pml_nvar=10,
             last_two_nvar=1,
             last_two_storage_nvar=8,
-            backward_workspace_nvar=8,
+            # The compiled backward's scratch (das_mu2d/driver_traits.cuh
+            # WS_CARRIERS), one padded grid per shot each: the 8 elastic
+            # adjoint grids [qxx, qzz, qxz, qzx, pxx, pzz, pxz, pzx] in every
+            # mode; the checkpoint modes add the velocity carriers -- v(t) at
+            # slots 8, 9 (vx, vz) and v(t+1) at 10, 11.
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                8 + (4 if mode in ("ckpt", "recursive") else 0)),
+            # ckpt: the per-segment vx, vz histories, one row per replayed step
+            # plus the segment start (das_mu2d/driver_traits.cuh seg_buffers);
+            # the recursive mode replays per step and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
             bs_reconstruction_nvar=7,   # vx, vz, sxx, szz, sxz + fvx_prev, fvz_prev (the DAS strains are dead in the bs reverse loop)
             derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
@@ -1437,7 +1448,18 @@ class DASMu3D(FirstOrderEquation):
             pml_nvar=18,
             last_two_nvar=1,
             last_two_storage_nvar=15,
-            backward_workspace_nvar=18,
+            # The compiled backward's scratch (das_mu3d/driver_traits.cuh
+            # WS_CARRIERS), one padded grid per shot each: the 18 elastic
+            # adjoint grids (9 q** + 9 p**) in every mode; the checkpoint
+            # modes add the velocity carriers -- v(t) at slots 18, 19, 20
+            # (vx, vy, vz) and v(t+1) at 21, 22, 23.
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                18 + (6 if mode in ("ckpt", "recursive") else 0)),
+            # ckpt: the per-segment vx, vy, vz histories, one row per replayed
+            # step plus the segment start (das_mu3d/driver_traits.cuh
+            # seg_buffers); the recursive mode replays per step and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
             bs_reconstruction_nvar=12,  # 9 elastic fields + fvx/fvy/fvz_prev (the DAS strains are dead in the bs reverse loop)
             derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )

@@ -36,9 +36,28 @@ namespace {
 
 // Layout of p.adjoint_workspace, declared on the Python side by
 // AcousticLSRTM.cuda_layout.backward_workspace_shapes (one padded grid per shot
-// each): the vp^2*lambda scratch of every adjoint step, and -- in the
-// recursive-checkpoint mode only -- the background u_tt of the replayed step.
-enum WorkspaceSlot : int { V2_LAMBDA = 0, BG_UTT, N_SLOTS_RECURSIVE, N_SLOTS_PLAIN = 1 };
+// each, zeroed by the propagator before every gradient-bearing forward): the
+// vp^2*lambda scratch of every adjoint step, then per mode --
+//   recursive: the background u_tt of the replayed step;
+//   ckpt:      the chunk replay state of the background field, one
+//              AcousticWavefieldTensor in its bind order (u_prev, u_now, u_next,
+//              psix, psiz, zetax, zetaz -- 7 tensors, no psi double-buffer
+//              shadow, so bind() keeps double_buffer_psi=false and the replay
+//              keeps its u-only swap()). It lives here rather than in
+//              forward_wavefields (checkpoint_state_nvar=0) because the LSRTM
+//              forward slot list is two acoustic layouts back to back.
+// The modes never share a pool, so the per-mode slots may overlap.
+enum WorkspaceSlot : int {
+    V2_LAMBDA = 0,
+    BG_UTT = 1,                                        // recursive mode
+    REPLAY_U_PREV = 1, REPLAY_U_NOW, REPLAY_U_NEXT,    // ckpt mode, AcousticWavefieldTensor::bind order
+    REPLAY_PSIX, REPLAY_PSIZ, REPLAY_ZETAX, REPLAY_ZETAZ,
+    N_SLOTS_PLAIN = 1,
+    N_SLOTS_RECURSIVE = 2,
+    N_SLOTS_CKPT = REPLAY_ZETAZ + 1,                   // 8
+};
+static_assert(N_SLOTS_CKPT - REPLAY_U_PREV == 7,
+              "acoustic 2-D replay state is the 7-tensor AcousticWavefieldTensor (PML, no double buffer)");
 
 // Either unbound (every slot then falls back to a fresh zero tensor) or exactly
 // the count this mode declares: any other size means the Python declaration
@@ -49,6 +68,21 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p,
                 "AcousticLSRTM2D backward: adjoint_workspace must be empty or hold ", n_slots,
                 " tensors for this mode, got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
+}
+
+// The chunk replay state from its workspace slots, in AcousticWavefieldTensor's
+// bind order; an unbound caller gets fresh zeros per slot, byte-identical to
+// the allocate(vp, 2, true) this replaces. Every chunk re-seeds all 7 (load the
+// 6 checkpointed fields + zero u_next) before any read, so the pool's
+// per-forward zeroing is all the initialisation the state ever needs.
+static std::vector<torch::Tensor> ckpt_replay_state(const std::vector<torch::Tensor>& workspace,
+                                                    const torch::Tensor& vp)
+{
+    std::vector<torch::Tensor> state;
+    state.reserve(N_SLOTS_CKPT - REPLAY_U_PREV);
+    for (int slot = REPLAY_U_PREV; slot < N_SLOTS_CKPT; ++slot)
+        state.push_back(pool_or_zeros(workspace, slot, vp, "adjoint_workspace"));
+    return state;
 }
 
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
@@ -606,17 +640,21 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     else
         adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
-    AcousticWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(), p.forward_wavefields.begin() + 7), 2, true);
-    else
-        forward.allocate(vp, 2, true);
+    // The chunk replay state is the workspace's REPLAY_* slots, not
+    // forward_wavefields (checkpoint_state_nvar=0): a caller that binds a
+    // state list here has the wrong layout.
+    TORCH_CHECK(p.forward_wavefields.empty(),
+                "Acoustic LSRTM 2D backward_ckpt keeps its replay state in adjoint_workspace; "
+                "forward_wavefields must be empty, got ", p.forward_wavefields.size());
 
     const auto& gs = grad_slots(p);
-    workspace_slots(p, N_SLOTS_PLAIN);
+    const auto& workspace = workspace_slots(p, N_SLOTS_CKPT);
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+
+    AcousticWavefieldTensor forward;
+    forward.bind(ckpt_replay_state(workspace, vp), 2, /*use_pml=*/true);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);

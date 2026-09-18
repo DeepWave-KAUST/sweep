@@ -677,12 +677,24 @@ struct ElasticAdjointWorkspaceTensor {
         allocated = true;
     }
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    // Slots this struct binds per dimension: 2-D qxx, qzz, qxz, qzx, pxx, pzz,
+    // pxz, pzx (8); 3-D the nine q* then the nine p* (18).  They are the HEAD
+    // of the adjoint_workspace pool (cuda_layout.backward_workspace_shapes);
+    // in the checkpoint modes the staggered skeleton's velocity carriers
+    // follow them (sg_driver.cuh SgCarrierSlots, from Eq::WS_CARRIERS on), so
+    // bind() accepts a longer list and takes only its head.
+    static constexpr int nslots(int dim_) { return dim_ == 2 ? 8 : 18; }
+
+    void bind(const std::vector<torch::Tensor>& tensors, int dim_)
     {
         int i = 0;
+        dim = dim_;
+        TORCH_CHECK(static_cast<int>(tensors.size()) >= nslots(dim),
+                    "Elastic adjoint workspace expects at least ", nslots(dim),
+                    " tensors (", dim, "D q*/p* scratch; any further slots are the "
+                    "checkpoint modes' velocity carriers), got ", tensors.size());
 
-        if (tensors.size() == 8) {
-            dim = 2;
+        if (dim == 2) {
             qxx_t = tensors[i++];
             qzz_t = tensors[i++];
             qxz_t = tensors[i++];
@@ -691,8 +703,7 @@ struct ElasticAdjointWorkspaceTensor {
             pzz_t = tensors[i++];
             pxz_t = tensors[i++];
             pzx_t = tensors[i++];
-        } else if (tensors.size() == 18) {
-            dim = 3;
+        } else {
             qxx_t = tensors[i++];
             qxy_t = tensors[i++];
             qxz_t = tensors[i++];
@@ -711,8 +722,6 @@ struct ElasticAdjointWorkspaceTensor {
             pzx_t = tensors[i++];
             pzy_t = tensors[i++];
             pzz_t = tensors[i++];
-        } else {
-            TORCH_CHECK(false, "Elastic adjoint workspace expects 8 tensors (2D) or 18 tensors (3D)");
         }
 
         allocated = true;
@@ -727,7 +736,7 @@ inline void init_adjoint_workspace(
 )
 {
     if (!tensors.empty())
-        workspace.bind(tensors);
+        workspace.bind(tensors, dim);
     else
         workspace.allocate(like, dim);
 }

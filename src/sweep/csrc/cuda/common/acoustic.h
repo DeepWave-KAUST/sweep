@@ -404,6 +404,47 @@ struct AcousticWavefieldTensor {
         allocated = true;
     }
 
+    // Bind one checkpoint replay state set: the 7 (2-D) / 9 (3-D) tensors of
+    // the in-place psi layout allocate_from_snapshots wires (use_pml, no psi
+    // double-buffer -- the replay pairs with the u-only swap()), then check
+    // the geometry allocate_from_snapshots derives: the u triple model-shaped,
+    // the CPML aux shaped like the checkpoint slot it is loaded from.  bind()
+    // checks the count only, and a slot of the wrong shape would read as
+    // garbage inside the kernels rather than fail.
+    void bind_replay_state(const std::vector<torch::Tensor>& tensors,
+                           const torch::Tensor& vp,
+                           const std::vector<torch::Tensor>& snaps,
+                           int dim_)
+    {
+        const size_t n = (dim_ == 2) ? 7 : 9;
+        TORCH_CHECK(tensors.size() == n,
+                    "acoustic ", dim_, "D checkpoint replay state expects ", n,
+                    " tensors (u triple + CPML aux, no psi double-buffer), got ",
+                    tensors.size());
+        const size_t n_snaps = (dim_ == 2) ? 6 : 8;
+        TORCH_CHECK(snaps.size() == n_snaps,
+                    "acoustic ", dim_, "D checkpoint set expects ", n_snaps, " tensors");
+        bind(tensors, dim_, /*use_pml_=*/true);
+        auto check = [&](const torch::Tensor& t, c10::IntArrayRef want, const char* name) {
+            TORCH_CHECK(t.sizes() == want,
+                        "acoustic checkpoint replay state ", name, " has shape ",
+                        t.sizes(), " but the driver's layout is ", want);
+        };
+        check(u_prev_t, vp.sizes(), "u_prev");
+        check(u_now_t,  vp.sizes(), "u_now");
+        check(u_next_t, vp.sizes(), "u_next");
+        // Snapshot slots are [n_ckpt, B, 1, ...]: drop the n_ckpt axis.
+        auto slot = [&](int i) { return snaps[i].sizes().slice(1); };
+        if (dim_ == 2) {
+            check(psix_t,  slot(2), "psix");  check(psiz_t,  slot(3), "psiz");
+            check(zetax_t, slot(4), "zetax"); check(zetaz_t, slot(5), "zetaz");
+        } else {
+            check(psix_t,  slot(2), "psix");  check(psiy_t,  slot(3), "psiy");
+            check(psiz_t,  slot(4), "psiz");  check(zetax_t, slot(5), "zetax");
+            check(zetay_t, slot(6), "zetay"); check(zetaz_t, slot(7), "zetaz");
+        }
+    }
+
     // =========================
     // Generate View
     // =========================

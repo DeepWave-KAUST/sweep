@@ -44,13 +44,25 @@ class CUDALayoutSpec:
     # ``(nfield, B, nrec, nt)`` staggered family); the propagator allocates it
     # per call and binds it as ``record_out``. None = the forward allocates.
     record_shape: Callable | None = None
-    # ``fn(B, nt, shape_cuda, max_segment) -> list of shapes``: the replay
+    # ``fn(B, nt, shape_cuda, max_segment, mode) -> list of shapes``: the replay
     # buffers a checkpoint-mode backward keeps (the recomputed forward of one
     # segment, ``max_segment`` steps long -- the chunk length, or the longest
-    # recursive segment). Allocated with the checkpoint snapshots, never
-    # re-zeroed: a driver writes every row it reads. None = the compiled
-    # backward allocates its own.
+    # recursive segment; ``mode`` is "ckpt" or "recursive", for a driver whose
+    # two modes keep different histories). Allocated with the checkpoint
+    # snapshots, never re-zeroed: a driver writes every row it reads. None =
+    # the compiled backward allocates its own.
     checkpoint_replay_shapes: Callable | None = None
+    # The replay STATE a checkpoint-mode backward steps (the forward's state
+    # struct: its ``base_nvar`` physical fields and the CPML memory it
+    # checkpoints, in bind order -- the forward slot list without the psi
+    # double-buffer shadows), handed over per backward call as
+    # ``forward_wavefields``. None = derive that count from the forward slots;
+    # 0 = the driver keeps its replay state elsewhere (LSRTM: workspace slots).
+    checkpoint_state_nvar: int | None = None
+    # The recursive-checkpoint backward bisects each segment and keeps one
+    # scratch state set per recursion level (the acoustic skeleton): the
+    # propagator then hands ``1 + depth(max_segment)`` state sets instead of one.
+    recursive_state_depth: bool = False
     # Shape of the full-mode forward history (``u_allt``) the propagator
     # allocates per call and hands the compiled forward as
     # ``ForwardInput.u_allt_out``: ``fn(B, nt, shape_cuda) -> tuple``, in the

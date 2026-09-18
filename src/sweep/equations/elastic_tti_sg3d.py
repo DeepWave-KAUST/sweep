@@ -437,6 +437,17 @@ class ElasticTTISG3D(FirstOrderEquation):
             pml_nvar=27,
             last_two_nvar=1,
             last_two_storage_nvar=9,
-            backward_workspace_nvar=18,
+            # The compiled backward's scratch (elastic_tti_sg3d/driver_traits.cuh
+            # WS_CARRIERS), one padded grid per shot each: the 18 elastic
+            # adjoint grids (9 q** + 9 p**) in every mode; ckpt (the only
+            # checkpoint mode this equation runs) adds the velocity carriers --
+            # v(t) at slots 18, 19, 20 (vx, vy, vz) and v(t+1) at 21, 22, 23.
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                18 + (6 if mode == "ckpt" else 0)),
+            # ckpt: the per-segment vx, vy, vz histories, one row per replayed
+            # step plus the segment start (elastic_tti_sg3d/driver_traits.cuh
+            # seg_buffers).
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
             bs_reconstruction_nvar=12,  # 9 physical fields + fvx/fvy/fvz_next carriers
         )

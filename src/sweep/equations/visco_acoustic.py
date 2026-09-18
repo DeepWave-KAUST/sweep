@@ -322,7 +322,8 @@ class ViscoAcoustic(SecondOrderEquation):
         return CUDALayoutSpec(
             record_shape=record_single(),
             # chunk_raw: the replayed chunk's raw pressure
-            checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)],
+            checkpoint_state_nvar=0,    # the ckpt backward still builds its own replay state
             # The reverse step's vp^2*Lap(u) carrier (visco_acoustic2d/backward.cu
             # WorkspaceSlot), one padded grid per shot.
             backward_workspace_nvar=1,

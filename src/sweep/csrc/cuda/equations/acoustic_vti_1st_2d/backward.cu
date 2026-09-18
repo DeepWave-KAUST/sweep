@@ -11,7 +11,11 @@
 //     NOPML kernels; its 4-tensor reconstruction list [vx, vz, sH, sV]
 //     (cuda_layout.bs_reconstruction_nvar) is bound from
 //     BackwardInput.forward_wavefields, or allocated here when unbound.
-//   - backward_ckpt is chunked replay; backward_recursive_ckpt is a stub.
+//   - backward_ckpt is chunked replay: its CKPT_STATE_COUNT-slot replay
+//     state (the forward slot list: 4 physical + 4 CPML memory) is bound
+//     from BackwardInput.forward_wavefields set 0 (cuda_layout
+//     checkpoint_state_nvar), or allocated here when unbound.
+//     backward_recursive_ckpt is a stub.
 //
 // Gradient ordering follows AcousticVTI1st.MODEL_SPECS: [vp, ε, δ, ρ].
 //
@@ -76,8 +80,9 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 // Same wavefield-tensor helper as forward.cu, lives in an anonymous namespace
 // so the linker sees it once per TU only.
 //
-// Two bindings: bind() takes the full 8-slot list (adjoint state: 4 physical
-// + 4 CPML memory, AcousticVTI1st.FIELD_SPECS order); bind_physical() takes
+// Two bindings: bind() takes the full 8-slot list (4 physical + 4 CPML
+// memory, AcousticVTI1st.FIELD_SPECS order -- the adjoint state, and the
+// CKPT_STATE_COUNT-slot checkpoint replay state); bind_physical() takes
 // the RECON_WF_COUNT-slot boundary-saving reconstruction list
 // (cuda_layout.bs_reconstruction_nvar) and leaves the m_* members undefined
 // -- the bs reverse loop steps the reconstruction with the NOPML kernels
@@ -86,6 +91,9 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 struct AdjWavefieldTensor {
     static constexpr int RECON_WF_COUNT = 4;
     static constexpr const char* RECON_LIST_DESC = "[vx, vz, sH, sV]";
+    // The checkpoint replay state the propagator binds: one full bind() list
+    // (cuda_layout checkpoint_state_nvar = base_nvar + pml_nvar).
+    static constexpr int CKPT_STATE_COUNT = 8;
 
     torch::Tensor vx_t, vz_t, sH_t, sV_t;
     torch::Tensor m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
@@ -736,9 +744,22 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto adj_view = adjoint.view();
     adjoint.zero_state();
 
-    // Forward-state buffer used during each chunk's replay.
+    // Forward-state buffer used during each chunk's replay: the
+    // CKPT_STATE_COUNT model-shaped slots the propagator hands over as
+    // p.forward_wavefields (set 0 of the replay state, zeroed per backward
+    // call), or a fresh allocation for a caller that binds nothing.  Every
+    // chunk re-seeds all of it (zero_state / checkpoint load) before stepping,
+    // so nothing depends on the initial zeros.
     AdjWavefieldTensor fwd_state;
-    fwd_state.allocate(vp_t);
+    if (!p.forward_wavefields.empty()) {
+        const char* what = "acoustic_vti_1st_2d ckpt replay state";
+        auto state = wavefield_set(p.forward_wavefields, 0, AdjWavefieldTensor::CKPT_STATE_COUNT, what);
+        for (int i = 0; i < AdjWavefieldTensor::CKPT_STATE_COUNT; ++i)
+            pool_slot_checked(state, i, vp_t, what);   // every slot is model-shaped
+        fwd_state.bind(state);
+    } else {
+        fwd_state.allocate(vp_t);
+    }
     auto fwd_view = fwd_state.view();
 
     // CheckpointRuntime — load checkpoints saved by the forward.

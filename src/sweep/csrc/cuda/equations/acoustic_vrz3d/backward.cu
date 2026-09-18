@@ -33,6 +33,21 @@ void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
     wf.zetaz_t.zero_();
 }
 
+// The checkpoint snapshot set (u_prev, u_now, psix, psiy, psiz, zetax, zetay,
+// zetaz) and the replay state backward_ckpt_impl steps, set 0 of
+// p.forward_wavefields (Python-zeroed per backward call): those slots plus
+// u_next -- the forward slot list without the psi double-buffer shadows -- in
+// the struct's bind order u_prev, u_now, u_next, psix, psiz, zetax, zetaz,
+// psiy, zetay.
+constexpr int CKPT_NVAR = 8;
+constexpr int REPLAY_STATE_NVAR = CKPT_NVAR + 1;   // 9
+
+// p.checkpoint_replay (cuda_layout.checkpoint_replay_shapes): allocated by the
+// propagator next to the checkpoint snapshots, never re-zeroed.
+enum ReplaySlot : int {
+    CHUNK_FORWARD = 0   // the replayed segment's pressure, (max_segment, B, 1, nz, ny, nx)
+};
+
 // Per-backward reusable scratch for the DD (per-step) VRZ backward.  A domain-
 // decomposed backward drives ONE single-step backward_bs call per time step
 // (ModelParallel._run_adjoint), and the time-invariant adjoint coefficients
@@ -709,9 +724,15 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
     zero_wavefield_state_vrz3d(adjoint);
 
+    // The replay state (REPLAY_STATE_NVAR above), bound through the struct's
+    // full PML bind: with no psi shadows in the set the replay writes psi in
+    // place -- the path allocate() gives (swap() rotates u only) -- and the
+    // propagator zeroed the set as allocate() started from.  An unbound
+    // caller keeps the allocation.
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields, 3, true);
+        forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
+                                   "acoustic_vrz3d ckpt replay state"), 3, true);
     else
         forward.allocate(vp, 3, true);
 
@@ -735,7 +756,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     const bool recursive_checkpoint = checkpoint_steps_cpu.numel() > 0;
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
-        8,
+        CKPT_NVAR,
         true,
         recursive_checkpoint,
         p.checkpoint_interval,
@@ -788,8 +809,14 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         );
     }
 
-    // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, 0, {max_segment_length, N, C, nz, ny, nx}, vp.options(), "checkpoint_replay");
+    // The replayed segment's pressure history from p.checkpoint_replay
+    // (ReplaySlot above), taken once at the full max_segment rows and reused
+    // by every segment: each row the reverse pass reads was written by the
+    // replay earlier in the same segment, so it is never zeroed.  An unbound
+    // caller allocates it once per call, as before.
+    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, CHUNK_FORWARD,
+                                       {max_segment_length, N, C, nz, ny, nx}, vp.options(),
+                                       "checkpoint_replay");
 
     // Time-invariant adjoint transpose coefficients, computed once for all segments.
     BUILD_VRZ_ADJOINT_COEFFS_3D(

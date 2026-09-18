@@ -10,7 +10,12 @@
 //   * the adjoint workspace is six plain scratch tensors, taken from
 //     p.adjoint_workspace when the propagator bound them (it declares them
 //     through cuda_layout.backward_workspace_shapes) and allocated internally
-//     otherwise;
+//     otherwise; in ckpt mode the pool continues with the velocity carriers
+//     the skeleton takes behind them (WS_CARRIERS);
+//   * ckpt: the replay state is set 0 of the Python-bound forward_wavefields
+//     (CKPT_STATE_COUNT = 20, the full bind with CPML memory) and the
+//     per-segment vx/vy/vz histories are the three checkpoint_replay slots
+//     (seg_buffers);
 //   * u_allt stores all 8 physical fields, not just the velocities;
 //   * bs: ReconCarriers {fvx_next, fvy_next, fvz_next}; bind_or_alloc_recon
 //     takes the 11-tensor p.forward_wavefields list (the 8 physical fields
@@ -66,6 +71,10 @@ struct Driver {
     static constexpr int CKPT_NVAR = 20;
     static constexpr const char* CKPT_COUNT_MSG =
         "ElasticTTISG checkpointing expects 20 checkpoint tensors";
+    // Checkpoint replay state: one set of the Python-bound forward_wavefields,
+    // in the forward's full bind order -- 8 fields + 12 CPML memory tensors,
+    // all full-grid (no aux slabs in this equation).
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;
     static constexpr int BS_NVAR = 8;   // vx, vy, vz, sxx, szz, syz, sxz, sxy
     static constexpr int CUT_MASK_BITS = 0x0;
     static constexpr const char* CUT_MASK_DESC =
@@ -137,11 +146,16 @@ struct Driver {
     // Slot names follow the stress-adjoint kernels' parameter order.
     enum WorkspaceSlot : int { Q_VXX = 0, Q_VYX, Q_VZX, Q_VXZ, Q_VYZ, Q_VZZ, N_WORKSPACE };
     using Workspace = std::array<torch::Tensor, N_WORKSPACE>;
+    // In ckpt mode the pool continues past these six with the velocity
+    // carriers the skeleton takes at WS_CARRIERS + c (v(t): next_segment_v)
+    // and WS_CARRIERS + N_VEL + c (v(t+1): prev_segment_next_v), sg_driver.cuh
+    // SgCarrierSlots (which also checks the pool's exact per-mode count).
+    static constexpr int WS_CARRIERS = N_WORKSPACE;
 
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& rho)
     {
-        TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_WORKSPACE,
-                    "elastic_tti_sg2d backward: adjoint_workspace must be empty or hold ",
+        TORCH_CHECK(p.adjoint_workspace.empty() || (int)p.adjoint_workspace.size() >= N_WORKSPACE,
+                    "elastic_tti_sg2d backward: adjoint_workspace must be empty or hold at least ",
                     static_cast<int>(N_WORKSPACE), " tensors, got ", p.adjoint_workspace.size());
         Workspace w;
         for (int i = 0; i < N_WORKSPACE; ++i)
@@ -770,33 +784,46 @@ public:
     //     vel_ptrs_from_carriers are deliberately absent -- see the header note.)
     // ===================================================================== //
 
+    // Replay state: set 0 of the Python-bound forward_wavefields (zeroed by
+    // the propagator per backward call), bound in FULL -- the 8 fields and
+    // the 12 CPML memory tensors the replay steps through the PML -- exactly
+    // the allocate(rho) layout an unbound caller still gets.  Every slot is
+    // a full grid here, so the geometry is checked as well.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInput& p,
                                          const torch::Tensor& rho)
     {
-        if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields);
-        else
+        if (!p.forward_wavefields.empty()) {
+            auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+                                       "elastic_tti_sg2d ckpt replay state");
+            for (int i = 0; i < CKPT_STATE_COUNT; ++i)
+                pool_slot_checked(state, i, rho, "elastic_tti_sg2d ckpt replay state");
+            forward.bind(state);
+        } else {
             forward.allocate(rho);
-    }
-
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput&,
-                                            const torch::Tensor& rho)
-    {
-        wf.allocate(rho);
+        }
     }
 
     static void check_ckpt_aux_layout(const Wavefield&, const Wavefield&) {}
 
-    static std::vector<torch::Tensor> alloc_seg_buffers(const torch::Tensor& rho,
-                                                        int segment_len)
+    // Per-segment velocity histories seg[c][k] = v_c(start + k), k in
+    // [0, segment_len]: the N_VEL checkpoint_replay slots [vx, vy, vz]
+    // (cuda_layout.checkpoint_replay_shapes, (chunk + 1, B, 1, nz, nx) each,
+    // allocated once next to the snapshots and never re-zeroed -- every row
+    // the reverse pass reads was written by save_seg_velocities earlier in
+    // the same segment), or that shape allocated once per call when unbound.
+    // Taken once per call at the longest segment; the skeleton narrows the
+    // rows of a shorter last segment itself.
+    static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
+                                                  const torch::Tensor& rho, int max_rows)
     {
-        std::vector<int64_t> seg_shape = rho.sizes().vec();
-        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(segment_len + 1));
-        auto seg_vx = torch::zeros(seg_shape, rho.options());
-        auto seg_vy = torch::zeros(seg_shape, rho.options());
-        auto seg_vz = torch::zeros(seg_shape, rho.options());
-        return {seg_vx, seg_vy, seg_vz};
+        std::vector<int64_t> seg_shape = rho.sizes().vec();   // (max_rows, B, 1, nz, nx)
+        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(max_rows));
+        std::vector<torch::Tensor> seg;
+        for (int c = 0; c < N_VEL; ++c)
+            seg.push_back(pool_or_zeros(p.checkpoint_replay, c, seg_shape, rho.options(),
+                                        "checkpoint_replay"));
+        return seg;
     }
 
     static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,

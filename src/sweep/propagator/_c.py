@@ -100,14 +100,25 @@ def _record_buffer(shape, device):
     return torch.zeros(shape, device=device)
 
 
-def _reconstruction_buffers(shapes, device):
-    """The boundary-saving backward's reconstruction state (the forward's
-    physical fields stepped backwards from ``u_last_two``, plus the carriers
-    the imaging reads), handed over as ``forward_wavefields``. Zeroed: the
-    reverse stencil never writes the absorbing rim, so its cells must read as
-    zero exactly as the driver's own zeros_like did. One backward call's
-    lifetime -- the same as the allocation it replaces."""
+def _forward_state_buffers(shapes, device):
+    """The forward state a backward rebuilds, handed over as
+    ``forward_wavefields``: the boundary-saving reconstruction (the physical
+    fields stepped backwards from ``u_last_two``, plus the carriers the imaging
+    reads) or the checkpoint replay state sets. Zeroed: the reverse and replay
+    stencils never write the absorbing rim, so its cells must read as zero
+    exactly as the driver's own zeros_like did. One backward call's lifetime --
+    the same as the allocation it replaces."""
     return [torch.zeros(shape, device=device) for shape in shapes]
+
+
+def _recursive_scratch_depth(segment):
+    """Scratch state sets the bisecting recursive-checkpoint backward keeps,
+    mirroring eq_driver.cuh recursive_checkpoint_scratch_depth."""
+    depth = 0
+    while segment > 1:
+        segment = (segment + 1) // 2
+        depth += 1
+    return depth
 
 
 def _derived_model_buffers(n, like):
@@ -475,7 +486,10 @@ class Wrapper(torch.autograd.Function):
             params.checkpoint_steps = checkpoint_steps.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
-            params.forward_wavefields = [f.zero_() for f in cp.forward_wavefields]
+            # the replay state sets (set 0 = replay / segment start state, the
+            # rest = the bisection's scratch states), one backward call's lifetime
+            params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes,
+                                                               params.models[0].device)
             if ctx.use_recursive_checkpoint:
                 gradients = cp.backward_recursive_ckpt_func(params)
             else:
@@ -492,8 +506,8 @@ class Wrapper(torch.autograd.Function):
             params.u_last_two = last.contiguous()
             # on the models' device: with cpu/disk boundary staging ``last`` may
             # live on the host, and the reconstruction is stepped on the GPU
-            params.forward_wavefields = _reconstruction_buffers(cp.bs_reconstruction_shapes,
-                                                                params.models[0].device)
+            params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes,
+                                                               params.models[0].device)
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = cp.backward_bs_func(params)
@@ -709,6 +723,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._checkpoint_cache_storage = None
         self._checkpoint_cache_pinned = None
         self._checkpoint_cache_segment = None
+        self._checkpoint_cache_mode = None
         self._workspace_cache_batch = None
         self._workspace_cache_nt = None
         self._workspace_cache_mode = None
@@ -1325,11 +1340,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fn = self._cuda_layout().save_all_shape
         return None if fn is None else tuple(int(x) for x in fn(batch_size, self.nt, self.shape_cuda))
 
-    def _reconstruction_shapes(self, batch_size):
-        """``cuda_layout.reconstruction_nvar`` padded per-shot grids for the
-        boundary-saving backward's reconstruction state."""
-        n = int(self._cuda_layout().reconstruction_nvar)
-        return tuple((batch_size, 1, *self.shape_cuda) for _ in range(n))
+    def _forward_state_shapes(self, batch_size, mode, max_segment=None):
+        """Shapes of the forward state the backward rebuilds, handed over as
+        ``forward_wavefields``: in bs mode ``cuda_layout.reconstruction_nvar``
+        padded grids; in the checkpoint modes the replay state set -- the
+        forward slot list (slab-shaped CPML aux included) without the psi
+        double-buffer shadows, or ``checkpoint_state_nvar`` when declared --
+        repeated once per recursion level for a bisecting driver."""
+        layout = self._cuda_layout()
+        if mode == "bs":
+            n = int(layout.reconstruction_nvar)
+            return tuple((batch_size, 1, *self.shape_cuda) for _ in range(n))
+        if mode not in ("ckpt", "recursive"):
+            return ()
+        shapes = [(batch_size, 1, *s[2:]) for s in self._forward_wavefield_shapes()]
+        if layout.checkpoint_state_nvar is not None:
+            shapes = shapes[:int(layout.checkpoint_state_nvar)]
+        elif layout.slots is not None:
+            forward_slots = [slot for slot in layout.slots.slots if not slot.adjoint_only]
+            assert len(forward_slots) == len(shapes), "slot table / forward shapes mismatch"
+            shapes = [sh for slot, sh in zip(forward_slots, shapes) if slot.role != "dbuf"]
+        sets = 1
+        if mode == "recursive" and layout.recursive_state_depth:
+            sets += _recursive_scratch_depth(int(max_segment))
+        return tuple(shapes) * sets
 
     def _derived_model_count(self, mode):
         """``cuda_layout.derived_model_nvar`` for one call: an int, or ``fn(mode)``
@@ -1399,7 +1433,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         return tuple(t.narrow(batch_dim, 0, batch_size) for t in tensors)
 
     def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None, batch_size=None,
-                                  max_segment=None):
+                                  max_segment=None, mode=None):
         if not self.use_ckpt or (self.backward_ckpt_func is None and self.backward_recursive_ckpt_func is None):
             return
 
@@ -1428,6 +1462,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._checkpoint_cache_storage == checkpoint_storage
             and self._checkpoint_cache_pinned == checkpoint_pinned
             and self._checkpoint_cache_segment == max_segment
+            and self._checkpoint_cache_mode == mode
         ):
             return
 
@@ -1466,7 +1501,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         replay_shapes = cuda_layout.checkpoint_replay_shapes
         if replay_shapes is not None:
             self.checkpoint_replay = tuple(Allocator(self.dev).zeros(
-                [list(s) for s in replay_shapes(active_batch, self.nt, self.shape_cuda, int(max_segment))]))
+                [list(s) for s in replay_shapes(active_batch, self.nt, self.shape_cuda, int(max_segment), mode)]))
         else:
             self.checkpoint_replay = ()
         self._checkpoint_cache_batch = active_batch
@@ -1476,6 +1511,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._checkpoint_cache_storage = checkpoint_storage
         self._checkpoint_cache_pinned = checkpoint_pinned
         self._checkpoint_cache_segment = max_segment
+        self._checkpoint_cache_mode = mode
 
     def _slice_checkpoint_buffers(self, batch_size):
         # Checkpoints are allocated at the active batch size in
@@ -1739,7 +1775,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # 18) padded grids on the first call of a propagator that would never run
         # a backward, and zeroed them on every call after.
         derived_model_nvar_backward = 0
-        bs_reconstruction_shapes = ()
+        forward_state_shapes = ()
         if requires_backward:
             # The memory mode this backward will run in, in the backward's own
             # precedence (checkpointing beats boundary saving).
@@ -1747,16 +1783,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                               else "bs" if use_boundary_saving else "full")
             self._ensure_adjoint_workspace_buffers(batch_size, workspace_mode)
             derived_model_nvar_backward = self._derived_model_count(workspace_mode)
-            if workspace_mode == "bs":
-                bs_reconstruction_shapes = self._reconstruction_shapes(batch_size)
+        max_segment = None
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
+                max_segment = self._longest_segment(checkpoint_steps)
                 self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size,
-                                                max_segment=self._longest_segment(checkpoint_steps))
+                                                max_segment=max_segment, mode="recursive")
             elif self.backward_ckpt_func is not None:
+                max_segment = self.ckpt_chunks
                 self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size,
-                                                max_segment=self.ckpt_chunks)
+                                                max_segment=max_segment, mode="ckpt")
+        if requires_backward:
+            forward_state_shapes = self._forward_state_shapes(batch_size, workspace_mode, max_segment)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         if not forward_wavefields:
             forward_wavefields = self._transient_forward_wavefields(batch_size)
@@ -1852,7 +1891,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     forward_workspace=forward_workspace,
                     derived_model_nvar_forward=self._derived_model_count("forward"),
                     derived_model_nvar_backward=derived_model_nvar_backward,
-                    bs_reconstruction_shapes=bs_reconstruction_shapes,
+                    forward_state_shapes=forward_state_shapes,
                     u_allt_shape=self._history_shape(batch_size),
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),

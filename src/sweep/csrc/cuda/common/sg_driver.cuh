@@ -54,7 +54,13 @@
 //   before the loop (first segment): seed_recon from u_last_two.
 //   (DD runs step_phase 3 = injections, then 1, then 2 — same op order.)
 //
-// sg_generic_backward_ckpt — per chunk (sg_backward_segment):
+// sg_generic_backward_ckpt — prologue: bind_or_alloc_recon_ckpt (the replay
+//   state = forward_wavefields set 0, CKPT_STATE_COUNT tensors, one for the
+//   whole call), seg_buffers (the N_VEL velocity histories, checkpoint_replay
+//   slots sized for the longest chunk), the cross-chunk carriers from
+//   adjoint_workspace (SgCarrierSlots, after the equation's WS_CARRIERS
+//   scratch slots).  Per chunk (sg_backward_segment; the chunk's snapshot is
+//   loaded straight into the replay state, chunk 0 zeroes it):
 //   replay:  velocity_substep / stress_substep / save_seg_velocities /
 //            inject_forward_sources
 //   reverse: fix_rho_grad_at_sources / inject_residuals / vel_ptrs_from_seg /
@@ -62,7 +68,9 @@
 //            (it > 0) plain_adjoint_step
 //   after each chunk: export_seg_next_v hands v(start+1) to the older chunk.
 //
-// sg_generic_backward_recursive_ckpt — per reverse it:
+// sg_generic_backward_recursive_ckpt — prologue: bind_or_alloc_recon_ckpt
+//   (replay state = forward_wavefields set 0), current_v / next_v from
+//   adjoint_workspace (SgCarrierSlots).  Per reverse it:
 //   fix_rho_grad_at_sources / inject_residuals
 //   sg_replay_forward_to_time: velocity/stress substeps + capture_velocities
 //                              (IMAGING_USES_NEXT_V eqs also capture v at it+1)
@@ -748,15 +756,67 @@ BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
 
 // ---- sg_generic_backward_ckpt (chunked segments with velocity carriers) ----
 
+// Velocity-carrier slots of the adjoint_workspace pool in the checkpoint
+// modes.  The pool (cuda_layout.backward_workspace_shapes(mode)) holds the
+// equation's own adjoint scratch first -- Eq::WS_CARRIERS slots, what
+// Eq::make_workspace binds -- and the skeleton's model-shaped carriers after
+// it, N_VEL each:
+//   NOW  = next_segment_v (ckpt: the younger chunk's v(end)) /
+//          current_v      (recursive: the captured v(it));
+//   NEXT = prev_segment_next_v (ckpt: this chunk's v(start+1), for the older
+//          chunk) / next_v (recursive: the captured v(it+1)) -- only for
+//          equations whose imaging reads v(t+1) (IMAGING_USES_NEXT_V).
+// The propagator zeroes the pool once per gradient-bearing forward, the state
+// a fresh zeros_like started from.  The ckpt entry relies on it for
+// next_segment_v at the tail chunk (v(nt) does not exist) and is entered at
+// most once per forward: it refuses stepped/DD calls, and a second backward
+// over one graph is refused in Python (_c.py Wrapper.backward).
+template <class Eq>
+struct SgCarrierSlots {
+    static constexpr int NOW = Eq::WS_CARRIERS;
+    static constexpr int NEXT = Eq::WS_CARRIERS + Eq::N_VEL;
+    static constexpr int CKPT_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : 0;
+    static constexpr int RECURSIVE_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : Eq::N_VEL;
+};
+
+// Either unbound (every slot then falls back to a fresh zero tensor, today's
+// allocation) or exactly the equation's scratch plus this mode's carriers: a
+// pool of any other size means the Python declaration drifted.
+template <class Eq>
+void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char* mode)
+{
+    const int expected = Eq::WS_CARRIERS + n_carriers;
+    TORCH_CHECK(p.adjoint_workspace.empty()
+                    || static_cast<int>(p.adjoint_workspace.size()) == expected,
+                Eq::NAME, " backward_", mode, ": adjoint_workspace must be empty or hold ",
+                expected, " tensors ([0-", Eq::WS_CARRIERS - 1, "] = the adjoint scratch, then ",
+                n_carriers, " velocity carriers), got ", p.adjoint_workspace.size());
+}
+
+// N_VEL model-shaped carriers from adjoint_workspace slots [first, first + N_VEL).
+template <class Eq>
+std::vector<torch::Tensor> sg_carriers(const BackwardInput& p, int first,
+                                       const torch::Tensor& vp)
+{
+    std::vector<torch::Tensor> v;
+    v.reserve(Eq::N_VEL);
+    for (int c = 0; c < Eq::N_VEL; ++c)
+        v.push_back(pool_or_zeros(p.adjoint_workspace, first + c, vp, "adjoint_workspace"));
+    return v;
+}
+
+// One chunk: ``forward`` holds the chunk's start snapshot (loaded by the
+// caller), ``seg_full`` the per-call velocity histories (Eq::seg_buffers,
+// N_VEL x (max_rows, B, 1, grid)).
 template <class Eq>
 void sg_backward_segment(
     const BackwardInput& p,
     typename Eq::Models& models,
     typename Eq::State& state,
-    typename Eq::Wavefield& start_state,
+    typename Eq::Wavefield& forward,
     typename Eq::Wavefield& adjoint,
     typename Eq::Workspace& workspace,
-    CheckpointRuntime& checkpoint_runtime,
+    const std::vector<torch::Tensor>& seg_full,
     int start, int end,
     decltype(std::declval<typename Eq::CPML>().view()) cpml_view,
     SolverContext& solver,
@@ -770,11 +830,16 @@ void sg_backward_segment(
     const int segment_len = end - start;
     const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
 
-    auto seg = Eq::alloc_seg_buffers(p.models[0], segment_len);
-    typename Eq::Wavefield forward;
-    Eq::bind_or_alloc_recon_ckpt(forward, p, p.models[0]);
-
-    checkpoint_runtime.copy_state(forward.state_tensors(), start_state.state_tensors());
+    // This chunk's rows of the histories: row 0 = v(start), row k = v(start + k)
+    // after the k-th replayed step.  Every row the reverse sweep reads
+    // (1..segment_len, and export_seg_next_v's row 1) is written by this
+    // chunk's replay first, so nothing an earlier chunk left behind reaches a
+    // kernel -- reusing the per-call buffers is bit-identical to the
+    // per-chunk zero tensors they replace.
+    std::vector<torch::Tensor> seg;
+    seg.reserve(seg_full.size());
+    for (const auto& history : seg_full)
+        seg.push_back(history.narrow(0, 0, segment_len + 1));
 
     Eq::save_seg_velocities(seg, forward, 0);
     auto for_view = Eq::view(forward);
@@ -860,18 +925,33 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     // {vp, vs, rho} need all of p.models to size it).
     std::vector<torch::Tensor> grads;
     Eq::bind_grads(p, grads);
+    sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::CKPT_COUNT, "ckpt");
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
 
-    typename Eq::Wavefield start_state;
-    Eq::alloc_recursive_start_state(start_state, p, vp);
-    Eq::check_ckpt_aux_layout(start_state, adjoint);
-    // Equations whose imaging has no velocity(t+1) term (IMAGING_USES_NEXT_V == false)
-    // skip the cross-segment velocity carriers entirely; their vel_ptrs_from_seg
-    // hands the imaging null next-pointers instead.
+    // The replay state, ONE for the whole call: forward_wavefields set 0 when
+    // Python bound it (zeroed per backward call), else today's allocation
+    // from the snapshot shapes.  Each chunk loads its snapshot straight into
+    // it (chunk 0 zeroes it).  The hand-written driver kept a start_state
+    // only to copy it into a fresh per-chunk forward -- the same bytes reach
+    // the same kernels, minus one CKPT_NVAR-grid allocation and copy per chunk.
+    typename Eq::Wavefield forward;
+    Eq::bind_or_alloc_recon_ckpt(forward, p, vp);
+    Eq::check_ckpt_aux_layout(forward, adjoint);
+    // The velocity histories of one chunk (checkpoint_replay), bound at the
+    // longest chunk and narrowed per chunk inside sg_backward_segment.
+    const int max_rows = p.checkpoint_interval + 1;   // v(start) + one row per replayed step
+    const auto seg = Eq::seg_buffers(p, vp, max_rows);
+    // Cross-chunk velocity carriers (adjoint_workspace, SgCarrierSlots): the
+    // younger chunk's v(end), read by the older chunk's imaging at its last
+    // step.  Equations whose imaging has no velocity(t+1) term
+    // (IMAGING_USES_NEXT_V == false) skip them entirely; their vel_ptrs_from_seg
+    // hands the imaging null next-pointers instead.  next_segment_v must be
+    // zero for the tail chunk (v(nt) does not exist): the pool is zero at
+    // entry, see SgCarrierSlots.
     std::vector<torch::Tensor> next_segment_v, prev_segment_next_v;
-    for (int c = 0; Eq::IMAGING_USES_NEXT_V && c < Eq::N_VEL; ++c) {
-        next_segment_v.push_back(torch::zeros_like(vp));
-        prev_segment_next_v.push_back(torch::zeros_like(vp));
+    if (Eq::IMAGING_USES_NEXT_V) {
+        next_segment_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NOW, vp);
+        prev_segment_next_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NEXT, vp);
     }
 
     int chunk_size = p.checkpoint_interval;
@@ -880,12 +960,12 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
         int start = chunk_id * chunk_size;
         int end = std::min(static_cast<int>(p.nt), start + chunk_size);
         if (chunk_id == 0) {
-            checkpoint_runtime.zero_state(start_state.state_tensors());
+            checkpoint_runtime.zero_state(forward.state_tensors());
         } else {
-            checkpoint_runtime.load(chunk_id, start_state.checkpoint_tensors());
+            checkpoint_runtime.load(chunk_id, forward.checkpoint_tensors());
         }
-        sg_backward_segment<Eq>(p, models, state, start_state, adjoint, workspace,
-                                checkpoint_runtime, start, end, cpml_view, solver,
+        sg_backward_segment<Eq>(p, models, state, forward, adjoint, workspace,
+                                seg, start, end, cpml_view, solver,
                                 source_fields, receiver_fields,
                                 next_segment_v, grads, prev_segment_next_v);
         for (int c = 0; Eq::IMAGING_USES_NEXT_V && c < Eq::N_VEL; ++c)
@@ -1016,6 +1096,7 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
 
     std::vector<torch::Tensor> grads;
     Eq::bind_grads(p, grads);
+    sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::RECURSIVE_COUNT, "ckpt_recursive");
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
@@ -1025,14 +1106,17 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
                 "checkpoint buffer is smaller than checkpoint_steps");
 
     const int* checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
+    // The replay state: forward_wavefields set 0 when Python bound it (zeroed
+    // per backward call), else today's allocation from the snapshot shapes.
     typename Eq::Wavefield forward;
     Eq::bind_or_alloc_recon_ckpt(forward, p, vp);
-    std::vector<torch::Tensor> current_v, next_v;
-    for (int c = 0; c < Eq::N_VEL; ++c) {
-        current_v.push_back(torch::zeros_like(vp));
-        if (Eq::IMAGING_USES_NEXT_V)
-            next_v.push_back(torch::zeros_like(vp));
-    }
+    // The captured v(it) / v(it+1) the imaging reads (adjoint_workspace,
+    // SgCarrierSlots); sg_replay_forward_to_time zeroes or overwrites them in
+    // full before every imaging step, so their entry state is never read.
+    std::vector<torch::Tensor> current_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NOW, vp);
+    std::vector<torch::Tensor> next_v;
+    if (Eq::IMAGING_USES_NEXT_V)
+        next_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NEXT, vp);
     const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
 
     auto adj_view = Eq::view(adjoint);

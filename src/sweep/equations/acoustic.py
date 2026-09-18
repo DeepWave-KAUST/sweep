@@ -152,6 +152,19 @@ class Acoustic(SecondOrderEquation):
         return CUDALayoutSpec(
             record_shape=record_single(),
             save_all_shape=history_plain(),
+            # Checkpoint backward (csrc/cuda/common/eq_driver.cuh
+            # generic_backward_ckpt / _recursive_ckpt).  Its replay state is
+            # the forward slot list without the psi shadows (7, derived); the
+            # recursive bisection keeps one scratch state set per level on
+            # top of set 0.
+            recursive_state_depth=True,
+            # ckpt mode: the recomputed chunk, allt_shape rows (chunk, B, nz, nx)
+            # (ACOUSTIC_CKPT_CHUNK_FORWARD); recursive mode images from the leaf's
+            # scratch instead and keeps no history.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)] if mode == "ckpt" else [],
+            # recursive mode: the leaf's model-shaped u_this scratch
+            # (ACOUSTIC_RECURSIVE_U_THIS); the other modes take no workspace.
+            backward_workspace_shapes=lambda B, nt, grid, mode: [[B, 1, *grid]] if mode == "recursive" else [],
             base_nvar=3,
             # psix, psiz, zetax, zetaz (4) + psixn, psizn (2) for the race-free
             # forward psi double-buffer: the forward reads psi at neighbours then

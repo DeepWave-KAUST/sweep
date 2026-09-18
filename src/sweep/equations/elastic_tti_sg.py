@@ -260,8 +260,17 @@ class ElasticTTISG(ElasticTTI):
             last_two_nvar=1,
             last_two_storage_nvar=8,
             # The six velocity-gradient scratch grids of the 2-D stress adjoint
-            # (elastic_tti_sg2d/driver_traits.cuh WorkspaceSlot); ElasticTTISG3D
-            # declares its own 18.
-            backward_workspace_nvar=6,
+            # (elastic_tti_sg2d/driver_traits.cuh WorkspaceSlot) in every mode;
+            # ckpt (the only checkpoint mode this equation runs) adds the
+            # velocity carriers behind them (WS_CARRIERS) -- v(t) at slots 6,
+            # 7, 8 (vx, vy, vz) and v(t+1) at 9, 10, 11.  ElasticTTISG3D
+            # declares its own 18 + 6.
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                6 + (6 if mode == "ckpt" else 0)),
+            # ckpt: the per-segment vx, vy, vz histories, one row per replayed
+            # step plus the segment start (elastic_tti_sg2d/driver_traits.cuh
+            # seg_buffers).
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
             bs_reconstruction_nvar=11,  # 8 physical fields + fvx/fvy/fvz_next carriers
         )

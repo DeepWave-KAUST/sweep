@@ -213,6 +213,36 @@ inline bool wavefields_bound(const std::vector<torch::Tensor>& list, int n,
     return true;
 }
 
+// One SET of a Python-bound wavefield list that holds K sets of n tensors back
+// to back (the checkpoint replay state: set 0 = the replay / segment start
+// state, sets 1..depth = the bisection scratch states). Count, dtype, device
+// and contiguity are checked here; the geometry is the struct's bind() business
+// (CPML aux slots are slab-shaped, not model-shaped).
+inline std::vector<torch::Tensor> wavefield_set(const std::vector<torch::Tensor>& list, int k, int n,
+                                                const char* what)
+{
+    TORCH_CHECK(static_cast<int>(list.size()) >= (k + 1) * n,
+                what, " expects at least ", (k + 1) * n, " bound wavefield tensors (",
+                k + 1, " sets of ", n, "), got ", list.size());
+    std::vector<torch::Tensor> set(list.begin() + k * n, list.begin() + (k + 1) * n);
+    for (int i = 0; i < n; ++i)
+        TORCH_CHECK(set[i].defined() && set[i].is_cuda() && set[i].scalar_type() == torch::kFloat
+                        && set[i].is_contiguous(),
+                    what, ": set ", k, " slot ", i, " must be a contiguous float32 CUDA tensor");
+    return set;
+}
+
+// A segment-sized pool slot (checkpoint_replay) bound at its full row count --
+// the longest segment -- and viewed down to the rows this segment uses, so one
+// buffer per call serves every segment. The fallback allocates the full shape
+// once per call, never per segment.
+inline torch::Tensor pool_rows(const std::vector<torch::Tensor>& pool, int idx,
+                               std::vector<int64_t> full_shape, int64_t rows,
+                               const torch::TensorOptions& options, const char* what)
+{
+    return pool_or_zeros(pool, idx, std::move(full_shape), options, what).narrow(0, 0, rows);
+}
+
 // Device pointer of an optional wavefield member: nullptr when the member was
 // left undefined by a partial bind (a reconstruction that carries no CPML
 // memory), for kernels that never touch it in that mode.

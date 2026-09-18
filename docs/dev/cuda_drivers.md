@@ -119,6 +119,16 @@ back to the per-call stepped path when a factory is missing.
   own struct that leaves the memory members undefined -- `view()` then hands
   `ptr_or_null` for them) and the carriers from the tail of the list, and allocates
   only when nothing was bound.
+  The checkpoint modes take the same route: `forward_wavefields` holds the replay
+  STATE sets (one set = the forward slot list without the psi double-buffer
+  shadows, `cuda_layout.checkpoint_state_nvar` when declared; `1 + depth(max_segment)`
+  sets for a bisecting driver that declares `recursive_state_depth`), taken with
+  `wavefield_set(list, k, n, what)` and bound with the struct's full bind; the
+  segment histories come from `checkpoint_replay` (`checkpoint_replay_shapes(B, nt,
+  shape, max_segment, mode)`, bound once per call and narrowed per segment with
+  `pool_rows`); the velocity carriers and other per-call scratch come from the
+  adjoint workspace pool (`backward_workspace_shapes(..., mode)`). A driver that keeps
+  its replay state elsewhere declares `checkpoint_state_nvar=0` (LSRTM: workspace slots).
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record
@@ -341,7 +351,7 @@ Types: `Wavefield`, `CPML`, `State`, `BwdWorkspace`, `BsScratch`.
 | `alloc_cpml(cpml, p)` | Allocate the CPML profile tensors | all |
 | `allt_shape(d, nt)` | Shape of the `u_allt` / ckpt chunk buffer | F, CK |
 | `save_width(abcn, M)` | Boundary strip width | F, BS |
-| `bind_or_alloc_forward` / `_adjoint` / `_recon` / `_recon_ckpt`, `alloc_recursive_start_state` | Bind the Python wavefield lists, allocating internally when empty (ckpt shapes follow the checkpoint slot layout) | F / B,BS,CK,RC / BS / CK,RC / RC |
+| `bind_or_alloc_forward` / `_adjoint` / `_recon` / `_recon_ckpt`, `bind_or_alloc_recursive_scratch` | Bind the Python wavefield lists, allocating internally when empty (ckpt shapes follow the checkpoint slot layout) | F / B,BS,CK,RC / BS / CK,RC / RC |
 | `bind_backward_outputs(p, grads, illum, want_adcig)` | Bind or allocate `grads` (slot 0 is `grad_wavelet`) and the illumination outputs; VRZ implements its own | B, BS |
 | `alloc_grads(p, grads)` / `pack_outputs(out, grads, illum)` | Internal gradient allocation for ckpt / packing the `BackwardOutput` | CK, RC / B, BS, CK, RC |
 | `rtm_out_full` / `rtm_out_bs` | Whether RTM/illumination/ADCIG are on (returns a pointer or nullptr) | B, CK, RC / BS |
@@ -380,7 +390,7 @@ Types: `Wavefield`, `WfView`, `CPML`, `Models`, `State`, `Workspace`, `VelPtrs`,
 | `validate_forward(p)` / `validate_backward(p, "full"\|"bs"\|"ckpt"\|"ckpt_recursive")` | Entry validation, hand-written text preserved per mode, run before the stepped checks | F / B, BS, CK, RC |
 | `setup_ctx` / `init_aux_slabs` / `alloc_cpml` / `allt_shape` | As in the acoustic family (sg's `save_width` is fixed at `M + 1`, so there is no hook) | all |
 | `field_ptr(wf, idx)` / `view(wf)` | Pointer by field index (for the source/receiver loops) / get a `WfView` | all |
-| `bind_or_alloc_forward` / `_adjoint` / `_recon` (returns `ReconCarriers`) / `_recon_ckpt`, `alloc_recursive_start_state`, `check_ckpt_aux_layout` | Bind or allocate each wavefield set; recon also carries v(t+1); ckpt validates that the aux layout agrees | F / B,BS,CK,RC / BS / CK,RC / CK,RC / CK |
+| `bind_or_alloc_forward` / `_adjoint` / `_recon` (returns `ReconCarriers`) / `_recon_ckpt`, `bind_or_alloc_recursive_scratch`, `check_ckpt_aux_layout` | Bind or allocate each wavefield set; recon also carries v(t+1); ckpt validates that the aux layout agrees | F / B,BS,CK,RC / BS / CK,RC / CK,RC / CK |
 | `zero_adjoint_if_first_segment(adjoint, first_segment)` / `zero_adjoint_if_first_segment_bs(...)` | Zero the adjoint state on the first segment (needed by the 3-D members; empty in 2-D) | B / BS |
 | `bind_grads(p, grads)` / `alloc_grads(vp, grads)` | Bind `grads_out` (stepped) or allocate; the element count is the number of models | B, BS, CK / RC |
 | `signed_adjoint_sources(p, receiver_fields)` | Sign the residuals per receiver field (stress receivers are negated; EVR is left as is) | B, BS, CK, RC |
@@ -398,7 +408,7 @@ Types: `Wavefield`, `WfView`, `CPML`, `Models`, `State`, `Workspace`, `VelPtrs`,
 | `seed_recon(forward, p)` | First segment: seed the reconstruction fields from `u_last_two` | BS |
 | `uninject_forward_source(state, solver, for_view, p, src_fields, neg_src, it, nsrc)` | Un-inject the source from the reconstruction fields (-source) | BS |
 | `bs_stress_half(...)` / `bs_velocity_half(...)` | See the timing map; DD phases 1 and 2 call one each | BS |
-| `alloc_seg_buffers(vp, len)` / `save_seg_velocities(seg, fwd, slot)` / `export_seg_next_v(prev, seg)` | Per-segment velocity buffers for ckpt: allocate / capture per step / hand v(start+1) to the earlier segment | CK |
+| `seg_buffers(p, vp, max_rows)` / `save_seg_velocities(seg, fwd, slot)` / `export_seg_next_v(prev, seg)` | Per-segment velocity buffers for ckpt: allocate / capture per step / hand v(start+1) to the earlier segment | CK |
 | `inject_forward_sources(state, solver, for_view, p, src_fields, it)` | Forward source injection during replay (`BackwardInput` field names) | CK, RC |
 | `capture_velocities(v, forward)` | Recursive replay captures v(it) at the target step (and v(it+1) when `IMAGING_USES_NEXT_V`) | RC |
 

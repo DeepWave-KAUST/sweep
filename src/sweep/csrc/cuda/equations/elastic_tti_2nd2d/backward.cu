@@ -64,6 +64,14 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_
     return p.adjoint_workspace;
 }
 
+// The checkpoint replay state the propagator binds as p.forward_wavefields
+// (set 0, zeroed per backward call): one full WavefieldTensor::bind() list --
+// the (ux, uz) x (now, pre, next) displacement triple plus the 8 CPML memory
+// fields, cuda_layout checkpoint_state_nvar = base_nvar + pml_nvar.  The
+// checkpoint snapshots hold that same list (checkpoint_tensors() is
+// state_tensors()), so it is also the CheckpointRuntime tensor count.
+constexpr int CKPT_STATE_COUNT = 14;
+
 struct AdjointWorkspace {
     std::array<torch::Tensor, 8> t;
 
@@ -482,11 +490,13 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     TORCH_CHECK(p.models.size() == 7, "ElasticTTI2nd checkpoint backward expects prepared models");
     TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd checkpoint backward expects cpmls PML profiles");
     TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
-    TORCH_CHECK(p.checkpoints.size() == 14, "ElasticTTI2nd checkpointing expects 14 checkpoint tensors");
+    TORCH_CHECK(static_cast<int>(p.checkpoints.size()) == CKPT_STATE_COUNT,
+                "ElasticTTI2nd checkpointing expects ", CKPT_STATE_COUNT, " checkpoint tensors, got ",
+                p.checkpoints.size());
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
-        14,
+        CKPT_STATE_COUNT,
         true,
         false,
         p.checkpoint_interval,
@@ -525,9 +535,6 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         adjoint.allocate(rho);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
-    WavefieldTensor start_state;
-    start_state.allocate(rho);
-
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
     auto cpml_view = cpml.view();
@@ -551,35 +558,49 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     const int chunk_size = p.checkpoint_interval;
     const int num_chunks = (static_cast<int>(p.nt) + chunk_size - 1) / chunk_size;
 
+    // Replay state: the CKPT_STATE_COUNT model-shaped slots the propagator
+    // hands over as p.forward_wavefields (set 0, zeroed per backward call), or
+    // a fresh allocation for a caller that binds nothing.  Every chunk seeds
+    // all of it (zero_state / checkpoint load) before stepping.
     WavefieldTensor replay;
-    if (!p.forward_wavefields.empty())
-        replay.bind(p.forward_wavefields);
-    else
+    if (!p.forward_wavefields.empty()) {
+        const char* what = "elastic_tti_2nd2d ckpt replay state";
+        auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT, what);
+        for (int i = 0; i < CKPT_STATE_COUNT; ++i)
+            pool_slot_checked(state, i, rho, what);   // every slot is model-shaped
+        replay.bind(state);
+    } else {
         replay.allocate(rho);
+    }
+
+    // seg[k] = W_{start-1+k}: two history levels + one entry per replayed
+    // step, so the reverse pass below has all three time slices in-chunk.
+    // Python-allocated with the checkpoint snapshots at chunk_size + 2 rows
+    // (or allocated here once per call when unbound); each chunk views the
+    // prefix it uses.  Rows 0..seg_len+1 are all written before the reverse
+    // pass reads them, so the buffer is never re-zeroed between chunks.
+    std::vector<int64_t> seg_shape = rho.sizes().vec();
+    seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(chunk_size + 2));
+    auto seg_ux_full = pool_or_zeros(p.checkpoint_replay, 0, seg_shape, rho.options(), "checkpoint_replay");
+    auto seg_uz_full = pool_or_zeros(p.checkpoint_replay, 1, seg_shape, rho.options(), "checkpoint_replay");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         const int start = chunk_id * chunk_size;
         const int end = std::min(static_cast<int>(p.nt), start + chunk_size);
         const int seg_len = end - start;
 
+        // Seed the chunk-start state straight into the replay struct: the
+        // snapshot holds the full state list in role order, and
+        // state_tensors() lists replay's members by role whatever swap_u()
+        // rotated into them -- the same bytes the old load-into-a-scratch-
+        // state-then-copy_state produced, one state copy fewer.
         if (chunk_id == 0)
-            checkpoint_runtime.zero_state(start_state.state_tensors());
+            checkpoint_runtime.zero_state(replay.state_tensors());
         else
-            checkpoint_runtime.load(chunk_id, start_state.checkpoint_tensors());
+            checkpoint_runtime.load(chunk_id, replay.checkpoint_tensors());
 
-        checkpoint_runtime.copy_state(replay.state_tensors(), start_state.state_tensors());
-
-        // seg[k] = W_{start-1+k}: two history levels + one entry per replayed
-        // step, so the reverse pass below has all three time slices in-chunk.
-        // Python-allocated with the checkpoint snapshots, chunk_size + 2 rows;
-        // a shorter last chunk uses a prefix. Rows 0..seg_len+1 are all written
-        // below before the reverse pass reads them.
-        std::vector<int64_t> seg_shape = rho.sizes().vec();
-        seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(chunk_size + 2));
-        auto seg_ux = pool_or_zeros(p.checkpoint_replay, 0, seg_shape, rho.options(), "checkpoint_replay")
-                          .narrow(0, 0, seg_len + 2);
-        auto seg_uz = pool_or_zeros(p.checkpoint_replay, 1, seg_shape, rho.options(), "checkpoint_replay")
-                          .narrow(0, 0, seg_len + 2);
+        auto seg_ux = seg_ux_full.narrow(0, 0, seg_len + 2);
+        auto seg_uz = seg_uz_full.narrow(0, 0, seg_len + 2);
         seg_ux.select(0, 0).copy_(replay.ux_pre_t);
         seg_uz.select(0, 0).copy_(replay.uz_pre_t);
         seg_ux.select(0, 1).copy_(replay.ux_t);

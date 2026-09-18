@@ -54,6 +54,16 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
     return p.adjoint_workspace;
 }
 
+// The checkpoint replay state the propagator binds as p.forward_wavefields
+// (set 0, zeroed per backward call): one full DasWavefieldTensor3D::bind()
+// list -- 9 physical + 18 CPML memory + 4 DAS projections, cuda_layout
+// checkpoint_state_nvar = base_nvar + pml_nvar.  The recompute steps it from
+// the quiescent zero state at it = 0, exactly the state allocate() started
+// from; an unbound caller keeps that allocation (backward_bs routes through
+// this same recompute with an empty list: DASZhao3D declares no
+// boundary-saving reconstruction).
+constexpr int CKPT_STATE_COUNT = 31;
+
 
 torch::Tensor recompute_strain_history(const BackwardInput& p)
 {
@@ -81,7 +91,15 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     auto source_fields = p.source_field_indices.to(torch::kCPU);
 
     DasWavefieldTensor3D wavefield;
-    wavefield.allocate(vp);
+    if (!p.forward_wavefields.empty()) {
+        const char* what = "das3d ckpt replay state";
+        auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT, what);
+        for (int i = 0; i < CKPT_STATE_COUNT; ++i)
+            pool_slot_checked(state, i, vp, what);   // every slot is model-shaped
+        wavefield.bind(state);
+    } else {
+        wavefield.allocate(vp);
+    }
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;

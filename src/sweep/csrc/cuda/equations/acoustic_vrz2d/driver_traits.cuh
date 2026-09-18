@@ -148,9 +148,10 @@ struct Driver {
     };
 
     // Layout of p.adjoint_workspace, declared on the Python side by
-    // AcousticVRZ.cuda_layout (backward_workspace_shapes: bound in the full
-    // and bs modes, which run through this skeleton; the hand-written ckpt
-    // backward in backward.cu still allocates its own).  One padded grid per
+    // AcousticVRZ.cuda_layout (backward_workspace_shapes, bound in all four
+    // memory modes: full and bs run through this skeleton, ckpt and recursive
+    // through the hand-written backward_ckpt in backward.cu, which takes the
+    // same seven slots through this enum).  One padded grid per
     // shot each, the 2-D cut of the 3-D sibling's WorkspaceSlot
     // (acoustic_vrz3d/backward.cu) in the order the DD runner binds the
     // family (coupling grids first, adjoint coefficients last): the four c/e

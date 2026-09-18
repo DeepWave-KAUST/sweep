@@ -73,6 +73,13 @@
 // generic_backward_recursive_ckpt — bisection over each ckpt segment; a
 //   leaf runs one replay triple, then the reverse-five of ckpt mode with
 //   the imaging fed from the leaf's scratch u.
+//
+// Propagator-owned buffers of the two checkpoint skeletons (see the
+// AcousticCkptReplaySlot / AcousticRecursiveWorkspaceSlot enums): the replay STATE rides
+// p.forward_wavefields as K sets of Eq::CKPT_STATE_COUNT tensors (set 0 via
+// bind_or_alloc_recon_ckpt; recursive mode adds one scratch set per bisection
+// level via bind_or_alloc_recursive_scratch), the chunk history rides
+// p.checkpoint_replay, the leaf scratch p.adjoint_workspace.
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -844,6 +851,28 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
     return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
 }
 
+// Pool slots of the two checkpoint skeletons, declared per equation in
+// cuda_layout (checkpoint_replay_shapes / backward_workspace_shapes, by memory
+// mode) and bound by the propagator; unbound, each falls back to the
+// allocation it replaces.
+//
+// checkpoint_replay, ckpt mode: the recomputed chunk, Eq::allt_shape(d,
+// chunk_size) rows.  One buffer per call serves every chunk (the last, shorter
+// chunk uses a prefix of its rows): each chunk replays rows [0, end - start)
+// before its reverse loop reads them, and the rim the stencil never writes
+// keeps its allocation-time zero -- exactly what the per-call torch::zeros it
+// replaces held -- so the pool is never re-zeroed.  Recursive mode keeps no
+// history: the leaf images from its u_this scratch.
+enum AcousticCkptReplaySlot : int {
+    ACOUSTIC_CKPT_CHUNK_FORWARD = 0, N_ACOUSTIC_CKPT_REPLAY
+};
+// adjoint_workspace, recursive mode: the leaf's model-shaped u_this, zeroed by
+// the leaf before the replay kernel writes it (so an uninitialised slot is
+// fine); the other modes of this skeleton take no workspace.
+enum AcousticRecursiveWorkspaceSlot : int {
+    ACOUSTIC_RECURSIVE_U_THIS = 0, N_ACOUSTIC_RECURSIVE_WORKSPACE
+};
+
 // ---- generic_backward_ckpt (uniform chunks; acoustic-family shape) ----
 template <class Eq>
 BackwardOutput generic_backward_ckpt(const BackwardInput& in)
@@ -853,6 +882,16 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     const auto& p = in;
     BackwardOutput out;
+    TORCH_CHECK(p.checkpoint_replay.empty()
+                    || static_cast<int>(p.checkpoint_replay.size()) == N_ACOUSTIC_CKPT_REPLAY,
+                Eq::NAME, " checkpoint backward expects ", N_ACOUSTIC_CKPT_REPLAY,
+                " checkpoint_replay slot (the chunk history), got ",
+                p.checkpoint_replay.size());
+    TORCH_CHECK(p.forward_wavefields.empty()
+                    || static_cast<int>(p.forward_wavefields.size()) == Eq::CKPT_STATE_COUNT,
+                Eq::NAME, " checkpoint backward expects one replay state set of ",
+                Eq::CKPT_STATE_COUNT, " forward_wavefields, got ",
+                p.forward_wavefields.size());
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints, Eq::CKPT_NVAR, true, false,
@@ -869,6 +908,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
 
     typename Eq::Wavefield adjoint;
     Eq::bind_or_alloc_adjoint(adjoint, p, vp);
+    // The chunk replay state: replay state set 0 of p.forward_wavefields.
     typename Eq::Wavefield forward;
     Eq::bind_or_alloc_recon_ckpt(forward, p, vp);
     // Slab geometry follows the FORWARD-state aux layout (the recompute runs
@@ -898,7 +938,10 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
 
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
-    auto chunk_forward = torch::zeros(Eq::allt_shape(d, chunk_size), vp.options());
+    // The recomputed chunk (ACOUSTIC_CKPT_CHUNK_FORWARD), once per call for every chunk.
+    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, ACOUSTIC_CKPT_CHUNK_FORWARD,
+                                       Eq::allt_shape(d, chunk_size), vp.options(),
+                                       "checkpoint_replay");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;
@@ -1022,6 +1065,16 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     TORCH_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                 Eq::NAME, " recursive checkpointing expects ", Eq::CKPT_NVAR,
                 " checkpoint tensors");
+    TORCH_CHECK(p.adjoint_workspace.empty()
+                    || static_cast<int>(p.adjoint_workspace.size())
+                           == N_ACOUSTIC_RECURSIVE_WORKSPACE,
+                Eq::NAME, " recursive checkpoint backward expects ", N_ACOUSTIC_RECURSIVE_WORKSPACE,
+                " adjoint_workspace slot (the leaf's u_this scratch), got ",
+                p.adjoint_workspace.size());
+    TORCH_CHECK(p.checkpoint_replay.empty(),
+                Eq::NAME, " recursive checkpoint backward keeps no segment history "
+                "(the leaf images from its u_this scratch): checkpoint_replay must be "
+                "empty, got ", p.checkpoint_replay.size());
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
     TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
@@ -1078,15 +1131,32 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
         max_segment_length = std::max(max_segment_length, end - start);
     }
 
+    // Replay state sets of p.forward_wavefields: set 0 is the segment start
+    // state (zeroed or checkpoint-loaded per segment before any read), sets
+    // 1..depth the bisection's scratch states (copy_state-filled from their
+    // parent before any read).  The propagator hands 1 + depth sets, its depth
+    // (_c.py _recursive_scratch_depth) mirroring recursive_checkpoint_scratch_depth
+    // on the same longest segment.
+    const int scratch_depth = recursive_checkpoint_scratch_depth(max_segment_length);
+    TORCH_CHECK(p.forward_wavefields.empty()
+                    || static_cast<int>(p.forward_wavefields.size())
+                           == (1 + scratch_depth) * Eq::CKPT_STATE_COUNT,
+                Eq::NAME, " recursive checkpoint backward expects ", 1 + scratch_depth,
+                " replay state sets of ", Eq::CKPT_STATE_COUNT,
+                " forward_wavefields, got ", p.forward_wavefields.size());
+
     typename Eq::Wavefield start_state;
-    Eq::alloc_recursive_start_state(start_state, p, vp);
+    Eq::bind_or_alloc_recon_ckpt(start_state, p, vp);
     Eq::init_aux_slabs(ctx, start_state);
 
-    std::vector<typename Eq::Wavefield> scratch_states(
-        recursive_checkpoint_scratch_depth(max_segment_length));
-    for (auto& scratch_state : scratch_states)
-        scratch_state.allocate_like(vp, start_state);
-    auto u_this_scratch = torch::empty_like(vp);
+    std::vector<typename Eq::Wavefield> scratch_states(scratch_depth);
+    for (int level = 0; level < scratch_depth; ++level)
+        Eq::bind_or_alloc_recursive_scratch(scratch_states[level], p, vp,
+                                            /*set=*/level + 1, start_state);
+    // The leaf's u_this (ACOUSTIC_RECURSIVE_U_THIS): zeroed per leaf before the replay
+    // kernel writes it, so it needs no initial contents.
+    auto u_this_scratch = pool_or_empty(p.adjoint_workspace, ACOUSTIC_RECURSIVE_U_THIS, vp,
+                                        "adjoint_workspace");
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];

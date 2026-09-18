@@ -34,8 +34,8 @@
 //   * seed_recon copies the five fields from u_last_two[0..4]; uninject_forward_source adds neg_forward_source at the source fields;
 //   * bs_stress_half order: STRESS_NOPML -> restore sxx/szz/sxz (fields 2..4, offset -M) -> STRESS_ADJOINT_PREPARE with the imaging fused (v(it) = for_view.v*, v(it+1) = carriers) -> fix_rho_grad_at_receivers -> STRESS_ADJOINT_APPLY;
 //   * bs_velocity_half order: VELOCITY_ADJOINT_PREPARE -> VELOCITY_ADJOINT_APPLY -> elastic_capture_strips_2d (restore strips into the carriers) -> VELOCITY_NOPML (carrier write of every computed cell, then the velocity update) -> restore vx/vz (fields 0..1, offset -M) -> prefetch_next_backward_chunk_if_needed;
-//   * ckpt: bind_or_alloc_recon_ckpt binds p.forward_wavefields or allocate_from_snapshots(vp, checkpoints, 2); alloc_recursive_start_state = allocate_from_snapshots; check_ckpt_aux_layout compares the m_vxx aux shapes;
-//   * seg buffers: alloc_seg_buffers = two zero tensors of shape (segment_len + 1, vp.size(0) * vp.size(1), 1, nz, nx) for vx / vz; save_seg_velocities fills a slot, export_seg_next_v keeps slot 1, vel_ptrs_from_seg picks now / next (next_segment_v past the end);
+//   * ckpt: bind_or_alloc_recon_ckpt binds forward_wavefields set 0 (CKPT_STATE_COUNT = 15, the full base+pml bind) or allocate_from_snapshots(vp, checkpoints, 2); check_ckpt_aux_layout compares the m_vxx aux shapes; WS_CARRIERS = 8 (the skeleton's velocity carriers follow the q*/p* scratch in adjoint_workspace, sg_driver.cuh SgCarrierSlots);
+//   * seg buffers: seg_buffers = the two checkpoint_replay slots (vx / vz histories of shape (checkpoint_interval + 1, vp.size(0) * vp.size(1), 1, nz, nx), narrowed per chunk by the skeleton); save_seg_velocities fills a row, export_seg_next_v keeps row 1, vel_ptrs_from_seg picks now / next (next_segment_v past the end);
 //   * recursive: inject_forward_sources replays the forward source per source field; capture_velocities / vel_ptrs_from_carriers feed the imaging from the captured v(it) / v(it+1) pair.
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
@@ -88,6 +88,12 @@ struct Driver {
         "Elastic 2D recursive checkpointing expects 15 checkpoint tensors";
     static constexpr int N_VEL = 2;
     static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
+    // Checkpoint modes: the replay state is one full base+pml struct
+    // (forward_wavefields set 0, cuda_layout.checkpoint_state_nvar); the
+    // adjoint_workspace pool holds the 8 q*/p* scratch slots first and the
+    // skeleton's velocity carriers after them (sg_driver.cuh SgCarrierSlots).
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;   // 15
+    static constexpr int WS_CARRIERS = 8;                // qxx, qzz, qxz, qzx, pxx, pzz, pxz, pzx
 
     using Wavefield = ElasticWavefieldTensor;
     using WfView = ElasticWavefieldPointer;
@@ -836,36 +842,44 @@ struct Driver {
                                          const torch::Tensor& vp)
     {
         if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields, true);
+            // Set 0 of the Python-bound replay state (one set: no bisection
+            // scratch here), the full bind -- the CPML aux slots are slab-shaped
+            // exactly like the forward's.
+            forward.bind(wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+                                       "elastic2d ckpt replay state"), true);
         else
             // Aux shapes must follow the Python-allocated checkpoint slots
             // (possibly per-axis slabs).
             forward.allocate_from_snapshots(vp, p.checkpoints, 2);
     }
 
-    static void alloc_recursive_start_state(Wavefield& wf, const BackwardInput& p,
-                                            const torch::Tensor& vp)
-    {
-        wf.allocate_from_snapshots(vp, p.checkpoints, 2);
-    }
-
-    static void check_ckpt_aux_layout(const Wavefield& start_state,
+    static void check_ckpt_aux_layout(const Wavefield& forward,
                                       const Wavefield& adjoint)
     {
         TORCH_CHECK(!adjoint.m_vxx_t.defined() ||
-                    start_state.m_vxx_t.sizes() == adjoint.m_vxx_t.sizes(),
+                    forward.m_vxx_t.sizes() == adjoint.m_vxx_t.sizes(),
                     "checkpoint aux layout differs from adjoint aux layout");
     }
 
     // ---- seg / carrier plumbing (ckpt + recursive modes) ----
 
-    static std::vector<torch::Tensor> alloc_seg_buffers(const torch::Tensor& vp,
-                                                        int segment_len)
+    // The chunked backward's velocity histories, checkpoint_replay slots
+    // [0, N_VEL) = vx, vz: (max_rows, B, 1, nz, nx) each, bound at the longest
+    // chunk (cuda_layout.checkpoint_replay_shapes) and narrowed per chunk by
+    // the skeleton; row 0 = v(start), row k = v(start + k).  Never re-zeroed:
+    // every row a chunk reads it wrote first.  Unbound: allocated once per
+    // call (the hand-written driver allocated them per chunk).
+    static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
+                                                  const torch::Tensor& vp, int max_rows)
     {
-        auto seg_vx = torch::zeros({segment_len + 1, vp.size(0) * vp.size(1), 1,
-                                    vp.size(2), vp.size(3)}, vp.options());
-        auto seg_vz = torch::zeros_like(seg_vx);
-        return {seg_vx, seg_vz};
+        std::vector<torch::Tensor> seg;
+        seg.reserve(N_VEL);
+        for (int c = 0; c < N_VEL; ++c)
+            seg.push_back(pool_or_zeros(p.checkpoint_replay, c,
+                                        {max_rows, vp.size(0) * vp.size(1), 1,
+                                         vp.size(2), vp.size(3)},
+                                        vp.options(), "checkpoint_replay"));
+        return seg;
     }
 
     static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,
