@@ -73,6 +73,9 @@ class CompiledCallParams:
     # Whether the equation's BackwardOutput.grads starts with grad_wavelet
     # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
     grads_out_has_wavelet: bool = False
+    # How many leading models receive a gradient of their own; the rest (the
+    # derived APM tensors) share one zero placeholder. None = all of them.
+    n_grad_models: int = None
     adjoint_wavefields: tuple = ()
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()

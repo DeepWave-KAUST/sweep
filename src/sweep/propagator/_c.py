@@ -101,7 +101,7 @@ def _history_buffer(shape, device):
     return torch.zeros(shape, device=device)
 
 
-def _gradient_buffers(has_wavelet, forward_source, models):
+def _gradient_buffers(has_wavelet, forward_source, models, n_grad_models=None):
     """One zero tensor per gradient the compiled backward accumulates into, in
     ``BackwardInput.grads_out`` order: ``grad_wavelet`` first when the equation
     declares it (``cuda_layout.grads_out_has_wavelet``), then one per model.
@@ -110,9 +110,19 @@ def _gradient_buffers(has_wavelet, forward_source, models):
     driver allocate its own. Allocating them here costs the same bytes and the
     same zero-fill per backward as the ``zeros_like`` they replace -- what moves
     is only who allocates, so the C++ side stops owning tensors.
+
+    ``n_grad_models`` caps the models that get a gradient of their own. The APM
+    list appends derived tensors (effective moduli, masked densities) whose
+    gradient the driver never produces: it returns one shared zero under every
+    such slot, and so does this -- one tensor, referenced by all of them --
+    which keeps the memory of an APM backward where it was.
     """
     grads = [torch.zeros_like(forward_source)] if has_wavelet else []
-    grads += [torch.zeros_like(m) for m in models]
+    n = len(models) if n_grad_models is None else int(n_grad_models)
+    grads += [torch.zeros_like(m) for m in models[:n]]
+    if n < len(models):
+        shared_zero = torch.zeros_like(models[0])
+        grads += [shared_zero] * (len(models) - n)
     return grads
 
 
@@ -370,7 +380,8 @@ class Wrapper(torch.autograd.Function):
         params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]
         params.adjoint_workspace = list(cp.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
-        params.grads_out = _gradient_buffers(cp.grads_out_has_wavelet, ctx.forward_source, params.models)
+        params.grads_out = _gradient_buffers(cp.grads_out_has_wavelet, ctx.forward_source,
+                                             params.models, cp.n_grad_models)
         params.eq_aux = [t.contiguous() for t in cp.eq_aux]
         # ``adjoint_source`` arrives in the canonical (B, nt, nrec, nfield)
         # layout that ``forward`` returned; permute it back to the raw CUDA
@@ -1753,6 +1764,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     forward_workspace=forward_workspace,
                     u_allt_shape=self._history_shape(batch_size),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
+                    n_grad_models=len(models) if use_apm_arg else None,
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,
                     checkpoint_buffers=checkpoint_buffers,

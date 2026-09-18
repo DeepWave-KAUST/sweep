@@ -254,9 +254,15 @@ BackwardOutput apm_backward(const BackwardInput& in)
     zero_wavefield_state(adjoint);
     auto adj_view = adjoint.view();
 
-    auto grad_vp  = torch::zeros_like(vp);
-    auto grad_vs  = torch::zeros_like(vp);
-    auto grad_rho = torch::zeros_like(vp);
+    // grads_out = {grad_vp, grad_vs, grad_rho, <one shared zero under every
+    // derived APM model>} from the propagator, or fresh tensors when unbound.
+    const auto& gs = p.grads_out;
+    TORCH_CHECK(gs.empty() || gs.size() == p.models.size(),
+                "elastic3d APM backward: grads_out must be empty or hold one tensor per model (",
+                p.models.size(), "), got ", gs.size());
+    auto grad_vp  = pool_or_zeros(gs, 0, vp, "grads_out");
+    auto grad_vs  = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
     auto zero_velocity = torch::zeros_like(vp);
     ElasticAdjointWorkspaceTensor workspace;
     init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 3);
@@ -326,7 +332,8 @@ BackwardOutput apm_backward(const BackwardInput& in)
         );
     }
 
-    auto z = torch::zeros_like(vp);
+    // The derived models' placeholder: the propagator's shared zero when bound.
+    auto z = gs.size() > 3 ? gs[3] : torch::zeros_like(vp);
     // Return 21 grads matching the 21-tensor APM model layout.
     out.grads = {grad_vp, grad_vs, grad_rho,
                  z, z, z,
@@ -422,9 +429,15 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     auto for_view = forward.view();
     auto adj_view = adjoint.view();
 
-    auto grad_vp  = torch::zeros_like(vp);
-    auto grad_vs  = torch::zeros_like(vp);
-    auto grad_rho = torch::zeros_like(vp);
+    // grads_out = {grad_vp, grad_vs, grad_rho, <one shared zero under every
+    // derived APM model>} from the propagator, or fresh tensors when unbound.
+    const auto& gs = p.grads_out;
+    TORCH_CHECK(gs.empty() || gs.size() == p.models.size(),
+                "elastic3d APM backward: grads_out must be empty or hold one tensor per model (",
+                p.models.size(), "), got ", gs.size());
+    auto grad_vp  = pool_or_zeros(gs, 0, vp, "grads_out");
+    auto grad_vs  = pool_or_zeros(gs, 1, vp, "grads_out");
+    auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
     ElasticAdjointWorkspaceTensor workspace;
     init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 3);
 
@@ -563,7 +576,8 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
-    auto z = torch::zeros_like(vp);
+    // The derived models' placeholder: the propagator's shared zero when bound.
+    auto z = gs.size() > 3 ? gs[3] : torch::zeros_like(vp);
     out.grads = {grad_vp, grad_vs, grad_rho,
                  z, z, z,
                  z, z, z, z, z, z, z, z, z,
