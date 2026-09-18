@@ -97,6 +97,17 @@ back to the per-call stepped path when a factory is missing.
   The record is the same: `cuda_layout.record_shape(B, nrec, nfield, nt)` declares the
   driver's layout (`record_single` / `record_multi`), the propagator allocates it per
   call and binds it as `record_out` on the monolithic path as well as the stepped one.
+  Derived model coefficients (Lame parameters, VTI stiffness, 1/z) are the same:
+  `cuda_layout.derived_model_nvar` (an int, or `fn(mode)` for a driver that derives
+  only in some modes -- the DAS full backward reads the stored strain history and
+  gets no slot) declares how many model-shaped slots the propagator hands a
+  forward or backward as `derived_models` (`torch.empty`: the driver writes every
+  cell), and one fused kernel per family
+  (`common/derived_models.h`, slots named by `LameSlot` / `VtiSlot` / `VrzSlot`)
+  fills them from the bound models, reading each model once -- the torch
+  expressions that used to do this inside the call (and their temporaries) are
+  gone. The kernels use `__f*_rn` intrinsics in the torch expressions' own
+  association, so the coefficients are bit-identical under `--use_fast_math`.
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record
@@ -353,7 +364,7 @@ Types: `Wavefield`, `WfView`, `CPML`, `Models`, `State`, `Workspace`, `VelPtrs`,
 
 | Hook | Purpose | Modes |
 |---|---|---|
-| `parse_models(p)` | Derive the models (lambda/mu and so on) from `p.models`; the struct holds them alive | all |
+| `parse_models(p)` | Bind the models from `p.models` and fill the derived coefficients (lambda/mu and so on) into the propagator's `derived_models` slots through `derived::lame` / `derived::vti_stiffness` / `derived::reciprocal` (`common/derived_models.h`); the struct holds them alive | all |
 | `make_state(p, d, models, launch, src_cfg, rec_cfg)` / `make_workspace(p, vp)` | Parameter pack built outside the loop / adjoint workspace (`init_adjoint_workspace` or internal scratch) | all / B, BS, CK, RC |
 | `validate_forward(p)` / `validate_backward(p, "full"\|"bs"\|"ckpt"\|"ckpt_recursive")` | Entry validation, hand-written text preserved per mode, run before the stepped checks | F / B, BS, CK, RC |
 | `setup_ctx` / `init_aux_slabs` / `alloc_cpml` / `allt_shape` | As in the acoustic family (sg's `save_width` is fixed at `M + 1`, so there is no hook) | all |

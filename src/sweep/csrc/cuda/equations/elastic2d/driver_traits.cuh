@@ -51,6 +51,7 @@
 #include "../../common/context.h"
 #include "../../common/elastic.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
@@ -92,8 +93,9 @@ struct Driver {
     using WfView = ElasticWavefieldPointer;
     using CPML = ElasticCPMLTensor;
 
-    // lambda/mu are torch-derived tensors: the struct keeps them alive for
-    // the whole call (kernels hold raw pointers into them).
+    // lambda/mu are the propagator's derived_models slots, filled once per
+    // call by common/derived_models.h; the struct keeps them alive for the
+    // whole call (kernels hold raw pointers into them).
     struct Models {
         torch::Tensor vp, vs, rho, mu, lambda;
     };
@@ -105,8 +107,9 @@ struct Driver {
         m.vp = p.models[0];
         m.vs = p.models[1];
         m.rho = p.models[2];
-        m.mu = m.rho * m.vs * m.vs;
-        m.lambda = m.rho * (m.vp * m.vp - 2 * m.vs * m.vs);
+        const auto lame = derived::lame(p, m.vp, m.vs, m.rho, "elastic2d::parse_models");
+        m.mu = lame.mu;
+        m.lambda = lame.lambda;
         return m;
     }
 

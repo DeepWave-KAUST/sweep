@@ -25,6 +25,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/elastic.h"     // ElasticCPMLTensor (re-used)
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
@@ -130,14 +131,15 @@ ForwardOutput forward(const ForwardInput& in)
     int nx = vp_t.size(3);
     int B  = N * C;
 
-    // Cached stiffness tensors (same formulas as Python prepare_models):
+    // Stiffness tensors (same formulas as Python prepare_models), filled into
+    // the propagator's derived_models slots by one kernel (common/derived_models.h):
     //   c11 = ρ V_P² (1+2ε), c33 = ρ V_P², c13 = ρ V_P² √(1+2δ).
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11     = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33     = rho_vp2;
-    auto c13     = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::forward");
+    auto c11     = stiff.c11;
+    auto c33     = stiff.c33;
+    auto c13     = stiff.c13;
+    auto inv_rho = stiff.inv_rho;
 
     // Wavefield allocation
     VTIWavefieldTensor wavefield;

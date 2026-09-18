@@ -26,6 +26,7 @@ struct ForwardInput {
     std::vector<torch::Tensor> pml_vals;  // Bind from python
     std::vector<torch::Tensor> wavefields; // Bind from python
     std::vector<torch::Tensor> forward_workspace; // Bind from python: per-call scratch, cuda_layout.forward_workspace_nvar
+    std::vector<torch::Tensor> derived_models; // Bind from python: cuda_layout.derived_model_nvar model-shaped slots the driver fills (common/derived_models.h)
     torch::Tensor last_two; // Bind from python
 
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
@@ -216,6 +217,7 @@ struct BackwardInput {
     std::vector<torch::Tensor> adjoint_wavefields; // Bind from python
     std::vector<torch::Tensor> forward_wavefields; // Bind from python
     std::vector<torch::Tensor> adjoint_workspace; // Bind from python
+    std::vector<torch::Tensor> derived_models; // Bind from python: cuda_layout.derived_model_nvar (see ForwardInput)
 
     // Wavefields
     std::vector<torch::Tensor> boundary_cpu; // Bind from python

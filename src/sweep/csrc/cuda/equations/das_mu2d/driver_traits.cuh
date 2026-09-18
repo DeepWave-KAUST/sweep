@@ -35,6 +35,7 @@
 #include "../../common/das_mu.h"
 #include "../../common/elastic.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
@@ -95,8 +96,9 @@ struct Driver {
         m.vp = p.models[0];
         m.vs = p.models[1];
         m.rho = p.models[2];
-        m.mu = m.rho * m.vs * m.vs;
-        m.lambda = m.rho * (m.vp * m.vp - 2 * m.vs * m.vs);
+        const auto lame = derived::lame(p, m.vp, m.vs, m.rho, "das_mu2d::parse_models");
+        m.mu = lame.mu;
+        m.lambda = lame.lambda;
         return m;
     }
 

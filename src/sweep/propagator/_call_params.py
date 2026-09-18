@@ -67,6 +67,11 @@ class CompiledCallParams:
     boundary_tail_steps: int = 0
     forward_wavefields: tuple = ()
     forward_workspace: tuple = ()
+    # Model-shaped derived-coefficient slots the compiled forward / backward is
+    # handed as ``derived_models`` (cuda_layout.derived_model_nvar, resolved for
+    # this call's mode); allocated per call.
+    derived_model_nvar_forward: int = 0
+    derived_model_nvar_backward: int = 0
     # Full-mode history shape (cuda_layout.save_all_shape at this batch), or
     # None when the compiled forward allocates its own.
     u_allt_shape: tuple = None

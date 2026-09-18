@@ -587,6 +587,7 @@ class Elastic(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=9,
             backward_workspace_nvar=18,
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
             # CPML memory variables in C++ bind order: nine (x, y, z) triples
             # (m_vx*, m_vy*, m_vz*, m_sxx*, m_syy*, m_szz*, m_sxy*, m_sxz*,
             # m_syz*); the differencing axis is the name's last letter.  All

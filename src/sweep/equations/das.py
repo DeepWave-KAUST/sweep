@@ -896,6 +896,14 @@ def step_das_zhao_3d(
     )
 
 
+def _das_derived_model_nvar(mode):
+    """mu and lambda (common/derived_models.h LameSlot) wherever the DAS drivers
+    step the elastic forward: the forward itself, the boundary-saving backward's
+    reconstruction and the checkpoint replays. The full-mode backward reads the
+    stored strain history and derives nothing, so it gets no slots."""
+    return 0 if mode == "full" else 2
+
+
 def _das2d_adjoint_workspace(B, nt, shape, mode):
     """The compiled 2-D DAS backward's scratch (das2d/backward.cu WorkspaceSlot),
     one padded grid per shot each: a read-only zero strain and eight adjoint
@@ -1021,6 +1029,7 @@ class DASZhao(FirstOrderEquation):
             # The four per-step derivative scratch grids the compiled forward
             # used to allocate itself (das2d/forward.cu ForwardWorkspaceSlot).
             forward_workspace_nvar=4,
+            derived_model_nvar=_das_derived_model_nvar,
         )
 
 
@@ -1163,6 +1172,7 @@ class DASZhao3D(FirstOrderEquation):
             # The nine per-step derivative scratch grids the compiled forward
             # used to allocate itself (das3d/forward.cu ForwardWorkspaceSlot).
             forward_workspace_nvar=9,
+            derived_model_nvar=_das_derived_model_nvar,
         )
 
 
@@ -1289,6 +1299,7 @@ class DASMu(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=8,
             backward_workspace_nvar=8,
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
 
 
@@ -1425,6 +1436,7 @@ class DASMu3D(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=15,
             backward_workspace_nvar=18,
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
 
 

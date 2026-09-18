@@ -10,6 +10,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
@@ -39,7 +40,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     auto vp = p.models[0];
     auto z = p.models[1];
-    auto inv_z = torch::reciprocal(z);
+    auto inv_z = derived::reciprocal(p, z, "acoustic_vrz2d::backward_ckpt");
     auto neg_adjoint_source = -p.adjoint_source;
 
     float dx = p.spacing[0];

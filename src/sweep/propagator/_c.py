@@ -100,6 +100,17 @@ def _record_buffer(shape, device):
     return torch.zeros(shape, device=device)
 
 
+def _derived_model_buffers(n, like):
+    """The ``cuda_layout.derived_model_nvar`` model-shaped slots a compiled call
+    fills with its derived coefficients (Lame parameters, VTI stiffness, 1/z),
+    bound as ``derived_models``. ``torch.empty``: the driver's kernel writes
+    every cell before anything reads it, so nobody pays a memset. One call's
+    lifetime -- allocated here for the forward and again for the backward,
+    never kept on ``ctx`` (the models they derive from are what autograd
+    saves)."""
+    return [torch.empty_like(like) for _ in range(n)]
+
+
 def _history_buffer(shape, device):
     """The full-mode forward history (``u_allt``), allocated here and bound as
     ``ForwardInput.u_allt_out`` so the compiled forward writes into it instead
@@ -197,6 +208,7 @@ class Wrapper(torch.autograd.Function):
         params.boundary_ring_buffers = cp.boundary_ring_buffers
         params.boundary_tail_steps = cp.boundary_tail_steps
         params.models = [m.contiguous() for m in models]
+        params.derived_models = _derived_model_buffers(cp.derived_model_nvar_forward, params.models[0])
         params.source = wavelet.contiguous()
         params.lap_coes = lap_coes.contiguous()
         params.grad_coes = grad_coes.contiguous()
@@ -390,6 +402,7 @@ class Wrapper(torch.autograd.Function):
         params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]
         params.adjoint_workspace = list(cp.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
+        params.derived_models = _derived_model_buffers(cp.derived_model_nvar_backward, params.models[0])
         params.grads_out = _gradient_buffers(cp.grads_out_has_wavelet, ctx.forward_source,
                                              params.models, cp.n_grad_models)
         params.eq_aux = [t.contiguous() for t in cp.eq_aux]
@@ -1298,6 +1311,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fn = self._cuda_layout().save_all_shape
         return None if fn is None else tuple(int(x) for x in fn(batch_size, self.nt, self.shape_cuda))
 
+    def _derived_model_count(self, mode):
+        """``cuda_layout.derived_model_nvar`` for one call: an int, or ``fn(mode)``
+        for a driver that derives its coefficients only in some modes (``mode`` is
+        "forward", or the backward's memory mode "full"/"bs"/"ckpt"/"recursive")."""
+        n = self._cuda_layout().derived_model_nvar
+        return int(n(mode)) if callable(n) else int(n)
+
     def _transient_forward_workspace(self, batch_size):
         """Per-call scratch for the compiled forward, ``cuda_layout.forward_workspace_nvar``
         padded grids per shot.
@@ -1698,12 +1718,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # not pay for it. Unconditional, this allocated Elastic's 8 (Elastic3D's
         # 18) padded grids on the first call of a propagator that would never run
         # a backward, and zeroed them on every call after.
+        derived_model_nvar_backward = 0
         if requires_backward:
             # The memory mode this backward will run in, in the backward's own
             # precedence (checkpointing beats boundary saving).
             workspace_mode = ("recursive" if use_recursive_checkpoint else "ckpt" if use_checkpoint
                               else "bs" if use_boundary_saving else "full")
             self._ensure_adjoint_workspace_buffers(batch_size, workspace_mode)
+            derived_model_nvar_backward = self._derived_model_count(workspace_mode)
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
@@ -1805,6 +1827,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     boundary_tail_steps=boundary_tail_steps,
                     forward_wavefields=forward_wavefields,
                     forward_workspace=forward_workspace,
+                    derived_model_nvar_forward=self._derived_model_count("forward"),
+                    derived_model_nvar_backward=derived_model_nvar_backward,
                     u_allt_shape=self._history_shape(batch_size),
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),

@@ -10,6 +10,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/das.h"
 #include "../../common/elastic.h"
 #include "../../common/wavetypes.h"
@@ -35,8 +36,9 @@ ForwardOutput forward(const ForwardInput& in)
     auto vp = p.models[0];
     auto vs = p.models[1];
     auto rho = p.models[2];
-    auto mu = rho * vs * vs;
-    auto lambda = rho * (vp * vp - 2 * vs * vs);
+    const auto lame = derived::lame(p, vp, vs, rho, "das3d::forward");
+    auto mu = lame.mu;
+    auto lambda = lame.lambda;
     c10::cuda::CUDAGuard device_guard(vp.device());
 
     float dx = p.spacing[0];

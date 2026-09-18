@@ -26,6 +26,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
@@ -203,12 +204,12 @@ BackwardOutput backward(const BackwardInput& in)
     int B  = N * C;
 
     // Cached stiffness (matches forward.cu)
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11_t   = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33_t   = rho_vp2;
-    auto c13_t   = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho_t = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::backward");
+    auto c11_t   = stiff.c11;
+    auto c33_t   = stiff.c33;
+    auto c13_t   = stiff.c13;
+    auto inv_rho_t = stiff.inv_rho;
 
     TORCH_CHECK(p.u_forward.defined(),
                 "AcousticVTI1st2D backward (full mode) requires the forward to "
@@ -394,12 +395,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int nx = vp_t.size(3);
     int B  = N * C;
 
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11_t   = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33_t   = rho_vp2;
-    auto c13_t   = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho_t = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::backward_bs");
+    auto c11_t   = stiff.c11;
+    auto c33_t   = stiff.c33;
+    auto c13_t   = stiff.c13;
+    auto inv_rho_t = stiff.inv_rho;
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -674,12 +675,12 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     int nx = vp_t.size(3);
     int B  = N * C;
 
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11_t   = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33_t   = rho_vp2;
-    auto c13_t   = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho_t = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::backward_ckpt");
+    auto c11_t   = stiff.c11;
+    auto c33_t   = stiff.c33;
+    auto c13_t   = stiff.c13;
+    auto inv_rho_t = stiff.inv_rho;
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,

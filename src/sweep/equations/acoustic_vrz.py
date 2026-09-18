@@ -213,6 +213,7 @@ class AcousticVRZ(SecondOrderEquation):
             # u, psix, psiz, zetax, zetaz; the singleton channel axis is the
             # driver's own layout (acoustic_vrz2d allt_shape).
             save_all_shape=lambda B, nt, grid: (nt, 5, B, 1, *grid),
+            derived_model_nvar=1,   # 1/z (common/derived_models.h VrzSlot)
             base_nvar=3,
             # psix,psiz,zetax,zetaz (4) + psixn,psizn (2): race-free forward psi
             # double-buffer (read psi, write psi*n, swap_pml).
@@ -335,6 +336,7 @@ class AcousticVRZ3D(SecondOrderEquation):
             # six c/e coupling grids of the split gradient and the four adjoint
             # coefficients C0/Cx/Cy/Cz -- the same ten the DD runner binds.
             backward_workspace_nvar=10,
+            derived_model_nvar=1,   # 1/z (common/derived_models.h VrzSlot)
             base_nvar=3,
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3): race-free
             # forward psi double-buffer (read psi, write psi*n, swap_pml).

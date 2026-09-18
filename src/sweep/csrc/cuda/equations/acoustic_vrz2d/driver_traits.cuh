@@ -46,6 +46,7 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
@@ -121,7 +122,7 @@ struct Driver {
         State s;
         s.vp_t = p.models[0];
         s.z_t = p.models[1];
-        s.inv_z_t = torch::reciprocal(s.z_t);
+        s.inv_z_t = derived::reciprocal(p, s.z_t, "acoustic_vrz2d::make_state");
         s.vp = s.vp_t.template data_ptr<float>();
         s.z = s.z_t.template data_ptr<float>();
         s.inv_z = s.inv_z_t.template data_ptr<float>();

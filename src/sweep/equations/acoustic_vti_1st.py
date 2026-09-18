@@ -437,6 +437,7 @@ class AcousticVTI1st(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=4,
             backward_workspace_nvar=5,
+            derived_model_nvar=4,   # c11, c13, c33, 1/rho (common/derived_models.h VtiSlot)
         )
 
 
@@ -611,4 +612,5 @@ class AcousticVTI1st3D(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=5,
             backward_workspace_nvar=6,
+            derived_model_nvar=4,   # c11, c13, c33, 1/rho (common/derived_models.h VtiSlot)
         )

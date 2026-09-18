@@ -138,19 +138,40 @@ struct AsyncCopyContext {
 // mismatch LOUD -- consumers take data_ptr<float>() and index by the model's
 // geometry, so a pool tensor of the wrong shape or dtype would read as garbage
 // rather than fail.
+inline bool pool_slot_bound(const std::vector<torch::Tensor>& pool, int idx)
+{
+    return static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0;
+}
+
+inline const torch::Tensor& pool_slot_checked(const std::vector<torch::Tensor>& pool, int idx,
+                                              const torch::Tensor& like, const char* what)
+{
+    TORCH_CHECK(pool[idx].sizes() == like.sizes(),
+                what, "[", idx, "] has shape ", pool[idx].sizes(),
+                " but the expected geometry is ", like.sizes());
+    TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat,
+                what, "[", idx, "] must be float32, got ", pool[idx].scalar_type());
+    return pool[idx];
+}
+
 inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int idx,
                                    const torch::Tensor& like,
                                    const char* what = "adjoint_workspace")
 {
-    if (static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0) {
-        TORCH_CHECK(pool[idx].sizes() == like.sizes(),
-                    what, "[", idx, "] has shape ", pool[idx].sizes(),
-                    " but the expected geometry is ", like.sizes());
-        TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat,
-                    what, "[", idx, "] must be float32, got ", pool[idx].scalar_type());
-        return pool[idx];
-    }
+    if (pool_slot_bound(pool, idx))
+        return pool_slot_checked(pool, idx, like, what);
     return torch::zeros_like(like);
+}
+
+// Same binding, uninitialised fallback: for a slot the driver writes in full
+// before it reads (the derived model coefficients), so neither side pays a
+// memset for it.
+inline torch::Tensor pool_or_empty(const std::vector<torch::Tensor>& pool, int idx,
+                                   const torch::Tensor& like, const char* what)
+{
+    if (pool_slot_bound(pool, idx))
+        return pool_slot_checked(pool, idx, like, what);
+    return torch::empty_like(like);
 }
 
 // The same for a pool whose slots are not model-shaped (checkpoint_replay):

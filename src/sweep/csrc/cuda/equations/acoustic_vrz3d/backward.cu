@@ -11,6 +11,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
@@ -98,7 +99,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
     auto vp = in.models[0];
     auto z = in.models[1];
-    auto inv_z = torch::reciprocal(z);
+    auto inv_z = derived::reciprocal(in, z, "acoustic_vrz3d::backward_full_impl");
     auto neg_adjoint_source = -in.adjoint_source;
 
     float dx = in.spacing[0];
@@ -260,7 +261,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
     auto vp = p.models[0];
     auto z = p.models[1];
-    auto inv_z = torch::reciprocal(z);
+    auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::backward_bs_impl");
     auto neg_adjoint_source = -p.adjoint_source;
 
     float dx = p.spacing[0];
@@ -679,7 +680,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
     auto vp = p.models[0];
     auto z = p.models[1];
-    auto inv_z = torch::reciprocal(z);
+    auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::backward_ckpt_impl");
     auto neg_adjoint_source = -p.adjoint_source;
 
     float dx = p.spacing[0];

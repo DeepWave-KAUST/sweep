@@ -12,6 +12,7 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
@@ -30,7 +31,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     auto vp = p.models[0];
     auto z = p.models[1];
-    auto inv_z = torch::reciprocal(z);
+    auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::forward");
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];

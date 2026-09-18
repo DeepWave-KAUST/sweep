@@ -28,6 +28,16 @@ class CUDALayoutSpec:
     # allocated for the duration of one call, never re-zeroed -- a driver
     # zeroes what it needs. 0 = the forward allocates nothing of its own.
     forward_workspace_nvar: int = 0
+    # Model-shaped slots the propagator hands the compiled forward AND backward
+    # as ``derived_models``: one per coefficient the driver derives from the
+    # bound models (Lame parameters, VTI stiffness, 1/z -- the slot order is
+    # the enum in csrc/cuda/common/derived_models.h). Allocated uninitialised
+    # per call (the driver's kernel writes every cell) and dropped with the
+    # call. An int, or ``fn(mode) -> int`` with ``mode`` = "forward" or the
+    # backward's memory mode ("full"/"bs"/"ckpt"/"recursive") for a driver
+    # that derives only in some modes, so no unused slot is ever allocated.
+    # 0 = the driver derives nothing.
+    derived_model_nvar: int | Callable = 0
     # ``fn(B, nrec, nfield, nt) -> tuple``: the record the compiled forward
     # writes, in the driver's own layout (``record_single`` for the
     # ``(B, nrec, nt)`` acoustic family, ``record_multi`` for the
