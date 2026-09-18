@@ -21,6 +21,21 @@ namespace {
 // grad_B2, grad_A} in BackwardOutput.grads order (zeroed per backward on the
 // Python side and accumulated here), or empty for an unbound caller, which
 // then gets fresh zeros per slot.
+// Layout of p.adjoint_workspace, declared on the Python side as
+// ViscoAcoustic.cuda_layout.backward_workspace_nvar: the vp^2*Lap(u) carrier
+// of the reverse step (one padded grid per shot). Its kernel writes non-halo
+// cells only and the reused grad/RTM kernels need a zero halo, which the
+// pool's zero-at-entry provides.
+enum WorkspaceSlot : int { CARRIER = 0, N_SLOTS };
+
+const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
+                "ViscoAcoustic backward: adjoint_workspace must be empty or hold ",
+                static_cast<int>(N_SLOTS), " tensors (carrier), got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
 const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
     TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 5,
@@ -232,7 +247,7 @@ void run_full_imaging_visco(
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
-    auto carrier = torch::zeros({B, nz, nx}, vp.options());
+    auto carrier = pool_or_zeros(workspace_slots(p), CARRIER, vp);   // one grid of scratch
 
     for (int it = p.nt - 1; it >= 0; --it) {
 
@@ -425,7 +440,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
-    auto carrier = torch::zeros({B, nz, nx}, vp.options());
+    auto carrier = pool_or_zeros(workspace_slots(p), CARRIER, vp);   // one grid of scratch
     RTMOutput* rtm_out = in.compute_illumination ? &illumination : nullptr;
 
     int chunk_size = p.checkpoint_interval;
@@ -915,7 +930,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         scratch_state.allocate_like(vp, start_state);
     // zeros (not empty): the carrier kernel writes non-halo cells only and the
     // halo band must stay 0 for the reused grad/RTM kernels.
-    auto carrier_scratch = torch::zeros_like(vp);
+    auto carrier_scratch = pool_or_zeros(workspace_slots(p), CARRIER, vp);
 
     RTMOutput* rtm_out = in.compute_illumination ? &illumination : nullptr;
 

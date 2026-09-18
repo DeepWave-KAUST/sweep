@@ -4,14 +4,18 @@ A bit-exact gate cannot see this change: when the pool is NOT bound the C++
 side allocates a fresh zero tensor of the same geometry, and the numbers are
 identical either way. Green therefore proves nothing about whether the move
 took effect (lesson_optimisation_flag_silently_inactive). The instrument here
-is direct: the backward writes its scratch into the workspace, so after a
-backward the Python-side pool must hold non-zero data. If the C++ side had
-fallen back to its own zeros_like, the pool would still be all zeros.
+is direct: after the forward (which zeroes the pool) every slot is filled
+with a sentinel, and after the backward at least one slot must have lost it
+-- the driver wrote there. A driver that had fallen back to its own
+zeros_like would leave every sentinel in place. The final CONTENTS are not
+the criterion: a per-step scratch holds whatever the last reverse step left
+(visco's carrier is vp^2*Lap(u) of the initial, all-zero state, i.e. exactly
+zero), so "non-zero at the end" would be a false alarm there.
 
-One further invariant rides along for the equations whose pool carries a
-read-only zero buffer (the "previous stress" at the first reverse step):
-that slot must still be zero afterwards, because nothing else guarantees it
-is zero the next time -- the pool is zeroed per forward, not per backward.
+The read-only zero slots (the "previous stress" at the first reverse step)
+must keep their sentinel in every cell: nothing may ever write them, because
+nothing re-zeroes the pool between forward and backward. The run's gradient
+is meaningless under the sentinel and is only required to finish.
 """
 from __future__ import annotations
 
@@ -43,10 +47,15 @@ def _backward_once(key, mode, nt):
 
     models = suite.tensors_from_models(models_init, grad_flags, dev)
     syn = suite.guarded_solver_call(solver, wavelet, sources, receivers, models=models)
+    torch.cuda.synchronize()
+    for t in solver.adjoint_workspace:          # after the forward's zeroing, before the backward
+        t.fill_(SENTINEL)
     (syn.double() ** 2).sum().backward()
     torch.cuda.synchronize()
     return solver, models
 
+
+SENTINEL = 1e-3
 
 # suite key -> (declared pool size per suite mode, index of the read-only zero
 # slot or None, modes to run). The modes differ in which slots they touch (the
@@ -65,11 +74,15 @@ CASES = {
     # in the others -- the modes never share a pool
     "elastic_tti_2nd2d": (lambda mode: 9 if mode == "full" else 11,
                           lambda mode: 8 if mode == "full" else None, ALL),
+    "lsrtm2d": (lambda mode: 1, None, ALL),
+    "lsrtm3d": (lambda mode: 2 if mode == "bs_gpu" else 1, None, ALL),
+    "visco2d": (lambda mode: 1, None, ("full", "ckpt_chunk")),
 }
 
 
 # suite keys whose compiled binding carries a family prefix
-BINDING = {"vrz3d": "acoustic_vrz3d"}
+BINDING = {"vrz3d": "acoustic_vrz3d", "lsrtm2d": "acoustic_lsrtm2d", "lsrtm3d": "acoustic_lsrtm3d",
+           "visco2d": "visco_acoustic2d"}
 
 
 @pytest.mark.parametrize("key, mode", [
@@ -86,15 +99,12 @@ def test_backward_writes_into_the_python_pool(key, mode):
     pool = solver.adjoint_workspace
     assert len(pool) == expected_n, (
         f"{key}/{mode}: expected the {expected_n} declared workspace tensors, got {len(pool)}")
-    touched = [bool((t != 0).any()) for t in pool]
+    touched = [bool((t != SENTINEL).any()) for t in pool]
     assert any(touched), (
-        f"{key}/{mode}: every pool tensor is still all-zero after a backward: the "
+        f"{key}/{mode}: every pool tensor still holds the sentinel after a backward: the "
         "C++ side did not take the pool -- it fell back to its own zeros_like, and "
         "this change is inert")
     if zero_slot is not None:
         assert not touched[zero_slot], (
             f"{key}/{mode}: slot {zero_slot} is the read-only zero buffer and was written")
-    # And the gradient is a real one, so the backward that wrote the pool did work.
-    g = [m.grad for m in models if m.grad is not None]
-    assert g and all(torch.isfinite(x).all() for x in g)
-    assert max(float(x.abs().max()) for x in g) > 0
+    assert all(m.grad is None or torch.isfinite(m.grad).all() for m in models)

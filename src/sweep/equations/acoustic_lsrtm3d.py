@@ -99,6 +99,16 @@ def step_cpml(
     )
 
 
+
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled backward's scratch (acoustic_lsrtm3d/backward.cu WorkspaceSlot),
+    one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
+    plus one grid in the boundary-saving mode (the forward step) and the
+    recursive-checkpoint mode (the replayed step's field).
+    """
+    n = 2 if mode in ("bs", "recursive") else 1
+    return n * [[B, 1, *shape]]
+
 @register_equation()
 class AcousticLSRTM3D(SecondOrderEquation):
     """Second-order 3-D acoustic Born / LSRTM wave equation.
@@ -202,6 +212,7 @@ class AcousticLSRTM3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            backward_workspace_shapes=_adjoint_workspace_shapes,
             save_all_shape=history_plain(),   # bg_utt_all
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.

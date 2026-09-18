@@ -59,6 +59,15 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
     return u_next, u_now, psixn, psiyn, zetax, zetaz, \
             su_next, su_now, spsixn, spsiyn, szetax, szetaz
 
+
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled backward's scratch (acoustic_lsrtm2d/backward.cu WorkspaceSlot),
+    one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
+    plus the replayed step's background u_tt in the recursive-checkpoint mode.
+    """
+    n = 2 if mode == "recursive" else 1
+    return n * [[B, 1, *shape]]
+
 @register_equation()
 class AcousticLSRTM(SecondOrderEquation):
     """Second-order 2-D acoustic Born / LSRTM wave equation.
@@ -145,6 +154,7 @@ class AcousticLSRTM(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            backward_workspace_shapes=_adjoint_workspace_shapes,
             save_all_shape=history_plain(),   # bg_utt_all
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.

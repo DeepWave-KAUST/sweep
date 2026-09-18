@@ -31,15 +31,35 @@ namespace {
 // Proper transpose adjoint step for the lsrtm 3D scattered field: v2_lambda =
 // vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
 // Replaces the old forward-operator adjoint (acoustic3d_single = vp^2*lap),
+
+// Layout of p.adjoint_workspace, declared on the Python side by
+// AcousticLSRTM3D.cuda_layout.backward_workspace_shapes (one padded grid per
+// shot each): the vp^2*lambda scratch of every adjoint step, plus one grid the
+// modes use differently -- the replayed step's field in the recursive mode,
+// the forward step in the boundary-saving mode; the modes never share a pool.
+enum WorkspaceSlot : int { V2_LAMBDA = 0, U_THIS = 1, F_THIS = 1, N_SLOTS_PLAIN = 1, N_SLOTS_EXTRA = 2 };
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// the count this mode declares: any other size means the Python declaration
+// drifted.
+static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "AcousticLSRTM3D backward: adjoint_workspace must be empty or hold ", n_slots,
+                " tensors for this mode, got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
 static inline void run_lsrtm3d_adjoint_step(
     int order, dim3 grid, dim3 block,
     AcousticWavefieldPointer adj_view,
     const torch::Tensor& vp,
     LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_y, GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml, SolverContext ctx)
+    AcousticCPMLPointer cpml, SolverContext ctx,
+    const std::vector<torch::Tensor>& workspace)
 {
-    auto v2_lambda = torch::empty_like(vp);   // vp^2 * lambda_now (fully overwritten each step)
+    auto v2_lambda = pool_or_zeros(workspace, V2_LAMBDA, vp);   // vp^2 * lambda_now (fully overwritten each step)
     compute_v2_lambda_lsrtm3d<<<grid, block>>>(
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.ny, ctx.nz, ctx.B);
     ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block,
@@ -301,7 +321,7 @@ void process_recursive_interval_3d(
         forward_step.allocate(vp, 3, true);
         checkpoint_runtime.copy_state(forward_step.state_tensors(), start_state.state_tensors());
 
-        auto u_this = torch::zeros_like(vp);
+        auto u_this = pool_or_zeros(p.adjoint_workspace, U_THIS, vp);
         auto fwd_view = forward_step.view();
 
         ACOUSTIC_LSRTM3D_SINGLE(
@@ -336,7 +356,7 @@ void process_recursive_interval_3d(
 
         run_lsrtm3d_adjoint_step(
             order, wave_grid, wave_block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source_3d<<<adj_source_grid, adj_source_block>>>(
             adj_view.u_next,
@@ -531,7 +551,7 @@ void run_full_imaging(
 
         run_lsrtm3d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -577,6 +597,7 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
@@ -625,7 +646,7 @@ void run_bs_imaging(
     forward.u_prev_t.copy_(p.u_last_two.select(1,1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
 
-    auto f_this = torch::zeros_like(vp);
+    auto f_this = pool_or_zeros(p.adjoint_workspace, F_THIS, vp);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -686,7 +707,7 @@ void run_bs_imaging(
 
         run_lsrtm3d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -767,7 +788,7 @@ void run_bs_imaging(
 
         run_lsrtm3d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -798,6 +819,7 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_EXTRA);
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
@@ -919,7 +941,7 @@ void run_ckpt_imaging(
 
             run_lsrtm3d_adjoint_step(
                 order, launch_config.grid, launch_config.block, adj_view,
-                vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+                vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
             add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
@@ -966,6 +988,7 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
@@ -1100,6 +1123,7 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
     c10::cuda::CUDAGuard device_guard(p.models[0].device());
     BackwardOutput out;
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_EXTRA);
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad = pool_or_zeros(gs, 2, p.models[1], "grads_out");
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");

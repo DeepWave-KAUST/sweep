@@ -33,15 +33,34 @@ namespace {
 // Proper transpose adjoint step for the lsrtm scattered field: v2_lambda =
 // vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
 // Replaces the old forward-operator adjoint (acoustic2d_single = vp^2*lap), which is
+
+// Layout of p.adjoint_workspace, declared on the Python side by
+// AcousticLSRTM.cuda_layout.backward_workspace_shapes (one padded grid per shot
+// each): the vp^2*lambda scratch of every adjoint step, and -- in the
+// recursive-checkpoint mode only -- the background u_tt of the replayed step.
+enum WorkspaceSlot : int { V2_LAMBDA = 0, BG_UTT, N_SLOTS_RECURSIVE, N_SLOTS_PLAIN = 1 };
+
+// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
+// the count this mode declares: any other size means the Python declaration
+// drifted.
+static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+{
+    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "AcousticLSRTM2D backward: adjoint_workspace must be empty or hold ", n_slots,
+                " tensors for this mode, got ", p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
 static inline void run_lsrtm2d_adjoint_step(
     int order, dim3 grid, dim3 block,
     AcousticWavefieldPointer adj_view,
     const torch::Tensor& vp,
     LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml, SolverContext ctx)
+    AcousticCPMLPointer cpml, SolverContext ctx,
+    const std::vector<torch::Tensor>& workspace)
 {
-    auto v2_lambda = torch::empty_like(vp);   // vp^2 * lambda_now (fully overwritten each step)
+    auto v2_lambda = pool_or_zeros(workspace, V2_LAMBDA, vp);   // vp^2 * lambda_now (fully overwritten each step)
     compute_v2_lambda_lsrtm2d<<<grid, block>>>(
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.nz, ctx.B);
     ACOUSTIC_LSRTM2D_ADJOINT(order, grid, block,
@@ -137,7 +156,7 @@ void process_recursive_interval_2d(
         forward_step.allocate(vp, 2, true);
         checkpoint_runtime.copy_state(forward_step.state_tensors(), start_state.state_tensors());
 
-        auto bg_utt = torch::zeros_like(vp);
+        auto bg_utt = pool_or_zeros(p.adjoint_workspace, BG_UTT, vp);
         auto fwd_view = forward_step.view();
 
         ACOUSTIC_LSRTM2D_SINGLE(
@@ -170,7 +189,7 @@ void process_recursive_interval_2d(
         auto adj_view = adjoint.view();
         run_lsrtm2d_adjoint_step(
             order, wave_grid, wave_block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source<<<adj_source_grid, adj_source_block>>>(
             adj_view.u_next,
@@ -320,7 +339,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
 
         run_lsrtm2d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -354,6 +373,7 @@ BackwardOutput backward(const BackwardInput& in)
     TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
 
     const auto& gs = grad_slots(in);
+    workspace_slots(in, N_SLOTS_PLAIN);
     auto grad_wavelet = pool_or_zeros(gs, 0, in.forward_source, "grads_out");
     auto grad_vp = pool_or_zeros(gs, 1, in.models[0], "grads_out");
     auto grad_mp = pool_or_zeros(gs, 2, in.models[1], "grads_out");
@@ -407,6 +427,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
 
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
@@ -467,7 +488,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
         run_lsrtm2d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -528,7 +549,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         auto adj_view = adjoint.view();
         run_lsrtm2d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
-            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+            vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -589,6 +610,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         forward.allocate(vp, 2, true);
 
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
@@ -665,7 +687,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
             run_lsrtm2d_adjoint_step(
                 order, launch_config.grid, launch_config.block, adj_view,
-                vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+                vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
@@ -745,6 +767,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     const auto& gs = grad_slots(p);
+    workspace_slots(p, N_SLOTS_RECURSIVE);
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
