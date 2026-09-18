@@ -158,6 +158,7 @@ class AcousticLSRTM(SecondOrderEquation):
             # chunk_forward: the replayed chunk's background u_tt
             checkpoint_replay_shapes=lambda B, nt, grid, seg: [(seg, B, *grid)],
             backward_workspace_shapes=_adjoint_workspace_shapes,
+            bs_reconstruction_nvar=3,   # u_prev, u_now, u_next of the background field
             save_all_shape=history_plain(),   # bg_utt_all
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.

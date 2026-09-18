@@ -418,11 +418,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
     else
         adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
+    // Background reconstruction: u_prev/u_now/u_next only (the reverse loop
+    // injects boundaries, it runs no CPML), bound from the propagator's
+    // bs_reconstruction_nvar = 3 grids when handed over.
     AcousticWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(), p.forward_wavefields.begin() + 7), 2, true);
+    if (wavefields_bound(p.forward_wavefields, 3, vp, "acoustic_lsrtm2d backward_bs reconstruction"))
+        forward.bind(p.forward_wavefields, 2, /*use_pml=*/false);
     else
-        forward.allocate(vp, 2, true);
+        forward.allocate(vp, 2, /*use_pml=*/false);
     forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
 

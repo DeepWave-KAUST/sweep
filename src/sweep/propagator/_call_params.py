@@ -66,6 +66,10 @@ class CompiledCallParams:
     boundary_disk_async_read: bool = False
     boundary_tail_steps: int = 0
     forward_wavefields: tuple = ()
+    # Shapes of the reconstruction grids a boundary-saving backward is handed
+    # as forward_wavefields (cuda_layout.reconstruction_nvar per-shot padded
+    # grids), allocated zeroed per backward call; () outside bs mode.
+    bs_reconstruction_shapes: tuple = ()
     forward_workspace: tuple = ()
     # Model-shaped derived-coefficient slots the compiled forward / backward is
     # handed as ``derived_models`` (cuda_layout.derived_model_nvar, resolved for

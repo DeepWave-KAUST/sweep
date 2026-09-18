@@ -2,6 +2,8 @@
 
 #include <torch/extension.h>
 
+#include "cudautils.h"
+
 struct DasWavefieldPointer2D {
     float* __restrict__ exx;
     float* __restrict__ ezz;
@@ -100,8 +102,38 @@ struct DasWavefieldTensor2D {
         allocated = true;
     }
 
+    // Boundary-saving reconstruction state (das2d backward_bs): the propagator
+    // binds cuda_layout.bs_reconstruction_nvar = RECON_NVAR zeroed grids in
+    // RECON_LIST_DESC order -- bind() order with the 8 CPML memory members
+    // (m_sxx_xf .. m_tzz_xb) skipped, because the NOPML reverse kernels never
+    // touch them. Those 8 stay undefined after bind_recon(); view() hands them
+    // out as nullptr.
+    static constexpr int RECON_NVAR = 9;
+    static constexpr const char* RECON_LIST_DESC =
+        "[exx, ezz, sxx, szz, txx, tzz, das35, das54x, das54z]";
+
+    void bind_recon(const std::vector<torch::Tensor>& tensors)
+    {
+        TORCH_CHECK(static_cast<int>(tensors.size()) == RECON_NVAR,
+                    "DAS 2D reconstruction expects ", RECON_NVAR,
+                    " wavefield tensors ", RECON_LIST_DESC, ", got ", tensors.size());
+        int i = 0;
+        exx_t = tensors[i++];
+        ezz_t = tensors[i++];
+        sxx_t = tensors[i++];
+        szz_t = tensors[i++];
+        txx_t = tensors[i++];
+        tzz_t = tensors[i++];
+        das35_t = tensors[i++];
+        das54x_t = tensors[i++];
+        das54z_t = tensors[i++];
+        allocated = true;
+    }
+
     DasWavefieldPointer2D view()
     {
+        // The 8 CPML memory members are undefined after bind_recon() (a
+        // no-PML reconstruction): ptr_or_null keeps view() usable there.
         return {
             exx_t.data_ptr<float>(),
             ezz_t.data_ptr<float>(),
@@ -109,14 +141,14 @@ struct DasWavefieldTensor2D {
             szz_t.data_ptr<float>(),
             txx_t.data_ptr<float>(),
             tzz_t.data_ptr<float>(),
-            m_sxx_xf_t.data_ptr<float>(),
-            m_sxx_xb_t.data_ptr<float>(),
-            m_szz_zf_t.data_ptr<float>(),
-            m_szz_zb_t.data_ptr<float>(),
-            m_txx_zf_t.data_ptr<float>(),
-            m_txx_zb_t.data_ptr<float>(),
-            m_tzz_xf_t.data_ptr<float>(),
-            m_tzz_xb_t.data_ptr<float>(),
+            ptr_or_null(m_sxx_xf_t),
+            ptr_or_null(m_sxx_xb_t),
+            ptr_or_null(m_szz_zf_t),
+            ptr_or_null(m_szz_zb_t),
+            ptr_or_null(m_txx_zf_t),
+            ptr_or_null(m_txx_zb_t),
+            ptr_or_null(m_tzz_xf_t),
+            ptr_or_null(m_tzz_xb_t),
             das35_t.data_ptr<float>(),
             das54x_t.data_ptr<float>(),
             das54z_t.data_ptr<float>(),

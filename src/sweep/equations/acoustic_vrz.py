@@ -126,6 +126,23 @@ def step_cpml_3d(
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
 
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled 2-D backward's scratch (acoustic_vrz2d/driver_traits.cuh
+    WorkspaceSlot), one padded grid per shot each, in the order the DD runner
+    binds the family (coupling grids first, adjoint coefficients last):
+    [0-3] = c_x, c_z, e_x, e_z, the split-gradient coupling scratch
+            (lambda*vp*grad p and lambda*vp^2*z*grad p; order >= 6 only),
+    [4-6] = C0, Cx, Cz, the time-invariant adjoint coefficients
+            (vp^2, dx b*kappa, dz b*kappa), built once per backward.
+    Only the full and boundary-saving modes run the template driver that
+    binds them; the checkpoint modes keep the hand-written backward_ckpt
+    (acoustic_vrz2d/backward.cu), which allocates its own scratch and never
+    reads the pool, so they get no pool at all rather than seven unread grids.
+    """
+    n = 7 if mode in ("full", "bs") else 0
+    return n * [[B, 1, *shape]]
+
+
 @register_equation()
 class AcousticVRZ(SecondOrderEquation):
     """Second-order 2-D acoustic wave equation in variable-density VRZ form.
@@ -213,6 +230,11 @@ class AcousticVRZ(SecondOrderEquation):
             # u, psix, psiz, zetax, zetaz; the singleton channel axis is the
             # driver's own layout (acoustic_vrz2d allt_shape).
             save_all_shape=lambda B, nt, grid: (nt, 5, B, 1, *grid),
+            # The compiled backward's scratch (acoustic_vrz2d/driver_traits.cuh
+            # WorkspaceSlot): four c/e coupling grids of the split gradient and
+            # the three adjoint coefficients C0/Cx/Cz -- 7 in the full/bs
+            # modes, none in the checkpoint modes (see _adjoint_workspace_shapes).
+            backward_workspace_shapes=_adjoint_workspace_shapes,
             derived_model_nvar=1,   # 1/z (common/derived_models.h VrzSlot)
             base_nvar=3,
             # psix,psiz,zetax,zetaz (4) + psixn,psizn (2): race-free forward psi

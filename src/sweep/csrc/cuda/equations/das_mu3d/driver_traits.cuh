@@ -11,8 +11,14 @@
 //   * boundary saving stores all 15 fields but restores only the elastic 9
 //     (strains are record-only, and unlike 2-D they are never seeded from
 //     last_two either -- the hand-written seed copies 9 fields);
-//   * the reconstruction wavefield binds/allocates WITHOUT the CPML memory
-//     tensors (use_pml = false; 2-D keeps them);
+//   * the bs reconstruction is the 12-tensor Python-bound list [vx, vy, vz,
+//     sxx, syy, szz, sxy, sxz, syz + fvx_prev, fvy_prev, fvz_prev carriers]
+//     -- elastic3d's list.  The reverse loop steps the elastic fields with
+//     the elastic NOPML kernels and images with the elastic bs kernel, so
+//     the strains (and the CPML memory) are never touched there and are not
+//     carried (bind_elastic); a caller that binds nothing gets
+//     allocate(vp, false) plus zeroed carriers (2-D's fallback keeps the
+//     CPML memory);
 //   * the full backward zeroes the adjoint state after binding (2-D relies
 //     on Python-zeroed buffers), mapped to zero_adjoint_if_first_segment on the first segment;
 //   * the full/ckpt imaging kernel is the shared LAUNCH_CALCULATE_GRAD_
@@ -60,14 +66,26 @@ struct Driver {
         "DAS Mu 3D recursive checkpointing expects 33 checkpoint tensors";
     // vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, exx, eyy, ezz, exy, exz, eyz
     static constexpr int BS_NVAR = 15;
+    // The bs reconstruction carries the elastic nine only (elastic3d's list):
+    // the reverse loop steps them with the elastic NOPML kernels and images
+    // with the elastic bs kernel, so the DAS strains are dead there.
+    static constexpr int BS_ELASTIC_NVAR = 9;   // vx, vy, vz, sxx, syy, szz, sxy, sxz, syz
     static constexpr int CUT_MASK_BITS = 0x0;
     static constexpr const char* CUT_MASK_DESC =
         "no bits (the borrowed elastic kernels are not cut-aware)";
     static constexpr int ADJ_WF_COUNT = 33;
-    static constexpr int RECON_WF_COUNT = 15;
+    static constexpr int RECON_WF_COUNT = 12;
     static constexpr const char* RECON_LIST_DESC =
-        "(the 15 base DAS-Mu field tensors; the reconstruction carries no "
-        "CPML memory)";
+        "[vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, fvx_prev, fvy_prev, "
+        "fvz_prev]";
+    // Slots of the reconstruction list: [0, BS_ELASTIC_NVAR) are the elastic
+    // fields (bound without strains or CPML memory), then the v(it+1)
+    // carriers.
+    static constexpr int RECON_SLOT_FVX_PREV = BS_ELASTIC_NVAR;       // 9
+    static constexpr int RECON_SLOT_FVY_PREV = BS_ELASTIC_NVAR + 1;   // 10
+    static constexpr int RECON_SLOT_FVZ_PREV = BS_ELASTIC_NVAR + 2;   // 11
+    static_assert(RECON_SLOT_FVZ_PREV + 1 == RECON_WF_COUNT,
+                  "das_mu3d reconstruction list = elastic fields + 3 carriers");
     static constexpr int N_VEL = 3;
     static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
 
@@ -650,25 +668,40 @@ public:
         torch::Tensor fvx_prev, fvy_prev, fvz_prev;
     };
 
-    // Unlike 2-D, the reconstruction wavefield lives WITHOUT the CPML memory
-    // tensors (the NOPML recon kernels never touch them).
+    // Reconstruction state: Python hands the RECON_WF_COUNT list
+    // RECON_LIST_DESC (zeroed, model-shaped) -- elastic3d's list.  The
+    // elastic fields bind through bind_elastic(): no strains (the reverse
+    // loop runs the elastic NOPML kernels and the elastic bs imaging, which
+    // never touch them) and no CPML memory (only the NOPML kernels step the
+    // reconstruction); view()/elastic_view() hand those kernels nullptr for
+    // every unbound slot.  The carriers are the tail of the same list.  A
+    // caller that binds nothing keeps the legacy allocation (all 15 fields,
+    // no CPML memory; the strains are never read).
     static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
                                              const BackwardInput& p,
                                              const torch::Tensor& vp)
     {
         ReconCarriers c;
-        if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields, false);
-        else
+        if (wavefields_bound(p.forward_wavefields, RECON_WF_COUNT, vp,
+                             "das_mu3d backward_bs reconstruction")) {
+            forward.bind_elastic(std::vector<torch::Tensor>(
+                p.forward_wavefields.begin(),
+                p.forward_wavefields.begin() + BS_ELASTIC_NVAR));
+            c.fvx_prev = p.forward_wavefields[RECON_SLOT_FVX_PREV];
+            c.fvy_prev = p.forward_wavefields[RECON_SLOT_FVY_PREV];
+            c.fvz_prev = p.forward_wavefields[RECON_SLOT_FVZ_PREV];
+        } else {
             forward.allocate(vp, false);
-        c.fvx_prev = torch::zeros_like(vp);
-        c.fvy_prev = torch::zeros_like(vp);
-        c.fvz_prev = torch::zeros_like(vp);
+            c.fvx_prev = torch::zeros_like(vp);
+            c.fvy_prev = torch::zeros_like(vp);
+            c.fvz_prev = torch::zeros_like(vp);
+        }
         return c;
     }
 
     // Seed the 9 elastic fields from the last snapshot; the strains are never
-    // seeded (record-only, and the restore below never brings them back).
+    // seeded (record-only, the restore below never brings them back, and the
+    // bound reconstruction does not even carry them).
     static void seed_recon(Wavefield& forward, const BackwardInput& p)
     {
         forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
@@ -682,6 +715,10 @@ public:
         forward.syz_t.copy_(p.u_last_two.select(0, 8).select(0, 0));
     }
 
+    // A strain-field source (the equation admits them) resolves to nullptr on
+    // the bound reconstruction and is skipped; on the allocate() fallback it
+    // still un-injects into the strain grid.  Either way the reverse loop
+    // never reads that grid, so the gradients are the same.
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,

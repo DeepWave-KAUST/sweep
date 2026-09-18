@@ -458,8 +458,16 @@ BackwardOutput backward_bs(const BackwardInput& in)
     else
         adjoint.allocate(vp);
 
+    // Reconstruction state: the propagator binds the RECON_NVAR = 9 zeroed
+    // grids RECON_LIST_DESC (no CPML memory -- the NOPML reverse kernels below
+    // never read or write it, so those 8 members stay undefined and view()
+    // nulls them); a caller that binds nothing keeps the in-driver allocation.
     DasWavefieldTensor2D forward;
-    forward.allocate(vp);
+    if (wavefields_bound(p.forward_wavefields, DasWavefieldTensor2D::RECON_NVAR, vp,
+                         "das2d backward_bs reconstruction"))
+        forward.bind_recon(p.forward_wavefields);
+    else
+        forward.allocate(vp);
     TORCH_CHECK(p.u_last_two.defined(), "DAS 2D boundary-saving backward requires the final forward state.");
     TORCH_CHECK(p.u_last_two.size(0) >= 6, "DAS 2D boundary-saving last_two must contain at least 6 fields.");
     forward.exx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));

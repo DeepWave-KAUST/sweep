@@ -11,7 +11,7 @@
 //   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
 //   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): rotate_adjoint_buffers rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
 //   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
-//   * BwdWorkspace is non-empty: neg_adjoint_source, the time-invariant adjoint coefficients C0/Cx/Cz, and the split-gradient scratch c_x/c_z/e_x/e_z; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
+//   * BwdWorkspace is non-empty: neg_adjoint_source, the time-invariant adjoint coefficients C0/Cx/Cz, and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz) when bound, else torch::zeros_like; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
 //   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
 //   * setup_ctx and init_aux_slabs are empty: no per-edge free surface, no topography, legacy full-grid CPML aux;
 //   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (rotate_buffers); the in-kernel u_thist stays disabled (false, nullptr);
@@ -147,6 +147,39 @@ struct Driver {
         torch::Tensor c_x, c_z, e_x, e_z;   // split gradient scratch (order>=6)
     };
 
+    // Layout of p.adjoint_workspace, declared on the Python side by
+    // AcousticVRZ.cuda_layout (backward_workspace_shapes: bound in the full
+    // and bs modes, which run through this skeleton; the hand-written ckpt
+    // backward in backward.cu still allocates its own).  One padded grid per
+    // shot each, the 2-D cut of the 3-D sibling's WorkspaceSlot
+    // (acoustic_vrz3d/backward.cu) in the order the DD runner binds the
+    // family (coupling grids first, adjoint coefficients last): the four c/e
+    // coupling grids of the split gradient, then the three time-invariant
+    // adjoint coefficients C0/Cx/Cz.  The pool is zero at backward entry --
+    // the propagator zeroes it before every gradient-bearing forward -- which
+    // is what a fresh zeros_like started from and what keeps every slot's
+    // M-wide halo at zero: build_vrz_adjoint_coeffs (once, below) and
+    // build_vrz_grad_fields (every imaging step, order >= 6 only) write the
+    // interior, while the fused adjoint and calculate_grad_vrz2d read those
+    // grids through an M-wide stencil that reaches into the halo.
+    enum WorkspaceSlot : int {
+        C_X = 0, C_Z, E_X, E_Z,      // λ·vp·∂p (c) and λ·vp²·z·∂p (e) coupling scratch
+        COEF_C0, COEF_CX, COEF_CZ,   // vp², ∂ₓb·κ, ∂_z b·κ adjoint coefficients
+        N_SLOTS                      // 7
+    };
+
+    // Either unbound (every slot then falls back to a fresh zero tensor) or
+    // exactly N_SLOTS: a pool of any other size means the Python declaration
+    // drifted.
+    static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+    {
+        TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
+                    "AcousticVRZ backward: adjoint_workspace must be empty or hold ",
+                    static_cast<int>(N_SLOTS), " tensors ([0-3]=c_x,c_z,e_x,e_z coupling, "
+                    "[4-6]=C0,Cx,Cz adjoint coeffs), got ", p.adjoint_workspace.size());
+        return p.adjoint_workspace;
+    }
+
     // (helper: fired inside make_bwd_workspace)
     static void zero_wavefield_state(Wavefield& wf)
     {
@@ -167,13 +200,17 @@ struct Driver {
         zero_wavefield_state(adjoint);
         BwdWorkspace ws;
         ws.neg_adjoint_source = -p.adjoint_source;
-        ws.C0 = torch::zeros_like(s.vp_t);
-        ws.Cx = torch::zeros_like(s.vp_t);
-        ws.Cz = torch::zeros_like(s.vp_t);
-        ws.c_x = torch::zeros_like(s.vp_t);
-        ws.c_z = torch::zeros_like(s.vp_t);
-        ws.e_x = torch::zeros_like(s.vp_t);
-        ws.e_z = torch::zeros_like(s.vp_t);
+        // Bound pool slot when Python handed one (WorkspaceSlot above), else
+        // today's zeros_like; torch::Tensor copies share storage, so the
+        // data_ptr() the kernels take hits the bound buffer either way.
+        const auto& pool = workspace_slots(p);
+        ws.C0  = pool_or_zeros(pool, COEF_C0, s.vp_t);   // vp²       (time-invariant adjoint coeffs)
+        ws.Cx  = pool_or_zeros(pool, COEF_CX, s.vp_t);   // ∂ₓb·κ
+        ws.Cz  = pool_or_zeros(pool, COEF_CZ, s.vp_t);   // ∂_z b·κ
+        ws.c_x = pool_or_zeros(pool, C_X, s.vp_t);       // split gradient scratch (order>=6 path)
+        ws.c_z = pool_or_zeros(pool, C_Z, s.vp_t);
+        ws.e_x = pool_or_zeros(pool, E_X, s.vp_t);
+        ws.e_z = pool_or_zeros(pool, E_Z, s.vp_t);
         // Time-invariant adjoint transpose coefficients (vp², ∂ₓb·κ, ∂_z b·κ),
         // computed once so the fused adjoint kernel only multiplies by λ per step.
         BUILD_VRZ_ADJOINT_COEFFS(

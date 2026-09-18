@@ -438,4 +438,5 @@ class ElasticTTISG3D(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=9,
             backward_workspace_nvar=18,
+            bs_reconstruction_nvar=12,  # 9 physical fields + fvx/fvy/fvz_next carriers
         )

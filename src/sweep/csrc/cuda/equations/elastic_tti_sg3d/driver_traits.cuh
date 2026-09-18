@@ -15,9 +15,14 @@
 //     the image method);
 //   * the velocity kernels take model.rho only, the stress kernels the full
 //     StiffnessPointer;
-//   * like 2-D: reconstruction wavefield always allocated internally, no
-//     recursive checkpointing (recursive-only hooks deliberately absent),
-//     no DD cut support, no aux slabs.
+//   * bs: ReconCarriers {fvx_next, fvy_next, fvz_next}; bind_or_alloc_recon
+//     takes the 12-tensor p.forward_wavefields list (the 9 physical fields
+//     bound through ElasticWavefieldTensor with use_pml = false -- CPML
+//     memory left undefined, the NOPML reverse kernels never touch it --
+//     plus the three carriers) or allocate(rho, 3) + three zero carriers
+//     when the list is empty;
+//   * like 2-D: no recursive checkpointing (recursive-only hooks
+//     deliberately absent), no DD cut support, no aux slabs.
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
 
@@ -62,11 +67,13 @@ struct Driver {
     static constexpr const char* CUT_MASK_DESC =
         "no bits (ElasticTTISG3D kernels are not cut-aware)";
     static constexpr int ADJ_WF_COUNT = 36;
-    static constexpr int RECON_WF_COUNT = 36;
+    static constexpr int RECON_WF_COUNT = 12;   // == cuda_layout.bs_reconstruction_nvar
     static constexpr const char* RECON_LIST_DESC =
-        "(the full 36-tensor elastic wavefield list)";
+        "[vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, fvx_next, fvy_next, fvz_next]";
     static constexpr int N_VEL = 3;
     static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
+    static_assert(RECON_WF_COUNT == BS_NVAR + N_VEL,
+                  "bs reconstruction list = the physical fields + one v(t+1) carrier per velocity");
 
     using Wavefield = ElasticWavefieldTensor;
     using WfView = ElasticWavefieldPointer;
@@ -603,17 +610,33 @@ public:
         torch::Tensor fvx_next, fvy_next, fvz_next;
     };
 
-    // The boundary-saving reconstruction wavefield is always allocated
-    // internally: the hand-written driver never binds p.forward_wavefields.
+    // Reconstruction state = the 9 physical fields + the v(t+1) carriers,
+    // RECON_LIST_DESC order.  Python owns all RECON_WF_COUNT of them when it
+    // binds p.forward_wavefields (bs_reconstruction_nvar zeroed grids shaped
+    // like rho); the empty-list fallback allocates exactly as before.
     static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
-                                             const BackwardInput&,
+                                             const BackwardInput& p,
                                              const torch::Tensor& rho)
     {
         ReconCarriers c;
-        forward.allocate(rho, 3);
-        c.fvx_next = torch::zeros_like(rho);
-        c.fvy_next = torch::zeros_like(rho);
-        c.fvz_next = torch::zeros_like(rho);
+        if (wavefields_bound(p.forward_wavefields, RECON_WF_COUNT, rho,
+                             "elastic_tti_sg3d backward_bs forward_wavefields")) {
+            const auto& list = p.forward_wavefields;
+            // [0..BS_NVAR) = vx, vy, vz, sxx, syy, szz, sxy, sxz, syz (the
+            // ElasticWavefieldTensor 3-D bind order), bound WITHOUT CPML
+            // memory: view() hands the NOPML reverse kernels nullptr for m_*.
+            forward.bind(std::vector<torch::Tensor>(
+                             list.begin(), list.begin() + BS_NVAR),
+                         /*use_pml=*/false);
+            c.fvx_next = list[BS_NVAR + 0];   // [9]  fvx_next
+            c.fvy_next = list[BS_NVAR + 1];   // [10] fvy_next
+            c.fvz_next = list[BS_NVAR + 2];   // [11] fvz_next
+        } else {
+            forward.allocate(rho, 3);
+            c.fvx_next = torch::zeros_like(rho);
+            c.fvy_next = torch::zeros_like(rho);
+            c.fvz_next = torch::zeros_like(rho);
+        }
         return c;
     }
 

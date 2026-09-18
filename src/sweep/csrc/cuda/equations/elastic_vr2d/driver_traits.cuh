@@ -20,9 +20,11 @@
 //     (slots 0-9, the Workspace) and the imaging half (slots 10-13 plus the
 //     zero next-momentum buffer, carried in the State so image_standalone
 //     can reach them);
-//   * backward_bs never binds Python reconstruction wavefields (always
-//     allocates, no carriers) and the ckpt/recursive states use the plain
-//     full-shape allocate (no snapshot-driven aux layout).
+//   * bs: bind_or_alloc_recon binds the 5-tensor p.forward_wavefields list
+//     [px, pz, sxx, szz, sxz] with use_pml = false (no carriers: the imaging
+//     has no velocity(t+1) term) or allocate(vp, 2, false) when the list is
+//     empty; the ckpt/recursive states use the plain full-shape allocate
+//     (no snapshot-driven aux layout).
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
@@ -69,9 +71,11 @@ struct Driver {
     static constexpr int CUT_MASK_BITS = 0xF;
     static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
     static constexpr int ADJ_WF_COUNT = 15;
-    static constexpr int RECON_WF_COUNT = 5;
+    static constexpr int RECON_WF_COUNT = 5;   // == cuda_layout.bs_reconstruction_nvar
     static constexpr const char* RECON_LIST_DESC =
         "[px, pz, sxx, szz, sxz]";
+    static_assert(RECON_WF_COUNT == BS_NVAR,
+                  "bs reconstruction list = the physical fields only (no carriers)");
     static constexpr int N_VEL = 2;
     static constexpr bool IMAGING_USES_NEXT_V = false;   // no velocity(t+1) imaging term
 
@@ -615,13 +619,21 @@ public:
     struct ReconCarriers {};
 
     static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
-                                             const BackwardInput&,
+                                             const BackwardInput& p,
                                              const torch::Tensor& vp)
     {
-        // The hand-written backward_bs always allocated the reconstruction
-        // state internally (no Python binding, no CPML memvars — the reverse
-        // reconstruction uses the NOPML kernels only).
-        forward.allocate(vp, 2, false);
+        // Reconstruction state = the 5 physical fields [px (vx slot), pz (vz
+        // slot), sxx, szz, sxz], RECON_LIST_DESC order, bound WITHOUT CPML
+        // memvars (the reverse reconstruction uses the NOPML kernels only;
+        // view() hands them nullptr for m_*).  Python owns all RECON_WF_COUNT
+        // of them when it binds p.forward_wavefields (bs_reconstruction_nvar
+        // zeroed grids shaped like vp); the empty-list fallback allocates
+        // exactly as before.
+        if (wavefields_bound(p.forward_wavefields, RECON_WF_COUNT, vp,
+                             "elastic_vr2d backward_bs forward_wavefields"))
+            forward.bind(p.forward_wavefields, /*use_pml=*/false);
+        else
+            forward.allocate(vp, 2, false);
         return {};
     }
 

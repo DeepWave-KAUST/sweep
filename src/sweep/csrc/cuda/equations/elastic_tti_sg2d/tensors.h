@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 
 #include "kernels.cuh"
+#include "../../common/cudautils.h"   // ptr_or_null
 
 namespace elastic_tti_sg2d {
 
@@ -61,6 +62,28 @@ struct WavefieldTensor {
         m_tzzz_t = tensors[i++];
     }
 
+    // Boundary-saving reconstruction bind: the 8 physical fields only (the
+    // first 8 slots of the bind() order); the 12 CPML memory tensors stay
+    // undefined, so view() hands the kernels nullptr for them.  Only valid
+    // for the NOPML reverse reconstruction, which never touches m_*.
+    void bind_physical(const std::vector<torch::Tensor>& tensors)
+    {
+        TORCH_CHECK(tensors.size() == 8,
+                    "ElasticTTISG 2D expects 8 physical wavefield tensors "
+                    "[vx, vy, vz, sxx, szz, syz, sxz, sxy]; got ", tensors.size());
+        int i = 0;
+        vx_t = tensors[i++];
+        vy_t = tensors[i++];
+        vz_t = tensors[i++];
+        sxx_t = tensors[i++];
+        szz_t = tensors[i++];
+        syz_t = tensors[i++];
+        sxz_t = tensors[i++];
+        sxy_t = tensors[i++];
+        m_vxx_t = m_vxz_t = m_vyx_t = m_vyz_t = m_vzx_t = m_vzz_t = torch::Tensor();
+        m_txxx_t = m_txzz_t = m_txyx_t = m_tyzz_t = m_txzx_t = m_tzzz_t = torch::Tensor();
+    }
+
     WavefieldPointer view() const
     {
         WavefieldPointer out{};
@@ -72,18 +95,19 @@ struct WavefieldTensor {
         out.syz = syz_t.data_ptr<float>();
         out.sxz = sxz_t.data_ptr<float>();
         out.sxy = sxy_t.data_ptr<float>();
-        out.m_vxx = m_vxx_t.data_ptr<float>();
-        out.m_vxz = m_vxz_t.data_ptr<float>();
-        out.m_vyx = m_vyx_t.data_ptr<float>();
-        out.m_vyz = m_vyz_t.data_ptr<float>();
-        out.m_vzx = m_vzx_t.data_ptr<float>();
-        out.m_vzz = m_vzz_t.data_ptr<float>();
-        out.m_txxx = m_txxx_t.data_ptr<float>();
-        out.m_txzz = m_txzz_t.data_ptr<float>();
-        out.m_txyx = m_txyx_t.data_ptr<float>();
-        out.m_tyzz = m_tyzz_t.data_ptr<float>();
-        out.m_txzx = m_txzx_t.data_ptr<float>();
-        out.m_tzzz = m_tzzz_t.data_ptr<float>();
+        // CPML memory: nullptr after bind_physical (bs reconstruction).
+        out.m_vxx = ptr_or_null(m_vxx_t);
+        out.m_vxz = ptr_or_null(m_vxz_t);
+        out.m_vyx = ptr_or_null(m_vyx_t);
+        out.m_vyz = ptr_or_null(m_vyz_t);
+        out.m_vzx = ptr_or_null(m_vzx_t);
+        out.m_vzz = ptr_or_null(m_vzz_t);
+        out.m_txxx = ptr_or_null(m_txxx_t);
+        out.m_txzz = ptr_or_null(m_txzz_t);
+        out.m_txyx = ptr_or_null(m_txyx_t);
+        out.m_tyzz = ptr_or_null(m_tyzz_t);
+        out.m_txzx = ptr_or_null(m_txzx_t);
+        out.m_tzzz = ptr_or_null(m_tzzz_t);
         return out;
     }
 

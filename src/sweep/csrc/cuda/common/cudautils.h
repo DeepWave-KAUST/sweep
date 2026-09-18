@@ -151,6 +151,9 @@ inline const torch::Tensor& pool_slot_checked(const std::vector<torch::Tensor>& 
                 " but the expected geometry is ", like.sizes());
     TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat,
                 what, "[", idx, "] must be float32, got ", pool[idx].scalar_type());
+    TORCH_CHECK(pool[idx].is_cuda(),
+                what, "[", idx, "] must live on the GPU (a host tensor here reads as an "
+                "illegal address inside the kernels), got ", pool[idx].device());
     return pool[idx];
 }
 
@@ -194,6 +197,30 @@ inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int i
 // A single Python-bound output buffer (u_allt_out, record_out) when it was
 // bound, else a fresh zero tensor of the driver's shape. The shape check is
 // what makes a Python/driver disagreement loud instead of a silent overrun.
+// A Python-bound wavefield LIST (``forward_wavefields`` handed to a
+// boundary-saving backward as its reconstruction state, sized by
+// ``cuda_layout.bs_reconstruction_nvar``): true when one was bound, after the
+// count and every slot's geometry/dtype were checked; false when the caller
+// bound nothing, in which case the driver allocates as it always did.
+inline bool wavefields_bound(const std::vector<torch::Tensor>& list, int n,
+                             const torch::Tensor& like, const char* what)
+{
+    if (list.empty()) return false;
+    TORCH_CHECK(static_cast<int>(list.size()) == n,
+                what, " expects ", n, " bound wavefield tensors, got ", list.size());
+    for (int i = 0; i < n; ++i)
+        pool_slot_checked(list, i, like, what);
+    return true;
+}
+
+// Device pointer of an optional wavefield member: nullptr when the member was
+// left undefined by a partial bind (a reconstruction that carries no CPML
+// memory), for kernels that never touch it in that mode.
+inline float* ptr_or_null(const torch::Tensor& t)
+{
+    return t.defined() ? t.data_ptr<float>() : nullptr;
+}
+
 inline torch::Tensor bound_or_zeros(const torch::Tensor& bound, std::vector<int64_t> shape,
                                     const torch::TensorOptions& options, const char* what)
 {

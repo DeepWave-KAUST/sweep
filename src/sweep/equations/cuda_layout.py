@@ -65,6 +65,13 @@ class CUDALayoutSpec:
     adjoint_extra_nvar: int = 0
     boundary_tangent_pad: int = 0
     boundary_save_nvar: int | None = None
+    # Padded per-shot grids the boundary-saving backward is handed as its
+    # reconstruction state (``BackwardInput.forward_wavefields``: the forward's
+    # physical fields stepped backwards from ``u_last_two``, plus any carrier
+    # the imaging reads), allocated zeroed per backward call. None = derive it
+    # from ``slots.recon`` (the DD path's source of the same count); 0 = the
+    # driver has no boundary-saving reconstruction. See ``reconstruction_nvar``.
+    bs_reconstruction_nvar: int | None = None
     # CPML aux strip (slab) storage.  ``pml_slot_axes`` tags each of the
     # pml_nvar FORWARD slots with its differencing axis ('x'/'y'/'z') in the
     # C++ bind order; the runtime then allocates those slots as per-axis
@@ -99,6 +106,14 @@ class CUDALayoutSpec:
     # must only be set once the kernels' drivers are actually stepped (the
     # shared template drivers in csrc/cuda/common are).
     stepped: bool = False
+
+    @property
+    def reconstruction_nvar(self) -> int:
+        """Reconstruction grids the boundary-saving backward binds: the explicit
+        ``bs_reconstruction_nvar``, else the slot table's ``recon`` list."""
+        if self.bs_reconstruction_nvar is not None:
+            return int(self.bs_reconstruction_nvar)
+        return int(self.slots.nrecon) if self.slots is not None else 0
     # The compiled backward implements the NUMBERED backward phases its DD
     # schedule drives (the elastic physics split, the VRZ coupling exchange).
     # The plain acoustic schedule phases nothing and ignores this flag.  The

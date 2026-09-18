@@ -315,8 +315,16 @@ BackwardOutput backward_bs(const BackwardInput& in)
     for (auto& tsr : adjoint.state_tensors())
         tsr.zero_();
 
+    // Reconstruction state: the RECON_WF_COUNT displacement grids bound from
+    // BackwardInput.forward_wavefields (Python-zeroed, no CPML memory -- the
+    // nopml reverse kernels below never read it), or allocated here for a
+    // caller that binds nothing.
     WavefieldTensor forward;
-    forward.allocate(rho);
+    if (wavefields_bound(p.forward_wavefields, WavefieldTensor::RECON_WF_COUNT, rho,
+                         "elastic_tti_2nd2d backward_bs reconstruction"))
+        forward.bind_recon(p.forward_wavefields);
+    else
+        forward.allocate(rho);
     // (storage, level): level 1 = W_nt goes to the pre slot (later time),
     // level 0 = W_{nt-1} becomes the current state — acoustic2d convention.
     forward.ux_pre_t.copy_(p.u_last_two.select(0, 0).select(0, 1));

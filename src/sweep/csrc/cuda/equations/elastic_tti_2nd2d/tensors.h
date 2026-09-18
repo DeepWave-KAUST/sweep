@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 
 #include "kernels.cuh"
+#include "../../common/cudautils.h"
 
 namespace elastic_tti_2nd2d {
 
@@ -10,6 +11,14 @@ struct WavefieldTensor {
     torch::Tensor ux_t, uz_t, ux_pre_t, uz_pre_t, ux_nxt_t, uz_nxt_t;
     torch::Tensor m_gxux_t, m_gzux_t, m_gxuz_t, m_gzuz_t;
     torch::Tensor m_sxxx_t, m_sxzz_t, m_sxzx_t, m_szzz_t;
+
+    // Boundary-saving reconstruction state (bind_recon): the six displacement
+    // slots only, in bind() order -- ElasticTTI2nd.cuda_layout.bs_reconstruction_nvar.
+    // The eight CPML memory members stay undefined; the nopml reverse kernels
+    // never read them and view() packs them as nullptr.
+    static constexpr int RECON_WF_COUNT = 6;
+    static constexpr const char* RECON_LIST_DESC =
+        "[ux, uz, ux_pre, uz_pre, ux_nxt, uz_nxt]";
 
     void allocate(const torch::Tensor& like)
     {
@@ -49,6 +58,25 @@ struct WavefieldTensor {
         m_szzz_t = tensors[i++];
     }
 
+    // Partial bind for backward_bs: BackwardInput.forward_wavefields holds
+    // exactly the RECON_WF_COUNT Python-zeroed displacement grids; no CPML
+    // memory is bound (nor allocated) in this mode.
+    void bind_recon(const std::vector<torch::Tensor>& tensors)
+    {
+        TORCH_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
+                    "ElasticTTI2nd backward_bs reconstruction expects ", RECON_WF_COUNT,
+                    " wavefield tensors ", RECON_LIST_DESC, ", got ", tensors.size());
+        int i = 0;
+        ux_t = tensors[i++];
+        uz_t = tensors[i++];
+        ux_pre_t = tensors[i++];
+        uz_pre_t = tensors[i++];
+        ux_nxt_t = tensors[i++];
+        uz_nxt_t = tensors[i++];
+        m_gxux_t = m_gzux_t = m_gxuz_t = m_gzuz_t = torch::Tensor();
+        m_sxxx_t = m_sxzz_t = m_sxzx_t = m_szzz_t = torch::Tensor();
+    }
+
     // Rotate the (now, pre, next) displacement triple buffer: next becomes
     // now, now becomes pre, the old pre tensor is recycled as next.
     void swap_u()
@@ -72,14 +100,16 @@ struct WavefieldTensor {
         out.uz_pre = uz_pre_t.data_ptr<float>();
         out.ux_nxt = ux_nxt_t.data_ptr<float>();
         out.uz_nxt = uz_nxt_t.data_ptr<float>();
-        out.m_gxux = m_gxux_t.data_ptr<float>();
-        out.m_gzux = m_gzux_t.data_ptr<float>();
-        out.m_gxuz = m_gxuz_t.data_ptr<float>();
-        out.m_gzuz = m_gzuz_t.data_ptr<float>();
-        out.m_sxxx = m_sxxx_t.data_ptr<float>();
-        out.m_sxzz = m_sxzz_t.data_ptr<float>();
-        out.m_sxzx = m_sxzx_t.data_ptr<float>();
-        out.m_szzz = m_szzz_t.data_ptr<float>();
+        // CPML memory: nullptr after bind_recon (backward_bs reconstruction),
+        // where only the nopml kernels run on this view.
+        out.m_gxux = ptr_or_null(m_gxux_t);
+        out.m_gzux = ptr_or_null(m_gzux_t);
+        out.m_gxuz = ptr_or_null(m_gxuz_t);
+        out.m_gzuz = ptr_or_null(m_gzuz_t);
+        out.m_sxxx = ptr_or_null(m_sxxx_t);
+        out.m_sxzz = ptr_or_null(m_sxzz_t);
+        out.m_sxzx = ptr_or_null(m_sxzx_t);
+        out.m_szzz = ptr_or_null(m_szzz_t);
         return out;
     }
 

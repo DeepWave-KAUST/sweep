@@ -263,4 +263,5 @@ class ElasticTTISG(ElasticTTI):
             # (elastic_tti_sg2d/driver_traits.cuh WorkspaceSlot); ElasticTTISG3D
             # declares its own 18.
             backward_workspace_nvar=6,
+            bs_reconstruction_nvar=11,  # 8 physical fields + fvx/fvy/fvz_next carriers
         )

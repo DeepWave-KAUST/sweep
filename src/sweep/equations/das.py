@@ -1029,6 +1029,7 @@ class DASZhao(FirstOrderEquation):
             # The four per-step derivative scratch grids the compiled forward
             # used to allocate itself (das2d/forward.cu ForwardWorkspaceSlot).
             forward_workspace_nvar=4,
+            bs_reconstruction_nvar=9,   # exx, ezz, sxx, szz, txx, tzz + das35, das54x, das54z
             derived_model_nvar=_das_derived_model_nvar,
         )
 
@@ -1299,6 +1300,7 @@ class DASMu(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=8,
             backward_workspace_nvar=8,
+            bs_reconstruction_nvar=7,   # vx, vz, sxx, szz, sxz + fvx_prev, fvz_prev (the DAS strains are dead in the bs reverse loop)
             derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
 
@@ -1436,6 +1438,7 @@ class DASMu3D(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=15,
             backward_workspace_nvar=18,
+            bs_reconstruction_nvar=12,  # 9 elastic fields + fvx/fvy/fvz_prev (the DAS strains are dead in the bs reverse loop)
             derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
 

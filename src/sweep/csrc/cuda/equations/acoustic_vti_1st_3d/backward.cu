@@ -4,7 +4,12 @@
 // Implements:
 //   * backward()                — full mode (saves entire u_forward (nt,5,...))
 //   * backward_bs()              — boundary saving (PML-band slabs + last_two,
-//                                  forward state reconstructed in reverse)
+//                                  forward state reconstructed in reverse by
+//                                  the NOPML kernels from the 5-tensor list
+//                                  [vx, vy, vz, sH, sV] bound from
+//                                  BackwardInput.forward_wavefields
+//                                  (cuda_layout.bs_reconstruction_nvar), or
+//                                  allocated here when unbound)
 //   * backward_ckpt()            — chunked checkpoints (every N steps)
 //   * backward_recursive_ckpt() — stub (TORCH_CHECK)
 //
@@ -74,7 +79,18 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 
 // Same wavefield-tensor helper as forward.cu, lives in an anonymous namespace
 // so the linker sees it once per TU only.
+//
+// Two bindings: bind() takes the full 11-slot list (adjoint state: 5 physical
+// + 6 CPML memory, AcousticVTI1st3D.FIELD_SPECS order); bind_physical() takes
+// the RECON_WF_COUNT-slot boundary-saving reconstruction list
+// (cuda_layout.bs_reconstruction_nvar) and leaves the m_* members undefined
+// -- the bs reverse loop steps the reconstruction with the NOPML kernels
+// only, which never read or write CPML memory, so view() hands those slots
+// out as nullptr (ptr_or_null).
 struct AdjWavefieldTensor3D {
+    static constexpr int RECON_WF_COUNT = 5;
+    static constexpr const char* RECON_LIST_DESC = "[vx, vy, vz, sH, sV]";
+
     torch::Tensor vx_t, vy_t, vz_t, sH_t, sV_t;
     torch::Tensor m_sHx_t, m_sHy_t, m_sVz_t;
     torch::Tensor m_vxx_t, m_vyy_t, m_vzz_t;
@@ -95,6 +111,22 @@ struct AdjWavefieldTensor3D {
         m_vxx_t = tensors[8];
         m_vyy_t = tensors[9];
         m_vzz_t = tensors[10];
+    }
+
+    // Boundary-saving reconstruction: the physical prefix only, in
+    // RECON_LIST_DESC order; m_sHx_t / m_sHy_t / m_sVz_t / m_vxx_t / m_vyy_t /
+    // m_vzz_t stay undefined.
+    void bind_physical(const std::vector<torch::Tensor>& tensors)
+    {
+        TORCH_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
+                    "AcousticVTI1st3D backward_bs: reconstruction list must hold ",
+                    RECON_WF_COUNT, " tensors ", RECON_LIST_DESC, ", got ",
+                    tensors.size());
+        vx_t = tensors[0];
+        vy_t = tensors[1];
+        vz_t = tensors[2];
+        sH_t = tensors[3];
+        sV_t = tensors[4];
     }
 
     void allocate(const torch::Tensor& ref)
@@ -122,12 +154,14 @@ struct AdjWavefieldTensor3D {
         p.vz    = vz_t.data_ptr<float>();
         p.sH    = sH_t.data_ptr<float>();
         p.sV    = sV_t.data_ptr<float>();
-        p.m_sHx = m_sHx_t.data_ptr<float>();
-        p.m_sHy = m_sHy_t.data_ptr<float>();
-        p.m_sVz = m_sVz_t.data_ptr<float>();
-        p.m_vxx = m_vxx_t.data_ptr<float>();
-        p.m_vyy = m_vyy_t.data_ptr<float>();
-        p.m_vzz = m_vzz_t.data_ptr<float>();
+        // nullptr after bind_physical(): only the NOPML kernels see such a
+        // view and they never touch CPML memory.
+        p.m_sHx = ptr_or_null(m_sHx_t);
+        p.m_sHy = ptr_or_null(m_sHy_t);
+        p.m_sVz = ptr_or_null(m_sVz_t);
+        p.m_vxx = ptr_or_null(m_vxx_t);
+        p.m_vyy = ptr_or_null(m_vyy_t);
+        p.m_vzz = ptr_or_null(m_vzz_t);
         return p;
     }
 
@@ -414,9 +448,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
         adjoint.allocate(vp_t);
     auto adj_view = adjoint.view();
 
+    // Reconstructed forward state: the RECON_WF_COUNT physical fields the
+    // propagator hands over as p.forward_wavefields (zeroed, model-shaped),
+    // or a fresh allocation for a caller that binds nothing.  Only the NOPML
+    // kernels step this state, so it carries no CPML memory.
     AdjWavefieldTensor3D forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields);
+    if (wavefields_bound(p.forward_wavefields, AdjWavefieldTensor3D::RECON_WF_COUNT, vp_t,
+                         "acoustic_vti_1st_3d backward_bs reconstruction"))
+        forward.bind_physical(p.forward_wavefields);
     else
         forward.allocate(vp_t);
     auto for_view = forward.view();

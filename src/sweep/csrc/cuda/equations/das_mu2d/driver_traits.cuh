@@ -11,6 +11,13 @@
 //   * 8-field boundary lists (5 elastic + 3 strains; only the elastic five
 //     are restored -- strains are record-only), 18 wavefield tensors,
 //     8-field last_two with a lenient 5-field legacy read;
+//   * the bs reconstruction is the 7-tensor Python-bound list [vx, vz, sxx,
+//     szz, sxz + fvx_prev, fvz_prev carriers] -- elastic2d's list.  The
+//     reverse loop steps the elastic fields with the elastic NOPML kernels
+//     and images with the elastic bs kernel, so the DAS strains (and the
+//     CPML memory) are never touched there and are not carried
+//     (bind_elastic); a caller that binds nothing keeps the legacy
+//     allocate(vp, use_pml=true) plus zeroed carriers;
 //   * the full backward has NO grad fusion: standalone imaging, then the
 //     receiver-rho correction, THEN the adjoint step;
 //   * checkpoints snapshot the full-domain state (allocate, not
@@ -65,13 +72,24 @@ struct Driver {
     static constexpr const char* CKPT_RECURSIVE_COUNT_MSG =
         "DAS Mu 2D recursive checkpointing expects 18 checkpoint tensors";
     static constexpr int BS_NVAR = 8;   // vx, vz, sxx, szz, sxz, exx, ezz, exz
+    // The bs reconstruction carries the elastic five only (elastic2d's list):
+    // the reverse loop steps them with the elastic NOPML kernels and images
+    // with the elastic bs kernel, so the DAS strains are dead there.
+    static constexpr int BS_ELASTIC_NVAR = 5;   // vx, vz, sxx, szz, sxz
     static constexpr int CUT_MASK_BITS = 0x0;
     static constexpr const char* CUT_MASK_DESC =
         "no bits (the borrowed elastic kernels are not cut-aware)";
     static constexpr int ADJ_WF_COUNT = 18;
-    static constexpr int RECON_WF_COUNT = 18;
+    static constexpr int RECON_WF_COUNT = 7;
     static constexpr const char* RECON_LIST_DESC =
-        "(the full 18-tensor DAS-Mu wavefield list)";
+        "[vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]";
+    // Slots of the reconstruction list: [0, BS_ELASTIC_NVAR) are the elastic
+    // fields (bound without strains or CPML memory), then the v(it+1)
+    // carriers.
+    static constexpr int RECON_SLOT_FVX_PREV = BS_ELASTIC_NVAR;       // 5
+    static constexpr int RECON_SLOT_FVZ_PREV = BS_ELASTIC_NVAR + 1;   // 6
+    static_assert(RECON_SLOT_FVZ_PREV + 1 == RECON_WF_COUNT,
+                  "das_mu2d reconstruction list = elastic fields + 2 carriers");
     static constexpr int N_VEL = 2;
     static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
 
@@ -572,22 +590,40 @@ public:
         torch::Tensor fvx_prev, fvz_prev;
     };
 
+    // Reconstruction state: Python hands the RECON_WF_COUNT list
+    // RECON_LIST_DESC (zeroed, model-shaped) -- elastic2d's list.  The
+    // elastic fields bind through bind_elastic(): no strains (the reverse
+    // loop runs the elastic NOPML kernels and the elastic bs imaging, which
+    // never touch them) and no CPML memory (only the NOPML kernels step the
+    // reconstruction); view()/elastic_view() hand those kernels nullptr for
+    // every unbound slot.  The carriers are the tail of the same list.  A
+    // caller that binds nothing keeps the legacy allocation (all 8 fields
+    // with CPML memory; the strains and the memory are never read).
     static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
                                              const BackwardInput& p,
                                              const torch::Tensor& vp)
     {
         ReconCarriers c;
-        if (!p.forward_wavefields.empty())
-            forward.bind(p.forward_wavefields, true);
-        else
+        if (wavefields_bound(p.forward_wavefields, RECON_WF_COUNT, vp,
+                             "das_mu2d backward_bs reconstruction")) {
+            forward.bind_elastic(std::vector<torch::Tensor>(
+                p.forward_wavefields.begin(),
+                p.forward_wavefields.begin() + BS_ELASTIC_NVAR));
+            c.fvx_prev = p.forward_wavefields[RECON_SLOT_FVX_PREV];
+            c.fvz_prev = p.forward_wavefields[RECON_SLOT_FVZ_PREV];
+        } else {
             forward.allocate(vp, true);
-        c.fvx_prev = torch::zeros_like(vp);
-        c.fvz_prev = torch::zeros_like(vp);
+            c.fvx_prev = torch::zeros_like(vp);
+            c.fvz_prev = torch::zeros_like(vp);
+        }
         return c;
     }
 
-    // Seed from the 8-field last snapshot; legacy 5-field saves lack the
-    // strain rows.
+    // Seed from the last snapshot: the elastic five always; the strain rows
+    // (8-field saves only -- legacy 5-field saves lack them) only when the
+    // reconstruction carries strain members, i.e. the unbound allocate()
+    // fallback.  The Python-bound reconstruction (bind_elastic) has none:
+    // the reverse loop never reads them.
     static void seed_recon(Wavefield& forward, const BackwardInput& p)
     {
         forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
@@ -595,13 +631,17 @@ public:
         forward.sxx_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
         forward.szz_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
         forward.sxz_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
-        if (p.u_last_two.size(0) >= 8) {
+        if (p.u_last_two.size(0) >= 8 && forward.exx_t.defined()) {
             forward.exx_t.copy_(p.u_last_two.select(0, 5).select(0, 0));
             forward.ezz_t.copy_(p.u_last_two.select(0, 6).select(0, 0));
             forward.exz_t.copy_(p.u_last_two.select(0, 7).select(0, 0));
         }
     }
 
+    // A strain-field source (the equation admits them) resolves to nullptr on
+    // the bound reconstruction and is skipped; on the allocate() fallback it
+    // still un-injects into the strain grid.  Either way the reverse loop
+    // never reads that grid, so the gradients are the same.
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,

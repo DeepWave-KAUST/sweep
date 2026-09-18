@@ -478,4 +478,5 @@ class ElasticVRR(FirstOrderEquation):
             last_two_nvar=1,
             last_two_storage_nvar=5,
             backward_workspace_nvar=14,
+            bs_reconstruction_nvar=5,   # px, pz, sxx, szz, sxz
         )

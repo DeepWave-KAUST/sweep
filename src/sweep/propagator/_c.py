@@ -100,6 +100,16 @@ def _record_buffer(shape, device):
     return torch.zeros(shape, device=device)
 
 
+def _reconstruction_buffers(shapes, device):
+    """The boundary-saving backward's reconstruction state (the forward's
+    physical fields stepped backwards from ``u_last_two``, plus the carriers
+    the imaging reads), handed over as ``forward_wavefields``. Zeroed: the
+    reverse stencil never writes the absorbing rim, so its cells must read as
+    zero exactly as the driver's own zeros_like did. One backward call's
+    lifetime -- the same as the allocation it replaces."""
+    return [torch.zeros(shape, device=device) for shape in shapes]
+
+
 def _derived_model_buffers(n, like):
     """The ``cuda_layout.derived_model_nvar`` model-shaped slots a compiled call
     fills with its derived coefficients (Lame parameters, VTI stiffness, 1/z),
@@ -480,6 +490,10 @@ class Wrapper(torch.autograd.Function):
             params.boundary_gpu = list(cp.boundary_gpu) if ctx.use_boundary_saving else []
             params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
             params.u_last_two = last.contiguous()
+            # on the models' device: with cpu/disk boundary staging ``last`` may
+            # live on the host, and the reconstruction is stepped on the GPU
+            params.forward_wavefields = _reconstruction_buffers(cp.bs_reconstruction_shapes,
+                                                                params.models[0].device)
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = cp.backward_bs_func(params)
@@ -1311,6 +1325,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fn = self._cuda_layout().save_all_shape
         return None if fn is None else tuple(int(x) for x in fn(batch_size, self.nt, self.shape_cuda))
 
+    def _reconstruction_shapes(self, batch_size):
+        """``cuda_layout.reconstruction_nvar`` padded per-shot grids for the
+        boundary-saving backward's reconstruction state."""
+        n = int(self._cuda_layout().reconstruction_nvar)
+        return tuple((batch_size, 1, *self.shape_cuda) for _ in range(n))
+
     def _derived_model_count(self, mode):
         """``cuda_layout.derived_model_nvar`` for one call: an int, or ``fn(mode)``
         for a driver that derives its coefficients only in some modes (``mode`` is
@@ -1719,6 +1739,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # 18) padded grids on the first call of a propagator that would never run
         # a backward, and zeroed them on every call after.
         derived_model_nvar_backward = 0
+        bs_reconstruction_shapes = ()
         if requires_backward:
             # The memory mode this backward will run in, in the backward's own
             # precedence (checkpointing beats boundary saving).
@@ -1726,6 +1747,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                               else "bs" if use_boundary_saving else "full")
             self._ensure_adjoint_workspace_buffers(batch_size, workspace_mode)
             derived_model_nvar_backward = self._derived_model_count(workspace_mode)
+            if workspace_mode == "bs":
+                bs_reconstruction_shapes = self._reconstruction_shapes(batch_size)
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
@@ -1829,6 +1852,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     forward_workspace=forward_workspace,
                     derived_model_nvar_forward=self._derived_model_count("forward"),
                     derived_model_nvar_backward=derived_model_nvar_backward,
+                    bs_reconstruction_shapes=bs_reconstruction_shapes,
                     u_allt_shape=self._history_shape(batch_size),
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
