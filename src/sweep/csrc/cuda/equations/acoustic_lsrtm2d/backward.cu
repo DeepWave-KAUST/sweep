@@ -37,27 +37,9 @@ namespace {
 // Layout of p.adjoint_workspace, declared on the Python side by
 // AcousticLSRTM.cuda_layout.backward_workspace_shapes (one padded grid per shot
 // each, zeroed by the propagator before every gradient-bearing forward): the
-// vp^2*lambda scratch of every adjoint step, then per mode --
-//   recursive: the background u_tt of the replayed step;
-//   ckpt:      the chunk replay state of the background field, one
-//              AcousticWavefieldTensor in its bind order (u_prev, u_now, u_next,
-//              psix, psiz, zetax, zetaz -- 7 tensors, no psi double-buffer
-//              shadow, so bind() keeps double_buffer_psi=false and the replay
-//              keeps its u-only swap()). It lives here rather than in
-//              forward_wavefields (checkpoint_state_nvar=0) because the LSRTM
-//              forward slot list is two acoustic layouts back to back.
-// The modes never share a pool, so the per-mode slots may overlap.
-enum WorkspaceSlot : int {
-    V2_LAMBDA = 0,
-    BG_UTT = 1,                                        // recursive mode
-    REPLAY_U_PREV = 1, REPLAY_U_NOW, REPLAY_U_NEXT,    // ckpt mode, AcousticWavefieldTensor::bind order
-    REPLAY_PSIX, REPLAY_PSIZ, REPLAY_ZETAX, REPLAY_ZETAZ,
-    N_SLOTS_PLAIN = 1,
-    N_SLOTS_RECURSIVE = 2,
-    N_SLOTS_CKPT = REPLAY_ZETAZ + 1,                   // 8
-};
-static_assert(N_SLOTS_CKPT - REPLAY_U_PREV == 7,
-              "acoustic 2-D replay state is the 7-tensor AcousticWavefieldTensor (PML, no double buffer)");
+// vp^2*lambda scratch of every adjoint step, and -- in the
+// recursive-checkpoint mode only -- the background u_tt of the replayed step.
+enum WorkspaceSlot : int { V2_LAMBDA = 0, BG_UTT, N_SLOTS_RECURSIVE, N_SLOTS_PLAIN = 1 };
 
 // Either unbound (every slot then falls back to a fresh zero tensor) or exactly
 // the count this mode declares: any other size means the Python declaration
@@ -70,19 +52,48 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p,
     return p.adjoint_workspace;
 }
 
-// The chunk replay state from its workspace slots, in AcousticWavefieldTensor's
-// bind order; an unbound caller gets fresh zeros per slot, byte-identical to
-// the allocate(vp, 2, true) this replaces. Every chunk re-seeds all 7 (load the
-// 6 checkpointed fields + zero u_next) before any read, so the pool's
-// per-forward zeroing is all the initialisation the state ever needs.
-static std::vector<torch::Tensor> ckpt_replay_state(const std::vector<torch::Tensor>& workspace,
-                                                    const torch::Tensor& vp)
+// The checkpoint replay state of the background field: one 2-D
+// AcousticWavefieldTensor in its bind order (u_prev, u_now, u_next, psix, psiz,
+// zetax, zetaz -- 7 model-shaped grids, no psi double-buffer shadow, so bind()
+// keeps double_buffer_psi=false and the replay keeps its u-only swap(): the
+// in-place psi path allocate(vp, 2, true) gives).  Declared on the Python side
+// as AcousticLSRTM.cuda_layout.checkpoint_state_nvar and handed over as
+// p.forward_wavefields, K sets back to back, zeroed per backward call (the
+// state allocate() started from): K = 1 in the chunk mode (the replay state),
+// K = 1 + depth in the recursive mode (set 0 = the segment start state, sets
+// 1..depth = the bisection's scratch states, one per recursion level).
+constexpr int REPLAY_STATE_NVAR = 7;
+
+// Bind set `set` of p.forward_wavefields, or allocate when the caller bound
+// nothing (byte-identical fallback: zeros, in-place psi).  Every slot is
+// model-shaped (LSRTM declares no per-axis CPML slabs); bind() checks the count
+// only, so the geometry is checked here.
+static void bind_or_alloc_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+                                       const torch::Tensor& vp, int set, const char* what)
 {
-    std::vector<torch::Tensor> state;
-    state.reserve(N_SLOTS_CKPT - REPLAY_U_PREV);
-    for (int slot = REPLAY_U_PREV; slot < N_SLOTS_CKPT; ++slot)
-        state.push_back(pool_or_zeros(workspace, slot, vp, "adjoint_workspace"));
-    return state;
+    if (p.forward_wavefields.empty()) {
+        wf.allocate(vp, 2, /*use_pml=*/true);
+        return;
+    }
+    auto state = wavefield_set(p.forward_wavefields, set, REPLAY_STATE_NVAR, what);
+    for (int i = 0; i < REPLAY_STATE_NVAR; ++i)
+        pool_slot_checked(state, i, vp, what);
+    wf.bind(state, 2, /*use_pml=*/true);
+}
+
+// Scratch state sets the bisecting recursive backward keeps: one per recursion
+// level of the longest segment.  The same loop as eq_driver.cuh
+// recursive_checkpoint_scratch_depth (not included by this driver) and the
+// propagator's _c.py _recursive_scratch_depth, which sizes p.forward_wavefields
+// from it.
+static int recursive_checkpoint_scratch_depth(int interval_length)
+{
+    int depth = 0;
+    while (interval_length > 1) {
+        interval_length = (interval_length + 1) / 2;
+        ++depth;
+    }
+    return depth;
 }
 
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
@@ -154,10 +165,20 @@ void advance_forward_interval_2d(
     }
 }
 
+// One bisection node of a checkpoint segment [start, end): advance a copy of
+// start_state to mid, recurse into the right half (on that copy), then into the
+// left half (on start_state).  scratch_states[level] is the node's mid_state,
+// one state per recursion level: copy_state fills it in full before any read,
+// and it is dead once the right subtree returns, so sibling nodes share it.
+// The leaf steps start_state IN PLACE: a left child's start_state has no
+// reader after that leaf, a right child's start_state is its parent's
+// mid_state, never re-read -- so the recursion allocates nothing per node or
+// per leaf.  Buffer identity is all that differs from a per-node copy; the
+// kernels and the values they read are the same.
 void process_recursive_interval_2d(
     int start,
     int end,
-    const AcousticWavefieldTensor& start_state,
+    AcousticWavefieldTensor& start_state,
     AcousticWavefieldTensor& adjoint,
     const BackwardInput& p,
     const torch::Tensor& vp,
@@ -178,6 +199,8 @@ void process_recursive_interval_2d(
     int forward_nsrc,
     int adjoint_nsrc,
     CheckpointRuntime& checkpoint_runtime,
+    std::vector<AcousticWavefieldTensor>& scratch_states,
+    int level,
     int nx,
     int nz
 )
@@ -186,12 +209,8 @@ void process_recursive_interval_2d(
         return;
 
     if (end - start == 1) {
-        AcousticWavefieldTensor forward_step;
-        forward_step.allocate(vp, 2, true);
-        checkpoint_runtime.copy_state(forward_step.state_tensors(), start_state.state_tensors());
-
         auto bg_utt = pool_or_zeros(p.adjoint_workspace, BG_UTT, vp);
-        auto fwd_view = forward_step.view();
+        auto fwd_view = start_state.view();
 
         ACOUSTIC_LSRTM2D_SINGLE(
             order,
@@ -218,7 +237,7 @@ void process_recursive_interval_2d(
             ctx
         );
 
-        forward_step.swap();
+        start_state.swap();
 
         auto adj_view = adjoint.view();
         run_lsrtm2d_adjoint_step(
@@ -250,8 +269,9 @@ void process_recursive_interval_2d(
 
     int mid = start + (end - start) / 2;
 
-    AcousticWavefieldTensor mid_state;
-    mid_state.allocate(vp, 2, true);
+    TORCH_CHECK(level < static_cast<int>(scratch_states.size()),
+                "Acoustic LSRTM 2D recursive checkpointing: scratch depth exhausted at level ", level);
+    AcousticWavefieldTensor& mid_state = scratch_states[level];
     checkpoint_runtime.copy_state(mid_state.state_tensors(), start_state.state_tensors());
 
     advance_forward_interval_2d(
@@ -298,6 +318,8 @@ void process_recursive_interval_2d(
         forward_nsrc,
         adjoint_nsrc,
         checkpoint_runtime,
+        scratch_states,
+        level + 1,
         nx,
         nz
     );
@@ -326,6 +348,8 @@ void process_recursive_interval_2d(
         forward_nsrc,
         adjoint_nsrc,
         checkpoint_runtime,
+        scratch_states,
+        level + 1,
         nx,
         nz
     );
@@ -640,21 +664,22 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     else
         adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
 
-    // The chunk replay state is the workspace's REPLAY_* slots, not
-    // forward_wavefields (checkpoint_state_nvar=0): a caller that binds a
-    // state list here has the wrong layout.
-    TORCH_CHECK(p.forward_wavefields.empty(),
-                "Acoustic LSRTM 2D backward_ckpt keeps its replay state in adjoint_workspace; "
-                "forward_wavefields must be empty, got ", p.forward_wavefields.size());
+    // The chunk replay state: the one set of p.forward_wavefields.  Every chunk
+    // re-seeds all 7 (load the 6 checkpointed fields + zero u_next) before any
+    // read, so the propagator's per-call zeroing is all the initialisation it
+    // ever needs.
+    TORCH_CHECK(p.forward_wavefields.empty()
+                    || static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
+                "Acoustic LSRTM 2D backward_ckpt expects one replay state set of ", REPLAY_STATE_NVAR,
+                " forward_wavefields, got ", p.forward_wavefields.size());
+    AcousticWavefieldTensor forward;
+    bind_or_alloc_replay_state(forward, p, vp, /*set=*/0, "acoustic_lsrtm2d ckpt replay state");
 
     const auto& gs = grad_slots(p);
-    const auto& workspace = workspace_slots(p, N_SLOTS_CKPT);
+    workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
     auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
     auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
-
-    AcousticWavefieldTensor forward;
-    forward.bind(ckpt_replay_state(workspace, vp), 2, /*use_pml=*/true);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -839,8 +864,33 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     const int* checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
 
+    int max_segment_length = 0;
+    for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
+        int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];
+        int end = (segment_idx == num_saved_checkpoints) ? static_cast<int>(p.nt) : checkpoint_steps[segment_idx];
+        max_segment_length = std::max(max_segment_length, end - start);
+    }
+
+    // Replay state sets of p.forward_wavefields: set 0 the segment start state
+    // (zeroed or checkpoint-loaded per segment before any read), sets 1..depth
+    // the bisection's scratch states (copy_state-filled from their parent
+    // before any read).  The propagator hands 1 + depth sets, its depth
+    // (_c.py _recursive_scratch_depth) mirroring recursive_checkpoint_scratch_depth
+    // on the same longest segment.
+    const int scratch_depth = recursive_checkpoint_scratch_depth(max_segment_length);
+    TORCH_CHECK(p.forward_wavefields.empty()
+                    || static_cast<int>(p.forward_wavefields.size()) == (1 + scratch_depth) * REPLAY_STATE_NVAR,
+                "Acoustic LSRTM 2D recursive checkpointing expects ", 1 + scratch_depth,
+                " replay state sets of ", REPLAY_STATE_NVAR, " forward_wavefields, got ",
+                p.forward_wavefields.size());
+
     AcousticWavefieldTensor start_state;
-    start_state.allocate(vp, 2, true);
+    bind_or_alloc_replay_state(start_state, p, vp, /*set=*/0, "acoustic_lsrtm2d recursive start state");
+
+    std::vector<AcousticWavefieldTensor> scratch_states(scratch_depth);
+    for (int level = 0; level < scratch_depth; ++level)
+        bind_or_alloc_replay_state(scratch_states[level], p, vp, /*set=*/level + 1,
+                                   "acoustic_lsrtm2d recursive scratch state");
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];
@@ -875,6 +925,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
             forward_nsrc,
             adjoint_nsrc,
             checkpoint_runtime,
+            scratch_states,
+            /*level=*/0,
             nx,
             nz
         );

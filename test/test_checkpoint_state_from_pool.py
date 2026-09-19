@@ -38,8 +38,7 @@ import solver_gradient_mode_suite as suite  # noqa: E402
 SENTINEL = 12345.0
 
 # (key, mode) -> allocations the compiled backward may still make of its own,
-# measured after slice 13 (LSRTM recursive, whose per-level states a later slice
-# restructures, is deliberately absent); binding prefix per key below.
+# measured after slices 13-14; binding prefix per key below.
 RESIDUAL = {
     ("acoustic2d", "ckpt_chunk"): 0, ("acoustic2d", "ckpt_recursive"): 0,
     ("acoustic3d", "ckpt_chunk"): 0, ("acoustic3d", "ckpt_recursive"): 0,
@@ -57,8 +56,8 @@ RESIDUAL = {
     # the VRZ checkpoint sweep still negates the adjoint source inside C++
     ("vrz2d", "ckpt_chunk"): 1, ("vrz2d", "ckpt_recursive"): 1,
     ("vrz3d", "ckpt_chunk"): 1, ("vrz3d", "ckpt_recursive"): 1,
-    ("lsrtm2d", "ckpt_chunk"): 0,
-    ("lsrtm3d", "ckpt_chunk"): 0,
+    ("lsrtm2d", "ckpt_chunk"): 0, ("lsrtm2d", "ckpt_recursive"): 0,
+    ("lsrtm3d", "ckpt_chunk"): 0, ("lsrtm3d", "ckpt_recursive"): 0,
 }
 BINDING = {"vrz2d": "acoustic_vrz2d", "vrz3d": "acoustic_vrz3d",
            "lsrtm2d": "acoustic_lsrtm2d", "lsrtm3d": "acoustic_lsrtm3d"}
