@@ -73,12 +73,16 @@ enum WorkspaceSlot : int {
     N_SLOTS
 };
 
-// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
-// N_SLOTS: a pool of any other size means the Python declaration drifted.
+// Exactly N_SLOTS.  The propagator allocates the pool for every
+// gradient-bearing forward (_ensure_adjoint_workspace_buffers over
+// AcousticVRZ3D.cuda_layout.backward_workspace_nvar = 10) and the DD runner
+// rebinds the same ten grids, so an empty or differently sized pool means the
+// Python declaration drifted.
 static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
-                "AcousticVRZ3D backward: adjoint_workspace must be empty or hold ",
+    TORCH_CHECK(p.adjoint_workspace.size() == N_SLOTS,
+                "acoustic_vrz3d/backward requires the propagator-bound adjoint_workspace "
+                "(cuda_layout.backward_workspace_nvar): ",
                 static_cast<int>(N_SLOTS), " tensors ([0-5]=c_x..e_z coupling, "
                 "[6-9]=C0,Cx,Cy,Cz adjoint coeffs), got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
@@ -88,13 +92,28 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 // {grad_wavelet, grad_vp, grad_z}. Slot 0 is the family's wavelet slot, which
 // this equation never produces; slots 1 and 2 are accumulated here (Python
 // zeroes them once per backward, or once per stepped/DD segment sequence).
-// Empty for an unbound caller, which then gets fresh zeros.
+// _c.py builds it for every backward (_gradient_buffers from
+// cuda_layout.grads_out_has_wavelet = true plus one slot per model) and the DD
+// runner rebinds the same list, so it is never empty.
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == p.models.size() + 1,
-                "AcousticVRZ3D grads_out must hold models.size()+1 tensors "
-                "(slot 0 = grad_wavelet, then one per model), got ", p.grads_out.size());
+    TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                "acoustic_vrz3d/backward requires the propagator-bound grads_out "
+                "(cuda_layout.grads_out_has_wavelet + one slot per model = "
+                "models.size()+1 tensors, slot 0 = grad_wavelet), got ", p.grads_out.size());
     return p.grads_out;
+}
+
+// The adjoint state: cuda_layout base_nvar 3 + pml_nvar 9 = 12 slots, bound by
+// _c.py on every backward (_ensure_wavefield_buffers allocates them whenever
+// the forward required a gradient) and rebound by the stepped / DD drivers.
+static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+                               const char* mode)
+{
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vrz3d/", mode, " requires the propagator-bound "
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 12 tensors)");
+    wf.bind(p.adjoint_wavefields, 3, true);
 }
 
 BackwardOutput backward_full_impl(const BackwardInput& in)
@@ -135,26 +154,23 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     ctx.set_cut_mask(in.cut_face_mask);   // DD cut-aware: skip cut faces in bs reconstruction
 
     AcousticWavefieldTensor adjoint;
-    if (!in.adjoint_wavefields.empty())
-        adjoint.bind(in.adjoint_wavefields, 3, true);
-    else
-        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, in, "backward");
     zero_wavefield_state_vrz3d(adjoint);
 
     const auto& gs = grad_slots(in);
     const auto& ws = workspace_slots(in);
-    auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
-    auto C0 = pool_or_zeros(ws, COEF_C0, vp);   // vp²       (time-invariant adjoint coeffs)
-    auto Cx = pool_or_zeros(ws, COEF_CX, vp);   // ∂ₓb·κ
-    auto Cy = pool_or_zeros(ws, COEF_CY, vp);   // ∂_yb·κ
-    auto Cz = pool_or_zeros(ws, COEF_CZ, vp);   // ∂_z b·κ
-    auto c_x = pool_or_zeros(ws, C_X, vp);      // split gradient scratch (order>=6 path)
-    auto c_y = pool_or_zeros(ws, C_Y, vp);
-    auto c_z = pool_or_zeros(ws, C_Z, vp);
-    auto e_x = pool_or_zeros(ws, E_X, vp);
-    auto e_y = pool_or_zeros(ws, E_Y, vp);
-    auto e_z = pool_or_zeros(ws, E_Z, vp);
+    auto grad_vp = pool_required(gs, 1, vp, "grads_out");
+    auto grad_z = pool_required(gs, 2, z, "grads_out");
+    auto C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");   // vp²       (time-invariant adjoint coeffs)
+    auto Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");   // ∂ₓb·κ
+    auto Cy = pool_required(ws, COEF_CY, vp, "adjoint_workspace");   // ∂_yb·κ
+    auto Cz = pool_required(ws, COEF_CZ, vp, "adjoint_workspace");   // ∂_z b·κ
+    auto c_x = pool_required(ws, C_X, vp, "adjoint_workspace");      // split gradient scratch (order>=6 path)
+    auto c_y = pool_required(ws, C_Y, vp, "adjoint_workspace");
+    auto c_z = pool_required(ws, C_Z, vp, "adjoint_workspace");
+    auto e_x = pool_required(ws, E_X, vp, "adjoint_workspace");
+    auto e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
+    auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(in.pml_vals, 3);
     auto cpml = cpml_tensor.view();
@@ -356,10 +372,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     }
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields, 3, true);
-    else
-        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, p, "backward_bs");
     // FIRST segment only: Python zeroes the bound adjoint once before segment 1;
     // continuation segments must carry the propagated adjoint state.
     if (first_segment && do_advance)
@@ -368,10 +381,14 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     AcousticWavefieldTensor forward;
     // Recon steps with the NOPML kernel — u triple buffer only; psi/zeta
     // would be dead weight (use_pml=false, 3 tensors, like vrz2d/acoustic).
-    if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields, 3, false);
-    else
-        forward.allocate(vp, 3, false);
+    // _c.py hands these over on every boundary-saving backward
+    // (_forward_state_buffers over cp.forward_state_shapes =
+    // cuda_layout.reconstruction_nvar, slot_table.ACOUSTIC_VRZ3D.recon = 3) and
+    // the DD runner rebinds the same list.
+    wavefields_required(p.forward_wavefields, 3, vp,
+                        "acoustic_vrz3d/backward_bs reconstruction "
+                        "(cuda_layout.reconstruction_nvar)");
+    forward.bind(p.forward_wavefields, 3, false);
 
     // Seed the reverse reconstruction from the saved last two snapshots — FIRST
     // segment only; continuation segments carry the reconstruction state.
@@ -385,8 +402,8 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // (calculate_grad does +=; Python zeroes them once before segment 1).
     const auto& gs = grad_slots(p);
     const auto& ws = workspace_slots(p);
-    auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
+    auto grad_vp = pool_required(gs, 1, vp, "grads_out");
+    auto grad_z = pool_required(gs, 2, z, "grads_out");
     // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*) come from the
     // pool (WorkspaceSlot above): under DD (phased) the driver halo-exchanges
     // the c/e grids between the build (phase 2) and divergence (phase 3) steps,
@@ -394,17 +411,17 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // ten slots. BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first
     // segment; build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
     // step while their halo stays at the pool's zero. torch::Tensor copies share
-    // storage, so .data_ptr() hits the bound buffer either way.
-    auto C0 = pool_or_zeros(ws, COEF_C0, vp);
-    auto Cx = pool_or_zeros(ws, COEF_CX, vp);
-    auto Cy = pool_or_zeros(ws, COEF_CY, vp);
-    auto Cz = pool_or_zeros(ws, COEF_CZ, vp);
-    auto c_x = pool_or_zeros(ws, C_X, vp);
-    auto c_y = pool_or_zeros(ws, C_Y, vp);
-    auto c_z = pool_or_zeros(ws, C_Z, vp);
-    auto e_x = pool_or_zeros(ws, E_X, vp);
-    auto e_y = pool_or_zeros(ws, E_Y, vp);
-    auto e_z = pool_or_zeros(ws, E_Z, vp);
+    // storage, so .data_ptr() hits the bound buffer.
+    auto C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");
+    auto Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");
+    auto Cy = pool_required(ws, COEF_CY, vp, "adjoint_workspace");
+    auto Cz = pool_required(ws, COEF_CZ, vp, "adjoint_workspace");
+    auto c_x = pool_required(ws, C_X, vp, "adjoint_workspace");
+    auto c_y = pool_required(ws, C_Y, vp, "adjoint_workspace");
+    auto c_z = pool_required(ws, C_Z, vp, "adjoint_workspace");
+    auto e_x = pool_required(ws, E_X, vp, "adjoint_workspace");
+    auto e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
+    auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
@@ -717,38 +734,39 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     ctx.set_cut_mask(p.cut_face_mask);   // DD cut-aware: skip cut faces in boundary reconstruction
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields, 3, true);
-    else
-        adjoint.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, p, "backward_ckpt");
     zero_wavefield_state_vrz3d(adjoint);
 
     // The replay state (REPLAY_STATE_NVAR above), bound through the struct's
     // full PML bind: with no psi shadows in the set the replay writes psi in
-    // place -- the path allocate() gives (swap() rotates u only) -- and the
-    // propagator zeroed the set as allocate() started from.  An unbound
-    // caller keeps the allocation.
+    // place (swap() rotates u only) and the propagator zeroed the set per call.
+    // _c.py hands it over on every checkpoint-mode backward
+    // (_forward_state_buffers over cp.forward_state_shapes, derived from
+    // slot_table.ACOUSTIC_VRZ3D's forward slots without the psi shadows), so
+    // there is no unbound caller to allocate for.
     AcousticWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
-                                   "acoustic_vrz3d ckpt replay state"), 3, true);
-    else
-        forward.allocate(vp, 3, true);
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
+                "acoustic_vrz3d/backward_ckpt requires the propagator-bound "
+                "forward_wavefields (cuda_layout.slots, the forward slots without the "
+                "psi double-buffer shadows): one replay state set of ",
+                REPLAY_STATE_NVAR, " tensors, got ", p.forward_wavefields.size());
+    forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
+                               "acoustic_vrz3d ckpt replay state"), 3, true);
 
     const auto& gs = grad_slots(p);
     const auto& ws = workspace_slots(p);
-    auto grad_vp = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_z = pool_or_zeros(gs, 2, z, "grads_out");
-    auto C0 = pool_or_zeros(ws, COEF_C0, vp);   // vp²       (time-invariant adjoint coeffs)
-    auto Cx = pool_or_zeros(ws, COEF_CX, vp);   // ∂ₓb·κ
-    auto Cy = pool_or_zeros(ws, COEF_CY, vp);   // ∂_yb·κ
-    auto Cz = pool_or_zeros(ws, COEF_CZ, vp);   // ∂_z b·κ
-    auto c_x = pool_or_zeros(ws, C_X, vp);      // split gradient scratch (order>=6 path)
-    auto c_y = pool_or_zeros(ws, C_Y, vp);
-    auto c_z = pool_or_zeros(ws, C_Z, vp);
-    auto e_x = pool_or_zeros(ws, E_X, vp);
-    auto e_y = pool_or_zeros(ws, E_Y, vp);
-    auto e_z = pool_or_zeros(ws, E_Z, vp);
+    auto grad_vp = pool_required(gs, 1, vp, "grads_out");
+    auto grad_z = pool_required(gs, 2, z, "grads_out");
+    auto C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");   // vp²       (time-invariant adjoint coeffs)
+    auto Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");   // ∂ₓb·κ
+    auto Cy = pool_required(ws, COEF_CY, vp, "adjoint_workspace");   // ∂_yb·κ
+    auto Cz = pool_required(ws, COEF_CZ, vp, "adjoint_workspace");   // ∂_z b·κ
+    auto c_x = pool_required(ws, C_X, vp, "adjoint_workspace");      // split gradient scratch (order>=6 path)
+    auto c_y = pool_required(ws, C_Y, vp, "adjoint_workspace");
+    auto c_z = pool_required(ws, C_Z, vp, "adjoint_workspace");
+    auto e_x = pool_required(ws, E_X, vp, "adjoint_workspace");
+    auto e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
+    auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
     auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
         ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
         : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
@@ -813,9 +831,10 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     // by every segment: each row the reverse pass reads was written by the
     // replay earlier in the same segment, so it is never zeroed.  An unbound
     // caller allocates it once per call, as before.
-    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, CHUNK_FORWARD,
+    auto chunk_forward = pool_required(p.checkpoint_replay, CHUNK_FORWARD,
                                        {max_segment_length, N, C, nz, ny, nx}, vp.options(),
-                                       "checkpoint_replay");
+                                       "checkpoint_replay (acoustic_vrz3d/backward_ckpt, "
+                                       "cuda_layout.checkpoint_replay_shapes)");
 
     // Time-invariant adjoint transpose coefficients, computed once for all segments.
     BUILD_VRZ_ADJOINT_COEFFS_3D(

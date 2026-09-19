@@ -44,7 +44,7 @@ struct Driver {
     // Constants, nested types, and the prologue hooks every entry point runs
     // before its time loop (per the timing map, in call order):
     //   validate_forward / (backward: validate_backward +
-    //   bind_backward_outputs / alloc_grads + rtm gate), bind_or_alloc_*
+    //   bind_backward_outputs + rtm gate), bind_or_alloc_*
     //   wavefields, alloc_cpml, setup_ctx, init_aux_slabs, make_state,
     //   make_bwd_workspace.
     // ===================================================================== //
@@ -171,13 +171,20 @@ struct Driver {
     //   after the loop: save_last_state.
     // ===================================================================== //
 
+    // MANDATORY: the propagator hands the forward state on every call --
+    // persistent buffers in save_all mode, a per-call transient set otherwise
+    // (_c.py PropBase.forward: ``forward_wavefields = self._slice_wavefield_buffers(...)``
+    // then ``if not forward_wavefields: ... _transient_forward_wavefields(...)``,
+    // both sized by cuda_layout.base_nvar + pml_nvar = 3 + 9).  bind() checks the
+    // count (3 / 9 / 12 / 15) and installs the psi double-buffer for the 12-slot
+    // layout, which is why the driver must not build its own.
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
-                                      const torch::Tensor& vp)
+                                      const torch::Tensor& /*vp*/)
     {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields, 3, true);
-        else
-            wf.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+        TORCH_CHECK(!p.wavefields.empty(),
+                    "acoustic3d/forward requires the propagator-bound wavefields "
+                    "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+        wf.bind(p.wavefields, 3, true);
     }
 
     static void launch_step_range(const State& s, const SolverContext& ctx,
@@ -295,13 +302,6 @@ struct Driver {
                                                       want_adcig);
     }
 
-    static void alloc_grads(const BackwardInput& p,
-                            std::vector<torch::Tensor>& grads)
-    {
-        grads = {torch::zeros_like(p.forward_source),
-                 torch::zeros_like(p.models[0])};
-    }
-
     static void pack_outputs(BackwardOutput& out,
                              std::vector<torch::Tensor>& grads,
                              RTMOutput& illumination)
@@ -330,13 +330,20 @@ struct Driver {
     }
 
 
+    // MANDATORY: a backward only runs when something required a gradient, which
+    // is the same predicate that allocates the adjoint pool (_c.py
+    // PropBase.forward: ``_ensure_wavefield_buffers(..., need_adjoint=requires_backward)``),
+    // and Wrapper.backward binds it zeroed on every call (``params.adjoint_wavefields =
+    // [a.zero_() for a in cp.adjoint_wavefields]``), 15 tensors for this equation
+    // (base_nvar + pml_nvar + cuda_layout.adjoint_extra_nvar = 3 + 9 + 3).
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
-                                      const torch::Tensor& vp)
+                                      const torch::Tensor& /*vp*/)
     {
-        if (!p.adjoint_wavefields.empty())
-            wf.bind(p.adjoint_wavefields, 3, true);
-        else
-            wf.allocate(vp, 3, true);
+        TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                    "acoustic3d/backward requires the propagator-bound "
+                    "adjoint_wavefields (cuda_layout.adjoint_extra_nvar on top of "
+                    "base_nvar + pml_nvar)");
+        wf.bind(p.adjoint_wavefields, 3, true);
     }
 
     // FUSED single-kernel exact 3D adjoint (see acoustic2d twin).
@@ -434,13 +441,20 @@ struct Driver {
             ? &illumination : nullptr;
     }
 
+    // MANDATORY: the boundary-saving backward is handed its reconstruction state
+    // per call (_c.py Wrapper.backward bs branch: ``params.forward_wavefields =
+    // _forward_state_buffers(cp.forward_state_shapes, ...)`` with
+    // ``_forward_state_shapes(..., "bs")`` = cuda_layout.reconstruction_nvar = 3
+    // grids from slot_table.ACOUSTIC3D.recon).  bind() checks the count (3, the
+    // no-PML layout).
     static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
-                                    const torch::Tensor& vp)
+                                    const torch::Tensor& /*vp*/)
     {
-        if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 3, false);
-        else
-            wf.allocate(vp, 3, false);
+        TORCH_CHECK(!p.forward_wavefields.empty(),
+                    "acoustic3d/backward_bs requires the propagator-bound "
+                    "reconstruction state forward_wavefields "
+                    "(cuda_layout.bs_reconstruction_nvar / slots.recon)");
+        wf.bind(p.forward_wavefields, 3, false);
     }
 
     // Seed from the saved last two snapshots only — 3-D has no rim-zeroing.
@@ -599,7 +613,7 @@ struct Driver {
     // Replay state set ``set`` of p.forward_wavefields, which holds K sets of
     // CKPT_STATE_COUNT tensors back to back (ckpt: K = 1; recursive: 1 + the
     // bisection depth, cuda_layout.recursive_state_depth).  The 9-tensor bind
-    // is the in-place psi layout allocate_from_snapshots wires (use_pml, no
+    // is the in-place psi layout the checkpoint snapshots carry (use_pml, no
     // psi double-buffer: the replay pairs with the u-only swap()).
     static void bind_replay_state(Wavefield& wf, const BackwardInput& p,
                                   const torch::Tensor& vp, int set)
@@ -610,30 +624,41 @@ struct Driver {
     }
 
     // Set 0: the chunk replay state (ckpt) / the segment start state
-    // (recursive).  The propagator zeroes the set per backward call -- the
-    // state the fallback allocation starts from.
+    // (recursive).  The propagator zeroes the set per backward call, which is
+    // the state the replay and the bisection both start from.
+    // MANDATORY: both checkpoint modes are handed their replay state sets per
+    // call (_c.py Wrapper.backward ckpt branch: ``params.forward_wavefields =
+    // _forward_state_buffers(cp.forward_state_shapes, ...)``, with
+    // ``_forward_state_shapes(..., "ckpt"/"recursive")`` = the forward slot list
+    // minus the psi shadows = CKPT_STATE_COUNT slots, aux slabs included).  The
+    // count is checked by the skeleton before this hook fires and again by
+    // bind_replay_state, which also checks the aux geometry against the
+    // checkpoint slots -- the reason the deleted fallback had to derive its
+    // shapes from the snapshots rather than from vp.
     static void bind_or_alloc_recon_ckpt(Wavefield& wf, const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        if (!p.forward_wavefields.empty())
-            bind_replay_state(wf, p, vp, 0);
-        else
-            // Aux shapes must follow the Python-allocated checkpoint slots
-            // (possibly per-axis slabs); a plain allocate() would build
-            // full-domain aux and break the snapshot copies.
-            wf.allocate_from_snapshots(vp, p.checkpoints, 3);
+        TORCH_CHECK(!p.forward_wavefields.empty(),
+                    "acoustic3d/ckpt backward requires the propagator-bound replay "
+                    "state forward_wavefields (cuda_layout.checkpoint_state_nvar / "
+                    "the forward slot table)");
+        bind_replay_state(wf, p, vp, 0);
     }
 
     // Sets 1..depth: the bisection's scratch states, each copy_state-filled
     // from its parent interval before any read.
+    // MANDATORY for the same reason as set 0: cuda_layout.recursive_state_depth
+    // makes the propagator hand 1 + depth(longest segment) sets, and the skeleton
+    // checks that total against its own bisection depth before binding.
     static void bind_or_alloc_recursive_scratch(Wavefield& wf, const BackwardInput& p,
                                                 const torch::Tensor& vp, int set,
-                                                const Wavefield& start_state)
+                                                const Wavefield& /*start_state*/)
     {
-        if (!p.forward_wavefields.empty())
-            bind_replay_state(wf, p, vp, set);
-        else
-            wf.allocate_like(vp, start_state);
+        TORCH_CHECK(!p.forward_wavefields.empty(),
+                    "acoustic3d/recursive backward requires the propagator-bound "
+                    "replay state sets forward_wavefields "
+                    "(cuda_layout.recursive_state_depth)");
+        bind_replay_state(wf, p, vp, set);
     }
 
     static void replay_step(const State& s, const SolverContext& ctx,

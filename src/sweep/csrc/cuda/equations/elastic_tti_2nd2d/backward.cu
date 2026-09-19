@@ -19,15 +19,16 @@
 
 namespace elastic_tti_2nd2d {
 
-// p.grads_out when the propagator bound the gradient outputs (one per prepared
-// model, BackwardOutput.grads order, zeroed per backward on the Python side),
-// else fresh zeros for an unbound caller.
-static std::vector<torch::Tensor> model_grads_or_zeros(const BackwardInput& p)
+// p.grads_out as the propagator binds it: one per prepared model, in
+// BackwardOutput.grads order, zeroed per backward on the Python side.
+// Mandatory: propagator/_c.py Wrapper.backward always sets
+// `params.grads_out = _gradient_buffers(...)`, one slot per model
+// (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
+static std::vector<torch::Tensor> model_grads(const BackwardInput& p)
 {
-    if (p.grads_out.empty())
-        return zero_model_grads(p.models);
     TORCH_CHECK(p.grads_out.size() == p.models.size(),
-                "ElasticTTI2nd backward: grads_out must hold one tensor per model (",
+                "elastic_tti_2nd2d/backward requires the propagator-bound grads_out "
+                "(one tensor per model, ",
                 p.models.size(), "), got ", p.grads_out.size());
     for (size_t i = 0; i < p.models.size(); ++i)
         TORCH_CHECK(p.grads_out[i].sizes() == p.models[i].sizes(),
@@ -53,14 +54,18 @@ enum WorkspaceSlot : int {
     N_SLOTS_BS = N_POOL + 3,
 };
 
-// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
-// the count this mode declares: any other size means the Python declaration
-// drifted.
+// Exactly the count this mode declares: any other size means the Python
+// declaration drifted.  Mandatory:
+// ElasticTTI2nd.cuda_layout.backward_workspace_shapes
+// (_adjoint_workspace_shapes) declares 9 slots for full and 11 for bs/ckpt,
+// and propagator/_c.py Wrapper.backward always sets
+// `params.adjoint_workspace = list(cp.adjoint_workspace)`.
 const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
 {
-    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
-                "ElasticTTI2nd backward: adjoint_workspace must be empty or hold ", n_slots,
-                " tensors for this mode, got ", p.adjoint_workspace.size());
+    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "elastic_tti_2nd2d/backward requires the propagator-bound adjoint_workspace (",
+                n_slots, " tensors for this mode, "
+                "cuda_layout.backward_workspace_shapes), got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
 }
 
@@ -70,21 +75,28 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_
 // fields, cuda_layout checkpoint_state_nvar = base_nvar + pml_nvar.  The
 // checkpoint snapshots hold that same list (checkpoint_tensors() is
 // state_tensors()), so it is also the CheckpointRuntime tensor count.
+// Mandatory: propagator/_c.py Wrapper.backward binds
+// `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+// on the checkpoint path, and _forward_state_shapes("ckpt") is the forward slot
+// list (base_nvar + pml_nvar = CKPT_STATE_COUNT).
 constexpr int CKPT_STATE_COUNT = 14;
 
 struct AdjointWorkspace {
     std::array<torch::Tensor, 8> t;
 
-    void init(const std::vector<torch::Tensor>& external, const torch::Tensor& like)
+    // The pool is mandatory: every mode's backward_workspace_shapes declares
+    // at least N_POOL slots, and workspace_slots() has already checked the
+    // exact count for this mode.
+    void init(const std::vector<torch::Tensor>& external)
     {
-        if (external.size() >= N_POOL) {
-            for (int i = 0; i < 8; ++i) {
-                t[i] = external[i];
-                t[i].zero_();
-            }
-        } else {
-            for (int i = 0; i < 8; ++i)
-                t[i] = torch::zeros_like(like);
+        TORCH_CHECK(external.size() >= N_POOL,
+                    "elastic_tti_2nd2d/backward requires the propagator-bound "
+                    "adjoint_workspace (at least ", static_cast<int>(N_POOL),
+                    " tensors, cuda_layout.backward_workspace_shapes), got ",
+                    external.size());
+        for (int i = 0; i < 8; ++i) {
+            t[i] = external[i];
+            t[i].zero_();
         }
     }
 
@@ -229,16 +241,18 @@ BackwardOutput backward(const BackwardInput& in)
     };
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
+    // Mandatory: propagator/_c.py Wrapper.backward always binds
+    // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`.
     WavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(rho);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "elastic_tti_2nd2d/full requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     for (auto& tsr : adjoint.state_tensors())
         tsr.zero_();
 
     auto model = stiffness_view(p.models);
-    auto grads = model_grads_or_zeros(p);
+    auto grads = model_grads(p);
     auto grad_view = stiffness_grad_view(grads);
 
     ElasticCPMLTensor cpml;
@@ -247,8 +261,8 @@ BackwardOutput backward(const BackwardInput& in)
 
     AdjointWorkspace ws;
     const auto& slots = workspace_slots(p, N_SLOTS_FULL);
-    ws.init(slots, rho);
-    auto zero_field = pool_or_zeros(slots, ZERO_FIELD, rho);   // read only
+    ws.init(slots);
+    auto zero_field = pool_required(slots, ZERO_FIELD, rho, "adjoint_workspace");   // read only
 
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto source_fields = p.source_field_indices.to(torch::kCPU);
@@ -316,23 +330,25 @@ BackwardOutput backward_bs(const BackwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     WavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(rho);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "elastic_tti_2nd2d/bs requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     for (auto& tsr : adjoint.state_tensors())
         tsr.zero_();
 
     // Reconstruction state: the RECON_WF_COUNT displacement grids bound from
     // BackwardInput.forward_wavefields (Python-zeroed, no CPML memory -- the
-    // nopml reverse kernels below never read it), or allocated here for a
-    // caller that binds nothing.
+    // nopml reverse kernels below never read it).  Mandatory:
+    // cuda_layout.bs_reconstruction_nvar = 6, and propagator/_c.py
+    // Wrapper.backward binds
+    // `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+    // on the boundary-saving path.
     WavefieldTensor forward;
-    if (wavefields_bound(p.forward_wavefields, WavefieldTensor::RECON_WF_COUNT, rho,
-                         "elastic_tti_2nd2d backward_bs reconstruction"))
-        forward.bind_recon(p.forward_wavefields);
-    else
-        forward.allocate(rho);
+    wavefields_required(p.forward_wavefields, WavefieldTensor::RECON_WF_COUNT, rho,
+                        "elastic_tti_2nd2d/bs reconstruction "
+                        "(cuda_layout.bs_reconstruction_nvar)");
+    forward.bind_recon(p.forward_wavefields);
     // (storage, level): level 1 = W_nt goes to the pre slot (later time),
     // level 0 = W_{nt-1} becomes the current state — acoustic2d convention.
     forward.ux_pre_t.copy_(p.u_last_two.select(0, 0).select(0, 1));
@@ -341,7 +357,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.uz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
 
     auto model = stiffness_view(p.models);
-    auto grads = model_grads_or_zeros(p);
+    auto grads = model_grads(p);
     auto grad_view = stiffness_grad_view(grads);
 
     ElasticCPMLTensor cpml;
@@ -350,11 +366,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     AdjointWorkspace ws;
     const auto& slots = workspace_slots(p, N_SLOTS_BS);
-    ws.init(slots, rho);
+    ws.init(slots);
 
-    auto sxx_ws = pool_or_zeros(slots, SXX_WS, rho);
-    auto szz_ws = pool_or_zeros(slots, SZZ_WS, rho);
-    auto sxz_ws = pool_or_zeros(slots, SXZ_WS, rho);
+    auto sxx_ws = pool_required(slots, SXX_WS, rho, "adjoint_workspace");
+    auto szz_ws = pool_required(slots, SZZ_WS, rho, "adjoint_workspace");
+    auto sxz_ws = pool_required(slots, SXZ_WS, rho, "adjoint_workspace");
 
     // last_two is bound but never read here: this backward seeds its
     // reconstruction from p.u_last_two directly, and an unbound saver would
@@ -525,14 +541,14 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     auto model = stiffness_view(p.models);
-    auto grads = model_grads_or_zeros(p);
+    auto grads = model_grads(p);
     auto grad_view = stiffness_grad_view(grads);
 
     WavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(rho);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "elastic_tti_2nd2d/ckpt requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ElasticCPMLTensor cpml;
@@ -541,11 +557,11 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     AdjointWorkspace ws;
     const auto& slots = workspace_slots(p, N_SLOTS_BS);
-    ws.init(slots, rho);
+    ws.init(slots);
 
-    auto sxx_ws = pool_or_zeros(slots, SXX_WS, rho);
-    auto szz_ws = pool_or_zeros(slots, SZZ_WS, rho);
-    auto sxz_ws = pool_or_zeros(slots, SXZ_WS, rho);
+    auto sxx_ws = pool_required(slots, SXX_WS, rho, "adjoint_workspace");
+    auto szz_ws = pool_required(slots, SZZ_WS, rho, "adjoint_workspace");
+    auto sxz_ws = pool_required(slots, SXZ_WS, rho, "adjoint_workspace");
 
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
     auto source_fields = p.source_field_indices.to(torch::kCPU);
@@ -559,30 +575,33 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     const int num_chunks = (static_cast<int>(p.nt) + chunk_size - 1) / chunk_size;
 
     // Replay state: the CKPT_STATE_COUNT model-shaped slots the propagator
-    // hands over as p.forward_wavefields (set 0, zeroed per backward call), or
-    // a fresh allocation for a caller that binds nothing.  Every chunk seeds
-    // all of it (zero_state / checkpoint load) before stepping.
+    // hands over as p.forward_wavefields (set 0, zeroed per backward call).
+    // Every chunk seeds all of it (zero_state / checkpoint load) before
+    // stepping.
     WavefieldTensor replay;
-    if (!p.forward_wavefields.empty()) {
+    {
         const char* what = "elastic_tti_2nd2d ckpt replay state";
+        TORCH_CHECK(!p.forward_wavefields.empty(),
+                    "elastic_tti_2nd2d/ckpt requires the propagator-bound "
+                    "forward_wavefields replay state (cuda_layout base_nvar + pml_nvar slots)");
         auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT, what);
         for (int i = 0; i < CKPT_STATE_COUNT; ++i)
             pool_slot_checked(state, i, rho, what);   // every slot is model-shaped
         replay.bind(state);
-    } else {
-        replay.allocate(rho);
     }
 
     // seg[k] = W_{start-1+k}: two history levels + one entry per replayed
     // step, so the reverse pass below has all three time slices in-chunk.
     // Python-allocated with the checkpoint snapshots at chunk_size + 2 rows
-    // (or allocated here once per call when unbound); each chunk views the
-    // prefix it uses.  Rows 0..seg_len+1 are all written before the reverse
-    // pass reads them, so the buffer is never re-zeroed between chunks.
+    // (cuda_layout.checkpoint_replay_shapes is declared, so
+    // _ensure_checkpoint_buffers always fills self.checkpoint_replay with the
+    // two slots); each chunk views the prefix it uses.  Rows 0..seg_len+1 are
+    // all written before the reverse pass reads them, so the buffer is never
+    // re-zeroed between chunks.
     std::vector<int64_t> seg_shape = rho.sizes().vec();
     seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(chunk_size + 2));
-    auto seg_ux_full = pool_or_zeros(p.checkpoint_replay, 0, seg_shape, rho.options(), "checkpoint_replay");
-    auto seg_uz_full = pool_or_zeros(p.checkpoint_replay, 1, seg_shape, rho.options(), "checkpoint_replay");
+    auto seg_ux_full = pool_required(p.checkpoint_replay, 0, seg_shape, rho.options(), "checkpoint_replay");
+    auto seg_uz_full = pool_required(p.checkpoint_replay, 1, seg_shape, rho.options(), "checkpoint_replay");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         const int start = chunk_id * chunk_size;

@@ -16,12 +16,12 @@
 //     reverse loop steps the elastic fields with the elastic NOPML kernels
 //     and images with the elastic bs kernel, so the DAS strains (and the
 //     CPML memory) are never touched there and are not carried
-//     (bind_elastic); a caller that binds nothing keeps the legacy
-//     allocate(vp, use_pml=true) plus zeroed carriers;
+//     (bind_elastic).  The list is MANDATORY -- there is no self-allocating
+//     fallback left;
 //   * the full backward has NO grad fusion: standalone imaging, then the
 //     receiver-rho correction, THEN the adjoint step;
-//   * checkpoints snapshot the full-domain state (allocate, not
-//     allocate_from_snapshots), and there is no aux-layout check; the
+//   * checkpoints snapshot the full-domain state (full grids, not per-axis
+//     aux slabs), and there is no aux-layout check; the
 //     ckpt/recursive replay state is set 0 of the Python-bound
 //     forward_wavefields (CKPT_STATE_COUNT = 18, the full bind with CPML
 //     memory), the per-segment vx/vz histories are the two
@@ -63,7 +63,7 @@ struct Driver {
     // Prologue of every entry point (sg_driver.cuh HOOK TIMING MAP, in call
     // order): validate_backward (backward only), parse_models, setup_ctx,
     // bind_or_alloc_* wavefields, init_aux_slabs, alloc_cpml, bind_grads /
-    // alloc_grads, make_workspace, make_state, adjoint_source_signs.
+    // make_workspace, make_state, adjoint_source_signs.
     // Constants, types and shared constructors live here; the per-mode
     // bind_or_alloc_* / grads / signed-sources hooks sit at the head of
     // their sections below.
@@ -176,7 +176,8 @@ struct Driver {
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
     {
         Workspace workspace;
-        init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
+        bind_adjoint_workspace_required(workspace, p.adjoint_workspace, 2,
+                                        "das_mu2d backward");
         return workspace;
     }
 
@@ -227,13 +228,18 @@ struct Driver {
     //   after the loop: save_last_state.
     // =================================================================== //
 
+    // MANDATORY: _c.py Prop.forward always hands the compiled forward its
+    // propagation state (persistent _slice_wavefield_buffers in full mode,
+    // per-call _transient_forward_wavefields otherwise), sized by
+    // cuda_layout.base_nvar + pml_nvar = CKPT_NVAR slots.
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& vp)
     {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields, true);
-        else
-            wf.allocate(vp, true);
+        TORCH_CHECK((int)p.wavefields.size() == CKPT_NVAR,
+                    "das_mu2d/forward requires the propagator-bound wavefields "
+                    "(cuda_layout.base_nvar + cuda_layout.pml_nvar = ", CKPT_NVAR,
+                    " tensors), got ", p.wavefields.size());
+        wf.bind(p.wavefields, true);
     }
 
     // (velocity/stress substeps are also replayed by the ckpt/recursive
@@ -416,32 +422,34 @@ public:
 
     // ---- backward hooks -------------------------------------------------- //
 
+    // MANDATORY, every backward mode: _ensure_wavefield_buffers allocates the
+    // adjoint set whenever a gradient is asked for and Wrapper.backward binds
+    // it (zeroed) as adjoint_wavefields.
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
-        if (!p.adjoint_wavefields.empty())
-            wf.bind(p.adjoint_wavefields, true);
-        else
-            wf.allocate(vp, true);
+        TORCH_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
+                    "das_mu2d/backward requires the propagator-bound "
+                    "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
+                    "adjoint_extra_nvar = ", ADJ_WF_COUNT, " tensors), got ",
+                    p.adjoint_wavefields.size());
+        wf.bind(p.adjoint_wavefields, true);
     }
 
     static void zero_adjoint_if_first_segment(Wavefield&, bool) {}
 
+    // The model-gradient accumulators, MANDATORY in every mode: _c.py
+    // Wrapper.backward allocates them per backward call (_gradient_buffers,
+    // one per model; cuda_layout.grads_out_has_wavelet is false here) and
+    // binds them as grads_out.
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        if (!p.grads_out.empty()) {
-            TORCH_CHECK(p.grads_out.size() == 3,
-                        "elastic grads_out must hold exactly {grad_vp, grad_vs, "
-                        "grad_rho}");
-            grads = {p.grads_out[0], p.grads_out[1], p.grads_out[2]};
-        } else {
-            alloc_grads(p.models[0], grads);
-        }
-    }
-
-    static void alloc_grads(const torch::Tensor& vp, std::vector<torch::Tensor>& grads)
-    {
-        grads = {torch::zeros_like(vp), torch::zeros_like(vp), torch::zeros_like(vp)};
+        TORCH_CHECK(p.grads_out.size() == 3,
+                    "das_mu2d/backward requires the propagator-bound grads_out "
+                    "holding exactly {grad_vp, grad_vs, grad_rho} "
+                    "(cuda_layout.grads_out_has_wavelet == false), got ",
+                    p.grads_out.size());
+        grads = {p.grads_out[0], p.grads_out[1], p.grads_out[2]};
     }
 
     static std::vector<float> adjoint_source_signs(
@@ -616,34 +624,31 @@ public:
     // loop runs the elastic NOPML kernels and the elastic bs imaging, which
     // never touch them) and no CPML memory (only the NOPML kernels step the
     // reconstruction); view()/elastic_view() hand those kernels nullptr for
-    // every unbound slot.  The carriers are the tail of the same list.  A
-    // caller that binds nothing keeps the legacy allocation (all 8 fields
-    // with CPML memory; the strains and the memory are never read).
+    // every unbound slot.  The carriers are the tail of the same list.
+    // MANDATORY: cuda_layout.bs_reconstruction_nvar = RECON_WF_COUNT grids,
+    // allocated per backward call by _forward_state_buffers and bound as
+    // forward_wavefields.
     static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
                                              const BackwardInput& p,
                                              const torch::Tensor& vp)
     {
         ReconCarriers c;
-        if (wavefields_bound(p.forward_wavefields, RECON_WF_COUNT, vp,
-                             "das_mu2d backward_bs reconstruction")) {
-            forward.bind_elastic(std::vector<torch::Tensor>(
-                p.forward_wavefields.begin(),
-                p.forward_wavefields.begin() + BS_ELASTIC_NVAR));
-            c.fvx_prev = p.forward_wavefields[RECON_SLOT_FVX_PREV];
-            c.fvz_prev = p.forward_wavefields[RECON_SLOT_FVZ_PREV];
-        } else {
-            forward.allocate(vp, true);
-            c.fvx_prev = torch::zeros_like(vp);
-            c.fvz_prev = torch::zeros_like(vp);
-        }
+        wavefields_required(p.forward_wavefields, RECON_WF_COUNT, vp,
+                            "das_mu2d/bs reconstruction list "
+                            "(cuda_layout.bs_reconstruction_nvar)");
+        forward.bind_elastic(std::vector<torch::Tensor>(
+            p.forward_wavefields.begin(),
+            p.forward_wavefields.begin() + BS_ELASTIC_NVAR));
+        c.fvx_prev = p.forward_wavefields[RECON_SLOT_FVX_PREV];
+        c.fvz_prev = p.forward_wavefields[RECON_SLOT_FVZ_PREV];
         return c;
     }
 
-    // Seed from the last snapshot: the elastic five always; the strain rows
-    // (8-field saves only -- legacy 5-field saves lack them) only when the
-    // reconstruction carries strain members, i.e. the unbound allocate()
-    // fallback.  The Python-bound reconstruction (bind_elastic) has none:
-    // the reverse loop never reads them.
+    // Seed from the last snapshot: the elastic five always.  The strain rows
+    // (8-field saves only -- legacy 5-field saves lack them) are copied only
+    // when the reconstruction carries strain members; the Python-bound
+    // reconstruction (bind_elastic, the only one left) has none, so that
+    // branch no longer fires -- the reverse loop never reads them anyway.
     static void seed_recon(Wavefield& forward, const BackwardInput& p)
     {
         forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
@@ -659,9 +664,8 @@ public:
     }
 
     // A strain-field source (the equation admits them) resolves to nullptr on
-    // the bound reconstruction and is skipped; on the allocate() fallback it
-    // still un-injects into the strain grid.  Either way the reverse loop
-    // never reads that grid, so the gradients are the same.
+    // the bound reconstruction and is skipped; the reverse loop never reads
+    // that grid, so the gradients are unaffected.
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,
@@ -808,21 +812,24 @@ public:
     // Replay state: set 0 of the Python-bound forward_wavefields (zeroed by
     // the propagator per backward call), bound in FULL -- the 8 fields and
     // the 10 CPML memory tensors the replay steps through the PML -- exactly
-    // the allocate(vp, true) layout an unbound caller still gets.  Every
-    // slot is a full grid here, so the geometry is checked as well.
+    // the layout the hand-written driver used to allocate.  Every slot is a
+    // full grid here, so the geometry is checked as well.  MANDATORY:
+    // _forward_state_shapes("ckpt" / "recursive") derives CKPT_STATE_COUNT
+    // slots from the forward slot shapes and Wrapper.backward binds them as
+    // forward_wavefields on both checkpoint entries.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        if (!p.forward_wavefields.empty()) {
-            auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
-                                       "das_mu2d ckpt replay state");
-            for (int i = 0; i < CKPT_STATE_COUNT; ++i)
-                pool_slot_checked(state, i, vp, "das_mu2d ckpt replay state");
-            forward.bind(state, true);
-        } else {
-            forward.allocate(vp, true);
-        }
+        TORCH_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
+                    "das_mu2d/ckpt requires the propagator-bound replay state "
+                    "(cuda_layout.base_nvar + pml_nvar = ", CKPT_STATE_COUNT,
+                    " tensors per set), got ", p.forward_wavefields.size());
+        auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+                                   "das_mu2d ckpt replay state");
+        for (int i = 0; i < CKPT_STATE_COUNT; ++i)
+            pool_slot_checked(state, i, vp, "das_mu2d ckpt replay state");
+        forward.bind(state, true);
     }
 
     static void check_ckpt_aux_layout(const Wavefield&, const Wavefield&) {}
@@ -834,17 +841,23 @@ public:
     // (cuda_layout.checkpoint_replay_shapes, (chunk + 1, B, 1, nz, nx) each,
     // allocated once next to the snapshots and never re-zeroed -- every row
     // the reverse pass reads was written by save_seg_velocities earlier in
-    // the same segment), or that shape allocated once per call when unbound.
-    // Taken once per call at the longest segment; the skeleton narrows the
-    // rows of a shorter last segment itself.
+    // the same segment).  MANDATORY in the chunked mode:
+    // cuda_layout.checkpoint_replay_shapes declares N_VEL histories for mode
+    // "ckpt" and _ensure_checkpoint_buffers allocates them next to the
+    // snapshots.  Taken once per call at the longest segment; the skeleton
+    // narrows the rows of a shorter last segment itself.
     static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
                                                   const torch::Tensor& vp, int max_rows)
     {
+        TORCH_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
+                    "das_mu2d/ckpt requires the propagator-bound checkpoint_replay "
+                    "(cuda_layout.checkpoint_replay_shapes, ", N_VEL,
+                    " velocity histories), got ", p.checkpoint_replay.size());
         std::vector<int64_t> shape = vp.sizes().vec();   // (max_rows, B, 1, nz, nx)
         shape.insert(shape.begin(), static_cast<int64_t>(max_rows));
         std::vector<torch::Tensor> seg;
         for (int c = 0; c < N_VEL; ++c)
-            seg.push_back(pool_or_zeros(p.checkpoint_replay, c, shape, vp.options(),
+            seg.push_back(pool_required(p.checkpoint_replay, c, shape, vp.options(),
                                         "checkpoint_replay"));
         return seg;
     }

@@ -1160,7 +1160,14 @@ class DASZhao3D(FirstOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             record_shape=record_multi(),
+            # The whole strain history, recomputed in one pass: this driver's
+            # boundary-saving backward is the checkpoint recompute (das3d/backward.cu
+            # backward_bs calls recompute_strain_history), so the buffer is needed
+            # in the bs mode as well as the checkpoint modes.
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(nt, 3, B, *grid)],
+            # ... and so is the replay state it steps: base + pml, the same list the
+            # checkpoint modes bind (there is no reverse reconstruction to size here).
+            bs_reconstruction_nvar=31,
             save_all_shape=history_fields(3),
             base_nvar=13,
             pml_nvar=18,

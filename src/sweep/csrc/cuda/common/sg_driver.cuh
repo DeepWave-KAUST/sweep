@@ -25,7 +25,7 @@
 // not named here is shared runtime (checkpoint / boundary machinery).
 // Prologue of every entry (in call order): validate_backward (backward only),
 // parse_models, setup_ctx, bind_or_alloc_* wavefields, init_aux_slabs,
-// alloc_cpml, bind_grads / alloc_grads, make_workspace, make_state,
+// alloc_cpml, bind_grads, make_workspace, make_state,
 // adjoint_source_signs.
 //
 // sg_generic_forward — per it in [it_begin, it_end):
@@ -160,7 +160,14 @@ public:
         // An empty tensor counts as unbound: nothing could be recorded into it.
         TORCH_CHECK(!stepped || (p.record_out.defined() && p.record_out.numel() > 0),
                     "stepped forward requires record_out bound from Python");
-        record = bound_or_zeros(p.record_out, {nrec_fields, d.B, nrec, p.nt}, vp.options(), "record_out");
+        // MANDATORY, every mode: every staggered equation declares
+        // cuda_layout.record_shape (record_multi), so _c.py Wrapper.forward
+        // always allocates the record and binds it as ForwardInput.record_out.
+        TORCH_CHECK(p.record_out.defined() && p.record_out.numel() > 0,
+                    Eq::NAME, "/forward requires the propagator-bound record_out "
+                    "(cuda_layout.record_shape)");
+        record = bound_required(p.record_out, {nrec_fields, d.B, nrec, p.nt}, vp.options(),
+                                "record_out");
 
         Eq::validate_forward(p);
 
@@ -178,7 +185,14 @@ public:
         if (p.save_all_wavefields) {
             TORCH_CHECK(!stepped || p.u_allt_out.defined(),
                         "stepped + save_all_wavefields requires u_allt_out bound from Python");
-            u_allt = bound_or_zeros(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(), "u_allt_out");
+            // MANDATORY whenever save_all_wavefields is on: every staggered
+            // equation declares cuda_layout.save_all_shape, and _c.py
+            // Wrapper.forward binds u_allt_out in exactly that case.
+            TORCH_CHECK(p.u_allt_out.defined() && p.u_allt_out.numel() > 0,
+                        Eq::NAME, "/full requires the propagator-bound u_allt_out "
+                        "(cuda_layout.save_all_shape)");
+            u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(),
+                                    "u_allt_out");
         }
 
         solver_.emplace(make_ctx<Eq>(p, d));
@@ -466,17 +480,21 @@ struct SgCarrierSlots {
     static constexpr int RECURSIVE_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : Eq::N_VEL;
 };
 
-// Either unbound (every slot then falls back to a fresh zero tensor, today's
-// allocation) or exactly the equation's scratch plus this mode's skeleton
-// slots (the full mode's zero grid, the checkpoint modes' velocity carriers):
-// a pool of any other size means the Python declaration drifted.
+// Exactly the equation's scratch plus this mode's skeleton slots (the full
+// mode's zero grid, the checkpoint modes' velocity carriers): a pool of any
+// other size means the Python declaration drifted.  MANDATORY -- the pool is
+// cuda_layout.backward_workspace_shapes(mode), which every staggered equation
+// declares as a callable, so _c.py sizes and binds it for every backward
+// (Prop.forward calls _ensure_adjoint_workspace_buffers(batch, workspace_mode)
+// whenever a gradient is asked for, and Wrapper.backward hands the pool over
+// as BackwardInput.adjoint_workspace).
 template <class Eq>
 void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char* mode)
 {
     const int expected = Eq::WS_CARRIERS + n_carriers;
-    TORCH_CHECK(p.adjoint_workspace.empty()
-                    || static_cast<int>(p.adjoint_workspace.size()) == expected,
-                Eq::NAME, " backward_", mode, ": adjoint_workspace must be empty or hold ",
+    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == expected,
+                Eq::NAME, " backward_", mode, ": requires the propagator-bound "
+                "adjoint_workspace (cuda_layout.backward_workspace_shapes) holding ",
                 expected, " tensors ([0-", Eq::WS_CARRIERS - 1, "] = the adjoint scratch, then ",
                 n_carriers, " skeleton slots), got ", p.adjoint_workspace.size());
 }
@@ -544,8 +562,12 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     // propagator once per gradient-bearing forward and only ever read here
     // (vel_ptrs_from_u_forward hands it out as a const float*).  Equations
     // without a v(t+1) imaging term take no slot and never index it.
+    // MANDATORY: sg_check_ckpt_workspace above already required the pool at
+    // WS_CARRIERS + FULL_COUNT, which is exactly what the "full" branch of
+    // cuda_layout.backward_workspace_shapes declares for every
+    // IMAGING_USES_NEXT_V equation of this family.
     const torch::Tensor zero_velocity = Eq::IMAGING_USES_NEXT_V
-        ? pool_or_zeros(p.adjoint_workspace, SgCarrierSlots<Eq>::FULL_ZERO, vp,
+        ? pool_required(p.adjoint_workspace, SgCarrierSlots<Eq>::FULL_ZERO, vp,
                         "adjoint_workspace")
         : torch::Tensor();
     const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
@@ -813,6 +835,10 @@ BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
 // ---- sg_generic_backward_ckpt (chunked segments with velocity carriers) ----
 
 // N_VEL model-shaped carriers from adjoint_workspace slots [first, first + N_VEL).
+// MANDATORY: the checkpoint modes' branch of
+// cuda_layout.backward_workspace_shapes declares WS_CARRIERS + CKPT_COUNT /
+// + RECURSIVE_COUNT slots, and sg_check_ckpt_workspace has already required
+// the pool at exactly that size before this runs.
 template <class Eq>
 std::vector<torch::Tensor> sg_carriers(const BackwardInput& p, int first,
                                        const torch::Tensor& vp)
@@ -820,7 +846,7 @@ std::vector<torch::Tensor> sg_carriers(const BackwardInput& p, int first,
     std::vector<torch::Tensor> v;
     v.reserve(Eq::N_VEL);
     for (int c = 0; c < Eq::N_VEL; ++c)
-        v.push_back(pool_or_zeros(p.adjoint_workspace, first + c, vp, "adjoint_workspace"));
+        v.push_back(pool_required(p.adjoint_workspace, first + c, vp, "adjoint_workspace"));
     return v;
 }
 
@@ -937,11 +963,11 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, models, launch_config,
                                               fwd_source_config, adj_source_config);
 
-    // bind_grads, not alloc_grads: ckpt refuses stepped calls (above), and
-    // grads_out is only ever bound for stepped/DD, so the bound branch is
-    // unreachable here and this is the same allocation — but it hands the
-    // hook the full BackwardInput (equations whose gradient set is not
-    // {vp, vs, rho} need all of p.models to size it).
+    // bind_grads: _c.py Wrapper.backward allocates grads_out for EVERY
+    // backward (_gradient_buffers, one per model), so the hook takes the
+    // bound accumulators here too.  It is handed the full BackwardInput
+    // because equations whose gradient set is not {vp, vs, rho} need all of
+    // p.models to check it.
     std::vector<torch::Tensor> grads;
     Eq::bind_grads(p, grads);
     sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::CKPT_COUNT, "ckpt");

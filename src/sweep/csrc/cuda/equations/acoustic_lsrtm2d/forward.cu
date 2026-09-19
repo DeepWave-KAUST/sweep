@@ -63,26 +63,35 @@ ForwardOutput forward(const ForwardInput& in) {
     SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
+    // The propagator binds the forward wavefield state on EVERY call -- the
+    // persistent save_all pool or the per-call transient set (_c.py
+    // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
+    // AcousticLSRTM.cuda_layout base_nvar 6 + pml_nvar 12) -- so the list is
+    // never empty and there is no unbound caller left to allocate for.
     AcousticWavefieldTensor bg;
     AcousticWavefieldTensor sc;
-    if (!p.wavefields.empty()) {
-        TORCH_CHECK(p.wavefields.size() == 18, "Acoustic LSRTM 2D expects 18 wavefield tensors (bg+sc, each 9 with psi double-buffer).");
-        bg.bind(slice_wavefields(p.wavefields, 0, 9), 2, true);
-        sc.bind(slice_wavefields(p.wavefields, 9, 9), 2, true);
-    } else {
-        bg.allocate(vp, 2, true, /*double_buffer_psi=*/true);
-        sc.allocate(vp, 2, true, /*double_buffer_psi=*/true);
-    }
+    TORCH_CHECK(p.wavefields.size() == 18,
+                "acoustic_lsrtm2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + pml_nvar = 18 tensors: bg+sc, each 9 with the "
+                "psi double-buffer), got ", p.wavefields.size());
+    bg.bind(slice_wavefields(p.wavefields, 0, 9), 2, true);
+    sc.bind(slice_wavefields(p.wavefields, 9, 9), 2, true);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    auto record = bound_or_zeros(p.record_out, {N, nrec, p.nt}, vp.options(), "record_out");
+    // record_out is bound on every call: AcousticLSRTM.cuda_layout declares
+    // record_shape, so cp.record_shape is never None and _c.py allocates it.
+    auto record = bound_required(p.record_out, {N, nrec, p.nt}, vp.options(),
+                                 "record_out (acoustic_lsrtm2d/forward, cuda_layout.record_shape)");
 
+    // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
+    // declares save_all_shape, so cp.u_allt_shape is never None.
     torch::Tensor bg_utt_all;
     if (p.save_all_wavefields)
-        bg_utt_all = bound_or_zeros(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(), "u_allt_out");
+        bg_utt_all = bound_required(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(),
+                                    "u_allt_out (acoustic_lsrtm2d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
         TORCH_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D checkpointing expects 6 checkpoint tensors.");

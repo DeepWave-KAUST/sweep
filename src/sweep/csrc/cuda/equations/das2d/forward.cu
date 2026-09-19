@@ -48,11 +48,15 @@ ForwardOutput forward(const ForwardInput& in)
     int nx = vp.size(3);
     int B = N * C;
 
+    // Mandatory: the propagator binds every forward state slot
+    // (cuda_layout.base_nvar + pml_nvar = 17, propagator/_c.py Wrapper.forward
+    // `params.wavefields = cp.forward_wavefields`), in every mode -- the
+    // persistent save_all pool or the per-call transient one.
     DasWavefieldTensor2D wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields);
-    else
-        wavefield.allocate(vp);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "das2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields);
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
@@ -65,19 +69,27 @@ ForwardOutput forward(const ForwardInput& in)
     int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out (propagator/_c.py Wrapper.forward,
+    // `params.record_out = _record_buffer(cp.record_shape, ...)`).
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
 
-    TORCH_CHECK(p.forward_workspace.empty() || p.forward_workspace.size() == N_FORWARD_SLOTS,
-                "DAS2D forward: forward_workspace must be empty or hold ",
-                static_cast<int>(N_FORWARD_SLOTS), " tensors, got ", p.forward_workspace.size());
+    // Mandatory: cuda_layout.forward_workspace_nvar = 4, so
+    // _transient_forward_workspace always hands over four grids.
+    TORCH_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+                "das2d/forward requires the propagator-bound forward_workspace "
+                "(cuda_layout.forward_workspace_nvar = ",
+                static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());
     const auto& ws = p.forward_workspace;
-    auto tmp_sxx_x = pool_or_zeros(ws, TMP_SXX_X, vp);
-    auto tmp_szz_z = pool_or_zeros(ws, TMP_SZZ_Z, vp);
-    auto tmp_txx_z = pool_or_zeros(ws, TMP_TXX_Z, vp);
-    auto tmp_tzz_x = pool_or_zeros(ws, TMP_TZZ_X, vp);
+    auto tmp_sxx_x = pool_required(ws, TMP_SXX_X, vp, "forward_workspace");
+    auto tmp_szz_z = pool_required(ws, TMP_SZZ_Z, vp, "forward_workspace");
+    auto tmp_txx_z = pool_required(ws, TMP_TXX_Z, vp, "forward_workspace");
+    auto tmp_tzz_x = pool_required(ws, TMP_TZZ_X, vp, "forward_workspace");
     torch::Tensor u_allt;
     if (p.save_all_wavefields) {
-        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(2), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
     }
 
     SolverContext solver{

@@ -11,7 +11,7 @@
 //   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
 //   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): rotate_adjoint_buffers rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
 //   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
-//   * BwdWorkspace is non-empty: the time-invariant adjoint coefficients C0/Cx/Cz and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz) when bound, else torch::zeros_like; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
+//   * BwdWorkspace is non-empty: the time-invariant adjoint coefficients C0/Cx/Cz and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz), which AcousticVRZ.cuda_layout.backward_workspace_shapes declares in every memory mode, so the binding is required; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
 //   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
 //   * setup_ctx and init_aux_slabs are empty: no per-edge free surface, no topography, legacy full-grid CPML aux;
 //   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (rotate_buffers); the in-kernel u_thist stays disabled (false, nullptr);
@@ -168,13 +168,16 @@ struct Driver {
         N_SLOTS                      // 7
     };
 
-    // Either unbound (every slot then falls back to a fresh zero tensor) or
-    // exactly N_SLOTS: a pool of any other size means the Python declaration
-    // drifted.
+    // Exactly N_SLOTS.  The propagator allocates the pool for every
+    // gradient-bearing forward (_ensure_adjoint_workspace_buffers over
+    // AcousticVRZ.cuda_layout.backward_workspace_shapes, which returns these
+    // seven grids in all four memory modes), so an empty or differently sized
+    // pool means the Python declaration drifted.
     static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
     {
-        TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
-                    "AcousticVRZ backward: adjoint_workspace must be empty or hold ",
+        TORCH_CHECK(p.adjoint_workspace.size() == N_SLOTS,
+                    "acoustic_vrz2d/backward requires the propagator-bound "
+                    "adjoint_workspace (cuda_layout.backward_workspace_shapes): ",
                     static_cast<int>(N_SLOTS), " tensors ([0-3]=c_x,c_z,e_x,e_z coupling, "
                     "[4-6]=C0,Cx,Cz adjoint coeffs), got ", p.adjoint_workspace.size());
         return p.adjoint_workspace;
@@ -199,17 +202,17 @@ struct Driver {
     {
         zero_wavefield_state(adjoint);
         BwdWorkspace ws;
-        // Bound pool slot when Python handed one (WorkspaceSlot above), else
-        // today's zeros_like; torch::Tensor copies share storage, so the
-        // data_ptr() the kernels take hits the bound buffer either way.
+        // The Python-bound pool slots (WorkspaceSlot above); torch::Tensor
+        // copies share storage, so the data_ptr() the kernels take hits the
+        // bound buffer.
         const auto& pool = workspace_slots(p);
-        ws.C0  = pool_or_zeros(pool, COEF_C0, s.vp_t);   // vp²       (time-invariant adjoint coeffs)
-        ws.Cx  = pool_or_zeros(pool, COEF_CX, s.vp_t);   // ∂ₓb·κ
-        ws.Cz  = pool_or_zeros(pool, COEF_CZ, s.vp_t);   // ∂_z b·κ
-        ws.c_x = pool_or_zeros(pool, C_X, s.vp_t);       // split gradient scratch (order>=6 path)
-        ws.c_z = pool_or_zeros(pool, C_Z, s.vp_t);
-        ws.e_x = pool_or_zeros(pool, E_X, s.vp_t);
-        ws.e_z = pool_or_zeros(pool, E_Z, s.vp_t);
+        ws.C0  = pool_required(pool, COEF_C0, s.vp_t, "adjoint_workspace");   // vp²       (time-invariant adjoint coeffs)
+        ws.Cx  = pool_required(pool, COEF_CX, s.vp_t, "adjoint_workspace");   // ∂ₓb·κ
+        ws.Cz  = pool_required(pool, COEF_CZ, s.vp_t, "adjoint_workspace");   // ∂_z b·κ
+        ws.c_x = pool_required(pool, C_X, s.vp_t, "adjoint_workspace");       // split gradient scratch (order>=6 path)
+        ws.c_z = pool_required(pool, C_Z, s.vp_t, "adjoint_workspace");
+        ws.e_x = pool_required(pool, E_X, s.vp_t, "adjoint_workspace");
+        ws.e_z = pool_required(pool, E_Z, s.vp_t, "adjoint_workspace");
         // Time-invariant adjoint transpose coefficients (vp², ∂ₓb·κ, ∂_z b·κ),
         // computed once so the fused adjoint kernel only multiplies by λ per step.
         BUILD_VRZ_ADJOINT_COEFFS(
@@ -290,13 +293,18 @@ struct Driver {
     //     save_last_state.
     // ===================================================================== //
 
+    // The propagator binds the forward wavefield state on EVERY call -- the
+    // persistent save_all pool or the per-call transient set (_c.py
+    // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
+    // AcousticVRZ.cuda_layout base_nvar 3 + pml_nvar 6) -- and the stepped / DD
+    // drivers rebind the same list, so there is no unbound caller to allocate for.
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
-                                      const torch::Tensor& vp)
+                                      const torch::Tensor& /*vp*/)
     {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields, 2, true);
-        else
-            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+        TORCH_CHECK(!p.wavefields.empty(),
+                    "acoustic_vrz2d/forward requires the propagator-bound wavefields "
+                    "(cuda_layout.base_nvar + pml_nvar = 9 tensors)");
+        wf.bind(p.wavefields, 2, true);
     }
 
     static void launch_step_range(const State& s, const SolverContext& ctx,
@@ -410,17 +418,18 @@ struct Driver {
                                       RTMOutput& /*illumination*/,
                                       bool /*want_adcig*/)
     {
-        if (!p.grads_out.empty()) {
-            // 3-D sibling convention: models.size()+1 slots, slot 0 (wavelet)
-            // unused -- VRZ computes no grad_wavelet.
-            TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
-                        "grads_out must hold models.size()+1 tensors "
-                        "(slot 0 = grad_wavelet, unused for VRZ)");
-            grads = {p.grads_out[1], p.grads_out[2]};
-        } else {
-            grads = {torch::zeros_like(p.models[0]),
-                     torch::zeros_like(p.models[1])};
-        }
+        // 3-D sibling convention: models.size()+1 slots, slot 0 (wavelet)
+        // unused -- VRZ computes no grad_wavelet.  _c.py builds grads_out for
+        // every backward (_gradient_buffers from
+        // cuda_layout.grads_out_has_wavelet = true plus one slot per model),
+        // and the DD runner rebinds the same list, so it is never empty.
+        TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                    "acoustic_vrz2d/backward requires the propagator-bound grads_out "
+                    "(cuda_layout.grads_out_has_wavelet + one slot per model = "
+                    "models.size()+1 tensors, slot 0 = grad_wavelet, unused for VRZ), got ",
+                    p.grads_out.size());
+        grads = {pool_required(p.grads_out, 1, p.models[0], "grads_out"),
+                 pool_required(p.grads_out, 2, p.models[1], "grads_out")};
     }
 
     static void pack_outputs(BackwardOutput& out,
@@ -441,13 +450,18 @@ struct Driver {
         return p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
     }
 
+    // _c.py binds cp.adjoint_wavefields on every backward
+    // (_ensure_wavefield_buffers allocates them whenever the forward required a
+    // gradient: base_nvar 3 + pml_nvar 6 + adjoint_extra_nvar 0 = 9 slots), and
+    // the stepped / DD drivers rebind the same list.
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
-                                      const torch::Tensor& vp)
+                                      const torch::Tensor& /*vp*/)
     {
-        if (!p.adjoint_wavefields.empty())
-            wf.bind(p.adjoint_wavefields, 2, true);
-        else
-            wf.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+        TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                    "acoustic_vrz2d/backward requires the propagator-bound "
+                    "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
+                    "adjoint_extra_nvar = 9 tensors)");
+        wf.bind(p.adjoint_wavefields, 2, true);
     }
 
     static void adjoint_step(const State& s, const SolverContext& ctx,
@@ -542,13 +556,18 @@ struct Driver {
     static RTMOutput* rtm_out_bs(const BackwardInput&, RTMOutput&)
     { return nullptr; }
 
+    // The reconstruction grids come from the propagator on every
+    // boundary-saving backward (_c.py _forward_state_buffers over
+    // cp.forward_state_shapes, which is cuda_layout.reconstruction_nvar --
+    // slot_table.ACOUSTIC_VRZ2D.recon = 3 -- in bs mode), and the DD runner
+    // rebinds the same list.
     static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
                                     const torch::Tensor& vp)
     {
-        if (!p.forward_wavefields.empty())
-            wf.bind(p.forward_wavefields, 2, false);
-        else
-            wf.allocate(vp, 2, false);
+        wavefields_required(p.forward_wavefields, RECON_WF_COUNT, vp,
+                            "acoustic_vrz2d/backward_bs reconstruction "
+                            "(cuda_layout.reconstruction_nvar)");
+        wf.bind(p.forward_wavefields, 2, false);
     }
 
     // Seed from last_two, zero u_next, and zero the boundary/PML band so stale

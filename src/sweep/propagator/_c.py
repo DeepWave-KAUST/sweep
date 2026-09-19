@@ -515,6 +515,12 @@ class Wrapper(torch.autograd.Function):
             # live on the host, and the reconstruction is stepped on the GPU
             params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes,
                                                                params.models[0].device)
+            # a driver whose boundary-saving backward recomputes the forward
+            # history (DASZhao3D) needs the replay buffer the checkpoint modes
+            # get from the snapshot pool; one backward call's lifetime, like the
+            # allocation it replaces
+            params.checkpoint_replay = _forward_state_buffers(cp.transient_replay_shapes,
+                                                              params.models[0].device)
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
             gradients = cp.backward_bs_func(params)
@@ -1347,6 +1353,17 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         fn = self._cuda_layout().save_all_shape
         return None if fn is None else tuple(int(x) for x in fn(batch_size, self.nt, self.shape_cuda))
 
+    def _transient_replay_shapes(self, batch_size, mode):
+        """``cuda_layout.checkpoint_replay_shapes`` for a mode that keeps no
+        checkpoint snapshots: a driver whose boundary-saving backward recomputes
+        the forward history needs the same replay buffer, and gets it per call
+        rather than from the persistent snapshot pool."""
+        fn = self._cuda_layout().checkpoint_replay_shapes
+        if fn is None:
+            return ()
+        return tuple(tuple(int(x) for x in shape)
+                     for shape in fn(batch_size, self.nt, self.shape_cuda, self.nt, mode))
+
     def _forward_state_shapes(self, batch_size, mode, max_segment=None):
         """Shapes of the forward state the backward rebuilds, handed over as
         ``forward_wavefields``: in bs mode ``cuda_layout.reconstruction_nvar``
@@ -1793,6 +1810,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # a backward, and zeroed them on every call after.
         derived_model_nvar_backward = 0
         forward_state_shapes = ()
+        transient_replay_shapes = ()
         if requires_backward:
             # The memory mode this backward will run in, in the backward's own
             # precedence (checkpointing beats boundary saving).
@@ -1813,6 +1831,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                                                 max_segment=max_segment, mode="ckpt")
         if requires_backward:
             forward_state_shapes = self._forward_state_shapes(batch_size, workspace_mode, max_segment)
+            if not use_checkpoint:
+                transient_replay_shapes = self._transient_replay_shapes(batch_size, workspace_mode)
         forward_wavefields, adjoint_wavefields = self._slice_wavefield_buffers(batch_size)
         if not forward_wavefields:
             forward_wavefields = self._transient_forward_wavefields(batch_size)
@@ -1909,6 +1929,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     derived_model_nvar_forward=self._derived_model_count("forward"),
                     derived_model_nvar_backward=derived_model_nvar_backward,
                     forward_state_shapes=forward_state_shapes,
+                    transient_replay_shapes=transient_replay_shapes,
                     u_allt_shape=self._history_shape(batch_size),
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),

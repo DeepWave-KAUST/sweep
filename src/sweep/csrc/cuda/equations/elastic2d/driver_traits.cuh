@@ -12,17 +12,17 @@
 //   * constants: NDIM = 2, CKPT_NVAR = 15 (CKPT_COUNT_MSG / CKPT_RECURSIVE_COUNT_MSG), BS_NVAR = 5 (vx, vz, sxx, szz, sxz), CUT_MASK_BITS = 0xF (x_lo, x_hi, z_lo, z_hi);
 //   * ADJ_WF_COUNT = 15, RECON_WF_COUNT = 7 (RECON_LIST_DESC = [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]), N_VEL = 2, IMAGING_USES_NEXT_V = true (imaging consumes the v(t+1) carriers);
 //   * models: parse_models reads {vp, vs, rho} and derives mu = rho*vs^2 and lambda = rho*(vp^2 - 2*vs^2) as torch tensors kept alive in Models (kernels hold raw pointers into them);
-//   * State = Models + one SGradParam grad_ctx + launch/source/record configs + order + nx/nz/B; Workspace = ElasticAdjointWorkspaceTensor via init_adjoint_workspace(p.adjoint_workspace, vp, 2);
+//   * State = Models + one SGradParam grad_ctx + launch/source/record configs + order + nx/nz/B; Workspace = ElasticAdjointWorkspaceTensor via bind_adjoint_workspace_required(p.adjoint_workspace, 2);
 //   * validate_forward / validate_backward and zero_adjoint_if_first_segment / zero_adjoint_if_first_segment_bs are no-ops (the adjoint buffers arrive Python-zeroed);
 //   * setup_ctx installs the per-edge free surface (set_per_edge(fs_faces, pad_lo, pad_hi)) and topo_rows / has_topo when p.has_topo;
 //   * init_aux_slabs = elastic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.allocate(pml_vals, 2);
 //   * allt_shape = (nt, 2, B, nz, nx): u_allt stores the velocities only (Vx, Vz);
 //   * field_ptr = elastic_field_ptr(wf, 2, idx); view = wf.view();
-//   * forward: bind(p.wavefields, true) or allocate(vp, 2); velocity_substep = LAUNCH_ELASTIC_VELOCITY (rho), stress_substep = LAUNCH_ELASTIC_STRESS (lambda, mu, u_this_t); both also replay in the ckpt/recursive modes;
+//   * forward: bind(p.wavefields, true) -- MANDATORY, no self-allocating fallback; velocity_substep = LAUNCH_ELASTIC_VELOCITY (rho), stress_substep = LAUNCH_ELASTIC_STRESS (lambda, mu, u_this_t); both also replay in the ckpt/recursive modes;
 //   * inject_source / record_field are plain add_source / record_kernel on the field selected by index; record_field writes record[irec];
 //   * save_boundary_fields = save_forward_2d_field for the five fields at offset -M (field index f, flag f == 4); save_last_state copies the five into last_two[0..4];
-//   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here) or alloc_grads zeros; adjoint_source_signs = elastic_adjoint_source_signs(adjoint_source, receiver_fields, 2);
-//   * bind_or_alloc_adjoint binds p.adjoint_wavefields or allocate(vp, 2);
+//   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here), MANDATORY; adjoint_source_signs = elastic_adjoint_source_signs(adjoint_source, receiver_fields, 2);
+//   * bind_or_alloc_adjoint binds p.adjoint_wavefields (MANDATORY);
 //   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; vel_ptrs_from_u_forward reads u_forward[it] and u_forward[it + 1] (zero_velocity -- the skeleton's read-only adjoint_workspace slot SgCarrierSlots::FULL_ZERO -- when it + 1 == nt);
 //   * fix_rho_grad_at_sources (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source_signed of the residual per receiver field with that field's sign;
 //   * fix_rho_grad_at_receivers = sub_receiver_rho_grad_correction at velocity receivers (stress receivers skipped) with imaging halo M;
@@ -30,11 +30,11 @@
 //   * adjoint launch helpers: stress_adjoint_prepare (10 explicit imaging pointers) / stress_adjoint_apply / velocity_adjoint_prepare / velocity_adjoint_apply, with velocity_adjoint_half = the last two;
 //   * full_mode_step: the vp/vs/rho imaging is fused into the STRESS_ADJOINT_PREPARE launch, then STRESS_ADJOINT_APPLY, VELOCITY_ADJOINT_PREPARE, VELOCITY_ADJOINT_APPLY, and the receiver-rho fix (fix_rho_grad_at_receivers) after the four launches;
 //   * plain_adjoint_step = the same four launches with all-null imaging pointers (ckpt/recursive reverse sweeps);
-//   * bs: ReconCarriers {fvx_prev, fvz_prev}; bind_or_alloc_recon takes the 7-tensor list (five fields bound with use_pml = false + two carriers) or allocate(vp, 2, false) + zero carriers;
+//   * bs: ReconCarriers {fvx_prev, fvz_prev}; bind_or_alloc_recon takes the 7-tensor list (five fields bound with use_pml = false + two carriers), MANDATORY;
 //   * seed_recon copies the five fields from u_last_two[0..4]; uninject_forward_source subtracts the forward source at the source fields (add_source_signed, sign -1);
 //   * bs_stress_half order: STRESS_NOPML -> restore sxx/szz/sxz (fields 2..4, offset -M) -> STRESS_ADJOINT_PREPARE with the imaging fused (v(it) = for_view.v*, v(it+1) = carriers) -> fix_rho_grad_at_receivers -> STRESS_ADJOINT_APPLY;
 //   * bs_velocity_half order: VELOCITY_ADJOINT_PREPARE -> VELOCITY_ADJOINT_APPLY -> elastic_capture_strips_2d (restore strips into the carriers) -> VELOCITY_NOPML (carrier write of every computed cell, then the velocity update) -> restore vx/vz (fields 0..1, offset -M) -> prefetch_next_backward_chunk_if_needed;
-//   * ckpt: bind_or_alloc_recon_ckpt binds forward_wavefields set 0 (CKPT_STATE_COUNT = 15, the full base+pml bind) or allocate_from_snapshots(vp, checkpoints, 2); check_ckpt_aux_layout compares the m_vxx aux shapes; WS_CARRIERS = 8 (the skeleton's velocity carriers follow the q*/p* scratch in adjoint_workspace, sg_driver.cuh SgCarrierSlots);
+//   * ckpt: bind_or_alloc_recon_ckpt binds forward_wavefields set 0 (CKPT_STATE_COUNT = 15, the full base+pml bind), MANDATORY; check_ckpt_aux_layout compares the m_vxx aux shapes; WS_CARRIERS = 8 (the skeleton's velocity carriers follow the q*/p* scratch in adjoint_workspace, sg_driver.cuh SgCarrierSlots);
 //   * seg buffers: seg_buffers = the two checkpoint_replay slots (vx / vz histories of shape (checkpoint_interval + 1, vp.size(0) * vp.size(1), 1, nz, nx), narrowed per chunk by the skeleton); save_seg_velocities fills a row, export_seg_next_v keeps row 1, vel_ptrs_from_seg picks now / next (next_segment_v past the end);
 //   * recursive: inject_forward_sources replays the forward source per source field; capture_velocities / vel_ptrs_from_carriers feed the imaging from the captured v(it) / v(it+1) pair.
 //
@@ -67,7 +67,7 @@ struct Driver {
     // Constants, type aliases, and the prologue hooks shared by every entry
     // point.  Prologue call order per the timing map: validate_backward
     // (backward only), parse_models, setup_ctx, bind_or_alloc_* wavefields,
-    // init_aux_slabs, alloc_cpml, bind_grads / alloc_grads, make_workspace,
+    // init_aux_slabs, alloc_cpml, bind_grads, make_workspace,
     // make_state, adjoint_source_signs.  The bind_or_alloc_* / bind_grads /
     // adjoint_source_signs hooks live in their entry-point sections below.
     // ===================================================================== //
@@ -155,7 +155,8 @@ struct Driver {
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
     {
         Workspace workspace;
-        init_adjoint_workspace(workspace, p.adjoint_workspace, vp, 2);
+        bind_adjoint_workspace_required(workspace, p.adjoint_workspace, 2,
+                                        "elastic2d backward");
         return workspace;
     }
 
@@ -201,13 +202,18 @@ struct Driver {
     //   <checkpoint save (shared runtime)> -> save_boundary_fields ->
     //   record_field; after the loop: save_last_state.
     // ===================================================================== //
+    // MANDATORY: _c.py Prop.forward always hands the compiled forward its
+    // propagation state (persistent _slice_wavefield_buffers in full mode,
+    // per-call _transient_forward_wavefields otherwise), sized by
+    // cuda_layout.base_nvar + pml_nvar = CKPT_NVAR slots.
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& vp)
     {
-        if (!p.wavefields.empty())
-            wf.bind(p.wavefields, true);
-        else
-            wf.allocate(vp, 2);
+        TORCH_CHECK((int)p.wavefields.size() == CKPT_NVAR,
+                    "elastic2d/forward requires the propagator-bound wavefields "
+                    "(cuda_layout.base_nvar + cuda_layout.pml_nvar = ", CKPT_NVAR,
+                    " tensors), got ", p.wavefields.size());
+        wf.bind(p.wavefields, true);
     }
 
     // (velocity_substep / stress_substep also replay in the ckpt/recursive
@@ -318,36 +324,35 @@ struct Driver {
     //   it == 0: image_standalone + fix_rho_grad_at_receivers, loop ends;
     //   it  > 0: full_mode_step (imaging + receiver-rho + adjoint step).
     // ===================================================================== //
+    // MANDATORY, every backward mode: _ensure_wavefield_buffers allocates the
+    // adjoint set whenever a gradient is asked for and Wrapper.backward binds
+    // it (zeroed) as adjoint_wavefields.
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
-        if (!p.adjoint_wavefields.empty())
-            wf.bind(p.adjoint_wavefields, true);
-        else
-            wf.allocate(vp, 2);
+        TORCH_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
+                    "elastic2d/backward requires the propagator-bound "
+                    "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
+                    "adjoint_extra_nvar = ", ADJ_WF_COUNT, " tensors), got ",
+                    p.adjoint_wavefields.size());
+        wf.bind(p.adjoint_wavefields, true);
     }
 
     static void zero_adjoint_if_first_segment(Wavefield&, bool) {}
 
-    // Bind the model-gradient accumulators from Python when provided
-    // (stepped), else fall back to internal zero allocation.  Bound tensors
-    // are accumulated "+=" and NOT zeroed here — Python zeroes them once
-    // before the first segment.
+    // The model-gradient accumulators, MANDATORY in every mode: _c.py
+    // Wrapper.backward allocates them per backward call (_gradient_buffers,
+    // one per model; cuda_layout.grads_out_has_wavelet is false here) and
+    // binds them as grads_out.  They are accumulated "+=" and NOT zeroed
+    // here — Python zeroes them once before the first segment.
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        if (!p.grads_out.empty()) {
-            TORCH_CHECK(p.grads_out.size() == 3,
-                        "elastic grads_out must hold exactly {grad_vp, grad_vs, "
-                        "grad_rho}");
-            grads = {p.grads_out[0], p.grads_out[1], p.grads_out[2]};
-        } else {
-            alloc_grads(p.models[0], grads);
-        }
-    }
-
-    static void alloc_grads(const torch::Tensor& vp, std::vector<torch::Tensor>& grads)
-    {
-        grads = {torch::zeros_like(vp), torch::zeros_like(vp), torch::zeros_like(vp)};
+        TORCH_CHECK(p.grads_out.size() == 3,
+                    "elastic2d/backward requires the propagator-bound grads_out "
+                    "holding exactly {grad_vp, grad_vs, grad_rho} "
+                    "(cuda_layout.grads_out_has_wavelet == false), got ",
+                    p.grads_out.size());
+        grads = {p.grads_out[0], p.grads_out[1], p.grads_out[2]};
     }
 
     static std::vector<float> adjoint_source_signs(
@@ -637,22 +642,20 @@ struct Driver {
                                              const BackwardInput& p,
                                              const torch::Tensor& vp)
     {
+        // MANDATORY: the bs backward's reconstruction state is
+        // cuda_layout.reconstruction_nvar (slot_table ELASTIC2D.recon = 7)
+        // grids, allocated per backward call by _forward_state_buffers and
+        // bound as forward_wavefields.
         ReconCarriers c;
-        if (!p.forward_wavefields.empty()) {
-            TORCH_CHECK(p.forward_wavefields.size() == 7,
-                        "elastic2d backward_bs reconstruction list must hold 7 "
-                        "tensors [vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev]; got ",
-                        p.forward_wavefields.size());
-            forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(),
-                                                    p.forward_wavefields.begin() + 5),
-                         /*use_pml=*/false);
-            c.fvx_prev = p.forward_wavefields[5];
-            c.fvz_prev = p.forward_wavefields[6];
-        } else {
-            forward.allocate(vp, 2, false);
-            c.fvx_prev = torch::zeros_like(vp);
-            c.fvz_prev = torch::zeros_like(vp);
-        }
+        wavefields_required(p.forward_wavefields, RECON_WF_COUNT, vp,
+                            "elastic2d/bs reconstruction list "
+                            "[vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev] "
+                            "(cuda_layout.reconstruction_nvar)");
+        forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(),
+                                                p.forward_wavefields.begin() + 5),
+                     /*use_pml=*/false);
+        c.fvx_prev = p.forward_wavefields[5];
+        c.fvz_prev = p.forward_wavefields[6];
         return c;
     }
 
@@ -842,16 +845,18 @@ struct Driver {
                                          const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        if (!p.forward_wavefields.empty())
-            // Set 0 of the Python-bound replay state (one set: no bisection
-            // scratch here), the full bind -- the CPML aux slots are slab-shaped
-            // exactly like the forward's.
-            forward.bind(wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
-                                       "elastic2d ckpt replay state"), true);
-        else
-            // Aux shapes must follow the Python-allocated checkpoint slots
-            // (possibly per-axis slabs).
-            forward.allocate_from_snapshots(vp, p.checkpoints, 2);
+        // Set 0 of the Python-bound replay state (one set: no bisection
+        // scratch here), the full bind -- the CPML aux slots are slab-shaped
+        // exactly like the forward's.  MANDATORY: _forward_state_shapes("ckpt"
+        // / "recursive") derives CKPT_STATE_COUNT slots from the forward slot
+        // table and Wrapper.backward binds them as forward_wavefields on both
+        // checkpoint entries.
+        TORCH_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
+                    "elastic2d/ckpt requires the propagator-bound replay state "
+                    "(cuda_layout.slots, the forward slot list: ", CKPT_STATE_COUNT,
+                    " tensors per set), got ", p.forward_wavefields.size());
+        forward.bind(wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+                                   "elastic2d ckpt replay state"), true);
     }
 
     static void check_ckpt_aux_layout(const Wavefield& forward,
@@ -868,15 +873,21 @@ struct Driver {
     // [0, N_VEL) = vx, vz: (max_rows, B, 1, nz, nx) each, bound at the longest
     // chunk (cuda_layout.checkpoint_replay_shapes) and narrowed per chunk by
     // the skeleton; row 0 = v(start), row k = v(start + k).  Never re-zeroed:
-    // every row a chunk reads it wrote first.  Unbound: allocated once per
-    // call (the hand-written driver allocated them per chunk).
+    // every row a chunk reads it wrote first.  MANDATORY in the
+    // chunked mode: cuda_layout.checkpoint_replay_shapes declares N_VEL
+    // histories for mode "ckpt" and _ensure_checkpoint_buffers allocates them
+    // next to the snapshots.
     static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
                                                   const torch::Tensor& vp, int max_rows)
     {
+        TORCH_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
+                    "elastic2d/ckpt requires the propagator-bound checkpoint_replay "
+                    "(cuda_layout.checkpoint_replay_shapes, ", N_VEL,
+                    " velocity histories), got ", p.checkpoint_replay.size());
         std::vector<torch::Tensor> seg;
         seg.reserve(N_VEL);
         for (int c = 0; c < N_VEL; ++c)
-            seg.push_back(pool_or_zeros(p.checkpoint_replay, c,
+            seg.push_back(pool_required(p.checkpoint_replay, c,
                                         {max_rows, vp.size(0) * vp.size(1), 1,
                                          vp.size(2), vp.size(3)},
                                         vp.options(), "checkpoint_replay"));

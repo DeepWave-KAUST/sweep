@@ -77,46 +77,55 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
                       dx, 0.f, dz};
 
+    // _c.py binds cp.adjoint_wavefields on every backward
+    // (_ensure_wavefield_buffers: base_nvar 3 + pml_nvar 6 = 9 slots), the same
+    // list Driver::bind_or_alloc_adjoint takes on the full/bs path.
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields, 2, true);
-    else
-        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vrz2d/backward_ckpt requires the propagator-bound "
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 9 tensors)");
+    adjoint.bind(p.adjoint_wavefields, 2, true);
     Driver::zero_wavefield_state(adjoint);
 
     // The replay state (REPLAY_STATE_NVAR above), bound through the struct's
     // full PML bind: with no psi shadows in the set the replay writes psi in
-    // place -- the path allocate() gives (swap() rotates u only) -- and the
-    // propagator zeroed the set as allocate() started from.  An unbound
-    // caller keeps the allocation.
+    // place (swap() rotates u only) and the propagator zeroed the set per call.
+    // _c.py hands it over on every checkpoint-mode backward
+    // (_forward_state_buffers over cp.forward_state_shapes, derived from
+    // slot_table.ACOUSTIC_VRZ2D's forward slots without the psi shadows), so
+    // there is no unbound caller to allocate for.
     AcousticWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
-                                   "acoustic_vrz2d ckpt replay state"), 2, true);
-    else
-        forward.allocate(vp, 2, true);
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
+                "acoustic_vrz2d/backward_ckpt requires the propagator-bound "
+                "forward_wavefields (cuda_layout.slots, the forward slots without the "
+                "psi double-buffer shadows): one replay state set of ",
+                REPLAY_STATE_NVAR, " tensors, got ", p.forward_wavefields.size());
+    forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
+                               "acoustic_vrz2d ckpt replay state"), 2, true);
 
     // {grad_vp, grad_z}: p.grads_out as the propagator binds it for the acoustic
     // family ({grad_wavelet, grad_vp, grad_z}; slot 0 unused, VRZ computes no
     // grad_wavelet), zeroed by Python once per backward -- the binding the
-    // full/bs skeleton takes (Driver::bind_backward_outputs).  Empty for an
-    // unbound caller, which then gets fresh zeros.
-    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == p.models.size() + 1,
-                "AcousticVRZ backward_ckpt: grads_out must be empty or hold models.size()+1 "
-                "tensors (slot 0 = grad_wavelet, unused for VRZ), got ", p.grads_out.size());
-    auto grad_vp = pool_or_zeros(p.grads_out, 1, vp, "grads_out");
-    auto grad_z  = pool_or_zeros(p.grads_out, 2, z, "grads_out");
+    // full/bs skeleton takes (Driver::bind_backward_outputs).  _c.py builds it
+    // for every backward, so it is never empty.
+    TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                "acoustic_vrz2d/backward_ckpt requires the propagator-bound grads_out "
+                "(cuda_layout.grads_out_has_wavelet + one slot per model = "
+                "models.size()+1 tensors, slot 0 = grad_wavelet, unused for VRZ), got ",
+                p.grads_out.size());
+    auto grad_vp = pool_required(p.grads_out, 1, vp, "grads_out");
+    auto grad_z  = pool_required(p.grads_out, 2, z, "grads_out");
     // Model-shaped per-call scratch from the propagator's pool (Driver::
     // WorkspaceSlot, the same seven slots the full/bs skeleton takes), zero at
-    // entry as the zeros_like it replaces; an unbound caller gets fresh zeros.
+    // entry; Driver::workspace_slots requires the binding.
     const auto& ws = Driver::workspace_slots(p);
-    auto C0  = pool_or_zeros(ws, Driver::COEF_C0, vp);   // vp²       (time-invariant adjoint coeffs)
-    auto Cx  = pool_or_zeros(ws, Driver::COEF_CX, vp);   // ∂ₓb·κ
-    auto Cz  = pool_or_zeros(ws, Driver::COEF_CZ, vp);   // ∂_z b·κ
-    auto c_x = pool_or_zeros(ws, Driver::C_X, vp);       // split gradient scratch (order>=6 path)
-    auto c_z = pool_or_zeros(ws, Driver::C_Z, vp);
-    auto e_x = pool_or_zeros(ws, Driver::E_X, vp);
-    auto e_z = pool_or_zeros(ws, Driver::E_Z, vp);
+    auto C0  = pool_required(ws, Driver::COEF_C0, vp, "adjoint_workspace");   // vp²       (time-invariant adjoint coeffs)
+    auto Cx  = pool_required(ws, Driver::COEF_CX, vp, "adjoint_workspace");   // ∂ₓb·κ
+    auto Cz  = pool_required(ws, Driver::COEF_CZ, vp, "adjoint_workspace");   // ∂_z b·κ
+    auto c_x = pool_required(ws, Driver::C_X, vp, "adjoint_workspace");       // split gradient scratch (order>=6 path)
+    auto c_z = pool_required(ws, Driver::C_Z, vp, "adjoint_workspace");
+    auto e_x = pool_required(ws, Driver::E_X, vp, "adjoint_workspace");
+    auto e_z = pool_required(ws, Driver::E_Z, vp, "adjoint_workspace");
     auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
         ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
         : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
@@ -193,11 +202,14 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // The replayed segment's pressure history from p.checkpoint_replay
     // (ReplaySlot above), taken once at the full max_segment rows and reused
     // by every segment: each row the reverse pass reads was written by the
-    // replay earlier in the same segment, so it is never zeroed.  An unbound
-    // caller allocates it once per call, as before.
-    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, CHUNK_FORWARD,
+    // replay earlier in the same segment, so it is never zeroed.  The
+    // propagator allocates it next to the checkpoint snapshots for both
+    // checkpoint modes (cuda_layout.checkpoint_replay_shapes is unconditional
+    // for this equation), so the binding is required.
+    auto chunk_forward = pool_required(p.checkpoint_replay, CHUNK_FORWARD,
                                        {max_segment_length, N, C, nz, nx}, vp.options(),
-                                       "checkpoint_replay");
+                                       "checkpoint_replay (acoustic_vrz2d/backward_ckpt, "
+                                       "cuda_layout.checkpoint_replay_shapes)");
 
     for (int segment_id = num_segments - 1; segment_id >= 0; --segment_id) {
         int start;

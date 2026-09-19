@@ -314,12 +314,16 @@ inline ViscoSlots visco_slots(bool damping, bool dispersion, derived::ViscoMode 
 // A complex64 grid over a pool slot laid out as float32 [B, 1, nz, nx, 2]:
 // at::view_as_complex gives the contiguous complex64 (B, 1, nz, nx) tensor
 // at::empty(kComplexFloat) would, which is also cuFFT's interleaved
-// cufftComplex layout.  Unbound: that at::empty, once per call.
+// cufftComplex layout.  The slot exists exactly when
+// ViscoAcoustic.cuda_layout's forward_workspace_shapes /
+// backward_workspace_shapes declared it for this mode and eq_aux composition,
+// and the propagator then binds it, so the binding is required.
 inline torch::Tensor visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool, int idx,
                                                    const torch::Tensor& like, const char* what)
 {
-    if (!pool_slot_bound(pool, idx))
-        return at::empty(like.sizes(), like.options().dtype(torch::kComplexFloat));
+    TORCH_CHECK(pool_slot_bound(pool, idx),
+                what, "[", idx, "] (complex spectrum) must be bound by the propagator "
+                "(cuda_layout forward_workspace_shapes / backward_workspace_shapes)");
     auto want = like.sizes().vec();
     want.push_back(2);
     const auto& raw = pool[idx];
@@ -333,14 +337,17 @@ inline torch::Tensor visco_acoustic2d_complex_slot(const std::vector<torch::Tens
 
 // The cuFFT work area over a pool slot: a flat float32 slot of at least
 // ceil(workspace_bytes / 4) elements (what visco_acoustic2d_fft_workspace_bytes
-// told the Python side).  Unbound: torch::empty of that size, once per call.
+// told the Python side).  Declared by ViscoAcoustic.cuda_layout whenever a
+// spectral term is on (_fft_work_area_slot asks this very binding for the size),
+// so the propagator always binds it and there is no fallback.
 inline torch::Tensor visco_acoustic2d_work_area_slot(const std::vector<torch::Tensor>& pool, int idx,
-                                                     const ViscoFFT& fft, const torch::Tensor& like,
+                                                     const ViscoFFT& fft, const torch::Tensor& /*like*/,
                                                      const char* what)
 {
     const int64_t floats = std::max<int64_t>(1, (fft.workspace_bytes() + 3) / 4);
-    if (!pool_slot_bound(pool, idx))
-        return torch::empty({floats}, like.options());
+    TORCH_CHECK(pool_slot_bound(pool, idx),
+                what, "[", idx, "] (cuFFT work area) must be bound by the propagator "
+                "(cuda_layout forward_workspace_shapes / backward_workspace_shapes)");
     const auto& raw = pool[idx];
     TORCH_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
                 what, "[", idx, "] (cuFFT work area) must be a contiguous float32 CUDA tensor");
@@ -372,20 +379,25 @@ struct ViscoScratch {
 
 // ``pool``: p.forward_workspace (mode Forward) or p.adjoint_workspace (the
 // backward modes); ``like``: the wavefield geometry (u_now_t: (B, 1, nz, nx)).
-// The pool must be empty (every slot allocated here, once per call: at::empty
-// for the complex slots and the work area, zeros for the real grids) or hold
-// exactly visco_slots(...).count tensors.
+// The pool must hold exactly visco_slots(...).count tensors.  That count is the
+// same function of (damping, dispersion, mode) that ViscoAcoustic.cuda_layout's
+// forward_workspace_shapes / backward_workspace_shapes evaluates -- the two
+// flags come from the SAME constructor switches on both sides (the eq_aux
+// composition c_eq_aux builds is what visco_acoustic2d_spectral_grids reads
+// back) -- so a bound pool of any other size means the declaration drifted.
+// count == 0 happens only in the forward mode with both spectral terms off,
+// where the propagator legitimately hands over an empty tuple.
 inline ViscoScratch visco_acoustic2d_bind_scratch(
     const std::vector<torch::Tensor>& pool, const torch::Tensor& like,
     bool damping, bool dispersion, derived::ViscoMode mode, const char* what)
 {
     ViscoScratch ws;
     ws.slots = visco_slots(damping, dispersion, mode);
-    TORCH_CHECK(pool.empty() || static_cast<int>(pool.size()) == ws.slots.count,
-                what, ": the workspace pool must be empty or hold ", ws.slots.count,
+    TORCH_CHECK(static_cast<int>(pool.size()) == ws.slots.count,
+                what, ": requires the propagator-bound workspace pool of ", ws.slots.count,
                 " tensors (visco_slots for this mode and eq_aux composition), got ", pool.size());
     if (ws.slots.carrier >= 0)
-        ws.CARRIER = pool_or_zeros(pool, ws.slots.carrier, like, what);
+        ws.CARRIER = pool_required(pool, ws.slots.carrier, like, what);
     if (!(damping || dispersion))
         return ws;
     TORCH_CHECK(like.dim() >= 2 && like.is_cuda() && like.scalar_type() == torch::kFloat,
@@ -398,9 +410,9 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
     if (ws.slots.c2 >= 0)
         ws.C2 = visco_acoustic2d_complex_slot(pool, ws.slots.c2, like, what);
     if (ws.slots.r1 >= 0)
-        ws.R1 = pool_or_zeros(pool, ws.slots.r1, like, what);
+        ws.R1 = pool_required(pool, ws.slots.r1, like, what);
     if (ws.slots.uprev >= 0)
-        ws.UPREV = pool_or_zeros(pool, ws.slots.uprev, like, what);
+        ws.UPREV = pool_required(pool, ws.slots.uprev, like, what);
     ws.fft_ws = visco_acoustic2d_work_area_slot(pool, ws.slots.fft_ws, *ws.fft, like, what);
     return ws;
 }

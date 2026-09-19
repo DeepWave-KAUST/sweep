@@ -55,14 +55,16 @@ namespace {
 enum GradSlot : int { GRAD_VP = 0, GRAD_EPS, GRAD_DELTA, GRAD_RHO, N_GRADS };
 
 // p.grads_out as the propagator binds it: {grad_vp, grad_eps, grad_delta, grad_rho}, in
-// BackwardOutput.grads order (zeroed per backward on the Python side and
-// accumulated here), or empty for an unbound caller, which then gets fresh
-// zeros per slot.
+// BackwardOutput.grads order, zeroed per backward on the Python side and
+// accumulated here.  Mandatory: propagator/_c.py Wrapper.backward always sets
+// `params.grads_out = _gradient_buffers(...)`, one slot per model
+// (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == N_GRADS,
-                "AcousticVTI1st3D backward: grads_out must be empty or hold ",
-                static_cast<int>(N_GRADS), " tensors ({grad_vp, grad_eps, grad_delta, grad_rho}), got ", p.grads_out.size());
+    TORCH_CHECK(static_cast<int>(p.grads_out.size()) == N_GRADS,
+                "acoustic_vti_1st_3d/backward requires the propagator-bound grads_out (",
+                static_cast<int>(N_GRADS), " tensors {grad_vp, grad_eps, grad_delta, grad_rho}), got ",
+                p.grads_out.size());
     return p.grads_out;
 }
 
@@ -73,13 +75,16 @@ static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 // before every gradient-bearing forward.
 enum WorkspaceSlot : int { SCRATCH_A = 0, SCRATCH_B, SCRATCH_C, ZERO_PREV, SEED_SH, SEED_SV, N_SLOTS };
 
-// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
-// N_SLOTS: a pool of any other size means the Python declaration drifted.
+// Exactly N_SLOTS: a pool of any other size means the Python declaration
+// drifted.  Mandatory: AcousticVTI1st3D.cuda_layout.backward_workspace_nvar = 6
+// in every mode, and propagator/_c.py Wrapper.backward always sets
+// `params.adjoint_workspace = list(cp.adjoint_workspace)`.
 const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
-                "AcousticVTI1st3D backward: adjoint_workspace must be empty or hold ",
-                static_cast<int>(N_SLOTS), " tensors, got ", p.adjoint_workspace.size());
+    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
+                "acoustic_vti_1st_3d/backward requires the propagator-bound adjoint_workspace (",
+                static_cast<int>(N_SLOTS), " tensors, cuda_layout.backward_workspace_nvar), got ",
+                p.adjoint_workspace.size());
     return p.adjoint_workspace;
 }
 
@@ -139,22 +144,8 @@ struct AdjWavefieldTensor3D {
         sV_t = tensors[4];
     }
 
-    void allocate(const torch::Tensor& ref)
-    {
-        auto opts  = ref.options();
-        auto shape = ref.sizes();
-        vx_t    = torch::zeros(shape, opts);
-        vy_t    = torch::zeros(shape, opts);
-        vz_t    = torch::zeros(shape, opts);
-        sH_t    = torch::zeros(shape, opts);
-        sV_t    = torch::zeros(shape, opts);
-        m_sHx_t = torch::zeros(shape, opts);
-        m_sHy_t = torch::zeros(shape, opts);
-        m_sVz_t = torch::zeros(shape, opts);
-        m_vxx_t = torch::zeros(shape, opts);
-        m_vyy_t = torch::zeros(shape, opts);
-        m_vzz_t = torch::zeros(shape, opts);
-    }
+    // No allocate(): every state this struct carries -- the adjoint, the bs
+    // reconstruction and the checkpoint replay -- is bound by the propagator.
 
     VTIWavefieldPointer3D view() const
     {
@@ -282,18 +273,20 @@ BackwardOutput backward(const BackwardInput& in)
                 "u_forward second dim must be 5 (vx, vy, vz, sH, sV); got ",
                 p.u_forward.size(1));
 
+    // Mandatory: propagator/_c.py Wrapper.backward always binds
+    // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`.
     AdjWavefieldTensor3D adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp_t);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vti_1st_3d/full requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     auto adj_view = adjoint.view();
 
     const auto& gs  = grad_slots(p);
-    auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
-    auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
-    auto grad_delta = pool_or_zeros(gs, GRAD_DELTA, delta_t, "grads_out");
-    auto grad_rho   = pool_or_zeros(gs, GRAD_RHO, rho_t, "grads_out");
+    auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_required(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     SolverContext solver{
         3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -308,15 +301,15 @@ BackwardOutput backward(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).
     const auto& ws = workspace_slots(p);
-    auto scratch_a = pool_or_zeros(ws, SCRATCH_A, vp_t);
-    auto scratch_b = pool_or_zeros(ws, SCRATCH_B, vp_t);
-    auto scratch_c = pool_or_zeros(ws, SCRATCH_C, vp_t);
+    auto scratch_a = pool_required(ws, SCRATCH_A, vp_t, "adjoint_workspace");
+    auto scratch_b = pool_required(ws, SCRATCH_B, vp_t, "adjoint_workspace");
+    auto scratch_c = pool_required(ws, SCRATCH_C, vp_t, "adjoint_workspace");
 
     // Zero buffer the size of one wavefield component, used as the "previous"
     // stress at iter `it = 0` (no prior step exists; initial state is zero).
     // ZERO_PREV is never written, and the pool is zeroed before every
     // gradient-bearing forward, so it is still zero here.
-    auto zero_state = pool_or_zeros(ws, ZERO_PREV, vp_t);
+    auto zero_state = pool_required(ws, ZERO_PREV, vp_t, "adjoint_workspace");
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
@@ -452,22 +445,24 @@ BackwardOutput backward_bs(const BackwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     AdjWavefieldTensor3D adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp_t);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vti_1st_3d/bs requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     auto adj_view = adjoint.view();
 
     // Reconstructed forward state: the RECON_WF_COUNT physical fields the
-    // propagator hands over as p.forward_wavefields (zeroed, model-shaped),
-    // or a fresh allocation for a caller that binds nothing.  Only the NOPML
-    // kernels step this state, so it carries no CPML memory.
+    // propagator hands over as p.forward_wavefields (zeroed, model-shaped).
+    // Only the NOPML kernels step this state, so it carries no CPML memory.
+    // Mandatory: cuda_layout.bs_reconstruction_nvar = 5, and
+    // propagator/_c.py Wrapper.backward binds
+    // `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+    // on the boundary-saving path.
     AdjWavefieldTensor3D forward;
-    if (wavefields_bound(p.forward_wavefields, AdjWavefieldTensor3D::RECON_WF_COUNT, vp_t,
-                         "acoustic_vti_1st_3d backward_bs reconstruction"))
-        forward.bind_physical(p.forward_wavefields);
-    else
-        forward.allocate(vp_t);
+    wavefields_required(p.forward_wavefields, AdjWavefieldTensor3D::RECON_WF_COUNT, vp_t,
+                        "acoustic_vti_1st_3d/bs reconstruction "
+                        "(cuda_layout.bs_reconstruction_nvar)");
+    forward.bind_physical(p.forward_wavefields);
     auto for_view = forward.view();
 
     TORCH_CHECK(p.u_last_two.defined(),
@@ -480,10 +475,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.sV_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
 
     const auto& gs  = grad_slots(p);
-    auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
-    auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
-    auto grad_delta = pool_or_zeros(gs, GRAD_DELTA, delta_t, "grads_out");
-    auto grad_rho   = pool_or_zeros(gs, GRAD_RHO, rho_t, "grads_out");
+    auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_required(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 3);
@@ -519,9 +514,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).
     const auto& ws = workspace_slots(p);
-    auto scratch_a = pool_or_zeros(ws, SCRATCH_A, vp_t);
-    auto scratch_b = pool_or_zeros(ws, SCRATCH_B, vp_t);
-    auto scratch_c = pool_or_zeros(ws, SCRATCH_C, vp_t);
+    auto scratch_a = pool_required(ws, SCRATCH_A, vp_t, "adjoint_workspace");
+    auto scratch_b = pool_required(ws, SCRATCH_B, vp_t, "adjoint_workspace");
+    auto scratch_c = pool_required(ws, SCRATCH_C, vp_t, "adjoint_workspace");
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
@@ -705,28 +700,32 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     AdjWavefieldTensor3D adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp_t);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vti_1st_3d/ckpt requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     auto adj_view = adjoint.view();
     adjoint.zero_state();
 
     // Forward-state buffer used during each chunk's replay: the
     // CKPT_STATE_COUNT model-shaped slots the propagator hands over as
     // p.forward_wavefields (set 0 of the replay state, zeroed per backward
-    // call), or a fresh allocation for a caller that binds nothing.  Every
-    // chunk re-seeds all of it (zero_state / checkpoint load) before stepping,
-    // so nothing depends on the initial zeros.
+    // call).  Every chunk re-seeds all of it (zero_state / checkpoint load)
+    // before stepping, so nothing depends on the initial zeros.  Mandatory:
+    // propagator/_c.py Wrapper.backward binds
+    // `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+    // on the checkpoint path, and _forward_state_shapes("ckpt") is the forward
+    // slot list (base_nvar + pml_nvar = CKPT_STATE_COUNT).
     AdjWavefieldTensor3D fwd_state;
-    if (!p.forward_wavefields.empty()) {
+    {
         const char* what = "acoustic_vti_1st_3d ckpt replay state";
+        TORCH_CHECK(!p.forward_wavefields.empty(),
+                    "acoustic_vti_1st_3d/ckpt requires the propagator-bound "
+                    "forward_wavefields replay state (cuda_layout base_nvar + pml_nvar slots)");
         auto state = wavefield_set(p.forward_wavefields, 0, AdjWavefieldTensor3D::CKPT_STATE_COUNT, what);
         for (int i = 0; i < AdjWavefieldTensor3D::CKPT_STATE_COUNT; ++i)
             pool_slot_checked(state, i, vp_t, what);   // every slot is model-shaped
         fwd_state.bind(state);
-    } else {
-        fwd_state.allocate(vp_t);
     }
     auto fwd_view = fwd_state.view();
 
@@ -747,18 +746,18 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto cpml_view = cpml.view();
 
     const auto& gs  = grad_slots(p);
-    auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
-    auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
-    auto grad_delta = pool_or_zeros(gs, GRAD_DELTA, delta_t, "grads_out");
-    auto grad_rho   = pool_or_zeros(gs, GRAD_RHO, rho_t, "grads_out");
+    auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_required(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).
     const auto& ws = workspace_slots(p);
-    auto scratch_a = pool_or_zeros(ws, SCRATCH_A, vp_t);
-    auto scratch_b = pool_or_zeros(ws, SCRATCH_B, vp_t);
-    auto scratch_c = pool_or_zeros(ws, SCRATCH_C, vp_t);
+    auto scratch_a = pool_required(ws, SCRATCH_A, vp_t, "adjoint_workspace");
+    auto scratch_b = pool_required(ws, SCRATCH_B, vp_t, "adjoint_workspace");
+    auto scratch_c = pool_required(ws, SCRATCH_C, vp_t, "adjoint_workspace");
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
@@ -778,14 +777,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     // Per-chunk replay buffer: shape (chunk_size, 5, B, nz, ny, nx) — only the
     // 5 physical fields are needed for the gradient kernel.
-    // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto u_chunk = pool_or_zeros(p.checkpoint_replay, 0, {chunk_size, 5, B, nz, ny, nx}, vp_t.options(), "checkpoint_replay");
+    // Python-allocated with the checkpoint snapshots (cuda_layout.checkpoint_replay_shapes
+    // is declared, so _ensure_checkpoint_buffers always fills self.checkpoint_replay);
+    // every row is written by the replay before the reverse pass reads it.
+    auto u_chunk = pool_required(p.checkpoint_replay, 0, {chunk_size, 5, B, nz, ny, nx}, vp_t.options(), "checkpoint_replay");
 
     // zero_prev is read-only (ZERO_PREV stays zero, see backward()); the two seed
     // buffers are overwritten at every chunk boundary before they are read.
-    auto zero_prev = pool_or_zeros(ws, ZERO_PREV, vp_t);
-    auto seed_sH   = pool_or_zeros(ws, SEED_SH, vp_t);
-    auto seed_sV   = pool_or_zeros(ws, SEED_SV, vp_t);
+    auto zero_prev = pool_required(ws, ZERO_PREV, vp_t, "adjoint_workspace");
+    auto seed_sH   = pool_required(ws, SEED_SH, vp_t, "adjoint_workspace");
+    auto seed_sV   = pool_required(ws, SEED_SV, vp_t, "adjoint_workspace");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;

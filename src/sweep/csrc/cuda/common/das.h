@@ -53,30 +53,10 @@ struct DasWavefieldTensor2D {
     torch::Tensor m_sxx_xf_t, m_sxx_xb_t, m_szz_zf_t, m_szz_zb_t;
     torch::Tensor m_txx_zf_t, m_txx_zb_t, m_tzz_xf_t, m_tzz_xb_t;
     torch::Tensor das35_t, das54x_t, das54z_t;
-    bool allocated = false;
 
-    void allocate(const torch::Tensor& like)
-    {
-        if (allocated) return;
-        exx_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        txx_t = torch::zeros_like(like);
-        tzz_t = torch::zeros_like(like);
-        m_sxx_xf_t = torch::zeros_like(like);
-        m_sxx_xb_t = torch::zeros_like(like);
-        m_szz_zf_t = torch::zeros_like(like);
-        m_szz_zb_t = torch::zeros_like(like);
-        m_txx_zf_t = torch::zeros_like(like);
-        m_txx_zb_t = torch::zeros_like(like);
-        m_tzz_xf_t = torch::zeros_like(like);
-        m_tzz_xb_t = torch::zeros_like(like);
-        das35_t = torch::zeros_like(like);
-        das54x_t = torch::zeros_like(like);
-        das54z_t = torch::zeros_like(like);
-        allocated = true;
-    }
+    // No allocate(): every DAS 2-D caller is handed its state by the
+    // propagator (ForwardInput.wavefields, BackwardInput.adjoint_wavefields /
+    // forward_wavefields), so the driver owns no wavefield storage.
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
@@ -99,7 +79,6 @@ struct DasWavefieldTensor2D {
         das35_t = tensors[i++];
         das54x_t = tensors[i++];
         das54z_t = tensors[i++];
-        allocated = true;
     }
 
     // Boundary-saving reconstruction state (das2d backward_bs): the propagator
@@ -127,7 +106,6 @@ struct DasWavefieldTensor2D {
         das35_t = tensors[i++];
         das54x_t = tensors[i++];
         das54z_t = tensors[i++];
-        allocated = true;
     }
 
     DasWavefieldPointer2D view()
@@ -269,44 +247,9 @@ struct DasWavefieldTensor3D {
     torch::Tensor m_tyy_xf_t, m_tyy_xb_t, m_tyy_zf_t, m_tyy_zb_t;
     torch::Tensor m_tzz_xf_t, m_tzz_xb_t, m_tzz_yf_t, m_tzz_yb_t;
     torch::Tensor das35_t, das54x_t, das54y_t, das54z_t;
-    bool allocated = false;
 
-    void allocate(const torch::Tensor& like)
-    {
-        if (allocated) return;
-        exx_t = torch::zeros_like(like);
-        eyy_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        syy_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        txx_t = torch::zeros_like(like);
-        tyy_t = torch::zeros_like(like);
-        tzz_t = torch::zeros_like(like);
-        m_sxx_xf_t = torch::zeros_like(like);
-        m_sxx_xb_t = torch::zeros_like(like);
-        m_syy_yf_t = torch::zeros_like(like);
-        m_syy_yb_t = torch::zeros_like(like);
-        m_szz_zf_t = torch::zeros_like(like);
-        m_szz_zb_t = torch::zeros_like(like);
-        m_txx_yf_t = torch::zeros_like(like);
-        m_txx_yb_t = torch::zeros_like(like);
-        m_txx_zf_t = torch::zeros_like(like);
-        m_txx_zb_t = torch::zeros_like(like);
-        m_tyy_xf_t = torch::zeros_like(like);
-        m_tyy_xb_t = torch::zeros_like(like);
-        m_tyy_zf_t = torch::zeros_like(like);
-        m_tyy_zb_t = torch::zeros_like(like);
-        m_tzz_xf_t = torch::zeros_like(like);
-        m_tzz_xb_t = torch::zeros_like(like);
-        m_tzz_yf_t = torch::zeros_like(like);
-        m_tzz_yb_t = torch::zeros_like(like);
-        das35_t = torch::zeros_like(like);
-        das54x_t = torch::zeros_like(like);
-        das54y_t = torch::zeros_like(like);
-        das54z_t = torch::zeros_like(like);
-        allocated = true;
-    }
+    // No allocate(): see DasWavefieldTensor2D -- the propagator binds every
+    // DAS 3-D state list.
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
@@ -343,7 +286,6 @@ struct DasWavefieldTensor3D {
         das54x_t = tensors[i++];
         das54y_t = tensors[i++];
         das54z_t = tensors[i++];
-        allocated = true;
     }
 
     DasWavefieldPointer3D view()

@@ -214,6 +214,14 @@ struct AcousticWavefieldTensor {
     // =========================
     // Allocate (only once)
     // =========================
+    // FALLBACK ONLY.  The propagator owns every wavefield the compiled drivers
+    // step, so the acoustic-family drivers that have completed the hand-over
+    // (acoustic2d / acoustic3d) bind unconditionally and never reach this or the
+    // two allocators below; the members stay because the drivers that still keep
+    // an unbound-caller fallback call them (grep for ``.allocate(``,
+    // ``.allocate_from_snapshots(``, ``.allocate_like(`` before deleting one --
+    // when the last caller goes, so should the member).
+    //
     // double_buffer_psi_: pass true at call sites whose stepping pairs with
     // swap_pml() (the forward time loops).  The stencil kernels neighbour-read
     // psi* in the same launch that writes the new psi, so the write must land

@@ -48,11 +48,15 @@ ForwardOutput forward(const ForwardInput& in)
     const float dx = p.spacing[0];
     const float dz = p.spacing[1];
 
+    // Mandatory: the propagator binds every forward state slot
+    // (cuda_layout.base_nvar + pml_nvar = 14, propagator/_c.py Wrapper.forward
+    // `params.wavefields = cp.forward_wavefields`), in every mode -- the
+    // persistent save_all pool or the per-call transient one.
     WavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields);
-    else
-        wavefield.allocate(rho);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "elastic_tti_2nd2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields);
     auto model = stiffness_view(p.models);
 
     ElasticCPMLTensor cpml;
@@ -65,11 +69,16 @@ ForwardOutput forward(const ForwardInput& in)
     const int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, rho.options(), "record_out");
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out.
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, rho.options(), "record_out");
 
     torch::Tensor u_allt;
-    if (p.save_all_wavefields)
-        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 2, B, nz, nx}, rho.options(), "u_allt_out");
+    if (p.save_all_wavefields) {
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(2), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, rho.options(), "u_allt_out");
+    }
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -83,13 +92,16 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
-    TORCH_CHECK(p.forward_workspace.empty() || p.forward_workspace.size() == N_FORWARD_SLOTS,
-                "ElasticTTI2nd forward: forward_workspace must be empty or hold ",
-                static_cast<int>(N_FORWARD_SLOTS), " tensors, got ", p.forward_workspace.size());
+    // Mandatory: cuda_layout.forward_workspace_nvar = 3, so
+    // _transient_forward_workspace always hands over three grids.
+    TORCH_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+                "elastic_tti_2nd2d/forward requires the propagator-bound forward_workspace "
+                "(cuda_layout.forward_workspace_nvar = ",
+                static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());
     const auto& ws = p.forward_workspace;
-    auto sxx_ws = pool_or_zeros(ws, SXX_WS, rho);
-    auto szz_ws = pool_or_zeros(ws, SZZ_WS, rho);
-    auto sxz_ws = pool_or_zeros(ws, SXZ_WS, rho);
+    auto sxx_ws = pool_required(ws, SXX_WS, rho, "forward_workspace");
+    auto szz_ws = pool_required(ws, SZZ_WS, rho, "forward_workspace");
+    auto sxz_ws = pool_required(ws, SXZ_WS, rho, "forward_workspace");
 
     EffectiveBoundarySaver boundary_saver;
     const int save_width = solver.M + 1;

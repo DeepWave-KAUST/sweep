@@ -21,14 +21,16 @@ namespace {
 using derived::ViscoMode;
 
 // ---------------------------------------------------------------------------
-// Allocation contract (the forward's twin, forward.cu): with the propagator's
-// pools bound -- adjoint_wavefields, forward_wavefields (the checkpoint replay
+// Allocation contract (the forward's twin, forward.cu): the propagator's pools
+// are REQUIRED -- adjoint_wavefields, forward_wavefields (the checkpoint replay
 // state sets), checkpoint_replay (the chunk history), adjoint_workspace (the
 // imaging carrier + the spectral scratch), derived_models (the tables),
-// grads_out, illum_out -- no backward mode allocates anything on the device:
+// grads_out -- and with them no backward mode allocates anything on the device:
 // the spectral terms run on the workspace slots through the cached cuFFT plan
-// (kernels.cuh ViscoScratch / ViscoFFT).  A caller that binds nothing gets
-// each buffer allocated here once per call, never per step or per segment.
+// (kernels.cuh ViscoScratch / ViscoFFT).  illum_out is the ONE optional
+// binding: the propagator hands it over only when the caller asked for
+// illumination (compute_illumination), so bind_illumination keeps its
+// allocating branch.
 //
 // Slot layouts, each through ONE helper (kernels.cuh / derived_models.h) and
 // count-checked against the bound pool at entry:
@@ -46,9 +48,10 @@ using derived::ViscoMode;
 // need a zero halo, which the pool's zero-at-entry provides.
 // ---------------------------------------------------------------------------
 
-// p.grads_out as the propagator binds it, in BackwardOutput.grads order
-// (zeroed per backward on the Python side and accumulated here), or empty for
-// an unbound caller, which then gets fresh zeros per slot.
+// p.grads_out as the propagator binds it, in BackwardOutput.grads order,
+// zeroed per backward on the Python side and accumulated here.  _c.py builds it
+// unconditionally for every backward (_gradient_buffers from
+// cuda_layout.grads_out_has_wavelet = true plus one slot per prepared model).
 enum GradSlot : int { GRAD_WAVELET = 0, GRAD_VP, GRAD_B1, GRAD_B2, GRAD_A, N_GRADS };
 
 struct ViscoGrads {
@@ -58,16 +61,17 @@ struct ViscoGrads {
 ViscoGrads bind_grads(const BackwardInput& p)
 {
     const auto& gs = p.grads_out;
-    TORCH_CHECK(gs.empty() || gs.size() == N_GRADS,
-                "ViscoAcoustic backward: grads_out must be empty or hold ",
-                static_cast<int>(N_GRADS), " tensors "
-                "(grad_wavelet, grad, grad_B1, grad_B2, grad_A), got ", gs.size());
+    TORCH_CHECK(gs.size() == N_GRADS,
+                "visco_acoustic2d/backward requires the propagator-bound grads_out "
+                "(cuda_layout.grads_out_has_wavelet + one slot per model = ",
+                static_cast<int>(N_GRADS), " tensors: "
+                "grad_wavelet, grad, grad_B1, grad_B2, grad_A), got ", gs.size());
     ViscoGrads g;
-    g.wavelet = pool_or_zeros(gs, GRAD_WAVELET, p.forward_source, "grads_out");
-    g.vp = pool_or_zeros(gs, GRAD_VP, p.models[0], "grads_out");
-    g.B1 = pool_or_zeros(gs, GRAD_B1, p.models[1], "grads_out");
-    g.B2 = pool_or_zeros(gs, GRAD_B2, p.models[2], "grads_out");
-    g.A = pool_or_zeros(gs, GRAD_A, p.models[3], "grads_out");
+    g.wavelet = pool_required(gs, GRAD_WAVELET, p.forward_source, "grads_out");
+    g.vp = pool_required(gs, GRAD_VP, p.models[0], "grads_out");
+    g.B1 = pool_required(gs, GRAD_B1, p.models[1], "grads_out");
+    g.B2 = pool_required(gs, GRAD_B2, p.models[2], "grads_out");
+    g.A = pool_required(gs, GRAD_A, p.models[3], "grads_out");
     return g;
 }
 
@@ -108,16 +112,31 @@ void pack_outputs(BackwardOutput& out, const ViscoGrads& g, const RTMOutput& ill
 // like the checkpoint slots -- cuda_layout.checkpoint_state_nvar = 7 with
 // checkpoint_slot_axes), zeroed per backward call: K = 1 (chunk mode) or
 // 1 + the bisection depth (recursive mode, cuda_layout.recursive_state_depth).
-// A caller that binds nothing gets set 0 allocated from the snapshot geometry
-// and the scratch sets allocated like it.
+// _c.py hands the sets over on every checkpoint-mode backward
+// (_forward_state_buffers over cp.forward_state_shapes), and visco refuses both
+// boundary saving and DD, so the checkpoint modes are the only callers -- the
+// binding is required.
 constexpr int CKPT_STATE_COUNT = 7;
 
 void check_replay_state_sets(const BackwardInput& p, int sets, const char* what)
 {
-    TORCH_CHECK(p.forward_wavefields.empty()
-                    || static_cast<int>(p.forward_wavefields.size()) == sets * CKPT_STATE_COUNT,
-                what, " expects ", sets, " replay state set(s) of ", CKPT_STATE_COUNT,
-                " forward_wavefields, got ", p.forward_wavefields.size());
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == sets * CKPT_STATE_COUNT,
+                what, " requires the propagator-bound forward_wavefields "
+                "(cuda_layout.checkpoint_state_nvar, recursive_state_depth): ", sets,
+                " replay state set(s) of ", CKPT_STATE_COUNT, " tensors, got ",
+                p.forward_wavefields.size());
+}
+
+// The adjoint state: cuda_layout base_nvar 3 + pml_nvar 6 + adjoint_extra_nvar 2
+// = 11 slots, bound by _c.py on every backward (_ensure_wavefield_buffers
+// allocates them whenever the forward required a gradient).
+void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p, const char* mode)
+{
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "visco_acoustic2d/", mode, " requires the propagator-bound "
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
+                "adjoint_extra_nvar tensors)");
+    wf.bind(p.adjoint_wavefields, 2, true);
 }
 
 void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
@@ -366,10 +385,7 @@ void run_full_imaging_visco(
     float dt = p.dt;
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields, 2, true);
-    else
-        adjoint.allocate(vp, 2, true);
+    bind_adjoint_state(adjoint, p, "backward");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -546,19 +562,13 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields, 2, true);
-    else
-        adjoint.allocate(vp, 2, true);
+    bind_adjoint_state(adjoint, p, "backward_ckpt");
 
     // The chunk replay state: set 0 of p.forward_wavefields (the only set in
     // chunk mode), zeroed by the propagator, loaded per chunk below.
-    check_replay_state_sets(p, 1, "visco_acoustic2d backward_ckpt");
+    check_replay_state_sets(p, 1, "visco_acoustic2d/backward_ckpt");
     AcousticWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        bind_replay_state(forward, p, vp, 0);
-    else
-        forward.allocate_from_snapshots(vp, p.checkpoints, 2);
+    bind_replay_state(forward, p, vp, 0);
     // Slab geometry follows the FORWARD-state aux layout (the recompute runs
     // the forward kernel); the adjoint aux stays full-domain.
     acoustic_init_aux_slabs(ctx, forward);
@@ -596,7 +606,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // RAW pressure store for the chunk (the acoustic twin stores the
     // vp^2*Lap(u) carrier; visco recomputes it from raw — see kernels.cuh).
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto chunk_raw = pool_or_zeros(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(), "checkpoint_replay");
+    auto chunk_raw = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(),
+                                   "checkpoint_replay (visco_acoustic2d/backward_ckpt, "
+                                   "cuda_layout.checkpoint_replay_shapes)");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;
@@ -1019,10 +1031,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields, 2, true);
-    else
-        adjoint.allocate(vp, 2, true);
+    bind_adjoint_state(adjoint, p, "backward_recursive_ckpt");
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ViscoGrads grads = bind_grads(p);
@@ -1081,22 +1090,15 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     // (_c.py _recursive_scratch_depth) the same halving loop on the same
     // longest segment.
     const int scratch_depth = visco_recursive_scratch_depth(max_segment_length);
-    check_replay_state_sets(p, 1 + scratch_depth, "visco_acoustic2d backward_recursive_ckpt");
+    check_replay_state_sets(p, 1 + scratch_depth, "visco_acoustic2d/backward_recursive_ckpt");
 
     AcousticWavefieldTensor start_state;
-    if (!p.forward_wavefields.empty())
-        bind_replay_state(start_state, p, vp, 0);
-    else
-        start_state.allocate_from_snapshots(vp, p.checkpoints, 2);
+    bind_replay_state(start_state, p, vp, 0);
     acoustic_init_aux_slabs(ctx, start_state);
 
     std::vector<AcousticWavefieldTensor> scratch_states(scratch_depth);
-    for (int level = 0; level < scratch_depth; ++level) {
-        if (!p.forward_wavefields.empty())
-            bind_replay_state(scratch_states[level], p, vp, /*set=*/level + 1);
-        else
-            scratch_states[level].allocate_like(vp, start_state);
-    }
+    for (int level = 0; level < scratch_depth; ++level)
+        bind_replay_state(scratch_states[level], p, vp, /*set=*/level + 1);
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];

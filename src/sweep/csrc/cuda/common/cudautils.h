@@ -177,21 +177,56 @@ inline torch::Tensor pool_or_empty(const std::vector<torch::Tensor>& pool, int i
     return torch::empty_like(like);
 }
 
+// REQUIRED variant of the two above, for a slot the propagator binds on every
+// call that reaches the site (its cuda_layout declares the pool unconditionally
+// for that equation and that memory mode).  Same geometry/dtype/device checks;
+// the branch that used to allocate is the error now, so a driver that switched
+// to this cannot silently keep a shadow buffer alive when a caller forgets to
+// bind.  Sites whose binding is conditional (a layout that may declare nothing,
+// a mode that legitimately passes an empty list) keep the optional variants.
+inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int idx,
+                                   const torch::Tensor& like, const char* what)
+{
+    TORCH_CHECK(pool_slot_bound(pool, idx),
+                what, "[", idx, "] must be bound by the propagator; this driver "
+                "has no fallback allocation for it (", pool.size(), " slots bound)");
+    return pool_slot_checked(pool, idx, like, what);
+}
+
 // The same for a pool whose slots are not model-shaped (checkpoint_replay):
 // the driver states the shape it lays out and a bound slot must match it.
+inline const torch::Tensor& pool_slot_checked(const std::vector<torch::Tensor>& pool, int idx,
+                                              const std::vector<int64_t>& shape, const char* what)
+{
+    TORCH_CHECK(pool[idx].sizes().vec() == shape,
+                what, "[", idx, "] has shape ", pool[idx].sizes(),
+                " but the driver's layout is ", shape);
+    TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat && pool[idx].is_contiguous(),
+                what, "[", idx, "] must be a contiguous float32 tensor");
+    return pool[idx];
+}
+
 inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int idx,
                                    std::vector<int64_t> shape, const torch::TensorOptions& options,
                                    const char* what)
 {
-    if (static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0) {
-        TORCH_CHECK(pool[idx].sizes().vec() == shape,
-                    what, "[", idx, "] has shape ", pool[idx].sizes(),
-                    " but the driver's layout is ", shape);
-        TORCH_CHECK(pool[idx].scalar_type() == torch::kFloat && pool[idx].is_contiguous(),
-                    what, "[", idx, "] must be a contiguous float32 tensor");
-        return pool[idx];
-    }
+    if (pool_slot_bound(pool, idx))
+        return pool_slot_checked(pool, idx, shape, what);
     return torch::zeros(shape, options);
+}
+
+// REQUIRED variant of the driver-shaped slot: same checks, no fallback.
+// ``options`` is kept in the signature so switching a site is a one-word edit
+// (and so the optional/required pair reads the same at every call site).
+inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int idx,
+                                   std::vector<int64_t> shape,
+                                   const torch::TensorOptions& /*options*/,
+                                   const char* what)
+{
+    TORCH_CHECK(pool_slot_bound(pool, idx),
+                what, "[", idx, "] must be bound by the propagator; this driver "
+                "has no fallback allocation for it (", pool.size(), " slots bound)");
+    return pool_slot_checked(pool, idx, shape, what);
 }
 
 // A single Python-bound output buffer (u_allt_out, record_out) when it was
@@ -211,6 +246,19 @@ inline bool wavefields_bound(const std::vector<torch::Tensor>& list, int n,
     for (int i = 0; i < n; ++i)
         pool_slot_checked(list, i, like, what);
     return true;
+}
+
+// REQUIRED variant: the list is bound on every call that reaches the site, so
+// an empty list is a broken contract and not "the driver allocates its own".
+// Same count and per-slot geometry checks; nothing is returned because there is
+// no longer a second case to report.
+inline void wavefields_required(const std::vector<torch::Tensor>& list, int n,
+                                const torch::Tensor& like, const char* what)
+{
+    TORCH_CHECK(!list.empty(),
+                what, " must be bound by the propagator; this driver has no "
+                "fallback allocation for it");
+    wavefields_bound(list, n, like, what);
 }
 
 // One SET of a Python-bound wavefield list that holds K sets of n tensors back
@@ -251,14 +299,32 @@ inline float* ptr_or_null(const torch::Tensor& t)
     return t.defined() ? t.data_ptr<float>() : nullptr;
 }
 
-inline torch::Tensor bound_or_zeros(const torch::Tensor& bound, std::vector<int64_t> shape,
-                                    const torch::TensorOptions& options, const char* what)
+inline const torch::Tensor& bound_checked(const torch::Tensor& bound,
+                                          const std::vector<int64_t>& shape, const char* what)
 {
-    if (!bound.defined())
-        return torch::zeros(shape, options);
     TORCH_CHECK(bound.sizes().vec() == shape, what, " has shape ", bound.sizes(),
                 " but the driver's layout is ", shape);
     TORCH_CHECK(bound.scalar_type() == torch::kFloat && bound.is_contiguous(),
                 what, " must be a contiguous float32 tensor");
     return bound;
+}
+
+inline torch::Tensor bound_or_zeros(const torch::Tensor& bound, std::vector<int64_t> shape,
+                                    const torch::TensorOptions& options, const char* what)
+{
+    if (!bound.defined())
+        return torch::zeros(shape, options);
+    return bound_checked(bound, shape, what);
+}
+
+// REQUIRED variant: same shape/dtype checks, and the undefined tensor that used
+// to select the allocation is the error.  ``options`` stays in the signature for
+// the same reason as in pool_required.
+inline torch::Tensor bound_required(const torch::Tensor& bound, std::vector<int64_t> shape,
+                                    const torch::TensorOptions& /*options*/, const char* what)
+{
+    TORCH_CHECK(bound.defined(),
+                what, " must be bound by the propagator; this driver has no "
+                "fallback allocation for it");
+    return bound_checked(bound, shape, what);
 }

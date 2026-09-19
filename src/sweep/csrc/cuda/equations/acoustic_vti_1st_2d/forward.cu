@@ -35,12 +35,12 @@
 
 namespace acoustic_vti_1st_2d {
 
-// Internal wavefield-tensor helper.  Allocates 8 float tensors shaped
-// (B=N*C, 1, nz, nx) if the caller did not supply pre-allocated ones.
+// Internal wavefield-tensor helper.  Binds the 8 float tensors shaped
+// (B=N*C, 1, nz, nx) the propagator hands over; it never allocates -- the
+// forward state is always bound (cuda_layout.base_nvar + pml_nvar = 8).
 struct VTIWavefieldTensor {
     torch::Tensor vx_t, vz_t, sH_t, sV_t;
     torch::Tensor m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
-    bool allocated = false;
 
     void bind(const std::vector<torch::Tensor>& tensors, bool /*use_pml*/)
     {
@@ -55,22 +55,6 @@ struct VTIWavefieldTensor {
         m_sVz_t = tensors[5];
         m_vxx_t = tensors[6];
         m_vzz_t = tensors[7];
-        allocated = true;
-    }
-
-    void allocate(const torch::Tensor& ref, int /*dim*/)
-    {
-        auto opts = ref.options();
-        auto shape = ref.sizes();   // (N, C, nz, nx)
-        vx_t    = torch::zeros(shape, opts);
-        vz_t    = torch::zeros(shape, opts);
-        sH_t    = torch::zeros(shape, opts);
-        sV_t    = torch::zeros(shape, opts);
-        m_sHx_t = torch::zeros(shape, opts);
-        m_sVz_t = torch::zeros(shape, opts);
-        m_vxx_t = torch::zeros(shape, opts);
-        m_vzz_t = torch::zeros(shape, opts);
-        allocated = true;
     }
 
     VTIWavefieldPointer view() const
@@ -141,12 +125,15 @@ ForwardOutput forward(const ForwardInput& in)
     auto c13     = stiff.c13;
     auto inv_rho = stiff.inv_rho;
 
-    // Wavefield allocation
+    // Wavefield binding.  Mandatory: the propagator binds every forward state
+    // slot (cuda_layout.base_nvar + pml_nvar = 8, propagator/_c.py
+    // Wrapper.forward `params.wavefields = cp.forward_wavefields`), in every
+    // mode -- the persistent save_all pool or the per-call transient one.
     VTIWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, true);
-    else
-        wavefield.allocate(vp_t, 2);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "acoustic_vti_1st_2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields, true);
     auto wf = wavefield.view();
 
     // CPML (cpmls, 8 vals in 2D — same struct elastic uses)
@@ -161,11 +148,16 @@ ForwardOutput forward(const ForwardInput& in)
     auto source_fields   = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
 
-    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, vp_t.options(), "record_out");
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out.
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, vp_t.options(), "record_out");
 
     torch::Tensor u_allt;
-    if (p.save_all_wavefields)
-        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 4, B, nz, nx}, vp_t.options(), "u_allt_out");  // vx,vz,sH,sV
+    if (p.save_all_wavefields) {
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(4), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 4, B, nz, nx}, vp_t.options(), "u_allt_out");  // vx,vz,sH,sV
+    }
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,

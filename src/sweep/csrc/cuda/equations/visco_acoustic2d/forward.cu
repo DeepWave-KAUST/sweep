@@ -29,15 +29,14 @@ namespace visco_acoustic2d {
 // reverse-time reconstruction; use ckpt / full).  Per-edge free surface is
 // inherited from the acoustic2d region logic + the post-damping halo zeroing.
 //
-// Allocation contract: with the propagator's pools bound (wavefields,
-// record_out, u_allt_out, derived_models, forward_workspace) this forward
-// allocates NOTHING on the device -- the spectral terms run on
+// Allocation contract: the propagator's pools (wavefields, record_out,
+// u_allt_out, derived_models, forward_workspace) are REQUIRED, and with them
+// this forward allocates NOTHING on the device -- the spectral terms run on
 // forward_workspace slots through the cached cuFFT plan (kernels.cuh
-// ViscoScratch / ViscoFFT) and the tables come from derived_models.  A caller
-// that binds nothing gets each buffer allocated here once per call, never per
-// step; the only remaining per-call host objects are tensor views and the
-// wrapped CPU scalars of the in-place Scalar ops (div_(dt), the ifft
-// normalisation), exactly as the ATen expressions had.
+// ViscoScratch / ViscoFFT) and the tables come from derived_models.  The only
+// remaining per-call host objects are tensor views and the wrapped CPU scalars
+// of the in-place Scalar ops (div_(dt), the ifft normalisation), exactly as the
+// ATen expressions had.
 ForwardOutput forward(const ForwardInput& in) {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
 
@@ -89,25 +88,36 @@ ForwardOutput forward(const ForwardInput& in) {
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     ctx.set_cut_mask(0);
 
+    // The propagator binds the forward wavefield state on EVERY call -- the
+    // persistent save_all pool or the per-call transient set (_c.py
+    // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
+    // ViscoAcoustic.cuda_layout base_nvar 3 + pml_nvar 6, the CPML aux as
+    // per-axis slabs via pml_slot_axes).
     AcousticWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, 2, true);
-    else
-        wavefield.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "visco_acoustic2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + pml_nvar = 9 tensors)");
+    wavefield.bind(p.wavefields, 2, true);
     acoustic_init_aux_slabs(ctx, wavefield);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    auto record = bound_or_zeros(p.record_out, {N, p.receivers_loc.size(1), p.nt}, vp.options(), "record_out");
+    // record_out is bound on every call: ViscoAcoustic.cuda_layout declares
+    // record_shape, so cp.record_shape is never None and _c.py allocates it.
+    auto record = bound_required(p.record_out, {N, p.receivers_loc.size(1), p.nt}, vp.options(),
+                                 "record_out (visco_acoustic2d/forward, cuda_layout.record_shape)");
 
     // Full-mode store: RAW pressure u(t) (NOT the acoustic vp^2*Lap(u)
     // carrier) — the attenuation adjoint needs du/dt and its |k| filter; the
     // vp_step-gradient carrier is recomputed in backward (kernels.cuh).
+    // Bound whenever save_all_wavefields is on: cuda_layout declares
+    // save_all_shape, so cp.u_allt_shape is never None.
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(), "u_allt_out");
+        u_allt = bound_required(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(),
+                                "u_allt_out (visco_acoustic2d/forward, cuda_layout.save_all_shape)");
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,

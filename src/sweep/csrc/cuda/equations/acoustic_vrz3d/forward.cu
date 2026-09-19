@@ -98,39 +98,44 @@ ForwardOutput forward(const ForwardInput& in)
                     ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
     }
 
+    // The propagator binds the forward wavefield state on EVERY call -- the
+    // persistent save_all pool or the per-call transient set (_c.py
+    // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
+    // AcousticVRZ3D.cuda_layout base_nvar 3 + pml_nvar 9) -- and the stepped /
+    // DD drivers rebind the same list; a continuation segment (it_begin>0) has
+    // to keep those very tensors, since an internal allocation would zero the
+    // propagation state mid-run.
     AcousticWavefieldTensor wavefield;
-    // A continuation segment (it_begin>0) must keep the same wavefield tensors;
-    // the internal allocate() would zero the propagation state mid-run.
-    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
-                "AcousticVRZ3D stepped continuation (it_begin>0) requires "
-                "Python-bound wavefields");
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, 3, true);
-    else
-        wavefield.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "acoustic_vrz3d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + pml_nvar = 12 tensors)");
+    wavefield.bind(p.wavefields, 3, true);
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
-    // Stepped runs accumulate absolute-it writes into a Python-bound record;
-    // a per-call allocation would lose every prior segment.
-    TORCH_CHECK(!stepped || p.record_out.defined(),
-                "AcousticVRZ3D stepped forward requires record_out bound from Python");
-    auto record = bound_or_zeros(p.record_out, {N, nrec, p.nt}, vp.options(), "record_out");
-    if (p.record_out.defined())
-        TORCH_CHECK(record.is_contiguous() &&
-                    record.size(-1) == static_cast<long>(p.nt),
-                    "record_out must be contiguous with trailing dim nt");
+    // record_out is bound on every call: AcousticVRZ3D.cuda_layout declares
+    // record_shape, so cp.record_shape is never None and _c.py allocates it.
+    // Stepped runs additionally accumulate absolute-it writes into it, where a
+    // per-call allocation would lose every prior segment.
+    auto record = bound_required(p.record_out, {N, nrec, p.nt}, vp.options(),
+                                 "record_out (acoustic_vrz3d/forward, cuda_layout.record_shape)");
+    TORCH_CHECK(record.is_contiguous() &&
+                record.size(-1) == static_cast<long>(p.nt),
+                "record_out must be contiguous with trailing dim nt");
 
     // save_all_wavefields keeps a fresh per-call buffer; it is a full-run-only
     // debug path (DD uses boundary saving), so forbid it under stepped where
     // segments would clobber each other.
     TORCH_CHECK(!stepped || !p.save_all_wavefields,
                 "AcousticVRZ3D stepped forward does not support save_all_wavefields");
+    // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
+    // declares save_all_shape, so cp.u_allt_shape is never None.
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 7, B, nz, ny, nx}, vp.options(), "u_allt_out");
+        u_allt = bound_required(p.u_allt_out, {p.nt, 7, B, nz, ny, nx}, vp.options(),
+                                "u_allt_out (acoustic_vrz3d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
         TORCH_CHECK(p.checkpoints.size() == 8, "AcousticVRZ3D checkpointing expects 8 checkpoint tensors");

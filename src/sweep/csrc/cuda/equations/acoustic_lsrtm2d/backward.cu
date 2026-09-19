@@ -18,13 +18,16 @@
 namespace acoustic_lsrtm2d {
 
 // p.grads_out as the propagator binds it: {grad_wavelet, grad_vp, grad_mp}, in
-// BackwardOutput.grads order (zeroed per backward on the Python side and
-// accumulated here), or empty for an unbound caller, which then gets fresh
-// zeros per slot.
+// BackwardOutput.grads order, zeroed per backward on the Python side and
+// accumulated here.  _c.py builds it unconditionally for every backward
+// (_gradient_buffers from cuda_layout.grads_out_has_wavelet = true plus one
+// slot per model), so the binding is mandatory here.
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 3,
-                "AcousticLSRTM2D backward: grads_out must be empty or hold 3 tensors ({grad_wavelet, grad_vp, grad_mp}), got ", p.grads_out.size());
+    TORCH_CHECK(p.grads_out.size() == 3,
+                "acoustic_lsrtm2d/backward requires the propagator-bound grads_out "
+                "(cuda_layout.grads_out_has_wavelet + one slot per model = 3 tensors: "
+                "{grad_wavelet, grad_vp, grad_mp}), got ", p.grads_out.size());
     return p.grads_out;
 }
 
@@ -41,13 +44,16 @@ namespace {
 // recursive-checkpoint mode only -- the background u_tt of the replayed step.
 enum WorkspaceSlot : int { V2_LAMBDA = 0, BG_UTT, N_SLOTS_RECURSIVE, N_SLOTS_PLAIN = 1 };
 
-// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
-// the count this mode declares: any other size means the Python declaration
-// drifted.
+// Exactly the count this mode declares.  The propagator allocates the pool for
+// every gradient-bearing forward (_ensure_adjoint_workspace_buffers, driven by
+// AcousticLSRTM.cuda_layout.backward_workspace_shapes, which returns a non-empty
+// list in all four memory modes), so an empty or differently sized pool means
+// the Python declaration drifted.
 static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
 {
-    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
-                "AcousticLSRTM2D backward: adjoint_workspace must be empty or hold ", n_slots,
+    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "acoustic_lsrtm2d/backward requires the propagator-bound adjoint_workspace "
+                "(cuda_layout.backward_workspace_shapes): ", n_slots,
                 " tensors for this mode, got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
 }
@@ -64,21 +70,39 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p,
 // 1..depth = the bisection's scratch states, one per recursion level).
 constexpr int REPLAY_STATE_NVAR = 7;
 
-// Bind set `set` of p.forward_wavefields, or allocate when the caller bound
-// nothing (byte-identical fallback: zeros, in-place psi).  Every slot is
-// model-shaped (LSRTM declares no per-axis CPML slabs); bind() checks the count
-// only, so the geometry is checked here.
-static void bind_or_alloc_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
-                                       const torch::Tensor& vp, int set, const char* what)
+// Bind set `set` of p.forward_wavefields.  The propagator hands the sets over on
+// every checkpoint-mode backward (_c.py _forward_state_buffers over
+// cp.forward_state_shapes, sized from cuda_layout.checkpoint_state_nvar and
+// recursive_state_depth), so there is no unbound caller to allocate for.  Every
+// slot is model-shaped (LSRTM declares no per-axis CPML slabs); bind() checks the
+// count only, so the geometry is checked here.
+static void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+                              const torch::Tensor& vp, int set, const char* what)
 {
-    if (p.forward_wavefields.empty()) {
-        wf.allocate(vp, 2, /*use_pml=*/true);
-        return;
-    }
+    TORCH_CHECK(!p.forward_wavefields.empty(),
+                what, " requires the propagator-bound forward_wavefields "
+                "(cuda_layout.checkpoint_state_nvar replay state sets)");
     auto state = wavefield_set(p.forward_wavefields, set, REPLAY_STATE_NVAR, what);
     for (int i = 0; i < REPLAY_STATE_NVAR; ++i)
         pool_slot_checked(state, i, vp, what);
     wf.bind(state, 2, /*use_pml=*/true);
+}
+
+// The adjoint state: the first 9 of the propagator's 18 adjoint wavefield slots
+// (cuda_layout base_nvar + pml_nvar; the background field's u triple + CPML quad
+// + psi double-buffer pair).  _c.py binds cp.adjoint_wavefields on every backward
+// -- _ensure_wavefield_buffers allocates them whenever the forward required a
+// gradient -- so the list is never empty here.
+static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+                               const char* mode)
+{
+    TORCH_CHECK(p.adjoint_wavefields.size() >= 9,
+                "acoustic_lsrtm2d/", mode, " requires the propagator-bound "
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 18 tensors; "
+                "the background field takes the first 9), got ",
+                p.adjoint_wavefields.size());
+    wf.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(),
+                                       p.adjoint_wavefields.begin() + 9), 2, true);
 }
 
 // Scratch state sets the bisecting recursive backward keeps: one per recursion
@@ -105,7 +129,7 @@ static inline void run_lsrtm2d_adjoint_step(
     AcousticCPMLPointer cpml, SolverContext ctx,
     const std::vector<torch::Tensor>& workspace)
 {
-    auto v2_lambda = pool_or_zeros(workspace, V2_LAMBDA, vp);   // vp^2 * lambda_now (fully overwritten each step)
+    auto v2_lambda = pool_required(workspace, V2_LAMBDA, vp, "adjoint_workspace");   // vp^2 * lambda_now (fully overwritten each step)
     compute_v2_lambda_lsrtm2d<<<grid, block>>>(
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.nz, ctx.B);
     ACOUSTIC_LSRTM2D_ADJOINT(order, grid, block,
@@ -209,7 +233,7 @@ void process_recursive_interval_2d(
         return;
 
     if (end - start == 1) {
-        auto bg_utt = pool_or_zeros(p.adjoint_workspace, BG_UTT, vp);
+        auto bg_utt = pool_required(p.adjoint_workspace, BG_UTT, vp, "adjoint_workspace");
         auto fwd_view = start_state.view();
 
         ACOUSTIC_LSRTM2D_SINGLE(
@@ -371,10 +395,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
     int M = p.M;
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
-    else
-        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, p, "backward");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -432,9 +453,9 @@ BackwardOutput backward(const BackwardInput& in)
 
     const auto& gs = grad_slots(in);
     workspace_slots(in, N_SLOTS_PLAIN);
-    auto grad_wavelet = pool_or_zeros(gs, 0, in.forward_source, "grads_out");
-    auto grad_vp = pool_or_zeros(gs, 1, in.models[0], "grads_out");
-    auto grad_mp = pool_or_zeros(gs, 2, in.models[1], "grads_out");
+    auto grad_wavelet = pool_required(gs, 0, in.forward_source, "grads_out");
+    auto grad_vp = pool_required(gs, 1, in.models[0], "grads_out");
+    auto grad_mp = pool_required(gs, 2, in.models[1], "grads_out");
 
     run_full_imaging(in, grad_mp);
 
@@ -471,27 +492,26 @@ BackwardOutput backward_bs(const BackwardInput& in)
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
-    else
-        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, p, "backward_bs");
 
     // Background reconstruction: u_prev/u_now/u_next only (the reverse loop
-    // injects boundaries, it runs no CPML), bound from the propagator's
-    // bs_reconstruction_nvar = 3 grids when handed over.
+    // injects boundaries, it runs no CPML).  The propagator hands these over on
+    // every boundary-saving backward (_c.py _forward_state_buffers over
+    // cp.forward_state_shapes, which is cuda_layout.bs_reconstruction_nvar = 3
+    // padded grids in bs mode), so the binding is mandatory.
     AcousticWavefieldTensor forward;
-    if (wavefields_bound(p.forward_wavefields, 3, vp, "acoustic_lsrtm2d backward_bs reconstruction"))
-        forward.bind(p.forward_wavefields, 2, /*use_pml=*/false);
-    else
-        forward.allocate(vp, 2, /*use_pml=*/false);
+    wavefields_required(p.forward_wavefields, 3, vp,
+                        "acoustic_lsrtm2d/backward_bs reconstruction "
+                        "(cuda_layout.bs_reconstruction_nvar)");
+    forward.bind(p.forward_wavefields, 2, /*use_pml=*/false);
     forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
     forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
 
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);
-    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
-    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
-    auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_required(gs, 0, p.forward_source, "grads_out");
+    auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
+    auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -659,27 +679,25 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
-    else
-        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, p, "backward_ckpt");
 
     // The chunk replay state: the one set of p.forward_wavefields.  Every chunk
     // re-seeds all 7 (load the 6 checkpointed fields + zero u_next) before any
     // read, so the propagator's per-call zeroing is all the initialisation it
     // ever needs.
-    TORCH_CHECK(p.forward_wavefields.empty()
-                    || static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
-                "Acoustic LSRTM 2D backward_ckpt expects one replay state set of ", REPLAY_STATE_NVAR,
-                " forward_wavefields, got ", p.forward_wavefields.size());
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
+                "acoustic_lsrtm2d/backward_ckpt requires the propagator-bound "
+                "forward_wavefields (cuda_layout.checkpoint_state_nvar): one replay "
+                "state set of ", REPLAY_STATE_NVAR, " tensors, got ",
+                p.forward_wavefields.size());
     AcousticWavefieldTensor forward;
-    bind_or_alloc_replay_state(forward, p, vp, /*set=*/0, "acoustic_lsrtm2d ckpt replay state");
+    bind_replay_state(forward, p, vp, /*set=*/0, "acoustic_lsrtm2d ckpt replay state");
 
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);
-    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
-    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
-    auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_required(gs, 0, p.forward_source, "grads_out");
+    auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
+    auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -709,7 +727,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(), "checkpoint_replay");
+    auto chunk_forward = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(),
+                                       "checkpoint_replay (acoustic_lsrtm2d/backward_ckpt, "
+                                       "cuda_layout.checkpoint_replay_shapes)");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;
@@ -827,17 +847,14 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     AcousticWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(), p.adjoint_wavefields.begin() + 9), 2, true);
-    else
-        adjoint.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    bind_adjoint_state(adjoint, p, "backward_recursive_ckpt");
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_RECURSIVE);
-    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
-    auto grad_vp = pool_or_zeros(gs, 1, p.models[0], "grads_out");
-    auto grad_mp = pool_or_zeros(gs, 2, p.models[1], "grads_out");
+    auto grad_wavelet = pool_required(gs, 0, p.forward_source, "grads_out");
+    auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
+    auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -878,19 +895,19 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     // (_c.py _recursive_scratch_depth) mirroring recursive_checkpoint_scratch_depth
     // on the same longest segment.
     const int scratch_depth = recursive_checkpoint_scratch_depth(max_segment_length);
-    TORCH_CHECK(p.forward_wavefields.empty()
-                    || static_cast<int>(p.forward_wavefields.size()) == (1 + scratch_depth) * REPLAY_STATE_NVAR,
-                "Acoustic LSRTM 2D recursive checkpointing expects ", 1 + scratch_depth,
-                " replay state sets of ", REPLAY_STATE_NVAR, " forward_wavefields, got ",
-                p.forward_wavefields.size());
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == (1 + scratch_depth) * REPLAY_STATE_NVAR,
+                "acoustic_lsrtm2d/backward_recursive_ckpt requires the propagator-bound "
+                "forward_wavefields (cuda_layout.checkpoint_state_nvar + "
+                "recursive_state_depth): ", 1 + scratch_depth, " replay state sets of ",
+                REPLAY_STATE_NVAR, " tensors, got ", p.forward_wavefields.size());
 
     AcousticWavefieldTensor start_state;
-    bind_or_alloc_replay_state(start_state, p, vp, /*set=*/0, "acoustic_lsrtm2d recursive start state");
+    bind_replay_state(start_state, p, vp, /*set=*/0, "acoustic_lsrtm2d recursive start state");
 
     std::vector<AcousticWavefieldTensor> scratch_states(scratch_depth);
     for (int level = 0; level < scratch_depth; ++level)
-        bind_or_alloc_replay_state(scratch_states[level], p, vp, /*set=*/level + 1,
-                                   "acoustic_lsrtm2d recursive scratch state");
+        bind_replay_state(scratch_states[level], p, vp, /*set=*/level + 1,
+                          "acoustic_lsrtm2d recursive scratch state");
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];

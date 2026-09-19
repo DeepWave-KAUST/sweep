@@ -20,13 +20,15 @@
 namespace das2d {
 
 // p.grads_out as the propagator binds it: {grad_vp, grad_vs, grad_rho}, in
-// BackwardOutput.grads order (zeroed per backward on the Python side and
-// accumulated here), or empty for an unbound caller, which then gets fresh
-// zeros per slot.
+// BackwardOutput.grads order, zeroed per backward on the Python side and
+// accumulated here.  Mandatory: propagator/_c.py Wrapper.backward always sets
+// `params.grads_out = _gradient_buffers(...)`, one slot per model
+// (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 3,
-                "DAS2D backward: grads_out must be empty or hold 3 tensors ({grad_vp, grad_vs, grad_rho}), got ", p.grads_out.size());
+    TORCH_CHECK(p.grads_out.size() == 3,
+                "das2d/backward requires the propagator-bound grads_out "
+                "(3 tensors {grad_vp, grad_vs, grad_rho}), got ", p.grads_out.size());
     return p.grads_out;
 }
 
@@ -53,14 +55,17 @@ enum WorkspaceSlot : int {
     REPLAY_TMP_TXX_Z = BAR_DZZ_TXX, REPLAY_TMP_TZZ_X = BAR_DXX_TZZ,
 };
 
-// Either unbound (every slot then falls back to a fresh zero tensor) or exactly
-// the count this mode declares: any other size means the Python declaration
-// drifted.
+// Exactly the count this mode declares: any other size means the Python
+// declaration drifted.  Mandatory: DASZhao.cuda_layout.backward_workspace_shapes
+// (_das2d_adjoint_workspace) declares 9 slots for full/ckpt/recursive and 15
+// for bs, and propagator/_c.py Wrapper.backward always sets
+// `params.adjoint_workspace = list(cp.adjoint_workspace)`.
 const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
 {
-    TORCH_CHECK(p.adjoint_workspace.empty() || static_cast<int>(p.adjoint_workspace.size()) == n_slots,
-                "DAS2D backward: adjoint_workspace must be empty or hold ", n_slots,
-                " tensors for this mode, got ", p.adjoint_workspace.size());
+    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+                "das2d/backward requires the propagator-bound adjoint_workspace (",
+                n_slots, " tensors for this mode, "
+                "cuda_layout.backward_workspace_shapes), got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
 }
 
@@ -68,8 +73,10 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_
 // (set 0, zeroed per backward call): one full DasWavefieldTensor2D::bind()
 // list -- 6 physical + 8 CPML memory + 3 DAS projections, cuda_layout
 // checkpoint_state_nvar = base_nvar + pml_nvar.  The recompute steps it from
-// the quiescent zero state at it = 0, exactly the state allocate() started
-// from; an unbound caller keeps that allocation.
+// the quiescent zero state at it = 0.  Mandatory: this function runs only from
+// backward_ckpt / backward_recursive_ckpt, and propagator/_c.py Wrapper.backward
+// binds `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+// on both checkpoint paths.
 constexpr int CKPT_STATE_COUNT = 17;
 
 
@@ -97,14 +104,15 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     auto source_fields = p.source_field_indices.to(torch::kCPU);
 
     DasWavefieldTensor2D wavefield;
-    if (!p.forward_wavefields.empty()) {
+    {
         const char* what = "das2d ckpt replay state";
+        TORCH_CHECK(!p.forward_wavefields.empty(),
+                    "das2d/ckpt requires the propagator-bound forward_wavefields "
+                    "replay state (cuda_layout base_nvar + pml_nvar slots)");
         auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT, what);
         for (int i = 0; i < CKPT_STATE_COUNT; ++i)
             pool_slot_checked(state, i, vp, what);   // every slot is model-shaped
         wavefield.bind(state);
-    } else {
-        wavefield.allocate(vp);
     }
     auto wf = wavefield.view();
 
@@ -113,12 +121,14 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     auto cpml_view = cpml.view();
 
     const auto& ws = workspace_slots(p, N_SLOTS_FULL);
-    auto tmp_sxx_x = pool_or_zeros(ws, REPLAY_TMP_SXX_X, vp);
-    auto tmp_szz_z = pool_or_zeros(ws, REPLAY_TMP_SZZ_Z, vp);
-    auto tmp_txx_z = pool_or_zeros(ws, REPLAY_TMP_TXX_Z, vp);
-    auto tmp_tzz_x = pool_or_zeros(ws, REPLAY_TMP_TZZ_X, vp);
-    // Python-allocated with the checkpoint snapshots; every step is written before the backward reads it.
-    auto history = pool_or_zeros(p.checkpoint_replay, 0, {p.nt, 2, B, nz, nx}, vp.options(), "checkpoint_replay");
+    auto tmp_sxx_x = pool_required(ws, REPLAY_TMP_SXX_X, vp, "adjoint_workspace");
+    auto tmp_szz_z = pool_required(ws, REPLAY_TMP_SZZ_Z, vp, "adjoint_workspace");
+    auto tmp_txx_z = pool_required(ws, REPLAY_TMP_TXX_Z, vp, "adjoint_workspace");
+    auto tmp_tzz_x = pool_required(ws, REPLAY_TMP_TZZ_X, vp, "adjoint_workspace");
+    // Python-allocated with the checkpoint snapshots (cuda_layout.checkpoint_replay_shapes
+    // is declared, so _ensure_checkpoint_buffers always fills self.checkpoint_replay);
+    // every step is written before the backward reads it.
+    auto history = pool_required(p.checkpoint_replay, 0, {p.nt, 2, B, nz, nx}, vp.options(), "checkpoint_replay");
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -228,11 +238,15 @@ BackwardOutput backward(const BackwardInput& in)
     };
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
+    // Mandatory: propagator/_c.py Wrapper.backward always binds
+    // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`
+    // (_ensure_wavefield_buffers allocates the adjoint pool for every
+    // gradient-bearing call).
     DasWavefieldTensor2D adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "das2d/full requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
@@ -242,21 +256,21 @@ BackwardOutput backward(const BackwardInput& in)
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     const auto& gs = grad_slots(p);
-    auto grad_vp = pool_or_zeros(gs, 0, vp, "grads_out");
-    auto grad_vs = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
+    auto grad_vp = pool_required(gs, 0, vp, "grads_out");
+    auto grad_vs = pool_required(gs, 1, vp, "grads_out");
+    auto grad_rho = pool_required(gs, 2, vp, "grads_out");
 
     const auto& ws = workspace_slots(p, N_SLOTS_FULL);
-    auto zero_strain = pool_or_zeros(ws, ZERO, vp);   // read only
+    auto zero_strain = pool_required(ws, ZERO, vp, "adjoint_workspace");   // read only
 
-    auto bar_dxx_sxx = pool_or_zeros(ws, BAR_DXX_SXX, vp);
-    auto bar_dzz_szz = pool_or_zeros(ws, BAR_DZZ_SZZ, vp);
-    auto bar_dzz_txx = pool_or_zeros(ws, BAR_DZZ_TXX, vp);
-    auto bar_dxx_tzz = pool_or_zeros(ws, BAR_DXX_TZZ, vp);
-    auto bar_sxx_x = pool_or_zeros(ws, BAR_SXX_X, vp);
-    auto bar_szz_z = pool_or_zeros(ws, BAR_SZZ_Z, vp);
-    auto bar_txx_z = pool_or_zeros(ws, BAR_TXX_Z, vp);
-    auto bar_tzz_x = pool_or_zeros(ws, BAR_TZZ_X, vp);
+    auto bar_dxx_sxx = pool_required(ws, BAR_DXX_SXX, vp, "adjoint_workspace");
+    auto bar_dzz_szz = pool_required(ws, BAR_DZZ_SZZ, vp, "adjoint_workspace");
+    auto bar_dzz_txx = pool_required(ws, BAR_DZZ_TXX, vp, "adjoint_workspace");
+    auto bar_dxx_tzz = pool_required(ws, BAR_DXX_TZZ, vp, "adjoint_workspace");
+    auto bar_sxx_x = pool_required(ws, BAR_SXX_X, vp, "adjoint_workspace");
+    auto bar_szz_z = pool_required(ws, BAR_SZZ_Z, vp, "adjoint_workspace");
+    auto bar_txx_z = pool_required(ws, BAR_TXX_Z, vp, "adjoint_workspace");
+    auto bar_tzz_x = pool_required(ws, BAR_TZZ_X, vp, "adjoint_workspace");
 
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
@@ -469,21 +483,22 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto lambda = lame.lambda;
 
     DasWavefieldTensor2D adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp);
+    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+                "das2d/bs requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
 
     // Reconstruction state: the propagator binds the RECON_NVAR = 9 zeroed
     // grids RECON_LIST_DESC (no CPML memory -- the NOPML reverse kernels below
     // never read or write it, so those 8 members stay undefined and view()
-    // nulls them); a caller that binds nothing keeps the in-driver allocation.
+    // nulls them).  Mandatory: cuda_layout.bs_reconstruction_nvar = 9, and
+    // propagator/_c.py Wrapper.backward binds
+    // `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+    // on the boundary-saving path.
     DasWavefieldTensor2D forward;
-    if (wavefields_bound(p.forward_wavefields, DasWavefieldTensor2D::RECON_NVAR, vp,
-                         "das2d backward_bs reconstruction"))
-        forward.bind_recon(p.forward_wavefields);
-    else
-        forward.allocate(vp);
+    wavefields_required(p.forward_wavefields, DasWavefieldTensor2D::RECON_NVAR, vp,
+                        "das2d/bs reconstruction (cuda_layout.bs_reconstruction_nvar)");
+    forward.bind_recon(p.forward_wavefields);
     TORCH_CHECK(p.u_last_two.defined(), "DAS 2D boundary-saving backward requires the final forward state.");
     TORCH_CHECK(p.u_last_two.size(0) >= 6, "DAS 2D boundary-saving last_two must contain at least 6 fields.");
     forward.exx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
@@ -548,28 +563,28 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
     const auto& gs = grad_slots(p);
-    auto grad_vp = pool_or_zeros(gs, 0, vp, "grads_out");
-    auto grad_vs = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_rho = pool_or_zeros(gs, 2, vp, "grads_out");
+    auto grad_vp = pool_required(gs, 0, vp, "grads_out");
+    auto grad_vs = pool_required(gs, 1, vp, "grads_out");
+    auto grad_rho = pool_required(gs, 2, vp, "grads_out");
 
     const auto& ws = workspace_slots(p, N_SLOTS_BS);
-    auto zero_strain = pool_or_zeros(ws, ZERO, vp);   // read only
-    auto current_exx = pool_or_zeros(ws, CURRENT_EXX, vp);
-    auto current_ezz = pool_or_zeros(ws, CURRENT_EZZ, vp);
+    auto zero_strain = pool_required(ws, ZERO, vp, "adjoint_workspace");   // read only
+    auto current_exx = pool_required(ws, CURRENT_EXX, vp, "adjoint_workspace");
+    auto current_ezz = pool_required(ws, CURRENT_EZZ, vp, "adjoint_workspace");
 
-    auto tmp_sxx_x = pool_or_zeros(ws, TMP_SXX_X, vp);
-    auto tmp_szz_z = pool_or_zeros(ws, TMP_SZZ_Z, vp);
-    auto tmp_txx_z = pool_or_zeros(ws, TMP_TXX_Z, vp);
-    auto tmp_tzz_x = pool_or_zeros(ws, TMP_TZZ_X, vp);
+    auto tmp_sxx_x = pool_required(ws, TMP_SXX_X, vp, "adjoint_workspace");
+    auto tmp_szz_z = pool_required(ws, TMP_SZZ_Z, vp, "adjoint_workspace");
+    auto tmp_txx_z = pool_required(ws, TMP_TXX_Z, vp, "adjoint_workspace");
+    auto tmp_tzz_x = pool_required(ws, TMP_TZZ_X, vp, "adjoint_workspace");
 
-    auto bar_dxx_sxx = pool_or_zeros(ws, BAR_DXX_SXX, vp);
-    auto bar_dzz_szz = pool_or_zeros(ws, BAR_DZZ_SZZ, vp);
-    auto bar_dzz_txx = pool_or_zeros(ws, BAR_DZZ_TXX, vp);
-    auto bar_dxx_tzz = pool_or_zeros(ws, BAR_DXX_TZZ, vp);
-    auto bar_sxx_x = pool_or_zeros(ws, BAR_SXX_X, vp);
-    auto bar_szz_z = pool_or_zeros(ws, BAR_SZZ_Z, vp);
-    auto bar_txx_z = pool_or_zeros(ws, BAR_TXX_Z, vp);
-    auto bar_tzz_x = pool_or_zeros(ws, BAR_TZZ_X, vp);
+    auto bar_dxx_sxx = pool_required(ws, BAR_DXX_SXX, vp, "adjoint_workspace");
+    auto bar_dzz_szz = pool_required(ws, BAR_DZZ_SZZ, vp, "adjoint_workspace");
+    auto bar_dzz_txx = pool_required(ws, BAR_DZZ_TXX, vp, "adjoint_workspace");
+    auto bar_dxx_tzz = pool_required(ws, BAR_DXX_TZZ, vp, "adjoint_workspace");
+    auto bar_sxx_x = pool_required(ws, BAR_SXX_X, vp, "adjoint_workspace");
+    auto bar_szz_z = pool_required(ws, BAR_SZZ_Z, vp, "adjoint_workspace");
+    auto bar_txx_z = pool_required(ws, BAR_TXX_Z, vp, "adjoint_workspace");
+    auto bar_tzz_x = pool_required(ws, BAR_TZZ_X, vp, "adjoint_workspace");
 
     TORCH_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
                 "das2d::backward_bs: forward_source must be defined when source "

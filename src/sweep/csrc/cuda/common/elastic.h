@@ -270,28 +270,6 @@ struct ElasticWavefieldTensor {
         allocated = true;
     }
 
-    // Allocate state whose slot shapes follow the Python-allocated checkpoint
-    // snapshots (bind order, each [n_ckpt, B, 1, ...]); memory variables may
-    // be per-axis slabs there.  Used by the checkpoint drivers, which have no
-    // bound forward wavefield to copy the layout from.
-    void allocate_from_snapshots(const torch::Tensor& vp,
-                                 const std::vector<torch::Tensor>& snaps,
-                                 int dim_)
-    {
-        if (allocated) return;
-        TORCH_CHECK((int)snaps.size() == (dim_ == 2 ? 15 : 36),
-                    "elastic checkpoint set expects 15 (2D) / 36 (3D) tensors, got ",
-                    snaps.size());
-        std::vector<torch::Tensor> ts;
-        ts.reserve(snaps.size());
-        for (const auto& t : snaps) {
-            auto sizes = t.sizes().vec();
-            sizes.erase(sizes.begin());          // drop the n_ckpt axis
-            ts.push_back(torch::zeros(sizes, vp.options()));
-        }
-        bind(ts, true);
-    }
-
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true)
     {
         int i = 0;
@@ -739,6 +717,30 @@ inline void init_adjoint_workspace(
         workspace.bind(tensors, dim);
     else
         workspace.allocate(like, dim);
+}
+
+// Required twin of init_adjoint_workspace, for the drivers whose pool the
+// propagator ALWAYS binds: every staggered-family equation declares
+// cuda_layout.backward_workspace_shapes as a callable, so _c.py's
+// _ensure_adjoint_workspace_buffers sizes the pool for the backward's memory
+// mode and Wrapper.backward hands it over as BackwardInput.adjoint_workspace
+// on every gradient-bearing call.  There is therefore no supported path on
+// which the driver has to allocate its own q*/p* scratch -- an empty pool is
+// a Python/driver contract break, not a mode.  ``who`` names the driver and
+// mode for the message.  init_adjoint_workspace stays for the hand-written
+// APM entry points (elastic2d/elastic3d backward.cu), which are not on the
+// shared skeleton.
+inline void bind_adjoint_workspace_required(
+    ElasticAdjointWorkspaceTensor& workspace,
+    const std::vector<torch::Tensor>& tensors,
+    int dim,
+    const char* who
+)
+{
+    TORCH_CHECK(!tensors.empty(),
+                who, " requires the propagator-bound adjoint_workspace "
+                "(cuda_layout.backward_workspace_shapes); got an empty pool");
+    workspace.bind(tensors, dim);
 }
 
 inline void zero_wavefield_state(ElasticWavefieldTensor& wf)

@@ -23,12 +23,22 @@
 // equation's copy disagreed with acoustic2d in loop structure, the difference
 // lives in that equation's hooks, never in a per-equation branch here.
 //
+// Buffer ownership: every buffer these drivers read or write is allocated by
+// the propagator (src/sweep/propagator/_c.py, the only place that builds a
+// ForwardInput / BackwardInput) and bound on the input struct.  A binding the
+// propagator makes unconditionally for every equation and mode reaching a site
+// is REQUIRED here -- a missing one is a TORCH_CHECK naming the cuda_layout
+// field that declares it, never a quiet driver-side allocation.  The two
+// conditional bindings keep their fallback and say why at the site:
+// ``illum_out`` (bound only when the caller asked for illumination) and the
+// ADCIG cube (allocated by init_rtm_output for an ADCIG-only backward).
+//
 // ---------------------------------------------------------------------------
 // HOOK TIMING MAP — read this before any equation's driver_traits.cuh.
 // Per entry point, the traits hooks fire in exactly this order; everything
 // not named here is shared runtime (checkpoint / boundary machinery).
 // Prologue of every entry (in call order): validate_forward / (backward:
-// check_stepped + validate_backward + bind_backward_outputs / alloc_grads +
+// check_stepped + validate_backward + bind_backward_outputs +
 // rtm gate), bind_or_alloc_* wavefields, alloc_cpml, setup_ctx,
 // init_aux_slabs, make_state, make_bwd_workspace.
 //
@@ -224,13 +234,30 @@ public:
         // shape-blind: the per-step Eq::record hook, out.record, the record_out
         // check (contiguity and trailing nt only), and
         // _c.py::_cuda_record_to_canonical, which dispatches on syn.ndim.
-        record = bound_or_zeros(p.record_out, Eq::record_shape(d, p), vp.options(), "record_out");
+        // MANDATORY: every equation on this skeleton declares
+        // cuda_layout.record_shape (acoustic2d / acoustic3d / acoustic_vrz2d),
+        // so the propagator allocates the record and binds it as record_out on
+        // EVERY call (_c.py Wrapper.forward: ``if cp.record_shape is not None:
+        // params.record_out = _record_buffer(...)``) -- no supported path
+        // arrives here unbound, and the driver keeps no allocation for one.
+        TORCH_CHECK(p.record_out.defined(),
+                    Eq::NAME, "/forward requires the propagator-bound record_out "
+                    "(cuda_layout.record_shape)");
+        record = bound_required(p.record_out, Eq::record_shape(d, p), vp.options(), "record_out");
 
         // Wavefields for all timestep
         if (p.save_all_wavefields) {
             TORCH_CHECK(!stepped || p.u_allt_out.defined(),
                         "stepped + save_all_wavefields requires u_allt_out bound from Python");
-            u_allt = bound_or_zeros(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(), "u_allt_out");
+            // MANDATORY under save_all_wavefields: the propagator binds the
+            // history on exactly the same condition (_c.py Wrapper.forward:
+            // ``if save_all_wavefields and cp.u_allt_shape is not None``), and
+            // cuda_layout.save_all_shape is declared by every equation on this
+            // skeleton, so the flag implies the binding.
+            TORCH_CHECK(p.u_allt_out.defined(),
+                        Eq::NAME, "/forward with save_all_wavefields requires the "
+                        "propagator-bound u_allt_out (cuda_layout.save_all_shape)");
+            u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(), "u_allt_out");
         }
 
         Eq::validate_forward(p);
@@ -535,17 +562,26 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
                                     RTMOutput& illumination,
                                     bool want_adcig)
 {
-    torch::Tensor grad_wavelet, grad;
-    if (!p.grads_out.empty()) {
-        TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
-                    "grads_out must hold models.size()+1 tensors "
-                    "(slot 0 = grad_wavelet)");
-        grad_wavelet = p.grads_out[0];
-        grad = p.grads_out[1];
-    } else {
-        grad_wavelet = torch::zeros_like(p.forward_source);
-        grad = torch::zeros_like(p.models[0]);
-    }
+    // MANDATORY: the propagator builds grads_out on EVERY backward, in every
+    // memory mode (_c.py Wrapper.backward: ``params.grads_out =
+    // _gradient_buffers(cp.grads_out_has_wavelet, ...)``, unconditional), and
+    // the equations on this hook declare cuda_layout.grads_out_has_wavelet, so
+    // the list is models.size()+1 long with grad_wavelet first.
+    TORCH_CHECK(!p.grads_out.empty(),
+                Eq::NAME, " backward requires the propagator-bound grads_out "
+                "(cuda_layout.grads_out_has_wavelet: slot 0 = grad_wavelet, "
+                "then one per model)");
+    TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+                "grads_out must hold models.size()+1 tensors "
+                "(slot 0 = grad_wavelet)");
+    torch::Tensor grad_wavelet = p.grads_out[0];
+    torch::Tensor grad = p.grads_out[1];
+    // OPTIONAL, deliberately: the propagator binds illum_out only when the
+    // caller asked for illumination (_c.py Wrapper.backward: ``if
+    // params.compute_illumination and cp.illum_nvar > 0``), and it never binds
+    // the ADCIG cube at all -- so an ADCIG-only backward (compute_adcig with
+    // compute_illumination off) legitimately arrives with an empty list and the
+    // allocation below is the only way it gets its buffers.
     if (!p.illum_out.empty()) {
         TORCH_CHECK(p.illum_out.size() == 2,
                     "illum_out must be {source_illumination, receiver_illumination}");
@@ -853,8 +889,12 @@ BackwardOutput generic_backward_bs(const BackwardInput& in)
 
 // Pool slots of the two checkpoint skeletons, declared per equation in
 // cuda_layout (checkpoint_replay_shapes / backward_workspace_shapes, by memory
-// mode) and bound by the propagator; unbound, each falls back to the
-// allocation it replaces.
+// mode) and bound by the propagator.  Both declarations are unconditional for
+// the equations that instantiate these two entry points (acoustic2d /
+// acoustic3d: ``checkpoint_replay_shapes`` returns the chunk history in "ckpt"
+// mode and ``backward_workspace_shapes`` the leaf scratch in "recursive"
+// mode), so each slot is REQUIRED in the mode that reads it -- there is no
+// fallback allocation left.
 //
 // checkpoint_replay, ckpt mode: the recomputed chunk, Eq::allt_shape(d,
 // chunk_size) rows.  One buffer per call serves every chunk (the last, shorter
@@ -882,16 +922,16 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     const auto& p = in;
     BackwardOutput out;
-    TORCH_CHECK(p.checkpoint_replay.empty()
-                    || static_cast<int>(p.checkpoint_replay.size()) == N_ACOUSTIC_CKPT_REPLAY,
-                Eq::NAME, " checkpoint backward expects ", N_ACOUSTIC_CKPT_REPLAY,
-                " checkpoint_replay slot (the chunk history), got ",
+    TORCH_CHECK(static_cast<int>(p.checkpoint_replay.size()) == N_ACOUSTIC_CKPT_REPLAY,
+                Eq::NAME, "/ckpt backward requires the propagator-bound "
+                "checkpoint_replay (cuda_layout.checkpoint_replay_shapes): ",
+                N_ACOUSTIC_CKPT_REPLAY, " slot (the chunk history), got ",
                 p.checkpoint_replay.size());
-    TORCH_CHECK(p.forward_wavefields.empty()
-                    || static_cast<int>(p.forward_wavefields.size()) == Eq::CKPT_STATE_COUNT,
-                Eq::NAME, " checkpoint backward expects one replay state set of ",
-                Eq::CKPT_STATE_COUNT, " forward_wavefields, got ",
-                p.forward_wavefields.size());
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == Eq::CKPT_STATE_COUNT,
+                Eq::NAME, "/ckpt backward requires the propagator-bound replay "
+                "state (cuda_layout.checkpoint_state_nvar / the forward slot "
+                "table): one set of ", Eq::CKPT_STATE_COUNT,
+                " forward_wavefields, got ", p.forward_wavefields.size());
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints, Eq::CKPT_NVAR, true, false,
@@ -939,7 +979,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     // The recomputed chunk (ACOUSTIC_CKPT_CHUNK_FORWARD), once per call for every chunk.
-    auto chunk_forward = pool_or_zeros(p.checkpoint_replay, ACOUSTIC_CKPT_CHUNK_FORWARD,
+    auto chunk_forward = pool_required(p.checkpoint_replay, ACOUSTIC_CKPT_CHUNK_FORWARD,
                                        Eq::allt_shape(d, chunk_size), vp.options(),
                                        "checkpoint_replay");
 
@@ -1065,11 +1105,12 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     TORCH_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                 Eq::NAME, " recursive checkpointing expects ", Eq::CKPT_NVAR,
                 " checkpoint tensors");
-    TORCH_CHECK(p.adjoint_workspace.empty()
-                    || static_cast<int>(p.adjoint_workspace.size())
-                           == N_ACOUSTIC_RECURSIVE_WORKSPACE,
-                Eq::NAME, " recursive checkpoint backward expects ", N_ACOUSTIC_RECURSIVE_WORKSPACE,
-                " adjoint_workspace slot (the leaf's u_this scratch), got ",
+    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size())
+                    == N_ACOUSTIC_RECURSIVE_WORKSPACE,
+                Eq::NAME, "/recursive backward requires the propagator-bound "
+                "adjoint_workspace (cuda_layout.backward_workspace_shapes in "
+                "\"recursive\" mode): ", N_ACOUSTIC_RECURSIVE_WORKSPACE,
+                " slot (the leaf's u_this scratch), got ",
                 p.adjoint_workspace.size());
     TORCH_CHECK(p.checkpoint_replay.empty(),
                 Eq::NAME, " recursive checkpoint backward keeps no segment history "
@@ -1138,11 +1179,11 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     // (_c.py _recursive_scratch_depth) mirroring recursive_checkpoint_scratch_depth
     // on the same longest segment.
     const int scratch_depth = recursive_checkpoint_scratch_depth(max_segment_length);
-    TORCH_CHECK(p.forward_wavefields.empty()
-                    || static_cast<int>(p.forward_wavefields.size())
-                           == (1 + scratch_depth) * Eq::CKPT_STATE_COUNT,
-                Eq::NAME, " recursive checkpoint backward expects ", 1 + scratch_depth,
-                " replay state sets of ", Eq::CKPT_STATE_COUNT,
+    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size())
+                    == (1 + scratch_depth) * Eq::CKPT_STATE_COUNT,
+                Eq::NAME, "/recursive backward requires the propagator-bound "
+                "replay state sets (cuda_layout.recursive_state_depth): ",
+                1 + scratch_depth, " sets of ", Eq::CKPT_STATE_COUNT,
                 " forward_wavefields, got ", p.forward_wavefields.size());
 
     typename Eq::Wavefield start_state;
@@ -1155,7 +1196,7 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
                                             /*set=*/level + 1, start_state);
     // The leaf's u_this (ACOUSTIC_RECURSIVE_U_THIS): zeroed per leaf before the replay
     // kernel writes it, so it needs no initial contents.
-    auto u_this_scratch = pool_or_empty(p.adjoint_workspace, ACOUSTIC_RECURSIVE_U_THIS, vp,
+    auto u_this_scratch = pool_required(p.adjoint_workspace, ACOUSTIC_RECURSIVE_U_THIS, vp,
                                         "adjoint_workspace");
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {

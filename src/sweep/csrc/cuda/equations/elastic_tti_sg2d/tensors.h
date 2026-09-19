@@ -12,30 +12,6 @@ struct WavefieldTensor {
     torch::Tensor m_vxx_t, m_vxz_t, m_vyx_t, m_vyz_t, m_vzx_t, m_vzz_t;
     torch::Tensor m_txxx_t, m_txzz_t, m_txyx_t, m_tyzz_t, m_txzx_t, m_tzzz_t;
 
-    void allocate(const torch::Tensor& like)
-    {
-        vx_t = torch::zeros_like(like);
-        vy_t = torch::zeros_like(like);
-        vz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        syz_t = torch::zeros_like(like);
-        sxz_t = torch::zeros_like(like);
-        sxy_t = torch::zeros_like(like);
-        m_vxx_t = torch::zeros_like(like);
-        m_vxz_t = torch::zeros_like(like);
-        m_vyx_t = torch::zeros_like(like);
-        m_vyz_t = torch::zeros_like(like);
-        m_vzx_t = torch::zeros_like(like);
-        m_vzz_t = torch::zeros_like(like);
-        m_txxx_t = torch::zeros_like(like);
-        m_txzz_t = torch::zeros_like(like);
-        m_txyx_t = torch::zeros_like(like);
-        m_tyzz_t = torch::zeros_like(like);
-        m_txzx_t = torch::zeros_like(like);
-        m_tzzz_t = torch::zeros_like(like);
-    }
-
     void bind(const std::vector<torch::Tensor>& tensors)
     {
         TORCH_CHECK(tensors.size() == 20, "ElasticTTISG 2D expects 20 wavefield tensors");
@@ -148,16 +124,6 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     out.C56 = models[i++].data_ptr<float>();
     out.C66 = models[i++].data_ptr<float>();
     return out;
-}
-
-inline std::vector<torch::Tensor> zero_model_grads(const std::vector<torch::Tensor>& models)
-{
-    TORCH_CHECK(models.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared models");
-    std::vector<torch::Tensor> grads;
-    grads.reserve(models.size());
-    for (const auto& model : models)
-        grads.push_back(torch::zeros_like(model));
-    return grads;
 }
 
 inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)

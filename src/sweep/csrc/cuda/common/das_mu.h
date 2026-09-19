@@ -75,33 +75,6 @@ struct DasMuWavefieldTensor2D {
 
     bool allocated = false;
 
-    void allocate(const torch::Tensor& like, bool use_pml = true)
-    {
-        if (allocated) return;
-        vx_t = torch::zeros_like(like);
-        vz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        sxz_t = torch::zeros_like(like);
-        exx_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        exz_t = torch::zeros_like(like);
-
-        if (use_pml) {
-            m_vxx_t = torch::zeros_like(like);
-            m_vxz_t = torch::zeros_like(like);
-            m_vzx_t = torch::zeros_like(like);
-            m_vzz_t = torch::zeros_like(like);
-            m_sxxx_t = torch::zeros_like(like);
-            m_sxxz_t = torch::zeros_like(like);
-            m_szzx_t = torch::zeros_like(like);
-            m_szzz_t = torch::zeros_like(like);
-            m_sxzx_t = torch::zeros_like(like);
-            m_sxzz_t = torch::zeros_like(like);
-        }
-        allocated = true;
-    }
-
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
     {
         int i = 0;
@@ -387,48 +360,6 @@ struct DasMuWavefieldTensor3D {
     torch::Tensor m_syzz_t;
 
     bool allocated = false;
-
-    void allocate(const torch::Tensor& like, bool use_pml = true)
-    {
-        if (allocated) return;
-        vx_t = torch::zeros_like(like);
-        vy_t = torch::zeros_like(like);
-        vz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        syy_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        sxy_t = torch::zeros_like(like);
-        sxz_t = torch::zeros_like(like);
-        syz_t = torch::zeros_like(like);
-        exx_t = torch::zeros_like(like);
-        eyy_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        exy_t = torch::zeros_like(like);
-        exz_t = torch::zeros_like(like);
-        eyz_t = torch::zeros_like(like);
-
-        if (use_pml) {
-            m_vxx_t = torch::zeros_like(like);
-            m_vxy_t = torch::zeros_like(like);
-            m_vxz_t = torch::zeros_like(like);
-            m_vyx_t = torch::zeros_like(like);
-            m_vyy_t = torch::zeros_like(like);
-            m_vyz_t = torch::zeros_like(like);
-            m_vzx_t = torch::zeros_like(like);
-            m_vzy_t = torch::zeros_like(like);
-            m_vzz_t = torch::zeros_like(like);
-            m_sxxx_t = torch::zeros_like(like);
-            m_szzz_t = torch::zeros_like(like);
-            m_sxyx_t = torch::zeros_like(like);
-            m_sxyy_t = torch::zeros_like(like);
-            m_sxzx_t = torch::zeros_like(like);
-            m_sxzz_t = torch::zeros_like(like);
-            m_syyy_t = torch::zeros_like(like);
-            m_syzy_t = torch::zeros_like(like);
-            m_syzz_t = torch::zeros_like(like);
-        }
-        allocated = true;
-    }
 
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
     {

@@ -20,23 +20,9 @@ struct WavefieldTensor {
     static constexpr const char* RECON_LIST_DESC =
         "[ux, uz, ux_pre, uz_pre, ux_nxt, uz_nxt]";
 
-    void allocate(const torch::Tensor& like)
-    {
-        ux_t = torch::zeros_like(like);
-        uz_t = torch::zeros_like(like);
-        ux_pre_t = torch::zeros_like(like);
-        uz_pre_t = torch::zeros_like(like);
-        ux_nxt_t = torch::zeros_like(like);
-        uz_nxt_t = torch::zeros_like(like);
-        m_gxux_t = torch::zeros_like(like);
-        m_gzux_t = torch::zeros_like(like);
-        m_gxuz_t = torch::zeros_like(like);
-        m_gzuz_t = torch::zeros_like(like);
-        m_sxxx_t = torch::zeros_like(like);
-        m_sxzz_t = torch::zeros_like(like);
-        m_sxzx_t = torch::zeros_like(like);
-        m_szzz_t = torch::zeros_like(like);
-    }
+    // No allocate(): every state this struct carries -- the forward, the
+    // adjoint, the bs reconstruction and the checkpoint replay -- is bound by
+    // the propagator, so the driver owns no wavefield storage.
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
@@ -141,16 +127,6 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     out.C15 = models[i++].data_ptr<float>();
     out.C35 = models[i++].data_ptr<float>();
     return out;
-}
-
-inline std::vector<torch::Tensor> zero_model_grads(const std::vector<torch::Tensor>& models)
-{
-    TORCH_CHECK(models.size() == 7, "ElasticTTI2nd CUDA backward expects 7 prepared models");
-    std::vector<torch::Tensor> grads;
-    grads.reserve(models.size());
-    for (const auto& model : models)
-        grads.push_back(torch::zeros_like(model));
-    return grads;
 }
 
 inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)

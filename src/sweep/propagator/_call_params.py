@@ -97,6 +97,11 @@ class CompiledCallParams:
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()
     checkpoint_replay: tuple = ()
+    # Replay buffers a NON-checkpoint backward needs (a driver whose
+    # boundary-saving backward recomputes the history instead of reconstructing
+    # it): cuda_layout.checkpoint_replay_shapes at this mode, allocated per
+    # backward call. () when the mode's declaration is empty.
+    transient_replay_shapes: tuple = ()
     last_two: torch.Tensor = None
     boundary_cpu: tuple = ()
     boundary_gpu: tuple = ()
