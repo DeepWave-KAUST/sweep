@@ -90,6 +90,9 @@ class CompiledCallParams:
     # How many leading models receive a gradient of their own; the rest (the
     # derived APM tensors) share one zero placeholder. None = all of them.
     n_grad_models: int = None
+    # Illumination grids the backward is handed as ``illum_out`` when the
+    # caller asked for illumination (cuda_layout.illum_nvar); 0 = none.
+    illum_nvar: int = 0
     adjoint_wavefields: tuple = ()
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()

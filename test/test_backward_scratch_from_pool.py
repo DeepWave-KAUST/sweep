@@ -77,7 +77,10 @@ CASES = {
                           lambda mode: 8 if mode == "full" else None, ALL),
     "lsrtm2d": (lambda mode: 1, None, ALL),
     "lsrtm3d": (lambda mode: 2 if mode == "bs_gpu" else 1, None, ALL),
-    "visco2d": (lambda mode: 1, None, ("full", "ckpt_chunk")),
+    # carrier + C0, C1 (+ C2 in the checkpoint modes) + R1 (+ UPREV in chunk mode)
+    # + the cuFFT work area, both spectral terms on (slice 15)
+    "visco2d": (lambda mode: {"full": 5, "ckpt_chunk": 7, "ckpt_recursive": 6}[mode], None,
+                ("full", "ckpt_chunk", "ckpt_recursive")),
 }
 
 

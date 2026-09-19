@@ -249,7 +249,11 @@ def build_ext_kwargs(build_cuda=None):
             # RPATH so the shipped wheel resolves libtorch/libc10 against the
             # USER's torch (auditwheel --exclude keeps those libs external).
             # Belt-and-suspenders: sweep always imports torch before sweep._C.
-            extra_link_args=[*omp_flags, "-Wl,-rpath,$ORIGIN/../torch/lib"],
+            # -lcufft: the visco-acoustic spectral step runs its own cuFFT plan
+            # (csrc/cuda/equations/visco_acoustic2d/fft.cu); torch links cuFFT
+            # itself (libcufft.so.<major> is loaded before sweep._C) but does
+            # not re-export it.
+            extra_link_args=[*omp_flags, "-lcufft", "-Wl,-rpath,$ORIGIN/../torch/lib"],
         )
     ]
     kwargs["cmdclass"] = {

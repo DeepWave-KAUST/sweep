@@ -90,6 +90,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("visco_acoustic2d_backward_bs", wrap_backward(visco_acoustic2d::backward_bs), "Visco-acoustic backward 2D boundary-saving (unsupported: raises)");
     m.def("visco_acoustic2d_backward_ckpt", wrap_backward(visco_acoustic2d::backward_ckpt), "Visco-acoustic backward 2D with checkpointing (CUDA only)");
     m.def("visco_acoustic2d_backward_recursive_ckpt", wrap_backward(visco_acoustic2d::backward_recursive_ckpt), "Visco-acoustic backward 2D with recursive checkpointing (CUDA only)");
+    m.def("visco_acoustic2d_fft_workspace_bytes", &visco_acoustic2d::fft_workspace_bytes,
+          "Work-area bytes of the visco-acoustic spectral step's cuFFT plan for a (B, 1, nz, nx) "
+          "grid on the current CUDA device (builds and caches the plan); sizes the FFT_WS pool slot");
     m.def("acoustic_lsrtm2d_forward", wrap_forward(dispatch_forward(acoustic_lsrtm2d::forward, EK::AcousticLSRTM2D)), "Acoustic LSRTM forward 2D (CUDA/CPU)");
     m.def("acoustic_lsrtm2d_backward", wrap_backward(dispatch_backward(acoustic_lsrtm2d::backward, EK::AcousticLSRTM2D, BM::Full)), "Acoustic LSRTM backward 2D (CUDA/CPU)");
     m.def("acoustic_lsrtm2d_backward_bs", wrap_backward(dispatch_backward(acoustic_lsrtm2d::backward_bs, EK::AcousticLSRTM2D, BM::BoundarySaving)), "Acoustic LSRTM backward with boundary saving 2D (CUDA/CPU)");

@@ -10,6 +10,7 @@
 #include "../../common/acoustic.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/laplace.cuh"
@@ -19,13 +20,24 @@ namespace visco_acoustic2d {
 
 // Nearly constant-Q visco-acoustic forward (Zhu & Harris 2014, decoupled):
 // the CPML acoustic step run with the dispersion-folded ``vp_step``
-// (models[0]) plus a per-step spectral amplitude-damping correction
-// (models[1] = A = tt*vp/2; active iff eq_aux = {|k| grid} is present).
+// (models[0]) plus the per-step spectral corrections (dispersion remainder
+// from B1/B2 = models[1..2], amplitude damping from A = models[3]), each
+// active iff its eq_aux filter grid is present.
 //
 // v1 scope (all guarded, never silent): no DD / stepped segments, no
 // topography / APM, no boundary saving (the dissipative term breaks the
 // reverse-time reconstruction; use ckpt / full).  Per-edge free surface is
 // inherited from the acoustic2d region logic + the post-damping halo zeroing.
+//
+// Allocation contract: with the propagator's pools bound (wavefields,
+// record_out, u_allt_out, derived_models, forward_workspace) this forward
+// allocates NOTHING on the device -- the spectral terms run on
+// forward_workspace slots through the cached cuFFT plan (kernels.cuh
+// ViscoScratch / ViscoFFT) and the tables come from derived_models.  A caller
+// that binds nothing gets each buffer allocated here once per call, never per
+// step; the only remaining per-call host objects are tensor views and the
+// wrapped CPU scalars of the in-place Scalar ops (div_(dt), the ifft
+// normalisation), exactly as the ATen expressions had.
 ForwardOutput forward(const ForwardInput& in) {
     c10::cuda::CUDAGuard device_guard(in.models[0].device());
 
@@ -111,9 +123,17 @@ ForwardOutput forward(const ForwardInput& in) {
     );
 
     // Spectral terms (damping / NCQ dispersion): selected by the eq_aux
-    // composition, see visco_acoustic2d_make_spectral (kernels.cuh).
-    ViscoSpectral spectral =
-        visco_acoustic2d_make_spectral(p.eq_aux, p.models, p.dt, nz, nx);
+    // composition (kernels.cuh).  Tables from p.derived_models in the forward
+    // slot order [dt2A if damping, Gd1, Gd2 if dispersion]
+    // (derived::visco_tables); per-step scratch from p.forward_workspace in
+    // the order [C0, C1, (C2 if dispersion), FFT_WS] (visco_slots) -- both
+    // count-checked against the flags at entry.
+    ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
+        p.eq_aux, p.models, p.derived_models, derived::ViscoMode::Forward, p.dt, nz, nx,
+        "visco_acoustic2d::forward");
+    ViscoScratch scratch = visco_acoustic2d_bind_scratch(
+        p.forward_workspace, wavefield.u_now_t, spectral.active, spectral.disp,
+        derived::ViscoMode::Forward, "visco_acoustic2d::forward forward_workspace");
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -148,10 +168,10 @@ ForwardOutput forward(const ForwardInput& in) {
             ctx
         );
 
-        // Dispersion + damping corrections; the FFTs write into the halo
-        // bands, so the helper restores the stencil-kernel invariant
-        // (halo == 0 == the free-surface image condition) afterwards.
-        visco_acoustic2d_apply_spectral(wavefield, spectral, p.dt, p.M);
+        // Dispersion + damping corrections on the bound slots; the FFTs write
+        // into the halo bands, so the helper restores the stencil-kernel
+        // invariant (halo == 0 == the free-surface image condition) afterwards.
+        visco_acoustic2d_apply_spectral_into(wavefield, spectral, scratch, p.dt, p.M);
 
         add_source<<<source_config.grid, source_config.block>>>(
             view.u_next,

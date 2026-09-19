@@ -408,6 +408,13 @@ class Wrapper(torch.autograd.Function):
             _wants_illum(cp.source_illumination_buffer)
             or _wants_illum(cp.receiver_illumination_buffer)
         )
+        # The illumination accumulators the driver adds into (source, receiver),
+        # zeroed per backward call, handed over as illum_out for the drivers that
+        # declare cuda_layout.illum_nvar; a driver that binds nothing allocates
+        # its own only when illumination was asked for.
+        if params.compute_illumination and cp.illum_nvar > 0:
+            like = ctx.models[0]
+            params.illum_out = [torch.zeros(like.shape, device=like.device) for _ in range(cp.illum_nvar)]
         # Space-lag ADCIG: a real, non-empty buffer allocated in forward is the
         # ON signal (mirrors illumination).  ``adcig_max_lag`` sizes the lag axis.
         params.compute_adcig = _wants_illum(cp.adcig_buffer)
@@ -1382,7 +1389,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         C++-side ``zeros_like`` it replaces had, so the bytes and the zero-fill
         per call are unchanged; what moves is only who allocates.
         """
-        n = int(self._cuda_layout().forward_workspace_nvar)
+        layout = self._cuda_layout()
+        if layout.forward_workspace_shapes is not None:
+            # shape-declared scratch is uninitialised: the driver writes every
+            # cell before it reads (complex spectra, a cuFFT work area)
+            return tuple(torch.empty([int(x) for x in shape], device=self.dev)
+                         for shape in layout.forward_workspace_shapes(batch_size, self.shape_cuda))
+        n = int(layout.forward_workspace_nvar)
         return tuple(
             torch.zeros([batch_size, 1, *self.shape_cuda], device=self.dev)
             for _ in range(n)
@@ -1418,9 +1431,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._workspace_cache_mode = mode
 
     def _slice_adjoint_workspace_buffers(self, batch_size):
+        """The pool at this call's batch. A slot's leading axis is the batch
+        (``[B, 1, *grid]``, or ``[B, 1, *grid, 2]`` for a complex spectrum);
+        a flat one-dimensional slot (a cuFFT work area) has no batch axis and
+        is handed over whole."""
         if not self.adjoint_workspace:
             return ()
-        return tuple(t[:batch_size] for t in self.adjoint_workspace)
+        return tuple(t[:batch_size] if t.dim() > 1 else t for t in self.adjoint_workspace)
 
     def _slice_last_two(self, batch_size):
         return self.last_two[:, :, :batch_size]
@@ -1896,6 +1913,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
                     n_grad_models=len(models) if use_apm_arg else None,
+                    illum_nvar=int(self._cuda_layout().illum_nvar),
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,
                     checkpoint_buffers=checkpoint_buffers,

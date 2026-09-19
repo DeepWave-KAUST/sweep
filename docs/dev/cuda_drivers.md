@@ -127,8 +127,17 @@ back to the per-call stepped path when a factory is missing.
   segment histories come from `checkpoint_replay` (`checkpoint_replay_shapes(B, nt,
   shape, max_segment, mode)`, bound once per call and narrowed per segment with
   `pool_rows`); the velocity carriers and other per-call scratch come from the
-  adjoint workspace pool (`backward_workspace_shapes(..., mode)`). A driver that keeps
-  its replay state elsewhere declares `checkpoint_state_nvar=0` (LSRTM: workspace slots).
+  adjoint workspace pool (`backward_workspace_shapes(..., mode)`). A driver whose state
+  set is not the forward slot list declares `checkpoint_state_nvar` explicitly (LSRTM: 7 / 9).
+  Scratch that is not a padded grid (complex spectra as float32 `[B, 1, *grid, 2]`
+  slots viewed with `torch::view_as_complex`, a cuFFT work area as a flat slot) is
+  declared by shape: `forward_workspace_shapes(B, shape)` (uninitialised, transient) and
+  `backward_workspace_shapes`; the visco driver runs its FFTs on the plan ATen itself
+  would build (`at::native::detail::CuFFTConfig`, work area from the pool), so the
+  spectra are bit-identical to `at::fft_fft2` and nothing is allocated per step.
+  Illumination accumulators come as `illum_out` (`cuda_layout.illum_nvar`, bound by the
+  monolithic backward when illumination was asked for) and are allocated in C++ only for
+  a caller that binds nothing.
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record

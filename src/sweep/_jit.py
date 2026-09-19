@@ -175,6 +175,21 @@ def can_build() -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 # source staging (dedupe object basenames)
 # --------------------------------------------------------------------------- #
+def _cufft_link_flag(cuda_home: str) -> str:
+    """``-lcufft`` when the toolkit ships the unversioned ``libcufft.so``; a
+    pip-only toolkit (``nvidia-cufft-cu*``) ships only the versioned soname, so
+    link that by name (``-l:libcufft.so.11``) instead of failing at link time."""
+    import glob as _glob
+    for d in [os.path.join(cuda_home, "lib64"), os.path.join(cuda_home, "lib")] + _nvidia_pip_libs():
+        if os.path.exists(os.path.join(d, "libcufft.so")):
+            return "-lcufft"
+    for d in _nvidia_pip_libs() + [os.path.join(cuda_home, "lib64"), os.path.join(cuda_home, "lib")]:
+        sonames = sorted(_glob.glob(os.path.join(d, "libcufft.so.*")), key=len)
+        if sonames:
+            return f"-l:{os.path.basename(sonames[0])}"
+    return "-lcufft"
+
+
 def _sources() -> list[str]:
     """C++/CUDA sources, mirroring build_config.get_sources(). CUDA-only by
     default (fast first compile, what GPU users need); set SWEEP_JIT_FULL=1 to
@@ -297,7 +312,10 @@ def load():
         # nvbf16.h) require to compile. Harmless on toolkits that don't need it.
         extra_cuda_cflags=["-O3", "--use_fast_math", "--expt-relaxed-constexpr",
                            "-Xcompiler=-Wno-deprecated-declarations"],
-        extra_ldflags=["-fopenmp"] + [f"-L{d}" for d in _nvidia_pip_libs()],
+        # cuFFT: the visco-acoustic spectral step runs its own cuFFT plan
+        # (csrc/cuda/equations/visco_acoustic2d/fft.cu), a library torch links
+        # but does not re-export.
+        extra_ldflags=["-fopenmp"] + [f"-L{d}" for d in _nvidia_pip_libs()] + [_cufft_link_flag(cuda_home)],
         build_directory=str(build_dir),
         verbose=building,
     )

@@ -29,11 +29,14 @@ CASES = {
     "das2d": 4,
     "das3d": 9,
     "elastic_tti_2nd2d": 3,
+    # visco2d: C0, C1, C2 complex spectra + the cuFFT work area (both spectral terms on)
+    "visco2d": 4,
 }
+BINDING = {"visco2d": "visco_acoustic2d"}
 
 
 @pytest.mark.parametrize("key", [
-    pytest.param(k, marks=requires_binding(f"{k}_forward")) for k in CASES
+    pytest.param(k, marks=requires_binding(f"{BINDING.get(k, k)}_forward")) for k in CASES
 ])
 def test_forward_writes_into_the_handed_over_scratch(key, monkeypatch):
     dev = torch.device("cuda:0")
@@ -74,7 +77,7 @@ def test_forward_writes_into_the_handed_over_scratch(key, monkeypatch):
 
 
 @pytest.mark.parametrize("key", [
-    pytest.param(k, marks=requires_binding(f"{k}_forward")) for k in CASES
+    pytest.param(k, marks=requires_binding(f"{BINDING.get(k, k)}_forward")) for k in CASES
 ])
 def test_the_scratch_does_not_outlive_the_forward(key, monkeypatch):
     """With gradients on, ``Wrapper.forward`` saves its params object on ``ctx``

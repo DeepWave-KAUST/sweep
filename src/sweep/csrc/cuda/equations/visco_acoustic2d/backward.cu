@@ -10,6 +10,7 @@
 #include "../../common/acoustic.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
@@ -17,37 +18,121 @@ namespace visco_acoustic2d {
 
 namespace {
 
-// p.grads_out as the propagator binds it: {grad_wavelet, grad, grad_B1,
-// grad_B2, grad_A} in BackwardOutput.grads order (zeroed per backward on the
-// Python side and accumulated here), or empty for an unbound caller, which
-// then gets fresh zeros per slot.
-// Layout of p.adjoint_workspace, declared on the Python side as
-// ViscoAcoustic.cuda_layout.backward_workspace_nvar: the vp^2*Lap(u) carrier
-// of the reverse step (one padded grid per shot). Its kernel writes non-halo
-// cells only and the reused grad/RTM kernels need a zero halo, which the
-// pool's zero-at-entry provides.
-enum WorkspaceSlot : int { CARRIER = 0, N_SLOTS };
+using derived::ViscoMode;
 
-const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+// ---------------------------------------------------------------------------
+// Allocation contract (the forward's twin, forward.cu): with the propagator's
+// pools bound -- adjoint_wavefields, forward_wavefields (the checkpoint replay
+// state sets), checkpoint_replay (the chunk history), adjoint_workspace (the
+// imaging carrier + the spectral scratch), derived_models (the tables),
+// grads_out, illum_out -- no backward mode allocates anything on the device:
+// the spectral terms run on the workspace slots through the cached cuFFT plan
+// (kernels.cuh ViscoScratch / ViscoFFT).  A caller that binds nothing gets
+// each buffer allocated here once per call, never per step or per segment.
+//
+// Slot layouts, each through ONE helper (kernels.cuh / derived_models.h) and
+// count-checked against the bound pool at entry:
+//   adjoint_workspace  visco_slots(a, d, mode):
+//       [CARRIER] + (spectral ? [C0, C1, (C2 if d and mode in ckpt/recursive),
+//                                (R1 if d), (UPREV if a and mode == ckpt), FFT_WS]
+//                             : [])
+//   derived_models     derived::visco_tables(a, d, mode):
+//       full:             [Gp if a, Gd1 if d, Gd2 if d]
+//       ckpt / recursive: [Gp if a, dt2A if a, Gd1 if d, Gd2 if d]
+// (a = amplitude damping = D_loss in eq_aux, d = phase dispersion = D_k2 +
+// D_frac in eq_aux; ViscoAcoustic.cuda_layout counts the same lists.)
+// CARRIER is the vp^2*Lap(u) carrier of the reverse step (one padded grid per
+// shot): its kernel writes non-halo cells only and the reused grad/RTM kernels
+// need a zero halo, which the pool's zero-at-entry provides.
+// ---------------------------------------------------------------------------
+
+// p.grads_out as the propagator binds it, in BackwardOutput.grads order
+// (zeroed per backward on the Python side and accumulated here), or empty for
+// an unbound caller, which then gets fresh zeros per slot.
+enum GradSlot : int { GRAD_WAVELET = 0, GRAD_VP, GRAD_B1, GRAD_B2, GRAD_A, N_GRADS };
+
+struct ViscoGrads {
+    torch::Tensor wavelet, vp, B1, B2, A;
+};
+
+ViscoGrads bind_grads(const BackwardInput& p)
 {
-    TORCH_CHECK(p.adjoint_workspace.empty() || p.adjoint_workspace.size() == N_SLOTS,
-                "ViscoAcoustic backward: adjoint_workspace must be empty or hold ",
-                static_cast<int>(N_SLOTS), " tensors (carrier), got ", p.adjoint_workspace.size());
-    return p.adjoint_workspace;
+    const auto& gs = p.grads_out;
+    TORCH_CHECK(gs.empty() || gs.size() == N_GRADS,
+                "ViscoAcoustic backward: grads_out must be empty or hold ",
+                static_cast<int>(N_GRADS), " tensors "
+                "(grad_wavelet, grad, grad_B1, grad_B2, grad_A), got ", gs.size());
+    ViscoGrads g;
+    g.wavelet = pool_or_zeros(gs, GRAD_WAVELET, p.forward_source, "grads_out");
+    g.vp = pool_or_zeros(gs, GRAD_VP, p.models[0], "grads_out");
+    g.B1 = pool_or_zeros(gs, GRAD_B1, p.models[1], "grads_out");
+    g.B2 = pool_or_zeros(gs, GRAD_B2, p.models[2], "grads_out");
+    g.A = pool_or_zeros(gs, GRAD_A, p.models[3], "grads_out");
+    return g;
 }
 
-const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+// The illumination accumulators: p.illum_out when the propagator bound them
+// ({source, receiver}, zeroed per backward; cuda_layout.illum_nvar = 2), else
+// allocated here only when the caller asked for illumination -- otherwise
+// left undefined, which the output packing hands Python as None and _c.py's
+// ``isinstance(..., torch.Tensor)`` guards skip (the acoustic family's
+// eq_driver.cuh acoustic_bind_backward_outputs / init_rtm_output do the
+// same).  ``always``: the rtm() entry, whose output IS the illumination.
+RTMOutput bind_illumination(const BackwardInput& p, bool always)
 {
-    TORCH_CHECK(p.grads_out.empty() || p.grads_out.size() == 5,
-                "ViscoAcoustic backward: grads_out must be empty or hold 5 tensors "
-                "(grad_wavelet, grad, grad_B1, grad_B2, grad_A), got ", p.grads_out.size());
-    return p.grads_out;
+    RTMOutput illumination;
+    if (!p.illum_out.empty()) {
+        TORCH_CHECK(p.illum_out.size() == 2,
+                    "illum_out must be {source_illumination, receiver_illumination}");
+        illumination.source_illumination =
+            pool_slot_checked(p.illum_out, 0, p.models[0], "illum_out");
+        illumination.receiver_illumination =
+            pool_slot_checked(p.illum_out, 1, p.models[0], "illum_out");
+    } else if (always || p.compute_illumination) {
+        illumination.source_illumination = torch::zeros_like(p.models[0]);
+        illumination.receiver_illumination = torch::zeros_like(p.models[0]);
+    }
+    return illumination;
+}
+
+void pack_outputs(BackwardOutput& out, const ViscoGrads& g, const RTMOutput& illumination)
+{
+    out.grads = {g.wavelet, g.vp, g.B1, g.B2, g.A};
+    out.source_illumination = illumination.source_illumination;
+    out.receiver_illumination = illumination.receiver_illumination;
+    out.adcig = illumination.adcig;
+}
+
+// Checkpoint replay state: p.forward_wavefields holds K sets of the 7 tensors
+// (u_prev, u_now, u_next model-shaped; psix, psiz, zetax, zetaz slab-shaped
+// like the checkpoint slots -- cuda_layout.checkpoint_state_nvar = 7 with
+// checkpoint_slot_axes), zeroed per backward call: K = 1 (chunk mode) or
+// 1 + the bisection depth (recursive mode, cuda_layout.recursive_state_depth).
+// A caller that binds nothing gets set 0 allocated from the snapshot geometry
+// and the scratch sets allocated like it.
+constexpr int CKPT_STATE_COUNT = 7;
+
+void check_replay_state_sets(const BackwardInput& p, int sets, const char* what)
+{
+    TORCH_CHECK(p.forward_wavefields.empty()
+                    || static_cast<int>(p.forward_wavefields.size()) == sets * CKPT_STATE_COUNT,
+                what, " expects ", sets, " replay state set(s) of ", CKPT_STATE_COUNT,
+                " forward_wavefields, got ", p.forward_wavefields.size());
+}
+
+void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+                       const torch::Tensor& vp, int set)
+{
+    wf.bind_replay_state(wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
+                                       "visco_acoustic2d ckpt replay state"),
+                         vp, p.checkpoints, 2);
 }
 
 // ---------------------------------------------------------------------------
 // Spectral terms (Zhu & Harris 2014, decoupled) — adjoint machinery.
 // The ViscoSpectral bundle (kernels.cuh) carries the damping filter and the
-// fractional-Laplacian dispersion remainder.
+// fractional-Laplacian dispersion remainder; the ViscoScratch bundle the
+// workspace slots the pipeline runs on.
 //
 // Forward, step j (buffers):  u_next -= Gp ⊙ L(u_now - u_prev),  Gp = dt*A,
 // followed by the halo zeroing Z.  With λ_j := adjoint of the fully-updated
@@ -58,22 +143,77 @@ const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 // L is self-adjoint (real, even |k| multiplier); Z^T = Z gates every
 // accumulation into λ, preserving the "λ halo == 0" invariant the reused
 // stencil kernels rely on.
+//
+// Bit-exactness of the slot forms below, against the torch expressions they
+// replaced (kernels.cuh records the transform / promote / product argument):
+//   * a product ``coef * X`` is at::mul_out(P, coef, X) into a float alias of
+//     a dead complex slot -- the structured mul kernel the functional product
+//     ran, operands in the same order, one IEEE multiply per cell;
+//   * ``X.mul_(coef)`` is used only where the original was ``coef * X`` on a
+//     staged X: the in-place mul computes X * coef, and IEEE multiplication
+//     commutes exactly (the correctly rounded exact product is symmetric, the
+//     sign of a zero is the XOR of the signs);
+//   * a difference ``a - b`` is at::sub_out(D, a, b) / ``D.sub_(b)`` on D == a:
+//     the same structured sub kernel (sub_out -> add_stub with alpha = -1) on
+//     the same operand values in the same order;
+//   * a sum ``m + e`` is ``R.add_(m)`` on R == e: IEEE addition commutes
+//     exactly, and the summands are Lops of adjoint fields nothing writes in
+//     between, so forming them in another order changes no bits;
+//   * every accumulation into a gradient keeps today's add_(P, alpha) with the
+//     same double alpha.  No addcmul anywhere (one fused lambda = FMA).
 // ---------------------------------------------------------------------------
+
+// ``u_a - u_b`` staged in the float alias of C1 (free between the adjoint
+// step, whose terms are already added into u_next, and the gradient
+// products), shaped like the adjoint field so the Lop pipeline takes it as
+// is.  Was ``u_a - u_b`` (functional); the row views only relabel contiguous
+// (B, nz, nx) rows as (B, 1, nz, nx).
+torch::Tensor stage_difference(ViscoScratch& ws, const torch::Tensor& u_a, const torch::Tensor& u_b)
+{
+    auto D = visco_acoustic2d_real_alias(ws.C1);
+    at::sub_out(D, u_a.view(D.sizes()), u_b.view(D.sizes()));
+    return D;
+}
+
 // The spectral terms of the adjoint recursion; call between the fused adjoint
 // kernel (which wrote u_next = λ_it^{S^T}) and swap_aux().  Damping reads the
 // lag pair (λ_{it+2} - λ_{it+1}); the dispersion term is memoryless in u_now,
 // so its transpose reads λ_{it+1} alone (adj.u_now_t) through the SAME
 // self-adjoint operators with the coefficient maps moved inside.
-void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d, int M)
+//
+// Was:  m = Lop(Gp * (u_prev - u_now), kmul)                       [damping]
+//       e = Lop(Gd1 * u_now, Dk2) - Lop(Gd2 * u_now, Dfrac)         [dispersion]
+//       m = active ? m + e : e;   zero_halo(m);   u_next += m
+// Now, on the slots: each product is staged in the float alias of C1 (the
+// spectrum C1 held is dead at that point) and consumed by the Lop pipeline's
+// promote before C1 is overwritten; the dispersion difference is
+// R1.copy_(real(L_Dk2)) (a copy, no arithmetic) then R1.sub_(real(L_Dfrac));
+// with both terms on, the damping Lop is formed AFTER the dispersion sum and
+// added into it, R1.add_(real(L_damp)) = e + m = m + e.  The result (R1, or
+// real(C1) with the damping alone) is halo-zeroed and added into u_next as
+// before.
+void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
+                           ViscoScratch& ws, int M)
 {
     if (!(d.active || d.disp)) return;
     torch::Tensor m;
-    if (d.active)
-        m = visco_acoustic2d_Lop(d.Gp * (adj.u_prev_t - adj.u_now_t), d.kmul);
     if (d.disp) {
-        auto e = visco_acoustic2d_Lop(d.Gd1 * adj.u_now_t, d.Dk2)
-               - visco_acoustic2d_Lop(d.Gd2 * adj.u_now_t, d.Dfrac);
-        m = d.active ? m + e : e;
+        auto X = visco_acoustic2d_real_alias(ws.C1);
+        at::mul_out(X, d.Gd1, adj.u_now_t);                          // Gd1 * u_now
+        ws.R1.copy_(visco_acoustic2d_lop_into(X, d.Dk2, ws));        // R1 = L_Dk2
+        at::mul_out(X, d.Gd2, adj.u_now_t);                          // Gd2 * u_now (L_Dk2 is in R1)
+        ws.R1.sub_(visco_acoustic2d_lop_into(X, d.Dfrac, ws));       // R1 = L_Dk2 - L_Dfrac = e
+        m = ws.R1;
+    }
+    if (d.active) {
+        auto X = visco_acoustic2d_real_alias(ws.C1);
+        at::sub_out(X, adj.u_prev_t, adj.u_now_t);                   // u_prev - u_now
+        X.mul_(d.Gp);                                                // == Gp * (u_prev - u_now)
+        auto L = visco_acoustic2d_lop_into(X, d.kmul, ws);           // real(C1)
+        if (d.disp)
+            ws.R1.add_(L);                                           // e + m == m + e
+        else
+            m = L;
     }
     visco_acoustic2d_zero_halo(m, M);
     adj.u_next_t.add_(m);
@@ -82,36 +222,43 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
 // grad_A += -dt^2 * λ_it ⊙ L((u[it] - u[it-1]) / dt)
 //         = -dt   * λ_it ⊙ L(du),  du = u[it] - u[it-1].
 // ``lam`` is the post-swap adjoint (λ_it, halo == 0 so the halo band of the
-// filtered field drops out automatically).
+// filtered field drops out automatically); ``du`` any float view of
+// lam.sizes() outside C0's storage (stage_difference puts it in C1's alias).
+// Was grad_A.add_(lam * Lop(du), -dt): the Lop on the pipeline, the product
+// through at::mul_out(P, lam, real(C1)) into the float alias of C0 (dead
+// after the inverse transform), lam first as before, then the same add_.
 void accumulate_grad_A(torch::Tensor& grad_A,
                        const torch::Tensor& lam,
                        const torch::Tensor& du,
-                       const ViscoSpectral& d, float dt)
+                       const ViscoSpectral& d, float dt, ViscoScratch& ws)
 {
     if (!d.active) return;
-    auto Ld = visco_acoustic2d_Lop(du.view(lam.sizes()), d.kmul);
-    grad_A.add_(lam * Ld, -static_cast<double>(dt));
+    auto L = visco_acoustic2d_lop_into(du.view(lam.sizes()), d.kmul, ws);
+    auto P = visco_acoustic2d_real_alias(ws.C0);
+    at::mul_out(P, lam, L);
+    grad_A.add_(P, -static_cast<double>(dt));
 }
 
 // grad_B1 += dt^2 * λ ⊙ L_{D_k2}(u[it]);  grad_B2 -= dt^2 * λ ⊙ L_{D_frac}(u[it]).
 // Same (λ, u[it]) index pairing as grad_A's u_now slot; valid from it = 0
-// (the dispersion term needs no u[it-1]).
+// (the dispersion term needs no u[it-1]).  Was grad_B1.add_(lam * Lop(u, Dk2),
+// dt2) and grad_B2.add_(lam * Lop(u, Dfrac), -dt2), each product now through
+// at::mul_out(P, lam, real(C1)) into C0's float alias, lam first as before.
 void accumulate_grad_disp(torch::Tensor* grad_B1, torch::Tensor* grad_B2,
                           const torch::Tensor& lam,
                           const torch::Tensor& u_it,
-                          const ViscoSpectral& d, float dt)
+                          const ViscoSpectral& d, float dt, ViscoScratch& ws)
 {
     if (!d.disp || grad_B1 == nullptr) return;
     auto uv = u_it.view(lam.sizes());
     const double dt2 = static_cast<double>(dt) * static_cast<double>(dt);
-    grad_B1->add_(lam * visco_acoustic2d_Lop(uv, d.Dk2), dt2);
-    grad_B2->add_(lam * visco_acoustic2d_Lop(uv, d.Dfrac), -dt2);
-}
-
-void init_rtm_output_visco_2d(RTMOutput& out, const torch::Tensor& vp)
-{
-    out.source_illumination = torch::zeros_like(vp);
-    out.receiver_illumination = torch::zeros_like(vp);
+    auto P = visco_acoustic2d_real_alias(ws.C0);
+    auto L1 = visco_acoustic2d_lop_into(uv, d.Dk2, ws);
+    at::mul_out(P, lam, L1);
+    grad_B1->add_(P, dt2);
+    auto L2 = visco_acoustic2d_lop_into(uv, d.Dfrac, ws);
+    at::mul_out(P, lam, L2);
+    grad_B2->add_(P, -dt2);
 }
 
 // One fused exact-adjoint launch (reused acoustic2d kernel; the damping term
@@ -141,7 +288,7 @@ void image_step_from_raw(
     const float* u_raw_ptr,
     const float* lam_ptr,
     const torch::Tensor& vp,
-    torch::Tensor& carrier,   // (B, nz, nx) scratch, halo stays 0
+    const torch::Tensor& carrier,   // (B, nz, nx) scratch (the CARRIER slot), halo stays 0
     torch::Tensor* grad,
     RTMOutput* rtm_out,
     const LaplaceParam& lap_ctx,
@@ -246,8 +393,15 @@ void run_full_imaging_visco(
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
-    auto carrier = pool_or_zeros(workspace_slots(p), CARRIER, vp);   // one grid of scratch
+    // Tables [Gp if a, Gd1, Gd2 if d] from p.derived_models; the carrier and
+    // the spectral scratch [CARRIER, C0, C1, (R1 if d), FFT_WS] from
+    // p.adjoint_workspace -- both count-checked against the flags at entry.
+    ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
+        p.eq_aux, p.models, p.derived_models, ViscoMode::Full, dt, nz, nx,
+        "visco_acoustic2d::backward");
+    ViscoScratch ws = visco_acoustic2d_bind_scratch(
+        p.adjoint_workspace, adjoint.u_now_t, spectral.active, spectral.disp,
+        ViscoMode::Full, "visco_acoustic2d::backward adjoint_workspace");
 
     for (int it = p.nt - 1; it >= 0; --it) {
 
@@ -259,7 +413,7 @@ void run_full_imaging_visco(
             lap_ctx, grad_ctx_x, grad_ctx_z,
             cpml, ctx);
 
-        adjoint_damping_extra(adjoint, damping, M);
+        adjoint_damping_extra(adjoint, spectral, ws, M);
 
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
@@ -288,16 +442,15 @@ void run_full_imaging_visco(
             order, launch_config.grid, launch_config.block,
             p.u_forward[it].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
-            vp, carrier, grad, rtm_out,
+            vp, ws.CARRIER, grad, rtm_out,
             lap_ctx, ctx, nx, nz, dt);
 
-        if (grad_A != nullptr && damping.active && it >= 1) {
-            accumulate_grad_A(*grad_A, adjoint.u_now_t,
-                              p.u_forward[it] - p.u_forward[it - 1],
-                              damping, dt);
+        if (grad_A != nullptr && spectral.active && it >= 1) {
+            auto du = stage_difference(ws, p.u_forward[it], p.u_forward[it - 1]);
+            accumulate_grad_A(*grad_A, adjoint.u_now_t, du, spectral, dt, ws);
         }
         accumulate_grad_disp(grad_B1, grad_B2, adjoint.u_now_t,
-                             p.u_forward[it], damping, dt);
+                             p.u_forward[it], spectral, dt, ws);
     }
 }
 
@@ -311,21 +464,12 @@ BackwardOutput backward(const BackwardInput& in)
                 "visco_acoustic2d backward (full) requires the raw forward "
                 "wavefield history");
     BackwardOutput out;
-    const auto& gs = grad_slots(in);
-    auto grad = pool_or_zeros(gs, 1, in.models[0], "grads_out");
-    auto grad_A = pool_or_zeros(gs, 4, in.models[3], "grads_out");
-    auto grad_B1 = pool_or_zeros(gs, 2, in.models[1], "grads_out");
-    auto grad_B2 = pool_or_zeros(gs, 3, in.models[2], "grads_out");
-    auto grad_wavelet = pool_or_zeros(gs, 0, in.forward_source, "grads_out");
-    RTMOutput illumination;
-    init_rtm_output_visco_2d(illumination, in.models[0]);
-    run_full_imaging_visco(in, &grad, &grad_A, &grad_B1, &grad_B2,
-                           &grad_wavelet,
+    ViscoGrads grads = bind_grads(in);
+    RTMOutput illumination = bind_illumination(in, /*always=*/false);
+    run_full_imaging_visco(in, &grads.vp, &grads.A, &grads.B1, &grads.B2,
+                           &grads.wavelet,
                            in.compute_illumination ? &illumination : nullptr);
-    out.grads = {grad_wavelet, grad, grad_B1, grad_B2, grad_A};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    pack_outputs(out, grads, illumination);
     return out;
 }
 
@@ -342,8 +486,7 @@ RTMOutput rtm(const BackwardInput& in)
         "visco_acoustic2d RTM does not support checkpoint mode."
     );
 
-    RTMOutput out;
-    init_rtm_output_visco_2d(out, in.models[0]);
+    RTMOutput out = bind_illumination(in, /*always=*/true);
     run_full_imaging_visco(in, nullptr, nullptr, nullptr, nullptr, nullptr, &out);
     return out;
 }
@@ -408,23 +551,21 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     else
         adjoint.allocate(vp, 2, true);
 
+    // The chunk replay state: set 0 of p.forward_wavefields (the only set in
+    // chunk mode), zeroed by the propagator, loaded per chunk below.
+    check_replay_state_sets(p, 1, "visco_acoustic2d backward_ckpt");
     AcousticWavefieldTensor forward;
     if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields, 2, true);
+        bind_replay_state(forward, p, vp, 0);
     else
         forward.allocate_from_snapshots(vp, p.checkpoints, 2);
     // Slab geometry follows the FORWARD-state aux layout (the recompute runs
     // the forward kernel); the adjoint aux stays full-domain.
     acoustic_init_aux_slabs(ctx, forward);
 
-    const auto& gs = grad_slots(p);
-    auto grad = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_A = pool_or_zeros(gs, 4, p.models[3], "grads_out");
-    auto grad_B1 = pool_or_zeros(gs, 2, p.models[1], "grads_out");
-    auto grad_B2 = pool_or_zeros(gs, 3, p.models[2], "grads_out");
-    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
-    RTMOutput illumination;
-    init_rtm_output_visco_2d(illumination, vp);
+    ViscoGrads grads = bind_grads(p);
+    RTMOutput illumination = bind_illumination(p, /*always=*/false);
+    RTMOutput* rtm_out = p.compute_illumination ? &illumination : nullptr;
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -439,9 +580,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
-    auto carrier = pool_or_zeros(workspace_slots(p), CARRIER, vp);   // one grid of scratch
-    RTMOutput* rtm_out = in.compute_illumination ? &illumination : nullptr;
+    // Tables [Gp, dt2A if a, Gd1, Gd2 if d] (the replay damps with dt2A, the
+    // reverse step with Gp) from p.derived_models; the scratch
+    // [CARRIER, C0, C1, (C2 if d), (R1 if d), (UPREV if a), FFT_WS] from
+    // p.adjoint_workspace -- both count-checked against the flags at entry.
+    ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
+        p.eq_aux, p.models, p.derived_models, ViscoMode::Checkpoint, dt, nz, nx,
+        "visco_acoustic2d::backward_ckpt");
+    ViscoScratch ws = visco_acoustic2d_bind_scratch(
+        p.adjoint_workspace, adjoint.u_now_t, spectral.active, spectral.disp,
+        ViscoMode::Checkpoint, "visco_acoustic2d::backward_ckpt adjoint_workspace");
 
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
@@ -458,9 +606,9 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
         // u(start-1): the loaded state is (u_prev, u_now) = (u(start-1), u(start));
         // the it == start reverse step needs it for du/dt of step ``start``.
-        torch::Tensor u_prev_chunk;
-        if (damping.active)
-            u_prev_chunk = forward.u_prev_t.reshape({B, nz, nx}).clone();
+        // Kept in the UPREV slot (the replay rotates u_prev away).
+        if (spectral.active)
+            ws.UPREV.copy_(forward.u_prev_t.view(ws.UPREV.sizes()));
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
@@ -483,7 +631,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 ctx
             );
 
-            visco_acoustic2d_apply_spectral(forward, damping, dt, M);
+            visco_acoustic2d_apply_spectral_into(forward, spectral, ws, dt, M);
 
             add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
                 for_view.u_next,
@@ -506,7 +654,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 lap_ctx, grad_ctx_x, grad_ctx_z,
                 cpml, ctx);
 
-            adjoint_damping_extra(adjoint, damping, M);
+            adjoint_damping_extra(adjoint, spectral, ws, M);
 
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
@@ -522,7 +670,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             accumulate_source_grad_2d<<<fwd_source_config.grid,
                                         fwd_source_config.block>>>(
                 adjoint.u_now_t.data_ptr<float>(),
-                grad_wavelet.data_ptr<float>(),
+                grads.wavelet.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
                 it,
                 forward_nsrc,
@@ -533,26 +681,21 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 order, launch_config.grid, launch_config.block,
                 chunk_raw[it - start].data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
-                vp, carrier, &grad, rtm_out,
+                vp, ws.CARRIER, &grads.vp, rtm_out,
                 lap_ctx, ctx, nx, nz, dt);
 
-            if (damping.active && it >= 1) {
-                accumulate_grad_A(grad_A, adjoint.u_now_t,
-                                  chunk_raw[it - start] -
-                                      (it > start ? chunk_raw[it - start - 1]
-                                                  : u_prev_chunk),
-                                  damping, dt);
+            if (spectral.active && it >= 1) {
+                auto du = stage_difference(ws, chunk_raw[it - start],
+                                           it > start ? chunk_raw[it - start - 1] : ws.UPREV);
+                accumulate_grad_A(grads.A, adjoint.u_now_t, du, spectral, dt, ws);
             }
-            accumulate_grad_disp(&grad_B1, &grad_B2,
+            accumulate_grad_disp(&grads.B1, &grads.B2,
                                  adjoint.u_now_t, chunk_raw[it - start],
-                                 damping, dt);
+                                 spectral, dt, ws);
         }
     }
 
-    out.grads = {grad_wavelet, grad, grad_B1, grad_B2, grad_A};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    pack_outputs(out, grads, illumination);
     return out;
 }
 
@@ -560,10 +703,10 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 // ---------------------------------------------------------------------------
 // Recursive (binary) checkpointing.  Mirrors acoustic2d's driver; the leaf
-// replays one visco forward step (stencil + damping) from the interval state,
-// recomputes the carrier from the raw pressure, and layers the damping terms
-// onto the fused adjoint.  The checkpoint state is the same 6-tensor acoustic
-// state — the amplitude damping is memoryless in (u_now, u_prev).
+// replays one visco forward step (stencil + spectral terms) from the interval
+// state, recomputes the carrier from the raw pressure, and layers the damping
+// terms onto the fused adjoint.  The checkpoint state is the same 6-tensor
+// acoustic state — the amplitude damping is memoryless in (u_now, u_prev).
 // ---------------------------------------------------------------------------
 namespace visco_acoustic2d {
 namespace {
@@ -596,7 +739,8 @@ void advance_forward_interval_visco_2d(
     const AcousticCPMLPointer& cpml,
     const SolverContext& ctx,
     int forward_nsrc,
-    const ViscoSpectral& damping)
+    const ViscoSpectral& spectral,
+    ViscoScratch& ws)
 {
     for (int it = start; it < end; ++it) {
         auto view = forward.view();
@@ -617,7 +761,7 @@ void advance_forward_interval_visco_2d(
             ctx
         );
 
-        visco_acoustic2d_apply_spectral(forward, damping, ctx.dt, ctx.M);
+        visco_acoustic2d_apply_spectral_into(forward, spectral, ws, ctx.dt, ctx.M);
 
         add_source<<<source_grid, source_block>>>(
             view.u_next,
@@ -663,8 +807,8 @@ void process_recursive_interval_visco_2d(
     CheckpointRuntime& checkpoint_runtime,
     std::vector<AcousticWavefieldTensor>& scratch_states,
     int scratch_depth,
-    torch::Tensor& carrier_scratch,
-    const ViscoSpectral& damping,
+    const ViscoSpectral& spectral,
+    ViscoScratch& ws,
     int nx,
     int nz)
 {
@@ -672,22 +816,12 @@ void process_recursive_interval_visco_2d(
         return;
 
     if (end - start == 1) {
-        // Pre-step captures: the state still holds (u_prev, u_now) =
-        // (u(start-1), u(start)).
-        torch::Tensor du;
-        if (damping.active && start >= 1)
-            du = start_state.u_now_t - start_state.u_prev_t;
-        // Dispersion gradient bases from the pre-step u(start) (the state
-        // rotates before the accumulation point below).
-        torch::Tensor Pb, Rb;
-        if (damping.disp && grad_B1 != nullptr) {
-            Pb = visco_acoustic2d_Lop(start_state.u_now_t, damping.Dk2);
-            Rb = visco_acoustic2d_Lop(start_state.u_now_t, damping.Dfrac);
-        }
+        // Pre-step: the state holds (u_prev, u_now) = (u(start-1), u(start));
+        // the carrier is recomputed from u(start) before the replay step.
         VISCO_ACOUSTIC2D_CARRIER(order, wave_grid, wave_block,
             start_state.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
-            carrier_scratch.data_ptr<float>(),
+            ws.CARRIER.data_ptr<float>(),
             lap_ctx, ctx);
 
         auto fwd_view = start_state.view();
@@ -708,7 +842,7 @@ void process_recursive_interval_visco_2d(
             ctx
         );
 
-        visco_acoustic2d_apply_spectral(start_state, damping, ctx.dt, ctx.M);
+        visco_acoustic2d_apply_spectral_into(start_state, spectral, ws, ctx.dt, ctx.M);
 
         add_source<<<forward_source_grid, forward_source_block>>>(
             fwd_view.u_next,
@@ -721,6 +855,18 @@ void process_recursive_interval_visco_2d(
 
         start_state.swap();
 
+        // The gradient bases used to be captured BEFORE the replay step
+        // (du = u_now - u_prev and the two Lops of u_now, three fresh tensors).
+        // swap() rotates (u_prev, u_now, u_next) <- (u_now, u_next, u_prev), so
+        // afterwards u_prev_t IS the pre-step u_now (u(start)) and u_next_t the
+        // pre-step u_prev (u(start-1)); the replay wrote only the old u_next
+        // (now u_now_t) and the CPML aux, so both hold exactly the bits the
+        // captures read.  They are consumed below, after the adjoint step, by
+        // the same kernels in the same operand order -- later in the stream,
+        // on values nothing has touched in between, i.e. bit for bit the same.
+        const torch::Tensor u_start = start_state.u_prev_t;    // u(start)
+        const torch::Tensor u_before = start_state.u_next_t;   // u(start-1)
+
         auto adj_view = adjoint.view();
 
         run_visco2d_adjoint_step(
@@ -729,7 +875,7 @@ void process_recursive_interval_visco_2d(
             lap_ctx, grad_ctx_x, grad_ctx_z,
             cpml, ctx);
 
-        adjoint_damping_extra(adjoint, damping, ctx.M);
+        adjoint_damping_extra(adjoint, spectral, ws, ctx.M);
 
         add_source<<<adj_source_grid, adj_source_block>>>(
             adj_view.u_next,
@@ -755,7 +901,7 @@ void process_recursive_interval_visco_2d(
 
         if (grad != nullptr) {
             calculate_grad<<<wave_grid, wave_block>>>(
-                carrier_scratch.data_ptr<float>(),
+                ws.CARRIER.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 grad->data_ptr<float>(),
@@ -764,7 +910,7 @@ void process_recursive_interval_visco_2d(
         }
         if (rtm_out != nullptr) {
             accumulate_illumination_2d<<<wave_grid, wave_block>>>(
-                carrier_scratch.data_ptr<float>(), nullptr, nullptr,
+                ws.CARRIER.data_ptr<float>(), nullptr, nullptr,
                 adjoint.u_now_t.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),
                 rtm_out->receiver_illumination.data_ptr<float>(),
@@ -772,13 +918,13 @@ void process_recursive_interval_visco_2d(
                 ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
         }
 
-        if (grad_A != nullptr && damping.active && start >= 1)
-            accumulate_grad_A(*grad_A, adjoint.u_now_t, du, damping, ctx.dt);
-        if (damping.disp && grad_B1 != nullptr) {
-            const double dt2 = static_cast<double>(ctx.dt) * static_cast<double>(ctx.dt);
-            grad_B1->add_(adjoint.u_now_t * Pb, dt2);
-            grad_B2->add_(adjoint.u_now_t * Rb, -dt2);
+        if (grad_A != nullptr && spectral.active && start >= 1) {
+            auto du = stage_difference(ws, u_start, u_before);   // == pre-step u_now - u_prev
+            accumulate_grad_A(*grad_A, adjoint.u_now_t, du, spectral, ctx.dt, ws);
         }
+        // == λ ⊙ Lop(pre-step u_now, D_k2 / D_frac), the former Pb / Rb
+        accumulate_grad_disp(grad_B1, grad_B2, adjoint.u_now_t, u_start,
+                             spectral, ctx.dt, ws);
         return;
     }
 
@@ -795,7 +941,7 @@ void process_recursive_interval_visco_2d(
         wave_grid, wave_block,
         forward_source_grid, forward_source_block,
         p, vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
-        cpml, ctx, forward_nsrc, damping);
+        cpml, ctx, forward_nsrc, spectral, ws);
 
     process_recursive_interval_visco_2d(
         mid, end, mid_state, adjoint, p, vp,
@@ -806,7 +952,7 @@ void process_recursive_interval_visco_2d(
         lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
         cpml, ctx, forward_nsrc, adjoint_nsrc,
         checkpoint_runtime, scratch_states, scratch_depth + 1,
-        carrier_scratch, damping, nx, nz);
+        spectral, ws, nx, nz);
 
     process_recursive_interval_visco_2d(
         start, mid, start_state, adjoint, p, vp,
@@ -817,7 +963,7 @@ void process_recursive_interval_visco_2d(
         lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
         cpml, ctx, forward_nsrc, adjoint_nsrc,
         checkpoint_runtime, scratch_states, scratch_depth + 1,
-        carrier_scratch, damping, nx, nz);
+        spectral, ws, nx, nz);
 }
 
 } // namespace
@@ -879,14 +1025,9 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         adjoint.allocate(vp, 2, true);
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
-    const auto& gs = grad_slots(p);
-    auto grad = pool_or_zeros(gs, 1, vp, "grads_out");
-    auto grad_A = pool_or_zeros(gs, 4, p.models[3], "grads_out");
-    auto grad_B1 = pool_or_zeros(gs, 2, p.models[1], "grads_out");
-    auto grad_B2 = pool_or_zeros(gs, 3, p.models[2], "grads_out");
-    auto grad_wavelet = pool_or_zeros(gs, 0, p.forward_source, "grads_out");
-    RTMOutput illumination;
-    init_rtm_output_visco_2d(illumination, vp);
+    ViscoGrads grads = bind_grads(p);
+    RTMOutput illumination = bind_illumination(p, /*always=*/false);
+    RTMOutput* rtm_out = p.compute_illumination ? &illumination : nullptr;
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.allocate(p.pml_vals, 2);
@@ -901,7 +1042,18 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    ViscoSpectral damping = visco_acoustic2d_make_spectral(p.eq_aux, p.models, dt, nz, nx);
+    // Tables [Gp, dt2A if a, Gd1, Gd2 if d] from p.derived_models; the scratch
+    // [CARRIER, C0, C1, (C2 if d), (R1 if d), FFT_WS] from p.adjoint_workspace
+    // -- both count-checked against the flags at entry.  CARRIER is zero at
+    // entry (the pool's per-backward zeroing / zeros here): the carrier kernel
+    // writes non-halo cells only and the halo band must stay 0 for the reused
+    // grad/RTM kernels.
+    ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
+        p.eq_aux, p.models, p.derived_models, ViscoMode::Recursive, dt, nz, nx,
+        "visco_acoustic2d::backward_recursive_ckpt");
+    ViscoScratch ws = visco_acoustic2d_bind_scratch(
+        p.adjoint_workspace, adjoint.u_now_t, spectral.active, spectral.disp,
+        ViscoMode::Recursive, "visco_acoustic2d::backward_recursive_ckpt adjoint_workspace");
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
     TORCH_CHECK(
@@ -922,18 +1074,29 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         max_segment_length = std::max(max_segment_length, end - start);
     }
 
+    // Replay state sets of p.forward_wavefields: set 0 is the segment start
+    // state (zeroed or checkpoint-loaded per segment before any read), sets
+    // 1..depth the bisection's scratch states (copy_state-filled from their
+    // parent before any read).  The propagator hands 1 + depth sets, its depth
+    // (_c.py _recursive_scratch_depth) the same halving loop on the same
+    // longest segment.
+    const int scratch_depth = visco_recursive_scratch_depth(max_segment_length);
+    check_replay_state_sets(p, 1 + scratch_depth, "visco_acoustic2d backward_recursive_ckpt");
+
     AcousticWavefieldTensor start_state;
-    start_state.allocate_from_snapshots(vp, p.checkpoints, 2);
+    if (!p.forward_wavefields.empty())
+        bind_replay_state(start_state, p, vp, 0);
+    else
+        start_state.allocate_from_snapshots(vp, p.checkpoints, 2);
     acoustic_init_aux_slabs(ctx, start_state);
 
-    std::vector<AcousticWavefieldTensor> scratch_states(visco_recursive_scratch_depth(max_segment_length));
-    for (auto& scratch_state : scratch_states)
-        scratch_state.allocate_like(vp, start_state);
-    // zeros (not empty): the carrier kernel writes non-halo cells only and the
-    // halo band must stay 0 for the reused grad/RTM kernels.
-    auto carrier_scratch = pool_or_zeros(workspace_slots(p), CARRIER, vp);
-
-    RTMOutput* rtm_out = in.compute_illumination ? &illumination : nullptr;
+    std::vector<AcousticWavefieldTensor> scratch_states(scratch_depth);
+    for (int level = 0; level < scratch_depth; ++level) {
+        if (!p.forward_wavefields.empty())
+            bind_replay_state(scratch_states[level], p, vp, /*set=*/level + 1);
+        else
+            scratch_states[level].allocate_like(vp, start_state);
+    }
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];
@@ -946,21 +1109,18 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
         process_recursive_interval_visco_2d(
             start, end, start_state, adjoint, p, vp,
-            &grad, &grad_A, &grad_B1, &grad_B2,
-            &grad_wavelet, rtm_out,
+            &grads.vp, &grads.A, &grads.B1, &grads.B2,
+            &grads.wavelet, rtm_out,
             order, launch_config.grid, launch_config.block,
             fwd_source_config.grid, fwd_source_config.block,
             adj_source_config.grid, adj_source_config.block,
             lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
             cpml, ctx, forward_nsrc, adjoint_nsrc,
             checkpoint_runtime, scratch_states, 0,
-            carrier_scratch, damping, nx, nz);
+            spectral, ws, nx, nz);
     }
 
-    out.grads = {grad_wavelet, grad, grad_B1, grad_B2, grad_A};
-    out.source_illumination = illumination.source_illumination;
-    out.receiver_illumination = illumination.receiver_illumination;
-    out.adcig = illumination.adcig;
+    pack_outputs(out, grads, illumination);
     return out;
 }
 

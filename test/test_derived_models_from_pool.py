@@ -38,12 +38,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import solver_gradient_mode_suite as suite  # noqa: E402
 
 
-def _lame(models):
+def _lame(models, dt, stage):
     vp, vs, rho = models[0], models[1], models[2]
     return [rho * vs * vs, rho * (vp * vp - 2 * vs * vs)]
 
 
-def _vti(models):
+def _vti(models, dt, stage):
     vp, eps, delta, rho = models[0], models[1], models[2], models[3]
     vp_sq = vp * vp
     rho_vp2 = rho * vp_sq
@@ -51,8 +51,19 @@ def _vti(models):
             rho_vp2, 1.0 / rho]
 
 
-def _vrz(models):
+def _vrz(models, dt, stage):
     return [torch.reciprocal(models[1])]
+
+
+def _visco(models, dt, stage):
+    # the spectral tables of visco_acoustic2d (both terms on): the forward reads
+    # dt2A = A*dt^2, the full backward Gp = A*dt, both read Gd1 = B1*dt^2, Gd2 = B2*dt^2
+    # (prepared models are [vp_step, B1, B2, A]); dt*dt in float32 as the driver does
+    dt = float(dt)
+    dt2 = float(torch.tensor(dt, dtype=torch.float32) * torch.tensor(dt, dtype=torch.float32))
+    B1, B2, A = models[1], models[2], models[3]
+    first = A * dt2 if stage == "forward" else A * dt
+    return [first, B1 * dt2, B2 * dt2]
 
 
 # key -> (slots the forward gets, slots the full-mode backward gets, reference
@@ -69,6 +80,7 @@ CASES = {
     "acoustic_vti_1st_3d": (4, 4, _vti, "acoustic_vti_1st_3d"),
     "vrz2d": (1, 1, _vrz, "acoustic_vrz2d"),
     "vrz3d": (1, 1, _vrz, "acoustic_vrz3d"),
+    "visco2d": (3, 3, _visco, "visco_acoustic2d"),
 }
 PARAMS = [pytest.param(k, marks=requires_binding(f"{CASES[k][3]}_forward")) for k in CASES]
 
@@ -109,7 +121,7 @@ class _Probe:
         torch.cuda.synchronize()
         allocs = torch.cuda.memory_stats()["allocation.all.allocated"] - allocs
         self.calls.append(dict(models=[m.detach().clone() for m in params.models],
-                               values=[t.detach().clone() for t in slots],
+                               values=[t.detach().clone() for t in slots], dt=float(params.dt),
                                weak=[weakref.ref(t) for t in slots], allocs=allocs))
         return out
 
@@ -134,7 +146,8 @@ def test_forward_and_backward_derive_into_the_handed_over_slots(key):
         call = probe.calls[0]
         assert len(call["values"]) == n, (
             f"{key}: {probe.name} was handed {len(call['values'])} derived slots, expected {n}")
-        for i, (got, ref) in enumerate(zip(call["values"], reference(call["models"]))):
+        stage = "forward" if probe.name == "forward_func" else "backward"
+        for i, (got, ref) in enumerate(zip(call["values"], reference(call["models"], call["dt"], stage))):
             assert torch.isfinite(got).all(), (
                 f"{key}: {probe.name} left the NaN sentinel in derived slot {i}: the driver "
                 "did not fill the handed-over slot")

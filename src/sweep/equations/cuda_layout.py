@@ -28,6 +28,12 @@ class CUDALayoutSpec:
     # allocated for the duration of one call, never re-zeroed -- a driver
     # zeroes what it needs. 0 = the forward allocates nothing of its own.
     forward_workspace_nvar: int = 0
+    # ``fn(B, shape_cuda) -> list of shapes``: the compiled forward's per-call
+    # scratch when it is not simply N padded grids (complex spectra as float32
+    # ``[B, 1, *grid, 2]`` slots, a cuFFT work area as a flat float32 slot).
+    # Uninitialised (``torch.empty``): the driver writes every cell before it
+    # reads. Takes precedence over ``forward_workspace_nvar``.
+    forward_workspace_shapes: Callable | None = None
     # Model-shaped slots the propagator hands the compiled forward AND backward
     # as ``derived_models``: one per coefficient the driver derives from the
     # bound models (Lame parameters, VTI stiffness, 1/z -- the slot order is

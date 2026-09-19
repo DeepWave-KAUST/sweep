@@ -58,6 +58,15 @@ __global__ void reciprocal_kernel(const float* __restrict__ z, float* __restrict
         inv_z[i] = __fdiv_rn(1.0f, z[i]);
 }
 
+// out = in * s: the one rounding of ``tensor * Scalar(float)`` (ATen loads the
+// wrapped scalar back as float and multiplies once per cell)
+__global__ void scale_kernel(const float* __restrict__ in, float s, float* __restrict__ out, int64_t n)
+{
+    for (int64_t i = blockIdx.x * static_cast<int64_t>(blockDim.x) + threadIdx.x; i < n;
+         i += static_cast<int64_t>(gridDim.x) * blockDim.x)
+        out[i] = __fmul_rn(in[i], s);
+}
+
 void check_operand(const torch::Tensor& t, const torch::Tensor& like, const char* name)
 {
     TORCH_CHECK(t.defined() && t.is_cuda() && t.scalar_type() == torch::kFloat && t.is_contiguous(),
@@ -119,6 +128,19 @@ void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z)
     c10::cuda::CUDAGuard guard(z.device());
     reciprocal_kernel<<<grid_for(n), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
         z.data_ptr<float>(), inv_z.data_ptr<float>(), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void derive_scale(const torch::Tensor& in, float s, torch::Tensor& out)
+{
+    check_operand(in, in, "in");
+    check_operand(out, in, "out");
+    TORCH_CHECK(in.data_ptr() != out.data_ptr(), "derived_models: derive_scale is out of place");
+    const int64_t n = in.numel();
+    if (n == 0) return;
+    c10::cuda::CUDAGuard guard(in.device());
+    scale_kernel<<<grid_for(n), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        in.data_ptr<float>(), s, out.data_ptr<float>(), n);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
