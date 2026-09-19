@@ -105,6 +105,10 @@ class CompiledCallParams:
     last_two: torch.Tensor = None
     boundary_cpu: tuple = ()
     boundary_gpu: tuple = ()
+    # FP32 one-timestep bands the scaled (int8/fp16) boundary store quantizes
+    # from and dequantizes into (Layout.staging_shapes). () for fp32/bf16
+    # storage, which never stages.
+    boundary_staging: tuple = ()
     boundary_disk_files: tuple = ()
     source_illumination_buffer: torch.Tensor = None
     receiver_illumination_buffer: torch.Tensor = None

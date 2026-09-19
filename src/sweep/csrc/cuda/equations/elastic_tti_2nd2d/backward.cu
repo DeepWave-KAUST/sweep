@@ -384,14 +384,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
             true, 2, 2, solver, rho, save_width, 2,
             true, false, p.transfer_interval,
             p.boundary_cpu, p.boundary_gpu,
-            p.u_last_two, p.use_pinned_memory
+            p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
             true, 2, 2, solver, rho, save_width, 2,
             true, true, 1,
             {}, p.boundary_gpu,
-            p.u_last_two, p.use_pinned_memory
+            p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, rho);

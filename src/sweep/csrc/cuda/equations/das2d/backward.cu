@@ -534,7 +534,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             p.boundary_cpu,
             p.boundary_gpu,
             p.u_last_two,
-            p.use_pinned_memory
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
@@ -551,7 +551,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
             {},
             p.boundary_gpu,
             p.u_last_two,
-            p.use_pinned_memory
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);

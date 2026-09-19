@@ -212,11 +212,11 @@ public:
             boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, solver, vp,
                                     save_width, 1, true, false, p.transfer_interval,
                                     p.boundary_cpu, p.boundary_gpu, p.last_two,
-                                    p.use_pinned_memory);
+                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
         else
             boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, solver, vp,
                                     save_width, 1, true, true, 1, {}, p.boundary_gpu,
-                                    p.last_two, p.use_pinned_memory);
+                                    p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
         bs = boundary_saver.view();
 
         launch_config = wave_config<Eq::NDIM>(d);
@@ -676,11 +676,11 @@ public:
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
                                     1, true, false, p.transfer_interval,
                                     p.boundary_cpu, p.boundary_gpu, last_two_bound,
-                                    p.use_pinned_memory);
+                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
         } else {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
                                     1, true, true, 1, {}, p.boundary_gpu, last_two_bound,
-                                    p.use_pinned_memory);
+                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
             if (p.boundary_gpu.empty())
                 boundary_saver.load_from_vector(p.u_boundary, vp);
         }

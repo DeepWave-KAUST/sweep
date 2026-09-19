@@ -448,13 +448,13 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            last_two_bound, p.use_pinned_memory, boundary_tangent_pad
+            last_two_bound, p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, true, 1, {}, p.boundary_gpu, last_two_bound,
-            p.use_pinned_memory, boundary_tangent_pad
+            p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);

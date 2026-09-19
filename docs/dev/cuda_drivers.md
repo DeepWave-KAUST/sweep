@@ -138,6 +138,16 @@ back to the per-call stepped path when a factory is missing.
   Illumination accumulators come as `illum_out` (`cuda_layout.illum_nvar`, bound by the
   monolithic backward when illumination was asked for) and are allocated in C++ only for
   a caller that binds nothing.
+  The boundary saver's last tensors went too: a scaled boundary store (`storage_dtype`
+  `int8` or `fp16`, on gpu, cpu or disk alike) quantizes through a one-timestep FP32 band
+  per face, and those bands now come as `boundary_staging` (`Layout.staging_shapes`, the
+  persistent face shape with the time axes collapsed to one slot), allocated in the
+  propagator's boundary GPU allocator beside `boundary_gpu` and bound by forward and
+  backward; `fp32`/`bf16` storage never stages and gets no bytes. They are zeroed once at
+  allocation rather than per call: every cell the band kernel writes is overwritten before
+  `launch_quantize_*` reduces over it, and the cells it never writes -- the tangential pad
+  of a `tangent_pad > 0` layout, a DD cut face -- must read 0 (they enter the per-block
+  max) and stay 0, since the only other writer maps a cell quantized from 0 back to 0.
   The last per-call tensors went the same way: un-injecting a source in a reverse
   reconstruction and injecting a stress residual use `add_source_signed` /
   `add_source_3d_signed` (`common/common.cu`: the sample's sign bit flipped, exact) instead

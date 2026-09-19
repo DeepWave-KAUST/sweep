@@ -272,30 +272,112 @@ struct EffectiveBoundarySaver {
                           left_scale_gpu, right_scale_gpu);
     }
 
-    // INT8 path: allocate transient FP32 staging buffer (one timestep
-    // per face).  Compute writes FP32 into staging via the existing
-    // FP32 boundary kernel; launch_quantize_int8 then compresses staging
-    // into the persistent uint8 + scale buffers (bound externally).
+    // Per-face FP32 staging geometry for the scaled (INT8 / FP16) store: ONE
+    // timestep's worth of boundary band per face, in bind_tensor_group's face
+    // order (top, bottom, front, back, left, right; 2-D drops front/back).
+    // The Python side derives the same list from ``Layout.staging_shapes``
+    // (memory/shape.py) out of the same width / n*_boundary the persistent
+    // buffers come from, so one formula lives on each side and the bound
+    // tensors are checked against this one below.
+    inline std::vector<std::vector<int64_t>> int8_staging_shapes(
+        const SolverContext& ctx,
+        int width,
+        int nx_boundary,
+        int ny_boundary,
+        int nz_boundary) const
+    {
+        if (dim == 3) {
+            return {
+                {1, ctx.B, width, ny_boundary, nx_boundary},   // top
+                {1, ctx.B, width, ny_boundary, nx_boundary},   // bottom
+                {1, ctx.B, nz_boundary, width, nx_boundary},   // front
+                {1, ctx.B, nz_boundary, width, nx_boundary},   // back
+                {1, ctx.B, nz_boundary, ny_boundary, width},   // left
+                {1, ctx.B, nz_boundary, ny_boundary, width},   // right
+            };
+        }
+        return {
+            {1, 1, ctx.B, width, nx_boundary},   // top
+            {1, 1, ctx.B, width, nx_boundary},   // bottom
+            {1, 1, ctx.B, nz_boundary, width},   // left
+            {1, 1, ctx.B, nz_boundary, width},   // right
+        };
+    }
+
+    // Bind the Python-owned FP32 staging (ForwardInput/BackwardInput::
+    // boundary_staging).  Count + per-slot geometry/dtype/device checks in the
+    // spirit of cudautils.h's pool_slot_checked: the save/restore kernels take
+    // data_ptr<float>() and index it by ctx.B / width / n*_boundary, and
+    // quantize_step copies the persistent buffer's whole per-step stride out of
+    // it, so a slot of the wrong shape reads as garbage rather than failing.
+    inline void bind_int8_staging(
+        const std::vector<torch::Tensor>& staging,
+        const std::vector<std::vector<int64_t>>& shapes)
+    {
+        TORCH_CHECK(staging.size() == shapes.size(),
+                    "boundary_staging must contain ", shapes.size(),
+                    " tensors for ", dim, "D, got ", staging.size());
+        for (size_t i = 0; i < shapes.size(); ++i) {
+            TORCH_CHECK(staging[i].sizes().vec() == shapes[i],
+                        "boundary_staging[", i, "] has shape ", staging[i].sizes(),
+                        " but the saver's geometry is ", shapes[i],
+                        " -- the Python Layout and this driver disagree on "
+                        "save_width or tangent_pad (the staging is one timestep "
+                        "of the same band as the persistent buffer).");
+            TORCH_CHECK(staging[i].scalar_type() == torch::kFloat,
+                        "boundary_staging[", i, "] must be float32, got ",
+                        staging[i].scalar_type());
+            TORCH_CHECK(staging[i].is_cuda(),
+                        "boundary_staging[", i, "] must live on the GPU (a host "
+                        "tensor here reads as an illegal address inside the "
+                        "kernels), got ", staging[i].device());
+        }
+        bind_tensor_group(staging, "boundary_staging",
+                          top_staging_t, bottom_staging_t,
+                          front_staging_t, back_staging_t,
+                          left_staging_t, right_staging_t);
+    }
+
+    // Scaled (INT8 / FP16) path: the FP32 staging buffer, one timestep per
+    // face.  Compute writes FP32 into staging via the existing FP32 boundary
+    // kernel; launch_quantize_{int8,fp16} then compresses staging into the
+    // persistent payload + scale buffers (bound externally), and the backward's
+    // launch_dequantize_* expands back into it before the restore kernel reads
+    // it.  ``staging`` is the propagator's buffer (same lifetime as the other
+    // boundary buffers: per propagator, re-made when the cache key changes);
+    // the torch::zeros branch is the unbound-caller fallback only.
+    //
+    // Zeroing: the propagator zeroes its staging ONCE, at allocation, not per
+    // call -- and that is enough to keep the scaled path bit-exact.  Every cell
+    // the save kernel writes is overwritten before quantize_step reduces over
+    // it; the only cells it never writes are the tangential pad of a
+    // tangent_pad > 0 layout (VRZ: the band kernels run with tangent_pad = 0
+    // while the buffers are sized with it) and a DD cut face (kernel and
+    // quantize both gate on ctx.cut_*).  The pad cells still enter the
+    // per-block max, so they must read 0 -- and they stay 0 forever: nothing
+    // but launch_dequantize_* ever writes them, and that writes back
+    // (0 - 128) * scale == 0 for a cell that was quantized from 0.
     inline void allocate_int8_staging(
         const SolverContext& ctx,
         int width,
         int nx_boundary,
         int ny_boundary,
         int nz_boundary,
-        const torch::TensorOptions& fp32_options)
+        const torch::TensorOptions& fp32_options,
+        const std::vector<torch::Tensor>& staging = {})
     {
-        if (dim == 3) {
-            top_staging_t    = torch::zeros({1, ctx.B, width, ny_boundary, nx_boundary}, fp32_options);
-            bottom_staging_t = torch::zeros({1, ctx.B, width, ny_boundary, nx_boundary}, fp32_options);
-            front_staging_t  = torch::zeros({1, ctx.B, nz_boundary, width, nx_boundary}, fp32_options);
-            back_staging_t   = torch::zeros({1, ctx.B, nz_boundary, width, nx_boundary}, fp32_options);
-            left_staging_t   = torch::zeros({1, ctx.B, nz_boundary, ny_boundary, width}, fp32_options);
-            right_staging_t  = torch::zeros({1, ctx.B, nz_boundary, ny_boundary, width}, fp32_options);
+        const auto shapes = int8_staging_shapes(ctx, width, nx_boundary, ny_boundary, nz_boundary);
+        if (!staging.empty()) {
+            bind_int8_staging(staging, shapes);
         } else {
-            top_staging_t    = torch::zeros({1, 1, ctx.B, width, nx_boundary}, fp32_options);
-            bottom_staging_t = torch::zeros({1, 1, ctx.B, width, nx_boundary}, fp32_options);
-            left_staging_t   = torch::zeros({1, 1, ctx.B, nz_boundary, width}, fp32_options);
-            right_staging_t  = torch::zeros({1, 1, ctx.B, nz_boundary, width}, fp32_options);
+            std::vector<torch::Tensor> fresh;
+            fresh.reserve(shapes.size());
+            for (const auto& shape : shapes)
+                fresh.push_back(torch::zeros(shape, fp32_options));
+            bind_tensor_group(fresh, "boundary_staging (self-allocated)",
+                              top_staging_t, bottom_staging_t,
+                              front_staging_t, back_staging_t,
+                              left_staging_t, right_staging_t);
         }
         // Defensive: quantize_step / dequantize_step copy the persistent buffer's
         // full per-step stride (top_t.stride(0) in 3D) between the staging and the
@@ -303,6 +385,10 @@ struct EffectiveBoundarySaver {
         // persistent buffers were allocated with (Python boundary_tangent_pad),
         // the staging is undersized and the copy reads/writes out of bounds.  Turn
         // that silent illegal access into a clear error at allocation time.
+        // (A DD cut face keeps its FULL staging band on both sides -- Python does
+        // NOT collapse these the way gpu_full_shapes collapses the persistent
+        // faces -- because PyTorch clamps a 0-size dim's stride to a nonzero
+        // value, so a numel-0 slot would trip this very check.)
         if (dim == 3 && top_t.defined() && top_t.numel() > 0) {
             TORCH_CHECK(top_staging_t.numel() >= top_t.stride(0) &&
                         left_staging_t.numel() >= left_t.stride(0) &&
@@ -311,73 +397,6 @@ struct EffectiveBoundarySaver {
                         "buffer per-step stride -- tangent_pad mismatch between the "
                         "Python layout and the CUDA saver (top ", top_staging_t.numel(),
                         " vs ", top_t.stride(0), ").");
-        }
-    }
-
-    // INT8 path (legacy, fully-internal allocation — used only if
-    // Python doesn't pre-allocate; saver-internal data is lost between
-    // forward and backward so this isn't used in the production flow).
-    inline void allocate_int8_main_and_scale(
-        const SolverContext& ctx,
-        int width,
-        int nx_boundary,
-        int ny_boundary,
-        int nz_boundary,
-        const torch::TensorOptions& gpu_options)
-    {
-        auto u8_options = gpu_options.dtype(torch::kUInt8);
-        auto scale_options = gpu_options.dtype(torch::kFloat32);
-
-        auto blocks_per_step = [](int64_t cells_per_step) -> int64_t {
-            return (cells_per_step + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
-        };
-
-        if (dim == 3) {
-            int64_t top_step = (int64_t)width * ny_boundary * nx_boundary * ctx.B;
-            int64_t side_step_lr = (int64_t)nz_boundary * ny_boundary * width * ctx.B;
-            int64_t side_step_fb = (int64_t)nz_boundary * width * nx_boundary * ctx.B;
-
-            top_t    = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, u8_options);
-            bottom_t = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, u8_options);
-            front_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, u8_options);
-            back_t   = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, u8_options);
-            left_t   = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, u8_options);
-            right_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, u8_options);
-
-            top_scale_t    = torch::zeros({nvar * ctx.nt, blocks_per_step(top_step)}, scale_options);
-            bottom_scale_t = torch::zeros({nvar * ctx.nt, blocks_per_step(top_step)}, scale_options);
-            front_scale_t  = torch::zeros({nvar * ctx.nt, blocks_per_step(side_step_fb)}, scale_options);
-            back_scale_t   = torch::zeros({nvar * ctx.nt, blocks_per_step(side_step_fb)}, scale_options);
-            left_scale_t   = torch::zeros({nvar * ctx.nt, blocks_per_step(side_step_lr)}, scale_options);
-            right_scale_t  = torch::zeros({nvar * ctx.nt, blocks_per_step(side_step_lr)}, scale_options);
-
-            // FP32 staging: one timestep's worth per face (no nt dim).
-            top_staging_t    = torch::zeros({1, ctx.B, width, ny_boundary, nx_boundary}, scale_options);
-            bottom_staging_t = torch::zeros({1, ctx.B, width, ny_boundary, nx_boundary}, scale_options);
-            front_staging_t  = torch::zeros({1, ctx.B, nz_boundary, width, nx_boundary}, scale_options);
-            back_staging_t   = torch::zeros({1, ctx.B, nz_boundary, width, nx_boundary}, scale_options);
-            left_staging_t   = torch::zeros({1, ctx.B, nz_boundary, ny_boundary, width}, scale_options);
-            right_staging_t  = torch::zeros({1, ctx.B, nz_boundary, ny_boundary, width}, scale_options);
-        } else {
-            int64_t top_step = (int64_t)width * nx_boundary * ctx.B;
-            int64_t side_step = (int64_t)nz_boundary * width * ctx.B;
-
-            top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, u8_options);
-            bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, u8_options);
-            left_t   = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, u8_options);
-            right_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, u8_options);
-            front_t  = torch::Tensor();
-            back_t   = torch::Tensor();
-
-            top_scale_t    = torch::zeros({nvar, ctx.nt, blocks_per_step(top_step)}, scale_options);
-            bottom_scale_t = torch::zeros({nvar, ctx.nt, blocks_per_step(top_step)}, scale_options);
-            left_scale_t   = torch::zeros({nvar, ctx.nt, blocks_per_step(side_step)}, scale_options);
-            right_scale_t  = torch::zeros({nvar, ctx.nt, blocks_per_step(side_step)}, scale_options);
-
-            top_staging_t    = torch::zeros({1, 1, ctx.B, width, nx_boundary}, scale_options);
-            bottom_staging_t = torch::zeros({1, 1, ctx.B, width, nx_boundary}, scale_options);
-            left_staging_t   = torch::zeros({1, 1, ctx.B, nz_boundary, width}, scale_options);
-            right_staging_t  = torch::zeros({1, 1, ctx.B, nz_boundary, width}, scale_options);
         }
     }
 
@@ -412,7 +431,8 @@ struct EffectiveBoundarySaver {
         const std::vector<torch::Tensor>& boundary_gpu = {},
         const torch::Tensor& last_two = {},
         bool use_pinned_memory_ = false,
-        int tangent_pad = 0
+        int tangent_pad = 0,
+        const std::vector<torch::Tensor>& boundary_staging = {}
     )
     {
         enabled = use_boundary_saving;
@@ -489,9 +509,9 @@ struct EffectiveBoundarySaver {
             // Scaled gpu-direct (INT8 / FP16): Python owns a persistent
             // payload main (uint8 or fp16) + FP32 per-block scale tensors
             // and passes them concatenated in ``boundary_gpu`` (first half
-            // = main, second half = scale).  We bind those here and
-            // allocate FP32 staging buffers internally (single timestep,
-            // transient).
+            // = main, second half = scale).  We bind those here, and the
+            // single-timestep FP32 staging comes from ``boundary_staging``
+            // (Python-owned; self-allocated only for an unbound caller).
             TORCH_CHECK(boundary_gpu.size() == 2 * scaled_faces,
                         "Scaled (int8/fp16) boundary_gpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
@@ -503,16 +523,16 @@ struct EffectiveBoundarySaver {
             bind_storage_tensors(main_tensors, "boundary_gpu scaled main");
             bind_int8_scales(scale_tensors);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
-                                  gpu_options.dtype(torch::kFloat32));
+                                  gpu_options.dtype(torch::kFloat32), boundary_staging);
         } else if (use_scaled) {
             // Scaled staged (cpu/disk): Python owns a persistent payload
             // main + FP32 scale buffer (``boundary_cpu``; on disk these are
             // the cpu staging buffers) AND a payload main + FP32 scale RING
             // on the GPU (``boundary_gpu``).  Both are concatenated
             // main-then-scale.  We bind the cpu side to top_t/top_scale_t,
-            // the gpu rings to top_gpu/top_scale_gpu, and allocate the
-            // shared FP32 transient staging internally (a single timestep,
-            // like gpu-direct).
+            // the gpu rings to top_gpu/top_scale_gpu, and take the shared
+            // single-timestep FP32 staging from ``boundary_staging`` (the same
+            // Python-owned buffer as gpu-direct).
             TORCH_CHECK(boundary_cpu.size() == 2 * scaled_faces,
                         "Scaled (int8/fp16) staged boundary_cpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
@@ -534,7 +554,7 @@ struct EffectiveBoundarySaver {
             bind_staging_tensors(gpu_main, "boundary_gpu scaled main ring");
             bind_int8_scale_rings(gpu_scale);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
-                                  gpu_options.dtype(torch::kFloat32));
+                                  gpu_options.dtype(torch::kFloat32), boundary_staging);
         } else if (!boundary_cpu.empty()) {
             bind_storage_tensors(boundary_cpu, "boundary_cpu");
         } else if (store_on_gpu && !boundary_gpu.empty()) {

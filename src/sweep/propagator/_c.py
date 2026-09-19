@@ -223,6 +223,9 @@ class Wrapper(torch.autograd.Function):
         else:
             params.boundary_cpu = []
             params.boundary_gpu = [b.zero_() for b in cp.boundary_gpu] if use_boundary_saving else []
+        # Scaled (int8/fp16) storage only; NOT zeroed per call, unlike the
+        # buffers above -- see _ensure_boundary_buffers for why once is enough.
+        params.boundary_staging = list(cp.boundary_staging) if use_boundary_saving else []
         params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
         params.checkpoints = [c.zero_() for c in cp.checkpoint_buffers] if use_checkpoint else []
         params.transfer_interval = cp.transfer_interval
@@ -509,6 +512,10 @@ class Wrapper(torch.autograd.Function):
         else:
             params.boundary_cpu = list(cp.boundary_cpu) if cp.boundary_on_cpu else []
             params.boundary_gpu = list(cp.boundary_gpu) if ctx.use_boundary_saving else []
+            # The same staging the forward quantized through: dequantize_step
+            # refills it in full before every restore, so it carries nothing
+            # across and needs no zeroing here either.
+            params.boundary_staging = list(cp.boundary_staging) if ctx.use_boundary_saving else []
             params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
             params.u_last_two = last.contiguous()
             # on the models' device: with cpu/disk boundary staging ``last`` may
@@ -715,6 +722,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.boundary_cpu = ()
         self.boundary_gpu = ()
         self.boundary_gpu_full = ()
+        self.boundary_staging = ()
         self.checkpoint_allocator = Allocator(self.dev)
         self.checkpoints = ()
         self.checkpoint_replay = ()
@@ -1097,6 +1105,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             'bf16': torch.bfloat16,
         }.get(boundary_dtype, torch.float32)
 
+        # FP32 staging for the scaled (int8/fp16) store: the ONE-timestep band
+        # per face that the boundary kernel writes, ``launch_quantize_*``
+        # compresses into the payload + per-block scale, and the backward's
+        # ``launch_dequantize_*`` expands back before the restore kernel reads
+        # it.  The C++ saver used to torch::zeros these on every forward AND
+        # every backward; they are the same lifetime as the boundary buffers
+        # around them (per propagator, re-made when the cache key changes), so
+        # they go in the same persistent GPU allocator.  ``fp32``/``bf16``
+        # storage has no staging at all -- it stays () and costs no bytes.
+        #
+        # Zeroed ONCE here, at allocation, not per call, and that is bit-exact.
+        # Every cell the band kernel writes is overwritten before quantize
+        # reduces over it.  The cells it never writes are (a) the tangential pad
+        # of a ``tangent_pad > 0`` layout (VRZ: the band kernels run with
+        # tangent_pad = 0 while the buffers are sized with it) and (b) a DD cut
+        # face (band kernel and quantize/dequantize both gate on the cut).  The
+        # pad cells DO enter the per-block max, so 0 is the load-bearing value
+        # and not merely a tidy one -- and they stay 0 for the buffer's whole
+        # life, because the only other writer, ``launch_dequantize_*``, maps a
+        # cell that was quantized from 0 back to exactly 0.  (On the disk path
+        # ``forward()`` calls ``boundary_gpu_allocator.zero_()`` per call, which
+        # re-zeroes these too; a superset of "once", so still bit-exact.)
+        self.boundary_staging = ()
+
         if boundary_on_cpu and boundary_dtype in ('int8', 'fp16'):
             # Staged scaled storage (int8 / fp16): a persistent payload main
             # (uint8 or fp16) + FP32 per-block scale on the cpu side
@@ -1131,6 +1163,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             ring_scale = self.boundary_gpu_allocator.zeros(
                 ring_scale_shapes, dtype=torch.float32)
             self.boundary_gpu = tuple(ring_main) + tuple(ring_scale)
+            self.boundary_staging = tuple(self.boundary_gpu_allocator.zeros(
+                layout.staging_shapes, dtype=torch.float32))
             self.boundary_gpu_full = ()
             self.last_two = self.boundary_cpu_allocator.zeros(
                 [last_two_shape],
@@ -1181,10 +1215,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 # recreated each call and would otherwise lose the data).
                 # Layout: list of N main payload tensors followed by N scale
                 # FP32 tensors, where N = 4 (2D) or 6 (3D).  Saver detects
-                # this pattern via dtype and binds main + scale + allocates
-                # FP32 staging internally.  fp16 shares int8's two-pass flow
-                # because a bare fp16 cast flushes values below 2^-24 to
-                # zero, wiping the velocity faces of elastic wavefields.
+                # this pattern via dtype and binds main + scale, and takes
+                # the FP32 staging from ``boundary_staging`` (allocated just
+                # below).  fp16 shares int8's two-pass flow because a bare
+                # fp16 cast flushes values below 2^-24 to zero, wiping the
+                # velocity faces of elastic wavefields.
                 # Scale shapes preserve the batch dimension so that
                 # ``_slice_boundary_buffers`` narrows the same axis as the
                 # main tensors.  Spatial dims collapse to n_blocks (shared
@@ -1200,6 +1235,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 scale_tensors = self.boundary_gpu_allocator.zeros(
                     self._int8_scale_shapes(main_shapes), dtype=torch.float32)
                 self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
+                self.boundary_staging = tuple(self.boundary_gpu_allocator.zeros(
+                    layout.staging_shapes, dtype=torch.float32))
             else:
                 self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
                     layout.gpu_full_shapes, dtype=_bdry_dtype)
@@ -1864,6 +1901,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     t.zero_()
             boundary_cpu = ()
             boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu_full, batch_size)
+        # Narrowed on the same batch axis as the buffers it feeds; () unless the
+        # storage dtype is scaled (int8/fp16), which is the only path that
+        # quantizes through a staging band.
+        boundary_staging = self._slice_boundary_buffers(self.boundary_staging, batch_size)
         last_two = self._slice_last_two(batch_size) if use_boundary_saving else self.last_two
 
         spacing = self._cuda_spacing()
@@ -1942,6 +1983,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     last_two=last_two,
                     boundary_cpu=boundary_cpu,
                     boundary_gpu=boundary_gpu,
+                    boundary_staging=boundary_staging,
                     boundary_disk_files=self._boundary_disk_files if boundary_on_disk else (),
                     source_illumination_buffer=self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
                     receiver_illumination_buffer=self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),

@@ -184,14 +184,14 @@ ForwardOutput forward(const ForwardInput& in)
             p.use_boundary_saving, /*dim=*/3, /*nvar=*/5, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/false, p.transfer_interval,
-            p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+            p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     } else {
         boundary_saver.allocate(
             p.use_boundary_saving, /*dim=*/3, /*nvar=*/5, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/true, /*transfer_interval=*/1,
             /*boundary_cpu=*/{}, p.boundary_gpu, p.last_two,
-            p.use_pinned_memory);
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     }
     auto bs = boundary_saver.view();
 

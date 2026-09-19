@@ -248,6 +248,47 @@ class Layout:
         return self.bottom_gpu_shape
 
     # -------------------------
+    # Scaled-storage FP32 staging (one timestep per face)
+    # -------------------------
+
+    @property
+    def staging_shapes(self):
+        """Per-face FP32 staging shapes for the scaled (int8/fp16) store.
+
+        The save kernel writes ONE timestep's worth of FP32 boundary band per
+        face; ``launch_quantize_{int8,fp16}`` compresses that band into the
+        persistent payload + per-block scale, and the backward's
+        ``launch_dequantize_*`` expands it back before the restore kernel reads
+        it.  So this is exactly the persistent face shape with the leading
+        time axes collapsed to a single slot -- ``(1, B, ...)`` in 3-D,
+        ``(1, 1, B, ...)`` in 2-D -- and the spatial dims untouched.
+
+        Derived from the SAME ``width`` / ``n*_boundary`` as ``cpu_shapes``
+        and ``gpu_shapes``, so ``tangent_pad`` / ``pad`` / ``cut_mask`` can
+        never drift between the staging and the buffer it feeds (the C++ saver
+        TORCH_CHECKs the staging against the persistent buffer's per-step
+        stride, which is precisely that drift).
+
+        Cut faces keep their FULL band here, unlike ``gpu_full_shapes``: that
+        same check compares ``numel()`` against a ``stride()``, and PyTorch
+        clamps a 0-size dim's stride to a nonzero value, so a collapsed slot
+        would trip it.  Nothing reads a cut face's staging anyway (the band
+        kernel and quantize/dequantize both gate on the cut), and the cost is
+        one transient band per face, not a ring.
+        """
+        lead = 1 if self.dim == 3 else 2   # (nvar*nt,) in 3-D, (nvar, nt) in 2-D
+        one = (1,) * lead
+        shapes = (
+            self.top_shape,
+            self.bottom_shape,
+            self.front_shape,
+            self.back_shape,
+            self.left_shape,
+            self.right_shape,
+        )
+        return tuple(one + tuple(shape[lead:]) for shape in shapes if shape is not None)
+
+    # -------------------------
     # last two wavefields
     # -------------------------
 

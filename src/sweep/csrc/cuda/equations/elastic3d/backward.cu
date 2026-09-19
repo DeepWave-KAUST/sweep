@@ -456,7 +456,7 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
         true, 3, 9, solver, vp, save_width, 1,
         true, !staged_boundary, staged_boundary ? p.transfer_interval : 1,
         staged_boundary ? p.boundary_cpu : std::vector<torch::Tensor>{},
-        p.boundary_gpu, p.u_last_two, p.use_pinned_memory
+        p.boundary_gpu, p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
     );
     auto bs = boundary_saver.view();
 

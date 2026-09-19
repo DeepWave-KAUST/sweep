@@ -117,7 +117,7 @@ ForwardOutput forward(const ForwardInput& in)
             p.boundary_cpu,
             p.boundary_gpu,
             p.last_two,
-            p.use_pinned_memory
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
@@ -134,7 +134,7 @@ ForwardOutput forward(const ForwardInput& in)
             {},
             p.boundary_gpu,
             p.last_two,
-            p.use_pinned_memory
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     }
     auto bs = boundary_saver.view();

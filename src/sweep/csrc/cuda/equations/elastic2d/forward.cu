@@ -103,9 +103,9 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int save_width = solver.M + 1;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary)
-        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     else
-        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+        boundary_saver.allocate(p.use_boundary_saving, 2, 5, solver, vp, save_width, 1, true, true, 1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     auto bs = boundary_saver.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
