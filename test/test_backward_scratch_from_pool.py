@@ -64,8 +64,20 @@ SENTINEL = 1e-3
 ALL = ("full", "bs_gpu", "ckpt_chunk")
 CASES = {
     # + 6 velocity carriers (next_segment_v / prev_segment_next_v) in ckpt mode (slice 13)
-    "elastic_tti_sg2d": (lambda mode: 12 if mode == "ckpt_chunk" else 6, None, ALL),
-    "elastic_tti_sg3d": (lambda mode: 24 if mode == "ckpt_chunk" else 18, None, ALL),
+    # the staggered full mode keeps a read-only zero grid (v(nt)) right after the
+    # adjoint scratch (slice 16); ckpt puts its velocity carriers there instead
+    "elastic_tti_sg2d": (lambda mode: {"full": 7, "bs_gpu": 6, "ckpt_chunk": 12}[mode],
+                         lambda mode: 6 if mode == "full" else None, ALL),
+    "elastic_tti_sg3d": (lambda mode: {"full": 19, "bs_gpu": 18, "ckpt_chunk": 24}[mode],
+                         lambda mode: 18 if mode == "full" else None, ALL),
+    "elastic2d": (lambda mode: {"full": 9, "bs_gpu": 8, "ckpt_chunk": 12}[mode],
+                  lambda mode: 8 if mode == "full" else None, ALL),
+    "elastic3d": (lambda mode: {"full": 19, "bs_gpu": 18, "ckpt_chunk": 24}[mode],
+                  lambda mode: 18 if mode == "full" else None, ALL),
+    "das_mu2d": (lambda mode: {"full": 9, "bs_gpu": 8, "ckpt_chunk": 12}[mode],
+                 lambda mode: 8 if mode == "full" else None, ALL),
+    "das_mu3d": (lambda mode: {"full": 19, "bs_gpu": 18, "ckpt_chunk": 24}[mode],
+                 lambda mode: 18 if mode == "full" else None, ALL),
     "acoustic_vti_1st_2d": (lambda mode: 5, 2, ALL),
     "acoustic_vti_1st_3d": (lambda mode: 6, 3, ALL),
     "das2d": (lambda mode: 15 if mode == "bs_gpu" else 9, 0, ALL),

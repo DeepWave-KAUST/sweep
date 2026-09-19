@@ -37,8 +37,8 @@ import solver_gradient_mode_suite as suite  # noqa: E402
 
 SENTINEL = 12345.0
 
-# (key, mode) -> allocations the compiled backward may still make of its own,
-# measured after slices 13-14; binding prefix per key below.
+# (key, mode) -> allocations the compiled backward may still make of its own:
+# none, since slice 16 replaced the negated source tensors by signed injection.
 RESIDUAL = {
     ("acoustic2d", "ckpt_chunk"): 0, ("acoustic2d", "ckpt_recursive"): 0,
     ("acoustic3d", "ckpt_chunk"): 0, ("acoustic3d", "ckpt_recursive"): 0,
@@ -53,9 +53,8 @@ RESIDUAL = {
     ("das2d", "ckpt_chunk"): 0, ("das2d", "ckpt_recursive"): 0,
     ("das3d", "ckpt_chunk"): 0, ("das3d", "ckpt_recursive"): 0,
     ("elastic_tti_2nd2d", "ckpt_chunk"): 0,
-    # the VRZ checkpoint sweep still negates the adjoint source inside C++
-    ("vrz2d", "ckpt_chunk"): 1, ("vrz2d", "ckpt_recursive"): 1,
-    ("vrz3d", "ckpt_chunk"): 1, ("vrz3d", "ckpt_recursive"): 1,
+    ("vrz2d", "ckpt_chunk"): 0, ("vrz2d", "ckpt_recursive"): 0,
+    ("vrz3d", "ckpt_chunk"): 0, ("vrz3d", "ckpt_recursive"): 0,
     ("lsrtm2d", "ckpt_chunk"): 0, ("lsrtm2d", "ckpt_recursive"): 0,
     ("visco2d", "ckpt_chunk"): 0, ("visco2d", "ckpt_recursive"): 0,
     ("lsrtm3d", "ckpt_chunk"): 0, ("lsrtm3d", "ckpt_recursive"): 0,

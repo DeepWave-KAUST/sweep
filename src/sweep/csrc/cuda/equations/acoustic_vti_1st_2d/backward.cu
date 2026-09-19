@@ -403,8 +403,9 @@ BackwardOutput backward(const BackwardInput& in)
 //      e. Propagate the adjoint state one step back in time (same as Phase 1).
 //      f. Time-reverse the forward VELOCITY step.
 //      g. Restore velocity boundary cells.
-// The wavelet source is also subtracted (negative sign) on the forward side
-// so that the source-injection contribution is removed when stepping back.
+// The wavelet source is also subtracted (add_source_signed, sign -1) on the
+// forward side so that the source-injection contribution is removed when
+// stepping back; no negated copy of the source is built.
 // ---------------------------------------------------------------------------
 BackwardOutput backward_bs(const BackwardInput& in)
 {
@@ -482,9 +483,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.sH_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
     forward.sV_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
 
-    // Negated forward source: time-reversal subtracts it during reconstruction.
-    auto neg_forward_source = -p.forward_source;
-
     // Gradient outputs.
     const auto& gs  = grad_slots(p);
     auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
@@ -547,6 +545,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
         ? fdtd::Geom::make(forward_nsrc, B) : fdtd::Geom::make(1, B);
+    TORCH_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
+                "AcousticVTI1st2D backward_bs: forward_source must be defined "
+                "when source fields are un-injected.");
 
     AsyncCopyContext async_copy(staged_boundary);
     BoundaryRuntime boundary_runtime(
@@ -576,17 +577,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 it, adjoint_nsrc, solver);
         }
 
-        // (b-i) forward source subtraction (neg_forward_source) — removes
-        //       the source contribution that was added during the forward
-        //       step we are about to time-reverse.
+        // (b-i) forward source subtraction (add_source_signed, sign -1) —
+        //       removes the source contribution that was added during the
+        //       forward step we are about to time-reverse. The in-kernel
+        //       sign flip is exact; no negated copy of the source is built.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             int field_index = source_fields[isrc].item<int>();
             float* field = vti_field_ptr(for_view, field_index);
             if (field == nullptr) continue;
-            add_source<<<fwd_src_config.grid, fwd_src_config.block>>>(
-                field, neg_forward_source.data_ptr<float>(),
+            add_source_signed<<<fwd_src_config.grid, fwd_src_config.block>>>(
+                field, p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
-                it, forward_nsrc, solver);
+                it, forward_nsrc, -1.0f, solver);
         }
 
         // (b-ii) time-reverse the STRESS update (uses NEW velocity which

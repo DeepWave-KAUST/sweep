@@ -1303,9 +1303,10 @@ class DASMu(FirstOrderEquation):
             # WS_CARRIERS), one padded grid per shot each: the 8 elastic
             # adjoint grids [qxx, qzz, qxz, qzx, pxx, pzz, pxz, pzx] in every
             # mode; the checkpoint modes add the velocity carriers -- v(t) at
-            # slots 8, 9 (vx, vz) and v(t+1) at 10, 11.
+            # slots 8, 9 (vx, vz) and v(t+1) at 10, 11; the full mode keeps one
+            # read-only zero grid at [8] (v(nt)).
             backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
-                8 + (4 if mode in ("ckpt", "recursive") else 0)),
+                8 + (4 if mode in ("ckpt", "recursive") else 1 if mode == "full" else 0)),
             # ckpt: the per-segment vx, vz histories, one row per replayed step
             # plus the segment start (das_mu2d/driver_traits.cuh seg_buffers);
             # the recursive mode replays per step and keeps none.
@@ -1452,9 +1453,10 @@ class DASMu3D(FirstOrderEquation):
             # WS_CARRIERS), one padded grid per shot each: the 18 elastic
             # adjoint grids (9 q** + 9 p**) in every mode; the checkpoint
             # modes add the velocity carriers -- v(t) at slots 18, 19, 20
-            # (vx, vy, vz) and v(t+1) at 21, 22, 23.
+            # (vx, vy, vz) and v(t+1) at 21, 22, 23; the full mode keeps one
+            # read-only zero grid at [18] (v(nt)).
             backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
-                18 + (6 if mode in ("ckpt", "recursive") else 0)),
+                18 + (6 if mode in ("ckpt", "recursive") else 1 if mode == "full" else 0)),
             # ckpt: the per-segment vx, vy, vz histories, one row per replayed
             # step plus the segment start (das_mu3d/driver_traits.cuh
             # seg_buffers); the recursive mode replays per step and keeps none.

@@ -63,7 +63,7 @@ struct Driver {
     // Prologue of every entry point (sg_driver.cuh HOOK TIMING MAP, in call
     // order): validate_backward (backward only), parse_models, setup_ctx,
     // bind_or_alloc_* wavefields, init_aux_slabs, alloc_cpml, bind_grads /
-    // alloc_grads, make_workspace, make_state, signed_adjoint_sources.
+    // alloc_grads, make_workspace, make_state, adjoint_source_signs.
     // Constants, types and shared constructors live here; the per-mode
     // bind_or_alloc_* / grads / signed-sources hooks sit at the head of
     // their sections below.
@@ -444,10 +444,10 @@ public:
         grads = {torch::zeros_like(vp), torch::zeros_like(vp), torch::zeros_like(vp)};
     }
 
-    static std::vector<torch::Tensor> signed_adjoint_sources(
+    static std::vector<float> adjoint_source_signs(
         const BackwardInput& p, const torch::Tensor& receiver_fields)
     {
-        return elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+        return elastic_adjoint_source_signs(p.adjoint_source, receiver_fields, 2);
     }
 
     struct VelPtrs {
@@ -498,18 +498,19 @@ public:
     static void inject_residuals(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const BackwardInput& p,
                                  const torch::Tensor& receiver_fields,
-                                 const std::vector<torch::Tensor>& adj_source_signed,
+                                 const std::vector<float>& adj_source_signs,
                                  int it, int adjoint_nsrc)
     {
         for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
             float* field = das_mu2d_field_ptr(adj_view.das, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.record_config.grid, s.record_config.block>>>(
+            add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
                 field,
-                adj_source_signed[irec].data_ptr<float>(),
+                p.adjoint_source[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
+                adj_source_signs[irec],
                 solver
             );
         }
@@ -664,18 +665,18 @@ public:
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,
-                                        const torch::Tensor& neg_forward_source,
                                         int it, int forward_nsrc)
     {
         for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
             float* field = das_mu2d_field_ptr(for_view.das, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
+            add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
                 field,
-                neg_forward_source.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
                 it,
                 forward_nsrc,
+                -1.0f,
                 solver
             );
         }

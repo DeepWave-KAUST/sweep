@@ -571,7 +571,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto bar_txx_z = pool_or_zeros(ws, BAR_TXX_Z, vp);
     auto bar_tzz_x = pool_or_zeros(ws, BAR_TZZ_X, vp);
 
-    auto neg_forward_source = -p.forward_source;
+    TORCH_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
+                "das2d::backward_bs: forward_source must be defined when source "
+                "fields are un-injected.");
 
     AsyncCopyContext async_copy(staged_boundary);
     BoundaryRuntime boundary_runtime(
@@ -609,15 +611,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
         current_exx.copy_(forward.exx_t);
         current_ezz.copy_(forward.ezz_t);
 
+        // Un-inject the forward source (sign -1) before time-reversing the
+        // step: exact sign flip in-kernel, no negated copy of the source.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = das2d_field_ptr(for_view, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
-            add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            add_source_signed<<<fwd_source_config.grid, fwd_source_config.block>>>(
                 field,
-                neg_forward_source.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
                 it,
                 forward_nsrc,
+                -1.0f,
                 solver
             );
         }

@@ -76,6 +76,31 @@ __global__ void add_source_3d(
     int nsrc,
     SolverContext solver
 );
+// Signed injection: the same kernels with the sample's sign flipped when
+// ``sign`` is negative -- what un-injecting a source in a reverse
+// reconstruction and injecting a stress residual used to do through a
+// negated copy of the source tensor (``-p.forward_source``,
+// ``(-adjoint_source).contiguous()``). Flipping the sign bit of the sample
+// (``-v``) is exact, so the atomically added value is bit-identical to the
+// negated copy's, and no tensor is built per call. ``sign`` is +1 or -1 only.
+__global__ void add_source_signed(
+    float* __restrict__ u,          // (B, nz, nx)
+    const float* __restrict__ source, // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,  // (B, nsrc, 2)
+    int it,
+    int nsrc,
+    float sign,
+    SolverContext solver
+);
+__global__ void add_source_3d_signed(
+    float* __restrict__ u,                 // (B, nz, ny, nx)
+    const float* __restrict__ source,      // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,   // (B, nsrc, 3)
+    int it,
+    int nsrc,
+    float sign,
+    SolverContext solver
+);
 
 __global__ void record_kernel_3d(
     const float* __restrict__ u,           // (B, nz, ny, nx)

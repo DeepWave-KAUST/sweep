@@ -46,6 +46,7 @@ shrink the boundary ring for finer grids; defaults to gpu/fp32.
 from __future__ import annotations
 
 import os
+import warnings
 from typing import List
 
 import numpy as np
@@ -692,6 +693,18 @@ class ModelParallel:
         if not L:
             L = [torch.zeros_like(self.fp.models[0]) for _ in range(self._nwf)]
         self.L_fwd = L
+        # The compiled forward's per-call scratch (cuda_layout
+        # .forward_workspace_nvar grids) rides on the captured fp and is bound
+        # again on every stepped call, so the zeroed-at-entry contract the
+        # monolithic path gets from a fresh torch.zeros per call has to be
+        # re-established by _prepare_call.  Shape-declared scratch
+        # (forward_workspace_shapes) is torch.empty on the monolithic path
+        # too -- the driver writes every cell before it reads -- so it is not
+        # re-zeroed here either.  Empty for every stepped equation today; what
+        # is kept is the contract.
+        _layout = getattr(self.equation, "cuda_layout", None)
+        self.fwd_ws = ([] if getattr(_layout, "forward_workspace_shapes", None)
+                       is not None else list(self.fp.forward_workspace))
         if self.bp is not None:
             self._bind_adjoint_buffers()
         else:
@@ -702,8 +715,25 @@ class ModelParallel:
             self.L_adj, self.recon = [], []
             self.coupling, self.adj_coeffs = [], []
             self.gbufs, self.illum = [], []
-        self.record = torch.zeros_like(cap["fraw"][2])
-        self.fp.record_out = self.record
+            self.adj_ws = []
+        # The record is the buffer _c.py bound as fp.record_out and the probe
+        # forward wrote into: the drivers' bound_or_zeros hands back the bound
+        # tensor itself, so the probe's raw record IS record_out.  Keep that
+        # one instead of a second zeros_like -- every stepped call already
+        # writes there, and _set_geometry re-allocates it only on an nrec
+        # change.  The identity check makes a driver that allocated its own
+        # record loud here, where a stepped forward would otherwise return
+        # the zeros nobody wrote into.
+        self.record = self.fp.record_out
+        _probe_rec = cap["fraw"][2]
+        if (self.record is None
+                or self.record.data_ptr() != _probe_rec.data_ptr()
+                or tuple(self.record.shape) != tuple(_probe_rec.shape)):
+            raise RuntimeError(
+                "ModelParallel: the probe forward did not return the record "
+                "bound as ForwardInput.record_out (the compiled forward "
+                "allocated its own); the stepped forward writes record_out, "
+                "so this capture cannot be driven.")
         # Cache the canonical wavelet shape + the per-tile source/receiver counts
         # so per-shot _set_geometry can validate and reshape. Read it off
         # ``fp.source``, which a forward-only capture also has: the binding is
@@ -744,7 +774,32 @@ class ModelParallel:
         if not self.L_adj:
             self.L_adj = [torch.zeros_like(self.bp.models[0])
                           for _ in range(self._nadj)]
-        self.recon = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nrecon)]
+        # The reconstruction list is the one _c.Wrapper.backward bound as
+        # bp.forward_wavefields (_forward_state_buffers, reconstruction_nvar
+        # grids) and the probe backward stepped through; the stepped backward
+        # binds exactly that list per segment, so reuse it instead of holding a
+        # second full-grid set for the instance's lifetime.  _run_adjoint
+        # re-zeroes it per call -- the one-call lifetime the monolithic path
+        # gets from allocating afresh.
+        recon = list(self.bp.forward_wavefields)
+        if recon:
+            if len(recon) != self._nrecon:
+                raise RuntimeError(
+                    f"captured BackwardInput.forward_wavefields holds "
+                    f"{len(recon)} reconstruction grids but the slot table of "
+                    f"{type(self.equation).__name__} lists {self._nrecon}; the "
+                    f"two bind orders drifted apart.")
+            self.recon = recon
+        else:
+            # Nothing was bound (a backward_bs that did not come through
+            # _c.Wrapper.backward's bs branch).  Allocating is the only way to
+            # keep going and a second full-grid set is what it costs -- say so.
+            warnings.warn(
+                "ModelParallel: the captured backward bound no reconstruction "
+                f"list; allocating {self._nrecon} grids of its own.",
+                RuntimeWarning, stacklevel=2)
+            self.recon = [torch.zeros_like(self.bp.models[0])
+                          for _ in range(self._nrecon)]
         # VRZ variable-density gradient is a spatial divergence of the coupling
         # field c/e = lambda*vp*grad(p), so under DD the divergence at a cut seam
         # needs the neighbour's c/e.  Materialise the six coupling buffers and bind
@@ -764,9 +819,17 @@ class ModelParallel:
             self.adj_coeffs = [torch.zeros_like(self.bp.models[0])
                                for _ in range(self._dd_coeff_nvar)]
             self.bp.adjoint_workspace = self.coupling + self.adj_coeffs  # [0-5]=c/e, [6-9]=C0,Cx,Cy,Cz
+            # VRZ's workspace IS the two lists above; they are zeroed by name.
+            self.adj_ws = []
         else:
             self.coupling = []
             self.adj_coeffs = []
+            # The captured adjoint scratch (cuda_layout.backward_workspace_nvar
+            # grids of the propagator's workspace pool -- elastic's q*/p*
+            # prepare->apply scratch; empty for the acoustic family).  The
+            # monolithic path zeroes that pool on every call; the DD path
+            # binds it again on every backward, so _run_adjoint re-zeroes it.
+            self.adj_ws = list(self.bp.adjoint_workspace)
         # grads_out = [grad_wavelet?, *model_grads]; the prefix is declared.
         self.gbufs = (
             [torch.zeros_like(self.bp.forward_source)] * self._ngrad_prefix
@@ -1051,7 +1114,7 @@ class ModelParallel:
             # allocates its own, so promotion never holds two full forward sets
             # at once. _captured goes False first so an OOM here leaves a clean
             # "capture again next call" state rather than a half-built one.
-            self.fp, self.L_fwd, self.record = None, [], None
+            self.fp, self.L_fwd, self.fwd_ws, self.record = None, [], [], None
             self._captured = False
             self._capture(wav, ls, lr, tiles, True)
             self._geom_key = geom_key
@@ -1069,7 +1132,15 @@ class ModelParallel:
         # cells fall into the zero-coeff PML branch and drift in the last ulp
         # against the single-domain reference (the asymmetric-pad invariant).
         self.fp.cut_face_mask = self.cut_mask
+        # Zeroed per forward like the monolithic path's per-call buffers
+        # (_c.py: transient forward wavefields, forward workspace and record
+        # are fresh zeros on every call); here the captured bindings persist,
+        # so the zeroing is explicit.  In place: the forward runner built by
+        # _forward_loop copies fp by value at construction, so the tensors
+        # bound at capture must stay the ones bound.
         for t in self.L_fwd:
+            t.zero_()
+        for t in self.fwd_ws:
             t.zero_()
         self.record.zero_()
         return sg
@@ -1227,7 +1298,14 @@ class ModelParallel:
                 "before asking for the adjoint.")
         self.bp.adjoint_source = torch.as_tensor(
             adjoint_source_tile, device=self.dev, dtype=torch.float32)
-        for t in self.L_adj + self.recon + self.gbufs + self.illum + self.coupling + self.adj_coeffs:
+        # Zeroed per backward like the monolithic path (_c.Wrapper.backward:
+        # adjoint wavefields zero_()'d, grads_out / illum_out /
+        # forward_wavefields fresh zeros, the workspace pool zeroed per call).
+        # Every one of these stays the tensor bound on bp at capture -- the
+        # persistent runner built below copies bp by value at construction,
+        # so they are zeroed in place, never rebound.
+        for t in (self.L_adj + self.recon + self.gbufs + self.illum
+                  + self.coupling + self.adj_coeffs + self.adj_ws):
             t.zero_()
         self.bp.cut_face_mask = self.cut_mask
         bhalo = self._halo("_bwd_halo")

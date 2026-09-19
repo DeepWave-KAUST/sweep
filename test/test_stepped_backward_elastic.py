@@ -170,10 +170,19 @@ class Harness:
             f"expected the full elastic adjoint layout ({N_ADJ[ndim]}), "
             f"got {len(self.L_adj)}"
         )
-        self.recon = (
-            [torch.zeros_like(self.p.models[0]) for _ in range(N_RECON[ndim])]
-            if mode == "bs" else None
-        )
+        # The captured params' own reconstruction list -- what
+        # _c.Wrapper.backward bound as forward_wavefields for the bs backward
+        # -- not a hand-built one: the replay then runs through the very grids
+        # the monolithic backward used, and a drift between the slot table's
+        # recon count and the driver's 7/12-tensor expectation surfaces here
+        # instead of hiding behind a literal that happened to match.  The
+        # full-storage backward binds none (it reads u_forward).
+        self.recon = list(self.p.forward_wavefields) if mode == "bs" else None
+        if self.recon is not None:
+            assert len(self.recon) == N_RECON[ndim], (
+                f"expected the {N_RECON[ndim]}-tensor reconstruction list the "
+                f"bs backward binds, got {len(self.recon)}"
+            )
         self.gbufs = [torch.zeros_like(m) for m in self.p.models]
         self.p.grads_out = self.gbufs
         self.p.illum_out = []
@@ -297,7 +306,9 @@ def test_stepped_backward_elastic_guards():
     run_public_once(prop, wavelet, sources, receivers, models)
     p, func = cap["params"], cap["func"]
     nt = int(p.nt)
-    recon = [torch.zeros_like(p.models[0]) for _ in range(7)]
+    recon = list(p.forward_wavefields)   # the bs backward's own 7-tensor list
+    assert len(recon) == N_RECON[2], (
+        f"expected {N_RECON[2]} reconstruction grids, got {len(recon)}")
     gbufs = [torch.zeros_like(m) for m in p.models]
 
     # segment range out of order / out of bounds

@@ -11,7 +11,7 @@
 //   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
 //   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): rotate_adjoint_buffers rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
 //   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
-//   * BwdWorkspace is non-empty: neg_adjoint_source, the time-invariant adjoint coefficients C0/Cx/Cz, and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz) when bound, else torch::zeros_like; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
+//   * BwdWorkspace is non-empty: the time-invariant adjoint coefficients C0/Cx/Cz and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz) when bound, else torch::zeros_like; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
 //   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
 //   * setup_ctx and init_aux_slabs are empty: no per-edge free surface, no topography, legacy full-grid CPML aux;
 //   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (rotate_buffers); the in-kernel u_thist stays disabled (false, nullptr);
@@ -19,7 +19,7 @@
 //   * launch_step_range refuses sub-ranges (the kernels ignore ctx.x_base / x_limit), so there are no phase-split strips and no air-clear prepass;
 //   * grads = the two model gradients {grad_vp, grad_z} (grads_out slot 0, the wavelet, is unused): no grad_wavelet (accumulate_source_grad is empty), no illumination/ADCIG (rtm_out_full / rtm_out_bs return nullptr, fused_grad_ptr is nullptr, bs_rtm_tap is empty, pack_outputs sets grads only);
 //   * u_forward_ptr = the u slice u_forward[it][0];
-//   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (ws.neg_adjoint_source);
+//   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (add_source_signed, sign -1, straight from p.adjoint_source -- no negated copy is built);
 //   * image_step = CALCULATE_GRAD_VRZ2D_AUTO (two gradients, split scratch from the workspace; returns early without grads), no RTM kernel;
 //   * seed_reconstruction also zeroes u_next, and its set_boundary_zeros calls do not pass the cut_mask;
 //   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on the post-swap u_now (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
@@ -142,7 +142,6 @@ struct Driver {
     }
 
     struct BwdWorkspace {
-        torch::Tensor neg_adjoint_source;
         torch::Tensor C0, Cx, Cz;           // time-invariant adjoint coeffs
         torch::Tensor c_x, c_z, e_x, e_z;   // split gradient scratch (order>=6)
     };
@@ -200,7 +199,6 @@ struct Driver {
     {
         zero_wavefield_state(adjoint);
         BwdWorkspace ws;
-        ws.neg_adjoint_source = -p.adjoint_source;
         // Bound pool slot when Python handed one (WorkspaceSlot above), else
         // today's zeros_like; torch::Tensor copies share storage, so the
         // data_ptr() the kernels take hits the bound buffer either way.
@@ -480,15 +478,18 @@ struct Driver {
     static void inject_adjoint_source(const State& s, const SolverContext& ctx,
                                       const AcousticWavefieldPointer& adj_view,
                                       const BackwardInput& p, int it, int nsrc,
-                                      BwdWorkspace& ws)
+                                      BwdWorkspace&)
     {
-        // The VRZ adjoint injects the NEGATED residual (driver-level sign).
-        add_source<<<s.record_config.grid, s.record_config.block>>>(
+        // The VRZ adjoint injects the NEGATED residual (driver-level sign):
+        // sign -1 flips the sample's sign bit inside the kernel, bit-identical
+        // to the negated copy this used to inject, with no tensor built.
+        add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
             adj_view.u_next,
-            ws.neg_adjoint_source.data_ptr<float>(),
+            p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
             it,
             nsrc,
+            -1.0f,
             ctx
         );
     }

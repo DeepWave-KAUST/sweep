@@ -115,7 +115,6 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     auto vp = in.models[0];
     auto z = in.models[1];
     auto inv_z = derived::reciprocal(in, z, "acoustic_vrz3d::backward_full_impl");
-    auto neg_adjoint_source = -in.adjoint_source;
 
     float dx = in.spacing[0];
     float dy = in.spacing[1];
@@ -209,12 +208,13 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
             ctx
         );
 
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+        add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
             adj_view.u_next,
-            neg_adjoint_source.data_ptr<float>(),
+            in.adjoint_source.data_ptr<float>(),
             in.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
+            -1.0f,   // NEGATED residual: sign bit flipped in-kernel, no negated copy
             ctx
         );
 
@@ -277,7 +277,6 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     auto vp = p.models[0];
     auto z = p.models[1];
     auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::backward_bs_impl");
-    auto neg_adjoint_source = -p.adjoint_source;
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -541,12 +540,13 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
                 ctx
             );
 
-            add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+            add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
-                neg_adjoint_source.data_ptr<float>(),
+                p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
+                -1.0f,   // NEGATED residual: sign bit flipped in-kernel, no negated copy
                 ctx
             );
 
@@ -696,7 +696,6 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     auto vp = p.models[0];
     auto z = p.models[1];
     auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::backward_ckpt_impl");
-    auto neg_adjoint_source = -p.adjoint_source;
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -909,12 +908,13 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
                 ctx
             );
 
-            add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+            add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
                 adj_view.u_next,
-                neg_adjoint_source.data_ptr<float>(),
+                p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
+                -1.0f,   // NEGATED residual: sign bit flipped in-kernel, no negated copy
                 ctx
             );
 

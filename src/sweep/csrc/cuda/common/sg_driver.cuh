@@ -26,7 +26,7 @@
 // Prologue of every entry (in call order): validate_backward (backward only),
 // parse_models, setup_ctx, bind_or_alloc_* wavefields, init_aux_slabs,
 // alloc_cpml, bind_grads / alloc_grads, make_workspace, make_state,
-// signed_adjoint_sources.
+// adjoint_source_signs.
 //
 // sg_generic_forward — per it in [it_begin, it_end):
 //   velocity_substep           v: t -> t+1/2           (DD step_phase 1)
@@ -37,7 +37,10 @@
 //   record_field               per receiver field
 //   after the loop: save_last_state (final 5-field snapshot for backward_bs)
 //
-// sg_generic_backward (full storage) — per reverse it:
+// sg_generic_backward (full storage) — prologue: the read-only zero grid the
+//   imaging reads as v(nt) at it = nt-1, adjoint_workspace slot
+//   SgCarrierSlots::FULL_ZERO (IMAGING_USES_NEXT_V equations only).  Per
+//   reverse it:
 //   fix_rho_grad_at_sources    body-force rho correction (pre-residual)
 //   inject_residuals           signed residuals into the adjoint fields
 //   vel_ptrs_from_u_forward    v(it) / v(it+1) pointers from u_forward
@@ -433,6 +436,51 @@ void sg_check_stepped_backward(const BackwardInput& p, bool need_recon,
     }
 }
 
+// Skeleton-owned slots of the adjoint_workspace pool.  The pool
+// (cuda_layout.backward_workspace_shapes(mode)) holds the equation's own
+// adjoint scratch first -- Eq::WS_CARRIERS slots, what Eq::make_workspace
+// binds -- and the skeleton's model-shaped slots after it:
+//   full:  FULL_ZERO, one read-only zero grid -- the v(nt) the imaging at
+//          it = nt-1 reads (IMAGING_USES_NEXT_V equations only; the others
+//          take no slot and hand their imaging null next-pointers);
+//   ckpt / recursive, N_VEL velocity carriers each:
+//   NOW  = next_segment_v (ckpt: the younger chunk's v(end)) /
+//          current_v      (recursive: the captured v(it));
+//   NEXT = prev_segment_next_v (ckpt: this chunk's v(start+1), for the older
+//          chunk) / next_v (recursive: the captured v(it+1)) -- only for
+//          equations whose imaging reads v(t+1) (IMAGING_USES_NEXT_V).
+// The propagator zeroes the pool once per gradient-bearing forward, the state
+// a fresh zeros_like started from.  The full entry only ever reads FULL_ZERO
+// (every consumer takes it as a const float*), so re-entry (stepped / DD)
+// is safe.  The ckpt entry relies on the zero state for next_segment_v at
+// the tail chunk (v(nt) does not exist) and is entered at most once per
+// forward: it refuses stepped/DD calls, and a second backward over one graph
+// is refused in Python (_c.py Wrapper.backward).
+template <class Eq>
+struct SgCarrierSlots {
+    static constexpr int FULL_ZERO = Eq::WS_CARRIERS;
+    static constexpr int FULL_COUNT = Eq::IMAGING_USES_NEXT_V ? 1 : 0;
+    static constexpr int NOW = Eq::WS_CARRIERS;
+    static constexpr int NEXT = Eq::WS_CARRIERS + Eq::N_VEL;
+    static constexpr int CKPT_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : 0;
+    static constexpr int RECURSIVE_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : Eq::N_VEL;
+};
+
+// Either unbound (every slot then falls back to a fresh zero tensor, today's
+// allocation) or exactly the equation's scratch plus this mode's skeleton
+// slots (the full mode's zero grid, the checkpoint modes' velocity carriers):
+// a pool of any other size means the Python declaration drifted.
+template <class Eq>
+void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char* mode)
+{
+    const int expected = Eq::WS_CARRIERS + n_carriers;
+    TORCH_CHECK(p.adjoint_workspace.empty()
+                    || static_cast<int>(p.adjoint_workspace.size()) == expected,
+                Eq::NAME, " backward_", mode, ": adjoint_workspace must be empty or hold ",
+                expected, " tensors ([0-", Eq::WS_CARRIERS - 1, "] = the adjoint scratch, then ",
+                n_carriers, " skeleton slots), got ", p.adjoint_workspace.size());
+}
+
 // ---- sg_generic_backward (full storage) ----
 template <class Eq>
 BackwardOutput sg_generic_backward(const BackwardInput& in)
@@ -478,6 +526,7 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
 
     std::vector<torch::Tensor> grads;
     Eq::bind_grads(p, grads);
+    sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::FULL_COUNT, "full");
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
 
     typename Eq::CPML cpml_tensor;
@@ -490,15 +539,23 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     typename Eq::State state = Eq::make_state(p, d, models, launch_config,
                                               fwd_source_config, adj_source_config);
 
-    auto zero_velocity = torch::zeros_like(vp);
-    const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
+    // v(nt) for the imaging at it = nt-1: the read-only zero grid at
+    // adjoint_workspace slot FULL_ZERO (SgCarrierSlots), zeroed by the
+    // propagator once per gradient-bearing forward and only ever read here
+    // (vel_ptrs_from_u_forward hands it out as a const float*).  Equations
+    // without a v(t+1) imaging term take no slot and never index it.
+    const torch::Tensor zero_velocity = Eq::IMAGING_USES_NEXT_V
+        ? pool_or_zeros(p.adjoint_workspace, SgCarrierSlots<Eq>::FULL_ZERO, vp,
+                        "adjoint_workspace")
+        : torch::Tensor();
+    const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
 
     // it_hi == nt and it_lo == 0 without DD, so this is dev's full
     // reverse loop verbatim in the single-domain case.
     for (int it = it_hi - 1; it >= it_lo; --it) {
         Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
-                             adj_source_signed, it, adjoint_nsrc);
+                             adj_source_signs, it, adjoint_nsrc);
 
         typename Eq::VelPtrs vptrs =
             Eq::vel_ptrs_from_u_forward(p, it, zero_velocity);
@@ -571,8 +628,6 @@ public:
         // stepping, all must be Python-owned to survive segment boundaries.
         carriers = Eq::bind_or_alloc_recon(forward, p, vp);
 
-        neg_forward_source = -p.forward_source;
-
         for_view = Eq::view(forward);
         adj_view = Eq::view(adjoint);
 
@@ -631,7 +686,7 @@ public:
         );
         boundary_runtime = &boundary_scope->runtime();
 
-        adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
+        adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
     }
 
     BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
@@ -682,13 +737,15 @@ public:
         // Residual / source injections for reverse index jt, one unit (the rho
         // correction must read the adjoint velocity BEFORE jt's residuals land):
         // body-force source-cell rho correction, signed receiver residuals,
-        // reconstruction un-injection of the forward source.
+        // reconstruction un-injection of the forward source (add_source_signed
+        // with sign -1: the sample's sign bit flipped at the atomicAdd,
+        // bit-identical to the negated copy this used to build per call).
         auto inject_step = [&](int jt) {
             Eq::fix_rho_grad_at_sources(*state, solver, adj_view, p, source_fields, jt, grads);
             Eq::inject_residuals(*state, solver, adj_view, p, receiver_fields,
-                                 adj_source_signed, jt, adjoint_nsrc);
+                                 adj_source_signs, jt, adjoint_nsrc);
             Eq::uninject_forward_source(*state, solver, for_view, p, source_fields,
-                                        neg_forward_source, jt, forward_nsrc);
+                                        jt, forward_nsrc);
         };
 
         for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
@@ -728,7 +785,6 @@ private:
     typename Eq::Wavefield adjoint;
     typename Eq::Wavefield forward;
     typename Eq::ReconCarriers carriers;
-    torch::Tensor neg_forward_source;
     typename Eq::WfView for_view;
     typename Eq::WfView adj_view;
     std::vector<torch::Tensor> grads;
@@ -743,7 +799,7 @@ private:
     std::optional<typename Eq::State> state;
     std::optional<BoundaryScope> boundary_scope;
     BoundaryRuntime* boundary_runtime = nullptr;
-    std::vector<torch::Tensor> adj_source_signed;
+    std::vector<float> adj_source_signs;
     int run_calls = 0;
 };
 
@@ -755,43 +811,6 @@ BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
 }
 
 // ---- sg_generic_backward_ckpt (chunked segments with velocity carriers) ----
-
-// Velocity-carrier slots of the adjoint_workspace pool in the checkpoint
-// modes.  The pool (cuda_layout.backward_workspace_shapes(mode)) holds the
-// equation's own adjoint scratch first -- Eq::WS_CARRIERS slots, what
-// Eq::make_workspace binds -- and the skeleton's model-shaped carriers after
-// it, N_VEL each:
-//   NOW  = next_segment_v (ckpt: the younger chunk's v(end)) /
-//          current_v      (recursive: the captured v(it));
-//   NEXT = prev_segment_next_v (ckpt: this chunk's v(start+1), for the older
-//          chunk) / next_v (recursive: the captured v(it+1)) -- only for
-//          equations whose imaging reads v(t+1) (IMAGING_USES_NEXT_V).
-// The propagator zeroes the pool once per gradient-bearing forward, the state
-// a fresh zeros_like started from.  The ckpt entry relies on it for
-// next_segment_v at the tail chunk (v(nt) does not exist) and is entered at
-// most once per forward: it refuses stepped/DD calls, and a second backward
-// over one graph is refused in Python (_c.py Wrapper.backward).
-template <class Eq>
-struct SgCarrierSlots {
-    static constexpr int NOW = Eq::WS_CARRIERS;
-    static constexpr int NEXT = Eq::WS_CARRIERS + Eq::N_VEL;
-    static constexpr int CKPT_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : 0;
-    static constexpr int RECURSIVE_COUNT = Eq::IMAGING_USES_NEXT_V ? 2 * Eq::N_VEL : Eq::N_VEL;
-};
-
-// Either unbound (every slot then falls back to a fresh zero tensor, today's
-// allocation) or exactly the equation's scratch plus this mode's carriers: a
-// pool of any other size means the Python declaration drifted.
-template <class Eq>
-void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char* mode)
-{
-    const int expected = Eq::WS_CARRIERS + n_carriers;
-    TORCH_CHECK(p.adjoint_workspace.empty()
-                    || static_cast<int>(p.adjoint_workspace.size()) == expected,
-                Eq::NAME, " backward_", mode, ": adjoint_workspace must be empty or hold ",
-                expected, " tensors ([0-", Eq::WS_CARRIERS - 1, "] = the adjoint scratch, then ",
-                n_carriers, " velocity carriers), got ", p.adjoint_workspace.size());
-}
 
 // N_VEL model-shaped carriers from adjoint_workspace slots [first, first + N_VEL).
 template <class Eq>
@@ -828,7 +847,7 @@ void sg_backward_segment(
 {
     const int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     const int segment_len = end - start;
-    const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
+    const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
 
     // This chunk's rows of the histories: row 0 = v(start), row k = v(start + k)
     // after the k-th replayed step.  Every row the reverse sweep reads
@@ -855,7 +874,7 @@ void sg_backward_segment(
     for (int it = end - 1; it >= start; --it) {
         Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
-                             adj_source_signed, it, adjoint_nsrc);
+                             adj_source_signs, it, adjoint_nsrc);
 
         const int now_offset = it - start + 1;
         const int next_offset = now_offset + 1;
@@ -1117,13 +1136,13 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     std::vector<torch::Tensor> next_v;
     if (Eq::IMAGING_USES_NEXT_V)
         next_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NEXT, vp);
-    const auto adj_source_signed = Eq::signed_adjoint_sources(p, receiver_fields);
+    const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
 
     auto adj_view = Eq::view(adjoint);
     for (int it = p.nt - 1; it >= 0; --it) {
         Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
-                             adj_source_signed, it, (int)p.adjoint_sources_loc.size(1));
+                             adj_source_signs, it, (int)p.adjoint_sources_loc.size(1));
 
         sg_replay_forward_to_time<Eq>(p, state, forward, current_v, next_v, it,
                                       checkpoint_steps, num_saved_checkpoints,

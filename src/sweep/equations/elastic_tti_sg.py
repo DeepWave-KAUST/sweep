@@ -264,9 +264,10 @@ class ElasticTTISG(ElasticTTI):
             # ckpt (the only checkpoint mode this equation runs) adds the
             # velocity carriers behind them (WS_CARRIERS) -- v(t) at slots 6,
             # 7, 8 (vx, vy, vz) and v(t+1) at 9, 10, 11.  ElasticTTISG3D
-            # declares its own 18 + 6.
+            # declares its own 18 + 6.  The full mode keeps one read-only
+            # zero grid at [6] (v(nt)).
             backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
-                6 + (6 if mode == "ckpt" else 0)),
+                6 + (6 if mode == "ckpt" else 1 if mode == "full" else 0)),
             # ckpt: the per-segment vx, vy, vz histories, one row per replayed
             # step plus the segment start (elastic_tti_sg2d/driver_traits.cuh
             # seg_buffers).

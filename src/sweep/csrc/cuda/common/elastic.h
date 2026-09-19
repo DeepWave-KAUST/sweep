@@ -810,24 +810,30 @@ inline bool elastic_field_is_stress(int dim, int idx)
 // component; injecting it raw (as for a velocity receiver) negates every model
 // gradient.
 //
-// Returns the per-receiver-field adjoint sources with that sign applied, built
-// once per backward call so the reverse loop stays allocation-free.
-inline std::vector<torch::Tensor> elastic_signed_adjoint_sources(
+// Returns the per-receiver-field injection sign (+1 velocity, -1 stress)
+// that add_source_signed / add_source_3d_signed (common.cuh) apply to the
+// sample at the injection -- bit-identical to the negated per-field copy this
+// used to build, without the copy.  Built once per backward call.  The signed
+// kernels read ``adjoint_source[i]`` in place, so the list must be contiguous:
+// the copy that used to make a stress field's slice contiguous is gone (a
+// velocity field's slice was always read in place).
+inline std::vector<float> elastic_adjoint_source_signs(
     const torch::Tensor& adjoint_source,     // (nfield, B, nrec, nt)
     const torch::Tensor& receiver_fields,    // (nfield,) wavefield indices, CPU
     int dim
 )
 {
+    TORCH_CHECK(adjoint_source.is_contiguous(),
+                "elastic adjoint_source must be contiguous (nfield, B, nrec, nt); "
+                "the residual injection reads it in place");
     const int64_t nfield = receiver_fields.numel();
-    std::vector<torch::Tensor> out;
-    out.reserve(static_cast<size_t>(nfield));
+    std::vector<float> signs;
+    signs.reserve(static_cast<size_t>(nfield));
     for (int64_t i = 0; i < nfield; ++i) {
         const int field = receiver_fields[i].item<int>();
-        out.push_back(elastic_field_is_stress(dim, field)
-                          ? (-adjoint_source[i]).contiguous()
-                          : adjoint_source[i]);
+        signs.push_back(elastic_field_is_stress(dim, field) ? -1.0f : 1.0f);
     }
-    return out;
+    return signs;
 }
 
 inline float* elastic_field_ptr(ElasticWavefieldPointer& wf, int dim, int idx)

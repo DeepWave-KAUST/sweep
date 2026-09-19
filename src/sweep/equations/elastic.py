@@ -367,10 +367,12 @@ class Elastic(FirstOrderEquation):
             # [10-11] = prev_segment_next_v (ckpt) / next_v (recursive): the
             #           v(it+1) carriers, vx / vz
             # -- [8-11] in the checkpoint modes only (sg_driver.cuh
-            # SgCarrierSlots after elastic2d WS_CARRIERS = 8).
+            # SgCarrierSlots after elastic2d WS_CARRIERS = 8); the full mode
+            # keeps one read-only zero grid at [8] instead (v(nt) for the last
+            # reverse step's imaging).
             backward_workspace_nvar=8,
             backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
-                12 if mode in ("ckpt", "recursive") else 8),
+                12 if mode in ("ckpt", "recursive") else 9 if mode == "full" else 8),
             # The chunked backward's replayed velocity histories (elastic2d
             # driver_traits seg_buffers): vx, vz of one chunk, (interval + 1, B, 1,
             # grid) each -- row 0 = v(start), row k = v(start + k).  The recursive

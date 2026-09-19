@@ -6,7 +6,7 @@
 //   * the model set is rho + 15 stiffness tensors (16 grads); the kernels
 //     take a StiffnessPointer, rebuilt on demand from p.models / grads;
 //   * three velocity components on a 2-D grid (TTI couples vy), so N_VEL = 3
-//     and the signed adjoint sources use the 3-D field layout;
+//     and the adjoint-source signs use the 3-D field layout;
 //   * the adjoint workspace is six plain scratch tensors, taken from
 //     p.adjoint_workspace when the propagator bound them (it declares them
 //     through cuda_layout.backward_workspace_shapes) and allocated internally
@@ -45,7 +45,7 @@
 #include "tensors.h"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
-#include "../../common/elastic.h"   // elastic_signed_adjoint_sources
+#include "../../common/elastic.h"   // elastic_adjoint_source_signs
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
@@ -63,7 +63,7 @@ struct Driver {
     //     Prologue of every entry (skeleton call order): validate_backward
     //     (backward only), parse_models, setup_ctx, bind_or_alloc_* wavefields,
     //     init_aux_slabs, alloc_cpml, bind_grads / alloc_grads, make_workspace,
-    //     make_state, signed_adjoint_sources.
+    //     make_state, adjoint_source_signs.
     // ===================================================================== //
 
     static constexpr int NDIM = 2;
@@ -440,11 +440,11 @@ public:
         grads = p.grads_out;
     }
 
-    static std::vector<torch::Tensor> signed_adjoint_sources(
+    static std::vector<float> adjoint_source_signs(
         const BackwardInput& p, const torch::Tensor& receiver_fields)
     {
         // 3-D field layout (vx = 0, vy = 1, vz = 2, then stresses).
-        return elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+        return elastic_adjoint_source_signs(p.adjoint_source, receiver_fields, 3);
     }
 
     struct VelPtrs {
@@ -494,18 +494,19 @@ public:
     static void inject_residuals(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const BackwardInput& p,
                                  const torch::Tensor& receiver_fields,
-                                 const std::vector<torch::Tensor>& adj_source_signed,
+                                 const std::vector<float>& adj_source_signs,
                                  int it, int adjoint_nsrc)
     {
         for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
             float* field = elastic_tti_sg2d::field_ptr(adj_view, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.record_config.grid, s.record_config.block>>>(
+            add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
                 field,
-                adj_source_signed[irec].data_ptr<float>(),
+                p.adjoint_source[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
+                adj_source_signs[irec],
                 solver
             );
         }
@@ -648,18 +649,18 @@ public:
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,
-                                        const torch::Tensor& neg_forward_source,
                                         int it, int forward_nsrc)
     {
         for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
             float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
+            add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
                 field,
-                neg_forward_source.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
                 it,
                 forward_nsrc,
+                -1.0f,
                 solver
             );
         }

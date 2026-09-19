@@ -138,6 +138,13 @@ back to the per-call stepped path when a factory is missing.
   Illumination accumulators come as `illum_out` (`cuda_layout.illum_nvar`, bound by the
   monolithic backward when illumination was asked for) and are allocated in C++ only for
   a caller that binds nothing.
+  The last per-call tensors went the same way: un-injecting a source in a reverse
+  reconstruction and injecting a stress residual use `add_source_signed` /
+  `add_source_3d_signed` (`common/common.cu`: the sample's sign bit flipped, exact) instead
+  of a negated copy of the source, and the staggered full-mode backward's read-only zero
+  velocity (v(nt) for the last reverse step's imaging) is one pool slot declared for the
+  full mode only (`SgCarrierSlots::FULL_ZERO`, the index the checkpoint modes give their
+  first velocity carrier -- the pools are per mode, so the slot never aliases).
 * On the Python side, `stepped=True` in `equations/cuda_layout.py` declares that both
   forward and `backward_bs` honour ranges. Only a migrated equation may set it: an
   equation that does not honour ranges will not raise, it will run the whole record
@@ -285,7 +292,7 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 // Prologue of every entry (in call order): validate_backward (backward only),
 // parse_models, setup_ctx, bind_or_alloc_* wavefields, init_aux_slabs,
 // alloc_cpml, bind_grads / alloc_grads, make_workspace, make_state,
-// signed_adjoint_sources.
+// adjoint_source_signs.
 //
 // sg_generic_forward — per it in [it_begin, it_end):
 //   velocity_substep           v: t -> t+1/2           (DD step_phase 1)
@@ -402,7 +409,7 @@ Types: `Wavefield`, `WfView`, `CPML`, `Models`, `State`, `Workspace`, `VelPtrs`,
 | `bind_or_alloc_forward` / `_adjoint` / `_recon` (returns `ReconCarriers`) / `_recon_ckpt`, `bind_or_alloc_recursive_scratch`, `check_ckpt_aux_layout` | Bind or allocate each wavefield set; recon also carries v(t+1); ckpt validates that the aux layout agrees | F / B,BS,CK,RC / BS / CK,RC / CK,RC / CK |
 | `zero_adjoint_if_first_segment(adjoint, first_segment)` / `zero_adjoint_if_first_segment_bs(...)` | Zero the adjoint state on the first segment (needed by the 3-D members; empty in 2-D) | B / BS |
 | `bind_grads(p, grads)` / `alloc_grads(vp, grads)` | Bind `grads_out` (stepped) or allocate; the element count is the number of models | B, BS, CK / RC |
-| `signed_adjoint_sources(p, receiver_fields)` | Sign the residuals per receiver field (stress receivers are negated; EVR is left as is) | B, BS, CK, RC |
+| `adjoint_source_signs(p, receiver_fields)` | The sign each receiver field's residual is injected with (stress receivers -1, velocity +1; EVR all +1): `add_source_signed` flips the sample's sign bit, no negated copy of the residual is built | B, BS, CK, RC |
 | `velocity_substep(state, wf, cpml, solver)` / `stress_substep(state, wf, cpml, solver, u_this)` | The two half-step kernels (also used by ckpt and recursive replay) | F, CK, RC |
 | `inject_source(state, solver, field, source, loc, it, nsrc)` | Single-field source injection (the skeleton loops over `source_field_indices`) | F |
 | `save_boundary_fields(rt, state, solver, wf, it, nt, bs, w)` / `record_field(...)` | Store the BS field list / sample one receiver field | F |

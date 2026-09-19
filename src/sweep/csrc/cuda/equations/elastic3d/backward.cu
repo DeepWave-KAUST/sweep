@@ -275,16 +275,17 @@ BackwardOutput apm_backward(const BackwardInput& in)
     auto source_config = fdtd::Geom::make(adjoint_nsrc, B);
     SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
 
-    const auto adj_source_signed =
-        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+    const auto adj_source_signs =
+        elastic_adjoint_source_signs(p.adjoint_source, receiver_fields, 3);
 
     for (int it = p.nt - 1; it >= 0; --it) {
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
-            add_source_3d<<<source_config.grid, source_config.block>>>(
-                field, adj_source_signed[irec].data_ptr<float>(),
-                p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc, solver
+            add_source_3d_signed<<<source_config.grid, source_config.block>>>(
+                field, p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc,
+                adj_source_signs[irec], solver
             );
         }
 
@@ -425,7 +426,6 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     forward.sxz_t.copy_(p.u_last_two.select(0,7).select(0,0));
     forward.syz_t.copy_(p.u_last_two.select(0,8).select(0,0));
 
-    auto neg_forward_source = -p.forward_source;
     auto for_view = forward.view();
     auto adj_view = adjoint.view();
 
@@ -478,16 +478,17 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
-    const auto adj_source_signed =
-        elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 3);
+    const auto adj_source_signs =
+        elastic_adjoint_source_signs(p.adjoint_source, receiver_fields, 3);
 
     for (int it = p.nt - 1; it >= 1; --it) {
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = elastic_field_ptr(adj_view, 3, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
-            add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
-                field, adj_source_signed[irec].data_ptr<float>(),
-                p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc, solver
+            add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
+                field, p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_sources_loc.data_ptr<int>(), it, adjoint_nsrc,
+                adj_source_signs[irec], solver
             );
         }
 
@@ -495,9 +496,9 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = elastic_field_ptr(for_view, 3, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
-            add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
-                field, neg_forward_source.data_ptr<float>(),
-                p.forward_sources_loc.data_ptr<int>(), it, forward_nsrc, solver
+            add_source_3d_signed<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                field, p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(), it, forward_nsrc, -1.0f, solver
             );
         }
 

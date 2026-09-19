@@ -441,9 +441,10 @@ class ElasticTTISG3D(FirstOrderEquation):
             # WS_CARRIERS), one padded grid per shot each: the 18 elastic
             # adjoint grids (9 q** + 9 p**) in every mode; ckpt (the only
             # checkpoint mode this equation runs) adds the velocity carriers --
-            # v(t) at slots 18, 19, 20 (vx, vy, vz) and v(t+1) at 21, 22, 23.
+            # v(t) at slots 18, 19, 20 (vx, vy, vz) and v(t+1) at 21, 22, 23;
+            # the full mode keeps one read-only zero grid at [18] (v(nt)).
             backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
-                18 + (6 if mode == "ckpt" else 0)),
+                18 + (6 if mode == "ckpt" else 1 if mode == "full" else 0)),
             # ckpt: the per-segment vx, vy, vz histories, one row per replayed
             # step plus the segment start (elastic_tti_sg3d/driver_traits.cuh
             # seg_buffers).

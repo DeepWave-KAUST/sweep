@@ -136,10 +136,19 @@ class Harness:
             f"expected the psi+zeta double-buffer adjoint layout "
             f"({want}), got {len(self.L_adj)}"
         )
-        self.recon = (
-            [torch.zeros_like(self.p.models[0]) for _ in range(3)]
-            if mode == "bs" else None
-        )
+        # The captured params' own reconstruction list -- what
+        # _c.Wrapper.backward bound as forward_wavefields for the bs backward
+        # -- not a hand-built one: the replay then runs through the very grids
+        # the monolithic backward used, and a drift between the slot table's
+        # recon count and the driver's 3-tensor expectation surfaces here
+        # instead of hiding behind a literal that happened to match.  The
+        # full-storage backward binds none (it reads u_forward).
+        self.recon = list(self.p.forward_wavefields) if mode == "bs" else None
+        if self.recon is not None:
+            assert len(self.recon) == 3, (
+                f"expected the 3-tensor reconstruction list the bs backward "
+                f"binds (u_prev, u_now, u_next), got {len(self.recon)}"
+            )
         self.gbufs = [torch.zeros_like(self.p.forward_source)] + [
             torch.zeros_like(m) for m in self.p.models
         ]
@@ -262,7 +271,8 @@ def test_stepped_backward_guards():
     run_public_once(prop, wavelet, sources, receivers, models)
     p, func = cap["params"], cap["func"]
     nt = int(p.nt)
-    recon = [torch.zeros_like(p.models[0]) for _ in range(3)]
+    recon = list(p.forward_wavefields)   # the bs backward's own 3-tensor list
+    assert len(recon) == 3, f"expected 3 reconstruction grids, got {len(recon)}"
     gbufs = [torch.zeros_like(p.forward_source)] + [
         torch.zeros_like(m) for m in p.models
     ]

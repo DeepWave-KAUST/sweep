@@ -34,9 +34,8 @@ import solver_gradient_mode_suite as suite  # noqa: E402
 SENTINEL = 12345.0
 
 # key -> (reconstruction grids handed over, allocations the bs backward still
-# makes inside C++ -- today the negated source (one tensor of nsrc x nt) in the
-# staggered family and the hand-written drivers, nothing in the acoustic
-# family -- , binding prefix)
+# makes inside C++ -- none since slice 16 (the negated source became a signed
+# injection kernel), binding prefix)
 # The DAS-mu drivers hand over the elastic fields only: their strain grids are
 # dead in the bs reverse loop, and a dead grid is exactly what this test's
 # sentinel would expose.
@@ -45,17 +44,17 @@ CASES = {
     "acoustic3d": (3, 0, "acoustic3d"),
     "lsrtm2d": (3, 0, "acoustic_lsrtm2d"),
     "lsrtm3d": (3, 0, "acoustic_lsrtm3d"),
-    "vrz2d": (3, 1, "acoustic_vrz2d"),
-    "vrz3d": (3, 1, "acoustic_vrz3d"),
-    "elastic2d": (7, 1, "elastic2d"),
-    "elastic3d": (12, 1, "elastic3d"),
-    "das_mu2d": (7, 1, "das_mu2d"),
-    "das_mu3d": (12, 1, "das_mu3d"),
-    "elastic_tti_sg2d": (11, 1, "elastic_tti_sg2d"),
-    "elastic_tti_sg3d": (12, 1, "elastic_tti_sg3d"),
-    "das2d": (9, 1, "das2d"),
-    "acoustic_vti_1st_2d": (4, 1, "acoustic_vti_1st_2d"),
-    "acoustic_vti_1st_3d": (5, 1, "acoustic_vti_1st_3d"),
+    "vrz2d": (3, 0, "acoustic_vrz2d"),
+    "vrz3d": (3, 0, "acoustic_vrz3d"),
+    "elastic2d": (7, 0, "elastic2d"),
+    "elastic3d": (12, 0, "elastic3d"),
+    "das_mu2d": (7, 0, "das_mu2d"),
+    "das_mu3d": (12, 0, "das_mu3d"),
+    "elastic_tti_sg2d": (11, 0, "elastic_tti_sg2d"),
+    "elastic_tti_sg3d": (12, 0, "elastic_tti_sg3d"),
+    "das2d": (9, 0, "das2d"),
+    "acoustic_vti_1st_2d": (4, 0, "acoustic_vti_1st_2d"),
+    "acoustic_vti_1st_3d": (5, 0, "acoustic_vti_1st_3d"),
     "elastic_tti_2nd2d": (6, 0, "elastic_tti_2nd2d"),
 }
 PARAMS = [pytest.param(k, marks=requires_binding(f"{CASES[k][2]}_forward")) for k in CASES]

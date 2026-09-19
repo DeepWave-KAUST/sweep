@@ -595,10 +595,11 @@ class Elastic(FirstOrderEquation):
             # [21-23] = prev_segment_next_v (ckpt) / next_v (recursive): the
             #           v(it+1) carriers, vx / vy / vz
             # -- [18-23] in the checkpoint modes only (sg_driver.cuh
-            # SgCarrierSlots after elastic3d WS_CARRIERS = 18).
+            # SgCarrierSlots after elastic3d WS_CARRIERS = 18); the full mode
+            # keeps one read-only zero grid at [18] instead (v(nt)).
             backward_workspace_nvar=18,
             backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
-                24 if mode in ("ckpt", "recursive") else 18),
+                24 if mode in ("ckpt", "recursive") else 19 if mode == "full" else 18),
             # The chunked backward's replayed velocity histories (elastic3d
             # driver_traits seg_buffers): vx, vy, vz of one chunk, (interval + 1,
             # B, 1, grid) each -- row 0 = v(start), row k = v(start + k).  The

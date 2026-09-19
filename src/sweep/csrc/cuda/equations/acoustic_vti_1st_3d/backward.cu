@@ -479,8 +479,6 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.sH_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
     forward.sV_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
 
-    auto neg_forward_source = -p.forward_source;
-
     const auto& gs  = grad_slots(p);
     auto grad_vp    = pool_or_zeros(gs, GRAD_VP, vp_t, "grads_out");
     auto grad_eps   = pool_or_zeros(gs, GRAD_EPS, epsilon_t, "grads_out");
@@ -536,6 +534,9 @@ BackwardOutput backward_bs(const BackwardInput& in)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
         ? fdtd::Geom::make(forward_nsrc, B) : fdtd::Geom::make(1, B);
+    TORCH_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
+                "AcousticVTI1st3D backward_bs: forward_source must be defined "
+                "when source fields are un-injected.");
 
     AsyncCopyContext async_copy(staged_boundary);
     BoundaryRuntime boundary_runtime(
@@ -565,16 +566,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 it, adjoint_nsrc, solver);
         }
 
-        // (b-i) forward source subtraction (removes the source contribution
-        //       that was added during the forward step we are about to reverse)
+        // (b-i) forward source subtraction (add_source_3d_signed, sign -1):
+        //       removes the source contribution that was added during the
+        //       forward step we are about to reverse. The in-kernel sign
+        //       flip is exact; no negated copy of the source is built.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             int field_index = source_fields[isrc].item<int>();
             float* field = vti_field_ptr_3d(for_view, field_index);
             if (field == nullptr) continue;
-            add_source_3d<<<fwd_src_config.grid, fwd_src_config.block>>>(
-                field, neg_forward_source.data_ptr<float>(),
+            add_source_3d_signed<<<fwd_src_config.grid, fwd_src_config.block>>>(
+                field, p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
-                it, forward_nsrc, solver);
+                it, forward_nsrc, -1.0f, solver);
         }
 
         // (b-ii) time-reverse the STRESS update (uses NEW velocity which

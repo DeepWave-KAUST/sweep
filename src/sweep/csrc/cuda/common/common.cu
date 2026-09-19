@@ -175,6 +175,74 @@ __global__ void add_source_3d(
     atomicAdd(&u[u_idx], source[src_idx]);
 }
 
+__global__ void add_source_signed(
+    float* __restrict__ u,          // (B, nz, nx)
+    const float* __restrict__ source, // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,  // (B, nsrc, 2)
+    int it,
+    int nsrc,
+    float sign,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 2;
+    int ix = sources_loc[base + 0];
+    int iz = sources_loc[base + 1];
+
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
+        return;
+
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    const float v = source[src_idx];
+    atomicAdd(&u[u_idx], sign < 0.0f ? -v : v);   // exact sign flip, see common.cuh
+
+}
+
+__global__ void add_source_3d_signed(
+    float* __restrict__ u,                 // (B, nz, ny, nx)
+    const float* __restrict__ source,      // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,   // (B, nsrc, 3)
+    int it,
+    int nsrc,
+    float sign,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 3;
+
+    int ix = sources_loc[base + 0];
+    int iy = sources_loc[base + 1];
+    int iz = sources_loc[base + 2];
+
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz)
+        return;
+
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
+
+    long long u_idx = (long long)b * spatial_size
+              + (long long)iz * solver.ny * solver.nx
+              + iy * solver.nx
+              + ix;
+
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    const float v = source[src_idx];
+    atomicAdd(&u[u_idx], sign < 0.0f ? -v : v);   // exact sign flip, see common.cuh
+}
+
 __global__ void record_kernel_3d(
     const float* __restrict__ u,           // (B, nz, ny, nx)
     float* __restrict__ record,            // (B, nrec, nt)

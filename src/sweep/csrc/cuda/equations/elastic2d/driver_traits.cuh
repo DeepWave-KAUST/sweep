@@ -21,17 +21,17 @@
 //   * forward: bind(p.wavefields, true) or allocate(vp, 2); velocity_substep = LAUNCH_ELASTIC_VELOCITY (rho), stress_substep = LAUNCH_ELASTIC_STRESS (lambda, mu, u_this_t); both also replay in the ckpt/recursive modes;
 //   * inject_source / record_field are plain add_source / record_kernel on the field selected by index; record_field writes record[irec];
 //   * save_boundary_fields = save_forward_2d_field for the five fields at offset -M (field index f, flag f == 4); save_last_state copies the five into last_two[0..4];
-//   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here) or alloc_grads zeros; signed_adjoint_sources = elastic_signed_adjoint_sources(adjoint_source, receiver_fields, 2);
+//   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here) or alloc_grads zeros; adjoint_source_signs = elastic_adjoint_source_signs(adjoint_source, receiver_fields, 2);
 //   * bind_or_alloc_adjoint binds p.adjoint_wavefields or allocate(vp, 2);
-//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; vel_ptrs_from_u_forward reads u_forward[it] and u_forward[it + 1] (zero_velocity when it + 1 == nt);
-//   * fix_rho_grad_at_sources (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source of the signed residual per receiver field;
+//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; vel_ptrs_from_u_forward reads u_forward[it] and u_forward[it + 1] (zero_velocity -- the skeleton's read-only adjoint_workspace slot SgCarrierSlots::FULL_ZERO -- when it + 1 == nt);
+//   * fix_rho_grad_at_sources (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source_signed of the residual per receiver field with that field's sign;
 //   * fix_rho_grad_at_receivers = sub_receiver_rho_grad_correction at velocity receivers (stress receivers skipped) with imaging halo M;
 //   * image_standalone = LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS (it == 0 in full mode; every reverse it in the ckpt/recursive modes);
 //   * adjoint launch helpers: stress_adjoint_prepare (10 explicit imaging pointers) / stress_adjoint_apply / velocity_adjoint_prepare / velocity_adjoint_apply, with velocity_adjoint_half = the last two;
 //   * full_mode_step: the vp/vs/rho imaging is fused into the STRESS_ADJOINT_PREPARE launch, then STRESS_ADJOINT_APPLY, VELOCITY_ADJOINT_PREPARE, VELOCITY_ADJOINT_APPLY, and the receiver-rho fix (fix_rho_grad_at_receivers) after the four launches;
 //   * plain_adjoint_step = the same four launches with all-null imaging pointers (ckpt/recursive reverse sweeps);
 //   * bs: ReconCarriers {fvx_prev, fvz_prev}; bind_or_alloc_recon takes the 7-tensor list (five fields bound with use_pml = false + two carriers) or allocate(vp, 2, false) + zero carriers;
-//   * seed_recon copies the five fields from u_last_two[0..4]; uninject_forward_source adds neg_forward_source at the source fields;
+//   * seed_recon copies the five fields from u_last_two[0..4]; uninject_forward_source subtracts the forward source at the source fields (add_source_signed, sign -1);
 //   * bs_stress_half order: STRESS_NOPML -> restore sxx/szz/sxz (fields 2..4, offset -M) -> STRESS_ADJOINT_PREPARE with the imaging fused (v(it) = for_view.v*, v(it+1) = carriers) -> fix_rho_grad_at_receivers -> STRESS_ADJOINT_APPLY;
 //   * bs_velocity_half order: VELOCITY_ADJOINT_PREPARE -> VELOCITY_ADJOINT_APPLY -> elastic_capture_strips_2d (restore strips into the carriers) -> VELOCITY_NOPML (carrier write of every computed cell, then the velocity update) -> restore vx/vz (fields 0..1, offset -M) -> prefetch_next_backward_chunk_if_needed;
 //   * ckpt: bind_or_alloc_recon_ckpt binds forward_wavefields set 0 (CKPT_STATE_COUNT = 15, the full base+pml bind) or allocate_from_snapshots(vp, checkpoints, 2); check_ckpt_aux_layout compares the m_vxx aux shapes; WS_CARRIERS = 8 (the skeleton's velocity carriers follow the q*/p* scratch in adjoint_workspace, sg_driver.cuh SgCarrierSlots);
@@ -68,8 +68,8 @@ struct Driver {
     // point.  Prologue call order per the timing map: validate_backward
     // (backward only), parse_models, setup_ctx, bind_or_alloc_* wavefields,
     // init_aux_slabs, alloc_cpml, bind_grads / alloc_grads, make_workspace,
-    // make_state, signed_adjoint_sources.  The bind_or_alloc_* / bind_grads /
-    // signed_adjoint_sources hooks live in their entry-point sections below.
+    // make_state, adjoint_source_signs.  The bind_or_alloc_* / bind_grads /
+    // adjoint_source_signs hooks live in their entry-point sections below.
     // ===================================================================== //
     static constexpr int NDIM = 2;
     static constexpr const char* NAME = "elastic2d";
@@ -350,10 +350,10 @@ struct Driver {
         grads = {torch::zeros_like(vp), torch::zeros_like(vp), torch::zeros_like(vp)};
     }
 
-    static std::vector<torch::Tensor> signed_adjoint_sources(
+    static std::vector<float> adjoint_source_signs(
         const BackwardInput& p, const torch::Tensor& receiver_fields)
     {
-        return elastic_signed_adjoint_sources(p.adjoint_source, receiver_fields, 2);
+        return elastic_adjoint_source_signs(p.adjoint_source, receiver_fields, 2);
     }
 
     // (VelPtrs is also produced by the bs / seg / carrier selectors below.)
@@ -410,18 +410,19 @@ struct Driver {
     static void inject_residuals(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const BackwardInput& p,
                                  const torch::Tensor& receiver_fields,
-                                 const std::vector<torch::Tensor>& adj_source_signed,
+                                 const std::vector<float>& adj_source_signs,
                                  int it, int adjoint_nsrc)
     {
         for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.record_config.grid, s.record_config.block>>>(
+            add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
                 field,
-                adj_source_signed[irec].data_ptr<float>(),
+                p.adjoint_source[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
+                adj_source_signs[irec],
                 solver
             );
         }
@@ -667,18 +668,18 @@ struct Driver {
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,
-                                        const torch::Tensor& neg_forward_source,
                                         int it, int forward_nsrc)
     {
         for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
             float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
+            add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
                 field,
-                neg_forward_source.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
                 it,
                 forward_nsrc,
+                -1.0f,
                 solver
             );
         }

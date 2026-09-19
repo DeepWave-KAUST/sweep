@@ -18,8 +18,11 @@
 //     image_standalone;
 //   * the 14-slot adjoint workspace pool (WorkspaceSlot) splits into the
 //     adjoint-step half (slots 0-9, the Workspace) and the imaging half
-//     (slots 10-13 plus the zero next-momentum buffer, carried in the State
-//     so image_standalone can reach them); in recursive mode the pool
+//     (slots 10-13, carried in the State so image_standalone can reach
+//     them); the imaging's next-momentum pointers are null in every mode
+//     (calculate_grad_evr_nobs never reads them), so the full mode takes no
+//     zero grid either (its pool stays at the 14 scratch slots); in
+//     recursive mode the pool
 //     continues with the N_VEL captured-momentum carriers the skeleton takes
 //     behind them (WS_CARRIERS; ckpt takes none: no p(t+1) term, so no
 //     cross-chunk carriers either);
@@ -64,7 +67,7 @@ struct Driver {
     // Prologue of every entry (timing map, in call order): validate_backward
     // (backward only), parse_models, setup_ctx, bind_or_alloc_* wavefields,
     // init_aux_slabs, alloc_cpml, bind_grads / alloc_grads, make_workspace,
-    // make_state, signed_adjoint_sources.
+    // make_state, adjoint_source_signs.
     // ===================================================================== //
 
     static constexpr int NDIM = 2;
@@ -136,11 +139,8 @@ struct Driver {
         fdtd::LaunchConfig record_config;
         int order;
         // Imaging half of the 14-slot adjoint workspace pool (chain-rule
-        // sources L_dV*), plus the zero next-momentum buffer for the
-        // bs/ckpt/recursive imaging calls (full mode gets its zero fallback
-        // from the driver's zero_velocity via vel_ptrs_from_u_forward).
+        // sources L_dV*).
         torch::Tensor ws_lvpx, ws_lvpz, ws_lvsx, ws_lvsz;
-        torch::Tensor zero_buf;
     };
 
     template <class P>
@@ -185,12 +185,6 @@ struct Driver {
         s.ws_lvpz = pool_or_zeros(p.adjoint_workspace, L_VP_Z, vp);
         s.ws_lvsx = pool_or_zeros(p.adjoint_workspace, L_VS_X, vp);
         s.ws_lvsz = pool_or_zeros(p.adjoint_workspace, L_VS_Z, vp);
-        // u_forward is bound in full mode only, where the imaging always has
-        // real next-momentum pointers — allocate the zero buffer for the
-        // other three modes, keeping the per-mode allocation count identical
-        // to the hand-written drivers.
-        if (!p.u_forward.defined())
-            s.zero_buf = torch::zeros_like(vp);
         return s;
     }
 
@@ -490,16 +484,16 @@ public:
     }
 
     // The EVR adjoint injects the raw residuals for every receiver field —
-    // the hand-written drivers apply no stress-receiver sign flip.
-    static std::vector<torch::Tensor> signed_adjoint_sources(
+    // the hand-written drivers apply no stress-receiver sign flip, so every
+    // injection sign is +1.  The signed kernel reads adjoint_source[i] in
+    // place, hence the contiguity check.
+    static std::vector<float> adjoint_source_signs(
         const BackwardInput& p, const torch::Tensor& receiver_fields)
     {
-        std::vector<torch::Tensor> out;
-        const int64_t nfield = receiver_fields.numel();
-        out.reserve(static_cast<size_t>(nfield));
-        for (int64_t i = 0; i < nfield; ++i)
-            out.push_back(p.adjoint_source[i]);
-        return out;
+        TORCH_CHECK(p.adjoint_source.is_contiguous(),
+                    "elastic_vr2d backward: adjoint_source must be contiguous "
+                    "(nfield, B, nrec, nt); the residual injection reads it in place");
+        return std::vector<float>(static_cast<size_t>(receiver_fields.numel()), 1.0f);
     }
 
     struct VelPtrs {
@@ -509,17 +503,21 @@ public:
         const float* pz_next;
     };
 
+    // ``zero_velocity`` is undefined here: the skeleton hands
+    // IMAGING_USES_NEXT_V == false equations no zero grid, and the imaging
+    // never reads the next-momentum pointers anyway (calculate_grad_evr_nobs
+    // takes fpx_prev / fpz_prev and dereferences neither), so v(nt) is null.
     static VelPtrs vel_ptrs_from_u_forward(const BackwardInput& p, int it,
-                                             const torch::Tensor& zero_velocity)
+                                             const torch::Tensor& /*zero_velocity*/)
     {
         // Saved forward momentum at time t (px in channel 0, pz in channel 1).
         VelPtrs v;
         v.px_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
         v.pz_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
         v.px_next = (it + 1 < p.nt) ? p.u_forward.select(0, it + 1).select(0, 0).data_ptr<float>()
-                                    : zero_velocity.data_ptr<float>();
+                                    : nullptr;
         v.pz_next = (it + 1 < p.nt) ? p.u_forward.select(0, it + 1).select(0, 1).data_ptr<float>()
-                                    : zero_velocity.data_ptr<float>();
+                                    : nullptr;
         return v;
     }
 
@@ -531,17 +529,17 @@ public:
     static void inject_residuals(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const BackwardInput& p,
                                  const torch::Tensor& receiver_fields,
-                                 const std::vector<torch::Tensor>& adj_source_signed,
+                                 const std::vector<float>& adj_source_signs,
                                  int it, int adjoint_nsrc)
     {
         for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.record_config.grid, s.record_config.block>>>(
+            add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
                 field,
-                adj_source_signed[irec].data_ptr<float>(),
+                p.adjoint_source[irec].data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
-                it, adjoint_nsrc, solver
+                it, adjoint_nsrc, adj_source_signs[irec], solver
             );
         }
         // Adjoint of the forward free-surface BC (szz = sxz = 0 at the
@@ -555,21 +553,20 @@ public:
 
     // Gradient kernel (pointwise terms + chain-rule sources), then the
     // chain-rule pass (transpose central FD on L_dV* into grad_vp/grad_vs).
-    // Null next pointers (bs/ckpt/recursive) read the zero buffer, exactly
-    // the zero_buf argument of the hand-written calls.
+    // The next-momentum pointers pass straight through: the kernel never
+    // dereferences fpx_prev / fpz_prev (no p(t+1) term), so they are null in
+    // the bs/ckpt/recursive modes and at it = nt-1 of the full mode.
     // (also fired by backward_bs phase 1 and the ckpt/recursive imaging)
     static void image_standalone(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const VelPtrs& v,
                                  std::vector<torch::Tensor>& grads)
     {
-        const float* px_next = v.px_next ? v.px_next : s.zero_buf.data_ptr<float>();
-        const float* pz_next = v.pz_next ? v.pz_next : s.zero_buf.data_ptr<float>();
         LAUNCH_CALCULATE_GRAD_EVR_NOBS(
             s.order,
             s.launch_config.grid, s.launch_config.block,
             adj_view,
             v.px_now, v.pz_now,
-            px_next, pz_next,
+            v.px_next, v.pz_next,
             s.models.vp.data_ptr<float>(),
             s.models.vs.data_ptr<float>(),
             s.models.Rp_x.data_ptr<float>(),
@@ -681,17 +678,16 @@ public:
     static void uninject_forward_source(const State& s, const SolverContext& solver,
                                         WfView& for_view, const BackwardInput& p,
                                         const torch::Tensor& source_fields,
-                                        const torch::Tensor& neg_forward_source,
                                         int it, int forward_nsrc)
     {
         for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
             float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
             if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
+            add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
                 field,
-                neg_forward_source.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
-                it, forward_nsrc, solver
+                it, forward_nsrc, -1.0f, solver
             );
         }
     }
@@ -732,7 +728,7 @@ public:
         }
 
         // Gradient (uses reconstructed p^{it} = for_view.vx/vz + adjoint);
-        // null next pointers read the zero buffer.
+        // the next pointers are null (never read).
         VelPtrs v{for_view.vx, for_view.vz, nullptr, nullptr};
         image_standalone(s, solver, adj_view, v, grads);
 
@@ -852,8 +848,7 @@ public:
                                 int now_offset, int /*next_offset*/,
                                 const std::vector<torch::Tensor>& /*next_segment_v*/)
     {
-        // No velocity(t+1) term: next stays null (image_standalone reads the
-        // zero buffer), matching the hand-written segment's zero_buf args.
+        // No velocity(t+1) term: next stays null (the imaging never reads it).
         VelPtrs v;
         v.px_now = seg[0].select(0, now_offset).data_ptr<float>();
         v.pz_now = seg[1].select(0, now_offset).data_ptr<float>();
