@@ -4,26 +4,45 @@
 #include <exception>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include <torch/extension.h>
 
+#include "../buf_torch.h"
 #include "../context.h"
 #include "disk_io.cuh"
 #include "kernels.cuh"
 #include "types.cuh"
 
-// Map a boundary-buffer tensor's dtype to the storage-dtype enum.  Python
-// allocates the buffers in the requested precision, so the tensor itself is
-// the source of truth (uint8 == the INT8 path's quantized main buffer).
-static inline BoundaryDtype boundary_dtype_from_tensor(const torch::Tensor& t) {
-    switch (t.scalar_type()) {
-        case torch::kUInt8:    return BoundaryDtype::INT8;
-        case torch::kHalf:     return BoundaryDtype::FP16;
-        case torch::kBFloat16: return BoundaryDtype::BF16;
-        default:               return BoundaryDtype::FP32;
+// boundary_dtype_from_tensor() now lives in ../buf_torch.h, next to buf_of()
+// which needs it to tag a descriptor; the torch::Tensor overload is unchanged
+// and a Buf overload was added so call sites that ask a (now Buf) saver member
+// for its storage dtype keep their spelling.
+
+// The storage-dtype guard that used to be a four-way torch::ScalarType test.
+// A Buf carries the tree's BoundaryDtype tag, whose four values ARE
+// float32/float16/bfloat16/uint8 -- so testing the tag alone would be a
+// tautology.  What the byte copies actually depend on is that the buffer's
+// element WIDTH is the width its tag implies; that is false for every dtype
+// outside the four whose width differs (float64, int64, ...), which is the case
+// the old check caught.  A same-width foreign dtype (int32 -> FP32 tag, 4 B)
+// now passes where it was rejected; nothing in sweep allocates one, since
+// Python allocates these buffers in the requested boundary precision.
+static inline bool boundary_storage_dtype_ok(const Buf& b) {
+    return b.element_size() == buf_dtype_element_size(b.dtype());
+}
+
+// Printable shape/stride for the bounds diagnostic below.  A Buf carries the
+// numbers but not torch's ArrayRef streaming, so format them here.
+static inline std::string boundary_shape_str(const Buf& b, bool strides) {
+    std::string out = "[";
+    for (int64_t i = 0; i < b.dim(); ++i) {
+        if (i > 0) out += ", ";
+        out += std::to_string(strides ? b.stride(i) : b.size(i));
     }
+    return out + "]";
 }
 
 // Byte pointer into a boundary tensor at element offset `off_elems`, honoring
@@ -36,7 +55,7 @@ static inline BoundaryDtype boundary_dtype_from_tensor(const torch::Tensor& t) {
 // thread inside cudaMemcpyAsync.  Report an empty face as null here; the two
 // copy primitives below skip it.  Non-DD never sees this: every face is backed
 // there, so nothing returns null.
-static inline char* boundary_byte_ptr(const torch::Tensor& t, int64_t off_elems) {
+static inline char* boundary_byte_ptr(const Buf& t, int64_t off_elems) {
     if (!t.defined() || t.numel() == 0) return nullptr;
     return static_cast<char*>(t.data_ptr()) + off_elems * t.element_size();
 }
@@ -54,7 +73,7 @@ static inline cudaError_t boundary_memcpy_async(
 // off one of its two buffers is invisible until the driver dereferences it,
 // and the stack then only says "cudaMemcpyAsync".
 static inline void boundary_bounds_check(
-    const char* what, const torch::Tensor& t, int64_t off_elems, size_t bytes) {
+    const char* what, const Buf& t, int64_t off_elems, size_t bytes) {
     static const bool on = std::getenv("SWEEP_BOUNDARY_BOUNDS") != nullptr;
     if (!on || !t.defined() || t.numel() == 0) return;
     const int64_t es = t.element_size();
@@ -65,19 +84,29 @@ static inline void boundary_bounds_check(
                 ": offset ", off_elems, " elems (", off_elems * es,
                 " B) + ", bytes, " B = ", want,
                 " B, buffer holds ", t.numel(), " elems (", have,
-                " B), sizes ", t.sizes(), " strides ", t.strides());
+                " B), sizes ", boundary_shape_str(t, false),
+                " strides ", boundary_shape_str(t, true));
 }
 
 struct EffectiveBoundarySaver {
 
-    torch::Tensor left_t, right_t;
-    torch::Tensor front_t, back_t;
-    torch::Tensor bottom_t, top_t;
+    // The buffers below are DESCRIPTORS (core/buf.h): non-owning views of
+    // memory the Python propagator allocated.  The tensor handles that keep
+    // that memory alive live in ``torch_refs_`` / ``storage_th_`` at the bottom
+    // of this struct -- the same refcount these members used to hold
+    // themselves.
+    Buf left_t, right_t;
+    Buf front_t, back_t;
+    Buf bottom_t, top_t;
+    // NOT a Buf: the equation drivers use last_two as a real tensor
+    // (``saver.last_two_t.select(...).copy_(...)`` in ~20 driver files, and
+    // ``out.last_two = saver.last_two_t``), and at 7 dimensions it is the one
+    // buffer here that exceeds BUF_MAX_DIMS anyway.
     torch::Tensor last_two_t;
 
-    torch::Tensor left_gpu, right_gpu;
-    torch::Tensor front_gpu, back_gpu;
-    torch::Tensor bottom_gpu, top_gpu;
+    Buf left_gpu, right_gpu;
+    Buf front_gpu, back_gpu;
+    Buf bottom_gpu, top_gpu;
 
     // INT8 path only: per-face FP32 scale buffer (one per quantization
     // block) and an FP32 staging buffer holding a single timestep's
@@ -85,21 +114,21 @@ struct EffectiveBoundarySaver {
     // existing kernel path, then launch_quantize_int8 reduces+stores
     // into the persistent uint8 face buffer (left_t et al.) plus this
     // scale buffer.
-    torch::Tensor left_scale_t, right_scale_t;
-    torch::Tensor front_scale_t, back_scale_t;
-    torch::Tensor bottom_scale_t, top_scale_t;
+    Buf left_scale_t, right_scale_t;
+    Buf front_scale_t, back_scale_t;
+    Buf bottom_scale_t, top_scale_t;
 
     // INT8 staged path (storage='cpu'/'disk') only: per-face FP32 scale
     // RING on the GPU, parallel to the uint8 main ring (top_gpu et al.).
     // Each chunk is flushed to / loaded from the persistent FP32 scale
     // buffer (top_scale_t et al.) alongside the uint8 main buffer.
-    torch::Tensor left_scale_gpu, right_scale_gpu;
-    torch::Tensor front_scale_gpu, back_scale_gpu;
-    torch::Tensor bottom_scale_gpu, top_scale_gpu;
+    Buf left_scale_gpu, right_scale_gpu;
+    Buf front_scale_gpu, back_scale_gpu;
+    Buf bottom_scale_gpu, top_scale_gpu;
 
-    torch::Tensor left_staging_t, right_staging_t;
-    torch::Tensor front_staging_t, back_staging_t;
-    torch::Tensor bottom_staging_t, top_staging_t;
+    Buf left_staging_t, right_staging_t;
+    Buf front_staging_t, back_staging_t;
+    Buf bottom_staging_t, top_staging_t;
 
     bool enabled = false;
 
@@ -117,33 +146,70 @@ struct EffectiveBoundarySaver {
     int64_t bottom_stride = 0;
     int64_t top_stride = 0;
 
+    // Torch-side ownership.  A Buf never owns memory, so every tensor this
+    // saver binds (or, on the self-allocating fallback, makes) is parked here
+    // for the saver's lifetime -- byte for byte the refcount the torch::Tensor
+    // members used to hold.  Pushing into the vector may reallocate it, which
+    // moves the Tensor handles but never the storage they point at, so the Bufs
+    // stay valid.
+    std::vector<torch::Tensor> torch_refs_;
+
+    // The six PERSISTENT storage faces as tensors, in bind_tensor_group order
+    // (top, bottom, front, back, left, right; front/back undefined in 2-D).
+    // load_from_vector() still needs real tensors for Tensor::copy_().
+    torch::Tensor storage_th_[6];
+
+    // Park the tensor, hand back a descriptor of it.
+    inline Buf keep(const torch::Tensor& t)
+    {
+        torch_refs_.push_back(t);
+        return buf_of(t);
+    }
+
     inline void bind_tensor_group(
         const std::vector<torch::Tensor>& tensors,
         const char* role,
-        torch::Tensor& top,
-        torch::Tensor& bottom,
-        torch::Tensor& front,
-        torch::Tensor& back,
-        torch::Tensor& left,
-        torch::Tensor& right
+        Buf& top,
+        Buf& bottom,
+        Buf& front,
+        Buf& back,
+        Buf& left,
+        Buf& right,
+        torch::Tensor* handles = nullptr
     )
     {
         if (dim == 3) {
             TORCH_CHECK(tensors.size() == 6, role, " must contain 6 tensors for 3D");
-            top    = tensors[0];
-            bottom = tensors[1];
-            front  = tensors[2];
-            back   = tensors[3];
-            left   = tensors[4];
-            right  = tensors[5];
+            top    = keep(tensors[0]);
+            bottom = keep(tensors[1]);
+            front  = keep(tensors[2]);
+            back   = keep(tensors[3]);
+            left   = keep(tensors[4]);
+            right  = keep(tensors[5]);
+            if (handles != nullptr) {
+                handles[0] = tensors[0];
+                handles[1] = tensors[1];
+                handles[2] = tensors[2];
+                handles[3] = tensors[3];
+                handles[4] = tensors[4];
+                handles[5] = tensors[5];
+            }
         } else {
             TORCH_CHECK(tensors.size() == 4, role, " must contain 4 tensors for 2D");
-            top    = tensors[0];
-            bottom = tensors[1];
-            left   = tensors[2];
-            right  = tensors[3];
-            front  = torch::Tensor();
-            back   = torch::Tensor();
+            top    = keep(tensors[0]);
+            bottom = keep(tensors[1]);
+            left   = keep(tensors[2]);
+            right  = keep(tensors[3]);
+            front  = Buf();
+            back   = Buf();
+            if (handles != nullptr) {
+                handles[0] = tensors[0];
+                handles[1] = tensors[1];
+                handles[2] = torch::Tensor();
+                handles[3] = torch::Tensor();
+                handles[4] = tensors[2];
+                handles[5] = tensors[3];
+            }
         }
     }
 
@@ -152,7 +218,8 @@ struct EffectiveBoundarySaver {
         const char* role
     )
     {
-        bind_tensor_group(tensors, role, top_t, bottom_t, front_t, back_t, left_t, right_t);
+        bind_tensor_group(tensors, role, top_t, bottom_t, front_t, back_t, left_t, right_t,
+                          storage_th_);
     }
 
     inline void bind_staging_tensors(
@@ -172,25 +239,34 @@ struct EffectiveBoundarySaver {
         const torch::TensorOptions& options
     )
     {
+        // Allocation ORDER is kept exactly as it was; only the binding changed
+        // (the tensors are parked in torch_refs_/storage_th_, the members are
+        // now descriptors of them).
+        std::vector<torch::Tensor> fresh;
         if (dim == 3) {
-            left_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, options);
-            right_t = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, options);
+            auto left   = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, options);
+            auto right  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, options);
 
-            front_t = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, options);
-            back_t  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, options);
+            auto front  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, options);
+            auto back   = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, options);
 
-            bottom_t = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, options);
-            top_t    = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, options);
+            auto bottom = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, options);
+            auto top    = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, options);
+
+            fresh = {top, bottom, front, back, left, right};
         } else {
-            left_t  = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, options);
-            right_t = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, options);
+            auto left   = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, options);
+            auto right  = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, options);
 
-            bottom_t = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, options);
-            top_t    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, options);
+            auto bottom = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, options);
+            auto top    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, options);
 
-            front_t = torch::Tensor();
-            back_t  = torch::Tensor();
+            // front/back stay undefined in 2-D, as before.
+            fresh = {top, bottom, left, right};
         }
+        bind_tensor_group(fresh, "boundary storage (self-allocated)",
+                          top_t, bottom_t, front_t, back_t, left_t, right_t,
+                          storage_th_);
     }
 
     inline void allocate_staging_storage(
@@ -203,22 +279,30 @@ struct EffectiveBoundarySaver {
         const torch::TensorOptions& options
     )
     {
+        std::vector<torch::Tensor> fresh;
         if (dim == 3) {
-            left_gpu  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, options);
-            right_gpu = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, options);
+            auto left   = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, options);
+            auto right  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, options);
 
-            front_gpu = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, options);
-            back_gpu  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, options);
+            auto front  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, options);
+            auto back   = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, options);
 
-            bottom_gpu = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, options);
-            top_gpu    = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, options);
+            auto bottom = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, options);
+            auto top    = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, options);
+
+            fresh = {top, bottom, front, back, left, right};
         } else {
-            left_gpu  = torch::zeros({nvar, transfer_interval, ctx.B, nz_boundary, width}, options);
-            right_gpu = torch::zeros({nvar, transfer_interval, ctx.B, nz_boundary, width}, options);
+            auto left   = torch::zeros({nvar, transfer_interval, ctx.B, nz_boundary, width}, options);
+            auto right  = torch::zeros({nvar, transfer_interval, ctx.B, nz_boundary, width}, options);
 
-            bottom_gpu = torch::zeros({nvar, transfer_interval, ctx.B, width, nx_boundary}, options);
-            top_gpu    = torch::zeros({nvar, transfer_interval, ctx.B, width, nx_boundary}, options);
+            auto bottom = torch::zeros({nvar, transfer_interval, ctx.B, width, nx_boundary}, options);
+            auto top    = torch::zeros({nvar, transfer_interval, ctx.B, width, nx_boundary}, options);
+
+            // front/back stay undefined in 2-D, as before.
+            fresh = {top, bottom, left, right};
         }
+        bind_tensor_group(fresh, "boundary staging (self-allocated)",
+                          top_gpu, bottom_gpu, front_gpu, back_gpu, left_gpu, right_gpu);
     }
 
     inline void compute_time_strides()
@@ -435,6 +519,12 @@ struct EffectiveBoundarySaver {
         const std::vector<torch::Tensor>& boundary_staging = {}
     )
     {
+        // One binding per saver. The Buf members describe the FIRST binding while
+        // torch_refs_ would pin both, so a second allocate() would leave the
+        // descriptors pointing at storage nothing else refers to. Every caller
+        // allocates once, in its constructor; this says so out loud.
+        TORCH_CHECK(torch_refs_.empty(),
+                    "EffectiveBoundarySaver::allocate() was called twice on one saver.");
         enabled = use_boundary_saving;
         dim = dim_;
         nvar = nvar_;
@@ -591,7 +681,7 @@ struct EffectiveBoundarySaver {
         // Detect storage dtype on the persistent face buffer (left_t) to
         // decide which set of pointers to populate.
         auto dt = left_t.dtype();
-        if (dt == torch::kHalf) {
+        if (dt == BoundaryDtype::FP16) {
             // FP16 is per-block scaled storage (same two-pass flow as
             // INT8): persistent __half payload + FP32 per-block scales +
             // FP32 transient staging for the boundary kernels.
@@ -624,7 +714,7 @@ struct EffectiveBoundarySaver {
                 v.front = front_staging_t.data_ptr<float>();
                 v.back  = back_staging_t.data_ptr<float>();
             }
-        } else if (dt == torch::kBFloat16) {
+        } else if (dt == BoundaryDtype::BF16) {
             v.dtype = BoundaryDtype::BF16;
             v.use_fp16 = false;
             v.left_bf  = reinterpret_cast<__nv_bfloat16*>(left_t.data_ptr());
@@ -635,7 +725,15 @@ struct EffectiveBoundarySaver {
             }
             v.bottom_bf = reinterpret_cast<__nv_bfloat16*>(bottom_t.data_ptr());
             v.top_bf    = reinterpret_cast<__nv_bfloat16*>(top_t.data_ptr());
-        } else if (dt == torch::kUInt8) {
+        } else if (dt == BoundaryDtype::INT8) {
+            // Same guard the FP16 branch carries.  torch used to raise
+            // "Tensor is undefined" from the first data_ptr<float>() below if
+            // the scales were missing; a descriptor's typed data_ptr only
+            // asserts (and is compiled out with -DNDEBUG), so state the
+            // requirement here instead of handing a null scale to a kernel.
+            TORCH_CHECK(top_scale_t.defined(),
+                        "int8 boundary storage requires per-block scale "
+                        "buffers (allocated by the Python wrapper).");
             v.dtype = BoundaryDtype::INT8;
             v.use_fp16 = false;
             // Persistent uint8 buffers
@@ -696,8 +794,8 @@ struct EffectiveBoundarySaver {
             // be seeded by a plain tensor copy, and an empty u_boundary
             // from the equation backward.cu fallback is fine — bail
             // before the size check.
-            if (left_t.defined() && (left_t.dtype() == torch::kUInt8 ||
-                                     left_t.dtype() == torch::kHalf))
+            if (left_t.defined() && (left_t.dtype() == BoundaryDtype::INT8 ||
+                                     left_t.dtype() == BoundaryDtype::FP16))
                 return;
 
             auto copy_to = [&](torch::Tensor& dst, const torch::Tensor& src)
@@ -715,24 +813,27 @@ struct EffectiveBoundarySaver {
                 if (u_boundary.size() != 4)
                     throw std::runtime_error("2D boundary expects 4 tensors.");
                 
-                copy_to( top_t, u_boundary[0]);
-                copy_to( bottom_t, u_boundary[1]);
-                copy_to( left_t, u_boundary[2]);
-                copy_to( right_t, u_boundary[3]);
+                // storage_th_[] is the same tensor top_t/bottom_t/... describe,
+                // in bind_tensor_group order (top, bottom, front, back, left,
+                // right); Tensor::copy_ needs the tensor, not the descriptor.
+                copy_to( storage_th_[0], u_boundary[0]);
+                copy_to( storage_th_[1], u_boundary[1]);
+                copy_to( storage_th_[4], u_boundary[2]);
+                copy_to( storage_th_[5], u_boundary[3]);
 
             } else { // 3D
 
                 if (u_boundary.size() != 6)
                     throw std::runtime_error("3D boundary expects 6 tensors.");
 
-                copy_to( top_t, u_boundary[0]);
-                copy_to( bottom_t, u_boundary[1]);
+                copy_to( storage_th_[0], u_boundary[0]);
+                copy_to( storage_th_[1], u_boundary[1]);
 
-                copy_to( front_t, u_boundary[2]);
-                copy_to( back_t, u_boundary[3]);
+                copy_to( storage_th_[2], u_boundary[2]);
+                copy_to( storage_th_[3], u_boundary[3]);
 
-                copy_to( left_t, u_boundary[4]);
-                copy_to( right_t, u_boundary[5]);
+                copy_to( storage_th_[4], u_boundary[4]);
+                copy_to( storage_th_[5], u_boundary[5]);
             }
         }
 
@@ -788,7 +889,7 @@ struct EffectiveBoundarySaver {
             size_t left_gpu_time_block = left_scale_gpu.stride(1);
             size_t top_bytes = (size_t)len * top_time_block * es;
             size_t left_bytes = (size_t)len * left_time_block * es;
-            auto face = [&](const torch::Tensor& cpu_t, const torch::Tensor& gpu_t,
+            auto face = [&](const Buf& cpu_t, const Buf& gpu_t,
                             size_t cpu_var_block, size_t cpu_time_block,
                             size_t gpu_var_block, size_t gpu_time_block, size_t bytes) {
                 char* cpu_p = boundary_byte_ptr(cpu_t, (int64_t)cpu_start * cpu_time_block);
@@ -817,7 +918,7 @@ struct EffectiveBoundarySaver {
         size_t top_gpu_offset = (size_t)gpu_start * nvar * top_gpu_block;
         size_t front_gpu_offset = (size_t)gpu_start * nvar * front_gpu_block;
         size_t left_gpu_offset = (size_t)gpu_start * nvar * left_gpu_block;
-        auto face = [&](const torch::Tensor& cpu_t, const torch::Tensor& gpu_t,
+        auto face = [&](const Buf& cpu_t, const Buf& gpu_t,
                         size_t cpu_block, size_t gpu_offset, size_t elems) {
             char* cpu_p = boundary_byte_ptr(cpu_t, (int64_t)cpu_start * nvar * cpu_block);
             char* gpu_p = boundary_byte_ptr(gpu_t, (int64_t)gpu_offset);
@@ -839,7 +940,7 @@ struct EffectiveBoundarySaver {
         // Scaled staged (INT8/FP16): flush the FP32 scale ring alongside
         // the payload main.
         if (top_t.defined() && top_scale_t.defined() &&
-            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf))
+            (top_t.dtype() == BoundaryDtype::INT8 || top_t.dtype() == BoundaryDtype::FP16))
             copy_int8_scales(start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
         if (dim == 2)
         {
@@ -856,7 +957,7 @@ struct EffectiveBoundarySaver {
             size_t top_bytes = (size_t)len * top_time_block * es;
             size_t left_bytes = (size_t)len * left_time_block * es;
 
-            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16 || top_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+            TORCH_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
             copy_2d_chunk_async(
                 boundary_byte_ptr(top_t, (int64_t)start * top_time_block),
                 top_var_block,
@@ -915,7 +1016,7 @@ struct EffectiveBoundarySaver {
         size_t bottom_gpu_offset = static_cast<size_t>(gpu_start) * nvar * bottom_gpu_block;
 
 
-        TORCH_CHECK(left_t.dtype() == torch::kFloat32 || left_t.dtype() == torch::kHalf || left_t.dtype() == torch::kBFloat16 || left_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+        TORCH_CHECK(boundary_storage_dtype_ok(left_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
         size_t es = left_t.element_size();
         boundary_memcpy_async(
             boundary_byte_ptr(left_t, (int64_t)start * nvar * left_block),
@@ -977,7 +1078,7 @@ struct EffectiveBoundarySaver {
         if (dim != 2)
             throw std::runtime_error("flush_gpu_to_disk_2d only supports 2D boundaries.");
         const bool is_scaled = top_t.defined() &&
-            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+            (top_t.dtype() == BoundaryDtype::INT8 || top_t.dtype() == BoundaryDtype::FP16);
         if (paths.size() != (is_scaled ? 8u : 4u))
             throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8/fp16) file paths.");
 
@@ -1092,7 +1193,7 @@ struct EffectiveBoundarySaver {
         if (dim != 3)
             throw std::runtime_error("flush_gpu_to_disk_3d only supports 3D boundaries.");
         const bool is_scaled = top_t.defined() &&
-            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+            (top_t.dtype() == BoundaryDtype::INT8 || top_t.dtype() == BoundaryDtype::FP16);
         if (paths.size() != (is_scaled ? 12u : 6u))
             throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8/fp16) file paths.");
 
@@ -1228,7 +1329,7 @@ struct EffectiveBoundarySaver {
         if (dim != 2)
             throw std::runtime_error("load_disk_to_cpu_2d only supports 2D boundaries.");
         const bool is_scaled = top_t.defined() &&
-            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+            (top_t.dtype() == BoundaryDtype::INT8 || top_t.dtype() == BoundaryDtype::FP16);
         if (paths.size() != (is_scaled ? 8u : 4u))
             throw std::runtime_error("2D disk boundary expects 4 (fp) / 8 (int8/fp16) file paths.");
 
@@ -1316,7 +1417,7 @@ struct EffectiveBoundarySaver {
         if (dim != 3)
             throw std::runtime_error("load_disk_to_cpu_3d only supports 3D boundaries.");
         const bool is_scaled = top_t.defined() &&
-            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf);
+            (top_t.dtype() == BoundaryDtype::INT8 || top_t.dtype() == BoundaryDtype::FP16);
         if (paths.size() != (is_scaled ? 12u : 6u))
             throw std::runtime_error("3D disk boundary expects 6 (fp) / 12 (int8/fp16) file paths.");
 
@@ -1401,7 +1502,7 @@ struct EffectiveBoundarySaver {
         // Scaled staged (INT8/FP16): load the FP32 scale ring alongside
         // the payload main.
         if (top_t.defined() && top_scale_t.defined() &&
-            (top_t.dtype() == torch::kUInt8 || top_t.dtype() == torch::kHalf))
+            (top_t.dtype() == BoundaryDtype::INT8 || top_t.dtype() == BoundaryDtype::FP16))
             copy_int8_scales(start, len, gpu_start, cudaMemcpyHostToDevice, stream);
         if (dim == 2)
         {
@@ -1418,7 +1519,7 @@ struct EffectiveBoundarySaver {
             size_t top_gpu_time_block = top_gpu.stride(1);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
-            TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16 || top_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+            TORCH_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
             boundary_bounds_check("top_t", top_t, (int64_t)start * top_time_block, top_bytes);
             boundary_bounds_check("top_gpu", top_gpu, (int64_t)gpu_start * top_gpu_time_block, top_bytes);
             copy_2d_chunk_async(
@@ -1484,7 +1585,7 @@ struct EffectiveBoundarySaver {
         size_t front_gpu_offset = static_cast<size_t>(gpu_start) * nvar * front_gpu_block;
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
-        TORCH_CHECK(top_t.dtype() == torch::kFloat32 || top_t.dtype() == torch::kHalf || top_t.dtype() == torch::kBFloat16 || top_t.dtype() == torch::kUInt8, "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+        TORCH_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
         size_t es = top_t.element_size();
         boundary_bounds_check("top_t", top_t, (int64_t)(start * nvar * top_block), top_elems * es);
         boundary_bounds_check("top_gpu", top_gpu, (int64_t)(top_gpu_offset), top_elems * es);
