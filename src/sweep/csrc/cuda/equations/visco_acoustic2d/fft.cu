@@ -9,6 +9,13 @@
 // parameters ATen's _exec_fft derives for our operands (see the class note in
 // kernels.cuh) and issuing the same cufftXtExec on the same data reproduces
 // its bits exactly; only the allocations go away.
+//
+// The plan is built with the cuFFT API directly.  An earlier version reached
+// for at::native::detail::CuFFTConfig to do it, which worked but put a PRIVATE
+// ATen header on this tree's compile path -- the only such dependency it had,
+// and one that a torch minor bump can break silently.  Same three arguments,
+// same plan; what guarantees the bits is the gate, not the provenance of the
+// constructor.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -19,6 +26,15 @@
 
 #include "kernels.cuh"
 #include "visco_acoustic2d.h"
+
+// cuFFT status check.  ATen has one (at::native::CUFFT_CHECK) but it is in the
+// private header this file exists to stop including.
+#define VISCO_CUFFT_CHECK(call)                                                   \
+    do {                                                                          \
+        const cufftResult _st = (call);                                           \
+        TORCH_CHECK(_st == CUFFT_SUCCESS, "cuFFT error ", static_cast<int>(_st),   \
+                    " from " #call);                                              \
+    } while (0)
 
 namespace {
 
@@ -66,19 +82,52 @@ ViscoFFT::ViscoFFT(c10::DeviceIndex device, int64_t B, int64_t nz, int64_t nx)
     // it plans for is the (B, nz, nx) contiguous reshape and the output the
     // (B, nz, nx) contiguous resize -- strides {nz*nx, nx, 1} on both sides,
     // signal_size {B, nz, nx}, fft_type C2C, value_type Float.
-    const int64_t strides[3] = {nz * nx, nx, 1};
-    const int64_t sizes[3] = {B, nz, nx};
-    const at::native::detail::CuFFTParams params(
-        c10::IntArrayRef(strides, 3), c10::IntArrayRef(strides, 3), c10::IntArrayRef(sizes, 3),
-        at::native::detail::CuFFTTransformType::C2C, at::ScalarType::Float);
+    // sizes {B, nz, nx} give CuFFTConfig batch = sizes[0] = B, signal_ndim =
+    // sizes.size() - 1 = 2 and signal_sizes {nz, nx}; kFloat + C2C gives
+    // itype = otype = exec_type = CUDA_C_32F.  Both operands are contiguous, so
+    // as_cufft_embed() reports `simple` (stride == 1, dist == nz*nx == the
+    // signal numel, embed.back() == nx) and CuFFTConfig takes the branch that
+    // passes inembed == onembed == nullptr, which tells cuFFT to assume the
+    // unit-stride layout and IGNORE istride/idist/ostride/odist.  Passing the
+    // {nz*nx, nx, 1} strides as an explicit embedding instead would be the
+    // other branch -- a different plan, and no longer a claim about the same
+    // bits.  Auto-allocation stays off, as there, so the work area is ours and
+    // comes from the pool.
+    long long signal_sizes[2] = {static_cast<long long>(nz), static_cast<long long>(nx)};
+
     // cufftXtMakePlanMany binds the plan to the current device.
     c10::cuda::CUDAGuard guard(device_);
-    config_ = std::make_unique<at::native::detail::CuFFTConfig>(params);
+    VISCO_CUFFT_CHECK(cufftCreate(&plan_));
+    VISCO_CUFFT_CHECK(cufftSetAutoAllocation(plan_, /*autoAllocate=*/0));
+    size_t ws_size_t = 0;
+    VISCO_CUFFT_CHECK(cufftXtMakePlanMany(
+        plan_, /*rank=*/2, signal_sizes,
+        /*inembed=*/nullptr, /*istride=*/1, /*idist=*/1, CUDA_C_32F,
+        /*onembed=*/nullptr, /*ostride=*/1, /*odist=*/1, CUDA_C_32F,
+        /*batch=*/static_cast<long long>(B), &ws_size_t, /*executiontype=*/CUDA_C_32F));
+    ws_bytes_ = static_cast<int64_t>(ws_size_t);
+}
+
+ViscoFFT::~ViscoFFT()
+{
+    if (plan_ != 0) {
+        // Unchecked and UNGUARDED, which is what ATen's ~CuFFTHandle does
+        // (a bare cufftDestroy, no CUDAGuard, no CUFFT_CHECK).  Both parts
+        // matter: a destructor must not throw, and the plan cache is a
+        // function-local static, so this runs during static destruction --
+        // where a CUDAGuard would call cudaSetDevice on a runtime that may
+        // already be torn down, and c10 turning that into an exception inside
+        // a destructor is std::terminate.  Deleting the guard here is not a
+        // simplification; it removes an exit-time crash the previous code
+        // (which destroyed the handle through ATen) never had.
+        cufftDestroy(plan_);
+        plan_ = 0;
+    }
 }
 
 int64_t ViscoFFT::workspace_bytes() const
 {
-    return config_->workspace_size();
+    return ws_bytes_;
 }
 
 void ViscoFFT::exec(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area,
@@ -116,11 +165,10 @@ void ViscoFFT::exec(const torch::Tensor& in, const torch::Tensor& out, const tor
     // stencil launches), so a current context is guaranteed here.
     c10::cuda::CUDAGuard guard(device_);
     std::lock_guard<std::mutex> lock(mutex_);
-    auto& plan = config_->plan();
-    at::native::CUFFT_CHECK(cufftSetStream(plan, at::cuda::getCurrentCUDAStream()));
-    at::native::CUFFT_CHECK(cufftSetWorkArea(plan, work_area.data_ptr()));
-    at::native::CUFFT_CHECK(cufftXtExec(plan, in.data_ptr(), out.data_ptr(),
-                                        forward ? CUFFT_FORWARD : CUFFT_INVERSE));
+    VISCO_CUFFT_CHECK(cufftSetStream(plan_, at::cuda::getCurrentCUDAStream()));
+    VISCO_CUFFT_CHECK(cufftSetWorkArea(plan_, work_area.data_ptr()));
+    VISCO_CUFFT_CHECK(cufftXtExec(plan_, in.data_ptr(), out.data_ptr(),
+                                  forward ? CUFFT_FORWARD : CUFFT_INVERSE));
 }
 
 void ViscoFFT::forward(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area)

@@ -4,7 +4,6 @@
 #include <cufft.h>
 #include <cufftXt.h>
 #include <ATen/ATen.h>
-#include <ATen/native/cuda/CuFFTPlanCache.h>   // at::native::detail::CuFFTParams / CuFFTConfig (header-only)
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -225,10 +224,17 @@ inline ViscoSpectral visco_acoustic2d_make_spectral_from(
 // resized output both (B, nz, nx) contiguous, hence
 //   CuFFTParams(in_strides = {nz*nx, nx, 1}, out_strides = {nz*nx, nx, 1},
 //               signal_size = {B, nz, nx}, CuFFTTransformType::C2C, kFloat)
-// which the header-only CuFFTConfig turns into cufftSetAutoAllocation(0) +
+// which CuFFTConfig turns into cufftSetAutoAllocation(0) +
 // cufftXtMakePlanMany(plan, 2, {nz, nx}, nullptr,1,1, CUDA_C_32F,
 //                     nullptr,1,1, CUDA_C_32F, B, &ws, CUDA_C_32F)
-// (the simple-layout branch both contiguous operands take).  Definitions in
+// (the simple-layout branch both contiguous operands take).  We ISSUE THAT
+// CALL OURSELVES rather than construct a CuFFTConfig: that type lives in
+// ATen/native/cuda/CuFFTPlanCache.h, a PRIVATE header whose contents differ
+// between torch minors (2.5 spells the layout helpers differently again), so
+// depending on it is the one thing in this tree a torch bump can break at
+// compile time for no reason of ours.  The arguments are the same arguments,
+// so the plan is the same plan -- which the bit-exactness gate checks rather
+// than this comment asserting it.  Definitions in
 // fft.cu (one cache per process); the binding
 // visco_acoustic2d_fft_workspace_bytes sizes the pool's work-area slot from
 // workspace_bytes().
@@ -258,6 +264,8 @@ public:
     // for fft_norm_mode::by_n (skipped, as there, when the scale is 1.0).
     void inverse(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area);
 
+    ~ViscoFFT();
+
     ViscoFFT(const ViscoFFT&) = delete;
     ViscoFFT& operator=(const ViscoFFT&) = delete;
 
@@ -269,7 +277,8 @@ private:
     c10::DeviceIndex device_;
     int64_t B_, nz_, nx_;
     double inverse_scale_;
-    std::unique_ptr<at::native::detail::CuFFTConfig> config_;
+    cufftHandle plan_ = 0;      // owned; destroyed in ~ViscoFFT
+    int64_t ws_bytes_ = 0;      // cufftXtMakePlanMany's workSize out-param
     std::mutex mutex_;   // SetStream / SetWorkArea / Exec are plan state: one exec at a time
 };
 
