@@ -19,11 +19,11 @@
 //   * allt_shape = (nt, 2, B, nz, nx): u_allt stores the velocities only (Vx, Vz);
 //   * field_ptr = elastic_field_ptr(wf, 2, idx); view = wf.view();
 //   * forward: bind(p.wavefields, true) -- MANDATORY, no self-allocating fallback; velocity_substep = LAUNCH_ELASTIC_VELOCITY (rho), stress_substep = LAUNCH_ELASTIC_STRESS (lambda, mu, u_this_t); both also replay in the ckpt/recursive modes;
-//   * inject_source / record_field are plain add_source / record_kernel on the field selected by index; record_field writes record[irec];
+//   * inject_source / record_field are plain add_source / record_kernel on the field selected by index; record_field writes record.select(0, irec);
 //   * save_boundary_fields = save_forward_2d_field for the five fields at offset -M (field index f, flag f == 4); save_last_state copies the five into last_two[0..4];
 //   * backward outputs: bind_grads takes exactly {grad_vp, grad_vs, grad_rho} from grads_out (accumulated "+=", never zeroed here), MANDATORY; adjoint_source_signs = elastic_adjoint_source_signs(adjoint_source, receiver_fields, 2);
 //   * bind_or_alloc_adjoint binds p.adjoint_wavefields (MANDATORY);
-//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; vel_ptrs_from_u_forward reads u_forward[it] and u_forward[it + 1] (zero_velocity -- the skeleton's read-only adjoint_workspace slot SgCarrierSlots::FULL_ZERO -- when it + 1 == nt);
+//   * VelPtrs = {vx_now, vz_now, vx_next, vz_next}; vel_ptrs_from_u_forward reads u_forward.select(0, it) and u_forward.select(0, it + 1) (zero_velocity -- the skeleton's read-only adjoint_workspace slot SgCarrierSlots::FULL_ZERO -- when it + 1 == nt);
 //   * fix_rho_grad_at_sources (velocity sources, field <= 1: add_body_force_rho_grad_correction) fires BEFORE inject_residuals; inject_residuals = add_source_signed of the residual per receiver field with that field's sign;
 //   * fix_rho_grad_at_receivers = sub_receiver_rho_grad_correction at velocity receivers (stress receivers skipped) with imaging halo M;
 //   * image_standalone = LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS (it == 0 in full mode; every reverse it in the ckpt/recursive modes);
@@ -103,7 +103,7 @@ struct Driver {
     // call by common/derived_models.h; the struct keeps them alive for the
     // whole call (kernels hold raw pointers into them).
     struct Models {
-        torch::Tensor vp, vs, rho, mu, lambda;
+        Buf vp, vs, rho, mu, lambda;
     };
 
     template <class P>
@@ -152,7 +152,7 @@ struct Driver {
 
     using Workspace = ElasticAdjointWorkspaceTensor;
 
-    static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
+    static Workspace make_workspace(const BackwardInputCore& p, const Buf& vp)
     {
         Workspace workspace;
         bind_adjoint_workspace_required(workspace, p.adjoint_workspace, 2,
@@ -160,8 +160,8 @@ struct Driver {
         return workspace;
     }
 
-    static void validate_forward(const ForwardInput&) {}
-    static void validate_backward(const BackwardInput&, const char*) {}
+    static void validate_forward(const ForwardInputCore&) {}
+    static void validate_backward(const BackwardInputCore&, const char*) {}
 
     template <class P>
     static void setup_ctx(SolverContext& solver, const P& p)
@@ -206,8 +206,8 @@ struct Driver {
     // propagation state (persistent _slice_wavefield_buffers in full mode,
     // per-call _transient_forward_wavefields otherwise), sized by
     // cuda_layout.base_nvar + pml_nvar = CKPT_NVAR slots.
-    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
-                                      const torch::Tensor& vp)
+    static void bind_or_alloc_forward(Wavefield& wf, const ForwardInputCore& p,
+                                      const Buf& vp)
     {
         SWEEP_CHECK((int)p.wavefields.size() == CKPT_NVAR,
                     "elastic2d/forward requires the propagator-bound wavefields "
@@ -220,7 +220,7 @@ struct Driver {
     // backward modes.)
     // No-op: this equation writes u_allt from inside its stress kernel.
     // See the call site in sg_driver.cuh for why the hook exists.
-    static void capture_allt(torch::Tensor&, WfView&, const SolverContext&, int) {}
+    static void capture_allt(Buf&, WfView&, const SolverContext&, int) {}
 
     static void velocity_substep(const State& s, WfView& wf,
                                  ElasticCPMLPointer cpml_view,
@@ -257,8 +257,8 @@ struct Driver {
     }
 
     static void inject_source(const State& s, const SolverContext& solver,
-                              float* field, const torch::Tensor& source,
-                              const torch::Tensor& sources_loc, int it, int nsrc)
+                              float* field, const Buf& source,
+                              const Buf& sources_loc, int it, int nsrc)
     {
         add_source<<<s.source_config.grid, s.source_config.block>>>(
             field,
@@ -295,12 +295,12 @@ struct Driver {
     }
 
     static void record_field(const State& s, const SolverContext& solver,
-                             float* field, torch::Tensor& record, int irec,
-                             const torch::Tensor& receivers_loc, int it, int nrec)
+                             float* field, Buf& record, int irec,
+                             const Buf& receivers_loc, int it, int nrec)
     {
         record_kernel<<<s.record_config.grid, s.record_config.block>>>(
             field,
-            record[irec].data_ptr<float>(),
+            record.select(0, irec).data_ptr<float>(),
             receivers_loc.data_ptr<int>(),
             it,
             nrec,
@@ -327,8 +327,8 @@ struct Driver {
     // MANDATORY, every backward mode: _ensure_wavefield_buffers allocates the
     // adjoint set whenever a gradient is asked for and Wrapper.backward binds
     // it (zeroed) as adjoint_wavefields.
-    static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
-                                      const torch::Tensor& vp)
+    static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInputCore& p,
+                                      const Buf& vp)
     {
         SWEEP_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
                     "elastic2d/backward requires the propagator-bound "
@@ -345,7 +345,7 @@ struct Driver {
     // one per model; cuda_layout.grads_out_has_wavelet is false here) and
     // binds them as grads_out.  They are accumulated "+=" and NOT zeroed
     // here — Python zeroes them once before the first segment.
-    static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
+    static void bind_grads(const BackwardInputCore& p, std::vector<Buf>& grads)
     {
         SWEEP_CHECK(p.grads_out.size() == 3,
                     "elastic2d/backward requires the propagator-bound grads_out "
@@ -356,7 +356,7 @@ struct Driver {
     }
 
     static std::vector<float> adjoint_source_signs(
-        const BackwardInput& p, const torch::Tensor& receiver_fields)
+        const BackwardInputCore& p, IntSpan receiver_fields)
     {
         return elastic_adjoint_source_signs(p.adjoint_source, receiver_fields, 2);
     }
@@ -369,8 +369,8 @@ struct Driver {
         const float* vz_next;
     };
 
-    static VelPtrs vel_ptrs_from_u_forward(const BackwardInput& p, int it,
-                                             const torch::Tensor& zero_velocity)
+    static VelPtrs vel_ptrs_from_u_forward(const BackwardInputCore& p, int it,
+                                             const Buf& zero_velocity)
     {
         VelPtrs v;
         v.vx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
@@ -388,13 +388,13 @@ struct Driver {
     // BEFORE this step's receiver residuals are injected (see the hand-written
     // driver's comment about source+receiver-on-one-cell overshoot).
     static void fix_rho_grad_at_sources(const State& s, const SolverContext& solver,
-                                WfView& adj_view, const BackwardInput& p,
-                                const torch::Tensor& source_fields, int it,
-                                std::vector<torch::Tensor>& grads)
+                                WfView& adj_view, const BackwardInputCore& p,
+                                IntSpan source_fields, int it,
+                                std::vector<Buf>& grads)
     {
         if (it < 0 || it >= p.nt) return;
-        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
-            const int sfield = source_fields[isrc].item<int>();
+        for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
+            const int sfield = source_fields[isrc];
             if (sfield > 1) continue;                       // vx = 0, vz = 1
             float* adj_field = elastic_field_ptr(adj_view, 2, sfield);
             if (adj_field == nullptr) continue;
@@ -413,17 +413,17 @@ struct Driver {
     }
 
     static void inject_residuals(const State& s, const SolverContext& solver,
-                                 WfView& adj_view, const BackwardInput& p,
-                                 const torch::Tensor& receiver_fields,
+                                 WfView& adj_view, const BackwardInputCore& p,
+                                 IntSpan receiver_fields,
                                  const std::vector<float>& adj_source_signs,
                                  int it, int adjoint_nsrc)
     {
-        for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
-            float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec].item<int>());
+        for (int irec = 0; irec < receiver_fields.size(); ++irec) {
+            float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec]);
             if (field == nullptr) continue;
             add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -435,7 +435,7 @@ struct Driver {
 
     static void image_standalone(const State& s, const SolverContext& solver,
                                  WfView& adj_view, const VelPtrs& v,
-                                 std::vector<torch::Tensor>& grads)
+                                 std::vector<Buf>& grads)
     {
         LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(
             s.order,
@@ -461,13 +461,13 @@ struct Driver {
     // imaging, at every velocity-receiver cell.  Stress receivers have no rho
     // term to correct.
     static void fix_rho_grad_at_receivers(const State& s, const SolverContext& solver,
-                                  std::vector<torch::Tensor>& grads,
-                                  const VelPtrs& v, const BackwardInput& p,
-                                  const torch::Tensor& receiver_fields,
+                                  std::vector<Buf>& grads,
+                                  const VelPtrs& v, const BackwardInputCore& p,
+                                  IntSpan receiver_fields,
                                   int it, int adjoint_nsrc)
     {
-        for (int irec = 0; irec < receiver_fields.numel(); ++irec) {
-            const int field = receiver_fields[irec].item<int>();
+        for (int irec = 0; irec < receiver_fields.size(); ++irec) {
+            const int field = receiver_fields[irec];
             const float* fv_now  = (field == 0) ? v.vx_now  : (field == 1) ? v.vz_now  : nullptr;
             const float* fv_next = (field == 0) ? v.vx_next : (field == 1) ? v.vz_next : nullptr;
             if (fv_now == nullptr) continue;              // stress receiver: no rho term
@@ -476,7 +476,7 @@ struct Driver {
                 fv_now,
                 fv_next,
                 s.models.rho.data_ptr<float>(),
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -588,9 +588,9 @@ struct Driver {
                                 Wavefield& adjoint, Workspace& workspace,
                                 ElasticCPMLPointer cpml_view,
                                 const VelPtrs& v,
-                                std::vector<torch::Tensor>& grads,
-                                const BackwardInput& p,
-                                const torch::Tensor& receiver_fields,
+                                std::vector<Buf>& grads,
+                                const BackwardInputCore& p,
+                                IntSpan receiver_fields,
                                 int it, int adjoint_nsrc)
     {
         auto adj_view = adjoint.view();
@@ -635,12 +635,12 @@ struct Driver {
     static void zero_adjoint_if_first_segment_bs(Wavefield&, bool) {}
 
     struct ReconCarriers {
-        torch::Tensor fvx_prev, fvz_prev;
+        Buf fvx_prev, fvz_prev;
     };
 
     static ReconCarriers bind_or_alloc_recon(Wavefield& forward,
-                                             const BackwardInput& p,
-                                             const torch::Tensor& vp)
+                                             const BackwardInputCore& p,
+                                             const Buf& vp)
     {
         // MANDATORY: the bs backward's reconstruction state is
         // cuda_layout.reconstruction_nvar (slot_table ELASTIC2D.recon = 7)
@@ -651,7 +651,7 @@ struct Driver {
                             "elastic2d/bs reconstruction list "
                             "[vx, vz, sxx, szz, sxz, fvx_prev, fvz_prev] "
                             "(cuda_layout.reconstruction_nvar)");
-        forward.bind(std::vector<torch::Tensor>(p.forward_wavefields.begin(),
+        forward.bind(std::vector<Buf>(p.forward_wavefields.begin(),
                                                 p.forward_wavefields.begin() + 5),
                      /*use_pml=*/false);
         c.fvx_prev = p.forward_wavefields[5];
@@ -659,7 +659,7 @@ struct Driver {
         return c;
     }
 
-    static void seed_recon(Wavefield& forward, const BackwardInput& p)
+    static void seed_recon(Wavefield& forward, const BackwardInputCore& p)
     {
         copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0, 0).select(0, 0));
         copy_tensor_cuda_async(forward.vz_t, p.u_last_two.select(0, 1).select(0, 0));
@@ -669,12 +669,12 @@ struct Driver {
     }
 
     static void uninject_forward_source(const State& s, const SolverContext& solver,
-                                        WfView& for_view, const BackwardInput& p,
-                                        const torch::Tensor& source_fields,
+                                        WfView& for_view, const BackwardInputCore& p,
+                                        IntSpan source_fields,
                                         int it, int forward_nsrc)
     {
-        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
-            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
+        for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
+            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
                 field,
@@ -696,9 +696,9 @@ struct Driver {
                           ElasticCPMLPointer cpml_view,
                           BoundaryRuntime& boundary_runtime,
                           const GeneralBoundaryPointer& bs, int save_width,
-                          std::vector<torch::Tensor>& grads,
-                          ReconCarriers& carriers, const BackwardInput& p,
-                          const torch::Tensor& receiver_fields,
+                          std::vector<Buf>& grads,
+                          ReconCarriers& carriers, const BackwardInputCore& p,
+                          IntSpan receiver_fields,
                           int it, int adjoint_nsrc)
     {
         LAUNCH_ELASTIC_STRESS_NOPML(
@@ -842,8 +842,8 @@ struct Driver {
     //   (it > 0) plain_adjoint_step.
     // ===================================================================== //
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
-                                         const BackwardInput& p,
-                                         const torch::Tensor& vp)
+                                         const BackwardInputCore& p,
+                                         const Buf& vp)
     {
         // Set 0 of the Python-bound replay state (one set: no bisection
         // scratch here), the full bind -- the CPML aux slots are slab-shaped
@@ -877,24 +877,23 @@ struct Driver {
     // chunked mode: cuda_layout.checkpoint_replay_shapes declares N_VEL
     // histories for mode "ckpt" and _ensure_checkpoint_buffers allocates them
     // next to the snapshots.
-    static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
-                                                  const torch::Tensor& vp, int max_rows)
+    static std::vector<Buf> seg_buffers(const BackwardInputCore& p,
+                                                  const Buf& vp, int max_rows)
     {
         SWEEP_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
                     "elastic2d/ckpt requires the propagator-bound checkpoint_replay "
                     "(cuda_layout.checkpoint_replay_shapes, ", N_VEL,
                     " velocity histories), got ", p.checkpoint_replay.size());
-        std::vector<torch::Tensor> seg;
+        std::vector<Buf> seg;
         seg.reserve(N_VEL);
         for (int c = 0; c < N_VEL; ++c)
             seg.push_back(pool_required(p.checkpoint_replay, c,
                                         {max_rows, vp.size(0) * vp.size(1), 1,
-                                         vp.size(2), vp.size(3)},
-                                        vp.options(), "checkpoint_replay"));
+                                         vp.size(2), vp.size(3)}, "checkpoint_replay"));
         return seg;
     }
 
-    static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,
+    static void save_seg_velocities(std::vector<Buf>& seg, Wavefield& forward,
                             int slot)
     {
         copy_tensor_cuda_async(seg[0].select(0, slot), forward.vx_t);
@@ -902,11 +901,11 @@ struct Driver {
     }
 
     static void inject_forward_sources(const State& s, const SolverContext& solver,
-                                      WfView& for_view, const BackwardInput& p,
-                                      const torch::Tensor& source_fields, int it)
+                                      WfView& for_view, const BackwardInputCore& p,
+                                      IntSpan source_fields, int it)
     {
-        for (int isrc = 0; isrc < source_fields.numel(); ++isrc) {
-            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc].item<int>());
+        for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
+            float* field = elastic_field_ptr(for_view, 2, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<s.source_config.grid, s.source_config.block>>>(
                 field,
@@ -919,9 +918,9 @@ struct Driver {
         }
     }
 
-    static VelPtrs vel_ptrs_from_seg(const std::vector<torch::Tensor>& seg,
+    static VelPtrs vel_ptrs_from_seg(const std::vector<Buf>& seg,
                                 int now_offset, int next_offset,
-                                const std::vector<torch::Tensor>& next_segment_v)
+                                const std::vector<Buf>& next_segment_v)
     {
         VelPtrs v;
         v.vx_now = seg[0].select(0, now_offset).data_ptr<float>();
@@ -933,21 +932,21 @@ struct Driver {
         return v;
     }
 
-    static void export_seg_next_v(std::vector<torch::Tensor>& prev,
-                                   const std::vector<torch::Tensor>& seg)
+    static void export_seg_next_v(std::vector<Buf>& prev,
+                                   const std::vector<Buf>& seg)
     {
         copy_tensor_cuda_async(prev[0], seg[0].select(0, 1));
         copy_tensor_cuda_async(prev[1], seg[1].select(0, 1));
     }
 
-    static void capture_velocities(std::vector<torch::Tensor>& v, Wavefield& forward)
+    static void capture_velocities(std::vector<Buf>& v, Wavefield& forward)
     {
         copy_tensor_cuda_async(v[0], forward.vx_t);
         copy_tensor_cuda_async(v[1], forward.vz_t);
     }
 
-    static VelPtrs vel_ptrs_from_carriers(const std::vector<torch::Tensor>& current_v,
-                                    const std::vector<torch::Tensor>& next_v)
+    static VelPtrs vel_ptrs_from_carriers(const std::vector<Buf>& current_v,
+                                    const std::vector<Buf>& next_v)
     {
         VelPtrs v;
         v.vx_now = current_v[0].data_ptr<float>();

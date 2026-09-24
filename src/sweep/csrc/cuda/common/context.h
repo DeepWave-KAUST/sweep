@@ -139,7 +139,8 @@ struct SolverContext {
     // ``pad_lo``/``pad_hi`` vectors (in C axis order [z,(y,)x]).  Empty vectors
     // leave the -1 sentinels => legacy layout.  Call right after the positional
     // brace-init of a SolverContext at every driver.
-    inline void set_per_edge(int fs, const std::vector<int>& plo, const std::vector<int>& phi) {
+    template <class Ints>   // std::vector<int> (the torch input) or IntSpan (the core twin)
+    inline void set_per_edge(int fs, const Ints& plo, const Ints& phi) {
         fs_faces_ = fs;
         for (int a = 0; a < 3; ++a) {
             pad_lo_[a] = (a < (int)plo.size()) ? plo[a] : -1;

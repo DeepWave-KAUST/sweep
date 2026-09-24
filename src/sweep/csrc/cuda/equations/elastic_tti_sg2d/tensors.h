@@ -110,7 +110,7 @@ struct WavefieldTensor {
     }
 };
 
-inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
+inline StiffnessPointer stiffness_view(const std::vector<Buf>& models)
 {
     SWEEP_CHECK(models.size() == 16, "ElasticTTISG CUDA expects prepared models: rho plus 15 stiffness tensors");
     StiffnessPointer out{};
@@ -134,7 +134,7 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     return out;
 }
 
-inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
+inline StiffnessGradPointer stiffness_grad_view(std::vector<Buf>& grads)
 {
     SWEEP_CHECK(grads.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared model gradients");
     StiffnessGradPointer out{};

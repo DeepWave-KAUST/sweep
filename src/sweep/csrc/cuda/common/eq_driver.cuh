@@ -57,7 +57,7 @@
 //
 // generic_backward (full storage) — per reverse it:
 //   adjoint_step               adjoint stencil; with HAS_FUSED_FULL_IMG the
-//                              imaging of u_forward[it+1] fuses into it
+//                              imaging of u_forward.select(0, it+1) fuses into it
 //   inject_adjoint_source      residual injection
 //   rotate_adjoint_buffers     adjoint buffer-role rotation
 //   accumulate_source_grad     grad_wavelet sampling
@@ -103,6 +103,7 @@
 #include "context.h"
 #include "checkpoint_runtime.cuh"
 #include "cudautils.h"
+#include "adapt_inputs.h"   // *InputCore, InputArena, the output twins, to_torch
 #include "boundarysaver.cuh"
 #include "boundary_runtime.cuh"
 #include "boundary/session.cuh"
@@ -139,24 +140,6 @@ inline Dims read_dims(const Buf& model)
     return d;
 }
 
-template <int NDIM>
-inline Dims read_dims(const torch::Tensor& model)
-{
-    Dims d;
-    d.N = model.size(0);
-    d.C = model.size(1);
-    if constexpr (NDIM == 2) {
-        d.nz = model.size(2);
-        d.ny = 0;
-        d.nx = model.size(3);
-    } else {
-        d.nz = model.size(2);
-        d.ny = model.size(3);
-        d.nx = model.size(4);
-    }
-    d.B = d.N * d.C;
-    return d;
-}
 
 template <int NDIM>
 inline fdtd::LaunchConfig wave_config(const Dims& d)
@@ -207,7 +190,7 @@ template <class Eq>
 class GenericForwardRunner final : public IForwardRunner {
 public:
     explicit GenericForwardRunner(const ForwardInput& in)
-        : p(in)
+        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -262,7 +245,7 @@ public:
         SWEEP_CHECK(p.record_out.defined(),
                     Eq::NAME, "/forward requires the propagator-bound record_out "
                     "(cuda_layout.record_shape)");
-        record = bound_required(p.record_out, Eq::record_shape(d, p), vp.options(), "record_out");
+        record = bound_required(p.record_out, Eq::record_shape(d, p), "record_out");
 
         // Wavefields for all timestep
         if (p.save_all_wavefields) {
@@ -276,7 +259,7 @@ public:
             SWEEP_CHECK(p.u_allt_out.defined(),
                         Eq::NAME, "/forward with save_all_wavefields requires the "
                         "propagator-bound u_allt_out (cuda_layout.save_all_shape)");
-            u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(), "u_allt_out");
+            u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt), "u_allt_out");
         }
 
         Eq::validate_forward(p);
@@ -347,7 +330,7 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files
+            disk_files_
         );
         boundary_runtime = &boundary_scope->runtime();
     }
@@ -356,9 +339,14 @@ public:
 
     ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
     {
+        return to_torch(run_core(run_it_begin, run_it_end, run_step_phase), in_);
+    }
+
+    ForwardOutputCore run_core(int run_it_begin, int run_it_end, int run_step_phase)
+    {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& ctx = *ctx_;
-        ForwardOutput out;
+        ForwardOutputCore out;
 
         const int it0 = run_it_begin;
         const int it1 = (run_it_end < 0) ? static_cast<int>(p.nt) : run_it_end;
@@ -375,7 +363,7 @@ public:
 
             auto view = wavefield.view();
 
-            u_thist = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+            u_thist = u_allt.defined() ? u_allt.select(0, it).data_ptr<float>() : nullptr;
 
             // Ranged stencil launch over x in [xb, xe); (0, nx) reproduces the
             // legacy full launch bit-identically (same grid dims, x_base = 0).
@@ -438,7 +426,7 @@ public:
             boundary_runtime->synchronize();
 
         out.wavefield = u_allt;
-        out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
+        out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
         out.record = record;
 
         return out;
@@ -470,8 +458,13 @@ private:
     }
 
     // Declaration order == construction order; destruction runs in reverse,
-    // matching the hand-written function's stack unwind.
-    ForwardInput p;
+    // matching the hand-written function's stack unwind.  The arena owns the
+    // descriptor arrays and host copies the core twin points into; the torch
+    // struct is kept for the output hand-back (to_torch) only.
+    InputArena arena_;
+    ForwardInput in_;
+    ForwardInputCore p;
+    std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     Dims d;
     int nsrc = 0, nrec = 0;
     std::optional<SolverContext> ctx_;
@@ -479,8 +472,8 @@ private:
     typename Eq::Wavefield wavefield;
     typename Eq::CPML cpml_tensor;
     decltype(std::declval<typename Eq::CPML>().view()) cpml;
-    torch::Tensor record;
-    torch::Tensor u_allt;
+    Buf record;
+    Buf u_allt;
     std::optional<CheckpointRuntime> checkpoint_runtime;
     int save_width = 0;
     bool staged_boundary = false;
@@ -509,7 +502,7 @@ ForwardOutput generic_forward(const ForwardInput& in)
 // runner can re-validate each run() with that call's range; the monolithic
 // entries pass the input-struct fields, reproducing the legacy behaviour.
 template <class Eq>
-void check_stepped_backward(const BackwardInput& p, bool need_recon,
+void check_stepped_backward(const BackwardInputCore& p, bool need_recon,
                             int bw_it_begin, int bw_it_end, int step_phase)
 {
     const int it_hi = (bw_it_begin < 0) ? static_cast<int>(p.nt) : bw_it_begin;
@@ -566,9 +559,9 @@ void check_stepped_backward(const BackwardInput& p, bool need_recon,
 // buffers.  Traits whose equation has no wavelet gradient or illumination
 // (VRZ) implement their own bind hook instead of calling this helper.
 template <class Eq>
-void acoustic_bind_backward_outputs(const BackwardInput& p,
-                                    std::vector<torch::Tensor>& grads,
-                                    RTMOutput& illumination,
+void acoustic_bind_backward_outputs(const BackwardInputCore& p,
+                                    std::vector<Buf>& grads,
+                                    RTMOutputCore& illumination,
                                     bool want_adcig)
 {
     // MANDATORY: the propagator builds grads_out on EVERY backward, in every
@@ -583,8 +576,8 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
     SWEEP_CHECK(p.grads_out.size() == p.models.size() + 1,
                 "grads_out must hold models.size()+1 tensors "
                 "(slot 0 = grad_wavelet)");
-    torch::Tensor grad_wavelet = p.grads_out[0];
-    torch::Tensor grad = p.grads_out[1];
+    Buf grad_wavelet = p.grads_out[0];
+    Buf grad = p.grads_out[1];
     // OPTIONAL, deliberately: the propagator binds illum_out only when the
     // caller asked for illumination (_c.py Wrapper.backward: ``if
     // params.compute_illumination and cp.illum_nvar > 0``); a backward that
@@ -616,7 +609,7 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
         const auto& vp = p.models[0];
         std::vector<int64_t> shape{static_cast<int64_t>(2 * p.adcig_max_lag + 1)};
         for (auto s : vp.sizes()) shape.push_back(s);
-        illumination.adcig = bound_required(p.adcig_out, shape, vp.options(),
+        illumination.adcig = bound_required(p.adcig_out, shape,
                                             "adcig_out (space-lag ADCIG cube, (nlag, N, C, grid))");
     }
     grads = {grad_wavelet, grad};
@@ -624,18 +617,20 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
 
 // ---- generic_backward (full storage) ----
 template <class Eq>
-BackwardOutput generic_backward(const BackwardInput& in)
+BackwardOutput generic_backward(const BackwardInput& in_torch)
 {
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_stepped_backward<Eq>(in, /*need_recon=*/false,
                                in.bw_it_begin, in.bw_it_end, in.step_phase);
     Eq::validate_backward(in, /*need_recon=*/false);
-    BackwardOutput out;
-    std::vector<torch::Tensor> grads;
-    RTMOutput illumination;
+    BackwardOutputCore out;
+    std::vector<Buf> grads;
+    RTMOutputCore illumination;
     Eq::bind_backward_outputs(in, grads, illumination,
                               /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
-    RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
+    RTMOutputCore* rtm_out = Eq::rtm_out_full(in, illumination);
 
     const auto& p = in;
     auto vp = p.models[0];
@@ -696,7 +691,7 @@ BackwardOutput generic_backward(const BackwardInput& in)
     }
 
     Eq::pack_outputs(out, grads, illumination);
-    return out;
+    return to_torch(out, in_torch);
 }
 
 // ---- generic_backward_bs ----
@@ -711,7 +706,7 @@ template <class Eq>
 class GenericBackwardBsRunner final : public IBackwardRunner {
 public:
     explicit GenericBackwardBsRunner(const BackwardInput& in)
-        : p(in)
+        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -751,7 +746,7 @@ public:
         // 3-D run went 1760 -> 166 s/iteration once the backward bound the tensor
         // instead.  Bind it here for every equation on this skeleton.
         // (dev 4290248, which fixed the pre-template acoustic3d/backward.cu.)
-        const torch::Tensor& last_two_bound = p.u_last_two;
+        const Buf& last_two_bound = p.u_last_two;
         if (staged_boundary) {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
                                     Eq::BS_LAST_TWO_NVAR, true, false,
@@ -789,7 +784,7 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files
+            disk_files_
         );
         boundary_runtime = &boundary_scope->runtime();
         SWEEP_CHECK(p.boundary_tail_steps >= 0, "boundary_tail_steps must be >= 0");
@@ -802,9 +797,14 @@ public:
 
     BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
     {
+        return to_torch(run_core(bw_it_begin, bw_it_end, run_step_phase), in_);
+    }
+
+    BackwardOutputCore run_core(int bw_it_begin, int bw_it_end, int run_step_phase)
+    {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& ctx = *ctx_;
-        BackwardOutput out;
+        BackwardOutputCore out;
 
         check_stepped_backward<Eq>(p, /*need_recon=*/true,
                                    bw_it_begin, bw_it_end, run_step_phase);
@@ -872,15 +872,18 @@ public:
 private:
     // Declaration order == construction order; destruction runs in reverse,
     // matching the hand-written function's stack unwind.
-    BackwardInput p;
+    InputArena arena_;
+    BackwardInput in_;
+    BackwardInputCore p;
+    std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     Dims d;
     int adjoint_nsrc = 0, forward_nsrc = 0;
     std::optional<SolverContext> ctx_;
     typename Eq::Wavefield adjoint;
     typename Eq::Wavefield forward;
-    std::vector<torch::Tensor> grads;
-    RTMOutput illumination;
-    RTMOutput* bs_rtm = nullptr;
+    std::vector<Buf> grads;
+    RTMOutputCore illumination;
+    RTMOutputCore* bs_rtm = nullptr;
     typename Eq::CPML cpml_tensor;
     decltype(std::declval<typename Eq::CPML>().view()) cpml;
     int save_width = 0;
@@ -932,13 +935,15 @@ enum AcousticRecursiveWorkspaceSlot : int {
 
 // ---- generic_backward_ckpt (uniform chunks; acoustic-family shape) ----
 template <class Eq>
-BackwardOutput generic_backward_ckpt(const BackwardInput& in)
+BackwardOutput generic_backward_ckpt(const BackwardInput& in_torch)
 {
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(!in.bw_stepped(),
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
     SWEEP_CHECK(static_cast<int>(p.checkpoint_replay.size()) == N_ACOUSTIC_CKPT_REPLAY,
                 Eq::NAME, "/ckpt backward requires the propagator-bound "
                 "checkpoint_replay (cuda_layout.checkpoint_replay_shapes): ",
@@ -974,11 +979,11 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
 
     // Same as full mode: gradients bound from grads_out (or allocated when
     // unbound), illumination only when something will read it.
-    std::vector<torch::Tensor> grads;
-    RTMOutput illumination;
+    std::vector<Buf> grads;
+    RTMOutputCore illumination;
     Eq::bind_backward_outputs(in, grads, illumination,
                               /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
-    RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
+    RTMOutputCore* rtm_out = Eq::rtm_out_full(in, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -997,7 +1002,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     // The recomputed chunk (ACOUSTIC_CKPT_CHUNK_FORWARD), once per call for every chunk.
     auto chunk_forward = pool_required(p.checkpoint_replay, ACOUSTIC_CKPT_CHUNK_FORWARD,
-                                       Eq::allt_shape(d, chunk_size), vp.options(),
+                                       Eq::allt_shape(d, chunk_size),
                                        "checkpoint_replay");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
@@ -1008,7 +1013,7 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
-            float* u_this = chunk_forward[it - start].template data_ptr<float>();
+            float* u_this = chunk_forward.select(0, it - start).template data_ptr<float>();
             Eq::replay_step(state, ctx, for_view, cpml, true, u_this);
             Eq::inject_source_fwd(state, ctx, for_view, p, it, forward_nsrc);
             Eq::rotate_recon_buffers(forward);
@@ -1022,13 +1027,13 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in)
             Eq::accumulate_source_grad(state, ctx, adjoint, p, grads,
                                        it, forward_nsrc);
             Eq::image_step(state, ctx,
-                           chunk_forward[it - start].template data_ptr<float>(),
+                           chunk_forward.select(0, it - start).template data_ptr<float>(),
                            it, adjoint, &grads, rtm_out, ws);
         }
     }
 
     Eq::pack_outputs(out, grads, illumination);
-    return out;
+    return to_torch(out, in_torch);
 }
 
 // ---- generic_backward_recursive_ckpt (acoustic-family bisection) ----
@@ -1045,7 +1050,7 @@ inline int recursive_checkpoint_scratch_depth(int interval_length)
 template <class Eq>
 void advance_forward_interval(typename Eq::Wavefield& forward, int start, int end,
                               typename Eq::State& state, const SolverContext& ctx,
-                              const BackwardInput& p,
+                              const BackwardInputCore& p,
                               decltype(std::declval<typename Eq::CPML>().view()) cpml,
                               int forward_nsrc)
 {
@@ -1061,9 +1066,9 @@ template <class Eq>
 void process_recursive_interval(int start, int end,
                                 typename Eq::Wavefield& start_state,
                                 typename Eq::Wavefield& adjoint,
-                                const BackwardInput& p,
-                                std::vector<torch::Tensor>& grads,
-                                RTMOutput* rtm_out,
+                                const BackwardInputCore& p,
+                                std::vector<Buf>& grads,
+                                RTMOutputCore* rtm_out,
                                 typename Eq::State& state, const SolverContext& ctx,
                                 typename Eq::BwdWorkspace& ws,
                                 decltype(std::declval<typename Eq::CPML>().view()) cpml,
@@ -1071,7 +1076,7 @@ void process_recursive_interval(int start, int end,
                                 CheckpointRuntime& checkpoint_runtime,
                                 std::vector<typename Eq::Wavefield>& scratch_states,
                                 int scratch_depth,
-                                torch::Tensor& u_this_scratch)
+                                Buf& u_this_scratch)
 {
     if (start >= end)
         return;
@@ -1111,13 +1116,15 @@ void process_recursive_interval(int start, int end,
 }
 
 template <class Eq>
-BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in_torch)
 {
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(!in.bw_stepped(),
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                 Eq::NAME, " recursive checkpointing expects ", Eq::CKPT_NVAR,
@@ -1134,7 +1141,7 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
                 "(the leaf images from its u_this scratch): checkpoint_replay must be "
                 "empty, got ", p.checkpoint_replay.size());
 
-    auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter
     SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints, Eq::CKPT_NVAR, true, true,
@@ -1155,11 +1162,11 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
 
     // Same as full mode: gradients bound from grads_out (or allocated when
     // unbound), illumination only when something will read it.
-    std::vector<torch::Tensor> grads;
-    RTMOutput illumination;
+    std::vector<Buf> grads;
+    RTMOutputCore illumination;
     Eq::bind_backward_outputs(in, grads, illumination,
                               /*want_adcig=*/Eq::ADCIG_IN_FULL_MODES);
-    RTMOutput* rtm_out = Eq::rtm_out_full(in, illumination);
+    RTMOutputCore* rtm_out = Eq::rtm_out_full(in, illumination);
 
     typename Eq::CPML cpml_tensor;
     Eq::alloc_cpml(cpml_tensor, p);
@@ -1234,7 +1241,7 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in)
     }
 
     Eq::pack_outputs(out, grads, illumination);
-    return out;
+    return to_torch(out, in_torch);
 }
 
 } // namespace eqdrv

@@ -5,6 +5,7 @@
 #include <string>
 #include <torch/extension.h>
 #include "../../core/input_core.h"
+#include "../../core/outputs.h"
 #include "buf_torch.h"
 
 struct InputArena {
@@ -18,6 +19,20 @@ struct InputArena {
         return BufList{a.data(), static_cast<int64_t>(a.size())};
     }
     IntSpan ints_of(const std::vector<int>& v) { ints.push_back(v); return IntSpan{ints.back().data(), (int64_t)v.size()}; }
+    // The host copies of the three tensors the drivers read on the host
+    // (the .to(kCPU) every driver used to make at entry, made once here).
+    std::vector<torch::Tensor> held;
+    IntSpan host_ints_of(const torch::Tensor& t) {
+        if (!t.defined() || t.numel() == 0) return IntSpan{};
+        const auto c = t.to(torch::kCPU).to(torch::kInt32).contiguous();
+        ints.emplace_back(c.data_ptr<int>(), c.data_ptr<int>() + c.numel());
+        return IntSpan{ints.back().data(), (int64_t)c.numel()};
+    }
+    Buf host_buf_of(const torch::Tensor& t) {
+        if (!t.defined()) return Buf{};
+        held.push_back(t.to(torch::kCPU).to(torch::kInt32).contiguous());
+        return buf_of(held.back());
+    }
     FloatSpan floats_of(const std::vector<float>& v) { floats.push_back(v); return FloatSpan{floats.back().data(), (int64_t)v.size()}; }
     CStrList cstrs_of(const std::vector<std::string>& v) {
         cstrs.emplace_back(); auto& a = cstrs.back(); for (const auto& x : v) a.push_back(x.c_str());
@@ -30,6 +45,44 @@ struct InputArena {
 // their heap storage, so BufLists handed out earlier stay valid. Same for
 // ints/floats/cstrs. (Documented because it is the one non-obvious lifetime.)
 
+// A driver's output Buf is one of the tensors the propagator bound (the
+// skeletons allocate nothing), so the tensor it stands for is the one with the
+// same data pointer.  An undefined Buf maps to an undefined tensor (Python
+// sees None).  A Buf that matches nothing is a contract break, reported.
+inline torch::Tensor tensor_of(const Buf& b, std::initializer_list<const torch::Tensor*> singles,
+                               std::initializer_list<const std::vector<torch::Tensor>*> lists,
+                               const char* what)
+{
+    if (!b.defined()) return torch::Tensor();
+    for (const torch::Tensor* t : singles)
+        if (t->defined() && t->data_ptr() == b.data_ptr()) return *t;
+    for (const std::vector<torch::Tensor>* l : lists)
+        for (const auto& t : *l)
+            if (t.defined() && t.data_ptr() == b.data_ptr()) return t;
+    SWEEP_CHECK(false, what, ": the driver handed back a buffer the propagator did not bind");
+    return torch::Tensor();
+}
+
+inline ForwardOutput to_torch(const ForwardOutputCore& c, const ForwardInput& in)
+{
+    ForwardOutput out;
+    out.wavefield = tensor_of(c.wavefield, {&in.u_allt_out}, {}, "ForwardOutput.wavefield");
+    out.last_two = tensor_of(c.last_two, {&in.last_two}, {}, "ForwardOutput.last_two");
+    out.record = tensor_of(c.record, {&in.record_out}, {}, "ForwardOutput.record");
+    return out;
+}
+
+inline BackwardOutput to_torch(const BackwardOutputCore& c, const BackwardInput& in)
+{
+    BackwardOutput out;
+    out.grads.reserve(c.grads.size());
+    for (const auto& g : c.grads)
+        out.grads.push_back(tensor_of(g, {}, {&in.grads_out}, "BackwardOutput.grads"));
+    out.source_illumination = tensor_of(c.source_illumination, {}, {&in.illum_out}, "BackwardOutput.source_illumination");
+    out.receiver_illumination = tensor_of(c.receiver_illumination, {}, {&in.illum_out}, "BackwardOutput.receiver_illumination");
+    out.adcig = tensor_of(c.adcig, {&in.adcig_out}, {}, "BackwardOutput.adcig");
+    return out;
+}
 inline ForwardInputCore adapt_input(const ForwardInput& in, InputArena& ar)
 {
     ForwardInputCore c;
@@ -37,11 +90,12 @@ inline ForwardInputCore adapt_input(const ForwardInput& in, InputArena& ar)
     c.source = buf_of(in.source);
     c.lap_coes = buf_of(in.lap_coes);
     c.grad_coes = buf_of(in.grad_coes);
+    c.M = in.M;
     c.abcn = in.abcn;
     c.sources_loc = buf_of(in.sources_loc);
     c.receivers_loc = buf_of(in.receivers_loc);
-    c.source_field_indices = buf_of(in.source_field_indices);
-    c.receiver_field_indices = buf_of(in.receiver_field_indices);
+    c.source_field_indices = ar.host_ints_of(in.source_field_indices);
+    c.receiver_field_indices = ar.host_ints_of(in.receiver_field_indices);
     c.pml_vals = ar.list_of(in.pml_vals);
     c.wavefields = ar.list_of(in.wavefields);
     c.forward_workspace = ar.list_of(in.forward_workspace);
@@ -52,7 +106,7 @@ inline ForwardInputCore adapt_input(const ForwardInput& in, InputArena& ar)
     c.boundary_staging = ar.list_of(in.boundary_staging);
     c.boundary_disk_files = ar.cstrs_of(in.boundary_disk_files);
     c.checkpoints = ar.list_of(in.checkpoints);
-    c.checkpoint_steps = buf_of(in.checkpoint_steps);
+    c.checkpoint_steps = ar.host_buf_of(in.checkpoint_steps);
     c.save_all_wavefields = in.save_all_wavefields;
     c.use_boundary_saving = in.use_boundary_saving;
     c.use_checkpoint = in.use_checkpoint;
@@ -97,7 +151,7 @@ inline BackwardInputCore adapt_input(const BackwardInput& in, InputArena& ar)
     c.u_last_two = buf_of(in.u_last_two);
     c.checkpoints = ar.list_of(in.checkpoints);
     c.checkpoint_replay = ar.list_of(in.checkpoint_replay);
-    c.checkpoint_steps = buf_of(in.checkpoint_steps);
+    c.checkpoint_steps = ar.host_buf_of(in.checkpoint_steps);
     c.adjoint_wavefields = ar.list_of(in.adjoint_wavefields);
     c.forward_wavefields = ar.list_of(in.forward_wavefields);
     c.adjoint_workspace = ar.list_of(in.adjoint_workspace);
@@ -111,11 +165,12 @@ inline BackwardInputCore adapt_input(const BackwardInput& in, InputArena& ar)
     c.forward_source = buf_of(in.forward_source);
     c.lap_coes = buf_of(in.lap_coes);
     c.grad_coes = buf_of(in.grad_coes);
+    c.M = in.M;
     c.abcn = in.abcn;
     c.adjoint_sources_loc = buf_of(in.adjoint_sources_loc);
     c.forward_sources_loc = buf_of(in.forward_sources_loc);
-    c.source_field_indices = buf_of(in.source_field_indices);
-    c.receiver_field_indices = buf_of(in.receiver_field_indices);
+    c.source_field_indices = ar.host_ints_of(in.source_field_indices);
+    c.receiver_field_indices = ar.host_ints_of(in.receiver_field_indices);
     c.pml_vals = ar.list_of(in.pml_vals);
     c.eq_aux = ar.list_of(in.eq_aux);
     c.nt = in.nt;

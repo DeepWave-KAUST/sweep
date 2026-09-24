@@ -67,42 +67,50 @@ inline ViscoTables visco_tables(bool damping, bool dispersion, ViscoMode mode)
     return t;
 }
 
-struct Lame { torch::Tensor mu, lambda; };
-struct VtiStiffness { torch::Tensor c11, c13, c33, inv_rho; };
+struct Lame { Buf mu, lambda; };
+struct VtiStiffness { Buf c11, c13, c33, inv_rho; };
 
 // mu = rho*vs*vs, lambda = rho*(vp*vp - 2*vs*vs)
-void derive_lame(const torch::Tensor& vp, const torch::Tensor& vs, const torch::Tensor& rho,
-                 torch::Tensor& mu, torch::Tensor& lambda);
+void derive_lame(const Buf& vp, const Buf& vs, const Buf& rho,
+                 const Buf& mu, const Buf& lambda);
 // c33 = rho*vp^2, c11 = c33*(1+2*eps), c13 = c33*sqrt(1+2*delta), inv_rho = 1/rho
-void derive_vti_stiffness(const torch::Tensor& vp, const torch::Tensor& epsilon,
-                          const torch::Tensor& delta, const torch::Tensor& rho,
-                          torch::Tensor& c11, torch::Tensor& c13, torch::Tensor& c33,
-                          torch::Tensor& inv_rho);
+void derive_vti_stiffness(const Buf& vp, const Buf& epsilon,
+                          const Buf& delta, const Buf& rho,
+                          const Buf& c11, const Buf& c13, const Buf& c33,
+                          const Buf& inv_rho);
 // inv_z = 1/z
-void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z);
+void derive_reciprocal(const Buf& z, const Buf& inv_z);
 // out = in * s, one float multiply per cell (__fmul_rn): the bits of
 // ``tensor * float_scalar`` (the visco tables Gp / dt2A / Gd1 / Gd2)
-void derive_scale(const torch::Tensor& in, float s, torch::Tensor& out);
+void derive_scale(const Buf& in, float s, const Buf& out);
 
 // The declared slots, bound from ``derived_models`` (the propagator always
 // passes cuda_layout.derived_model_nvar of them; count checked here, shape/
 // dtype per slot).  Nothing allocates: an empty list is the error.
-inline std::vector<torch::Tensor> slots(const std::vector<torch::Tensor>& bound, int n,
-                                        const torch::Tensor& like, const char* what)
+inline std::vector<Buf> slots(const BufList& bound, int n, const Buf& like, const char* what)
 {
     SWEEP_CHECK(static_cast<int>(bound.size()) == n,
                 what, ": derived_models must hold ", n,
                 " tensors (cuda_layout.derived_model_nvar), got ", bound.size());
-    std::vector<torch::Tensor> out;
+    std::vector<Buf> out;
     out.reserve(n);
     for (int i = 0; i < n; ++i)
         out.push_back(pool_required(bound, i, like, "derived_models"));
     return out;
 }
+// torch spelling (the hand-written drivers, still on the torch input struct).
+inline std::vector<Buf> slots(const std::vector<torch::Tensor>& bound, int n, const Buf& like, const char* what)
+{
+    const std::vector<Buf> b = bufs_of(bound);
+    return slots(BufList{b.data(), static_cast<int64_t>(b.size())}, n, like, what);
+}
 
 template <class P>
 inline Lame lame(const P& p, const torch::Tensor& vp, const torch::Tensor& vs,
-                 const torch::Tensor& rho, const char* what)
+                 const torch::Tensor& rho, const char* what);   // torch spelling, below
+template <class P>
+inline Lame lame(const P& p, const Buf& vp, const Buf& vs,
+                 const Buf& rho, const char* what)
 {
     auto s = slots(p.derived_models, N_LAME, vp, what);
     derive_lame(vp, vs, rho, s[MU], s[LAMBDA]);
@@ -112,6 +120,10 @@ inline Lame lame(const P& p, const torch::Tensor& vp, const torch::Tensor& vs,
 template <class P>
 inline VtiStiffness vti_stiffness(const P& p, const torch::Tensor& vp, const torch::Tensor& epsilon,
                                   const torch::Tensor& delta, const torch::Tensor& rho,
+                                  const char* what);   // torch spelling, below
+template <class P>
+inline VtiStiffness vti_stiffness(const P& p, const Buf& vp, const Buf& epsilon,
+                                  const Buf& delta, const Buf& rho,
                                   const char* what)
 {
     auto s = slots(p.derived_models, N_VTI, vp, what);
@@ -120,7 +132,9 @@ inline VtiStiffness vti_stiffness(const P& p, const torch::Tensor& vp, const tor
 }
 
 template <class P>
-inline torch::Tensor reciprocal(const P& p, const torch::Tensor& z, const char* what)
+inline Buf reciprocal(const P& p, const torch::Tensor& z, const char* what);   // torch spelling, below
+template <class P>
+inline Buf reciprocal(const P& p, const Buf& z, const char* what)
 {
     auto s = slots(p.derived_models, N_VRZ, z, what);
     derive_reciprocal(z, s[INV_Z]);
@@ -134,12 +148,12 @@ inline torch::Tensor reciprocal(const P& p, const torch::Tensor& z, const char* 
 // not derive stay undefined.
 struct ViscoCoefficients {
     ViscoTables tables;
-    torch::Tensor gp, dt2a, gd1, gd2;
+    Buf gp, dt2a, gd1, gd2;
 };
 
-inline ViscoCoefficients visco_coefficients(const std::vector<torch::Tensor>& bound,
-                                            const torch::Tensor& B1, const torch::Tensor& B2,
-                                            const torch::Tensor& A, bool damping, bool dispersion,
+inline ViscoCoefficients visco_coefficients(const BufList& bound,
+                                            const Buf& B1, const Buf& B2,
+                                            const Buf& A, bool damping, bool dispersion,
                                             ViscoMode mode, float dt, float dt2, const char* what)
 {
     ViscoCoefficients c;
@@ -150,6 +164,29 @@ inline ViscoCoefficients visco_coefficients(const std::vector<torch::Tensor>& bo
     if (c.tables.gd1 >= 0)  { c.gd1  = s[c.tables.gd1];  derive_scale(B1, dt2, c.gd1); }
     if (c.tables.gd2 >= 0)  { c.gd2  = s[c.tables.gd2];  derive_scale(B2, dt2, c.gd2); }
     return c;
+}
+
+// ---- torch spellings, for the hand-written drivers still on the torch struct ----
+template <class P>
+inline Lame lame(const P& p, const torch::Tensor& vp, const torch::Tensor& vs,
+                 const torch::Tensor& rho, const char* what)
+{ return lame(p, buf_of(vp), buf_of(vs), buf_of(rho), what); }
+template <class P>
+inline VtiStiffness vti_stiffness(const P& p, const torch::Tensor& vp, const torch::Tensor& epsilon,
+                                  const torch::Tensor& delta, const torch::Tensor& rho,
+                                  const char* what)
+{ return vti_stiffness(p, buf_of(vp), buf_of(epsilon), buf_of(delta), buf_of(rho), what); }
+template <class P>
+inline Buf reciprocal(const P& p, const torch::Tensor& z, const char* what)
+{ return reciprocal(p, buf_of(z), what); }
+inline ViscoCoefficients visco_coefficients(const std::vector<torch::Tensor>& bound,
+                                            const torch::Tensor& B1, const torch::Tensor& B2,
+                                            const torch::Tensor& A, bool damping, bool dispersion,
+                                            ViscoMode mode, float dt, float dt2, const char* what)
+{
+    const std::vector<Buf> b = bufs_of(bound);
+    return visco_coefficients(BufList{b.data(), static_cast<int64_t>(b.size())},
+                              buf_of(B1), buf_of(B2), buf_of(A), damping, dispersion, mode, dt, dt2, what);
 }
 
 }  // namespace derived

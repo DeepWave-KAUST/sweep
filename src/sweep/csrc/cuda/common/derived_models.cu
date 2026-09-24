@@ -67,9 +67,9 @@ __global__ void scale_kernel(const float* __restrict__ in, float s, float* __res
         out[i] = __fmul_rn(in[i], s);
 }
 
-void check_operand(const torch::Tensor& t, const torch::Tensor& like, const char* name)
+void check_operand(const Buf& t, const Buf& like, const char* name)
 {
-    SWEEP_CHECK(t.defined() && t.is_cuda() && t.scalar_type() == torch::kFloat && t.is_contiguous(),
+    SWEEP_CHECK(t.defined() && t.is_cuda() && t.dtype() == BoundaryDtype::FP32 && t.element_size() == 4 && t.is_contiguous(),
                 "derived_models: ", name, " must be a contiguous float32 CUDA tensor");
     SWEEP_CHECK(t.numel() == like.numel(),
                 "derived_models: ", name, " has ", t.numel(), " elements, expected ", like.numel());
@@ -79,8 +79,8 @@ void check_operand(const torch::Tensor& t, const torch::Tensor& like, const char
 
 namespace derived {
 
-void derive_lame(const torch::Tensor& vp, const torch::Tensor& vs, const torch::Tensor& rho,
-                 torch::Tensor& mu, torch::Tensor& lambda)
+void derive_lame(const Buf& vp, const Buf& vs, const Buf& rho,
+                 const Buf& mu, const Buf& lambda)
 {
     check_operand(vp, vp, "vp");
     check_operand(vs, vp, "vs");
@@ -96,10 +96,10 @@ void derive_lame(const torch::Tensor& vp, const torch::Tensor& vs, const torch::
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
-void derive_vti_stiffness(const torch::Tensor& vp, const torch::Tensor& epsilon,
-                          const torch::Tensor& delta, const torch::Tensor& rho,
-                          torch::Tensor& c11, torch::Tensor& c13, torch::Tensor& c33,
-                          torch::Tensor& inv_rho)
+void derive_vti_stiffness(const Buf& vp, const Buf& epsilon,
+                          const Buf& delta, const Buf& rho,
+                          const Buf& c11, const Buf& c13, const Buf& c33,
+                          const Buf& inv_rho)
 {
     check_operand(vp, vp, "vp");
     check_operand(epsilon, vp, "epsilon");
@@ -119,7 +119,7 @@ void derive_vti_stiffness(const torch::Tensor& vp, const torch::Tensor& epsilon,
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
-void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z)
+void derive_reciprocal(const Buf& z, const Buf& inv_z)
 {
     check_operand(z, z, "z");
     check_operand(inv_z, z, "inv_z");
@@ -131,7 +131,7 @@ void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z)
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
-void derive_scale(const torch::Tensor& in, float s, torch::Tensor& out)
+void derive_scale(const Buf& in, float s, const Buf& out)
 {
     check_operand(in, in, "in");
     check_operand(out, in, "out");

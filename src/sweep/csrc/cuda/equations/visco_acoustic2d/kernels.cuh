@@ -110,9 +110,9 @@ struct ViscoSpectral {
     bool disp = false;         // dispersion term present
     torch::Tensor kmul;        // D_loss
     torch::Tensor Dk2, Dfrac;  // dispersion grids
-    torch::Tensor Gp;          // dt   * A  (adjoint damping)
-    torch::Tensor dt2A;        // dt^2 * A  (forward damping)
-    torch::Tensor Gd1, Gd2;    // dt^2 * B1, dt^2 * B2
+    Buf Gp;                    // dt   * A  (adjoint damping)
+    Buf dt2A;                  // dt^2 * A  (forward damping)
+    Buf Gd1, Gd2;              // dt^2 * B1, dt^2 * B2
 };
 
 inline void visco_acoustic2d_check_grid(
@@ -489,7 +489,7 @@ inline void visco_acoustic2d_lop_into(const float* x, const float* kmul, ViscoSc
 inline void visco_acoustic2d_apply_damping_into(
     AcousticWavefieldTensor& wf,
     const torch::Tensor& kmul,   // (nz, nx) D_loss grid
-    const torch::Tensor& dt2A,   // (B, 1, nz, nx) dt^2 * A (derived table)
+    const Buf& dt2A,             // (B, 1, nz, nx) dt^2 * A (derived table)
     float dt, ViscoScratch& ws)
 {
     const Buf dudt = visco_acoustic2d_real_alias(ws.C1);

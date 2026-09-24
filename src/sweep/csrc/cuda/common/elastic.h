@@ -616,7 +616,7 @@ struct ElasticAdjointWorkspaceTensor {
 // mode for the message.
 inline void bind_adjoint_workspace_required(
     ElasticAdjointWorkspaceTensor& workspace,
-    const std::vector<torch::Tensor>& tensors,
+    const BufList& tensors,
     int dim,
     const char* who
 )
@@ -705,19 +705,19 @@ inline bool elastic_field_is_stress(int dim, int idx)
 // the copy that used to make a stress field's slice contiguous is gone (a
 // velocity field's slice was always read in place).
 inline std::vector<float> elastic_adjoint_source_signs(
-    const torch::Tensor& adjoint_source,     // (nfield, B, nrec, nt)
-    const torch::Tensor& receiver_fields,    // (nfield,) wavefield indices, CPU
+    const Buf& adjoint_source,     // (nfield, B, nrec, nt)
+    IntSpan receiver_fields,       // (nfield,) wavefield indices, host
     int dim
 )
 {
     SWEEP_CHECK(adjoint_source.is_contiguous(),
                 "elastic adjoint_source must be contiguous (nfield, B, nrec, nt); "
                 "the residual injection reads it in place");
-    const int64_t nfield = receiver_fields.numel();
+    const int64_t nfield = receiver_fields.size();
     std::vector<float> signs;
     signs.reserve(static_cast<size_t>(nfield));
     for (int64_t i = 0; i < nfield; ++i) {
-        const int field = receiver_fields[i].item<int>();
+        const int field = receiver_fields[i];
         signs.push_back(elastic_field_is_stress(dim, field) ? -1.0f : 1.0f);
     }
     return signs;

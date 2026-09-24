@@ -5,6 +5,7 @@
 // subset of std::vector the drivers use: size(), empty(), operator[], begin/end.
 #include <cstdint>
 #include <vector>
+#include <string>
 #include "buf.h"
 struct BufList {
     const Buf* p = nullptr;
@@ -21,4 +22,7 @@ struct BufList {
 // Small spans for the few vector<int>/vector<float>/vector<string> fields.
 struct IntSpan   { const int*   p = nullptr; int64_t n = 0; int64_t size() const { return n; } int   operator[](int64_t i) const { return p[i]; } const int*   begin() const { return p; } const int*   end() const { return p + n; } };
 struct FloatSpan { const float* p = nullptr; int64_t n = 0; int64_t size() const { return n; } float operator[](int64_t i) const { return p[i]; } const float* begin() const { return p; } const float* end() const { return p + n; } };
-struct CStrList  { const char* const* p = nullptr; int64_t n = 0; int64_t size() const { return n; } const char* operator[](int64_t i) const { return p[i]; } };
+struct CStrList  {
+    // the std::vector<std::string> a consumer that predates the span wants
+    std::vector<std::string> vec() const { std::vector<std::string> v; for (int64_t i = 0; i < n; ++i) v.emplace_back(p[i]); return v; }
+ const char* const* p = nullptr; int64_t n = 0; int64_t size() const { return n; } const char* operator[](int64_t i) const { return p[i]; } };

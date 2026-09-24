@@ -12,12 +12,12 @@ struct ForwardInputCore {
     Buf source;
     Buf lap_coes;
     Buf grad_coes;
-    // (skipped non-field line: int M;)
+    int M{};
     int abcn{};
     Buf sources_loc;
     Buf receivers_loc;
-    Buf source_field_indices;
-    Buf receiver_field_indices;
+    IntSpan source_field_indices;
+    IntSpan receiver_field_indices;
     BufList pml_vals;   // Bind from python
     BufList wavefields;   // Bind from python
     BufList forward_workspace;   // Bind from python: per-call scratch, cuda_layout.forward_workspace_nvar
@@ -84,12 +84,12 @@ struct BackwardInputCore {
     Buf forward_source;
     Buf lap_coes;
     Buf grad_coes;
-    // (skipped non-field line: int M;)
+    int M{};
     int abcn{};
     Buf adjoint_sources_loc;
     Buf forward_sources_loc;
-    Buf source_field_indices;
-    Buf receiver_field_indices;
+    IntSpan source_field_indices;
+    IntSpan receiver_field_indices;
     BufList pml_vals;
     BufList eq_aux;
     unsigned int nt{};
@@ -122,8 +122,8 @@ struct BackwardInputCore {
     BufList illum_out;
     Buf adcig_out;
     int cut_face_mask = 0;
-    // (skipped non-field line: int bw_begin() const { return bw_it_begin < 0 ? static_cast<)
-    // (skipped non-field line: bool bw_stepped() const { return bw_begin() < static_cast<in)
+    int bw_begin() const { return bw_it_begin < 0 ? static_cast<int>(nt) : bw_it_begin; }
+    bool bw_stepped() const { return bw_begin() < static_cast<int>(nt) || bw_it_end > 0; }
     bool compute_adcig = false;
     int adcig_max_lag = 0;
 };

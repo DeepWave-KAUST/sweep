@@ -7,7 +7,7 @@
 
 namespace elastic_tti_sg3d {
 
-inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
+inline StiffnessPointer stiffness_view(const std::vector<Buf>& models)
 {
     SWEEP_CHECK(models.size() == 22, "ElasticTTISG3D CUDA expects prepared models: rho plus 21 stiffness tensors");
     StiffnessPointer out{};
@@ -37,7 +37,7 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     return out;
 }
 
-inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
+inline StiffnessGradPointer stiffness_grad_view(std::vector<Buf>& grads)
 {
     SWEEP_CHECK(grads.size() == 22, "ElasticTTISG3D CUDA backward expects 22 prepared model gradients");
     StiffnessGradPointer out{};

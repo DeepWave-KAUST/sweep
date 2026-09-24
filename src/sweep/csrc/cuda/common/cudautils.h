@@ -168,6 +168,49 @@ inline const Buf& pool_required(const BufList& pool, int idx, const Buf& like, c
     return b;
 }
 
+// The driver-shaped slot with the shape as a vector (the traits build it).
+inline const Buf& pool_required(const BufList& pool, int idx, const std::vector<int64_t>& shape,
+                                const char* what)
+{
+    SWEEP_CHECK(pool_slot_bound(pool, idx),
+                what, "[", idx, "] must be bound by the propagator; this driver "
+                "has no fallback allocation for it (", pool.size(), " slots bound)");
+    const Buf& b = pool[idx];
+    SWEEP_CHECK(b.sizes() == shape, what, "[", idx, "] has shape ", b.sizes(),
+                " but the driver's layout is ", shape);
+    SWEEP_CHECK(b.dtype() == BoundaryDtype::FP32 && b.is_contiguous(),
+                what, "[", idx, "] must be a contiguous float32 buffer");
+    return b;
+}
+
+// A slot checked against a geometry (no "must be bound" wording: the set it
+// comes from was counted by the caller).
+inline const Buf& pool_slot_checked(const BufList& pool, int idx, const Buf& like, const char* what)
+{
+    const Buf& b = pool[idx];
+    SWEEP_CHECK(b.sizes() == like.sizes(),
+                what, "[", idx, "] has shape ", b.sizes(), " but the expected geometry is ", like.sizes());
+    SWEEP_CHECK(b.dtype() == BoundaryDtype::FP32,
+                what, "[", idx, "] must be float32");
+    SWEEP_CHECK(b.is_cuda(),
+                what, "[", idx, "] must live on the GPU (a host buffer here reads as an "
+                "illegal address inside the kernels)");
+    return b;
+}
+
+// A single propagator-bound output buffer (record_out, u_allt_out, adcig_out).
+inline const Buf& bound_required(const Buf& bound, const std::vector<int64_t>& shape, const char* what)
+{
+    SWEEP_CHECK(bound.defined(),
+                what, " must be bound by the propagator; this driver has no "
+                "fallback allocation for it");
+    SWEEP_CHECK(bound.sizes() == shape, what, " has shape ", bound.sizes(),
+                " but the driver's layout is ", shape);
+    SWEEP_CHECK(bound.dtype() == BoundaryDtype::FP32 && bound.is_contiguous(),
+                what, " must be a contiguous float32 buffer");
+    return bound;
+}
+
 inline const Buf& pool_required(const BufList& pool, int idx, std::initializer_list<int64_t> shape,
                                 const char* what)
 {
@@ -206,6 +249,18 @@ inline size_t buf_bytes(const Buf& b)
 {
     return b.defined() ? static_cast<size_t>(b.numel() * b.element_size()) : 0;
 }
+
+// The pool helpers on an owned std::vector<Buf> (a trait's slot list); after
+// every BufList overload so the delegations resolve to them exactly.
+inline BufList as_list(const std::vector<Buf>& v) { return BufList{v.data(), static_cast<int64_t>(v.size())}; }
+inline const Buf& pool_required(const std::vector<Buf>& pool, int idx, const Buf& like, const char* what)
+{ return pool_required(as_list(pool), idx, like, what); }
+inline const Buf& pool_required(const std::vector<Buf>& pool, int idx, const std::vector<int64_t>& shape, const char* what)
+{ return pool_required(as_list(pool), idx, shape, what); }
+inline const Buf& pool_required(const std::vector<Buf>& pool, int idx, std::initializer_list<int64_t> shape, const char* what)
+{ return pool_required(as_list(pool), idx, shape, what); }
+inline const Buf& pool_slot_checked(const std::vector<Buf>& pool, int idx, const Buf& like, const char* what)
+{ return pool_slot_checked(as_list(pool), idx, like, what); }
 
 #define SWEEP_CUDA_SYNC_CHECK(label)                                                \
     do {                                                                            \
@@ -348,6 +403,23 @@ inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int i
 // ``cuda_layout.bs_reconstruction_nvar``): true when one was bound, after the
 // count and every slot's geometry/dtype were checked; false when the caller
 // bound nothing, in which case the driver allocates as it always did.
+inline bool wavefields_bound(const BufList& list, int n, const Buf& like, const char* what)
+{
+    if (list.empty()) return false;
+    SWEEP_CHECK(static_cast<int>(list.size()) == n,
+                what, " expects ", n, " bound wavefield tensors, got ", list.size());
+    for (int i = 0; i < n; ++i)
+        pool_slot_checked(list, i, like, what);
+    return true;
+}
+inline void wavefields_required(const BufList& list, int n, const Buf& like, const char* what)
+{
+    SWEEP_CHECK(!list.empty(),
+                what, " must be bound by the propagator; this driver has no "
+                "fallback allocation for it");
+    wavefields_bound(list, n, like, what);
+}
+// the torch pair: hand-written drivers only, retired in 2d4
 inline bool wavefields_bound(const std::vector<torch::Tensor>& list, int n,
                              const torch::Tensor& like, const char* what)
 {

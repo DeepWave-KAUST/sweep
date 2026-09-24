@@ -195,7 +195,7 @@ void vti_adjoint_A_3d(
     int order,
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer3D adj_view,
-    const torch::Tensor& c11, const torch::Tensor& c33, const torch::Tensor& c13,
+    const Buf& c11, const Buf& c33, const Buf& c13,
     torch::Tensor& sa, torch::Tensor& sb,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
@@ -213,7 +213,7 @@ void vti_adjoint_B_3d(
     int order,
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer3D adj_view,
-    const torch::Tensor& inv_rho,
+    const Buf& inv_rho,
     torch::Tensor& sa, torch::Tensor& sb, torch::Tensor& sc,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {

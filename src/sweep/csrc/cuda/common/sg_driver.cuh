@@ -30,7 +30,7 @@
 //
 // sg_generic_forward — per it in [it_begin, it_end):
 //   velocity_substep           v: t -> t+1/2           (DD step_phase 1)
-//   stress_substep             s: t -> t+1, u_allt[it] (DD step_phase 2 from here)
+//   stress_substep             s: t -> t+1, u_allt.select(0, it) (DD step_phase 2 from here)
 //   inject_source              per source field
 //   <checkpoint save>          shared runtime, not a hook
 //   save_boundary_fields       BS strips (when use_boundary_saving)
@@ -117,7 +117,7 @@ template <class Eq>
 class SgForwardRunner final : public IForwardRunner {
 public:
     explicit SgForwardRunner(const ForwardInput& in)
-        : p(in)
+        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -152,10 +152,10 @@ public:
 
         nsrc = p.sources_loc.size(1);
         nrec = p.receivers_loc.size(1);
-        nsrc_fields = p.source_field_indices.numel();
-        nrec_fields = p.receiver_field_indices.numel();
-        source_fields = p.source_field_indices.to(torch::kCPU);
-        receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+        nsrc_fields = p.source_field_indices.size();
+        nrec_fields = p.receiver_field_indices.size();
+        source_fields = p.source_field_indices;
+        receiver_fields = p.receiver_field_indices;
         // An empty tensor counts as unbound: nothing could be recorded into it.
         SWEEP_CHECK(!stepped || (p.record_out.defined() && p.record_out.numel() > 0),
                     "stepped forward requires record_out bound from Python");
@@ -165,7 +165,7 @@ public:
         SWEEP_CHECK(p.record_out.defined() && p.record_out.numel() > 0,
                     Eq::NAME, "/forward requires the propagator-bound record_out "
                     "(cuda_layout.record_shape)");
-        record = bound_required(p.record_out, {nrec_fields, d.B, nrec, p.nt}, vp.options(),
+        record = bound_required(p.record_out, {nrec_fields, d.B, nrec, p.nt},
                                 "record_out");
 
         Eq::validate_forward(p);
@@ -190,7 +190,7 @@ public:
             SWEEP_CHECK(p.u_allt_out.defined() && p.u_allt_out.numel() > 0,
                         Eq::NAME, "/full requires the propagator-bound u_allt_out "
                         "(cuda_layout.save_all_shape)");
-            u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(),
+            u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt),
                                     "u_allt_out");
         }
 
@@ -245,7 +245,7 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files
+            disk_files_
         );
         boundary_runtime = &boundary_scope->runtime();
         checkpoint_runtime.emplace(
@@ -265,6 +265,11 @@ public:
     int device_index() const override { return device_index_of(p.models[0]); }
 
     ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
+    {
+        return to_torch(run_core(run_it_begin, run_it_end, run_step_phase), in_);
+    }
+
+    ForwardOutputCore run_core(int run_it_begin, int run_it_end, int run_step_phase)
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& solver = *solver_;
@@ -286,7 +291,7 @@ public:
 
         for (int it = it0; it < it1; ++it) {
 
-            u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+            u_this_t = u_allt.defined() ? u_allt.select(0, it).data_ptr<float>() : nullptr;
 
             if (do_v)
                 Eq::velocity_substep(*state, wf, cpml, solver);   // t+0.5
@@ -297,7 +302,7 @@ public:
             Eq::stress_substep(*state, wf, cpml, solver, u_this_t);   // t+1.0
 
             for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-                float* field = Eq::field_ptr(wf, source_fields[isrc].item<int>());
+                float* field = Eq::field_ptr(wf, source_fields[isrc]);
                 if (field == nullptr) continue;
                 Eq::inject_source(*state, solver, field, p.source, p.sources_loc,
                                   it, nsrc);
@@ -308,7 +313,7 @@ public:
             // (through u_this_t) and leaves this a no-op -- the acoustic
             // skeleton has the same hook for the same reason (eq_driver.cuh).
             // It exists because the pseudo-acoustic VTI family cannot: it needs
-            // the POST-inject state, since u_forward[it-1].sH is the sH INPUT to
+            // the POST-inject state, since u_forward.select(0, it-1).sH is the sH INPUT to
             // step it's velocity substep and the rho gradient reads it as
             // fsH_prev.  Capturing before the injection changes grad[rho]
             // whenever the source lands on sH/sV, which is that family's default.
@@ -322,7 +327,7 @@ public:
                                          it, (int)p.nt, bs, save_width);
 
             for (int irec = 0; irec < nrec_fields; ++irec) {
-                float* field = Eq::field_ptr(wf, receiver_fields[irec].item<int>());
+                float* field = Eq::field_ptr(wf, receiver_fields[irec]);
                 if (field == nullptr) continue;
                 Eq::record_field(*state, solver, field, record, irec,
                                  p.receivers_loc, it, nrec);
@@ -339,9 +344,9 @@ public:
         if (boundary_scope->owns())
             boundary_runtime->synchronize();
 
-        ForwardOutput out;
+        ForwardOutputCore out;
         out.wavefield = u_allt;
-        out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
+        out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
         out.record = record;
 
         return out;
@@ -358,8 +363,13 @@ private:
     }
 
     // Declaration order == construction order; destruction runs in reverse,
-    // matching the hand-written function's stack unwind.
-    ForwardInput p;
+    // matching the hand-written function's stack unwind.  The arena owns the
+    // descriptor arrays and host copies the core twin points into; the torch
+    // struct is kept for the output hand-back (to_torch) only.
+    InputArena arena_;
+    ForwardInput in_;
+    ForwardInputCore p;
+    std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     typename Eq::Models models;
     Dims d;
     typename Eq::Wavefield wavefield;
@@ -367,9 +377,9 @@ private:
     typename Eq::CPML cpml_tensor;
     decltype(std::declval<typename Eq::CPML>().view()) cpml;
     int nsrc = 0, nrec = 0, nsrc_fields = 0, nrec_fields = 0;
-    torch::Tensor source_fields, receiver_fields;
-    torch::Tensor record;
-    torch::Tensor u_allt;
+    IntSpan source_fields, receiver_fields;
+    Buf record;
+    Buf u_allt;
     std::optional<SolverContext> solver_;
     int save_width = 0;
     bool staged_boundary = false;
@@ -398,7 +408,7 @@ ForwardOutput sg_generic_forward(const ForwardInput& in)
 // runner can re-validate each run() with that call's range; the monolithic
 // entries pass the input-struct fields, reproducing the legacy behaviour.
 template <class Eq>
-void sg_check_stepped_backward(const BackwardInput& p, bool need_recon,
+void sg_check_stepped_backward(const BackwardInputCore& p, bool need_recon,
                                int bw_it_begin, int bw_it_end, int step_phase)
 {
     const int it_hi = (bw_it_begin < 0) ? static_cast<int>(p.nt) : bw_it_begin;
@@ -490,7 +500,7 @@ struct SgCarrierSlots {
 // whenever a gradient is asked for, and Wrapper.backward hands the pool over
 // as BackwardInput.adjoint_workspace).
 template <class Eq>
-void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char* mode)
+void sg_check_ckpt_workspace(const BackwardInputCore& p, int n_carriers, const char* mode)
 {
     const int expected = Eq::WS_CARRIERS + n_carriers;
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == expected,
@@ -502,8 +512,10 @@ void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char*
 
 // ---- sg_generic_backward (full storage) ----
 template <class Eq>
-BackwardOutput sg_generic_backward(const BackwardInput& in)
+BackwardOutput sg_generic_backward(const BackwardInput& in_torch)
 {
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     // Per-equation entry validation (model/PML counts, mode-specific input
@@ -518,15 +530,15 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     const int it_hi = p.bw_begin();
     const int it_lo = p.bw_it_end;
     const bool first_segment = (it_hi == static_cast<int>(p.nt));
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     typename Eq::Models models = Eq::parse_models(p);
     const auto& vp = p.models[0];
     const Dims d = read_dims<Eq::NDIM>(vp);
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    auto receiver_fields = p.receiver_field_indices;
+    auto source_fields = p.source_field_indices;
 
     SolverContext solver = make_ctx<Eq>(p, d);
     Eq::setup_ctx(solver, p);
@@ -543,7 +555,7 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
 
     auto adj_view = Eq::view(adjoint);
 
-    std::vector<torch::Tensor> grads;
+    std::vector<Buf> grads;
     Eq::bind_grads(p, grads);
     sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::FULL_COUNT, "full");
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
@@ -567,10 +579,10 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     // WS_CARRIERS + FULL_COUNT, which is exactly what the "full" branch of
     // cuda_layout.backward_workspace_shapes declares for every
     // IMAGING_USES_NEXT_V equation of this family.
-    const torch::Tensor zero_velocity = Eq::IMAGING_USES_NEXT_V
+    const Buf zero_velocity = Eq::IMAGING_USES_NEXT_V
         ? pool_required(p.adjoint_workspace, SgCarrierSlots<Eq>::FULL_ZERO, vp,
                         "adjoint_workspace")
-        : torch::Tensor();
+        : Buf{};
     const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
 
     // it_hi == nt and it_lo == 0 without DD, so this is dev's full
@@ -602,7 +614,7 @@ BackwardOutput sg_generic_backward(const BackwardInput& in)
     }
 
     out.grads = grads;
-    return out;
+    return to_torch(out, in_torch);
 }
 
 // ---- sg_generic_backward_bs ----
@@ -618,7 +630,7 @@ template <class Eq>
 class SgBackwardBsRunner final : public IBackwardRunner {
 public:
     explicit SgBackwardBsRunner(const BackwardInput& in)
-        : p(in)
+        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -632,8 +644,8 @@ public:
 
         adjoint_nsrc = p.adjoint_sources_loc.size(1);
         forward_nsrc = p.forward_sources_loc.size(1);
-        source_fields = p.source_field_indices.to(torch::kCPU);
-        receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+        source_fields = p.source_field_indices;
+        receiver_fields = p.receiver_field_indices;
 
         solver_.emplace(make_ctx<Eq>(p, d));
         SolverContext& solver = *solver_;
@@ -672,7 +684,7 @@ public:
         // costs nothing and returns all of it.  Same defect and same fix as the
         // acoustic skeleton (eq_driver.cuh, dev 4290248); allocate_last_two
         // still self-allocates if the tensor is undefined.
-        const torch::Tensor& last_two_bound = p.u_last_two;
+        const Buf& last_two_bound = p.u_last_two;
         if (staged_boundary) {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
                                     1, true, false, p.transfer_interval,
@@ -705,7 +717,7 @@ public:
             p.boundary_disk_async_read,
             p.transfer_interval,
             p.boundary_ring_buffers,
-            p.boundary_disk_files
+            disk_files_
         );
         boundary_runtime = &boundary_scope->runtime();
 
@@ -716,9 +728,14 @@ public:
 
     BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
     {
+        return to_torch(run_core(bw_it_begin, bw_it_end, run_step_phase), in_);
+    }
+
+    BackwardOutputCore run_core(int bw_it_begin, int bw_it_end, int run_step_phase)
+    {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& solver = *solver_;
-        BackwardOutput out;
+        BackwardOutputCore out;
 
         sg_check_stepped_backward<Eq>(p, /*need_recon=*/true,
                                       bw_it_begin, bw_it_end, run_step_phase);
@@ -801,18 +818,21 @@ public:
 private:
     // Declaration order == construction order; destruction runs in reverse,
     // matching the hand-written function's stack unwind.
-    BackwardInput p;
+    InputArena arena_;
+    BackwardInput in_;
+    BackwardInputCore p;
+    std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     typename Eq::Models models;
     Dims d;
     int adjoint_nsrc = 0, forward_nsrc = 0;
-    torch::Tensor source_fields, receiver_fields;
+    IntSpan source_fields, receiver_fields;
     std::optional<SolverContext> solver_;
     typename Eq::Wavefield adjoint;
     typename Eq::Wavefield forward;
     typename Eq::ReconCarriers carriers;
     typename Eq::WfView for_view;
     typename Eq::WfView adj_view;
-    std::vector<torch::Tensor> grads;
+    std::vector<Buf> grads;
     std::optional<typename Eq::Workspace> workspace;
     typename Eq::CPML cpml_tensor;
     decltype(std::declval<typename Eq::CPML>().view()) cpml_view;
@@ -843,10 +863,10 @@ BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
 // + RECURSIVE_COUNT slots, and sg_check_ckpt_workspace has already required
 // the pool at exactly that size before this runs.
 template <class Eq>
-std::vector<torch::Tensor> sg_carriers(const BackwardInput& p, int first,
-                                       const torch::Tensor& vp)
+std::vector<Buf> sg_carriers(const BackwardInputCore& p, int first,
+                                       const Buf& vp)
 {
-    std::vector<torch::Tensor> v;
+    std::vector<Buf> v;
     v.reserve(Eq::N_VEL);
     for (int c = 0; c < Eq::N_VEL; ++c)
         v.push_back(pool_required(p.adjoint_workspace, first + c, vp, "adjoint_workspace"));
@@ -858,21 +878,21 @@ std::vector<torch::Tensor> sg_carriers(const BackwardInput& p, int first,
 // N_VEL x (max_rows, B, 1, grid)).
 template <class Eq>
 void sg_backward_segment(
-    const BackwardInput& p,
+    const BackwardInputCore& p,
     typename Eq::Models& models,
     typename Eq::State& state,
     typename Eq::Wavefield& forward,
     typename Eq::Wavefield& adjoint,
     typename Eq::Workspace& workspace,
-    const std::vector<torch::Tensor>& seg_full,
+    const std::vector<Buf>& seg_full,
     int start, int end,
     decltype(std::declval<typename Eq::CPML>().view()) cpml_view,
     SolverContext& solver,
-    const torch::Tensor& source_fields,
-    const torch::Tensor& receiver_fields,
-    const std::vector<torch::Tensor>& next_segment_v,
-    std::vector<torch::Tensor>& grads,
-    std::vector<torch::Tensor>& prev_segment_next_v)
+    IntSpan source_fields,
+    IntSpan receiver_fields,
+    const std::vector<Buf>& next_segment_v,
+    std::vector<Buf>& grads,
+    std::vector<Buf>& prev_segment_next_v)
 {
     const int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     const int segment_len = end - start;
@@ -884,7 +904,7 @@ void sg_backward_segment(
     // chunk's replay first, so nothing an earlier chunk left behind reaches a
     // kernel -- reusing the per-call buffers is bit-identical to the
     // per-chunk zero tensors they replace.
-    std::vector<torch::Tensor> seg;
+    std::vector<Buf> seg;
     seg.reserve(seg_full.size());
     for (const auto& history : seg_full)
         seg.push_back(history.narrow(0, 0, segment_len + 1));
@@ -926,8 +946,10 @@ void sg_backward_segment(
 }
 
 template <class Eq>
-BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
+BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in_torch)
 {
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     Eq::validate_backward(p, "ckpt");
@@ -958,8 +980,8 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     Eq::alloc_cpml(cpml_tensor, p);
     auto cpml_view = cpml_tensor.view();
 
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    auto source_fields = p.source_field_indices;
+    auto receiver_fields = p.receiver_field_indices;
     auto launch_config = wave_config<Eq::NDIM>(d);
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), d.B);
     auto adj_source_config = fdtd::Geom::make(p.adjoint_sources_loc.size(1), d.B);
@@ -971,7 +993,7 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     // bound accumulators here too.  It is handed the full BackwardInput
     // because equations whose gradient set is not {vp, vs, rho} need all of
     // p.models to check it.
-    std::vector<torch::Tensor> grads;
+    std::vector<Buf> grads;
     Eq::bind_grads(p, grads);
     sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::CKPT_COUNT, "ckpt");
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
@@ -996,7 +1018,7 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
     // hands the imaging null next-pointers instead.  next_segment_v must be
     // zero for the tail chunk (v(nt) does not exist): the pool is zero at
     // entry, see SgCarrierSlots.
-    std::vector<torch::Tensor> next_segment_v, prev_segment_next_v;
+    std::vector<Buf> next_segment_v, prev_segment_next_v;
     if (Eq::IMAGING_USES_NEXT_V) {
         next_segment_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NOW, vp);
         prev_segment_next_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NEXT, vp);
@@ -1020,9 +1042,9 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
             copy_tensor_cuda_async(next_segment_v[c], prev_segment_next_v[c]);
     }
 
-    BackwardOutput out;
+    BackwardOutputCore out;
     out.grads = grads;
-    return out;
+    return to_torch(out, in_torch);
 }
 
 // ---- sg_generic_backward_recursive_ckpt (per-step replay) ----
@@ -1042,18 +1064,18 @@ inline int sg_find_previous_checkpoint_idx(
 
 template <class Eq>
 void sg_replay_forward_to_time(
-    const BackwardInput& p,
+    const BackwardInputCore& p,
     typename Eq::State& state,
     typename Eq::Wavefield& forward,
-    std::vector<torch::Tensor>& current_v,
-    std::vector<torch::Tensor>& next_v,
+    std::vector<Buf>& current_v,
+    std::vector<Buf>& next_v,
     int target_index,
     const int* checkpoint_steps,
     int num_saved_checkpoints,
     CheckpointRuntime& checkpoint_runtime,
     decltype(std::declval<typename Eq::CPML>().view()) cpml_view,
     SolverContext& solver,
-    const torch::Tensor& source_fields)
+    IntSpan source_fields)
 {
     // next_v must be zero when target_index + 1 == nt (never captured below).
     // IMAGING_USES_NEXT_V == false equations skip both zeroings like their hand-written
@@ -1099,8 +1121,10 @@ void sg_replay_forward_to_time(
 }
 
 template <class Eq>
-BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in_torch)
 {
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     Eq::validate_backward(p, "ckpt_recursive");
@@ -1111,7 +1135,7 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     SWEEP_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                 Eq::CKPT_RECURSIVE_COUNT_MSG);
 
-    auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter
     SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints, Eq::CKPT_NVAR, true, true,
@@ -1134,15 +1158,15 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     Eq::alloc_cpml(cpml_tensor, p);
     auto cpml_view = cpml_tensor.view();
 
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    auto source_fields = p.source_field_indices;
+    auto receiver_fields = p.receiver_field_indices;
     auto launch_config = wave_config<Eq::NDIM>(d);
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), d.B);
     auto adj_source_config = fdtd::Geom::make(p.adjoint_sources_loc.size(1), d.B);
     typename Eq::State state = Eq::make_state(p, d, models, launch_config,
                                               fwd_source_config, adj_source_config);
 
-    std::vector<torch::Tensor> grads;
+    std::vector<Buf> grads;
     Eq::bind_grads(p, grads);
     sg_check_ckpt_workspace<Eq>(p, SgCarrierSlots<Eq>::RECURSIVE_COUNT, "ckpt_recursive");
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
@@ -1161,8 +1185,8 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     // The captured v(it) / v(it+1) the imaging reads (adjoint_workspace,
     // SgCarrierSlots); sg_replay_forward_to_time zeroes or overwrites them in
     // full before every imaging step, so their entry state is never read.
-    std::vector<torch::Tensor> current_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NOW, vp);
-    std::vector<torch::Tensor> next_v;
+    std::vector<Buf> current_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NOW, vp);
+    std::vector<Buf> next_v;
     if (Eq::IMAGING_USES_NEXT_V)
         next_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NEXT, vp);
     const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
@@ -1189,8 +1213,8 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
         Eq::plain_adjoint_step(state, solver, adjoint, workspace, cpml_view);
     }
 
-    BackwardOutput out;
+    BackwardOutputCore out;
     out.grads = grads;
-    return out;
+    return to_torch(out, in_torch);
 }
 } // namespace eqdrv
