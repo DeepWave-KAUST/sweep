@@ -159,6 +159,24 @@ python -c "import sweep; sweep.precompile()"   # exits 0 on success; raises a cl
 
 Afterwards `sweep.backend.torch.binding.is_compiled()` returns `True`.
 
+### Building where there is no GPU (CI, or a CPU allocation on a cluster)
+
+Compiling needs `nvcc` and a target architecture — not a card. Name the arch and
+build ahead of time, then let the GPU run pick the cache up:
+
+```bash
+TORCH_CUDA_ARCH_LIST=7.0 TORCH_EXTENSIONS_DIR=/scratch/ext python -m sweep.build --no-gpu-required
+```
+
+Point the GPU job at the same `TORCH_EXTENSIONS_DIR` and it starts without
+compiling. This matters on a shared cluster: without it, every build has to sit
+inside a GPU allocation to run a compiler that never touches the GPU, and the
+queue for a GPU partition is usually much longer than for CPU.
+
+`--no-gpu-required` only relaxes the *build*. `sweep.is_torch_binding_available()`
+still reports `False` on a machine with no device — you cannot run `impl='c'`
+there, only produce the `.so`.
+
 ## Notes
 
 - Lazy imports mean you do not need to install both JAX and PyTorch unless you

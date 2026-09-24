@@ -1,0 +1,65 @@
+name: CPU test suite
+
+# Nothing in this repository ran the tests. That was not an oversight anyone
+# could act on either: `pytest test/` could not return 0, because
+# test_import_does_not_pull_optional_deps asserted on the process-global
+# sys.modules and so reported whatever the preceding ~600 tests had imported.
+# Every recorded full-suite run ends "1 failed, 886 passed". With that fixed the
+# suite is gateable, so this gates it.
+#
+# CPU only: GitHub's hosted runners have no GPU, so roughly 60% of the suite
+# skips. That is still 313 real tests in ~3 minutes, and it catches the class of
+# breakage that costs the most time -- an import cycle, a signature that moved,
+# a validation rule that changed -- before it reaches a GPU box. The
+# bit-exactness gate (gate/README.md) stays where the GPUs are.
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install with a CPU-only torch
+        run: |
+          python -m pip install --upgrade pip
+          # The CUDA wheel is ~2.5 GB and nothing here can use it.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e . pytest
+          # sweep._C is JIT-compiled on first use, never at install time, so
+          # there is no CUDA toolchain to provide here. Tests that need it skip.
+
+      - name: Run the suite
+        env:
+          CUDA_VISIBLE_DEVICES: ''
+          OMP_NUM_THREADS: '4'      # unbounded OMP thrashes a 2-core runner
+        run: pytest test/ -q --junitxml=report.xml
+
+      - name: Refuse a green run that executed almost nothing
+        # A skip is not a failure, and half this suite is gated on CUDA or on a
+        # compiled binding: without a floor, "the tests passed" and "the tests
+        # did not run" print the same summary. 313 executed on a CPU-only
+        # runner when this was added.
+        run: python .github/scripts/assert_executed_floor.py report.xml 300
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: report.xml

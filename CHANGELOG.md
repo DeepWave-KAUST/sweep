@@ -10,6 +10,16 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
+  repository ran the tests before, and nothing could: `pytest test/` was unable
+  to return 0.  With that fixed, every push and pull request to `dev` runs the
+  suite on a hosted runner -- 313 tests in about three minutes; the rest skip
+  for want of a GPU or a compiled binding.  A skip is not a failure, so the job
+  also asserts a floor on the number of tests that actually EXECUTED
+  (`.github/scripts/assert_executed_floor.py`): without it, "the tests passed"
+  and "the tests did not run" print the same summary.  The bit-exactness gate
+  stays where the GPUs are.
+
 - **ViscoAcoustic: Zhu & Harris (2014) nearly constant-Q equation, per-edge
   free surface, and a CUDA backend (`impl='c'`).**  The equation now
   implements the paper's decoupled fractional Laplacians (eq. 10/11,
@@ -166,6 +176,39 @@ and this project adheres to
   / `Ckpt(...)`.
 
 ### Fixed
+- **`pytest test/` could never exit 0.**  `test_import_does_not_pull_optional_deps`
+  asserted `mod not in sys.modules`, which is process-global: by the time it
+  runs it is a statement about everything the preceding ~600 tests imported,
+  not about `sweep.datasets`.  Every recorded full-suite run ended
+  `1 failed, 886 passed`, so no script, hook or CI job could gate on the suite.
+  The check now runs the import in a fresh interpreter and asserts on *its*
+  `sys.modules`, which is both order-independent and what the test always meant
+  to say.
+- **The JIT staging directory ignored edits to `csrc`.**  `_stage()` mirrors
+  the CUDA tree into the torch-extension build dir with unique compiled-source
+  basenames; the directory was named after the installed `sweep-solver`
+  version and the staleness check was "does `.staged` exist".  Editing a kernel
+  without bumping the version therefore left the previous copy in place, ninja
+  compiled the OLD source, and the `.so` silently did not contain the edit --
+  which is why working on `csrc` came with a "delete the extension directory
+  first" ritual.  The sentinel is now a manifest of per-file SHA-256 digests:
+  only files whose contents changed are re-staged (so ninja still rebuilds just
+  the affected translation units, and through its header depfiles whatever
+  includes a changed `.cuh`), files whose source disappeared are removed from
+  the stage, and a re-staged copy is stamped with the current time so a source
+  that moves BACKWARDS in time (`git checkout` of an older revision) still
+  invalidates the object built from it.  The staged tree is byte-identical to
+  what the previous implementation produced (150 files, the same 50 compiled
+  sources); the manifest costs ~44 ms once per process.
+  The staging is also taken under `torch.utils.file_baton.FileBaton`, the
+  mechanism torch uses for concurrent extension builds.  `torchrun` starts
+  one process per GPU and they all stage before `cpp_extension.load` takes
+  its own lock, so nothing serialised them: two ranks copied the tree on
+  top of each other, and on a real 150-file tree over a shared filesystem
+  one lost with `FileExistsError` on the stage directory -- which is what
+  killed a 2-rank domain-decomposition benchmark before it measured
+  anything.  The regression test asserts on work rather than timing:
+  staging from two processes must copy no more than staging from one.
 - **Three test files turned a build failure into a green skip.**  They probed
   the extension as `try: import sweep._C as _C; return hasattr(_C, "sym")
   except Exception: return False`.  `sweep._C` is a lazy shim whose attribute
