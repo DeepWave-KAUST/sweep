@@ -1,11 +1,13 @@
-"""Compile sweep's CUDA/C++ backend against the *user's* torch, on first use.
+"""Build sweep's compiled backend on first use: the torch-free CUDA core
+(``libsweep_core.so``, nvcc) and the thin torch shim (``sweep._C``, a plain C++
+compile against the *user's* torch, linked to the core).
 
 This is why a single ``py3-none`` wheel of sweep works with **any** torch version
-and any Python 3: the compiled extension (``sweep._C``) is not shipped pre-built —
-it is JIT-compiled at runtime via ``torch.utils.cpp_extension.load()`` against
-whatever libtorch is currently imported, then cached. First use of ``impl='c'``
-pays a one-time ~2-5 min compile (only for *this* machine's GPU arch); every run
-after that loads the cached ``.so`` instantly.
+and any Python 3: nothing torch-specific ships pre-built.  The core depends on
+CUDA only, so it is built once per machine (or shipped, step 5); the shim is
+what a torch upgrade rebuilds, in about a minute, without nvcc.  First use of
+``impl='c'`` pays the one-time compile; every run after that loads the cached
+libraries instantly.
 
 The C++ sources ship inside the wheel under ``sweep/csrc/`` (package data).
 """
@@ -341,30 +343,122 @@ def _stage_locked(stage: Path, manifest_path: Path) -> tuple[list[str], list[str
     return _staged_paths(stage)
 
 
-def _will_build(build_dir: Path) -> bool:
-    """Whether the next load() will actually *compile* (vs reuse the cached .so).
+def _core_sources(sources: list[str]) -> list[str]:
+    return [x for x in sources if x.endswith(".cu")]
 
-    A ``sweep_C.so`` can exist yet still be rebuilt — e.g. after the user upgrades
-    torch, whose changed headers make ninja re-link — so "the .so exists" is not a
-    reliable signal. Ask ninja (``-n`` dry run) whether any target is stale. This
-    drives the one-time "compiling…" notice + verbose output, so a genuine rebuild
-    is never a silent 2-5 min hang that looks frozen. When we can't tell, assume a
-    build so the user always sees *something*."""
-    so = build_dir / "sweep_C.so"
-    ninja_file = build_dir / "build.ninja"
-    if not so.exists() or not ninja_file.exists():
-        return True                       # never built (no .so / no ninja graph yet)
+
+def _shim_sources(sources: list[str]) -> list[str]:
+    return [x for x in sources if not x.endswith(".cu")]
+
+
+def _gencode_flags() -> list[str]:
+    """One -gencode per target: the visible device's arch, else the archs
+    TORCH_CUDA_ARCH_LIST names ("7.0;8.0+PTX", as torch spells it)."""
+    import torch
+    if torch.cuda.is_available() and not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        maj, minr = torch.cuda.get_device_capability()
+        return [f"-gencode=arch=compute_{maj}{minr},code=sm_{maj}{minr}"]
+    flags: list[str] = []
+    for a in os.environ.get("TORCH_CUDA_ARCH_LIST", "").replace(",", ";").split(";"):
+        a = a.strip()
+        if not a:
+            continue
+        ptx = a.endswith("+PTX")
+        a = a[:-4] if ptx else a
+        a = a.replace(".", "")
+        flags.append(f"-gencode=arch=compute_{a},code=sm_{a}")
+        if ptx:
+            flags.append(f"-gencode=arch=compute_{a},code=compute_{a}")
+    return flags
+
+
+# What cpp_extension passed for these translation units, minus torch: the same
+# defines (they select the fp16/bf16 header code paths) and the same numerics
+# flags, so the core compiled here is the core the gate baselines were made with.
+_CORE_DEFINES = ["-D__CUDA_NO_HALF_OPERATORS__", "-D__CUDA_NO_HALF_CONVERSIONS__",
+                 "-D__CUDA_NO_BFLOAT16_CONVERSIONS__", "-D__CUDA_NO_HALF2_OPERATORS__"]
+_CORE_FLAGS = ["--expt-relaxed-constexpr", "--compiler-options", "'-fPIC'", "-O3", "--use_fast_math",
+               "-Xcompiler=-Wno-deprecated-declarations", "-Xcompiler=-fvisibility=hidden", "-std=c++17"]
+
+
+def _core_ninja(core_dir: Path, sources: list[str], inc: list[str], cuda_home: str) -> str:
+    import shlex
+    nvcc = os.path.join(cuda_home, "bin", "nvcc")
+    cufft = _cufft_link_flag(cuda_home)
+    if not cufft.startswith("-lcufft"):
+        cufft = "-Xlinker " + cufft                     # -l:libcufft.so.11 is the host linker's spelling
+    ldflags = " ".join([f"-L{shlex.quote(d)}" for d in _nvidia_pip_libs()] + [cufft])
+    cflags = " ".join(_CORE_DEFINES + _gencode_flags() + _CORE_FLAGS + [f"-I{shlex.quote(d)}" for d in inc])
+    lines = [f"nvcc = {nvcc}", f"cflags = {cflags}", "",
+             "rule nvcc",
+             "  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cflags -c $in -o $out",
+             "  depfile = $out.d", "  deps = gcc", "",
+             "rule link", f"  command = $nvcc -shared -o $out $in {ldflags}", ""]
+    objs = []
+    for src in sources:
+        obj = Path(src).stem + ".o"                     # staged names are unique already
+        objs.append(obj)
+        lines.append(f"build {obj}: nvcc {shlex.quote(src)}")
+    lines += ["", f"build libsweep_core.so: link {' '.join(objs)}", "", "default libsweep_core.so", ""]
+    return "\n".join(lines)
+
+
+def _build_core(build_dir: Path, sources: list[str], inc: list[str], cuda_home: str, verbose: bool) -> Path:
+    """libsweep_core.so: the torch-free core, nvcc through its own ninja graph
+    (incremental; header depfiles).  Serialised with the same baton the staging
+    uses, so the ranks of a torchrun job do not build on top of each other."""
+    import subprocess
+    from torch.utils.file_baton import FileBaton
+    core_dir = build_dir / "core"
+    core_dir.mkdir(parents=True, exist_ok=True)
+    text = _core_ninja(core_dir, sources, inc, cuda_home)
+    ninja_file = core_dir / "build.ninja"
+    if not ninja_file.exists() or ninja_file.read_text() != text:
+        ninja_file.write_text(text)
     _ensure_ninja_on_path()
+    baton = FileBaton(str(build_dir / "sweep_core_lock"))
+    if not baton.try_acquire():
+        baton.wait()
+    else:
+        try:
+            r = subprocess.run(["ninja", "-C", str(core_dir)], capture_output=not verbose, text=True)
+            if r.returncode != 0:
+                raise RuntimeError("sweep core build (libsweep_core.so) failed:\n"
+                                   + (r.stdout or "")[-4000:] + (r.stderr or "")[-4000:])
+        finally:
+            baton.release()
+    so = core_dir / "libsweep_core.so"
+    if not so.exists():
+        raise RuntimeError(f"sweep core build left no {so}")
+    return so
+
+
+def _ninja_has_work(d: Path) -> bool:
     ninja = shutil.which("ninja")
     if ninja is None:
         return True                       # can't check -> assume yes (never hang silently)
     try:
         import subprocess
-        r = subprocess.run([ninja, "-n"], cwd=str(build_dir),
-                           capture_output=True, text=True, timeout=30)
+        r = subprocess.run([ninja, "-n"], cwd=str(d), capture_output=True, text=True, timeout=30)
         return "no work to do" not in (r.stdout + r.stderr)
     except Exception:
         return True
+
+
+def _will_build(build_dir: Path) -> bool:
+    """Whether the next load() will actually *compile* (vs reuse the cached
+    libraries): the core's ninja graph or the shim's has work.  A cached .so can
+    still be rebuilt -- e.g. after the user upgrades torch, whose changed headers
+    make the shim recompile -- so "the .so exists" is not the signal; ninja is.
+    This drives the one-time "compiling..." notice + verbose output, so a genuine
+    rebuild is never a silent hang that looks frozen."""
+    core = build_dir / "core"
+    if not (core / "libsweep_core.so").exists() or not (core / "build.ninja").exists():
+        return True
+    if not (build_dir / "sweep_C.so").exists() or not (build_dir / "build.ninja").exists():
+        return True
+    _ensure_ninja_on_path()
+    return _ninja_has_work(core) or _ninja_has_work(build_dir)
 
 
 # --------------------------------------------------------------------------- #
@@ -373,29 +467,28 @@ def _will_build(build_dir: Path) -> bool:
 def load(compile_only: bool = False):
     """Compile (first call, cached) and return the ``sweep._C`` module.
 
-    ``compile_only=True`` warms the cache without requiring a device, for CI and
-    for pre-building on a CPU allocation; ``TORCH_CUDA_ARCH_LIST`` must then name
-    the target arch. The returned module is not usable for kernels on a machine
-    with no GPU -- the point is the cached ``.so``.
+    Two stages: ``libsweep_core.so`` (the torch-free CUDA core, nvcc) and the
+    torch shim ``sweep_C`` (a plain C++ compile against the user's torch, linked
+    to the core).  ``compile_only=True`` warms the cache without requiring a
+    device, for CI and for pre-building on a CPU allocation;
+    ``TORCH_CUDA_ARCH_LIST`` must then name the target arch.  The returned
+    module is not usable for kernels on a machine with no GPU -- the point is
+    the cached libraries.
     """
     global _module
     if _module is not None:
         return _module
-
     import torch
     from torch.utils import cpp_extension
-
     ok, why = can_compile() if compile_only else can_build()
     if not ok:
         raise RuntimeError(
             f"sweep's compiled backend (impl='c') is unavailable: {why}. "
             "Use impl='eager' for a pure-Python (slower) CPU/GPU path.")
-
     cuda_home = _find_cuda_home()
     os.environ["CUDA_HOME"] = cuda_home
     os.environ["PATH"] = os.path.join(cuda_home, "bin") + os.pathsep + os.environ.get("PATH", "")
     _ensure_ninja_on_path()
-
     build_dir = Path(cpp_extension._get_build_directory("sweep_C", verbose=False))
     build_dir.mkdir(parents=True, exist_ok=True)
     sources, inc = _stage(build_dir)
@@ -406,7 +499,6 @@ def load(compile_only: bool = False):
     inc = inc + [p for p in (os.path.join(cuda_home, "include"),
                              os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
                  if os.path.isdir(p)]
-
     building = _will_build(build_dir)
     if building:
         if torch.cuda.is_available():
@@ -414,24 +506,18 @@ def load(compile_only: bool = False):
             target = f"your GPU (sm_{cap[0]}{cap[1]})"
         else:
             target = f"TORCH_CUDA_ARCH_LIST={os.environ.get('TORCH_CUDA_ARCH_LIST')}"
-        print(f"[sweep] compiling the CUDA backend for {target} — "
+        print(f"[sweep] compiling the CUDA backend for {target} -- "
               f"one-time, ~2-5 min, then cached at {build_dir} ...",
               file=sys.stderr, flush=True)
-
+    core_so = _build_core(build_dir, _core_sources(sources), inc, cuda_home, verbose=building)
+    core_dir = str(core_so.parent)
     _module = cpp_extension.load(
         name="sweep_C",
-        sources=sources,
+        sources=_shim_sources(sources),                 # module.cpp + the CPU binding: C++ only, no nvcc
         extra_include_paths=inc,
         extra_cflags=["-O3", "-Wno-attributes", "-fopenmp"],
-        # --expt-relaxed-constexpr: lets constexpr __host__ funcs call __device__
-        # ones, which some CUDA toolkits' <cuda/std> bf16 headers (e.g. 12.4's
-        # nvbf16.h) require to compile. Harmless on toolkits that don't need it.
-        extra_cuda_cflags=["-O3", "--use_fast_math", "--expt-relaxed-constexpr",
-                           "-Xcompiler=-Wno-deprecated-declarations"],
-        # cuFFT: the visco-acoustic spectral step runs its own cuFFT plan
-        # (csrc/cuda/equations/visco_acoustic2d/fft.cu), a library torch links
-        # but does not re-export.
-        extra_ldflags=["-fopenmp"] + [f"-L{d}" for d in _nvidia_pip_libs()] + [_cufft_link_flag(cuda_home)],
+        extra_ldflags=["-fopenmp", f"-L{core_dir}", "-lsweep_core", f"-Wl,-rpath,{core_dir}"]
+                      + [f"-L{d}" for d in _nvidia_pip_libs()],
         build_directory=str(build_dir),
         verbose=building,
     )
