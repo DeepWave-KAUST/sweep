@@ -91,9 +91,10 @@ RTMOutput bind_illumination(const BackwardInput& p, bool always)
             pool_slot_checked(p.illum_out, 0, p.models[0], "illum_out");
         illumination.receiver_illumination =
             pool_slot_checked(p.illum_out, 1, p.models[0], "illum_out");
-    } else if (always || p.compute_illumination) {
-        illumination.source_illumination = torch::zeros_like(p.models[0]);
-        illumination.receiver_illumination = torch::zeros_like(p.models[0]);
+    } else {
+        SWEEP_CHECK(!(always || p.compute_illumination),
+                    "visco_acoustic2d: illumination requires the propagator-bound illum_out "
+                    "{source, receiver} (cuda_layout.illum_nvar); nothing allocates it here");
     }
     return illumination;
 }
@@ -186,10 +187,10 @@ void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
 // products), shaped like the adjoint field so the Lop pipeline takes it as
 // is.  Was ``u_a - u_b`` (functional); the row views only relabel contiguous
 // (B, nz, nx) rows as (B, 1, nz, nx).
-torch::Tensor stage_difference(ViscoScratch& ws, const torch::Tensor& u_a, const torch::Tensor& u_b)
+Buf stage_difference(ViscoScratch& ws, const float* u_a, const float* u_b)
 {
-    auto D = visco_acoustic2d_real_alias(ws.C1);
-    at::sub_out(D, u_a.view(D.sizes()), u_b.view(D.sizes()));
+    const Buf D = visco_acoustic2d_real_alias(ws.C1);
+    visco_ops::binary<visco_ops::SubOp>(D.data_ptr<float>(), u_a, 1, u_b, 1, D.numel());
     return D;
 }
 
@@ -214,31 +215,48 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
                            ViscoScratch& ws, int M)
 {
     if (!(d.active || d.disp)) return;
-    torch::Tensor m;
+    const float* u_now = adj.u_now_t.template data_ptr<float>();
+    const float* u_prev = adj.u_prev_t.template data_ptr<float>();
+    float* u_next = adj.u_next_t.template data_ptr<float>();
+    const int64_t n = ws.C1.numel() / 2;
+    // m: the term to add, as (pointer, stride) -- R1 (contiguous), or the real
+    // part of C1 (stride 2) with the damping alone.
+    const float* m = nullptr;
+    int m_stride = 1;
     if (d.disp) {
-        auto X = visco_acoustic2d_real_alias(ws.C1);
-        at::mul_out(X, d.Gd1, adj.u_now_t);                          // Gd1 * u_now
-        // NOT the memcpy helper: lop_into returns at::real(...) of a complex grid,
-        // a stride-2 view, and copy_ is the strided gather that reads it. The
-        // helper's contiguity assert caught exactly this (tier B, visco2d full/
-        // ckpt). Goes with visco's other at:: arithmetic in step 3.
-        ws.R1.copy_(visco_acoustic2d_lop_into(X, d.Dk2, ws));        // R1 = L_Dk2
-        at::mul_out(X, d.Gd2, adj.u_now_t);                          // Gd2 * u_now (L_Dk2 is in R1)
-        ws.R1.sub_(visco_acoustic2d_lop_into(X, d.Dfrac, ws));       // R1 = L_Dk2 - L_Dfrac = e
-        m = ws.R1;
+        const Buf X = visco_acoustic2d_real_alias(ws.C1);
+        visco_ops::binary<visco_ops::MulOp>(X.data_ptr<float>(), d.Gd1.data_ptr<float>(), 1, u_now, 1, n);   // Gd1 * u_now
+        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.Dk2.data_ptr<float>(), ws);                          // C1.re = L_Dk2
+        visco_ops::real_copy(ws.R1.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n);                          // R1 = L_Dk2
+        visco_ops::binary<visco_ops::MulOp>(X.data_ptr<float>(), d.Gd2.data_ptr<float>(), 1, u_now, 1, n);   // Gd2 * u_now (L_Dk2 is in R1)
+        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.Dfrac.data_ptr<float>(), ws);                        // C1.re = L_Dfrac
+        visco_ops::inplace<visco_ops::SubOp>(ws.R1.data_ptr<float>(), visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);   // R1 = L_Dk2 - L_Dfrac = e
+        m = ws.R1.data_ptr<float>(); m_stride = 1;
     }
     if (d.active) {
-        auto X = visco_acoustic2d_real_alias(ws.C1);
-        at::sub_out(X, adj.u_prev_t, adj.u_now_t);                   // u_prev - u_now
-        X.mul_(d.Gp);                                                // == Gp * (u_prev - u_now)
-        auto L = visco_acoustic2d_lop_into(X, d.kmul, ws);           // real(C1)
+        const Buf X = visco_acoustic2d_real_alias(ws.C1);
+        visco_ops::binary<visco_ops::SubOp>(X.data_ptr<float>(), u_prev, 1, u_now, 1, n);                    // u_prev - u_now
+        visco_ops::inplace<visco_ops::MulOp>(X.data_ptr<float>(), d.Gp.data_ptr<float>(), 1, n);             // == Gp * (u_prev - u_now)
+        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.kmul.data_ptr<float>(), ws);                         // C1.re = L
         if (d.disp)
-            ws.R1.add_(L);                                           // e + m == m + e
-        else
-            m = L;
+            visco_ops::inplace<visco_ops::AddOp>(ws.R1.data_ptr<float>(), visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);   // e + m == m + e
+        else {
+            m = visco_acoustic2d_real_ptr(ws.C1); m_stride = VISCO_REAL_STRIDE;
+        }
     }
-    visco_acoustic2d_zero_halo(m, M);
-    adj.u_next_t.add_(m);
+    // zero_halo(m) then u_next += m.  With the damping alone m is the strided
+    // real part of C1: the halo zeroing was on that view, so the add reads the
+    // zeroed cells -- here the halo cells of the ADD are masked instead, which
+    // adds 0 to exactly the cells the zeroed view added 0 to.
+    if (m_stride == 1) {
+        visco_acoustic2d_zero_halo(ws.R1, M);
+        visco_ops::inplace<visco_ops::AddOp>(u_next, m, 1, n);
+    } else {
+        const Buf Lr = visco_acoustic2d_real_alias(ws.C1);   // C1's real parts, gathered contiguous
+        visco_ops::real_copy(Lr.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n);
+        visco_acoustic2d_zero_halo(Lr, M);
+        visco_ops::inplace<visco_ops::AddOp>(u_next, Lr.data_ptr<float>(), 1, n);
+    }
 }
 
 // grad_A += -dt^2 * λ_it ⊙ L((u[it] - u[it-1]) / dt)
@@ -249,16 +267,18 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
 // Was grad_A.add_(lam * Lop(du), -dt): the Lop on the pipeline, the product
 // through at::mul_out(P, lam, real(C1)) into the float alias of C0 (dead
 // after the inverse transform), lam first as before, then the same add_.
-void accumulate_grad_A(torch::Tensor& grad_A,
-                       const torch::Tensor& lam,
-                       const torch::Tensor& du,
+void accumulate_grad_A(float* grad_A,
+                       const float* lam,
+                       const float* du,
                        const ViscoSpectral& d, float dt, ViscoScratch& ws)
 {
     if (!d.active) return;
-    auto L = visco_acoustic2d_lop_into(du.view(lam.sizes()), d.kmul, ws);
-    auto P = visco_acoustic2d_real_alias(ws.C0);
-    at::mul_out(P, lam, L);
-    grad_A.add_(P, -static_cast<double>(dt));
+    const int64_t n = ws.C1.numel() / 2;
+    visco_acoustic2d_lop_into(du, d.kmul.data_ptr<float>(), ws);                       // C1.re = L(du)
+    const Buf P = visco_acoustic2d_real_alias(ws.C0);
+    visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1,
+                                        visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
+    visco_ops::axpy(grad_A, P.data_ptr<float>(), 1, -dt, n);                            // grad_A.add_(P, -dt)
 }
 
 // grad_B1 += dt^2 * λ ⊙ L_{D_k2}(u[it]);  grad_B2 -= dt^2 * λ ⊙ L_{D_frac}(u[it]).
@@ -266,21 +286,22 @@ void accumulate_grad_A(torch::Tensor& grad_A,
 // (the dispersion term needs no u[it-1]).  Was grad_B1.add_(lam * Lop(u, Dk2),
 // dt2) and grad_B2.add_(lam * Lop(u, Dfrac), -dt2), each product now through
 // at::mul_out(P, lam, real(C1)) into C0's float alias, lam first as before.
-void accumulate_grad_disp(torch::Tensor* grad_B1, torch::Tensor* grad_B2,
-                          const torch::Tensor& lam,
-                          const torch::Tensor& u_it,
+void accumulate_grad_disp(float* grad_B1, float* grad_B2,
+                          const float* lam,
+                          const float* u_it,
                           const ViscoSpectral& d, float dt, ViscoScratch& ws)
 {
     if (!d.disp || grad_B1 == nullptr) return;
-    auto uv = u_it.view(lam.sizes());
-    const double dt2 = static_cast<double>(dt) * static_cast<double>(dt);
-    auto P = visco_acoustic2d_real_alias(ws.C0);
-    auto L1 = visco_acoustic2d_lop_into(uv, d.Dk2, ws);
-    at::mul_out(P, lam, L1);
-    grad_B1->add_(P, dt2);
-    auto L2 = visco_acoustic2d_lop_into(uv, d.Dfrac, ws);
-    at::mul_out(P, lam, L2);
-    grad_B2->add_(P, -dt2);
+    const int64_t n = ws.C1.numel() / 2;
+    // add_(P, Scalar(dt2)): the double dt*dt, loaded as the float alpha
+    const float dt2 = static_cast<float>(static_cast<double>(dt) * static_cast<double>(dt));
+    const Buf P = visco_acoustic2d_real_alias(ws.C0);
+    visco_acoustic2d_lop_into(u_it, d.Dk2.data_ptr<float>(), ws);
+    visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1, visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
+    visco_ops::axpy(grad_B1, P.data_ptr<float>(), 1, dt2, n);
+    visco_acoustic2d_lop_into(u_it, d.Dfrac.data_ptr<float>(), ws);
+    visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1, visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
+    visco_ops::axpy(grad_B2, P.data_ptr<float>(), 1, -dt2, n);
 }
 
 // One fused exact-adjoint launch (reused acoustic2d kernel; the damping term
@@ -310,7 +331,7 @@ void image_step_from_raw(
     const float* u_raw_ptr,
     const float* lam_ptr,
     const torch::Tensor& vp,
-    const torch::Tensor& carrier,   // (B, nz, nx) scratch (the CARRIER slot), halo stays 0
+    const Buf& carrier,             // (B, nz, nx) scratch (the CARRIER slot), halo stays 0
     torch::Tensor* grad,
     RTMOutput* rtm_out,
     const LaplaceParam& lap_ctx,
@@ -465,11 +486,15 @@ void run_full_imaging_visco(
             lap_ctx, ctx, nx, nz, dt);
 
         if (grad_A != nullptr && spectral.active && it >= 1) {
-            auto du = stage_difference(ws, p.u_forward[it], p.u_forward[it - 1]);
-            accumulate_grad_A(*grad_A, adjoint.u_now_t, du, spectral, dt, ws);
+            const Buf du = stage_difference(ws, p.u_forward[it].data_ptr<float>(),
+                                            p.u_forward[it - 1].data_ptr<float>());
+            accumulate_grad_A(grad_A->data_ptr<float>(), adjoint.u_now_t.template data_ptr<float>(),
+                              du.data_ptr<float>(), spectral, dt, ws);
         }
-        accumulate_grad_disp(grad_B1, grad_B2, adjoint.u_now_t,
-                             p.u_forward[it], spectral, dt, ws);
+        accumulate_grad_disp(grad_B1 ? grad_B1->data_ptr<float>() : nullptr,
+                             grad_B2 ? grad_B2->data_ptr<float>() : nullptr,
+                             adjoint.u_now_t.template data_ptr<float>(),
+                             p.u_forward[it].data_ptr<float>(), spectral, dt, ws);
     }
 }
 
@@ -623,12 +648,12 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         // the it == start reverse step needs it for du/dt of step ``start``.
         // Kept in the UPREV slot (the replay rotates u_prev away).
         if (spectral.active)
-            ws.UPREV.copy_(forward.u_prev_t.view(ws.UPREV.sizes()));
+            copy_tensor_device_to_device_async(ws.UPREV, forward.u_prev_t);
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
 
-            chunk_raw[it - start].copy_(forward.u_now_t.view({B, nz, nx}));
+            copy_tensor_device_to_device_async(chunk_raw[it - start], forward.u_now_t);
 
             ACOUSTIC2D(
                 order,
@@ -700,13 +725,15 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 lap_ctx, ctx, nx, nz, dt);
 
             if (spectral.active && it >= 1) {
-                auto du = stage_difference(ws, chunk_raw[it - start],
-                                           it > start ? chunk_raw[it - start - 1] : ws.UPREV);
-                accumulate_grad_A(grads.A, adjoint.u_now_t, du, spectral, dt, ws);
+                const Buf du = stage_difference(
+                    ws, chunk_raw[it - start].data_ptr<float>(),
+                    it > start ? chunk_raw[it - start - 1].data_ptr<float>() : ws.UPREV.data_ptr<float>());
+                accumulate_grad_A(grads.A.data_ptr<float>(), adjoint.u_now_t.template data_ptr<float>(),
+                                  du.data_ptr<float>(), spectral, dt, ws);
             }
-            accumulate_grad_disp(&grads.B1, &grads.B2,
-                                 adjoint.u_now_t, chunk_raw[it - start],
-                                 spectral, dt, ws);
+            accumulate_grad_disp(grads.B1.data_ptr<float>(), grads.B2.data_ptr<float>(),
+                                 adjoint.u_now_t.template data_ptr<float>(),
+                                 chunk_raw[it - start].data_ptr<float>(), spectral, dt, ws);
         }
     }
 
@@ -879,8 +906,8 @@ void process_recursive_interval_visco_2d(
         // captures read.  They are consumed below, after the adjoint step, by
         // the same kernels in the same operand order -- later in the stream,
         // on values nothing has touched in between, i.e. bit for bit the same.
-        const torch::Tensor u_start = start_state.u_prev_t;    // u(start)
-        const torch::Tensor u_before = start_state.u_next_t;   // u(start-1)
+        const float* u_start = start_state.u_prev_t.template data_ptr<float>();    // u(start)
+        const float* u_before = start_state.u_next_t.template data_ptr<float>();   // u(start-1)
 
         auto adj_view = adjoint.view();
 
@@ -934,11 +961,14 @@ void process_recursive_interval_visco_2d(
         }
 
         if (grad_A != nullptr && spectral.active && start >= 1) {
-            auto du = stage_difference(ws, u_start, u_before);   // == pre-step u_now - u_prev
-            accumulate_grad_A(*grad_A, adjoint.u_now_t, du, spectral, ctx.dt, ws);
+            const Buf du = stage_difference(ws, u_start, u_before);   // == pre-step u_now - u_prev
+            accumulate_grad_A(grad_A->data_ptr<float>(), adjoint.u_now_t.template data_ptr<float>(),
+                              du.data_ptr<float>(), spectral, ctx.dt, ws);
         }
         // == λ ⊙ Lop(pre-step u_now, D_k2 / D_frac), the former Pb / Rb
-        accumulate_grad_disp(grad_B1, grad_B2, adjoint.u_now_t, u_start,
+        accumulate_grad_disp(grad_B1 ? grad_B1->data_ptr<float>() : nullptr,
+                             grad_B2 ? grad_B2->data_ptr<float>() : nullptr,
+                             adjoint.u_now_t.template data_ptr<float>(), u_start,
                              spectral, ctx.dt, ws);
         return;
     }

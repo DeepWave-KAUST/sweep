@@ -129,29 +129,27 @@ int64_t ViscoFFT::workspace_bytes() const
     return ws_bytes_;
 }
 
-void ViscoFFT::exec(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area,
-                    bool forward)
+void ViscoFFT::exec(const Buf& in, const Buf& out, const Buf& work_area, bool forward)
 {
-    auto check = [&](const torch::Tensor& t, const char* name) {
-        SWEEP_CHECK(t.defined() && t.is_cuda() && t.device().index() == device_,
+    // A complex64 slot is (..., nz, nx, 2) contiguous float pairs.
+    auto check = [&](const Buf& t, const char* name) {
+        SWEEP_CHECK(t.defined() && t.is_cuda() && t.device_index() == device_,
                     "ViscoFFT: ", name, " must live on CUDA device ", static_cast<int>(device_),
                     " (the plan's device)");
-        SWEEP_CHECK(t.scalar_type() == torch::kComplexFloat && t.is_contiguous(),
-                    "ViscoFFT: ", name, " must be a contiguous complex64 tensor, got ",
-                    t.scalar_type());
-        SWEEP_CHECK(t.dim() >= 2 && t.size(-2) == nz_ && t.size(-1) == nx_
-                        && t.numel() == B_ * nz_ * nx_,
+        SWEEP_CHECK(t.element_size() == 4 && t.is_contiguous() && t.dim() >= 3 && t.size(-1) == 2,
+                    "ViscoFFT: ", name, " must be a contiguous (..., 2) float32 slot (complex64 pairs)");
+        SWEEP_CHECK(t.size(-3) == nz_ && t.size(-2) == nx_ && t.numel() == 2 * B_ * nz_ * nx_,
                     "ViscoFFT: ", name, " has shape ", t.sizes(), " but the plan is for ",
-                    B_, " x (", nz_, ", ", nx_, ")");
+                    B_, " x (", nz_, ", ", nx_, ") complex");
     };
     check(in, "in");
     check(out, "out");
     SWEEP_CHECK(in.data_ptr() != out.data_ptr(),
                 "ViscoFFT: the transform is out of place (in and out must be distinct slots)");
-    SWEEP_CHECK(work_area.defined() && work_area.is_cuda() && work_area.device().index() == device_
+    SWEEP_CHECK(work_area.defined() && work_area.is_cuda() && work_area.device_index() == device_
                     && work_area.is_contiguous(),
-                "ViscoFFT: the work area must be a contiguous CUDA tensor on the plan's device");
-    const int64_t have = static_cast<int64_t>(work_area.nbytes());
+                "ViscoFFT: the work area must be a contiguous CUDA slot on the plan's device");
+    const int64_t have = work_area.numel() * work_area.element_size();
     SWEEP_CHECK(have >= workspace_bytes(),
                 "ViscoFFT: the work area holds ", have, " bytes but the plan needs ",
                 workspace_bytes(), " (size the slot with visco_acoustic2d_fft_workspace_bytes)");
@@ -170,18 +168,19 @@ void ViscoFFT::exec(const torch::Tensor& in, const torch::Tensor& out, const tor
                                   forward ? CUFFT_FORWARD : CUFFT_INVERSE));
 }
 
-void ViscoFFT::forward(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area)
+void ViscoFFT::forward(const Buf& in, const Buf& out, const Buf& work_area)
 {
     exec(in, out, work_area, /*forward=*/true);
 }
 
-void ViscoFFT::inverse(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area)
+void ViscoFFT::inverse(const Buf& in, const Buf& out, const Buf& work_area)
 {
     exec(in, out, work_area, /*forward=*/false);
     // _fft_apply_normalization: (scale == 1.0) ? self : self.mul_(scale), the
-    // double Scalar form of Tensor::mul_.
+    // double Scalar form of Tensor::mul_ -- on complex64 the scalar becomes
+    // complex<float>(float(scale), 0) and multiplies (spectral_ops.cuh).
     if (inverse_scale_ != 1.0)
-        out.mul_(inverse_scale_);
+        visco_ops::cscale(visco_acoustic2d_complex_ptr(out), static_cast<float>(inverse_scale_), out.numel() / 2);
 }
 
 namespace visco_acoustic2d {

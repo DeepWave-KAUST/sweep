@@ -11,6 +11,7 @@
 #include "../../common/acoustic.h"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "spectral_ops.cuh"
 #include "../../common/derived_models.h"
 #include "../../operators/laplace.cuh"
 
@@ -82,15 +83,15 @@ __global__ void visco_acoustic2d_carrier(
 // condition on free-surface faces); the global FFT damping term DOES write
 // them, so it must be followed by this to (a) keep the free-surface BC and
 // (b) preserve the c-backend "halo == 0" invariant the stencil taps assume.
-inline void visco_acoustic2d_zero_halo(torch::Tensor u, int M)
+inline void visco_acoustic2d_zero_halo(const Buf& u, int M)
 {
-    const long nz = u.size(-2);
-    const long nx = u.size(-1);
-    u.narrow(-2, 0, M).zero_();
-    u.narrow(-2, nz - M, M).zero_();
-    u.narrow(-1, 0, M).zero_();
-    u.narrow(-1, nx - M, M).zero_();
+    SWEEP_CHECK(u.defined() && u.is_contiguous() && u.dim() >= 2,
+                "visco_acoustic2d_zero_halo: a contiguous (..., nz, nx) grid");
+    const int nz = static_cast<int>(u.size(-2));
+    const int nx = static_cast<int>(u.size(-1));
+    visco_ops::zero_halo(u.data_ptr<float>(), u.numel() / (static_cast<int64_t>(nz) * nx), nz, nx, M);
 }
+inline void visco_acoustic2d_zero_halo(const torch::Tensor& u, int M) { visco_acoustic2d_zero_halo(buf_of(u), M); }
 
 // ---------------------------------------------------------------------------
 // Spectral-term bundle: the amplitude damping (the D_loss filter on du/dt,
@@ -257,12 +258,12 @@ public:
     // holding B*nz*nx elements with trailing (nz, nx), in DISTINCT storages
     // (out of place, as ATen always transforms); ``work_area``: a contiguous
     // CUDA slot of at least workspace_bytes() bytes.
-    void forward(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area);
+    void forward(const Buf& in, const Buf& out, const Buf& work_area);
     // out = ifft2(in) with ATen's default ("backward") normalization: the
     // CUFFT_INVERSE exec, then out.mul_(1.0 / (nz*nx)) -- the very
     // Tensor::mul_(Scalar) with the same double _fft_apply_normalization uses
     // for fft_norm_mode::by_n (skipped, as there, when the scale is 1.0).
-    void inverse(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area);
+    void inverse(const Buf& in, const Buf& out, const Buf& work_area);
 
     ~ViscoFFT();
 
@@ -271,8 +272,7 @@ public:
 
 private:
     ViscoFFT(int device, int64_t B, int64_t nz, int64_t nx);
-    void exec(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area,
-              bool forward);
+    void exec(const Buf& in, const Buf& out, const Buf& work_area, bool forward);
 
     int device_;
     int64_t B_, nz_, nx_;
@@ -327,8 +327,8 @@ inline ViscoSlots visco_slots(bool damping, bool dispersion, derived::ViscoMode 
 // ViscoAcoustic.cuda_layout's forward_workspace_shapes /
 // backward_workspace_shapes declared it for this mode and eq_aux composition,
 // and the propagator then binds it, so the binding is required.
-inline torch::Tensor visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool, int idx,
-                                                   const torch::Tensor& like, const char* what)
+inline Buf visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool, int idx,
+                                         const torch::Tensor& like, const char* what)
 {
     SWEEP_CHECK(pool_slot_bound(pool, idx),
                 what, "[", idx, "] (complex spectrum) must be bound by the propagator "
@@ -341,7 +341,7 @@ inline torch::Tensor visco_acoustic2d_complex_slot(const std::vector<torch::Tens
                 " but the complex slot layout is ", want, " (float32 pairs)");
     SWEEP_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
                 what, "[", idx, "] must be a contiguous float32 CUDA tensor");
-    return at::view_as_complex(raw);
+    return buf_of(raw);   // (..., 2) float pairs: the complex64 grid, as cuFFT reads it
 }
 
 // The cuFFT work area over a pool slot: a flat float32 slot of at least
@@ -349,9 +349,9 @@ inline torch::Tensor visco_acoustic2d_complex_slot(const std::vector<torch::Tens
 // told the Python side).  Declared by ViscoAcoustic.cuda_layout whenever a
 // spectral term is on (_fft_work_area_slot asks this very binding for the size),
 // so the propagator always binds it and there is no fallback.
-inline torch::Tensor visco_acoustic2d_work_area_slot(const std::vector<torch::Tensor>& pool, int idx,
-                                                     const ViscoFFT& fft, const torch::Tensor& /*like*/,
-                                                     const char* what)
+inline Buf visco_acoustic2d_work_area_slot(const std::vector<torch::Tensor>& pool, int idx,
+                                           const ViscoFFT& fft, const torch::Tensor& /*like*/,
+                                           const char* what)
 {
     const int64_t floats = std::max<int64_t>(1, (fft.workspace_bytes() + 3) / 4);
     SWEEP_CHECK(pool_slot_bound(pool, idx),
@@ -364,16 +364,38 @@ inline torch::Tensor visco_acoustic2d_work_area_slot(const std::vector<torch::Te
                 what, "[", idx, "] (cuFFT work area) holds ", raw.numel(),
                 " floats but the plan needs ", floats,
                 " (visco_acoustic2d_fft_workspace_bytes on this device)");
-    return raw;
+    return buf_of(raw);
 }
 
 // A float32 grid aliasing the first half of a complex slot's storage: free
-// real scratch whenever that spectrum is dead (view_as_real is (…, 2)
-// contiguous, so the flat view / narrow / reshape are all views).
-inline torch::Tensor visco_acoustic2d_real_alias(const torch::Tensor& C)
+// real scratch whenever that spectrum is dead (the slot is (..., 2)
+// contiguous float pairs, so its first numel/2 floats are one contiguous
+// grid of the spectrum's shape).
+inline Buf visco_acoustic2d_real_alias(const Buf& C)
 {
-    return at::view_as_real(C).view({-1}).narrow(0, 0, C.numel()).view(C.sizes());
+    SWEEP_CHECK(C.defined() && C.dim() >= 2 && C.size(-1) == 2 && C.is_contiguous(),
+                "visco_acoustic2d_real_alias: a contiguous (..., 2) complex slot");
+    Buf r = C;
+    r.ndim_ = C.ndim_ - 1;
+    r.numel_ = C.numel() / 2;
+    r.sizes_[r.ndim_] = 0;
+    r.strides_[r.ndim_] = 0;
+    int64_t stride = 1;
+    for (int64_t i = r.ndim_ - 1; i >= 0; --i) {
+        r.strides_[i] = stride;
+        stride *= r.sizes_[i];
+    }
+    return r;
 }
+
+// The complex slot's real parts, as the strided float operand at::real used
+// to hand the ATen kernels: pointer + element stride 2.
+inline const float* visco_acoustic2d_real_ptr(const Buf& C) { return C.data_ptr<float>(); }
+// The slot as cuFFT / the complex kernels read it: float2 pairs over the same
+// bytes.  Not Buf::data_ptr<float2>() -- that asserts on the element width,
+// and the slot's width is the float's (the JIT build keeps asserts).
+inline float2* visco_acoustic2d_complex_ptr(const Buf& C) { return reinterpret_cast<float2*>(C.data_ptr<float>()); }
+constexpr int VISCO_REAL_STRIDE = 2;
 
 // The spectral scratch of one call, bound from a workspace pool by
 // visco_acoustic2d_bind_scratch.  Members whose slot does not exist for the
@@ -381,9 +403,9 @@ inline torch::Tensor visco_acoustic2d_real_alias(const torch::Tensor& C)
 struct ViscoScratch {
     ViscoSlots slots;
     std::shared_ptr<ViscoFFT> fft;      // the plan for the bound geometry
-    torch::Tensor C0, C1, C2;           // complex64, like.sizes()
-    torch::Tensor R1, UPREV, CARRIER;   // float32, like.sizes() (backward pools only)
-    torch::Tensor fft_ws;               // flat float32 cuFFT work area
+    Buf C0, C1, C2;           // complex64 as (like.sizes(), 2) float pairs
+    Buf R1, UPREV, CARRIER;   // float32, like.sizes() (backward pools only)
+    Buf fft_ws;               // flat float32 cuFFT work area
 };
 
 // ``pool``: p.forward_workspace (mode Forward) or p.adjoint_workspace (the
@@ -406,7 +428,7 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
                 what, ": requires the propagator-bound workspace pool of ", ws.slots.count,
                 " tensors (visco_slots for this mode and eq_aux composition), got ", pool.size());
     if (ws.slots.carrier >= 0)
-        ws.CARRIER = pool_required(pool, ws.slots.carrier, like, what);
+        ws.CARRIER = buf_of(pool_required(pool, ws.slots.carrier, like, what));
     if (!(damping || dispersion))
         return ws;
     SWEEP_CHECK(like.dim() >= 2 && like.is_cuda() && like.scalar_type() == torch::kFloat,
@@ -419,9 +441,9 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
     if (ws.slots.c2 >= 0)
         ws.C2 = visco_acoustic2d_complex_slot(pool, ws.slots.c2, like, what);
     if (ws.slots.r1 >= 0)
-        ws.R1 = pool_required(pool, ws.slots.r1, like, what);
+        ws.R1 = buf_of(pool_required(pool, ws.slots.r1, like, what));
     if (ws.slots.uprev >= 0)
-        ws.UPREV = pool_required(pool, ws.slots.uprev, like, what);
+        ws.UPREV = buf_of(pool_required(pool, ws.slots.uprev, like, what));
     ws.fft_ws = visco_acoustic2d_work_area_slot(pool, ws.slots.fft_ws, *ws.fft, like, what);
     return ws;
 }
@@ -441,14 +463,18 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
 // product staged in a real alias).  It may live in C1's storage (the alias
 // is consumed by the promote before C1 is overwritten) but NOT in C0's.
 // ---------------------------------------------------------------------------
-inline torch::Tensor visco_acoustic2d_lop_into(
-    const torch::Tensor& x, const torch::Tensor& kmul, ViscoScratch& ws)
+// ``x``: a contiguous float grid of the slot's shape (a wavefield, a real
+// alias, a history row); ``kmul``: the (nz, nx) filter.  The result is the
+// real part of C1 -- visco_acoustic2d_real_ptr(ws.C1) at VISCO_REAL_STRIDE --
+// valid until C1 is next written.
+inline void visco_acoustic2d_lop_into(const float* x, const float* kmul, ViscoScratch& ws)
 {
-    ws.C0.copy_(x);
+    const int64_t n = ws.C1.numel() / 2;
+    const int64_t ng = ws.C1.size(-3) * ws.C1.size(-2);   // (nz, nx) of the (..., nz, nx, 2) slot
+    visco_ops::promote(visco_acoustic2d_complex_ptr(ws.C0), x, n);
     ws.fft->forward(ws.C0, ws.C1, ws.fft_ws);
-    at::mul_out(ws.C0, kmul, ws.C1);
+    visco_ops::cmul_grid(visco_acoustic2d_complex_ptr(ws.C0), kmul, visco_acoustic2d_complex_ptr(ws.C1), n, ng);
     ws.fft->inverse(ws.C0, ws.C1, ws.fft_ws);
-    return at::real(ws.C1);
 }
 
 // One amplitude-damping application on the freshly-written u_next:
@@ -466,13 +492,17 @@ inline void visco_acoustic2d_apply_damping_into(
     const torch::Tensor& dt2A,   // (B, 1, nz, nx) dt^2 * A (derived table)
     float dt, ViscoScratch& ws)
 {
-    auto dudt = visco_acoustic2d_real_alias(ws.C1);
-    at::sub_out(dudt, wf.u_now_t, wf.u_prev_t);
-    dudt.div_(dt);
-    auto L = visco_acoustic2d_lop_into(dudt, kmul, ws);   // == at::real(ws.C1); dudt is gone
-    auto R = visco_acoustic2d_real_alias(ws.C0);
-    at::mul_out(R, dt2A, L);
-    wf.u_next_t.sub_(R);
+    const Buf dudt = visco_acoustic2d_real_alias(ws.C1);
+    const int64_t n = dudt.numel();
+    visco_ops::binary<visco_ops::SubOp>(dudt.data_ptr<float>(),
+                                        wf.u_now_t.template data_ptr<float>(), 1,
+                                        wf.u_prev_t.template data_ptr<float>(), 1, n);
+    visco_ops::scale(dudt.data_ptr<float>(), 1.0f / dt, n);            // div_(dt): times the reciprocal
+    visco_acoustic2d_lop_into(dudt.data_ptr<float>(), kmul.data_ptr<float>(), ws);   // C1.re = L; dudt is gone
+    const Buf R = visco_acoustic2d_real_alias(ws.C0);
+    visco_ops::binary<visco_ops::MulOp>(R.data_ptr<float>(), dt2A.data_ptr<float>(), 1,
+                                        visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
+    visco_ops::inplace<visco_ops::SubOp>(wf.u_next_t.template data_ptr<float>(), R.data_ptr<float>(), 1, n);
 }
 
 // Forward spectral terms on slots: dispersion first, damping second (the
@@ -499,17 +529,22 @@ inline void visco_acoustic2d_apply_spectral_into(
     if (s.disp) {
         SWEEP_CHECK(ws.C2.defined(), "visco_acoustic2d: the dispersion pipeline needs the C2 slot "
                     "(bind the scratch with dispersion on, in forward / ckpt / recursive mode)");
-        ws.C0.copy_(wf.u_now_t);
+        const int64_t n = ws.C1.numel() / 2;
+        const int64_t ng = ws.C1.size(-3) * ws.C1.size(-2);
+        float2* C0 = visco_acoustic2d_complex_ptr(ws.C0);
+        visco_ops::promote(C0, wf.u_now_t.template data_ptr<float>(), n);
         ws.fft->forward(ws.C0, ws.C1, ws.fft_ws);            // C1 = F, alive across both products
-        at::mul_out(ws.C0, s.Dk2, ws.C1);                     // C0 = Dk2 * F
+        visco_ops::cmul_grid(C0, s.Dk2.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, ng);   // C0 = Dk2 * F
         ws.fft->inverse(ws.C0, ws.C2, ws.fft_ws);            // C2 = IFFT2(Dk2 * F)
-        auto R = visco_acoustic2d_real_alias(ws.C0);          // the product in C0 is dead
-        at::mul_out(R, s.Gd1, at::real(ws.C2));
-        wf.u_next_t.add_(R);
-        at::mul_out(ws.C0, s.Dfrac, ws.C1);                   // C0 = Dfrac * F (R's bits are dead)
+        const Buf R = visco_acoustic2d_real_alias(ws.C0);     // the product in C0 is dead
+        visco_ops::binary<visco_ops::MulOp>(R.data_ptr<float>(), s.Gd1.data_ptr<float>(), 1,
+                                            visco_acoustic2d_real_ptr(ws.C2), VISCO_REAL_STRIDE, n);
+        visco_ops::inplace<visco_ops::AddOp>(wf.u_next_t.template data_ptr<float>(), R.data_ptr<float>(), 1, n);
+        visco_ops::cmul_grid(C0, s.Dfrac.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, ng); // C0 = Dfrac * F (R's bits are dead)
         ws.fft->inverse(ws.C0, ws.C2, ws.fft_ws);            // C2 = IFFT2(Dfrac * F)
-        at::mul_out(R, s.Gd2, at::real(ws.C2));
-        wf.u_next_t.sub_(R);
+        visco_ops::binary<visco_ops::MulOp>(R.data_ptr<float>(), s.Gd2.data_ptr<float>(), 1,
+                                            visco_acoustic2d_real_ptr(ws.C2), VISCO_REAL_STRIDE, n);
+        visco_ops::inplace<visco_ops::SubOp>(wf.u_next_t.template data_ptr<float>(), R.data_ptr<float>(), 1, n);
     }
     if (s.active)
         visco_acoustic2d_apply_damping_into(wf, s.kmul, s.dt2A, dt, ws);

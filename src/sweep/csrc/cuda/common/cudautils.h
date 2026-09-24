@@ -134,6 +134,8 @@ inline void zero_tensor_device_async(const Buf& dst)
 // one side and a Buf on the other should not force a site to spell buf_of().
 inline void copy_tensor_cuda_async(const Buf& dst, const torch::Tensor& src) { copy_tensor_cuda_async(dst, buf_of(src)); }
 inline void copy_tensor_cuda_async(const torch::Tensor& dst, const Buf& src) { copy_tensor_cuda_async(buf_of(dst), src); }
+inline void copy_tensor_device_to_device_async(const Buf& dst, const torch::Tensor& src) { copy_tensor_device_to_device_async(dst, buf_of(src)); }
+inline void copy_tensor_device_to_device_async(const torch::Tensor& dst, const Buf& src) { copy_tensor_device_to_device_async(buf_of(dst), src); }
 
 // ---- BufList / Buf twins of the pool and set helpers (step 2, unit 2a) ------
 // Same names, same checks, same semantics, on descriptors.  Neither side

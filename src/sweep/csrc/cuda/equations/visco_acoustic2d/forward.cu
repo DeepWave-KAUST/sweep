@@ -159,7 +159,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
         // Raw store BEFORE the step: u_now == u(t=it).
         if (u_allt.defined())
-            u_allt[it].copy_(wavefield.u_now_t.view({B, nz, nx}));
+            copy_tensor_device_to_device_async(u_allt.select(0, it), wavefield.u_now_t);
 
         ACOUSTIC2D(
             order,
