@@ -1,4 +1,3 @@
-#include <torch/extension.h>
 
 #include "elastic_tti_2nd2d.h"
 #include "kernels.cuh"
@@ -11,9 +10,7 @@
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace elastic_tti_2nd2d {
 
@@ -229,11 +226,5 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
 }
 
 
-ForwardOutput forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(forward_core(in), in_torch);
-}
 
 }

@@ -1,6 +1,5 @@
 #include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "acoustic_lsrtm3d.h"
 #include "kernels.cuh"
@@ -11,9 +10,7 @@
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_lsrtm3d {
 
@@ -231,11 +228,5 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 }
 
 
-ForwardOutput forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(forward_core(in), in_torch);
-}
 
 } // namespace acoustic_lsrtm3d

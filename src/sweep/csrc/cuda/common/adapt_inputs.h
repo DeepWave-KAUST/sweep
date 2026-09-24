@@ -6,7 +6,6 @@
 #include <torch/extension.h>
 #include "../../core/input_core.h"
 #include "../../core/outputs.h"
-#include "../../core/runner.h"
 #include "buf_torch.h"
 
 struct InputArena {
@@ -141,7 +140,7 @@ inline ForwardInputCore adapt_input(const ForwardInput& in, InputArena& ar)
     c.transfer_interval = in.transfer_interval;
     c.boundary_ring_buffers = in.boundary_ring_buffers;
     c.boundary_tail_steps = in.boundary_tail_steps;
-    c.boundary_session = in.boundary_session.get();
+    c.boundary_session = (in.boundary_session ? static_cast<BoundarySession*>(in.boundary_session->h) : nullptr);
     c.checkpoint_interval = in.checkpoint_interval;
     c.checkpoint_count = in.checkpoint_count;
     c.it_begin = in.it_begin;
@@ -202,7 +201,7 @@ inline BackwardInputCore adapt_input(const BackwardInput& in, InputArena& ar)
     c.transfer_interval = in.transfer_interval;
     c.boundary_ring_buffers = in.boundary_ring_buffers;
     c.boundary_tail_steps = in.boundary_tail_steps;
-    c.boundary_session = in.boundary_session.get();
+    c.boundary_session = (in.boundary_session ? static_cast<BoundarySession*>(in.boundary_session->h) : nullptr);
     c.checkpoint_interval = in.checkpoint_interval;
     c.checkpoint_count = in.checkpoint_count;
     c.compute_illumination = in.compute_illumination;
@@ -217,31 +216,3 @@ inline BackwardInputCore adapt_input(const BackwardInput& in, InputArena& ar)
     c.adcig_max_lag = in.adcig_max_lag;
     return c;
 }
-
-
-// The torch side of a stepped runner (IForwardRunner / IBackwardRunner are the
-// binding's interfaces, shared/wavetypes.h): it holds the torch input and the
-// arena the core runner's spans point into, adapts once at construction and
-// maps every run()'s outputs back by pointer identity.  R is a core runner
-// (IForwardRunnerCore / IBackwardRunnerCore, core/runner.h).
-template <class R>
-struct TorchForwardRunner final : IForwardRunner {
-    ForwardInput in_;
-    InputArena arena_;
-    R core_;
-    explicit TorchForwardRunner(const ForwardInput& in) : in_(in), core_(adapt_input(in_, arena_)) {}
-    ForwardOutput run(int it_begin, int it_end, int step_phase) override
-    { return to_torch(core_.run(it_begin, it_end, step_phase), in_); }
-    int device_index() const override { return core_.device_index(); }
-};
-
-template <class R>
-struct TorchBackwardRunner final : IBackwardRunner {
-    BackwardInput in_;
-    InputArena arena_;
-    R core_;
-    explicit TorchBackwardRunner(const BackwardInput& in) : in_(in), core_(adapt_input(in_, arena_)) {}
-    BackwardOutput run(int bw_it_begin, int bw_it_end, int step_phase) override
-    { return to_torch(core_.run(bw_it_begin, bw_it_end, step_phase), in_); }
-    int device_index() const override { return core_.device_index(); }
-};

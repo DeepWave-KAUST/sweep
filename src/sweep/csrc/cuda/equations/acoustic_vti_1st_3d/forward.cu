@@ -17,7 +17,6 @@
 // DOI: 10.1190/1.3059320.
 // ---------------------------------------------------------------------------
 
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
@@ -33,8 +32,6 @@
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../launch/config.h"
-#include "../../common/wavetypes.h"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_vti_1st_3d {
 
@@ -355,11 +352,5 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
 // Backward implementations live in backward.cu.
 
 
-ForwardOutput forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(forward_core(in), in_torch);
-}
 
 }  // namespace acoustic_vti_1st_3d

@@ -93,7 +93,6 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -103,11 +102,9 @@
 #include "context.h"
 #include "checkpoint_runtime.cuh"
 #include "cudautils.h"
-#include "adapt_inputs.h"   // *InputCore, InputArena, the output twins, to_torch
 #include "boundarysaver.cuh"
 #include "boundary_runtime.cuh"
 #include "boundary/session.cuh"
-#include "wavetypes.h"
 #include "../launch/config.h"
 
 namespace eqdrv {
@@ -487,14 +484,6 @@ ForwardOutputCore generic_forward_core(const ForwardInputCore& in)
     return runner.run(in.it_begin, in.it_end, in.step_phase);
 }
 
-template <class Eq>
-ForwardOutput generic_forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(generic_forward_core<Eq>(in), in_torch);
-}
-
 
 // Validate the stepped-backward segment fields (bw_it_begin/bw_it_end).
 // ``need_recon`` is true for boundary-saving mode, where the reconstruction
@@ -691,14 +680,6 @@ BackwardOutputCore generic_backward_core(const BackwardInputCore& in)
 
     Eq::pack_outputs(out, grads, illumination);
     return out;
-}
-
-template <class Eq>
-BackwardOutput generic_backward(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(generic_backward_core<Eq>(in), in_torch);
 }
 
 // ---- generic_backward_bs ----
@@ -907,14 +888,6 @@ BackwardOutputCore generic_backward_bs_core(const BackwardInputCore& in)
     return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
 }
 
-template <class Eq>
-BackwardOutput generic_backward_bs(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(generic_backward_bs_core<Eq>(in), in_torch);
-}
-
 // Pool slots of the two checkpoint skeletons, declared per equation in
 // cuda_layout (checkpoint_replay_shapes / backward_workspace_shapes, by memory
 // mode) and bound by the propagator.  Both declarations are unconditional for
@@ -1040,14 +1013,6 @@ BackwardOutputCore generic_backward_ckpt_core(const BackwardInputCore& in)
 
     Eq::pack_outputs(out, grads, illumination);
     return out;
-}
-
-template <class Eq>
-BackwardOutput generic_backward_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(generic_backward_ckpt_core<Eq>(in), in_torch);
 }
 
 // ---- generic_backward_recursive_ckpt (acoustic-family bisection) ----
@@ -1254,14 +1219,6 @@ BackwardOutputCore generic_backward_recursive_ckpt_core(const BackwardInputCore&
 
     Eq::pack_outputs(out, grads, illumination);
     return out;
-}
-
-template <class Eq>
-BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(generic_backward_recursive_ckpt_core<Eq>(in), in_torch);
 }
 
 } // namespace eqdrv

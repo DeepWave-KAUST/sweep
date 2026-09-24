@@ -1,4 +1,3 @@
-#include <torch/extension.h>
 #include <algorithm>
 #include <array>
 
@@ -13,9 +12,7 @@
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace elastic_tti_2nd2d {
 
@@ -691,25 +688,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 }
 
 
-BackwardOutput backward(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_core(in), in_torch);
-}
 
-BackwardOutput backward_bs(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_bs_core(in), in_torch);
-}
 
-BackwardOutput backward_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_ckpt_core(in), in_torch);
-}
 
 } // namespace elastic_tti_2nd2d

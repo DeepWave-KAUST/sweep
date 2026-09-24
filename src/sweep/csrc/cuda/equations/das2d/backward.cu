@@ -1,4 +1,3 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
@@ -13,9 +12,7 @@
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace das2d {
 
@@ -927,32 +924,8 @@ BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 }
 
 
-BackwardOutput backward(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_core(in), in_torch);
-}
 
-BackwardOutput backward_bs(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_bs_core(in), in_torch);
-}
 
-BackwardOutput backward_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_ckpt_core(in), in_torch);
-}
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(backward_recursive_ckpt_core(in), in_torch);
-}
 
 } // namespace das2d

@@ -1,4 +1,3 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
@@ -13,9 +12,7 @@
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace das2d {
 
@@ -277,11 +274,5 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
 }
 
 
-ForwardOutput forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(forward_core(in), in_torch);
-}
 
 }

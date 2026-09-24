@@ -16,7 +16,6 @@
 // and one that a torch minor bump can break silently.  Same three arguments,
 // same plan; what guarantees the bits is the gate, not the provenance of the
 // constructor.
-#include <torch/extension.h>
 
 #include <map>
 #include <tuple>

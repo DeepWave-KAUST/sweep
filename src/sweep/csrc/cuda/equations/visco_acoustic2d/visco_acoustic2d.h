@@ -1,11 +1,9 @@
 #pragma once
-#include <torch/extension.h>
 #include <cstddef>
 #include <cstdint>
-#include "../../common/wavetypes.h"
-#include "../../core/input_core.h"
-#include "../../core/outputs.h"
-#include "../../core/runner.h"
+#include "../../../core/input_core.h"
+#include "../../../core/outputs.h"
+#include "../../../core/runner.h"
 
 namespace visco_acoustic2d {
 
@@ -15,22 +13,16 @@ namespace visco_acoustic2d {
 // adjoint_workspace from it as ceil(bytes / 4) float32 elements.
 size_t fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx);
 
-ForwardOutput forward(const ForwardInput& in);
 ForwardOutputCore forward_core(const ForwardInputCore& in);
 
-BackwardOutput backward(const BackwardInput& in);
 BackwardOutputCore backward_core(const BackwardInputCore& in);
 
-BackwardOutput backward_bs(const BackwardInput& in);
 BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 
-BackwardOutput backward_ckpt(const BackwardInput& in);
 BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
 BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
 
-RTMOutput rtm(const BackwardInput& in);
 RTMOutputCore rtm_core(const BackwardInputCore& in);
 
 } // namespace visco_acoustic2d

@@ -1,32 +1,21 @@
 #pragma once
-#include <torch/extension.h>
-#include "../../common/wavetypes.h"
-#include "../../core/input_core.h"
-#include "../../core/outputs.h"
-#include "../../core/runner.h"
+#include "../../../core/input_core.h"
+#include "../../../core/outputs.h"
+#include "../../../core/runner.h"
 
 namespace elastic2d {
 
-ForwardOutput forward(const ForwardInput& in);
 ForwardOutputCore forward_core(const ForwardInputCore& in);
 
-// Persistent stepped runners (prologue once, run() per segment) —
-// see IForwardRunner/IBackwardRunner in shared/wavetypes.h.
-ForwardRunnerPtr forward_runner(const ForwardInput& in);
 ForwardRunnerCorePtr forward_runner_core(const ForwardInputCore& in);
-BackwardRunnerPtr backward_bs_runner(const BackwardInput& in);
 BackwardRunnerCorePtr backward_bs_runner_core(const BackwardInputCore& in);
 
-BackwardOutput backward(const BackwardInput& in);
 BackwardOutputCore backward_core(const BackwardInputCore& in);
 
-BackwardOutput backward_bs(const BackwardInput& in);
 BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 
-BackwardOutput backward_ckpt(const BackwardInput& in);
 BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
 BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
 
 // APM (Cao & Chen 2018) parameter-modified path for irregular topography.
@@ -35,7 +24,6 @@ BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
 //    lam_eff, mu_eff, mu_xz_node, rho_x_eff, rho_z_eff]
 // and ``in.topo_category`` set to the runtime-padded ``int32`` category
 // tensor (INTERIOR=0, AIR=1, H=2, VL=3, VR=4, OC=5, IC=6).
-ForwardOutput  apm_forward(const ForwardInput& in);   // forward only: no compiled APM backward
 ForwardOutputCore apm_forward_core(const ForwardInputCore& in);
 
 }

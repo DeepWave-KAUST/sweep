@@ -1,4 +1,3 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
@@ -13,16 +12,9 @@
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../launch/config.h"
-#include "../../common/wavetypes.h"
 #include "driver_traits.cuh"
-#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace elastic2d {
-
-ForwardOutput forward(const ForwardInput& in)
-{
-    return eqdrv::sg_generic_forward<Driver>(in);
-}
 
 ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
@@ -206,17 +198,6 @@ ForwardRunnerCorePtr forward_runner_core(const ForwardInputCore& in)
     return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
 }
 
-ForwardRunnerPtr forward_runner(const ForwardInput& in)
-{
-    return std::make_shared<TorchForwardRunner<eqdrv::SgForwardRunner<Driver>>>(in);
-}
 
-
-ForwardOutput apm_forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(apm_forward_core(in), in_torch);
-}
 
 }

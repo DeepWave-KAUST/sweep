@@ -4,7 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "boundary_session.h"
+#include "session_handle.h"
 
 
 struct ForwardInput {
@@ -96,7 +96,7 @@ struct ForwardInput {
     // per-call copy stream + BoundaryRuntime, i.e. exactly the old
     // behaviour.  DD sets it so a transfer can stay in flight across the
     // per-step calls.
-    std::shared_ptr<BoundarySession> boundary_session;
+    std::shared_ptr<BoundarySessionHandle> boundary_session;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
@@ -286,7 +286,7 @@ struct BackwardInput {
     // per-call copy stream + BoundaryRuntime, i.e. exactly the old
     // behaviour.  DD sets it so a transfer can stay in flight across the
     // per-step calls.
-    std::shared_ptr<BoundarySession> boundary_session;
+    std::shared_ptr<BoundarySessionHandle> boundary_session;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 

@@ -6,11 +6,6 @@
 
 namespace elastic_vr2d {
 
-ForwardOutput forward(const ForwardInput& in)
-{
-    return eqdrv::sg_generic_forward<Driver>(in);
-}
-
 ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
     return eqdrv::sg_generic_forward_core<Driver>(in);
@@ -19,11 +14,6 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
 ForwardRunnerCorePtr forward_runner_core(const ForwardInputCore& in)
 {
     return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
-}
-
-ForwardRunnerPtr forward_runner(const ForwardInput& in)
-{
-    return std::make_shared<TorchForwardRunner<eqdrv::SgForwardRunner<Driver>>>(in);
 }
 
 } // namespace elastic_vr2d

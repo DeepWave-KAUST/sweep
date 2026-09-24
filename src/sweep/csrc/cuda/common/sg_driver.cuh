@@ -82,7 +82,6 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -96,7 +95,6 @@
 #include "boundarysaver.cuh"
 #include "boundary_runtime.cuh"
 #include "boundary/session.cuh"
-#include "wavetypes.h"
 #include "eq_driver.cuh"     // Dims / read_dims / make_ctx / stencil_order
 #include "../launch/config.h"
 
@@ -393,14 +391,6 @@ ForwardOutputCore sg_generic_forward_core(const ForwardInputCore& in)
     return runner.run(in.it_begin, in.it_end, in.step_phase);
 }
 
-template <class Eq>
-ForwardOutput sg_generic_forward(const ForwardInput& in_torch)
-{
-    InputArena arena;
-    const ForwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(sg_generic_forward_core<Eq>(in), in_torch);
-}
-
 
 // Validate the stepped-backward segment fields, the DD cut mask and the
 // backward phase split for staggered-family entry points.  ``need_recon`` is
@@ -614,14 +604,6 @@ BackwardOutputCore sg_generic_backward_core(const BackwardInputCore& in)
 
     out.grads = grads;
     return out;
-}
-
-template <class Eq>
-BackwardOutput sg_generic_backward(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(sg_generic_backward_core<Eq>(in), in_torch);
 }
 
 // ---- sg_generic_backward_bs ----
@@ -855,14 +837,6 @@ BackwardOutputCore sg_generic_backward_bs_core(const BackwardInputCore& in)
     return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
 }
 
-template <class Eq>
-BackwardOutput sg_generic_backward_bs(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(sg_generic_backward_bs_core<Eq>(in), in_torch);
-}
-
 // ---- sg_generic_backward_ckpt (chunked segments with velocity carriers) ----
 
 // N_VEL model-shaped carriers from adjoint_workspace slots [first, first + N_VEL).
@@ -1053,14 +1027,6 @@ BackwardOutputCore sg_generic_backward_ckpt_core(const BackwardInputCore& in)
     return out;
 }
 
-template <class Eq>
-BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(sg_generic_backward_ckpt_core<Eq>(in), in_torch);
-}
-
 // ---- sg_generic_backward_recursive_ckpt (per-step replay) ----
 
 inline int sg_find_previous_checkpoint_idx(
@@ -1230,11 +1196,4 @@ BackwardOutputCore sg_generic_backward_recursive_ckpt_core(const BackwardInputCo
     return out;
 }
 
-template <class Eq>
-BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in_torch)
-{
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
-    return to_torch(sg_generic_backward_recursive_ckpt_core<Eq>(in), in_torch);
-}
 } // namespace eqdrv
