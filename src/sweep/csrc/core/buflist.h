@@ -4,6 +4,7 @@
 // that outlives the call). Same non-owning rule as Buf. The read API is the
 // subset of std::vector the drivers use: size(), empty(), operator[], begin/end.
 #include <cstdint>
+#include <vector>
 #include "buf.h"
 struct BufList {
     const Buf* p = nullptr;
@@ -13,6 +14,9 @@ struct BufList {
     const Buf& operator[](int64_t i) const { return p[i]; }
     const Buf* begin() const { return p; }
     const Buf* end() const { return p + n; }
+    // A struct bind that wants a std::vector<Buf> takes the span through this
+    // (a copy of n descriptors, nothing else).
+    operator std::vector<Buf>() const { return std::vector<Buf>(p, p + n); }
 };
 // Small spans for the few vector<int>/vector<float>/vector<string> fields.
 struct IntSpan   { const int*   p = nullptr; int64_t n = 0; int64_t size() const { return n; } int   operator[](int64_t i) const { return p[i]; } const int*   begin() const { return p; } const int*   end() const { return p + n; } };

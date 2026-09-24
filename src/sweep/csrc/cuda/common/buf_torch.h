@@ -9,7 +9,7 @@
 //
 // The conversion is a COPY, not a reference: nothing here keeps the tensor
 // alive, so the caller must hold the tensor for at least as long as the Buf it
-// made from it (EffectiveBoundarySaver keeps them in ``torch_refs_``).
+// made from it (the propagator holds every buffer for the call).
 // ---------------------------------------------------------------------------
 
 #include <torch/extension.h>

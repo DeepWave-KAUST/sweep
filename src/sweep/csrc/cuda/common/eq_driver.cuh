@@ -438,7 +438,7 @@ public:
             boundary_runtime->synchronize();
 
         out.wavefield = u_allt;
-        out.last_two = boundary_saver.last_two_th_;
+        out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
         out.record = record;
 
         return out;

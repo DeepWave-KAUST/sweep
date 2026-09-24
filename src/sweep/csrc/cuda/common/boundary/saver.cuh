@@ -93,20 +93,17 @@ struct EffectiveBoundarySaver {
 
     // The buffers below are DESCRIPTORS (core/buf.h): non-owning views of
     // memory the Python propagator allocated.  The tensor handles that keep
-    // that memory alive live in ``torch_refs_`` / ``storage_th_`` at the bottom
+    // that memory alive live in ``a parked tensor list`` / ``the storage tensors`` at the bottom
     // of this struct -- the same refcount these members used to hold
     // themselves.
     Buf left_t, right_t;
     Buf front_t, back_t;
     Buf bottom_t, top_t;
-    // last_two is a Buf like every other buffer here since step 2 of the
-    // torch-free line: the drivers' ``select(...).copy_(...)`` on it now go
-    // through the memcpy helpers, which take a Buf, and BUF_MAX_DIMS is 8, so
-    // its 7 dimensions fit.  The tensor itself is kept beside it for the one
-    // thing that still needs a tensor -- handing it back to Python as
-    // ``out.last_two`` -- the way storage_th_ sits beside the storage faces.
+    // last_two is a Buf like every other buffer here: the drivers'
+    // ``select(...).copy_(...)`` on it go through the memcpy helpers, which
+    // take a Buf, and BUF_MAX_DIMS is 8, so its 7 dimensions fit.  The tensor
+    // Python bound is what ``out.last_two`` hands back, from the input struct.
     Buf last_two;
-    torch::Tensor last_two_th_;
 
     Buf left_gpu, right_gpu;
     Buf front_gpu, back_gpu;
@@ -135,6 +132,7 @@ struct EffectiveBoundarySaver {
     Buf bottom_staging_t, top_staging_t;
 
     bool enabled = false;
+    bool allocated_ = false;   // allocate() binds once per saver
 
     int dim = 3;
     int nvar = 1;
@@ -150,86 +148,47 @@ struct EffectiveBoundarySaver {
     int64_t bottom_stride = 0;
     int64_t top_stride = 0;
 
-    // Torch-side ownership.  A Buf never owns memory, so every tensor this
-    // saver binds (or, on the self-allocating fallback, makes) is parked here
-    // for the saver's lifetime -- byte for byte the refcount the torch::Tensor
-    // members used to hold.  Pushing into the vector may reallocate it, which
-    // moves the Tensor handles but never the storage they point at, so the Bufs
-    // stay valid.
-    std::vector<torch::Tensor> torch_refs_;
-
-    // The six PERSISTENT storage faces as tensors, in bind_tensor_group order
-    // (top, bottom, front, back, left, right; front/back undefined in 2-D).
-    // load_from_vector() still needs real tensors for Tensor::copy_().
-    torch::Tensor storage_th_[6];
-
-    // Park the tensor, hand back a descriptor of it.
-    inline Buf keep(const torch::Tensor& t)
-    {
-        torch_refs_.push_back(t);
-        return buf_of(t);
-    }
+    // No ownership here: a Buf never owns memory, and every buffer this saver
+    // binds is the propagator's, alive for the call (or the propagator's
+    // lifetime for the persistent faces).  The members are descriptors, copied
+    // out of the caller's list at bind time.
 
     inline void bind_tensor_group(
-        const std::vector<torch::Tensor>& tensors,
+        const BufList& tensors,
         const char* role,
         Buf& top,
         Buf& bottom,
         Buf& front,
         Buf& back,
         Buf& left,
-        Buf& right,
-        torch::Tensor* handles = nullptr
+        Buf& right
     )
     {
         if (dim == 3) {
             SWEEP_CHECK(tensors.size() == 6, role, " must contain 6 tensors for 3D");
-            top    = keep(tensors[0]);
-            bottom = keep(tensors[1]);
-            front  = keep(tensors[2]);
-            back   = keep(tensors[3]);
-            left   = keep(tensors[4]);
-            right  = keep(tensors[5]);
-            if (handles != nullptr) {
-                handles[0] = tensors[0];
-                handles[1] = tensors[1];
-                handles[2] = tensors[2];
-                handles[3] = tensors[3];
-                handles[4] = tensors[4];
-                handles[5] = tensors[5];
-            }
+            top    = tensors[0];
+            bottom = tensors[1];
+            front  = tensors[2];
+            back   = tensors[3];
+            left   = tensors[4];
+            right  = tensors[5];
         } else {
             SWEEP_CHECK(tensors.size() == 4, role, " must contain 4 tensors for 2D");
-            top    = keep(tensors[0]);
-            bottom = keep(tensors[1]);
-            left   = keep(tensors[2]);
-            right  = keep(tensors[3]);
+            top    = tensors[0];
+            bottom = tensors[1];
+            left   = tensors[2];
+            right  = tensors[3];
             front  = Buf();
             back   = Buf();
-            if (handles != nullptr) {
-                handles[0] = tensors[0];
-                handles[1] = tensors[1];
-                handles[2] = torch::Tensor();
-                handles[3] = torch::Tensor();
-                handles[4] = tensors[2];
-                handles[5] = tensors[3];
-            }
         }
     }
 
-    inline void bind_storage_tensors(
-        const std::vector<torch::Tensor>& tensors,
-        const char* role
-    )
+    inline void bind_storage_tensors(const BufList& tensors, const char* role)
     {
-        bind_tensor_group(tensors, role, top_t, bottom_t, front_t, back_t, left_t, right_t,
-                          storage_th_);
+        bind_tensor_group(tensors, role, top_t, bottom_t, front_t, back_t, left_t, right_t);
     }
 
-    inline void bind_staging_tensors(
-        const std::vector<torch::Tensor>& tensors,
-        const char* role
-    )
+    inline void bind_staging_tensors(const BufList& tensors, const char* role)
     {
         bind_tensor_group(tensors, role, top_gpu, bottom_gpu, front_gpu, back_gpu, left_gpu, right_gpu);
     }
@@ -266,7 +225,7 @@ struct EffectiveBoundarySaver {
     // Bind externally-allocated per-block FP32 scale tensors.  Used by
     // the INT8 path so the same persistent scale buffer is visible to
     // both the forward save kernel and the backward restore kernel.
-    inline void bind_int8_scales(const std::vector<torch::Tensor>& scales)
+    inline void bind_int8_scales(const BufList& scales)
     {
         bind_tensor_group(scales, "boundary_gpu int8 scale",
                           top_scale_t, bottom_scale_t,
@@ -277,7 +236,7 @@ struct EffectiveBoundarySaver {
     // Bind externally-allocated per-block FP32 scale RING tensors (staged
     // INT8 only).  Parallel to bind_staging_tensors for the uint8 main
     // ring; flushed to / loaded from the persistent scale buffer.
-    inline void bind_int8_scale_rings(const std::vector<torch::Tensor>& scales)
+    inline void bind_int8_scale_rings(const BufList& scales)
     {
         bind_tensor_group(scales, "boundary_gpu int8 scale ring",
                           top_scale_gpu, bottom_scale_gpu,
@@ -324,26 +283,25 @@ struct EffectiveBoundarySaver {
     // quantize_step copies the persistent buffer's whole per-step stride out of
     // it, so a slot of the wrong shape reads as garbage rather than failing.
     inline void bind_int8_staging(
-        const std::vector<torch::Tensor>& staging,
+        const BufList& staging,
         const std::vector<std::vector<int64_t>>& shapes)
     {
-        SWEEP_CHECK(staging.size() == shapes.size(),
+        SWEEP_CHECK(static_cast<size_t>(staging.size()) == shapes.size(),
                     "boundary_staging must contain ", shapes.size(),
                     " tensors for ", dim, "D, got ", staging.size());
         for (size_t i = 0; i < shapes.size(); ++i) {
-            SWEEP_CHECK(staging[i].sizes().vec() == shapes[i],
+            SWEEP_CHECK(staging[i].sizes() == shapes[i],
                         "boundary_staging[", i, "] has shape ", staging[i].sizes(),
                         " but the saver's geometry is ", shapes[i],
                         " -- the Python Layout and this driver disagree on "
                         "save_width or tangent_pad (the staging is one timestep "
                         "of the same band as the persistent buffer).");
-            SWEEP_CHECK(staging[i].scalar_type() == torch::kFloat,
-                        "boundary_staging[", i, "] must be float32, got ",
-                        staging[i].scalar_type());
+            SWEEP_CHECK(staging[i].dtype() == BoundaryDtype::FP32 && staging[i].element_size() == 4,
+                        "boundary_staging[", i, "] must be float32");
             SWEEP_CHECK(staging[i].is_cuda(),
                         "boundary_staging[", i, "] must live on the GPU (a host "
                         "tensor here reads as an illegal address inside the "
-                        "kernels), got ", staging[i].device());
+                        "kernels)");
         }
         bind_tensor_group(staging, "boundary_staging",
                           top_staging_t, bottom_staging_t,
@@ -376,7 +334,7 @@ struct EffectiveBoundarySaver {
         int nx_boundary,
         int ny_boundary,
         int nz_boundary,
-        const std::vector<torch::Tensor>& staging)
+        const BufList& staging)
     {
         const auto shapes = int8_staging_shapes(ctx, width, nx_boundary, ny_boundary, nz_boundary);
         SWEEP_CHECK(!staging.empty(),
@@ -408,7 +366,7 @@ struct EffectiveBoundarySaver {
     inline void allocate_last_two(
         const SolverContext& ctx,
         int last_two_nvar,
-        const torch::Tensor& last_two
+        const Buf& last_two
     )
     {
         // Binding is mandatory, as it is for every driver buffer since the
@@ -421,10 +379,11 @@ struct EffectiveBoundarySaver {
                     "boundary saving requires the propagator-bound u_last_two "
                     "({nvar, 2, B, 1, nz[, ny], nx}); the saver no longer allocates it.");
         (void)last_two_nvar;
-        last_two_th_ = last_two;
-        this->last_two = keep(last_two);
+        this->last_two = last_two;
     }
 
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the saver keeps descriptors only, so temporaries suffice.
     void allocate(
         bool use_boundary_saving,
         int dim_,
@@ -444,12 +403,41 @@ struct EffectiveBoundarySaver {
         const std::vector<torch::Tensor>& boundary_staging = {}
     )
     {
-        // One binding per saver. The Buf members describe the FIRST binding while
-        // torch_refs_ would pin both, so a second allocate() would leave the
-        // descriptors pointing at storage nothing else refers to. Every caller
-        // allocates once, in its constructor; this says so out loud.
-        SWEEP_CHECK(torch_refs_.empty(),
+        const std::vector<Buf> cpu = bufs_of(boundary_cpu), gpu = bufs_of(boundary_gpu),
+                               staging = bufs_of(boundary_staging);
+        allocate(use_boundary_saving, dim_, nvar_, ctx, buf_of(ref_tensor), width, last_two_nvar,
+                 override_storage, store_on_gpu_override, transfer_interval,
+                 BufList{cpu.data(), static_cast<int64_t>(cpu.size())},
+                 BufList{gpu.data(), static_cast<int64_t>(gpu.size())},
+                 buf_of(last_two), use_pinned_memory_, tangent_pad,
+                 BufList{staging.data(), static_cast<int64_t>(staging.size())});
+    }
+
+    void allocate(
+        bool use_boundary_saving,
+        int dim_,
+        int nvar_,
+        const SolverContext& ctx,
+        const Buf& ref_tensor,
+        int width,
+        int last_two_nvar,
+        bool override_storage,
+        bool store_on_gpu_override,
+        int transfer_interval,
+        const BufList& boundary_cpu,
+        const BufList& boundary_gpu,
+        const Buf& last_two,
+        bool use_pinned_memory_,
+        int tangent_pad,
+        const BufList& boundary_staging
+    )
+    {
+        // One binding per saver: the Buf members describe the FIRST binding, and
+        // a second allocate() would silently redescribe. Every caller allocates
+        // once, in its constructor; this says so out loud.
+        SWEEP_CHECK(!allocated_,
                     "EffectiveBoundarySaver::allocate() was called twice on one saver.");
+        allocated_ = true;
         enabled = use_boundary_saving;
         dim = dim_;
         nvar = nvar_;
@@ -477,7 +465,7 @@ struct EffectiveBoundarySaver {
         // used to bootstrap backward, staging is the INT8 path's per-timestep
         // FP32 view before quantization.
         BoundaryDtype runtime_dtype = BoundaryDtype::FP32;
-        if (!boundary_gpu.empty() && boundary_gpu[0].scalar_type() == torch::kUInt8) {
+        if (!boundary_gpu.empty() && boundary_gpu[0].dtype() == BoundaryDtype::INT8) {
             runtime_dtype = BoundaryDtype::INT8;        // uint8 main buffer => INT8 path
         } else if (!boundary_cpu.empty()) {
             runtime_dtype = boundary_dtype_from_tensor(boundary_cpu[0]);
@@ -519,10 +507,9 @@ struct EffectiveBoundarySaver {
                         "Scaled (int8/fp16) boundary_gpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_gpu.size());
-            std::vector<torch::Tensor> main_tensors(boundary_gpu.begin(),
-                                                    boundary_gpu.begin() + scaled_faces);
-            std::vector<torch::Tensor> scale_tensors(boundary_gpu.begin() + scaled_faces,
-                                                     boundary_gpu.end());
+            const BufList main_tensors{boundary_gpu.begin(), static_cast<int64_t>(scaled_faces)};
+            const BufList scale_tensors{boundary_gpu.begin() + scaled_faces,
+                                        static_cast<int64_t>(boundary_gpu.size() - scaled_faces)};
             bind_storage_tensors(main_tensors, "boundary_gpu scaled main");
             bind_int8_scales(scale_tensors);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
@@ -544,14 +531,12 @@ struct EffectiveBoundarySaver {
                         "Scaled (int8/fp16) staged boundary_gpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_gpu.size());
-            std::vector<torch::Tensor> cpu_main(boundary_cpu.begin(),
-                                                boundary_cpu.begin() + scaled_faces);
-            std::vector<torch::Tensor> cpu_scale(boundary_cpu.begin() + scaled_faces,
-                                                 boundary_cpu.end());
-            std::vector<torch::Tensor> gpu_main(boundary_gpu.begin(),
-                                                boundary_gpu.begin() + scaled_faces);
-            std::vector<torch::Tensor> gpu_scale(boundary_gpu.begin() + scaled_faces,
-                                                 boundary_gpu.end());
+            const BufList cpu_main{boundary_cpu.begin(), static_cast<int64_t>(scaled_faces)};
+            const BufList cpu_scale{boundary_cpu.begin() + scaled_faces,
+                                    static_cast<int64_t>(boundary_cpu.size() - scaled_faces)};
+            const BufList gpu_main{boundary_gpu.begin(), static_cast<int64_t>(scaled_faces)};
+            const BufList gpu_scale{boundary_gpu.begin() + scaled_faces,
+                                    static_cast<int64_t>(boundary_gpu.size() - scaled_faces)};
             bind_storage_tensors(cpu_main, "boundary_cpu scaled main");
             bind_int8_scales(cpu_scale);
             bind_staging_tensors(gpu_main, "boundary_gpu scaled main ring");
@@ -696,9 +681,16 @@ struct EffectiveBoundarySaver {
         return v;
     }
 
+    // torch spelling, see below.
+    void load_from_vector(const std::vector<torch::Tensor>& u_boundary, const torch::Tensor& ref_tensor)
+    {
+        const std::vector<Buf> ub = bufs_of(u_boundary);
+        load_from_vector(BufList{ub.data(), static_cast<int64_t>(ub.size())}, buf_of(ref_tensor));
+    }
+
     void load_from_vector(
-        const std::vector<torch::Tensor>& u_boundary,
-        const torch::Tensor& ref_tensor
+        const BufList& u_boundary,
+        const Buf& /*ref_tensor*/
         )
         {
             if (!enabled)
@@ -712,42 +704,32 @@ struct EffectiveBoundarySaver {
                                      left_t.dtype() == BoundaryDtype::FP16))
                 return;
 
-            auto copy_to = [&](torch::Tensor& dst, const torch::Tensor& src)
-            {
-                if (dst.device() == src.device()) {
-                    copy_tensor_cuda_async(dst, src);
-                }
-                else {
-                    copy_tensor_cuda_async(dst, src);
-                }
-            };
+            // The memcpy helper picks H2D / D2H / D2D from the two descriptors.
+            auto copy_to = [&](const Buf& dst, const Buf& src) { copy_tensor_cuda_async(dst, src); };
 
             if (dim == 2) {
 
                 if (u_boundary.size() != 4)
                     throw std::runtime_error("2D boundary expects 4 tensors.");
                 
-                // storage_th_[] is the same tensor top_t/bottom_t/... describe,
-                // in bind_tensor_group order (top, bottom, front, back, left,
-                // right); Tensor::copy_ needs the tensor, not the descriptor.
-                copy_to( storage_th_[0], u_boundary[0]);
-                copy_to( storage_th_[1], u_boundary[1]);
-                copy_to( storage_th_[4], u_boundary[2]);
-                copy_to( storage_th_[5], u_boundary[3]);
+                copy_to(top_t, u_boundary[0]);
+                copy_to(bottom_t, u_boundary[1]);
+                copy_to(left_t, u_boundary[2]);
+                copy_to(right_t, u_boundary[3]);
 
             } else { // 3D
 
                 if (u_boundary.size() != 6)
                     throw std::runtime_error("3D boundary expects 6 tensors.");
 
-                copy_to( storage_th_[0], u_boundary[0]);
-                copy_to( storage_th_[1], u_boundary[1]);
+                copy_to(top_t, u_boundary[0]);
+                copy_to(bottom_t, u_boundary[1]);
 
-                copy_to( storage_th_[2], u_boundary[2]);
-                copy_to( storage_th_[3], u_boundary[3]);
+                copy_to(front_t, u_boundary[2]);
+                copy_to(back_t, u_boundary[3]);
 
-                copy_to( storage_th_[4], u_boundary[4]);
-                copy_to( storage_th_[5], u_boundary[5]);
+                copy_to(left_t, u_boundary[4]);
+                copy_to(right_t, u_boundary[5]);
             }
         }
 

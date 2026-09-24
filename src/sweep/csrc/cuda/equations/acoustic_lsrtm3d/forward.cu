@@ -223,7 +223,7 @@ ForwardOutput forward(const ForwardInput& in) {
     boundary_runtime.synchronize();
 
     out.wavefield = bg_utt_all.defined() ? bg_utt_all : torch::Tensor();
-    out.last_two = boundary_saver.last_two_th_;
+    out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
     out.record = record;
     return out;
 }
