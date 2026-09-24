@@ -120,6 +120,26 @@ struct Dims {
     int N, C, nz, ny, nx, B;
 };
 
+// Descriptor twin of read_dims below: the same size() reads, on a Buf.
+template <int NDIM>
+inline Dims read_dims(const Buf& model)
+{
+    Dims d;
+    d.N = model.size(0);
+    d.C = model.size(1);
+    if constexpr (NDIM == 2) {
+        d.nz = model.size(2);
+        d.ny = 0;
+        d.nx = model.size(3);
+    } else {
+        d.nz = model.size(2);
+        d.ny = model.size(3);
+        d.nx = model.size(4);
+    }
+    d.B = d.N * d.C;
+    return d;
+}
+
 template <int NDIM>
 inline Dims read_dims(const torch::Tensor& model)
 {

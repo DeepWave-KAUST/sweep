@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 #include "buf_torch.h"   // Buf + buf_of, for the Buf overloads below
+#include "../../core/buflist.h"   // BufList, for the pool/set twins
 
 inline void validate_cuda_copy_tensors(
     const torch::Tensor& dst,
@@ -131,6 +132,78 @@ inline void zero_tensor_device_async(const Buf& dst)
 // one side and a Buf on the other should not force a site to spell buf_of().
 inline void copy_tensor_cuda_async(const Buf& dst, const torch::Tensor& src) { copy_tensor_cuda_async(dst, buf_of(src)); }
 inline void copy_tensor_cuda_async(const torch::Tensor& dst, const Buf& src) { copy_tensor_cuda_async(buf_of(dst), src); }
+
+// ---- BufList / Buf twins of the pool and set helpers (step 2, unit 2a) ------
+// Same names, same checks, same semantics, on descriptors -- except the ONE
+// difference this line of work exists for: nothing here allocates. The torch
+// pool_or_zeros / pool_or_empty fall back to a fresh tensor for an unbound
+// slot; the descriptor versions refuse it, which is what the propagator-
+// allocates-everything policy already promises and test_binding_is_mandatory
+// pins at the driver level.
+inline bool pool_slot_bound(const BufList& pool, int idx)
+{
+    return pool.size() > idx && pool[idx].defined() && pool[idx].numel() > 0;
+}
+
+inline bool same_shape(const Buf& a, const Buf& b)
+{
+    if (a.dim() != b.dim()) return false;
+    for (int64_t d = 0; d < a.dim(); ++d) if (a.size(d) != b.size(d)) return false;
+    return true;
+}
+
+// pool_required, the tree's own name for "bound or refuse": the torch overload
+// above checks sizes() == like.sizes(), float32 and is_cuda; this one checks the
+// same three on descriptors.
+inline const Buf& pool_required(const BufList& pool, int idx, const Buf& like, const char* what)
+{
+    TORCH_CHECK(pool_slot_bound(pool, idx), what, " slot ", idx,
+                " is not bound; the compiled drivers no longer allocate it.");
+    const Buf& b = pool[idx];
+    TORCH_CHECK(same_shape(b, like), what, " slot ", idx, " has the wrong shape for its reference buffer");
+    TORCH_CHECK(b.dtype() == BoundaryDtype::FP32, what, " slot ", idx, " must be float32");
+    TORCH_CHECK(b.is_cuda(), what, " slot ", idx, " must be a CUDA buffer");
+    return b;
+}
+
+inline const Buf& pool_required(const BufList& pool, int idx, std::initializer_list<int64_t> shape,
+                                const char* what)
+{
+    TORCH_CHECK(pool_slot_bound(pool, idx), what, " slot ", idx,
+                " is not bound; the compiled drivers no longer allocate it.");
+    const Buf& b = pool[idx];
+    bool ok = (b.dim() == static_cast<int64_t>(shape.size()));
+    int64_t d = 0; for (int64_t s : shape) { ok = ok && (d < b.dim()) && (b.size(d) == s); ++d; }
+    TORCH_CHECK(ok, what, " slot ", idx, " has the wrong shape");
+    TORCH_CHECK(b.dtype() == BoundaryDtype::FP32 && b.is_contiguous(),
+                what, " slot ", idx, " must be a contiguous float32 buffer");
+    return b;
+}
+
+// A window of n descriptors starting at set k of a flat list -- a span, not a
+// copy; the caller's BufList outlives it because the arena does.
+inline BufList wavefield_set(const BufList& list, int k, int n, const char* what)
+{
+    TORCH_CHECK(list.size() >= static_cast<int64_t>(k + 1) * n,
+                what, " expects at least ", (k + 1) * n, " bound wavefield buffers (",
+                k + 1, " sets of ", n, "), got ", list.size());
+    BufList set{list.p + static_cast<int64_t>(k) * n, n};
+    for (int i = 0; i < n; ++i)
+        TORCH_CHECK(set[i].defined() && set[i].is_cuda() && set[i].dtype() == BoundaryDtype::FP32
+                        && set[i].is_contiguous(),
+                    what, ": set ", k, " slot ", i, " must be a contiguous float32 CUDA buffer");
+    return set;
+}
+
+inline float* ptr_or_null(const Buf& b)
+{
+    return b.defined() ? b.data_ptr<float>() : nullptr;
+}
+
+inline size_t buf_bytes(const Buf& b)
+{
+    return b.defined() ? static_cast<size_t>(b.numel() * b.element_size()) : 0;
+}
 
 #define SWEEP_CUDA_SYNC_CHECK(label)                                                \
     do {                                                                            \
