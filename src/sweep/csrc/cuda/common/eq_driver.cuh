@@ -187,10 +187,10 @@ inline int stencil_order(int M)
 // the only modes whose cross-call state lives entirely in Python-bound
 // buffers.
 template <class Eq>
-class GenericForwardRunner final : public IForwardRunner {
+class GenericForwardRunner final : public IForwardRunnerCore {
 public:
-    explicit GenericForwardRunner(const ForwardInput& in)
-        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
+    explicit GenericForwardRunner(const ForwardInputCore& in)
+        : p(in), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -337,12 +337,7 @@ public:
 
     int device_index() const override { return device_index_of(p.models[0]); }
 
-    ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
-    {
-        return to_torch(run_core(run_it_begin, run_it_end, run_step_phase), in_);
-    }
-
-    ForwardOutputCore run_core(int run_it_begin, int run_it_end, int run_step_phase)
+    ForwardOutputCore run(int run_it_begin, int run_it_end, int run_step_phase) override
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& ctx = *ctx_;
@@ -461,8 +456,6 @@ private:
     // matching the hand-written function's stack unwind.  The arena owns the
     // descriptor arrays and host copies the core twin points into; the torch
     // struct is kept for the output hand-back (to_torch) only.
-    InputArena arena_;
-    ForwardInput in_;
     ForwardInputCore p;
     std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     Dims d;
@@ -488,10 +481,18 @@ private:
 };
 
 template <class Eq>
-ForwardOutput generic_forward(const ForwardInput& in)
+ForwardOutputCore generic_forward_core(const ForwardInputCore& in)
 {
     GenericForwardRunner<Eq> runner(in);
     return runner.run(in.it_begin, in.it_end, in.step_phase);
+}
+
+template <class Eq>
+ForwardOutput generic_forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(generic_forward_core<Eq>(in), in_torch);
 }
 
 
@@ -617,10 +618,8 @@ void acoustic_bind_backward_outputs(const BackwardInputCore& p,
 
 // ---- generic_backward (full storage) ----
 template <class Eq>
-BackwardOutput generic_backward(const BackwardInput& in_torch)
+BackwardOutputCore generic_backward_core(const BackwardInputCore& in)
 {
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_stepped_backward<Eq>(in, /*need_recon=*/false,
                                in.bw_it_begin, in.bw_it_end, in.step_phase);
@@ -691,7 +690,15 @@ BackwardOutput generic_backward(const BackwardInput& in_torch)
     }
 
     Eq::pack_outputs(out, grads, illumination);
-    return to_torch(out, in_torch);
+    return out;
+}
+
+template <class Eq>
+BackwardOutput generic_backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(generic_backward_core<Eq>(in), in_torch);
 }
 
 // ---- generic_backward_bs ----
@@ -703,10 +710,10 @@ BackwardOutput generic_backward(const BackwardInput& in_torch)
 // reconstruction wavefield, so the value sequence is identical.  Reuse (a
 // second run()) requires gpu-direct boundary storage.
 template <class Eq>
-class GenericBackwardBsRunner final : public IBackwardRunner {
+class GenericBackwardBsRunner final : public IBackwardRunnerCore {
 public:
-    explicit GenericBackwardBsRunner(const BackwardInput& in)
-        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
+    explicit GenericBackwardBsRunner(const BackwardInputCore& in)
+        : p(in), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -795,12 +802,7 @@ public:
 
     int device_index() const override { return device_index_of(p.models[0]); }
 
-    BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
-    {
-        return to_torch(run_core(bw_it_begin, bw_it_end, run_step_phase), in_);
-    }
-
-    BackwardOutputCore run_core(int bw_it_begin, int bw_it_end, int run_step_phase)
+    BackwardOutputCore run(int bw_it_begin, int bw_it_end, int run_step_phase) override
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& ctx = *ctx_;
@@ -872,8 +874,6 @@ public:
 private:
     // Declaration order == construction order; destruction runs in reverse,
     // matching the hand-written function's stack unwind.
-    InputArena arena_;
-    BackwardInput in_;
     BackwardInputCore p;
     std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     Dims d;
@@ -901,10 +901,18 @@ private:
 };
 
 template <class Eq>
-BackwardOutput generic_backward_bs(const BackwardInput& in)
+BackwardOutputCore generic_backward_bs_core(const BackwardInputCore& in)
 {
     GenericBackwardBsRunner<Eq> runner(in);
     return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
+}
+
+template <class Eq>
+BackwardOutput generic_backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(generic_backward_bs_core<Eq>(in), in_torch);
 }
 
 // Pool slots of the two checkpoint skeletons, declared per equation in
@@ -935,10 +943,8 @@ enum AcousticRecursiveWorkspaceSlot : int {
 
 // ---- generic_backward_ckpt (uniform chunks; acoustic-family shape) ----
 template <class Eq>
-BackwardOutput generic_backward_ckpt(const BackwardInput& in_torch)
+BackwardOutputCore generic_backward_ckpt_core(const BackwardInputCore& in)
 {
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(!in.bw_stepped(),
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
@@ -1033,7 +1039,15 @@ BackwardOutput generic_backward_ckpt(const BackwardInput& in_torch)
     }
 
     Eq::pack_outputs(out, grads, illumination);
-    return to_torch(out, in_torch);
+    return out;
+}
+
+template <class Eq>
+BackwardOutput generic_backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(generic_backward_ckpt_core<Eq>(in), in_torch);
 }
 
 // ---- generic_backward_recursive_ckpt (acoustic-family bisection) ----
@@ -1116,10 +1130,8 @@ void process_recursive_interval(int start, int end,
 }
 
 template <class Eq>
-BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in_torch)
+BackwardOutputCore generic_backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(!in.bw_stepped(),
                 "checkpoint backward does not support bw_it_begin/bw_it_end in v1");
@@ -1241,7 +1253,15 @@ BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in_torch)
     }
 
     Eq::pack_outputs(out, grads, illumination);
-    return to_torch(out, in_torch);
+    return out;
+}
+
+template <class Eq>
+BackwardOutput generic_backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(generic_backward_recursive_ckpt_core<Eq>(in), in_torch);
 }
 
 } // namespace eqdrv

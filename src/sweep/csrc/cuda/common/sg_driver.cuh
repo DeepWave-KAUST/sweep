@@ -114,10 +114,10 @@ namespace eqdrv {
 // checkpointing -- the only modes whose cross-call state lives entirely in
 // Python-bound buffers.
 template <class Eq>
-class SgForwardRunner final : public IForwardRunner {
+class SgForwardRunner final : public IForwardRunnerCore {
 public:
-    explicit SgForwardRunner(const ForwardInput& in)
-        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
+    explicit SgForwardRunner(const ForwardInputCore& in)
+        : p(in), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -264,12 +264,7 @@ public:
 
     int device_index() const override { return device_index_of(p.models[0]); }
 
-    ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
-    {
-        return to_torch(run_core(run_it_begin, run_it_end, run_step_phase), in_);
-    }
-
-    ForwardOutputCore run_core(int run_it_begin, int run_it_end, int run_step_phase)
+    ForwardOutputCore run(int run_it_begin, int run_it_end, int run_step_phase) override
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& solver = *solver_;
@@ -366,8 +361,6 @@ private:
     // matching the hand-written function's stack unwind.  The arena owns the
     // descriptor arrays and host copies the core twin points into; the torch
     // struct is kept for the output hand-back (to_torch) only.
-    InputArena arena_;
-    ForwardInput in_;
     ForwardInputCore p;
     std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     typename Eq::Models models;
@@ -394,10 +387,18 @@ private:
 };
 
 template <class Eq>
-ForwardOutput sg_generic_forward(const ForwardInput& in)
+ForwardOutputCore sg_generic_forward_core(const ForwardInputCore& in)
 {
     SgForwardRunner<Eq> runner(in);
     return runner.run(in.it_begin, in.it_end, in.step_phase);
+}
+
+template <class Eq>
+ForwardOutput sg_generic_forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(sg_generic_forward_core<Eq>(in), in_torch);
 }
 
 
@@ -512,10 +513,8 @@ void sg_check_ckpt_workspace(const BackwardInputCore& p, int n_carriers, const c
 
 // ---- sg_generic_backward (full storage) ----
 template <class Eq>
-BackwardOutput sg_generic_backward(const BackwardInput& in_torch)
+BackwardOutputCore sg_generic_backward_core(const BackwardInputCore& in)
 {
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     // Per-equation entry validation (model/PML counts, mode-specific input
@@ -614,7 +613,15 @@ BackwardOutput sg_generic_backward(const BackwardInput& in_torch)
     }
 
     out.grads = grads;
-    return to_torch(out, in_torch);
+    return out;
+}
+
+template <class Eq>
+BackwardOutput sg_generic_backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(sg_generic_backward_core<Eq>(in), in_torch);
 }
 
 // ---- sg_generic_backward_bs ----
@@ -627,10 +634,10 @@ BackwardOutput sg_generic_backward(const BackwardInput& in_torch)
 // only, so the value sequence is identical.  Reuse (a second run()) requires
 // gpu-direct boundary storage.
 template <class Eq>
-class SgBackwardBsRunner final : public IBackwardRunner {
+class SgBackwardBsRunner final : public IBackwardRunnerCore {
 public:
-    explicit SgBackwardBsRunner(const BackwardInput& in)
-        : in_(in), p(adapt_input(in_, arena_)), disk_files_(p.boundary_disk_files.vec())
+    explicit SgBackwardBsRunner(const BackwardInputCore& in)
+        : p(in), disk_files_(p.boundary_disk_files.vec())
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
@@ -726,12 +733,7 @@ public:
 
     int device_index() const override { return device_index_of(p.models[0]); }
 
-    BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
-    {
-        return to_torch(run_core(bw_it_begin, bw_it_end, run_step_phase), in_);
-    }
-
-    BackwardOutputCore run_core(int bw_it_begin, int bw_it_end, int run_step_phase)
+    BackwardOutputCore run(int bw_it_begin, int bw_it_end, int run_step_phase) override
     {
         sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& solver = *solver_;
@@ -818,8 +820,6 @@ public:
 private:
     // Declaration order == construction order; destruction runs in reverse,
     // matching the hand-written function's stack unwind.
-    InputArena arena_;
-    BackwardInput in_;
     BackwardInputCore p;
     std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
     typename Eq::Models models;
@@ -849,10 +849,18 @@ private:
 };
 
 template <class Eq>
-BackwardOutput sg_generic_backward_bs(const BackwardInput& in)
+BackwardOutputCore sg_generic_backward_bs_core(const BackwardInputCore& in)
 {
     SgBackwardBsRunner<Eq> runner(in);
     return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
+}
+
+template <class Eq>
+BackwardOutput sg_generic_backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(sg_generic_backward_bs_core<Eq>(in), in_torch);
 }
 
 // ---- sg_generic_backward_ckpt (chunked segments with velocity carriers) ----
@@ -946,10 +954,8 @@ void sg_backward_segment(
 }
 
 template <class Eq>
-BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in_torch)
+BackwardOutputCore sg_generic_backward_ckpt_core(const BackwardInputCore& in)
 {
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     Eq::validate_backward(p, "ckpt");
@@ -1044,7 +1050,15 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in_torch)
 
     BackwardOutputCore out;
     out.grads = grads;
-    return to_torch(out, in_torch);
+    return out;
+}
+
+template <class Eq>
+BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(sg_generic_backward_ckpt_core<Eq>(in), in_torch);
 }
 
 // ---- sg_generic_backward_recursive_ckpt (per-step replay) ----
@@ -1121,10 +1135,8 @@ void sg_replay_forward_to_time(
 }
 
 template <class Eq>
-BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in_torch)
+BackwardOutputCore sg_generic_backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
-    InputArena arena;
-    const BackwardInputCore in = adapt_input(in_torch, arena);
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     Eq::validate_backward(p, "ckpt_recursive");
@@ -1215,6 +1227,14 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in_torch)
 
     BackwardOutputCore out;
     out.grads = grads;
-    return to_torch(out, in_torch);
+    return out;
+}
+
+template <class Eq>
+BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(sg_generic_backward_recursive_ckpt_core<Eq>(in), in_torch);
 }
 } // namespace eqdrv

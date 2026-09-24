@@ -24,6 +24,11 @@ ForwardOutput forward(const ForwardInput& in)
     return eqdrv::sg_generic_forward<Driver>(in);
 }
 
+ForwardOutputCore forward_core(const ForwardInputCore& in)
+{
+    return eqdrv::sg_generic_forward_core<Driver>(in);
+}
+
 
 // ---------------------------------------------------------------------------
 // APM (Cao & Chen 2018) forward
@@ -196,9 +201,14 @@ ForwardOutputCore apm_forward_core(const ForwardInputCore& in)
     return out;
 }
 
-ForwardRunnerPtr forward_runner(const ForwardInput& in)
+ForwardRunnerCorePtr forward_runner_core(const ForwardInputCore& in)
 {
     return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
+}
+
+ForwardRunnerPtr forward_runner(const ForwardInput& in)
+{
+    return std::make_shared<TorchForwardRunner<eqdrv::SgForwardRunner<Driver>>>(in);
 }
 
 

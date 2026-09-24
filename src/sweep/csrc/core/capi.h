@@ -1,0 +1,161 @@
+#pragma once
+// core/capi.h -- the C boundary of libsweep_core: what the torch shim (and any
+// other host) calls.  Plain C: the inputs and outputs are the standard-layout
+// core structs (core/input_core.h, core/outputs.h) passed by pointer; errors
+// come back as a non-zero return with the message copied into ``err``; nothing
+// is thrown across.  Buffers are never allocated here: every output descriptor
+// names one the caller bound on the input.
+#include <stddef.h>
+#include <stdint.h>
+
+#if defined(_WIN32)
+#define SWEEP_CAPI __declspec(dllexport)
+#else
+#define SWEEP_CAPI __attribute__((visibility("default")))
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SWEEP_CORE_ABI_VERSION 1
+SWEEP_CAPI int sweep_core_abi_version(void);
+
+// One id per bound <equation>_<op>; the names (sweep_entry_name) are the Python
+// module's function names.  Kind: 0 = forward (ForwardInputCore ->
+// ForwardOutputCore), 1 = backward (BackwardInputCore -> BackwardOutputCore),
+// 2 = rtm (BackwardInputCore -> RTMOutputCore).
+enum SweepEntry {
+    SWEEP_ENTRY_ACOUSTIC2D_FORWARD = 0,
+    SWEEP_ENTRY_ACOUSTIC2D_BACKWARD = 1,
+    SWEEP_ENTRY_ACOUSTIC2D_BACKWARD_BS = 2,
+    SWEEP_ENTRY_ACOUSTIC2D_BACKWARD_CKPT = 3,
+    SWEEP_ENTRY_ACOUSTIC2D_BACKWARD_RECURSIVE_CKPT = 4,
+    SWEEP_ENTRY_ACOUSTIC3D_FORWARD = 5,
+    SWEEP_ENTRY_ACOUSTIC3D_BACKWARD = 6,
+    SWEEP_ENTRY_ACOUSTIC3D_BACKWARD_BS = 7,
+    SWEEP_ENTRY_ACOUSTIC3D_BACKWARD_CKPT = 8,
+    SWEEP_ENTRY_ACOUSTIC3D_BACKWARD_RECURSIVE_CKPT = 9,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM2D_FORWARD = 10,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM2D_BACKWARD = 11,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM2D_BACKWARD_BS = 12,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM2D_BACKWARD_CKPT = 13,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM2D_BACKWARD_RECURSIVE_CKPT = 14,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM3D_FORWARD = 15,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM3D_BACKWARD = 16,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM3D_BACKWARD_BS = 17,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM3D_BACKWARD_CKPT = 18,
+    SWEEP_ENTRY_ACOUSTIC_LSRTM3D_BACKWARD_RECURSIVE_CKPT = 19,
+    SWEEP_ENTRY_ACOUSTIC_VRZ2D_FORWARD = 20,
+    SWEEP_ENTRY_ACOUSTIC_VRZ2D_BACKWARD = 21,
+    SWEEP_ENTRY_ACOUSTIC_VRZ2D_BACKWARD_BS = 22,
+    SWEEP_ENTRY_ACOUSTIC_VRZ2D_BACKWARD_CKPT = 23,
+    SWEEP_ENTRY_ACOUSTIC_VRZ2D_BACKWARD_RECURSIVE_CKPT = 24,
+    SWEEP_ENTRY_ACOUSTIC_VRZ3D_FORWARD = 25,
+    SWEEP_ENTRY_ACOUSTIC_VRZ3D_BACKWARD = 26,
+    SWEEP_ENTRY_ACOUSTIC_VRZ3D_BACKWARD_BS = 27,
+    SWEEP_ENTRY_ACOUSTIC_VRZ3D_BACKWARD_CKPT = 28,
+    SWEEP_ENTRY_ACOUSTIC_VRZ3D_BACKWARD_RECURSIVE_CKPT = 29,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_2D_FORWARD = 30,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_2D_BACKWARD = 31,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_2D_BACKWARD_BS = 32,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_2D_BACKWARD_CKPT = 33,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_2D_BACKWARD_RECURSIVE_CKPT = 34,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_3D_FORWARD = 35,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_3D_BACKWARD = 36,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_3D_BACKWARD_BS = 37,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_3D_BACKWARD_CKPT = 38,
+    SWEEP_ENTRY_ACOUSTIC_VTI_1ST_3D_BACKWARD_RECURSIVE_CKPT = 39,
+    SWEEP_ENTRY_DAS2D_FORWARD = 40,
+    SWEEP_ENTRY_DAS2D_BACKWARD = 41,
+    SWEEP_ENTRY_DAS2D_BACKWARD_BS = 42,
+    SWEEP_ENTRY_DAS2D_BACKWARD_CKPT = 43,
+    SWEEP_ENTRY_DAS2D_BACKWARD_RECURSIVE_CKPT = 44,
+    SWEEP_ENTRY_DAS3D_FORWARD = 45,
+    SWEEP_ENTRY_DAS3D_BACKWARD = 46,
+    SWEEP_ENTRY_DAS3D_BACKWARD_BS = 47,
+    SWEEP_ENTRY_DAS3D_BACKWARD_CKPT = 48,
+    SWEEP_ENTRY_DAS3D_BACKWARD_RECURSIVE_CKPT = 49,
+    SWEEP_ENTRY_DAS_MU2D_FORWARD = 50,
+    SWEEP_ENTRY_DAS_MU2D_BACKWARD = 51,
+    SWEEP_ENTRY_DAS_MU2D_BACKWARD_BS = 52,
+    SWEEP_ENTRY_DAS_MU2D_BACKWARD_CKPT = 53,
+    SWEEP_ENTRY_DAS_MU2D_BACKWARD_RECURSIVE_CKPT = 54,
+    SWEEP_ENTRY_DAS_MU3D_FORWARD = 55,
+    SWEEP_ENTRY_DAS_MU3D_BACKWARD = 56,
+    SWEEP_ENTRY_DAS_MU3D_BACKWARD_BS = 57,
+    SWEEP_ENTRY_DAS_MU3D_BACKWARD_CKPT = 58,
+    SWEEP_ENTRY_DAS_MU3D_BACKWARD_RECURSIVE_CKPT = 59,
+    SWEEP_ENTRY_ELASTIC2D_FORWARD = 60,
+    SWEEP_ENTRY_ELASTIC2D_BACKWARD = 61,
+    SWEEP_ENTRY_ELASTIC2D_BACKWARD_BS = 62,
+    SWEEP_ENTRY_ELASTIC2D_BACKWARD_CKPT = 63,
+    SWEEP_ENTRY_ELASTIC2D_BACKWARD_RECURSIVE_CKPT = 64,
+    SWEEP_ENTRY_ELASTIC2D_APM_FORWARD = 65,
+    SWEEP_ENTRY_ELASTIC3D_FORWARD = 66,
+    SWEEP_ENTRY_ELASTIC3D_BACKWARD_BS = 67,
+    SWEEP_ENTRY_ELASTIC3D_BACKWARD_CKPT = 68,
+    SWEEP_ENTRY_ELASTIC3D_BACKWARD_RECURSIVE_CKPT = 69,
+    SWEEP_ENTRY_ELASTIC3D_BACKWARD = 70,
+    SWEEP_ENTRY_ELASTIC3D_APM_FORWARD = 71,
+    SWEEP_ENTRY_ELASTIC_TTI_2ND2D_FORWARD = 72,
+    SWEEP_ENTRY_ELASTIC_TTI_2ND2D_BACKWARD = 73,
+    SWEEP_ENTRY_ELASTIC_TTI_2ND2D_BACKWARD_BS = 74,
+    SWEEP_ENTRY_ELASTIC_TTI_2ND2D_BACKWARD_CKPT = 75,
+    SWEEP_ENTRY_ELASTIC_TTI_SG2D_FORWARD = 76,
+    SWEEP_ENTRY_ELASTIC_TTI_SG2D_BACKWARD = 77,
+    SWEEP_ENTRY_ELASTIC_TTI_SG2D_BACKWARD_BS = 78,
+    SWEEP_ENTRY_ELASTIC_TTI_SG2D_BACKWARD_CKPT = 79,
+    SWEEP_ENTRY_ELASTIC_TTI_SG3D_FORWARD = 80,
+    SWEEP_ENTRY_ELASTIC_TTI_SG3D_BACKWARD = 81,
+    SWEEP_ENTRY_ELASTIC_TTI_SG3D_BACKWARD_BS = 82,
+    SWEEP_ENTRY_ELASTIC_TTI_SG3D_BACKWARD_CKPT = 83,
+    SWEEP_ENTRY_ELASTIC_VR2D_FORWARD = 84,
+    SWEEP_ENTRY_ELASTIC_VR2D_BACKWARD = 85,
+    SWEEP_ENTRY_ELASTIC_VR2D_BACKWARD_BS = 86,
+    SWEEP_ENTRY_ELASTIC_VR2D_BACKWARD_CKPT = 87,
+    SWEEP_ENTRY_ELASTIC_VR2D_BACKWARD_RECURSIVE_CKPT = 88,
+    SWEEP_ENTRY_VISCO_ACOUSTIC2D_FORWARD = 89,
+    SWEEP_ENTRY_VISCO_ACOUSTIC2D_BACKWARD = 90,
+    SWEEP_ENTRY_VISCO_ACOUSTIC2D_BACKWARD_BS = 91,
+    SWEEP_ENTRY_VISCO_ACOUSTIC2D_BACKWARD_CKPT = 92,
+    SWEEP_ENTRY_VISCO_ACOUSTIC2D_BACKWARD_RECURSIVE_CKPT = 93,
+    SWEEP_ENTRY_COUNT = 94
+};
+SWEEP_CAPI int sweep_entry_count(void);
+SWEEP_CAPI const char* sweep_entry_name(int entry);   // NULL when out of range
+SWEEP_CAPI int sweep_entry_kind(int entry);           // -1 when out of range
+
+// The monolithic call: ``in``/``out`` point at the structs of the entry's kind.
+SWEEP_CAPI int sweep_call(int entry, const void* in, void* out, char* err, int err_cap);
+
+// Stepped runners (the DD time loop): built once from a core input whose spans
+// the caller keeps valid until destroy, run() per segment.  ``entry`` is the
+// equation's forward (resp. backward_bs) entry; equations without a stepped
+// runner fail with a message.
+SWEEP_CAPI int sweep_forward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap);
+SWEEP_CAPI int sweep_forward_runner_run(void* handle, int it_begin, int it_end, int step_phase, void* out, char* err, int err_cap);
+SWEEP_CAPI int sweep_forward_runner_device_index(void* handle);
+SWEEP_CAPI void sweep_forward_runner_destroy(void* handle);
+SWEEP_CAPI int sweep_backward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap);
+SWEEP_CAPI int sweep_backward_runner_run(void* handle, int bw_it_begin, int bw_it_end, int step_phase, void* out, char* err, int err_cap);
+SWEEP_CAPI int sweep_backward_runner_device_index(void* handle);
+SWEEP_CAPI void sweep_backward_runner_destroy(void* handle);
+
+// The persistent boundary-staging session (shared/boundary_session.h): the
+// pointer goes into ForwardInputCore/BackwardInputCore.boundary_session.
+SWEEP_CAPI void* sweep_session_create(void);
+SWEEP_CAPI int sweep_session_finish(void* session, char* err, int err_cap);
+SWEEP_CAPI int sweep_session_used(void* session);
+SWEEP_CAPI void sweep_session_destroy(void* session);
+
+// The stream every launch in the core goes on (thread-local): the host sets it
+// around each call from its own current stream.  A cudaStream_t.
+SWEEP_CAPI void sweep_set_stream(void* stream);
+SWEEP_CAPI void* sweep_get_stream(void);
+
+SWEEP_CAPI size_t sweep_visco_fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx);
+
+#ifdef __cplusplus
+}
+#endif
