@@ -92,12 +92,12 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int B  = N * C;
 
     ElasticWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, true);
-    else
-        wavefield.allocate(vp, 3);
-    if (!wavefield.m_syzx_t.defined())
-        wavefield.m_syzx_t = torch::zeros_like(vp);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "elastic3d/apm_forward requires the propagator-bound wavefields "
+                "(36-slot layout); nothing allocates them here");
+    wavefield.bind(p.wavefields, true);
+    TORCH_CHECK(wavefield.m_syzx_t.defined(),
+                "elastic3d/apm_forward: the bound wavefield list must carry m_syzx");
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
@@ -110,11 +110,11 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
 
     torch::Tensor u_allt;
     if (p.save_all_wavefields)
-        u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 3, B, nz, ny, nx}, vp.options(), "u_allt_out");
+        u_allt = bound_required(p.u_allt_out, {p.nt, 3, B, nz, ny, nx}, vp.options(), "u_allt_out");
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -252,8 +252,6 @@ ForwardOutput apm_forward(const ForwardInput& in)
 
     return out;
 }
-
-// apm_backward / apm_backward_bs are implemented in backward.cu.
 
 ForwardRunnerPtr forward_runner(const ForwardInput& in)
 {

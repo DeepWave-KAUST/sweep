@@ -84,18 +84,19 @@ void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z);
 // ``tensor * float_scalar`` (the visco tables Gp / dt2A / Gd1 / Gd2)
 void derive_scale(const torch::Tensor& in, float s, torch::Tensor& out);
 
-// The declared slots, bound from ``derived_models`` when the propagator passed
-// them (count checked at entry, shape/dtype per slot) or allocated here.
+// The declared slots, bound from ``derived_models`` (the propagator always
+// passes cuda_layout.derived_model_nvar of them; count checked here, shape/
+// dtype per slot).  Nothing allocates: an empty list is the error.
 inline std::vector<torch::Tensor> slots(const std::vector<torch::Tensor>& bound, int n,
                                         const torch::Tensor& like, const char* what)
 {
-    TORCH_CHECK(bound.empty() || static_cast<int>(bound.size()) == n,
-                what, ": derived_models must be empty or hold ", n,
+    TORCH_CHECK(static_cast<int>(bound.size()) == n,
+                what, ": derived_models must hold ", n,
                 " tensors (cuda_layout.derived_model_nvar), got ", bound.size());
     std::vector<torch::Tensor> out;
     out.reserve(n);
     for (int i = 0; i < n; ++i)
-        out.push_back(pool_or_empty(bound, i, like, "derived_models"));
+        out.push_back(pool_required(bound, i, like, "derived_models"));
     return out;
 }
 

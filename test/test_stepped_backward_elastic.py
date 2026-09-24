@@ -350,11 +350,14 @@ def test_stepped_backward_elastic_guards():
     # the Python-owned BoundarySession, so the copy stream and its ring events
     # outlive the per-step call); disk still is not.  This guard used to refuse
     # both -- if it starts refusing cpu again, that capability has regressed.
+    # (This bare input binds no boundary buffers, so the call is refused
+    # further in, by the saver's mandatory-binding check; only the GUARD's
+    # own wording is the regression signal here.)
     p.boundary_on_cpu = True
     try:
         func(p)
     except RuntimeError as exc:
-        assert "boundary storage" not in str(exc), (
+        assert "gpu-direct or cpu boundary storage only" not in str(exc), (
             f"cpu boundary staging is refused again: {exc}")
     p.boundary_on_cpu = False
     p.boundary_on_disk = True

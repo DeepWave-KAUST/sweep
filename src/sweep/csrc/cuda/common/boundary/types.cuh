@@ -95,28 +95,3 @@ struct GeneralBoundaryPointer {
     bool use_fp16 = false;   // == (dtype == FP16), kept for back-compat
 };
 
-// Legacy env-var gate (FP16 only).  Prefer the per-PropTorch option
-// passed through BoundaryOptions.storage_dtype.
-static inline bool sweep_use_fp16_boundary() {
-    static bool flag = []() {
-        const char* env = std::getenv("SWEEP_FP16_BOUNDARY");
-        return env != nullptr && std::atoi(env) != 0;
-    }();
-    return flag;
-}
-
-// New unified dtype gate, driven by env var SWEEP_BOUNDARY_DTYPE in
-// {fp32, fp16, bf16, int8}.  The Python wrapper sets this per-call
-// before invoking the forward kernel.  Returning FP32 when unset
-// preserves the legacy default.
-static inline BoundaryDtype sweep_boundary_dtype_env() {
-    const char* env = std::getenv("SWEEP_BOUNDARY_DTYPE");
-    if (env == nullptr) {
-        // Fall back to legacy FP16 gate so old test paths still work.
-        return sweep_use_fp16_boundary() ? BoundaryDtype::FP16 : BoundaryDtype::FP32;
-    }
-    if (env[0] == 'f' && env[1] == 'p' && env[2] == '1' && env[3] == '6') return BoundaryDtype::FP16;
-    if (env[0] == 'b' && env[1] == 'f' && env[2] == '1' && env[3] == '6') return BoundaryDtype::BF16;
-    if (env[0] == 'i' && env[1] == 'n' && env[2] == 't' && env[3] == '8') return BoundaryDtype::INT8;
-    return BoundaryDtype::FP32;
-}

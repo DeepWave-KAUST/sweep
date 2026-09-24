@@ -185,10 +185,11 @@ struct Driver {
     // ===================================================================== //
 
     // (also used by the ckpt/recursive binds in section [5])
-    static void backfill_syzx(Wavefield& wf, const torch::Tensor& like)
+    static void backfill_syzx(Wavefield& wf, const torch::Tensor& /*like*/)
     {
-        if (!wf.m_syzx_t.defined())
-            wf.m_syzx_t = torch::zeros_like(like);
+        TORCH_CHECK(wf.m_syzx_t.defined(),
+                    "elastic3d: the bound wavefield list must carry m_syzx "
+                    "(36-slot layout); nothing allocates it here");
     }
 
     // MANDATORY: _c.py Prop.forward always hands the compiled forward its

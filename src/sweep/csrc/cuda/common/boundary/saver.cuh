@@ -234,81 +234,6 @@ struct EffectiveBoundarySaver {
         bind_tensor_group(tensors, role, top_gpu, bottom_gpu, front_gpu, back_gpu, left_gpu, right_gpu);
     }
 
-    inline void allocate_full_storage(
-        const SolverContext& ctx,
-        int width,
-        int nx_boundary,
-        int ny_boundary,
-        int nz_boundary,
-        const torch::TensorOptions& options
-    )
-    {
-        // Allocation ORDER is kept exactly as it was; only the binding changed
-        // (the tensors are parked in torch_refs_/storage_th_, the members are
-        // now descriptors of them).
-        std::vector<torch::Tensor> fresh;
-        if (dim == 3) {
-            auto left   = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, options);
-            auto right  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, ny_boundary, width}, options);
-
-            auto front  = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, options);
-            auto back   = torch::zeros({nvar * ctx.nt, ctx.B, nz_boundary, width, nx_boundary}, options);
-
-            auto bottom = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, options);
-            auto top    = torch::zeros({nvar * ctx.nt, ctx.B, width, ny_boundary, nx_boundary}, options);
-
-            fresh = {top, bottom, front, back, left, right};
-        } else {
-            auto left   = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, options);
-            auto right  = torch::zeros({nvar, ctx.nt, ctx.B, nz_boundary, width}, options);
-
-            auto bottom = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, options);
-            auto top    = torch::zeros({nvar, ctx.nt, ctx.B, width, nx_boundary}, options);
-
-            // front/back stay undefined in 2-D, as before.
-            fresh = {top, bottom, left, right};
-        }
-        bind_tensor_group(fresh, "boundary storage (self-allocated)",
-                          top_t, bottom_t, front_t, back_t, left_t, right_t,
-                          storage_th_);
-    }
-
-    inline void allocate_staging_storage(
-        const SolverContext& ctx,
-        int width,
-        int transfer_interval,
-        int nx_boundary,
-        int ny_boundary,
-        int nz_boundary,
-        const torch::TensorOptions& options
-    )
-    {
-        std::vector<torch::Tensor> fresh;
-        if (dim == 3) {
-            auto left   = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, options);
-            auto right  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, ny_boundary, width}, options);
-
-            auto front  = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, options);
-            auto back   = torch::zeros({nvar * transfer_interval, ctx.B, nz_boundary, width, nx_boundary}, options);
-
-            auto bottom = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, options);
-            auto top    = torch::zeros({nvar * transfer_interval, ctx.B, width, ny_boundary, nx_boundary}, options);
-
-            fresh = {top, bottom, front, back, left, right};
-        } else {
-            auto left   = torch::zeros({nvar, transfer_interval, ctx.B, nz_boundary, width}, options);
-            auto right  = torch::zeros({nvar, transfer_interval, ctx.B, nz_boundary, width}, options);
-
-            auto bottom = torch::zeros({nvar, transfer_interval, ctx.B, width, nx_boundary}, options);
-            auto top    = torch::zeros({nvar, transfer_interval, ctx.B, width, nx_boundary}, options);
-
-            // front/back stay undefined in 2-D, as before.
-            fresh = {top, bottom, left, right};
-        }
-        bind_tensor_group(fresh, "boundary staging (self-allocated)",
-                          top_gpu, bottom_gpu, front_gpu, back_gpu, left_gpu, right_gpu);
-    }
-
     inline void compute_time_strides()
     {
         if (dim == 3) {
@@ -433,7 +358,7 @@ struct EffectiveBoundarySaver {
     // launch_dequantize_* expands back into it before the restore kernel reads
     // it.  ``staging`` is the propagator's buffer (same lifetime as the other
     // boundary buffers: per propagator, re-made when the cache key changes);
-    // the torch::zeros branch is the unbound-caller fallback only.
+    // there is no unbound-caller fallback.
     //
     // Zeroing: the propagator zeroes its staging ONCE, at allocation, not per
     // call -- and that is enough to keep the scaled path bit-exact.  Every cell
@@ -451,22 +376,14 @@ struct EffectiveBoundarySaver {
         int nx_boundary,
         int ny_boundary,
         int nz_boundary,
-        const torch::TensorOptions& fp32_options,
-        const std::vector<torch::Tensor>& staging = {})
+        const std::vector<torch::Tensor>& staging)
     {
         const auto shapes = int8_staging_shapes(ctx, width, nx_boundary, ny_boundary, nz_boundary);
-        if (!staging.empty()) {
-            bind_int8_staging(staging, shapes);
-        } else {
-            std::vector<torch::Tensor> fresh;
-            fresh.reserve(shapes.size());
-            for (const auto& shape : shapes)
-                fresh.push_back(torch::zeros(shape, fp32_options));
-            bind_tensor_group(fresh, "boundary_staging (self-allocated)",
-                              top_staging_t, bottom_staging_t,
-                              front_staging_t, back_staging_t,
-                              left_staging_t, right_staging_t);
-        }
+        TORCH_CHECK(!staging.empty(),
+                    "scaled (int8/fp16) boundary storage requires the propagator-bound "
+                    "boundary_staging (Layout.staging_shapes); the saver no longer "
+                    "allocates it.");
+        bind_int8_staging(staging, shapes);
         // Defensive: quantize_step / dequantize_step copy the persistent buffer's
         // full per-step stride (top_t.stride(0) in 3D) between the staging and the
         // int8 ring.  If the caller's tangent_pad here disagrees with the pad the
@@ -491,8 +408,7 @@ struct EffectiveBoundarySaver {
     inline void allocate_last_two(
         const SolverContext& ctx,
         int last_two_nvar,
-        const torch::Tensor& last_two,
-        const torch::TensorOptions& options
+        const torch::Tensor& last_two
     )
     {
         // Binding is mandatory, as it is for every driver buffer since the
@@ -504,7 +420,7 @@ struct EffectiveBoundarySaver {
         TORCH_CHECK(last_two.defined(),
                     "boundary saving requires the propagator-bound u_last_two "
                     "({nvar, 2, B, 1, nz[, ny], nx}); the saver no longer allocates it.");
-        (void)options; (void)last_two_nvar;
+        (void)last_two_nvar;
         last_two_th_ = last_two;
         this->last_two = keep(last_two);
     }
@@ -556,13 +472,11 @@ struct EffectiveBoundarySaver {
         // FP16 / BF16 / INT8 storage gate.  Derived from the boundary buffers
         // Python hands us (allocated in the requested precision) rather than a
         // process-global env var — this prevents a per-instance storage_dtype
-        // from leaking across propagator instances.  The SWEEP_BOUNDARY_DTYPE
-        // env is consulted only for the (normally unreachable) C++-side
-        // self-allocation fallback where no buffer is passed.  Last-two and
+        // from leaking across propagator instances.  Last-two and
         // staging buffers remain FP32 — last_two is a full-wavefield snapshot
         // used to bootstrap backward, staging is the INT8 path's per-timestep
         // FP32 view before quantization.
-        BoundaryDtype runtime_dtype;
+        BoundaryDtype runtime_dtype = BoundaryDtype::FP32;
         if (!boundary_gpu.empty() && boundary_gpu[0].scalar_type() == torch::kUInt8) {
             runtime_dtype = BoundaryDtype::INT8;        // uint8 main buffer => INT8 path
         } else if (!boundary_cpu.empty()) {
@@ -570,26 +484,16 @@ struct EffectiveBoundarySaver {
         } else if (!boundary_gpu.empty()) {
             runtime_dtype = boundary_dtype_from_tensor(boundary_gpu[0]);
         } else {
-            runtime_dtype = sweep_boundary_dtype_env();
+            TORCH_CHECK(false, "boundary saving requires the propagator-bound boundary "
+                        "buffers (boundary_cpu / boundary_gpu); the saver no longer "
+                        "allocates them.");
         }
         const bool use_scaled = (runtime_dtype == BoundaryDtype::INT8 ||
                                  runtime_dtype == BoundaryDtype::FP16);
-        torch::Dtype dtype_storage;
-        switch (runtime_dtype) {
-            case BoundaryDtype::FP16: dtype_storage = torch::kHalf; break;
-            case BoundaryDtype::BF16: dtype_storage = torch::kBFloat16; break;
-            case BoundaryDtype::INT8: dtype_storage = torch::kUInt8; break;
-            default:                  dtype_storage = torch::kFloat32; break;
-        }
-
-        auto gpu_options = ref_tensor.options().dtype(dtype_storage);
-
-        auto pinned_options = torch::TensorOptions()
-            .dtype(dtype_storage)
-            .device(torch::kCPU)
-            .pinned_memory(use_pinned_memory_);
-
-        auto storage_options = store_on_gpu ? gpu_options : pinned_options;
+        // ref_tensor / use_pinned_memory_ chose the dtype and placement of the
+        // self-allocated storage; with binding mandatory they are unused and
+        // leave the signature with the Buf flip.
+        (void)ref_tensor; (void)use_pinned_memory_;
 
         // =========================
         // Physical domain
@@ -622,7 +526,7 @@ struct EffectiveBoundarySaver {
             bind_storage_tensors(main_tensors, "boundary_gpu scaled main");
             bind_int8_scales(scale_tensors);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
-                                  gpu_options.dtype(torch::kFloat32), boundary_staging);
+                                  boundary_staging);
         } else if (use_scaled) {
             // Scaled staged (cpu/disk): Python owns a persistent payload
             // main + FP32 scale buffer (``boundary_cpu``; on disk these are
@@ -653,20 +557,22 @@ struct EffectiveBoundarySaver {
             bind_staging_tensors(gpu_main, "boundary_gpu scaled main ring");
             bind_int8_scale_rings(gpu_scale);
             allocate_int8_staging(ctx, width, nx_boundary, ny_boundary, nz_boundary,
-                                  gpu_options.dtype(torch::kFloat32), boundary_staging);
+                                  boundary_staging);
         } else if (!boundary_cpu.empty()) {
             bind_storage_tensors(boundary_cpu, "boundary_cpu");
         } else if (store_on_gpu && !boundary_gpu.empty()) {
             bind_storage_tensors(boundary_gpu, "boundary_gpu");
         } else {
-            allocate_full_storage(ctx, width, nx_boundary, ny_boundary, nz_boundary, storage_options);
+            TORCH_CHECK(false, "boundary saving requires the propagator-bound boundary "
+                        "storage (boundary_cpu, or boundary_gpu for gpu-direct); the "
+                        "saver no longer allocates it.");
         }
 
         if (!use_scaled && !store_on_gpu) {
-            if (!boundary_gpu.empty())
-                bind_staging_tensors(boundary_gpu, "boundary_gpu");
-            else
-                allocate_staging_storage(ctx, width, transfer_interval, nx_boundary, ny_boundary, nz_boundary, gpu_options);
+            TORCH_CHECK(!boundary_gpu.empty(),
+                        "cpu/disk boundary staging requires the propagator-bound "
+                        "boundary_gpu ring; the saver no longer allocates it.");
+            bind_staging_tensors(boundary_gpu, "boundary_gpu");
         }
 
         compute_time_strides();
@@ -674,8 +580,7 @@ struct EffectiveBoundarySaver {
         // last_two is the wavefield snapshot used to bootstrap the backward
         // pass — full-precision matters here even when boundary buffers go
         // FP16 (PoC choice; can be relaxed later).
-        auto last_two_options = (store_on_gpu ? gpu_options : pinned_options).dtype(torch::kFloat32);
-        allocate_last_two(ctx, last_two_nvar, last_two, last_two_options);
+        allocate_last_two(ctx, last_two_nvar, last_two);
     }
 
     GeneralBoundaryPointer view()

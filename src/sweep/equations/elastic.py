@@ -339,15 +339,11 @@ class Elastic(FirstOrderEquation):
         )
     
     def _C_apm(self):
-        """CUDA APM (Cao & Chen 2018) entry points.  Forward is fully
-        implemented; backward is a stub — gradients should be computed
-        via the eager autograd path (see :func:`_func_apm`)."""
+        """CUDA APM (Cao & Chen 2018) entry point: the forward only.  There is
+        no compiled APM backward; gradients go through eager autograd (see
+        :func:`_func_apm` and ``_c.py``'s ``_guard_apm_backward``)."""
         import sweep._C as _C
-        return (
-            _C.elastic2d_apm_forward,
-            _C.elastic2d_apm_backward,
-            _C.elastic2d_apm_backward_bs,
-        )
+        return (_C.elastic2d_apm_forward,)
 
     @property
     def cuda_layout(self):

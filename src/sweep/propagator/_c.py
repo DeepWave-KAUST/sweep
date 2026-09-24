@@ -691,17 +691,17 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 "recursive-checkpoint C binding; use Ckpt(mode='chunk', ...).")
 
         # APM CUDA path — only attached when the equation supports it AND the
-        # user selected ``topo_method='apm'``.  Forward only: the APM backward
-        # kernels are attached so the dispatch stays uniform, but they return a
-        # wrong rho gradient at body-force source cells, so
+        # user selected ``topo_method='apm'``.  Forward only: there is no
+        # compiled APM backward (the one there was returned a wrong rho
+        # gradient at body-force source cells and is gone), so
         # ``_guard_apm_backward`` refuses any backward through this path and
         # sends gradients to eager autograd (see that method for the numbers).
+        # The two backward slots raise the same refusal if ever reached.
         if (getattr(self, "_topo_method", None) == "apm"
                 and hasattr(self.equation, "_C_apm")):
-            apm_funcs = self.equation._C_apm()
-            self.forward_func = apm_funcs[0]
-            self.backward_func = apm_funcs[1]
-            self.backward_bs_func = apm_funcs[2]
+            self.forward_func = self.equation._C_apm()[0]
+            self.backward_func = self._apm_backward_removed
+            self.backward_bs_func = self._apm_backward_removed
             # APM has no checkpoint backward implementation; drop out of
             # checkpointing so backward routes to boundary saving if it is on,
             # otherwise to full.
@@ -784,6 +784,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.compute_adcig = False
         self.adcig_max_lag = 0
         self.adcig = None
+
+    @staticmethod
+    def _apm_backward_removed(*_args, **_kwargs):
+        raise NotImplementedError(
+            "topo_method='apm' has no gradient on impl='c': there is no compiled "
+            "APM backward (_guard_apm_backward refuses before this is reached)")
 
     def _guard_apm_backward(self, requires_backward):
         """The CUDA APM backward returns a WRONG rho gradient.

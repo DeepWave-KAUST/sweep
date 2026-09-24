@@ -211,124 +211,9 @@ struct AcousticWavefieldTensor {
     bool double_buffer_psi = false;   // true when psi*n_t are present
     bool double_buffer_aux = false;   // true when zeta*n_t are present (fused adjoint)
 
-    // =========================
-    // Allocate (only once)
-    // =========================
-    // FALLBACK ONLY.  The propagator owns every wavefield the compiled drivers
-    // step, so the acoustic-family drivers that have completed the hand-over
-    // (acoustic2d / acoustic3d) bind unconditionally and never reach this or the
-    // two allocators below; the members stay because the drivers that still keep
-    // an unbound-caller fallback call them (grep for ``.allocate(``,
-    // ``.allocate_from_snapshots(``, ``.allocate_like(`` before deleting one --
-    // when the last caller goes, so should the member).
-    //
-    // double_buffer_psi_: pass true at call sites whose stepping pairs with
-    // swap_pml() (the forward time loops).  The stencil kernels neighbour-read
-    // psi* in the same launch that writes the new psi, so the write must land
-    // in psi*n (read-old/write-new, swap_pml() per step) — matching the
-    // Python-bound 9/12-tensor layout.  Without it the kernel falls back to
-    // the legacy in-place write, an intra-launch RAW race (nondeterministic
-    // at ulp level in 3-D).  Call sites that pair with the u-only swap()
-    // (checkpoint recompute, adjoint states) must keep the default: they
-    // never swap psi, so a psi*n write would be lost.
-    void allocate(
-        const torch::Tensor& vp,
-        int dim_,
-        bool use_pml_ = true,
-        bool double_buffer_psi_ = false
-    )
-    {
-        if (allocated) return;
-
-        dim = dim_;
-        use_pml = use_pml_;
-
-        // Always allocate wavefield
-        u_prev_t = torch::zeros_like(vp);
-        u_now_t  = torch::zeros_like(vp);
-        u_next_t = torch::zeros_like(vp);
-
-        if (use_pml) {
-
-            psix_t  = torch::zeros_like(vp);
-            psiz_t  = torch::zeros_like(vp);
-            zetax_t = torch::zeros_like(vp);
-            zetaz_t = torch::zeros_like(vp);
-
-            if (dim == 3) {
-                psiy_t  = torch::zeros_like(vp);
-                zetay_t = torch::zeros_like(vp);
-            }
-
-            if (double_buffer_psi_) {
-                psixn_t = torch::zeros_like(vp);
-                psizn_t = torch::zeros_like(vp);
-                if (dim == 3) psiyn_t = torch::zeros_like(vp);
-                double_buffer_psi = true;
-            }
-        }
-
-        allocated = true;
-    }
-
-    // Allocate state whose aux shapes follow the Python-allocated checkpoint
-    // snapshot slots (checkpoint_tensors() order, each [n_ckpt, B, 1, ...]).
-    // Used by the recursive-checkpoint driver, which has no bound forward
-    // wavefield to copy the (possibly slab-shaped) aux layout from.
-    void allocate_from_snapshots(const torch::Tensor& vp,
-                                 const std::vector<torch::Tensor>& snaps,
-                                 int dim_)
-    {
-        if (allocated) return;
-        dim = dim_;
-        use_pml = true;
-        u_prev_t = torch::zeros_like(vp);
-        u_now_t  = torch::zeros_like(vp);
-        u_next_t = torch::zeros_like(vp);
-        auto zl = [&](const torch::Tensor& t) {
-            auto sizes = t.sizes().vec();
-            sizes.erase(sizes.begin());          // drop the n_ckpt axis
-            return torch::zeros(sizes, vp.options());
-        };
-        if (dim == 2) {
-            TORCH_CHECK(snaps.size() == 6, "acoustic 2D checkpoint set expects 6 tensors");
-            psix_t = zl(snaps[2]); psiz_t = zl(snaps[3]);
-            zetax_t = zl(snaps[4]); zetaz_t = zl(snaps[5]);
-        } else {
-            TORCH_CHECK(snaps.size() == 8, "acoustic 3D checkpoint set expects 8 tensors");
-            psix_t = zl(snaps[2]); psiy_t = zl(snaps[3]); psiz_t = zl(snaps[4]);
-            zetax_t = zl(snaps[5]); zetay_t = zl(snaps[6]); zetaz_t = zl(snaps[7]);
-        }
-        allocated = true;
-    }
-
-    // Like allocate(), but clones the aux-field SHAPES from a reference
-    // wavefield (which may carry slab-shaped CPML aux tensors).  Physical
-    // fields stay model-shaped.  Use for driver-internal scratch/segment
-    // state so it agrees with the Python-chosen aux layout.
-    void allocate_like(const torch::Tensor& vp, const AcousticWavefieldTensor& ref)
-    {
-        if (allocated) return;
-        dim = ref.dim;
-        use_pml = ref.use_pml;
-
-        u_prev_t = torch::zeros_like(vp);
-        u_now_t  = torch::zeros_like(vp);
-        u_next_t = torch::zeros_like(vp);
-
-        if (use_pml) {
-            psix_t  = torch::zeros_like(ref.psix_t);
-            psiz_t  = torch::zeros_like(ref.psiz_t);
-            zetax_t = torch::zeros_like(ref.zetax_t);
-            zetaz_t = torch::zeros_like(ref.zetaz_t);
-            if (dim == 3) {
-                psiy_t  = torch::zeros_like(ref.psiy_t);
-                zetay_t = torch::zeros_like(ref.zetay_t);
-            }
-        }
-        allocated = true;
-    }
-
+    // No allocate(): the propagator binds every wavefield the compiled
+    // drivers step (acoustic2d / acoustic3d through the skeleton, the
+    // hand-written acoustic-family drivers through their own binds).
     void bind(
         const std::vector<torch::Tensor>& tensors,
         int dim_,
@@ -413,10 +298,10 @@ struct AcousticWavefieldTensor {
     }
 
     // Bind one checkpoint replay state set: the 7 (2-D) / 9 (3-D) tensors of
-    // the in-place psi layout allocate_from_snapshots wires (use_pml, no psi
-    // double-buffer -- the replay pairs with the u-only swap()), then check
-    // the geometry allocate_from_snapshots derives: the u triple model-shaped,
-    // the CPML aux shaped like the checkpoint slot it is loaded from.  bind()
+    // the in-place psi layout (use_pml, no psi double-buffer -- the replay
+    // pairs with the u-only swap()), then check the geometry: the u triple
+    // model-shaped, the CPML aux shaped like the checkpoint slot it is loaded
+    // from.  bind()
     // checks the count only, and a slot of the wrong shape would read as
     // garbage inside the kernels rather than fail.
     void bind_replay_state(const std::vector<torch::Tensor>& tensors,

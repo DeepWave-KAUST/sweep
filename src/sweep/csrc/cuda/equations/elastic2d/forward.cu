@@ -68,10 +68,10 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int B = N * C;
 
     ElasticWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, true);
-    else
-        wavefield.allocate(vp, 2);
+    TORCH_CHECK(!p.wavefields.empty(),
+                "elastic2d/apm_forward requires the propagator-bound wavefields "
+                "(15-slot layout); nothing allocates them here");
+    wavefield.bind(p.wavefields, true);
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
@@ -84,10 +84,10 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int nrec_fields = p.receiver_field_indices.numel();
     auto source_fields = p.source_field_indices.to(torch::kCPU);
     auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = bound_or_zeros(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
 
     torch::Tensor u_allt;
-    if (p.save_all_wavefields) u_allt = bound_or_zeros(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
+    if (p.save_all_wavefields) u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn,
                          /* free_surface */ false,

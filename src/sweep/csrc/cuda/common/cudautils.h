@@ -134,12 +134,10 @@ inline void copy_tensor_cuda_async(const Buf& dst, const torch::Tensor& src) { c
 inline void copy_tensor_cuda_async(const torch::Tensor& dst, const Buf& src) { copy_tensor_cuda_async(buf_of(dst), src); }
 
 // ---- BufList / Buf twins of the pool and set helpers (step 2, unit 2a) ------
-// Same names, same checks, same semantics, on descriptors -- except the ONE
-// difference this line of work exists for: nothing here allocates. The torch
-// pool_or_zeros / pool_or_empty fall back to a fresh tensor for an unbound
-// slot; the descriptor versions refuse it, which is what the propagator-
-// allocates-everything policy already promises and test_binding_is_mandatory
-// pins at the driver level.
+// Same names, same checks, same semantics, on descriptors.  Neither side
+// allocates: an unbound slot is refused, which is what the propagator-
+// allocates-everything policy promises and test_binding_is_mandatory pins at
+// the driver level.
 inline bool pool_slot_bound(const BufList& pool, int idx)
 {
     return pool.size() > idx && pool[idx].defined() && pool[idx].numel() > 0;
@@ -256,14 +254,11 @@ struct AsyncCopyContext {
 };
 
 // A tensor from a Python-bound pool (adjoint_workspace, forward_workspace,
-// grads_out) when one was bound, else a fresh
-// zero tensor of the same geometry. This is what lets an equation stop
-// allocating its per-backward scratch in C++: the propagator owns the pool's
-// lifetime and zeroes it before every gradient-bearing forward, which is the
-// same state a fresh zeros_like starts in. The two checks are what make a
-// mismatch LOUD -- consumers take data_ptr<float>() and index by the model's
-// geometry, so a pool tensor of the wrong shape or dtype would read as garbage
-// rather than fail.
+// grads_out).  The propagator owns the pool's lifetime and zeroes it before
+// every gradient-bearing forward; nothing here allocates.  The checks are
+// what make a mismatch LOUD -- consumers take data_ptr<float>() and index by
+// the model's geometry, so a pool tensor of the wrong shape or dtype would
+// read as garbage rather than fail.
 inline bool pool_slot_bound(const std::vector<torch::Tensor>& pool, int idx)
 {
     return static_cast<int>(pool.size()) > idx && pool[idx].defined() && pool[idx].numel() > 0;
@@ -283,33 +278,11 @@ inline const torch::Tensor& pool_slot_checked(const std::vector<torch::Tensor>& 
     return pool[idx];
 }
 
-inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int idx,
-                                   const torch::Tensor& like,
-                                   const char* what = "adjoint_workspace")
-{
-    if (pool_slot_bound(pool, idx))
-        return pool_slot_checked(pool, idx, like, what);
-    return torch::zeros_like(like);
-}
-
-// Same binding, uninitialised fallback: for a slot the driver writes in full
-// before it reads (the derived model coefficients), so neither side pays a
-// memset for it.
-inline torch::Tensor pool_or_empty(const std::vector<torch::Tensor>& pool, int idx,
-                                   const torch::Tensor& like, const char* what)
-{
-    if (pool_slot_bound(pool, idx))
-        return pool_slot_checked(pool, idx, like, what);
-    return torch::empty_like(like);
-}
-
-// REQUIRED variant of the two above, for a slot the propagator binds on every
-// call that reaches the site (its cuda_layout declares the pool unconditionally
-// for that equation and that memory mode).  Same geometry/dtype/device checks;
-// the branch that used to allocate is the error now, so a driver that switched
-// to this cannot silently keep a shadow buffer alive when a caller forgets to
-// bind.  Sites whose binding is conditional (a layout that may declare nothing,
-// a mode that legitimately passes an empty list) keep the optional variants.
+// A slot the propagator binds on every call that reaches the site (its
+// cuda_layout declares the pool unconditionally for that equation and that
+// memory mode).  Geometry/dtype/device checks; an unbound slot is the error,
+// so a driver cannot silently keep a shadow buffer alive when a caller forgets
+// to bind.
 inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int idx,
                                    const torch::Tensor& like, const char* what)
 {
@@ -332,18 +305,8 @@ inline const torch::Tensor& pool_slot_checked(const std::vector<torch::Tensor>& 
     return pool[idx];
 }
 
-inline torch::Tensor pool_or_zeros(const std::vector<torch::Tensor>& pool, int idx,
-                                   std::vector<int64_t> shape, const torch::TensorOptions& options,
-                                   const char* what)
-{
-    if (pool_slot_bound(pool, idx))
-        return pool_slot_checked(pool, idx, shape, what);
-    return torch::zeros(shape, options);
-}
-
-// REQUIRED variant of the driver-shaped slot: same checks, no fallback.
-// ``options`` is kept in the signature so switching a site is a one-word edit
-// (and so the optional/required pair reads the same at every call site).
+// The driver-shaped slot (checkpoint_replay): same checks.  ``options`` is
+// unused; it leaves the signature with the Buf flip.
 inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int idx,
                                    std::vector<int64_t> shape,
                                    const torch::TensorOptions& /*options*/,
@@ -355,9 +318,9 @@ inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int i
     return pool_slot_checked(pool, idx, shape, what);
 }
 
-// A single Python-bound output buffer (u_allt_out, record_out) when it was
-// bound, else a fresh zero tensor of the driver's shape. The shape check is
-// what makes a Python/driver disagreement loud instead of a silent overrun.
+// A single Python-bound output buffer (u_allt_out, record_out).  The shape
+// check is what makes a Python/driver disagreement loud instead of a silent
+// overrun.
 // A Python-bound wavefield LIST (``forward_wavefields`` handed to a
 // boundary-saving backward as its reconstruction state, sized by
 // ``cuda_layout.bs_reconstruction_nvar``): true when one was bound, after the
@@ -406,17 +369,6 @@ inline std::vector<torch::Tensor> wavefield_set(const std::vector<torch::Tensor>
     return set;
 }
 
-// A segment-sized pool slot (checkpoint_replay) bound at its full row count --
-// the longest segment -- and viewed down to the rows this segment uses, so one
-// buffer per call serves every segment. The fallback allocates the full shape
-// once per call, never per segment.
-inline torch::Tensor pool_rows(const std::vector<torch::Tensor>& pool, int idx,
-                               std::vector<int64_t> full_shape, int64_t rows,
-                               const torch::TensorOptions& options, const char* what)
-{
-    return pool_or_zeros(pool, idx, std::move(full_shape), options, what).narrow(0, 0, rows);
-}
-
 // Device pointer of an optional wavefield member: nullptr when the member was
 // left undefined by a partial bind (a reconstruction that carries no CPML
 // memory), for kernels that never touch it in that mode.
@@ -435,17 +387,8 @@ inline const torch::Tensor& bound_checked(const torch::Tensor& bound,
     return bound;
 }
 
-inline torch::Tensor bound_or_zeros(const torch::Tensor& bound, std::vector<int64_t> shape,
-                                    const torch::TensorOptions& options, const char* what)
-{
-    if (!bound.defined())
-        return torch::zeros(shape, options);
-    return bound_checked(bound, shape, what);
-}
-
-// REQUIRED variant: same shape/dtype checks, and the undefined tensor that used
-// to select the allocation is the error.  ``options`` stays in the signature for
-// the same reason as in pool_required.
+// The undefined tensor that used to select an allocation is the error.
+// ``options`` is unused; it leaves the signature with the Buf flip.
 inline torch::Tensor bound_required(const torch::Tensor& bound, std::vector<int64_t> shape,
                                     const torch::TensorOptions& /*options*/, const char* what)
 {

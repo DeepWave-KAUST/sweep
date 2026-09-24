@@ -36,16 +36,6 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     return out;
 }
 
-inline std::vector<torch::Tensor> zero_model_grads(const std::vector<torch::Tensor>& models)
-{
-    TORCH_CHECK(models.size() == 22, "ElasticTTISG3D CUDA backward expects 22 prepared models");
-    std::vector<torch::Tensor> grads;
-    grads.reserve(models.size());
-    for (const auto& model : models)
-        grads.push_back(torch::zeros_like(model));
-    return grads;
-}
-
 inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
 {
     TORCH_CHECK(grads.size() == 22, "ElasticTTISG3D CUDA backward expects 22 prepared model gradients");

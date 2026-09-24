@@ -566,16 +566,11 @@ class Elastic(FirstOrderEquation):
         )
     
     def _C_apm(self):
-        """APM CUDA bindings (Cao & Chen 2018, 3-D).
-        Forward is fully implemented; backward is a stub pending Phase 3D
-        — the _c.py dispatch handles the fallback to eager autograd for
-        gradient computation."""
+        """APM CUDA binding (Cao & Chen 2018, 3-D): the forward only.  There
+        is no compiled APM backward; ``_c.py``'s ``_guard_apm_backward``
+        sends gradients to eager autograd."""
         import sweep._C as _C
-        return (
-            _C.elastic3d_apm_forward,
-            _C.elastic3d_apm_backward,
-            _C.elastic3d_apm_backward_bs,
-        )
+        return (_C.elastic3d_apm_forward,)
     
     @property
     def cuda_layout(self):

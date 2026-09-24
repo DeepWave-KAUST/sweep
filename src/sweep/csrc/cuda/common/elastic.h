@@ -237,40 +237,6 @@ struct ElasticWavefieldTensor {
     bool use_pml = true;
     bool allocated = false;
 
-    void allocate(const torch::Tensor& vp, int dim_, bool use_pml_ = true)
-    {
-        if (allocated) return;
-
-        dim = dim_;
-        use_pml = use_pml_;
-
-        vx_t = torch::zeros_like(vp);
-        vz_t = torch::zeros_like(vp);
-        sxx_t = torch::zeros_like(vp);
-        szz_t = torch::zeros_like(vp);
-        sxz_t = torch::zeros_like(vp);
-
-        reset_optional_3d();
-        reset_optional_pml();
-
-        if (dim == 3) {
-            vy_t = torch::zeros_like(vp);
-            syy_t = torch::zeros_like(vp);
-            sxy_t = torch::zeros_like(vp);
-            syz_t = torch::zeros_like(vp);
-        }
-
-        if (use_pml) {
-            allocate_common_pml(vp);
-
-            if (dim == 3) {
-                allocate_3d_only_pml(vp);
-            }
-        }
-
-        allocated = true;
-    }
-
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true)
     {
         int i = 0;
@@ -475,47 +441,6 @@ private:
         m_syzz_t = torch::Tensor();
     }
 
-    void allocate_common_pml(const torch::Tensor& like)
-    {
-        m_vxx_t = torch::zeros_like(like);
-        m_vxz_t = torch::zeros_like(like);
-        m_vzx_t = torch::zeros_like(like);
-        m_vzz_t = torch::zeros_like(like);
-
-        m_sxxx_t = torch::zeros_like(like);
-        m_sxxz_t = torch::zeros_like(like);
-        m_szzx_t = torch::zeros_like(like);
-        m_szzz_t = torch::zeros_like(like);
-        m_sxzx_t = torch::zeros_like(like);
-        m_sxzz_t = torch::zeros_like(like);
-    }
-
-    void allocate_3d_only_pml(const torch::Tensor& like)
-    {
-        m_vxy_t = torch::zeros_like(like);
-        m_vzy_t = torch::zeros_like(like);
-
-        m_vyx_t = torch::zeros_like(like);
-        m_vyy_t = torch::zeros_like(like);
-        m_vyz_t = torch::zeros_like(like);
-
-        m_sxyx_t = torch::zeros_like(like);
-        m_sxyy_t = torch::zeros_like(like);
-        m_sxyz_t = torch::zeros_like(like);
-
-        m_syyx_t = torch::zeros_like(like);
-        m_syyy_t = torch::zeros_like(like);
-        m_syyz_t = torch::zeros_like(like);
-
-        m_sxzy_t = torch::zeros_like(like);
-        m_syzx_t = torch::zeros_like(like);
-        m_syzy_t = torch::zeros_like(like);
-        m_syzz_t = torch::zeros_like(like);
-
-        m_sxxy_t = torch::zeros_like(like);
-        m_szzy_t = torch::zeros_like(like);
-    }
-
     void bind_common_pml_view(ElasticWavefieldPointer& v)
     {
         v.m_vxx = m_vxx_t.data_ptr<float>();
@@ -619,43 +544,6 @@ struct ElasticAdjointWorkspaceTensor {
     int dim = 2;
     bool allocated = false;
 
-    void allocate(const torch::Tensor& like, int dim_ = 2)
-    {
-        if (allocated) return;
-
-        dim = dim_;
-        qxx_t = torch::zeros_like(like);
-        pxx_t = torch::zeros_like(like);
-
-        if (dim == 2) {
-            qzz_t = torch::zeros_like(like);
-            qxz_t = torch::zeros_like(like);
-            qzx_t = torch::zeros_like(like);
-            pzz_t = torch::zeros_like(like);
-            pxz_t = torch::zeros_like(like);
-            pzx_t = torch::zeros_like(like);
-        } else {
-            qxy_t = torch::zeros_like(like);
-            qxz_t = torch::zeros_like(like);
-            qyx_t = torch::zeros_like(like);
-            qyy_t = torch::zeros_like(like);
-            qyz_t = torch::zeros_like(like);
-            qzx_t = torch::zeros_like(like);
-            qzy_t = torch::zeros_like(like);
-            qzz_t = torch::zeros_like(like);
-
-            pxy_t = torch::zeros_like(like);
-            pxz_t = torch::zeros_like(like);
-            pyx_t = torch::zeros_like(like);
-            pyy_t = torch::zeros_like(like);
-            pyz_t = torch::zeros_like(like);
-            pzx_t = torch::zeros_like(like);
-            pzy_t = torch::zeros_like(like);
-            pzz_t = torch::zeros_like(like);
-        }
-        allocated = true;
-    }
-
     // Slots this struct binds per dimension: 2-D qxx, qzz, qxz, qzx, pxx, pzz,
     // pxz, pzx (8); 3-D the nine q* then the nine p* (18).  They are the HEAD
     // of the adjoint_workspace pool (cuda_layout.backward_workspace_shapes);
@@ -707,30 +595,14 @@ struct ElasticAdjointWorkspaceTensor {
     }
 };
 
-inline void init_adjoint_workspace(
-    ElasticAdjointWorkspaceTensor& workspace,
-    const std::vector<torch::Tensor>& tensors,
-    const torch::Tensor& like,
-    int dim
-)
-{
-    if (!tensors.empty())
-        workspace.bind(tensors, dim);
-    else
-        workspace.allocate(like, dim);
-}
-
-// Required twin of init_adjoint_workspace, for the drivers whose pool the
-// propagator ALWAYS binds: every staggered-family equation declares
+// The adjoint workspace, which the propagator ALWAYS binds: every staggered-family equation declares
 // cuda_layout.backward_workspace_shapes as a callable, so _c.py's
 // _ensure_adjoint_workspace_buffers sizes the pool for the backward's memory
 // mode and Wrapper.backward hands it over as BackwardInput.adjoint_workspace
 // on every gradient-bearing call.  There is therefore no supported path on
 // which the driver has to allocate its own q*/p* scratch -- an empty pool is
 // a Python/driver contract break, not a mode.  ``who`` names the driver and
-// mode for the message.  init_adjoint_workspace stays for the hand-written
-// APM entry points (elastic2d/elastic3d backward.cu), which are not on the
-// shared skeleton.
+// mode for the message.
 inline void bind_adjoint_workspace_required(
     ElasticAdjointWorkspaceTensor& workspace,
     const std::vector<torch::Tensor>& tensors,
@@ -746,8 +618,9 @@ inline void bind_adjoint_workspace_required(
 
 inline void zero_wavefield_state(ElasticWavefieldTensor& wf)
 {
-    if (wf.dim == 3 && !wf.m_syzx_t.defined())
-        wf.m_syzx_t = torch::zeros_like(wf.vx_t);
+    TORCH_CHECK(wf.dim != 3 || wf.m_syzx_t.defined(),
+                "zero_wavefield_state: a 3-D elastic wavefield must carry m_syzx "
+                "(the propagator binds all 36 slots; nothing allocates it here)");
 
     zero_tensor_device_async(wf.vx_t);
     zero_tensor_device_async(wf.vz_t);

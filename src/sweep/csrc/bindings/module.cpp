@@ -126,8 +126,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // APM (Cao & Chen 2018) parameter-modified path for irregular topography.
     // CUDA-only; the dispatch wrapper falls back to image method on CPU.
     m.def("elastic2d_apm_forward", wrap_forward(elastic2d::apm_forward), "Elastic APM forward 2D (CUDA only)");
-    m.def("elastic2d_apm_backward", wrap_backward(elastic2d::apm_backward), "Elastic APM backward 2D full mode (CUDA only)");
-    m.def("elastic2d_apm_backward_bs", wrap_backward(elastic2d::apm_backward_bs), "Elastic APM backward 2D boundary-saving (CUDA only)");
     // Soares & Sacchi 2025 vector-reflectivity elastic (2D). CUDA only; no
     // CPU fallback (the eager Python path covers CPU).
     m.def("elastic_vr2d_forward", wrap_forward(elastic_vr2d::forward), "Elastic vector-reflectivity forward 2D (CUDA only)");
@@ -141,11 +139,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("elastic3d_backward_recursive_ckpt", wrap_backward(dispatch_backward(elastic3d::backward_recursive_ckpt, EK::Elastic3D, BM::RecursiveCheckpoint)), "Elastic backward with recursive checkpointing 3D (CUDA/CPU)");
     m.def("elastic3d_backward", wrap_backward(dispatch_backward(elastic3d::backward, EK::Elastic3D, BM::Full)), "Elastic backward 3D (CUDA/CPU)");
     // APM (Cao & Chen 2018, 3-D) — Phase 3C/3D.
-    // CUDA only; forward is full implementation, backward is stub
-    // until Phase 3D ships.
+    // CUDA only; forward only (no compiled APM backward).
     m.def("elastic3d_apm_forward", wrap_forward(elastic3d::apm_forward), "Elastic APM forward 3D (CUDA only)");
-    m.def("elastic3d_apm_backward", wrap_backward(elastic3d::apm_backward), "Elastic APM backward 3D full mode (CUDA only — stub pending Phase 3D)");
-    m.def("elastic3d_apm_backward_bs", wrap_backward(elastic3d::apm_backward_bs), "Elastic APM backward 3D boundary-saving (CUDA only — stub pending Phase 3D)");
     m.def("elastic_tti_sg2d_forward", wrap_forward(dispatch_forward(elastic_tti_sg2d::forward, EK::ElasticTTISG2D)), "Elastic TTI staggered-grid forward 2D (CUDA/CPU)");
     m.def("elastic_tti_sg2d_backward", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward, EK::ElasticTTISG2D, BM::Full)), "Elastic TTI staggered-grid backward 2D full mode (CUDA/CPU)");
     m.def("elastic_tti_sg2d_backward_bs", wrap_backward(dispatch_backward(elastic_tti_sg2d::backward_bs, EK::ElasticTTISG2D, BM::BoundarySaving)), "Elastic TTI staggered-grid backward 2D boundary-saving mode (CUDA/CPU)");
