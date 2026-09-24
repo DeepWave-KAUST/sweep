@@ -15,6 +15,7 @@
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace das2d {
 
@@ -24,10 +25,10 @@ namespace das2d {
 // is written, so nothing here relies on the pool's contents at entry.
 enum ForwardWorkspaceSlot : int { TMP_SXX_X = 0, TMP_SZZ_Z, TMP_TXX_Z, TMP_TZZ_X, N_FORWARD_SLOTS };
 
-ForwardOutput forward(const ForwardInput& in)
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     auto vp = p.models[0];
     auto vs = p.models[1];
@@ -63,14 +64,14 @@ ForwardOutput forward(const ForwardInput& in)
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
     // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
     // always allocates and binds record_out (propagator/_c.py Wrapper.forward,
     // `params.record_out = _record_buffer(cp.record_shape, ...)`).
-    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
     // Mandatory: cuda_layout.forward_workspace_nvar = 4, so
     // _transient_forward_workspace always hands over four grids.
@@ -83,11 +84,11 @@ ForwardOutput forward(const ForwardInput& in)
     auto tmp_szz_z = pool_required(ws, TMP_SZZ_Z, vp, "forward_workspace");
     auto tmp_txx_z = pool_required(ws, TMP_TXX_Z, vp, "forward_workspace");
     auto tmp_tzz_x = pool_required(ws, TMP_TZZ_X, vp, "forward_workspace");
-    torch::Tensor u_allt;
+    Buf u_allt;
     if (p.save_all_wavefields) {
         // Mandatory in this branch: cuda_layout.save_all_shape is
         // history_fields(2), so a save_all forward always binds u_allt_out.
-        u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
+        u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, "u_allt_out");
     }
 
     SolverContext solver{
@@ -143,6 +144,7 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -152,7 +154,7 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -195,7 +197,7 @@ ForwardOutput forward(const ForwardInput& in)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = das2d_field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = das2d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
@@ -241,11 +243,11 @@ ForwardOutput forward(const ForwardInput& in)
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = das2d_field_ptr(wf, receiver_fields[irec].item<int>());
+            float* field = das2d_field_ptr(wf, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel<<<record_config.grid, record_config.block>>>(
                 field,
-                record[irec].data_ptr<float>(),
+                record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(),
                 it,
                 nrec,
@@ -269,9 +271,17 @@ ForwardOutput forward(const ForwardInput& in)
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
+}
+
+
+ForwardOutput forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(forward_core(in), in_torch);
 }
 
 }

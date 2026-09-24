@@ -183,16 +183,6 @@ struct Driver {
         return p.adjoint_workspace;
     }
 
-    // torch twin for the hand-written ckpt driver (backward.cu); retired with 2d3
-    static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
-    {
-        SWEEP_CHECK(p.adjoint_workspace.size() == N_SLOTS,
-                    "acoustic_vrz2d/backward requires the propagator-bound "
-                    "adjoint_workspace (cuda_layout.backward_workspace_shapes): ",
-                    static_cast<int>(N_SLOTS), " tensors, got ", p.adjoint_workspace.size());
-        return p.adjoint_workspace;
-    }
-
     // (helper: fired inside make_bwd_workspace)
     static void zero_wavefield_state(Wavefield& wf)
     {

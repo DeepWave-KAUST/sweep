@@ -14,6 +14,7 @@
 #include "../../launch/config.h"
 #include "../../operators/laplace.cuh"
 #include "../../operators/gradient.cuh"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace visco_acoustic2d {
 
@@ -36,11 +37,11 @@ namespace visco_acoustic2d {
 // remaining per-call host objects are tensor views and the wrapped CPU scalars
 // of the in-place Scalar ops (div_(dt), the ifft normalisation), exactly as the
 // ATen expressions had.
-ForwardOutput forward(const ForwardInput& in) {
+ForwardOutputCore forward_core(const ForwardInputCore& in) {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
 
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 4,
                 "visco_acoustic2d expects the prepared models "
@@ -105,7 +106,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
     // record_out is bound on every call: ViscoAcoustic.cuda_layout declares
     // record_shape, so cp.record_shape is never None and _c.py allocates it.
-    auto record = bound_required(p.record_out, {N, p.receivers_loc.size(1), p.nt}, vp.options(),
+    auto record = bound_required(p.record_out, {N, p.receivers_loc.size(1), p.nt},
                                  "record_out (visco_acoustic2d/forward, cuda_layout.record_shape)");
 
     // Full-mode store: RAW pressure u(t) (NOT the acoustic vp^2*Lap(u)
@@ -113,9 +114,9 @@ ForwardOutput forward(const ForwardInput& in) {
     // vp_step-gradient carrier is recomputed in backward (kernels.cuh).
     // Bound whenever save_all_wavefields is on: cuda_layout declares
     // save_all_shape, so cp.u_allt_shape is never None.
-    torch::Tensor u_allt;
+    Buf u_allt;
     if (p.save_all_wavefields)
-        u_allt = bound_required(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(),
+        u_allt = bound_required(p.u_allt_out, {p.nt, B, nz, nx},
                                 "u_allt_out (visco_acoustic2d/forward, cuda_layout.save_all_shape)");
 
     CheckpointRuntime checkpoint_runtime(
@@ -207,10 +208,18 @@ ForwardOutput forward(const ForwardInput& in) {
     }
 
     out.wavefield = u_allt;
-    out.last_two = torch::Tensor();
+    out.last_two = Buf{};
     out.record = record;
 
     return out;
+}
+
+
+ForwardOutput forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(forward_core(in), in_torch);
 }
 
 } // namespace visco_acoustic2d

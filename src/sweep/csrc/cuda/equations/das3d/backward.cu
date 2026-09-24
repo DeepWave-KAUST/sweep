@@ -13,15 +13,16 @@
 #include "../../common/elastic.h"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace das3d {
 
 // p.grads_out as the propagator binds it: {grad_vp, grad_vs, grad_rho}, in
-// BackwardOutput.grads order, zeroed per backward on the Python side and
+// BackwardOutputCore.grads order, zeroed per backward on the Python side and
 // accumulated here.  Mandatory: propagator/_c.py Wrapper.backward always sets
 // `params.grads_out = _gradient_buffers(...)`, one slot per model
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
-static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == 3,
                 "das3d/backward requires the propagator-bound grads_out "
@@ -49,7 +50,7 @@ enum WorkspaceSlot : int {
 // drifted.  Mandatory: DASZhao3D.cuda_layout.backward_workspace_nvar = 19 and
 // propagator/_c.py Wrapper.backward always sets
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
-const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+BufList workspace_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
                 "das3d/backward requires the propagator-bound adjoint_workspace (",
@@ -72,7 +73,7 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 constexpr int CKPT_STATE_COUNT = 31;
 
 
-torch::Tensor recompute_strain_history(const BackwardInput& p)
+Buf recompute_strain_history(const BackwardInputCore& p)
 {
     auto vp = p.models[0];
     auto vs = p.models[1];
@@ -94,8 +95,8 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     int B = N * C;
 
     int forward_nsrc = p.forward_sources_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
 
     DasWavefieldTensor3D wavefield;
     {
@@ -127,7 +128,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     // Python-allocated with the checkpoint snapshots (cuda_layout.checkpoint_replay_shapes
     // is declared, so _ensure_checkpoint_buffers always fills self.checkpoint_replay);
     // every step is written before the backward reads it.
-    auto history = pool_required(p.checkpoint_replay, 0, {p.nt, 3, B, nz, ny, nx}, vp.options(), "checkpoint_replay");
+    auto history = pool_required(p.checkpoint_replay, 0, {p.nt, 3, B, nz, ny, nx}, "checkpoint_replay");
 
     SolverContext solver{
         3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -193,7 +194,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = das3d_field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = das3d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source_3d<<<source_config.grid, source_config.block>>>(
                 field,
@@ -216,10 +217,10 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.u_forward.defined(), "DAS 3D full backward requires saved exx/eyy/ezz wavefields.");
     SWEEP_CHECK(p.u_forward.dim() == 6, "DAS 3D saved wavefields must have shape (nt, 3, B, nz, ny, nx).");
@@ -243,8 +244,8 @@ BackwardOutput backward(const BackwardInput& in)
     int B = N * C;
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan receiver_fields = p.receiver_field_indices;
 
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
@@ -302,11 +303,11 @@ BackwardOutput backward(const BackwardInput& in)
         auto adj_view = adjoint.view();
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = das3d_field_ptr(adj_view, receiver_fields[irec].item<int>());
+            float* field = das3d_field_ptr(adj_view, receiver_fields[irec]);
             if (field == nullptr) continue;
             add_source_3d<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -438,25 +439,54 @@ BackwardOutput backward(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
-    BackwardInput replay = in;
+    BackwardInputCore replay = in;
     replay.u_forward = recompute_strain_history(in);
-    return backward(replay);
+    return backward_core(replay);
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
-    BackwardInput replay = in;
+    BackwardInputCore replay = in;
     replay.u_forward = recompute_strain_history(in);
-    return backward(replay);
+    return backward_core(replay);
 }
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
-    BackwardInput replay = in;
+    BackwardInputCore replay = in;
     replay.u_forward = recompute_strain_history(in);
-    return backward(replay);
+    return backward_core(replay);
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 }

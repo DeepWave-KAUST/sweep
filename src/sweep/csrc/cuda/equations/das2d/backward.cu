@@ -15,15 +15,16 @@
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace das2d {
 
 // p.grads_out as the propagator binds it: {grad_vp, grad_vs, grad_rho}, in
-// BackwardOutput.grads order, zeroed per backward on the Python side and
+// BackwardOutputCore.grads order, zeroed per backward on the Python side and
 // accumulated here.  Mandatory: propagator/_c.py Wrapper.backward always sets
 // `params.grads_out = _gradient_buffers(...)`, one slot per model
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
-static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == 3,
                 "das2d/backward requires the propagator-bound grads_out "
@@ -59,7 +60,7 @@ enum WorkspaceSlot : int {
 // (_das2d_adjoint_workspace) declares 9 slots for full/ckpt/recursive and 15
 // for bs, and propagator/_c.py Wrapper.backward always sets
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
-const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+BufList workspace_slots(const BackwardInputCore& p, int n_slots)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
                 "das2d/backward requires the propagator-bound adjoint_workspace (",
@@ -79,7 +80,7 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_
 constexpr int CKPT_STATE_COUNT = 17;
 
 
-torch::Tensor recompute_strain_history(const BackwardInput& p)
+Buf recompute_strain_history(const BackwardInputCore& p)
 {
     auto vp = p.models[0];
     auto vs = p.models[1];
@@ -99,8 +100,8 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     int B = N * C;
 
     int forward_nsrc = p.forward_sources_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
 
     DasWavefieldTensor2D wavefield;
     {
@@ -127,7 +128,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     // Python-allocated with the checkpoint snapshots (cuda_layout.checkpoint_replay_shapes
     // is declared, so _ensure_checkpoint_buffers always fills self.checkpoint_replay);
     // every step is written before the backward reads it.
-    auto history = pool_required(p.checkpoint_replay, 0, {p.nt, 2, B, nz, nx}, vp.options(), "checkpoint_replay");
+    auto history = pool_required(p.checkpoint_replay, 0, {p.nt, 2, B, nz, nx}, "checkpoint_replay");
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -178,7 +179,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = das2d_field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = das2d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
@@ -200,10 +201,10 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.u_forward.defined(), "DAS 2D full backward requires saved exx/ezz wavefields.");
     SWEEP_CHECK(p.u_forward.dim() == 5, "DAS 2D saved wavefields must have shape (nt, 2, B, nz, nx).");
@@ -225,8 +226,8 @@ BackwardOutput backward(const BackwardInput& in)
     int B = N * C;
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan receiver_fields = p.receiver_field_indices;
 
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
@@ -275,11 +276,11 @@ BackwardOutput backward(const BackwardInput& in)
         auto adj_view = adjoint.view();
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = das2d_field_ptr(adj_view, receiver_fields[irec].item<int>());
+            float* field = das2d_field_ptr(adj_view, receiver_fields[irec]);
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -442,10 +443,10 @@ BackwardOutput backward(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     auto vp = p.models[0];
     auto vs = p.models[1];
@@ -463,10 +464,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
     int forward_nsrc = p.forward_sources_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
 
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
@@ -590,6 +591,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 "fields are un-injected.");
 
     AsyncCopyContext async_copy(staged_boundary);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -599,7 +601,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -610,11 +612,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
         auto for_view = forward.view();
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = das2d_field_ptr(adj_view, receiver_fields[irec].item<int>());
+            float* field = das2d_field_ptr(adj_view, receiver_fields[irec]);
             if (field == nullptr) continue;
             add_source<<<adj_source_config.grid, adj_source_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -628,7 +630,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         // Un-inject the forward source (sign -1) before time-reversing the
         // step: exact sign flip in-kernel, no negated copy of the source.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = das2d_field_ptr(for_view, source_fields[isrc].item<int>());
+            float* field = das2d_field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source_signed<<<fwd_source_config.grid, fwd_source_config.block>>>(
                 field,
@@ -867,11 +869,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     auto adj_view = adjoint.view();
     for (int irec = 0; irec < nrec_fields; ++irec) {
-        float* field = das2d_field_ptr(adj_view, receiver_fields[irec].item<int>());
+        float* field = das2d_field_ptr(adj_view, receiver_fields[irec]);
         if (field == nullptr) continue;
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             field,
-            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_source.select(0, irec).data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
             0,
             adjoint_nsrc,
@@ -910,18 +912,47 @@ BackwardOutput backward_bs(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
-    BackwardInput replay = in;
+    BackwardInputCore replay = in;
     replay.u_forward = recompute_strain_history(in);
-    return backward(replay);
+    return backward_core(replay);
 }
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
-    BackwardInput replay = in;
+    BackwardInputCore replay = in;
     replay.u_forward = recompute_strain_history(in);
-    return backward(replay);
+    return backward_core(replay);
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 } // namespace das2d

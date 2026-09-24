@@ -36,3 +36,12 @@ inline BackwardOutput to_torch(const BackwardOutputCore& c, const BackwardInput&
     out.adcig = tensor_of(c.adcig, {&in.adcig_out}, {}, "BackwardOutput.adcig");
     return out;
 }
+
+inline RTMOutput to_torch(const RTMOutputCore& c, const BackwardInput& in)
+{
+    RTMOutput out;
+    out.source_illumination = tensor_of(c.source_illumination, {}, {&in.illum_out}, "RTMOutput.source_illumination");
+    out.receiver_illumination = tensor_of(c.receiver_illumination, {}, {&in.illum_out}, "RTMOutput.receiver_illumination");
+    out.adcig = tensor_of(c.adcig, {&in.adcig_out}, {}, "RTMOutput.adcig");
+    return out;
+}

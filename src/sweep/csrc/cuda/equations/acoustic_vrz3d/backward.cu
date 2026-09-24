@@ -14,6 +14,7 @@
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_vrz3d {
 
@@ -77,7 +78,7 @@ enum WorkspaceSlot : int {
 // AcousticVRZ3D.cuda_layout.backward_workspace_nvar = 10) and the DD runner
 // rebinds the same ten grids, so an empty or differently sized pool means the
 // Python declaration drifted.
-static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+static BufList workspace_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.adjoint_workspace.size() == N_SLOTS,
                 "acoustic_vrz3d/backward requires the propagator-bound adjoint_workspace "
@@ -94,7 +95,7 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 // _c.py builds it for every backward (_gradient_buffers from
 // cuda_layout.grads_out_has_wavelet = true plus one slot per model) and the DD
 // runner rebinds the same list, so it is never empty.
-static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == p.models.size() + 1,
                 "acoustic_vrz3d/backward requires the propagator-bound grads_out "
@@ -106,7 +107,7 @@ static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 // The adjoint state: cuda_layout base_nvar 3 + pml_nvar 9 = 12 slots, bound by
 // _c.py on every backward (_ensure_wavefield_buffers allocates them whenever
 // the forward required a gradient) and rebound by the stepped / DD drivers.
-static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                                const char* mode)
 {
     SWEEP_CHECK(!p.adjoint_wavefields.empty(),
@@ -115,7 +116,7 @@ static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput&
     wf.bind(p.adjoint_wavefields, 3, true);
 }
 
-BackwardOutput backward_full_impl(const BackwardInput& in)
+BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(
@@ -128,7 +129,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
         "AcousticVRZ3D backward expects forward wavefields with shape (nt, 7, B, nz, ny, nx)."
     );
 
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     auto vp = in.models[0];
     auto z = in.models[1];
@@ -258,32 +259,16 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
         );
     }
 
-    const auto normalize_grad = [](const torch::Tensor& model_grad, const torch::Tensor& model) {
-        if (!model_grad.defined()) return model_grad;
-        if (
-            model_grad.dim() == static_cast<int>(model.dim()) - 1 &&
-            model_grad.size(0) == model.size(0) &&
-            model.dim() >= 2 &&
-            model.size(1) == 1
-        ) {
-            return model_grad.unsqueeze(1);
-        }
-
-        return model_grad;
-    };
-
-    grad_vp = normalize_grad(grad_vp, vp);
-    grad_z = normalize_grad(grad_z, z);
 
     out.grads = {grad_vp, grad_z};
     return out;
 }
 
-BackwardOutput backward_bs_impl(const BackwardInput& in)
+BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_bs expects models [vp, z].");
     SWEEP_CHECK(p.u_last_two.defined() && p.u_last_two.numel() > 0,
@@ -409,7 +394,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // so they are Python-bound there, and the monolithic path binds the same
     // ten slots. BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first
     // segment; build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
-    // step while their halo stays at the pool's zero. torch::Tensor copies share
+    // step while their halo stays at the pool's zero. Buf copies share
     // storage, so .data_ptr() hits the bound buffer.
     auto C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");
     auto Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");
@@ -442,7 +427,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // skeleton records a production 3-D run going 1760 -> 166 s/iteration once
     // the backward bound the tensor instead (dev 4290248 fixed the pre-template
     // acoustic3d/backward.cu the same way; this hand-written driver never got it).
-    const torch::Tensor& last_two_bound = p.u_last_two;
+    const Buf& last_two_bound = p.u_last_two;
     if (staged_boundary) {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
@@ -477,6 +462,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // -- which is every gpu-direct run, since ModelParallel only builds a
     // session when storage != 'gpu' -- BoundaryScope falls into its local branch
     // and reproduces the AsyncCopyContext + BoundaryRuntime pair this replaces.
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryScope boundary_scope(
         p.boundary_session ? p.boundary_session->impl() : nullptr,
         BoundarySessionImpl::Phase::Backward,
@@ -488,7 +474,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files
+        disk_files
     );
     BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
     // it_hi, not nt: without it every stepped call primes the TAIL chunk instead
@@ -679,31 +665,15 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
             boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
-    const auto normalize_grad = [](const torch::Tensor& model_grad, const torch::Tensor& model) {
-        if (!model_grad.defined()) return model_grad;
-        if (
-            model_grad.dim() == static_cast<int>(model.dim()) - 1 &&
-            model_grad.size(0) == model.size(0) &&
-            model.dim() >= 2 &&
-            model.size(1) == 1
-        ) {
-            return model_grad.unsqueeze(1);
-        }
-
-        return model_grad;
-    };
-
-    grad_vp = normalize_grad(grad_vp, vp);
-    grad_z = normalize_grad(grad_z, z);
     out.grads = {grad_vp, grad_z};
     return out;
 }
 
-BackwardOutput backward_ckpt_impl(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_ckpt expects models [vp, z].");
     SWEEP_CHECK(!p.checkpoints.empty(), "AcousticVRZ3D backward_ckpt expects checkpoints.");
@@ -766,9 +736,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     auto e_x = pool_required(ws, E_X, vp, "adjoint_workspace");
     auto e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
     auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
-    auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
-        ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
-        : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter (undefined -> numel 0)
     const bool recursive_checkpoint = checkpoint_steps_cpu.numel() > 0;
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -831,7 +799,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     // replay earlier in the same segment, so it is never zeroed.  An unbound
     // caller allocates it once per call, as before.
     auto chunk_forward = pool_required(p.checkpoint_replay, CHUNK_FORWARD,
-                                       {max_segment_length, N, C, nz, ny, nx}, vp.options(),
+                                       {max_segment_length, N, C, nz, ny, nx},
                                        "checkpoint_replay (acoustic_vrz3d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
@@ -899,7 +867,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
             );
 
             forward.swap();
-            copy_tensor_device_to_device_async(chunk_forward[it - start], forward.u_now_t);
+            copy_tensor_device_to_device_async(chunk_forward.select(0, it - start), forward.u_now_t);
         }
 
         for (int it = end - 1; it >= start; --it) {
@@ -942,7 +910,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
                 order,
                 launch_config.grid,
                 launch_config.block,
-                chunk_forward[it - start].data_ptr<float>(),
+                chunk_forward.select(0, it - start).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
@@ -962,51 +930,64 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         }
     }
 
-    const auto normalize_grad = [](const torch::Tensor& model_grad, const torch::Tensor& model) {
-        if (!model_grad.defined()) return model_grad;
-        if (
-            model_grad.dim() == static_cast<int>(model.dim()) - 1 &&
-            model_grad.size(0) == model.size(0) &&
-            model.dim() >= 2 &&
-            model.size(1) == 1
-        ) {
-            return model_grad.unsqueeze(1);
-        }
-
-        return model_grad;
-    };
-
-    grad_vp = normalize_grad(grad_vp, vp);
-    grad_z = normalize_grad(grad_z, z);
     out.grads = {grad_vp, grad_z};
     return out;
 }
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_full_impl(in);
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_bs_impl(in);
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_ckpt_impl(in);
 }
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_ckpt_impl(in);
 }
 
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
+}
 
 } // namespace acoustic_vrz3d

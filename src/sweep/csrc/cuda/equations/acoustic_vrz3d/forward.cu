@@ -17,14 +17,15 @@
 #include "../../launch/config.h"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_vrz3d {
 
-ForwardOutput forward(const ForwardInput& in)
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D CUDA forward expects models [vp, z]");
 
@@ -118,7 +119,7 @@ ForwardOutput forward(const ForwardInput& in)
     // record_shape, so cp.record_shape is never None and _c.py allocates it.
     // Stepped runs additionally accumulate absolute-it writes into it, where a
     // per-call allocation would lose every prior segment.
-    auto record = bound_required(p.record_out, {N, nrec, p.nt}, vp.options(),
+    auto record = bound_required(p.record_out, {N, nrec, p.nt},
                                  "record_out (acoustic_vrz3d/forward, cuda_layout.record_shape)");
     SWEEP_CHECK(record.is_contiguous() &&
                 record.size(-1) == static_cast<long>(p.nt),
@@ -131,9 +132,9 @@ ForwardOutput forward(const ForwardInput& in)
                 "AcousticVRZ3D stepped forward does not support save_all_wavefields");
     // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
     // declares save_all_shape, so cp.u_allt_shape is never None.
-    torch::Tensor u_allt;
+    Buf u_allt;
     if (p.save_all_wavefields)
-        u_allt = bound_required(p.u_allt_out, {p.nt, 7, B, nz, ny, nx}, vp.options(),
+        u_allt = bound_required(p.u_allt_out, {p.nt, 7, B, nz, ny, nx},
                                 "u_allt_out (acoustic_vrz3d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
@@ -186,6 +187,7 @@ ForwardOutput forward(const ForwardInput& in)
     // Same persistent-session handling as the backward; see there. Without it
     // the DD forward tears down and rebuilds the copy stream once per time step
     // and the staged ring can never overlap compute.
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryScope boundary_scope(
         p.boundary_session ? p.boundary_session->impl() : nullptr,
         BoundarySessionImpl::Phase::Forward,
@@ -197,7 +199,7 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files
+        disk_files
     );
     BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
     CheckpointRuntime checkpoint_runtime(
@@ -321,10 +323,18 @@ ForwardOutput forward(const ForwardInput& in)
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
 
     return out;
+}
+
+
+ForwardOutput forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(forward_core(in), in_torch);
 }
 
 } // namespace acoustic_vrz3d

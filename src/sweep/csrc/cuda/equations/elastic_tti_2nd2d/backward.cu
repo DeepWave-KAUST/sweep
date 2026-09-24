@@ -15,15 +15,16 @@
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace elastic_tti_2nd2d {
 
 // p.grads_out as the propagator binds it: one per prepared model, in
-// BackwardOutput.grads order, zeroed per backward on the Python side.
+// BackwardOutputCore.grads order, zeroed per backward on the Python side.
 // Mandatory: propagator/_c.py Wrapper.backward always sets
 // `params.grads_out = _gradient_buffers(...)`, one slot per model
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
-static std::vector<torch::Tensor> model_grads(const BackwardInput& p)
+static std::vector<Buf> model_grads(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == p.models.size(),
                 "elastic_tti_2nd2d/backward requires the propagator-bound grads_out "
@@ -59,7 +60,7 @@ enum WorkspaceSlot : int {
 // (_adjoint_workspace_shapes) declares 9 slots for full and 11 for bs/ckpt,
 // and propagator/_c.py Wrapper.backward always sets
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
-const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+BufList workspace_slots(const BackwardInputCore& p, int n_slots)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
                 "elastic_tti_2nd2d/backward requires the propagator-bound adjoint_workspace (",
@@ -81,12 +82,12 @@ const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_
 constexpr int CKPT_STATE_COUNT = 14;
 
 struct AdjointWorkspace {
-    std::array<torch::Tensor, 8> t;
+    std::array<Buf, 8> t;
 
     // The pool is mandatory: every mode's backward_workspace_shapes declares
     // at least N_POOL slots, and workspace_slots() has already checked the
     // exact count for this mode.
-    void init(const std::vector<torch::Tensor>& external)
+    void init(const std::vector<Buf>& external)
     {
         SWEEP_CHECK(external.size() >= N_POOL,
                     "elastic_tti_2nd2d/backward requires the propagator-bound "
@@ -149,25 +150,25 @@ void adjoint_advance(
 }
 
 void inject_adjoint_source(
-    const BackwardInput& p,
+    const BackwardInputCore& p,
     WavefieldTensor& adjoint,
-    const torch::Tensor& receiver_fields,
+    IntSpan receiver_fields,
     const fdtd::LaunchConfig& adj_source_config,
     SolverContext solver,
     int it
 )
 {
     const int adjoint_nsrc = p.adjoint_sources_loc.size(1);
-    const int nrec_fields = p.receiver_field_indices.numel();
+    const int nrec_fields = p.receiver_field_indices.size();
     for (int irec = 0; irec < nrec_fields; ++irec) {
-        const int fld = receiver_fields[irec].item<int>();
+        const int fld = receiver_fields[irec];
         float* field = nullptr;
         if (fld == 0) field = adjoint.ux_t.data_ptr<float>();
         else if (fld == 1) field = adjoint.uz_t.data_ptr<float>();
         if (field == nullptr) continue;
         add_source<<<adj_source_config.grid, adj_source_config.block>>>(
             field,
-            p.adjoint_source[irec].data_ptr<float>(),
+            p.adjoint_source.select(0, irec).data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
             it,
             adjoint_nsrc,
@@ -177,20 +178,20 @@ void inject_adjoint_source(
 }
 
 void rho_source_correction(
-    const BackwardInput& p,
+    const BackwardInputCore& p,
     WavefieldTensor& adjoint,
-    const torch::Tensor& source_fields,
-    torch::Tensor& grad_rho,
-    const torch::Tensor& rho,
+    IntSpan source_fields,
+    Buf& grad_rho,
+    const Buf& rho,
     const fdtd::LaunchConfig& fwd_source_config,
     SolverContext solver,
     int it
 )
 {
     const int forward_nsrc = p.forward_sources_loc.size(1);
-    const int nsrc_fields = p.source_field_indices.numel();
+    const int nsrc_fields = p.source_field_indices.size();
     for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-        const int fld = source_fields[isrc].item<int>();
+        const int fld = source_fields[isrc];
         float* adj_field = nullptr;
         if (fld == 0) adj_field = adjoint.ux_t.data_ptr<float>();
         else if (fld == 1) adj_field = adjoint.uz_t.data_ptr<float>();
@@ -210,11 +211,11 @@ void rho_source_correction(
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd backward expects prepared models");
     SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd backward expects cpmls PML profiles");
@@ -263,8 +264,8 @@ BackwardOutput backward(const BackwardInput& in)
     ws.init(slots);
     auto zero_field = pool_required(slots, ZERO_FIELD, rho, "adjoint_workspace");   // read only
 
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    const IntSpan source_fields = p.source_field_indices;
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto adj_source_config = fdtd::Geom::make(p.adjoint_sources_loc.size(1), B);
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
@@ -300,11 +301,11 @@ BackwardOutput backward(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd boundary-saving backward expects prepared models");
     SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd boundary-saving backward expects cpmls PML profiles");
@@ -337,7 +338,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         zero_tensor_device_async(tsr);
 
     // Reconstruction state: the RECON_WF_COUNT displacement grids bound from
-    // BackwardInput.forward_wavefields (Python-zeroed, no CPML memory -- the
+    // BackwardInputCore.forward_wavefields (Python-zeroed, no CPML memory -- the
     // nopml reverse kernels below never read it).  Mandatory:
     // cuda_layout.bs_reconstruction_nvar = 6, and propagator/_c.py
     // Wrapper.backward binds
@@ -397,15 +398,16 @@ BackwardOutput backward_bs(const BackwardInput& in)
     }
     auto bs = boundary_saver.view();
 
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    const IntSpan source_fields = p.source_field_indices;
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto adj_source_config = fdtd::Geom::make(p.adjoint_sources_loc.size(1), B);
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
     const int forward_nsrc = p.forward_sources_loc.size(1);
-    const int nsrc_fields = p.source_field_indices.numel();
+    const int nsrc_fields = p.source_field_indices.size();
 
     AsyncCopyContext async_copy(staged_boundary);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -415,7 +417,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -461,7 +463,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         }
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = field_ptr(for_view, source_fields[isrc].item<int>());
+            float* field = field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
                 field,
@@ -496,11 +498,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd checkpoint backward expects prepared models");
     SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd checkpoint backward expects cpmls PML profiles");
@@ -562,13 +564,13 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto szz_ws = pool_required(slots, SZZ_WS, rho, "adjoint_workspace");
     auto sxz_ws = pool_required(slots, SXZ_WS, rho, "adjoint_workspace");
 
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    const IntSpan source_fields = p.source_field_indices;
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto adj_source_config = fdtd::Geom::make(p.adjoint_sources_loc.size(1), B);
     auto fwd_source_config = fdtd::Geom::make(p.forward_sources_loc.size(1), B);
     const int forward_nsrc = p.forward_sources_loc.size(1);
-    const int nsrc_fields = p.source_field_indices.numel();
+    const int nsrc_fields = p.source_field_indices.size();
 
     const int chunk_size = p.checkpoint_interval;
     const int num_chunks = (static_cast<int>(p.nt) + chunk_size - 1) / chunk_size;
@@ -599,8 +601,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // re-zeroed between chunks.
     std::vector<int64_t> seg_shape = rho.sizes().vec();
     seg_shape.insert(seg_shape.begin(), static_cast<int64_t>(chunk_size + 2));
-    auto seg_ux_full = pool_required(p.checkpoint_replay, 0, seg_shape, rho.options(), "checkpoint_replay");
-    auto seg_uz_full = pool_required(p.checkpoint_replay, 1, seg_shape, rho.options(), "checkpoint_replay");
+    auto seg_ux_full = pool_required(p.checkpoint_replay, 0, seg_shape, "checkpoint_replay");
+    auto seg_uz_full = pool_required(p.checkpoint_replay, 1, seg_shape, "checkpoint_replay");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         const int start = chunk_id * chunk_size;
@@ -639,7 +641,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 nullptr, cpml_view, grad_ctx, solver);
 
             for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-                float* field = field_ptr(rep_view, source_fields[isrc].item<int>());
+                float* field = field_ptr(rep_view, source_fields[isrc]);
                 if (field == nullptr) continue;
                 add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
                     field,
@@ -686,6 +688,28 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     out.grads = grads;
     return out;
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
 }
 
 } // namespace elastic_tti_2nd2d

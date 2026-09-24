@@ -15,13 +15,14 @@
 #include "../../launch/config.h"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_lsrtm2d {
 
 namespace {
 
-std::vector<torch::Tensor> slice_wavefields(
-    const std::vector<torch::Tensor>& tensors,
+std::vector<Buf> slice_wavefields(
+    const std::vector<Buf>& tensors,
     size_t start,
     size_t count
 ) {
@@ -29,16 +30,16 @@ std::vector<torch::Tensor> slice_wavefields(
         tensors.size() >= start + count,
         "Acoustic LSRTM 2D wavefield buffer does not contain enough tensors."
     );
-    return std::vector<torch::Tensor>(tensors.begin() + static_cast<long>(start),
+    return std::vector<Buf>(tensors.begin() + static_cast<long>(start),
                                       tensors.begin() + static_cast<long>(start + count));
 }
 
 } // namespace
 
-ForwardOutput forward(const ForwardInput& in) {
+ForwardOutputCore forward_core(const ForwardInputCore& in) {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D expects two models: vp and mp.");
 
@@ -82,14 +83,14 @@ ForwardOutput forward(const ForwardInput& in) {
 
     // record_out is bound on every call: AcousticLSRTM.cuda_layout declares
     // record_shape, so cp.record_shape is never None and _c.py allocates it.
-    auto record = bound_required(p.record_out, {N, nrec, p.nt}, vp.options(),
+    auto record = bound_required(p.record_out, {N, nrec, p.nt},
                                  "record_out (acoustic_lsrtm2d/forward, cuda_layout.record_shape)");
 
     // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
     // declares save_all_shape, so cp.u_allt_shape is never None.
-    torch::Tensor bg_utt_all;
+    Buf bg_utt_all;
     if (p.save_all_wavefields)
-        bg_utt_all = bound_required(p.u_allt_out, {p.nt, B, nz, nx}, vp.options(),
+        bg_utt_all = bound_required(p.u_allt_out, {p.nt, B, nz, nx},
                                     "u_allt_out (acoustic_lsrtm2d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
@@ -125,6 +126,7 @@ ForwardOutput forward(const ForwardInput& in) {
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -134,7 +136,7 @@ ForwardOutput forward(const ForwardInput& in) {
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -153,7 +155,7 @@ ForwardOutput forward(const ForwardInput& in) {
     for (int it = 0; it < p.nt; ++it) {
         auto bg_view = bg.view();
         auto sc_view = sc.view();
-        float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all[it].data_ptr<float>() : nullptr;
+        float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all.select(0, it).data_ptr<float>() : nullptr;
 
         ACOUSTIC_LSRTM2D_COUPLED(
             order,
@@ -219,9 +221,17 @@ ForwardOutput forward(const ForwardInput& in) {
     boundary_runtime.synchronize();
 
     out.wavefield = bg_utt_all;
-    out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
+}
+
+
+ForwardOutput forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(forward_core(in), in_torch);
 }
 
 } // namespace acoustic_lsrtm2d

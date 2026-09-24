@@ -12,6 +12,7 @@
 #include "../../common/derived_models.h"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace visco_acoustic2d {
 
@@ -47,17 +48,17 @@ using derived::ViscoMode;
 // need a zero halo, which the pool's zero-at-entry provides.
 // ---------------------------------------------------------------------------
 
-// p.grads_out as the propagator binds it, in BackwardOutput.grads order,
+// p.grads_out as the propagator binds it, in BackwardOutputCore.grads order,
 // zeroed per backward on the Python side and accumulated here.  _c.py builds it
 // unconditionally for every backward (_gradient_buffers from
 // cuda_layout.grads_out_has_wavelet = true plus one slot per prepared model).
 enum GradSlot : int { GRAD_WAVELET = 0, GRAD_VP, GRAD_B1, GRAD_B2, GRAD_A, N_GRADS };
 
 struct ViscoGrads {
-    torch::Tensor wavelet, vp, B1, B2, A;
+    Buf wavelet, vp, B1, B2, A;
 };
 
-ViscoGrads bind_grads(const BackwardInput& p)
+ViscoGrads bind_grads(const BackwardInputCore& p)
 {
     const auto& gs = p.grads_out;
     SWEEP_CHECK(gs.size() == N_GRADS,
@@ -81,9 +82,9 @@ ViscoGrads bind_grads(const BackwardInput& p)
 // ``isinstance(..., torch.Tensor)`` guards skip (the acoustic family's
 // eq_driver.cuh acoustic_bind_backward_outputs / init_rtm_output do the
 // same).  ``always``: the rtm() entry, whose output IS the illumination.
-RTMOutput bind_illumination(const BackwardInput& p, bool always)
+RTMOutputCore bind_illumination(const BackwardInputCore& p, bool always)
 {
-    RTMOutput illumination;
+    RTMOutputCore illumination;
     if (!p.illum_out.empty()) {
         SWEEP_CHECK(p.illum_out.size() == 2,
                     "illum_out must be {source_illumination, receiver_illumination}");
@@ -99,7 +100,7 @@ RTMOutput bind_illumination(const BackwardInput& p, bool always)
     return illumination;
 }
 
-void pack_outputs(BackwardOutput& out, const ViscoGrads& g, const RTMOutput& illumination)
+void pack_outputs(BackwardOutputCore& out, const ViscoGrads& g, const RTMOutputCore& illumination)
 {
     out.grads = {g.wavelet, g.vp, g.B1, g.B2, g.A};
     out.source_illumination = illumination.source_illumination;
@@ -118,7 +119,7 @@ void pack_outputs(BackwardOutput& out, const ViscoGrads& g, const RTMOutput& ill
 // binding is required.
 constexpr int CKPT_STATE_COUNT = 7;
 
-void check_replay_state_sets(const BackwardInput& p, int sets, const char* what)
+void check_replay_state_sets(const BackwardInputCore& p, int sets, const char* what)
 {
     SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == sets * CKPT_STATE_COUNT,
                 what, " requires the propagator-bound forward_wavefields "
@@ -130,7 +131,7 @@ void check_replay_state_sets(const BackwardInput& p, int sets, const char* what)
 // The adjoint state: cuda_layout base_nvar 3 + pml_nvar 6 + adjoint_extra_nvar 2
 // = 11 slots, bound by _c.py on every backward (_ensure_wavefield_buffers
 // allocates them whenever the forward required a gradient).
-void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p, const char* mode)
+void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p, const char* mode)
 {
     SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "visco_acoustic2d/", mode, " requires the propagator-bound "
@@ -139,8 +140,8 @@ void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p, con
     wf.bind(p.adjoint_wavefields, 2, true);
 }
 
-void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
-                       const torch::Tensor& vp, int set)
+void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
+                       const Buf& vp, int set)
 {
     wf.bind_replay_state(wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
                                        "visco_acoustic2d ckpt replay state"),
@@ -330,10 +331,10 @@ void image_step_from_raw(
     int order, dim3 grid, dim3 block,
     const float* u_raw_ptr,
     const float* lam_ptr,
-    const torch::Tensor& vp,
+    const Buf& vp,
     const Buf& carrier,             // (B, nz, nx) scratch (the CARRIER slot), halo stays 0
-    torch::Tensor* grad,
-    RTMOutput* rtm_out,
+    Buf* grad,
+    RTMOutputCore* rtm_out,
     const LaplaceParam& lap_ctx,
     const SolverContext& ctx,
     int nx, int nz, float dt)
@@ -365,7 +366,7 @@ void image_step_from_raw(
     }
 }
 
-void check_visco_backward(const BackwardInput& p)
+void check_visco_backward(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.models.size() == 4,
                 "visco_acoustic2d expects the prepared models "
@@ -384,13 +385,13 @@ void check_visco_backward(const BackwardInput& p)
 // Full-storage reverse sweep (the rtm() entry point it used to also serve
 // was removed in 295858c).
 void run_full_imaging_visco(
-    const BackwardInput& p,
-    torch::Tensor* grad,
-    torch::Tensor* grad_A,
-    torch::Tensor* grad_B1,
-    torch::Tensor* grad_B2,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out)
+    const BackwardInputCore& p,
+    Buf* grad,
+    Buf* grad_A,
+    Buf* grad_B1,
+    Buf* grad_B2,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out)
 {
     auto vp = p.models[0];
 
@@ -480,36 +481,36 @@ void run_full_imaging_visco(
 
         image_step_from_raw(
             order, launch_config.grid, launch_config.block,
-            p.u_forward[it].data_ptr<float>(),
+            p.u_forward.select(0, it).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp, ws.CARRIER, grad, rtm_out,
             lap_ctx, ctx, nx, nz, dt);
 
         if (grad_A != nullptr && spectral.active && it >= 1) {
-            const Buf du = stage_difference(ws, p.u_forward[it].data_ptr<float>(),
-                                            p.u_forward[it - 1].data_ptr<float>());
+            const Buf du = stage_difference(ws, p.u_forward.select(0, it).data_ptr<float>(),
+                                            p.u_forward.select(0, it - 1).data_ptr<float>());
             accumulate_grad_A(grad_A->data_ptr<float>(), adjoint.u_now_t.template data_ptr<float>(),
                               du.data_ptr<float>(), spectral, dt, ws);
         }
         accumulate_grad_disp(grad_B1 ? grad_B1->data_ptr<float>() : nullptr,
                              grad_B2 ? grad_B2->data_ptr<float>() : nullptr,
                              adjoint.u_now_t.template data_ptr<float>(),
-                             p.u_forward[it].data_ptr<float>(), spectral, dt, ws);
+                             p.u_forward.select(0, it).data_ptr<float>(), spectral, dt, ws);
     }
 }
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
     SWEEP_CHECK(in.u_forward.defined() && in.u_forward.numel() > 0,
                 "visco_acoustic2d backward (full) requires the raw forward "
                 "wavefield history");
-    BackwardOutput out;
+    BackwardOutputCore out;
     ViscoGrads grads = bind_grads(in);
-    RTMOutput illumination = bind_illumination(in, /*always=*/false);
+    RTMOutputCore illumination = bind_illumination(in, /*always=*/false);
     run_full_imaging_visco(in, &grads.vp, &grads.A, &grads.B1, &grads.B2,
                            &grads.wavelet,
                            in.compute_illumination ? &illumination : nullptr);
@@ -517,7 +518,7 @@ BackwardOutput backward(const BackwardInput& in)
     return out;
 }
 
-RTMOutput rtm(const BackwardInput& in)
+RTMOutputCore rtm_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
@@ -530,12 +531,12 @@ RTMOutput rtm(const BackwardInput& in)
         "visco_acoustic2d RTM does not support checkpoint mode."
     );
 
-    RTMOutput out = bind_illumination(in, /*always=*/true);
+    RTMOutputCore out = bind_illumination(in, /*always=*/true);
     run_full_imaging_visco(in, nullptr, nullptr, nullptr, nullptr, nullptr, &out);
     return out;
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     SWEEP_CHECK(false,
         "visco_acoustic2d does not support boundary saving: the amplitude "
@@ -545,13 +546,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
     return {};
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
 
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -602,8 +603,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     acoustic_init_aux_slabs(ctx, forward);
 
     ViscoGrads grads = bind_grads(p);
-    RTMOutput illumination = bind_illumination(p, /*always=*/false);
-    RTMOutput* rtm_out = p.compute_illumination ? &illumination : nullptr;
+    RTMOutputCore illumination = bind_illumination(p, /*always=*/false);
+    RTMOutputCore* rtm_out = p.compute_illumination ? &illumination : nullptr;
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.bind(p.pml_vals, 2);
@@ -634,7 +635,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // RAW pressure store for the chunk (the acoustic twin stores the
     // vp^2*Lap(u) carrier; visco recomputes it from raw — see kernels.cuh).
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto chunk_raw = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(),
+    auto chunk_raw = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx},
                                    "checkpoint_replay (visco_acoustic2d/backward_ckpt, "
                                    "cuda_layout.checkpoint_replay_shapes)");
 
@@ -653,7 +654,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
 
-            copy_tensor_device_to_device_async(chunk_raw[it - start], forward.u_now_t);
+            copy_tensor_device_to_device_async(chunk_raw.select(0, it - start), forward.u_now_t);
 
             ACOUSTIC2D(
                 order,
@@ -719,21 +720,21 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
             image_step_from_raw(
                 order, launch_config.grid, launch_config.block,
-                chunk_raw[it - start].data_ptr<float>(),
+                chunk_raw.select(0, it - start).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp, ws.CARRIER, &grads.vp, rtm_out,
                 lap_ctx, ctx, nx, nz, dt);
 
             if (spectral.active && it >= 1) {
                 const Buf du = stage_difference(
-                    ws, chunk_raw[it - start].data_ptr<float>(),
-                    it > start ? chunk_raw[it - start - 1].data_ptr<float>() : ws.UPREV.data_ptr<float>());
+                    ws, chunk_raw.select(0, it - start).data_ptr<float>(),
+                    it > start ? chunk_raw.select(0, it - start - 1).data_ptr<float>() : ws.UPREV.data_ptr<float>());
                 accumulate_grad_A(grads.A.data_ptr<float>(), adjoint.u_now_t.template data_ptr<float>(),
                                   du.data_ptr<float>(), spectral, dt, ws);
             }
             accumulate_grad_disp(grads.B1.data_ptr<float>(), grads.B2.data_ptr<float>(),
                                  adjoint.u_now_t.template data_ptr<float>(),
-                                 chunk_raw[it - start].data_ptr<float>(), spectral, dt, ws);
+                                 chunk_raw.select(0, it - start).data_ptr<float>(), spectral, dt, ws);
         }
     }
 
@@ -772,8 +773,8 @@ void advance_forward_interval_visco_2d(
     dim3 wave_block,
     dim3 source_grid,
     dim3 source_block,
-    const BackwardInput& p,
-    const torch::Tensor& vp,
+    const BackwardInputCore& p,
+    const Buf& vp,
     const LaplaceParam& lap_ctx,
     const GradParam& grad_ctx,
     const GradParam& grad_ctx_x,
@@ -823,14 +824,14 @@ void process_recursive_interval_visco_2d(
     int end,
     AcousticWavefieldTensor& start_state,
     AcousticWavefieldTensor& adjoint,
-    const BackwardInput& p,
-    const torch::Tensor& vp,
-    torch::Tensor* grad,
-    torch::Tensor* grad_A,
-    torch::Tensor* grad_B1,
-    torch::Tensor* grad_B2,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out,
+    const BackwardInputCore& p,
+    const Buf& vp,
+    Buf* grad,
+    Buf* grad_A,
+    Buf* grad_B1,
+    Buf* grad_B2,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out,
     int order,
     dim3 wave_grid,
     dim3 wave_block,
@@ -1013,19 +1014,19 @@ void process_recursive_interval_visco_2d(
 
 } // namespace
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(
         p.checkpoints.size() == 6,
         "visco_acoustic2d recursive checkpointing expects 6 checkpoint tensors"
     );
 
-    auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter
     SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -1068,8 +1069,8 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ViscoGrads grads = bind_grads(p);
-    RTMOutput illumination = bind_illumination(p, /*always=*/false);
-    RTMOutput* rtm_out = p.compute_illumination ? &illumination : nullptr;
+    RTMOutputCore illumination = bind_illumination(p, /*always=*/false);
+    RTMOutputCore* rtm_out = p.compute_illumination ? &illumination : nullptr;
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.bind(p.pml_vals, 2);
@@ -1157,6 +1158,42 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     pack_outputs(out, grads, illumination);
     return out;
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+RTMOutput rtm(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(rtm_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 } // namespace visco_acoustic2d

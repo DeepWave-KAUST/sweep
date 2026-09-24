@@ -809,7 +809,7 @@ __global__ void calculate_grad_kernel_3d(
 // Order MUST match AcousticVTI1st3D.FIELD_SPECS:
 //   [vx, vy, vz, sH, sV, m_sHx, m_sHy, m_sVz, m_vxx, m_vyy, m_vzz].
 // ---------------------------------------------------------------------------
-inline VTIWavefieldPointer3D make_wf_pointer_3d(const std::vector<torch::Tensor>& w)
+inline VTIWavefieldPointer3D make_wf_pointer_3d(const std::vector<Buf>& w)
 {
     SWEEP_CHECK(w.size() == 11,
                 "AcousticVTI1st 3D expects 11 wavefield tensors; got ", w.size());

@@ -13,15 +13,16 @@
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_lsrtm2d {
 
 // p.grads_out as the propagator binds it: {grad_wavelet, grad_vp, grad_mp}, in
-// BackwardOutput.grads order, zeroed per backward on the Python side and
+// BackwardOutputCore.grads order, zeroed per backward on the Python side and
 // accumulated here.  _c.py builds it unconditionally for every backward
 // (_gradient_buffers from cuda_layout.grads_out_has_wavelet = true plus one
 // slot per model), so the binding is mandatory here.
-static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == 3,
                 "acoustic_lsrtm2d/backward requires the propagator-bound grads_out "
@@ -48,7 +49,7 @@ enum WorkspaceSlot : int { V2_LAMBDA = 0, BG_UTT, N_SLOTS_RECURSIVE, N_SLOTS_PLA
 // AcousticLSRTM.cuda_layout.backward_workspace_shapes, which returns a non-empty
 // list in all four memory modes), so an empty or differently sized pool means
 // the Python declaration drifted.
-static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+static BufList workspace_slots(const BackwardInputCore& p, int n_slots)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
                 "acoustic_lsrtm2d/backward requires the propagator-bound adjoint_workspace "
@@ -75,8 +76,8 @@ constexpr int REPLAY_STATE_NVAR = 7;
 // recursive_state_depth), so there is no unbound caller to allocate for.  Every
 // slot is model-shaped (LSRTM declares no per-axis CPML slabs); bind() checks the
 // count only, so the geometry is checked here.
-static void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
-                              const torch::Tensor& vp, int set, const char* what)
+static void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
+                              const Buf& vp, int set, const char* what)
 {
     SWEEP_CHECK(!p.forward_wavefields.empty(),
                 what, " requires the propagator-bound forward_wavefields "
@@ -92,7 +93,7 @@ static void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInput& 
 // + psi double-buffer pair).  _c.py binds cp.adjoint_wavefields on every backward
 // -- _ensure_wavefield_buffers allocates them whenever the forward required a
 // gradient -- so the list is never empty here.
-static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                                const char* mode)
 {
     SWEEP_CHECK(p.adjoint_wavefields.size() >= 9,
@@ -100,7 +101,7 @@ static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput&
                 "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 18 tensors; "
                 "the background field takes the first 9), got ",
                 p.adjoint_wavefields.size());
-    wf.bind(std::vector<torch::Tensor>(p.adjoint_wavefields.begin(),
+    wf.bind(std::vector<Buf>(p.adjoint_wavefields.begin(),
                                        p.adjoint_wavefields.begin() + 9), 2, true);
 }
 
@@ -123,10 +124,10 @@ static int recursive_checkpoint_scratch_depth(int interval_length)
 static inline void run_lsrtm2d_adjoint_step(
     int order, dim3 grid, dim3 block,
     AcousticWavefieldPointer adj_view,
-    const torch::Tensor& vp,
+    const Buf& vp,
     LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_z,
     AcousticCPMLPointer cpml, SolverContext ctx,
-    const std::vector<torch::Tensor>& workspace)
+    const std::vector<Buf>& workspace)
 {
     auto v2_lambda = pool_required(workspace, V2_LAMBDA, vp, "adjoint_workspace");   // vp^2 * lambda_now (fully overwritten each step)
     compute_v2_lambda_lsrtm2d<<<grid, block>>>(
@@ -145,8 +146,8 @@ void advance_forward_interval_2d(
     dim3 wave_block,
     dim3 source_grid,
     dim3 source_block,
-    const BackwardInput& p,
-    const torch::Tensor& vp,
+    const BackwardInputCore& p,
+    const Buf& vp,
     const LaplaceParam& lap_ctx,
     const GradParam& grad_ctx,
     const GradParam& grad_ctx_x,
@@ -203,9 +204,9 @@ void process_recursive_interval_2d(
     int end,
     AcousticWavefieldTensor& start_state,
     AcousticWavefieldTensor& adjoint,
-    const BackwardInput& p,
-    const torch::Tensor& vp,
-    torch::Tensor& grad_mp,
+    const BackwardInputCore& p,
+    const Buf& vp,
+    Buf& grad_mp,
     int order,
     dim3 wave_grid,
     dim3 wave_block,
@@ -378,7 +379,7 @@ void process_recursive_interval_2d(
     );
 }
 
-void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
+void run_full_imaging(const BackwardInputCore& p, Buf& grad_mp)
 {
     auto vp = p.models[0];
 
@@ -431,7 +432,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
         adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
         calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
-            p.u_forward[it].data_ptr<float>(),
+            p.u_forward.select(0, it).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
             grad_mp.data_ptr<float>(),
@@ -444,10 +445,10 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
-    BackwardOutput out;
+    BackwardOutputCore out;
     SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
 
     const auto& gs = grad_slots(in);
@@ -462,11 +463,11 @@ BackwardOutput backward(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
 
@@ -547,6 +548,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     GradParam grad_ctx_x{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
     AsyncCopyContext async_copy(staged_boundary);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -556,7 +558,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -647,11 +649,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
     SWEEP_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
@@ -726,7 +728,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto chunk_forward = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx}, vp.options(),
+    auto chunk_forward = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx},
                                        "checkpoint_replay (acoustic_lsrtm2d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
@@ -738,7 +740,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
-            float* bg_utt = chunk_forward[it - start].data_ptr<float>();
+            float* bg_utt = chunk_forward.select(0, it - start).data_ptr<float>();
 
             ACOUSTIC_LSRTM2D_SINGLE(
                 order,
@@ -787,7 +789,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
 
             calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
-                chunk_forward[it - start].data_ptr<float>(),
+                chunk_forward.select(0, it - start).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 grad_mp.data_ptr<float>(),
@@ -802,16 +804,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
     SWEEP_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D recursive checkpointing expects 6 checkpoint tensors");
 
-    auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter
     SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -950,6 +952,35 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 
     out.grads = {grad_wavelet, grad_vp, grad_mp};
     return out;
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 } // namespace acoustic_lsrtm2d

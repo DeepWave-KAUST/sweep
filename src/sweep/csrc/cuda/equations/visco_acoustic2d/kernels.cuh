@@ -91,7 +91,6 @@ inline void visco_acoustic2d_zero_halo(const Buf& u, int M)
     const int nx = static_cast<int>(u.size(-1));
     visco_ops::zero_halo(u.data_ptr<float>(), u.numel() / (static_cast<int64_t>(nz) * nx), nz, nx, M);
 }
-inline void visco_acoustic2d_zero_halo(const torch::Tensor& u, int M) { visco_acoustic2d_zero_halo(buf_of(u), M); }
 
 // ---------------------------------------------------------------------------
 // Spectral-term bundle: the amplitude damping (the D_loss filter on du/dt,
@@ -108,27 +107,27 @@ inline void visco_acoustic2d_zero_halo(const torch::Tensor& u, int M) { visco_ac
 struct ViscoSpectral {
     bool active = false;       // damping term present
     bool disp = false;         // dispersion term present
-    torch::Tensor kmul;        // D_loss
-    torch::Tensor Dk2, Dfrac;  // dispersion grids
+    Buf kmul;        // D_loss
+    Buf Dk2, Dfrac;  // dispersion grids
     Buf Gp;                    // dt   * A  (adjoint damping)
     Buf dt2A;                  // dt^2 * A  (forward damping)
     Buf Gd1, Gd2;              // dt^2 * B1, dt^2 * B2
 };
 
 inline void visco_acoustic2d_check_grid(
-    const torch::Tensor& g, int nz, int nx, const char* name)
+    const Buf& g, int nz, int nx, const char* name)
 {
     SWEEP_CHECK(g.dim() == 2 && g.size(0) == nz && g.size(1) == nx,
                 "visco eq_aux grid ", name,
                 " must be (nz_runtime, nx_runtime) = (", nz, ", ", nx,
                 "), got ", g.sizes());
-    SWEEP_CHECK(g.is_cuda() && g.scalar_type() == torch::kFloat32,
+    SWEEP_CHECK(g.is_cuda() && g.scalar_type() == BoundaryDtype::FP32,
                 "visco eq_aux grid ", name, " must be a float32 CUDA tensor");
 }
 
 // The term switches and filter grids from the eq_aux composition (no tables).
 inline ViscoSpectral visco_acoustic2d_spectral_grids(
-    const std::vector<torch::Tensor>& eq_aux, int nz, int nx)
+    const BufList& eq_aux, int nz, int nx)
 {
     ViscoSpectral s;
     const size_t n = eq_aux.size();
@@ -157,9 +156,9 @@ inline ViscoSpectral visco_acoustic2d_spectral_grids(
 // Only the mode's tables are defined (derived::visco_tables); Gp is never
 // derived in forward mode, dt2A never in full/bs mode.
 inline ViscoSpectral visco_acoustic2d_make_spectral_from(
-    const std::vector<torch::Tensor>& eq_aux,
-    const std::vector<torch::Tensor>& models,
-    const std::vector<torch::Tensor>& derived_models,
+    const BufList& eq_aux,
+    const BufList& models,
+    const BufList& derived_models,
     derived::ViscoMode mode, float dt, int nz, int nx, const char* what)
 {
     SWEEP_CHECK(models.size() == 4, what, ": visco_acoustic2d expects the prepared models "
@@ -327,7 +326,7 @@ inline ViscoSlots visco_slots(bool damping, bool dispersion, derived::ViscoMode 
 // ViscoAcoustic.cuda_layout's forward_workspace_shapes /
 // backward_workspace_shapes declared it for this mode and eq_aux composition,
 // and the propagator then binds it, so the binding is required.
-inline Buf visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool, int idx,
+inline Buf visco_acoustic2d_complex_slot(const BufList& pool, int idx,
                                          const Buf& like, const char* what)
 {
     SWEEP_CHECK(pool_slot_bound(pool, idx),
@@ -339,9 +338,9 @@ inline Buf visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool,
     SWEEP_CHECK(raw.sizes().vec() == want,
                 what, "[", idx, "] has shape ", raw.sizes(),
                 " but the complex slot layout is ", want, " (float32 pairs)");
-    SWEEP_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
+    SWEEP_CHECK(raw.scalar_type() == BoundaryDtype::FP32 && raw.is_cuda() && raw.is_contiguous(),
                 what, "[", idx, "] must be a contiguous float32 CUDA tensor");
-    return buf_of(raw);   // (..., 2) float pairs: the complex64 grid, as cuFFT reads it
+    return (raw);   // (..., 2) float pairs: the complex64 grid, as cuFFT reads it
 }
 
 // The cuFFT work area over a pool slot: a flat float32 slot of at least
@@ -349,7 +348,7 @@ inline Buf visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool,
 // told the Python side).  Declared by ViscoAcoustic.cuda_layout whenever a
 // spectral term is on (_fft_work_area_slot asks this very binding for the size),
 // so the propagator always binds it and there is no fallback.
-inline Buf visco_acoustic2d_work_area_slot(const std::vector<torch::Tensor>& pool, int idx,
+inline Buf visco_acoustic2d_work_area_slot(const BufList& pool, int idx,
                                            const ViscoFFT& fft, const Buf& /*like*/,
                                            const char* what)
 {
@@ -358,13 +357,13 @@ inline Buf visco_acoustic2d_work_area_slot(const std::vector<torch::Tensor>& poo
                 what, "[", idx, "] (cuFFT work area) must be bound by the propagator "
                 "(cuda_layout forward_workspace_shapes / backward_workspace_shapes)");
     const auto& raw = pool[idx];
-    SWEEP_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
+    SWEEP_CHECK(raw.scalar_type() == BoundaryDtype::FP32 && raw.is_cuda() && raw.is_contiguous(),
                 what, "[", idx, "] (cuFFT work area) must be a contiguous float32 CUDA tensor");
     SWEEP_CHECK(raw.numel() >= floats,
                 what, "[", idx, "] (cuFFT work area) holds ", raw.numel(),
                 " floats but the plan needs ", floats,
                 " (visco_acoustic2d_fft_workspace_bytes on this device)");
-    return buf_of(raw);
+    return (raw);
 }
 
 // A float32 grid aliasing the first half of a complex slot's storage: free
@@ -419,7 +418,7 @@ struct ViscoScratch {
 // count == 0 happens only in the forward mode with both spectral terms off,
 // where the propagator legitimately hands over an empty tuple.
 inline ViscoScratch visco_acoustic2d_bind_scratch(
-    const std::vector<torch::Tensor>& pool, const Buf& like,
+    const BufList& pool, const Buf& like,
     bool damping, bool dispersion, derived::ViscoMode mode, const char* what)
 {
     ViscoScratch ws;
@@ -428,7 +427,7 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
                 what, ": requires the propagator-bound workspace pool of ", ws.slots.count,
                 " tensors (visco_slots for this mode and eq_aux composition), got ", pool.size());
     if (ws.slots.carrier >= 0)
-        ws.CARRIER = buf_of(pool_required(pool, ws.slots.carrier, like, what));
+        ws.CARRIER = (pool_required(pool, ws.slots.carrier, like, what));
     if (!(damping || dispersion))
         return ws;
     SWEEP_CHECK(like.dim() >= 2 && like.is_cuda() && like.element_size() == 4,
@@ -441,9 +440,9 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
     if (ws.slots.c2 >= 0)
         ws.C2 = visco_acoustic2d_complex_slot(pool, ws.slots.c2, like, what);
     if (ws.slots.r1 >= 0)
-        ws.R1 = buf_of(pool_required(pool, ws.slots.r1, like, what));
+        ws.R1 = (pool_required(pool, ws.slots.r1, like, what));
     if (ws.slots.uprev >= 0)
-        ws.UPREV = buf_of(pool_required(pool, ws.slots.uprev, like, what));
+        ws.UPREV = (pool_required(pool, ws.slots.uprev, like, what));
     ws.fft_ws = visco_acoustic2d_work_area_slot(pool, ws.slots.fft_ws, *ws.fft, like, what);
     return ws;
 }
@@ -488,7 +487,7 @@ inline void visco_acoustic2d_lop_into(const float* x, const float* kmul, ViscoSc
 // subtracted in place, as before.
 inline void visco_acoustic2d_apply_damping_into(
     AcousticWavefieldTensor& wf,
-    const torch::Tensor& kmul,   // (nz, nx) D_loss grid
+    const Buf& kmul,   // (nz, nx) D_loss grid
     const Buf& dt2A,             // (B, 1, nz, nx) dt^2 * A (derived table)
     float dt, ViscoScratch& ws)
 {

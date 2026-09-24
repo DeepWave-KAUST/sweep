@@ -11,14 +11,15 @@
 #include "../../common/wavetypes.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_lsrtm3d {
 
 // p.grads_out as the propagator binds it: {grad_wavelet, grad_vp, grad_mp}, in
-// BackwardOutput.grads order (zeroed per backward on the Python side and
+// BackwardOutputCore.grads order (zeroed per backward on the Python side and
 // accumulated here), or empty for an unbound caller, which then gets fresh
 // zeros per slot.
-static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == 3,
                 "acoustic_lsrtm3d/backward requires the propagator-bound grads_out "
@@ -56,7 +57,7 @@ static constexpr int CKPT_STATE_NVAR = 9;
 // AcousticLSRTM3D.cuda_layout.backward_workspace_shapes, which returns a
 // non-empty list in all four memory modes), so an empty or differently sized
 // pool means the Python declaration drifted.
-static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
+static BufList workspace_slots(const BackwardInputCore& p, int n_slots)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
                 "acoustic_lsrtm3d/backward requires the propagator-bound adjoint_workspace "
@@ -75,8 +76,8 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p,
 // wavefield_set checks count, dtype, device and contiguity; the model shape is
 // checked here because bind() counts only and a slot of the wrong shape would
 // read as garbage inside the kernels.
-static void bind_replay_state_set(AcousticWavefieldTensor& wf, const BackwardInput& p,
-                                  const torch::Tensor& vp, int set, const char* what)
+static void bind_replay_state_set(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
+                                  const Buf& vp, int set, const char* what)
 {
     SWEEP_CHECK(!p.forward_wavefields.empty(),
                 what, " requires the propagator-bound forward_wavefields "
@@ -108,10 +109,10 @@ static int recursive_scratch_depth(int interval_length)
 static inline void run_lsrtm3d_adjoint_step(
     int order, dim3 grid, dim3 block,
     AcousticWavefieldPointer adj_view,
-    const torch::Tensor& vp,
+    const Buf& vp,
     LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_y, GradParam grad_ctx_z,
     AcousticCPMLPointer cpml, SolverContext ctx,
-    const std::vector<torch::Tensor>& workspace)
+    const std::vector<Buf>& workspace)
 {
     auto v2_lambda = pool_required(workspace, V2_LAMBDA, vp, "adjoint_workspace");   // vp^2 * lambda_now (fully overwritten each step)
     compute_v2_lambda_lsrtm3d<<<grid, block>>>(
@@ -121,8 +122,8 @@ static inline void run_lsrtm3d_adjoint_step(
         lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 }
 
-std::vector<torch::Tensor> slice_wavefields(
-    const std::vector<torch::Tensor>& tensors,
+std::vector<Buf> slice_wavefields(
+    const std::vector<Buf>& tensors,
     size_t start,
     size_t count
 ) {
@@ -130,7 +131,7 @@ std::vector<torch::Tensor> slice_wavefields(
         tensors.size() >= start + count,
         "Acoustic LSRTM 3D wavefield buffer does not contain enough tensors."
     );
-    return std::vector<torch::Tensor>(
+    return std::vector<Buf>(
         tensors.begin() + static_cast<long>(start),
         tensors.begin() + static_cast<long>(start + count)
     );
@@ -141,7 +142,7 @@ std::vector<torch::Tensor> slice_wavefields(
 // CPML sextet + psi double-buffer triple).  _c.py binds cp.adjoint_wavefields
 // on every backward -- _ensure_wavefield_buffers allocates them whenever the
 // forward required a gradient -- so the list is never empty here.
-void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
+void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                         const char* mode)
 {
     SWEEP_CHECK(p.adjoint_wavefields.size() >= 12,
@@ -152,21 +153,21 @@ void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
     wf.bind(slice_wavefields(p.adjoint_wavefields, 0, 12), 3, true);
 }
 
-BackwardOutput backward_full_imaging_impl(const BackwardInput& p);
-BackwardOutput backward_bs_imaging_impl(const BackwardInput& p);
-BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p);
-BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p);
+BackwardOutputCore backward_full_imaging_impl(const BackwardInputCore& p);
+BackwardOutputCore backward_bs_imaging_impl(const BackwardInputCore& p);
+BackwardOutputCore backward_ckpt_imaging_impl(const BackwardInputCore& p);
+BackwardOutputCore backward_recursive_imaging_impl(const BackwardInputCore& p);
 
 } // namespace
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_full_imaging_impl(in);
 }
 
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
@@ -180,7 +181,7 @@ void accumulate_rtm_3d(
     dim3 wave_block,
     const float* forward_ptr,
     const float* adjoint_ptr,
-    RTMOutput& out,
+    RTMOutputCore& out,
     int B,
     int nx,
     int ny,
@@ -206,9 +207,9 @@ void accumulate_imaging_3d(
     dim3 wave_block,
     const float* forward_ptr,
     const float* adjoint_ptr,
-    const torch::Tensor& vp,
-    torch::Tensor* grad,
-    RTMOutput* rtm_out,
+    const Buf& vp,
+    Buf* grad,
+    RTMOutputCore* rtm_out,
     int B,
     int nx,
     int ny,
@@ -238,10 +239,10 @@ void accumulate_imaging_utt_3d(
     const float* u_now_ptr,
     const float* u_prev_ptr,
     const float* adjoint_ptr,
-    const torch::Tensor& vp,
+    const Buf& vp,
     float dt,
-    torch::Tensor* grad,
-    RTMOutput* rtm_out,
+    Buf* grad,
+    RTMOutputCore* rtm_out,
     int B,
     int nx,
     int ny,
@@ -269,8 +270,8 @@ void accumulate_source_gradient_3d(
     dim3 source_grid,
     dim3 source_block,
     const float* adjoint_ptr,
-    const BackwardInput& p,
-    torch::Tensor* grad_wavelet,
+    const BackwardInputCore& p,
+    Buf* grad_wavelet,
     int it,
     const SolverContext& ctx,
     int nsrc
@@ -299,8 +300,8 @@ void advance_forward_interval_3d(
     dim3 wave_block,
     dim3 source_grid,
     dim3 source_block,
-    const BackwardInput& p,
-    const torch::Tensor& vp,
+    const BackwardInputCore& p,
+    const Buf& vp,
     const LaplaceParam& lap_ctx,
     const GradParam& grad_ctx,
     const GradParam& grad_ctx_x,
@@ -360,11 +361,11 @@ void process_recursive_interval_3d(
     int end,
     AcousticWavefieldTensor& start_state,
     AcousticWavefieldTensor& adjoint,
-    const BackwardInput& p,
-    const torch::Tensor& vp,
-    torch::Tensor* grad,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out,
+    const BackwardInputCore& p,
+    const Buf& vp,
+    Buf* grad,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out,
     int order,
     dim3 wave_grid,
     dim3 wave_block,
@@ -579,10 +580,10 @@ void process_recursive_interval_3d(
 }
 
 void run_full_imaging(
-    const BackwardInput& p,
-    torch::Tensor* grad,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out
+    const BackwardInputCore& p,
+    Buf* grad,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out
 )
 {
     auto vp = p.models[0];
@@ -655,7 +656,7 @@ void run_full_imaging(
         accumulate_imaging_3d(
             launch_config.grid,
             launch_config.block,
-            p.u_forward[it].data_ptr<float>(),
+            p.u_forward.select(0, it).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp,
             grad,
@@ -669,10 +670,10 @@ void run_full_imaging(
     }
 }
 
-BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
+BackwardOutputCore backward_full_imaging_impl(const BackwardInputCore& p)
 {
     sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
-    BackwardOutput out;
+    BackwardOutputCore out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
@@ -684,10 +685,10 @@ BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
 }
 
 void run_bs_imaging(
-    const BackwardInput& p,
-    torch::Tensor* grad,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out
+    const BackwardInputCore& p,
+    Buf* grad,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out
 )
 {
     auto vp = p.models[0];
@@ -765,6 +766,7 @@ void run_bs_imaging(
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     AsyncCopyContext async_copy(staged_boundary);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         3,
@@ -774,7 +776,7 @@ void run_bs_imaging(
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -893,10 +895,10 @@ void run_bs_imaging(
     }
 }
 
-BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
+BackwardOutputCore backward_bs_imaging_impl(const BackwardInputCore& p)
 {
     sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
-    BackwardOutput out;
+    BackwardOutputCore out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_EXTRA);
     auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
@@ -908,10 +910,10 @@ BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
 }
 
 void run_ckpt_imaging(
-    const BackwardInput& p,
-    torch::Tensor* grad,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out
+    const BackwardInputCore& p,
+    Buf* grad,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out
 )
 {
     auto vp = p.models[0];
@@ -961,7 +963,6 @@ void run_ckpt_imaging(
 
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
     auto chunk_forward = pool_required(p.checkpoint_replay, 0, {p.checkpoint_interval, B, nz, ny, nx},
-                                       vp.options(),
                                        "checkpoint_replay (acoustic_lsrtm3d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
@@ -990,7 +991,7 @@ void run_ckpt_imaging(
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
-            float* u_this = chunk_forward[it - start].data_ptr<float>();
+            float* u_this = chunk_forward.select(0, it - start).data_ptr<float>();
 
             ACOUSTIC_LSRTM3D_SINGLE(
                 order,
@@ -1053,7 +1054,7 @@ void run_ckpt_imaging(
             accumulate_imaging_3d(
                 launch_config.grid,
                 launch_config.block,
-                chunk_forward[it - start].data_ptr<float>(),
+                chunk_forward.select(0, it - start).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp,
                 grad,
@@ -1068,10 +1069,10 @@ void run_ckpt_imaging(
     }
 }
 
-BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
+BackwardOutputCore backward_ckpt_imaging_impl(const BackwardInputCore& p)
 {
     sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
-    BackwardOutput out;
+    BackwardOutputCore out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);
     auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
@@ -1083,15 +1084,15 @@ BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
 }
 
 void run_recursive_imaging(
-    const BackwardInput& p,
-    torch::Tensor* grad,
-    torch::Tensor* grad_wavelet,
-    RTMOutput* rtm_out
+    const BackwardInputCore& p,
+    Buf* grad,
+    Buf* grad_wavelet,
+    RTMOutputCore* rtm_out
 )
 {
     auto vp = p.models[0];
 
-    auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter
     SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -1227,10 +1228,10 @@ void run_recursive_imaging(
 
 }
 
-BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
+BackwardOutputCore backward_recursive_imaging_impl(const BackwardInputCore& p)
 {
     sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
-    BackwardOutput out;
+    BackwardOutputCore out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_EXTRA);
     auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
@@ -1243,18 +1244,47 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
 
 } // namespace
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_ckpt_imaging_impl(in);
 }
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_recursive_imaging_impl(in);
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 }

@@ -14,6 +14,7 @@
 #include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "driver_traits.cuh"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_vrz2d {
 
@@ -44,11 +45,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
     return eqdrv::generic_backward_bs<Driver>(in);
 }
 
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ backward_ckpt expects models [vp, z].");
     SWEEP_CHECK(!p.checkpoints.empty(), "AcousticVRZ backward_ckpt expects checkpoints.");
@@ -125,9 +126,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto c_z = pool_required(ws, Driver::C_Z, vp, "adjoint_workspace");
     auto e_x = pool_required(ws, Driver::E_X, vp, "adjoint_workspace");
     auto e_z = pool_required(ws, Driver::E_Z, vp, "adjoint_workspace");
-    auto checkpoint_steps_cpu = p.checkpoint_steps.defined()
-        ? p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous()
-        : torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32));
+    const Buf& checkpoint_steps_cpu = p.checkpoint_steps;   // a host copy, made by the adapter (undefined -> numel 0)
     const bool recursive_checkpoint = checkpoint_steps_cpu.numel() > 0;
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -206,7 +205,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // checkpoint modes (cuda_layout.checkpoint_replay_shapes is unconditional
     // for this equation), so the binding is required.
     auto chunk_forward = pool_required(p.checkpoint_replay, CHUNK_FORWARD,
-                                       {max_segment_length, N, C, nz, nx}, vp.options(),
+                                       {max_segment_length, N, C, nz, nx},
                                        "checkpoint_replay (acoustic_vrz2d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
@@ -259,7 +258,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             );
 
             forward.swap();
-            copy_tensor_device_to_device_async(chunk_forward[it - start], forward.u_now_t);
+            copy_tensor_device_to_device_async(chunk_forward.select(0, it - start), forward.u_now_t);
         }
 
         for (int it = end - 1; it >= start; --it) {
@@ -300,7 +299,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 order,
                 launch_config.grid,
                 launch_config.block,
-                chunk_forward[it - start].data_ptr<float>(),
+                chunk_forward.select(0, it - start).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
@@ -322,15 +321,30 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     return out;
 }
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
-    return backward_ckpt(in);
+    return backward_ckpt_core(in);
 }
 
 BackwardRunnerPtr backward_bs_runner(const BackwardInput& in)
 {
     return std::make_shared<eqdrv::GenericBackwardBsRunner<Driver>>(in);
+}
+
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 } // namespace acoustic_vrz2d

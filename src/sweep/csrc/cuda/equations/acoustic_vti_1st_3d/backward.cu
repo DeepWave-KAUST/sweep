@@ -7,14 +7,14 @@
 //                                  forward state reconstructed in reverse by
 //                                  the NOPML kernels from the 5-tensor list
 //                                  [vx, vy, vz, sH, sV] bound from
-//                                  BackwardInput.forward_wavefields
+//                                  BackwardInputCore.forward_wavefields
 //                                  (cuda_layout.bs_reconstruction_nvar), or
 //                                  allocated here when unbound)
 //   * backward_ckpt()            — chunked checkpoints (every N steps; the
 //                                  CKPT_STATE_COUNT-slot replay state -- the
 //                                  forward slot list, 5 physical + 6 CPML
 //                                  memory -- is bound from
-//                                  BackwardInput.forward_wavefields set 0
+//                                  BackwardInputCore.forward_wavefields set 0
 //                                  (cuda_layout checkpoint_state_nvar), or
 //                                  allocated here when unbound)
 //   * backward_recursive_ckpt() — stub (SWEEP_CHECK)
@@ -46,6 +46,7 @@
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../launch/config.h"
 #include "../../common/wavetypes.h"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace acoustic_vti_1st_3d {
 
@@ -54,11 +55,11 @@ namespace {
 enum GradSlot : int { GRAD_VP = 0, GRAD_EPS, GRAD_DELTA, GRAD_RHO, N_GRADS };
 
 // p.grads_out as the propagator binds it: {grad_vp, grad_eps, grad_delta, grad_rho}, in
-// BackwardOutput.grads order, zeroed per backward on the Python side and
+// BackwardOutputCore.grads order, zeroed per backward on the Python side and
 // accumulated here.  Mandatory: propagator/_c.py Wrapper.backward always sets
 // `params.grads_out = _gradient_buffers(...)`, one slot per model
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
-static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
+static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(static_cast<int>(p.grads_out.size()) == N_GRADS,
                 "acoustic_vti_1st_3d/backward requires the propagator-bound grads_out (",
@@ -78,7 +79,7 @@ enum WorkspaceSlot : int { SCRATCH_A = 0, SCRATCH_B, SCRATCH_C, ZERO_PREV, SEED_
 // drifted.  Mandatory: AcousticVTI1st3D.cuda_layout.backward_workspace_nvar = 6
 // in every mode, and propagator/_c.py Wrapper.backward always sets
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
-const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
+BufList workspace_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
                 "acoustic_vti_1st_3d/backward requires the propagator-bound adjoint_workspace (",
@@ -111,7 +112,6 @@ struct AdjWavefieldTensor3D {
 
     // torch spelling: the drivers still hand over the input struct's tensor
     // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
 
     void bind(const std::vector<Buf>& tensors)
     {
@@ -136,7 +136,6 @@ struct AdjWavefieldTensor3D {
     // m_vzz_t stay undefined.
     // torch spelling: the drivers still hand over the input struct's tensor
     // lists; the descriptors are what the struct keeps.
-    void bind_physical(const std::vector<torch::Tensor>& tensors) { bind_physical(bufs_of(tensors)); }
 
     void bind_physical(const std::vector<Buf>& tensors)
     {
@@ -196,7 +195,7 @@ void vti_adjoint_A_3d(
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer3D adj_view,
     const Buf& c11, const Buf& c33, const Buf& c13,
-    torch::Tensor& sa, torch::Tensor& sb,
+    Buf& sa, Buf& sb,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_stress_kernel_3d<0><<<lc.grid, lc.block>>>(
@@ -214,7 +213,7 @@ void vti_adjoint_B_3d(
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer3D adj_view,
     const Buf& inv_rho,
-    torch::Tensor& sa, torch::Tensor& sb, torch::Tensor& sc,
+    Buf& sa, Buf& sb, Buf& sc,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_vel_kernel_3d<0><<<lc.grid, lc.block>>>(
@@ -232,11 +231,11 @@ void vti_adjoint_B_3d(
 // ===========================================================================
 //                           backward() — full mode
 // ===========================================================================
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D CUDA backward: free_surface=True not supported "
@@ -320,8 +319,8 @@ BackwardOutput backward(const BackwardInput& in)
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan receiver_fields = p.receiver_field_indices;
     auto adjoint_src_config = (adjoint_nsrc > 0)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
 
@@ -330,12 +329,12 @@ BackwardOutput backward(const BackwardInput& in)
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
         // 1. Inject adjoint source at receivers (residual back-projected)
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            int field_index = receiver_fields[irec].item<int>();
+            int field_index = receiver_fields[irec];
             float* field = vti_field_ptr_3d(adj_view, field_index);
             if (field == nullptr) continue;
             add_source_3d<<<adjoint_src_config.grid, adjoint_src_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -405,11 +404,11 @@ BackwardOutput backward(const BackwardInput& in)
 // See the 2-D companion for the algorithm.  In 3-D we save 5 physical
 // fields' boundary slabs (vx, vy, vz, sH, sV) and time-reverse them
 // alongside the adjoint pass.
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D backward_bs: free_surface=True not supported.");
@@ -528,10 +527,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
                        ? p.forward_sources_loc.size(1) : 0;
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields   = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
     auto adj_src_config = (adjoint_nsrc > 0)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
@@ -541,6 +540,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 "when source fields are un-injected.");
 
     AsyncCopyContext async_copy(staged_boundary);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         /*dim=*/3,
@@ -550,7 +550,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -559,11 +559,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
     for (int it = static_cast<int>(p.nt) - 1; it >= 1; --it) {
         // (a) adjoint source injection (receiver-side residual)
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            int field_index = receiver_fields[irec].item<int>();
+            int field_index = receiver_fields[irec];
             float* field = vti_field_ptr_3d(adj_view, field_index);
             if (field == nullptr) continue;
             add_source_3d<<<adj_src_config.grid, adj_src_config.block>>>(
-                field, p.adjoint_source[irec].data_ptr<float>(),
+                field, p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it, adjoint_nsrc, solver);
         }
@@ -573,7 +573,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         //       forward step we are about to reverse. The in-kernel sign
         //       flip is exact; no negated copy of the source is built.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            int field_index = source_fields[isrc].item<int>();
+            int field_index = source_fields[isrc];
             float* field = vti_field_ptr_3d(for_view, field_index);
             if (field == nullptr) continue;
             add_source_3d_signed<<<fwd_src_config.grid, fwd_src_config.block>>>(
@@ -657,11 +657,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
 // ===========================================================================
 //                  backward_ckpt() — chunked checkpoint
 // ===========================================================================
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
     SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D backward_ckpt: free_surface=True not supported.");
@@ -770,10 +770,10 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
                        ? p.forward_sources_loc.size(1) : 0;
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields   = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
     auto adj_src_config = (adjoint_nsrc > 0)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
@@ -787,7 +787,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // Python-allocated with the checkpoint snapshots (cuda_layout.checkpoint_replay_shapes
     // is declared, so _ensure_checkpoint_buffers always fills self.checkpoint_replay);
     // every row is written by the replay before the reverse pass reads it.
-    auto u_chunk = pool_required(p.checkpoint_replay, 0, {chunk_size, 5, B, nz, ny, nx}, vp_t.options(), "checkpoint_replay");
+    auto u_chunk = pool_required(p.checkpoint_replay, 0, {chunk_size, 5, B, nz, ny, nx}, "checkpoint_replay");
 
     // zero_prev is read-only (ZERO_PREV stays zero, see backward()); the two seed
     // buffers are overwritten at every chunk boundary before they are read.
@@ -839,7 +839,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 grad_ctx, cpml_view, solver);
 
             for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-                int field_index = source_fields[isrc].item<int>();
+                int field_index = source_fields[isrc];
                 float* field = vti_field_ptr_3d(fwd_view, field_index);
                 if (field == nullptr) continue;
                 add_source_3d<<<fwd_src_config.grid, fwd_src_config.block>>>(
@@ -850,7 +850,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
             // Snapshot to chunk buffer (vx, vy, vz, sH, sV).
             int spatial_size = solver.nx * solver.ny * solver.nz;
-            float* slot = u_chunk[local_i].data_ptr<float>();
+            float* slot = u_chunk.select(0, local_i).data_ptr<float>();
             const int comp_stride = B * spatial_size;
             cudaMemcpyAsync(slot + 0 * comp_stride, fwd_view.vx,
                             B * spatial_size * sizeof(float),
@@ -874,27 +874,27 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         for (int local_i = local_len - 1; local_i >= 0; --local_i) {
             int it = start + local_i;
 
-            // adjoint source from record[it]
+            // adjoint source from record.select(0, it)
             for (int irec = 0; irec < nrec_fields; ++irec) {
-                int field_index = receiver_fields[irec].item<int>();
+                int field_index = receiver_fields[irec];
                 float* field = vti_field_ptr_3d(adj_view, field_index);
                 if (field == nullptr) continue;
                 add_source_3d<<<adj_src_config.grid, adj_src_config.block>>>(
-                    field, p.adjoint_source[irec].data_ptr<float>(),
+                    field, p.adjoint_source.select(0, irec).data_ptr<float>(),
                     p.adjoint_sources_loc.data_ptr<int>(),
                     it, adjoint_nsrc, solver);
             }
 
             // gradient
-            const float* fvx_now = u_chunk[local_i].select(0, 0).data_ptr<float>();
-            const float* fvy_now = u_chunk[local_i].select(0, 1).data_ptr<float>();
-            const float* fvz_now = u_chunk[local_i].select(0, 2).data_ptr<float>();
+            const float* fvx_now = u_chunk.select(0, local_i).select(0, 0).data_ptr<float>();
+            const float* fvy_now = u_chunk.select(0, local_i).select(0, 1).data_ptr<float>();
+            const float* fvz_now = u_chunk.select(0, local_i).select(0, 2).data_ptr<float>();
             const float* fsH_prev;
             const float* fsV_prev;
             if (it > 0) {
                 if (local_i > 0) {
-                    fsH_prev = u_chunk[local_i - 1].select(0, 3).data_ptr<float>();
-                    fsV_prev = u_chunk[local_i - 1].select(0, 4).data_ptr<float>();
+                    fsH_prev = u_chunk.select(0, local_i - 1).select(0, 3).data_ptr<float>();
+                    fsV_prev = u_chunk.select(0, local_i - 1).select(0, 4).data_ptr<float>();
                 } else {
                     // Crossing a chunk boundary: the state at step start-1 is
                     // the checkpoint this chunk was replayed from.
@@ -939,11 +939,40 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 }
 
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& /*in*/)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& /*in*/)
 {
     SWEEP_CHECK(false,
         "AcousticVTI1st3D CUDA backward_recursive_ckpt is not yet implemented.");
     return {};
+}
+
+
+BackwardOutput backward(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_core(in), in_torch);
+}
+
+BackwardOutput backward_bs(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_bs_core(in), in_torch);
+}
+
+BackwardOutput backward_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_ckpt_core(in), in_torch);
+}
+
+BackwardOutput backward_recursive_ckpt(const BackwardInput& in_torch)
+{
+    InputArena arena;
+    const BackwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(backward_recursive_ckpt_core(in), in_torch);
 }
 
 }  // namespace acoustic_vti_1st_3d
