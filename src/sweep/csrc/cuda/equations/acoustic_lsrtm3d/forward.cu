@@ -78,7 +78,7 @@ ForwardOutput forward(const ForwardInput& in) {
     sc.bind(slice_wavefields(p.wavefields, 12, 12), 3, true);
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     // record_out is bound on every call: AcousticLSRTM3D.cuda_layout declares

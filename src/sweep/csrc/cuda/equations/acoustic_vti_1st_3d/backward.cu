@@ -105,11 +105,15 @@ struct AdjWavefieldTensor3D {
     // (cuda_layout checkpoint_state_nvar = base_nvar + pml_nvar).
     static constexpr int CKPT_STATE_COUNT = 11;
 
-    torch::Tensor vx_t, vy_t, vz_t, sH_t, sV_t;
-    torch::Tensor m_sHx_t, m_sHy_t, m_sVz_t;
-    torch::Tensor m_vxx_t, m_vyy_t, m_vzz_t;
+    Buf vx_t, vy_t, vz_t, sH_t, sV_t;
+    Buf m_sHx_t, m_sHy_t, m_sVz_t;
+    Buf m_vxx_t, m_vyy_t, m_vzz_t;
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
+
+    void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 11,
                     "AcousticVTI1st3D backward: expects 11 adjoint wavefield tensors, got ",
@@ -130,7 +134,11 @@ struct AdjWavefieldTensor3D {
     // Boundary-saving reconstruction: the physical prefix only, in
     // RECON_LIST_DESC order; m_sHx_t / m_sHy_t / m_sVz_t / m_vxx_t / m_vyy_t /
     // m_vzz_t stay undefined.
-    void bind_physical(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind_physical(const std::vector<torch::Tensor>& tensors) { bind_physical(bufs_of(tensors)); }
+
+    void bind_physical(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
                     "AcousticVTI1st3D backward_bs: reconstruction list must hold ",
@@ -165,7 +173,7 @@ struct AdjWavefieldTensor3D {
         return p;
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {vx_t, vy_t, vz_t, sH_t, sV_t,
                 m_sHx_t, m_sHy_t, m_sVz_t,
@@ -480,7 +488,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
+    cpml.bind(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     // last_two is bound but never read here: this backward seeds its
@@ -741,7 +749,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     );
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
+    cpml.bind(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     const auto& gs  = grad_slots(p);

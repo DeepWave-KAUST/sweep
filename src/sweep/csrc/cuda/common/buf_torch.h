@@ -88,3 +88,11 @@ static inline Buf buf_of(const torch::Tensor& t) {
     }
     return b;
 }
+
+// A whole list, for the struct binds that take std::vector<Buf>.
+static inline std::vector<Buf> bufs_of(const std::vector<torch::Tensor>& ts) {
+    std::vector<Buf> out;
+    out.reserve(ts.size());
+    for (const auto& t : ts) out.push_back(buf_of(t));
+    return out;
+}

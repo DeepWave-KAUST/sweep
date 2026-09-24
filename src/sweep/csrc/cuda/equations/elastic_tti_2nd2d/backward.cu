@@ -255,7 +255,7 @@ BackwardOutput backward(const BackwardInput& in)
     auto grad_view = stiffness_grad_view(grads);
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     AdjointWorkspace ws;
@@ -360,7 +360,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto grad_view = stiffness_grad_view(grads);
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     AdjointWorkspace ws;
@@ -551,7 +551,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     AdjointWorkspace ws;

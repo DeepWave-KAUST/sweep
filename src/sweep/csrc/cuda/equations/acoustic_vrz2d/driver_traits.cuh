@@ -268,7 +268,7 @@ struct Driver {
     template <class P>
     static void alloc_cpml(CPML& cpml, const P& p)
     {
-        cpml.allocate(p.pml_vals, 2);
+        cpml.bind(p.pml_vals, 2);
     }
 
     // The record this equation writes: one field, {N, nrec, nt}.  Moved here

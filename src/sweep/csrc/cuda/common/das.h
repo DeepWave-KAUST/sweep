@@ -49,16 +49,20 @@ struct DasWavefieldPointer2D {
 };
 
 struct DasWavefieldTensor2D {
-    torch::Tensor exx_t, ezz_t, sxx_t, szz_t, txx_t, tzz_t;
-    torch::Tensor m_sxx_xf_t, m_sxx_xb_t, m_szz_zf_t, m_szz_zb_t;
-    torch::Tensor m_txx_zf_t, m_txx_zb_t, m_tzz_xf_t, m_tzz_xb_t;
-    torch::Tensor das35_t, das54x_t, das54z_t;
+    Buf exx_t, ezz_t, sxx_t, szz_t, txx_t, tzz_t;
+    Buf m_sxx_xf_t, m_sxx_xb_t, m_szz_zf_t, m_szz_zb_t;
+    Buf m_txx_zf_t, m_txx_zb_t, m_tzz_xf_t, m_tzz_xb_t;
+    Buf das35_t, das54x_t, das54z_t;
 
     // No allocate(): every DAS 2-D caller is handed its state by the
     // propagator (ForwardInput.wavefields, BackwardInput.adjoint_wavefields /
     // forward_wavefields), so the driver owns no wavefield storage.
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
+
+    void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 17, "DAS 2D expects 17 wavefield tensors");
         int i = 0;
@@ -91,7 +95,11 @@ struct DasWavefieldTensor2D {
     static constexpr const char* RECON_LIST_DESC =
         "[exx, ezz, sxx, szz, txx, tzz, das35, das54x, das54z]";
 
-    void bind_recon(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind_recon(const std::vector<torch::Tensor>& tensors) { bind_recon(bufs_of(tensors)); }
+
+    void bind_recon(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_NVAR,
                     "DAS 2D reconstruction expects ", RECON_NVAR,
@@ -133,7 +141,7 @@ struct DasWavefieldTensor2D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             exx_t, ezz_t, sxx_t, szz_t, txx_t, tzz_t,
@@ -241,17 +249,21 @@ struct DasWavefieldPointer3D {
 };
 
 struct DasWavefieldTensor3D {
-    torch::Tensor exx_t, eyy_t, ezz_t, sxx_t, syy_t, szz_t, txx_t, tyy_t, tzz_t;
-    torch::Tensor m_sxx_xf_t, m_sxx_xb_t, m_syy_yf_t, m_syy_yb_t, m_szz_zf_t, m_szz_zb_t;
-    torch::Tensor m_txx_yf_t, m_txx_yb_t, m_txx_zf_t, m_txx_zb_t;
-    torch::Tensor m_tyy_xf_t, m_tyy_xb_t, m_tyy_zf_t, m_tyy_zb_t;
-    torch::Tensor m_tzz_xf_t, m_tzz_xb_t, m_tzz_yf_t, m_tzz_yb_t;
-    torch::Tensor das35_t, das54x_t, das54y_t, das54z_t;
+    Buf exx_t, eyy_t, ezz_t, sxx_t, syy_t, szz_t, txx_t, tyy_t, tzz_t;
+    Buf m_sxx_xf_t, m_sxx_xb_t, m_syy_yf_t, m_syy_yb_t, m_szz_zf_t, m_szz_zb_t;
+    Buf m_txx_yf_t, m_txx_yb_t, m_txx_zf_t, m_txx_zb_t;
+    Buf m_tyy_xf_t, m_tyy_xb_t, m_tyy_zf_t, m_tyy_zb_t;
+    Buf m_tzz_xf_t, m_tzz_xb_t, m_tzz_yf_t, m_tzz_yb_t;
+    Buf das35_t, das54x_t, das54y_t, das54z_t;
 
     // No allocate(): see DasWavefieldTensor2D -- the propagator binds every
     // DAS 3-D state list.
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
+
+    void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 31, "DAS 3D expects 31 wavefield tensors");
         int i = 0;
@@ -325,7 +337,7 @@ struct DasWavefieldTensor3D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             exx_t, eyy_t, ezz_t, sxx_t, syy_t, szz_t, txx_t, tyy_t, tzz_t,

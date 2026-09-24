@@ -38,10 +38,14 @@ namespace acoustic_vti_1st_2d {
 // (B=N*C, 1, nz, nx) the propagator hands over; it never allocates -- the
 // forward state is always bound (cuda_layout.base_nvar + pml_nvar = 8).
 struct VTIWavefieldTensor {
-    torch::Tensor vx_t, vz_t, sH_t, sV_t;
-    torch::Tensor m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
+    Buf vx_t, vz_t, sH_t, sV_t;
+    Buf m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
 
-    void bind(const std::vector<torch::Tensor>& tensors, bool /*use_pml*/)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml) { bind(bufs_of(tensors), use_pml); }
+
+    void bind(const std::vector<Buf>& tensors, bool /*use_pml*/)
     {
         SWEEP_CHECK(tensors.size() == 8,
                     "AcousticVTI1st2D expects 8 wavefield tensors, got ",
@@ -71,7 +75,7 @@ struct VTIWavefieldTensor {
     }
 
     // 8 tensors saved as one checkpoint "state".
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {vx_t, vz_t, sH_t, sV_t,
                 m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t};
@@ -137,7 +141,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     // CPML (cpmls, 8 vals in 2D — same struct elastic uses)
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     int nsrc        = p.sources_loc.size(1);

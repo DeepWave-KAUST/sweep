@@ -162,7 +162,7 @@ struct Driver {
     template <class P>
     static void alloc_cpml(CPML& cpml, const P& p)
     {
-        cpml.allocate(p.pml_vals, 3);
+        cpml.bind(p.pml_vals, 3);
     }
 
     static std::vector<int64_t> allt_shape(const eqdrv::Dims& d, int64_t nt)
@@ -575,15 +575,15 @@ public:
         view.dim = 3;
         view.use_pml = false;
         view.allocated = true;
-        view.vx_t = vx;
-        view.vy_t = vy;
-        view.vz_t = vz;
-        view.sxx_t = vx;
-        view.syy_t = vx;
-        view.szz_t = vx;
-        view.sxy_t = vx;
-        view.sxz_t = vx;
-        view.syz_t = vx;
+        view.vx_t = buf_of(vx);
+        view.vy_t = buf_of(vy);
+        view.vz_t = buf_of(vz);
+        view.sxx_t = buf_of(vx);
+        view.syy_t = buf_of(vx);
+        view.szz_t = buf_of(vx);
+        view.sxy_t = buf_of(vx);
+        view.sxz_t = buf_of(vx);
+        view.syz_t = buf_of(vx);
         return view;
     }
 

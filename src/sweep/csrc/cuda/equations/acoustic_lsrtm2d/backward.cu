@@ -397,7 +397,7 @@ void run_full_imaging(const BackwardInput& p, torch::Tensor& grad_mp)
     bind_adjoint_state(adjoint, p, "backward");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 2);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -513,7 +513,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 2);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
     int save_width = p.abcn > 0 ? M + 1 : M;
@@ -699,7 +699,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 2);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -856,7 +856,7 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
     auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 2);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);

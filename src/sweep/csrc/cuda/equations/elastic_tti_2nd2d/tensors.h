@@ -8,9 +8,9 @@
 namespace elastic_tti_2nd2d {
 
 struct WavefieldTensor {
-    torch::Tensor ux_t, uz_t, ux_pre_t, uz_pre_t, ux_nxt_t, uz_nxt_t;
-    torch::Tensor m_gxux_t, m_gzux_t, m_gxuz_t, m_gzuz_t;
-    torch::Tensor m_sxxx_t, m_sxzz_t, m_sxzx_t, m_szzz_t;
+    Buf ux_t, uz_t, ux_pre_t, uz_pre_t, ux_nxt_t, uz_nxt_t;
+    Buf m_gxux_t, m_gzux_t, m_gxuz_t, m_gzuz_t;
+    Buf m_sxxx_t, m_sxzz_t, m_sxzx_t, m_szzz_t;
 
     // Boundary-saving reconstruction state (bind_recon): the six displacement
     // slots only, in bind() order -- ElasticTTI2nd.cuda_layout.bs_reconstruction_nvar.
@@ -24,7 +24,11 @@ struct WavefieldTensor {
     // adjoint, the bs reconstruction and the checkpoint replay -- is bound by
     // the propagator, so the driver owns no wavefield storage.
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
+
+    void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 14, "ElasticTTI2nd expects 14 wavefield tensors");
         int i = 0;
@@ -47,7 +51,11 @@ struct WavefieldTensor {
     // Partial bind for backward_bs: BackwardInput.forward_wavefields holds
     // exactly the RECON_WF_COUNT Python-zeroed displacement grids; no CPML
     // memory is bound (nor allocated) in this mode.
-    void bind_recon(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind_recon(const std::vector<torch::Tensor>& tensors) { bind_recon(bufs_of(tensors)); }
+
+    void bind_recon(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
                     "ElasticTTI2nd backward_bs reconstruction expects ", RECON_WF_COUNT,
@@ -59,8 +67,8 @@ struct WavefieldTensor {
         uz_pre_t = tensors[i++];
         ux_nxt_t = tensors[i++];
         uz_nxt_t = tensors[i++];
-        m_gxux_t = m_gzux_t = m_gxuz_t = m_gzuz_t = torch::Tensor();
-        m_sxxx_t = m_sxzz_t = m_sxzx_t = m_szzz_t = torch::Tensor();
+        m_gxux_t = m_gzux_t = m_gxuz_t = m_gzuz_t = Buf{};
+        m_sxxx_t = m_sxzz_t = m_sxzx_t = m_szzz_t = Buf{};
     }
 
     // Rotate the (now, pre, next) displacement triple buffer: next becomes
@@ -99,7 +107,7 @@ struct WavefieldTensor {
         return out;
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             ux_t, uz_t, ux_pre_t, uz_pre_t, ux_nxt_t, uz_nxt_t,
@@ -108,7 +116,7 @@ struct WavefieldTensor {
         };
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return state_tensors();
     }

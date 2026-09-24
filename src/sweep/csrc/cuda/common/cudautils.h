@@ -322,6 +322,24 @@ inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int i
     return pool_slot_checked(pool, idx, shape, what);
 }
 
+// The same required slot, its geometry given by a Buf (a wavefield member).
+inline torch::Tensor pool_required(const std::vector<torch::Tensor>& pool, int idx,
+                                   const Buf& like, const char* what)
+{
+    SWEEP_CHECK(pool_slot_bound(pool, idx),
+                what, "[", idx, "] must be bound by the propagator; this driver "
+                "has no fallback allocation for it (", pool.size(), " slots bound)");
+    const Buf b = buf_of(pool[idx]);
+    SWEEP_CHECK(b.sizes() == like.sizes(),
+                what, "[", idx, "] has shape ", b.sizes(), " but the expected geometry is ", like.sizes());
+    SWEEP_CHECK(pool[idx].scalar_type() == torch::kFloat,
+                what, "[", idx, "] must be float32, got ", pool[idx].scalar_type());
+    SWEEP_CHECK(b.is_cuda(),
+                what, "[", idx, "] must live on the GPU (a host tensor here reads as an "
+                "illegal address inside the kernels)");
+    return pool[idx];
+}
+
 // A single Python-bound output buffer (u_allt_out, record_out).  The shape
 // check is what makes a Python/driver disagreement loud instead of a silent
 // overrun.

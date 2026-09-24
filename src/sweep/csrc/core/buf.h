@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
+#include <vector>
 #include <initializer_list>
 
 #include "../cuda/common/boundary/types.cuh"   // BoundaryDtype
@@ -208,6 +209,23 @@ struct Buf {
     // moves by start * stride(d); the stride of d is unchanged, so the result
     // is contiguous only when the source was and d is the outermost dim of
     // size != 1 -- again exactly torch's rule, which is_contiguous() applies.
+    // torch: drop dimension d, which must have size 1 (the vrz3d history
+    // capture squeezes the C axis before the copy).
+    Buf squeeze(int64_t d) const
+    {
+        if (!defined_) return Buf{};
+        const int64_t k = normalize_dim(d);
+        assert(sizes_[k] == 1 && "Buf::squeeze: dimension is not of size 1");
+        Buf r = *this;
+        for (int64_t i = k; i + 1 < static_cast<int64_t>(ndim_); ++i) {
+            r.sizes_[i] = sizes_[i + 1];
+            r.strides_[i] = strides_[i + 1];
+        }
+        r.sizes_[ndim_ - 1] = 0; r.strides_[ndim_ - 1] = 0;
+        r.ndim_ = ndim_ - 1;
+        return r;
+    }
+
     Buf narrow(int64_t d, int64_t start, int64_t len) const
     {
         if (!defined_) return Buf{};   // the undefined tensor stays undefined, no assert
@@ -258,6 +276,8 @@ struct Buf {
         const int64_t* begin() const { return p; }
         const int64_t* end() const { return p + n; }
         const int64_t* data() const { return p; }
+        // torch: sizes().vec()
+        std::vector<int64_t> vec() const { return std::vector<int64_t>(p, p + n); }
     };
     Span sizes() const { return Span{sizes_, static_cast<int64_t>(ndim_)}; }
     Span strides() const { return Span{strides_, static_cast<int64_t>(ndim_)}; }
@@ -285,6 +305,21 @@ struct Buf {
 // cuda/common/buf_torch.h, so an entry-point guard spells the same thing for
 // either type: ``sweep::DeviceGuard g(device_index_of(models[0]))``.
 inline int device_index_of(const Buf& b) { return b.device_index(); }
+
+// torch: IntArrayRef == IntArrayRef / == vector (the layout checks).
+inline bool operator==(const Buf::Span& a, const Buf::Span& b)
+{
+    if (a.size() != b.size()) return false;
+    for (int64_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) return false;
+    return true;
+}
+inline bool operator!=(const Buf::Span& a, const Buf::Span& b) { return !(a == b); }
+inline bool operator==(const Buf::Span& a, const std::vector<int64_t>& b)
+{
+    return a == Buf::Span{b.data(), static_cast<int64_t>(b.size())};
+}
+inline bool operator==(const std::vector<int64_t>& a, const Buf::Span& b) { return b == a; }
+inline bool operator!=(const Buf::Span& a, const std::vector<int64_t>& b) { return !(a == b); }
 
 // sizes() in an error message, printed as c10 printed an IntArrayRef: [a, b].
 inline std::ostream& operator<<(std::ostream& o, const Buf::Span& s)

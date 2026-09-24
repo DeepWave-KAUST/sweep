@@ -17,6 +17,8 @@ enum class CheckpointProfileKind {
 
 class CheckpointRuntime {
 public:
+    // torch spelling: the drivers hand over the input struct's checkpoint
+    // list and the CPU int32 step table; descriptors are what is kept.
     CheckpointRuntime(
         const std::vector<torch::Tensor>& checkpoints,
         int expected_tensors,
@@ -29,7 +31,24 @@ public:
         const char* label = "checkpoint",
         int it_begin = 0
     )
-        : checkpoints_(checkpoints),
+        : CheckpointRuntime(bufs_of(checkpoints), expected_tensors, enabled, recursive,
+                            checkpoint_interval, buf_of(checkpoint_steps), checkpoint_on_cpu,
+                            role, label, it_begin)
+    {}
+
+    CheckpointRuntime(
+        std::vector<Buf> checkpoints,
+        int expected_tensors,
+        bool enabled,
+        bool recursive,
+        int checkpoint_interval,
+        const Buf& checkpoint_steps,
+        bool checkpoint_on_cpu,
+        const char* role,
+        const char* label = "checkpoint",
+        int it_begin = 0
+    )
+        : checkpoints_(std::move(checkpoints)),
           expected_tensors_(expected_tensors),
           enabled_(enabled),
           recursive_(recursive),
@@ -53,7 +72,7 @@ public:
             SWEEP_CHECK(checkpoint.defined(), label_, " checkpoint tensor must be defined");
             SWEEP_CHECK(checkpoint.is_contiguous(), label_, " checkpoint tensor must be contiguous");
             if (checkpoint_on_cpu_) {
-                SWEEP_CHECK(!checkpoint.is_cuda() && checkpoint.device().is_cpu(), label_, " CPU checkpoint storage expects CPU tensors");
+                SWEEP_CHECK(!checkpoint.is_cuda(), label_, " CPU checkpoint storage expects CPU tensors");
             } else {
                 SWEEP_CHECK(checkpoint.is_cuda(), label_, " GPU checkpoint storage expects CUDA tensors");
             }
@@ -77,7 +96,7 @@ public:
         print_profile_if_needed();
     }
 
-    inline void save_forward(int it, int nt, const std::vector<torch::Tensor>& tensors)
+    inline void save_forward(int it, int nt, const std::vector<Buf>& tensors)
     {
         const int checkpoint_idx = forward_checkpoint_index(it, nt);
         if (checkpoint_idx < 0)
@@ -85,7 +104,7 @@ public:
         save(checkpoint_idx, tensors);
     }
 
-    inline void save(int checkpoint_idx, const std::vector<torch::Tensor>& tensors)
+    inline void save(int checkpoint_idx, const std::vector<Buf>& tensors)
     {
         if (!enabled_)
             return;
@@ -101,16 +120,16 @@ public:
         );
     }
 
-    inline void load(int checkpoint_idx, const std::vector<torch::Tensor>& dst_tensors)
+    inline void load(int checkpoint_idx, const std::vector<Buf>& dst_tensors)
     {
-        static const std::vector<torch::Tensor> no_zero_after;
+        static const std::vector<Buf> no_zero_after;
         load(checkpoint_idx, dst_tensors, no_zero_after);
     }
 
     inline void load(
         int checkpoint_idx,
-        const std::vector<torch::Tensor>& dst_tensors,
-        const std::vector<torch::Tensor>& zero_after
+        const std::vector<Buf>& dst_tensors,
+        const std::vector<Buf>& zero_after
     )
     {
         if (!enabled_)
@@ -131,8 +150,8 @@ public:
     }
 
     inline void copy_state(
-        const std::vector<torch::Tensor>& dst_tensors,
-        const std::vector<torch::Tensor>& src_tensors
+        const std::vector<Buf>& dst_tensors,
+        const std::vector<Buf>& src_tensors
     )
     {
         SWEEP_CHECK(
@@ -150,7 +169,7 @@ public:
         );
     }
 
-    inline void zero_state(const std::vector<torch::Tensor>& tensors)
+    inline void zero_state(const std::vector<Buf>& tensors)
     {
         profile_group(
             CheckpointProfileKind::StateZero,
@@ -229,20 +248,20 @@ private:
         return -1;
     }
 
-    inline void copy_to_checkpoint(int idx, int checkpoint_idx, const torch::Tensor& src)
+    inline void copy_to_checkpoint(int idx, int checkpoint_idx, const Buf& src)
     {
         auto dst = checkpoints_[idx].select(0, checkpoint_idx);
         copy_tensor_cuda_async(dst, src);
     }
 
-    inline void copy_from_checkpoint(const torch::Tensor& dst, int idx, int checkpoint_idx)
+    inline void copy_from_checkpoint(const Buf& dst, int idx, int checkpoint_idx)
     {
         auto src = checkpoints_[idx].select(0, checkpoint_idx);
         copy_tensor_cuda_async(dst, src);
     }
 
     inline static void check_tensor_count(
-        const std::vector<torch::Tensor>& tensors,
+        const std::vector<Buf>& tensors,
         int expected,
         const char* op
     )
@@ -253,12 +272,12 @@ private:
         );
     }
 
-    inline static size_t tensor_bytes(const torch::Tensor& tensor)
+    inline static size_t tensor_bytes(const Buf& tensor)
     {
-        return tensor.defined() ? static_cast<size_t>(tensor.nbytes()) : 0;
+        return tensor.defined() ? static_cast<size_t>(tensor.numel() * tensor.element_size()) : 0;
     }
 
-    inline static size_t tensor_list_bytes(const std::vector<torch::Tensor>& tensors)
+    inline static size_t tensor_list_bytes(const std::vector<Buf>& tensors)
     {
         size_t bytes = 0;
         for (const auto& tensor : tensors)
@@ -340,12 +359,12 @@ private:
         std::fflush(stderr);
     }
 
-    const std::vector<torch::Tensor>& checkpoints_;
+    std::vector<Buf> checkpoints_;
     int expected_tensors_ = 0;
     bool enabled_ = false;
     bool recursive_ = false;
     int checkpoint_interval_ = 1;
-    const torch::Tensor& checkpoint_steps_;
+    Buf checkpoint_steps_;
     bool checkpoint_on_cpu_ = false;
     std::string role_;
     std::string label_;

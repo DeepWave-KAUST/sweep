@@ -203,7 +203,7 @@ struct Driver {
     template <class P>
     static void alloc_cpml(CPML& cpml, const P& p)
     {
-        cpml.allocate(p.pml_vals, 2);
+        cpml.bind(p.pml_vals, 2);
     }
 
     static std::vector<int64_t> allt_shape(const eqdrv::Dims& d, int64_t nt)

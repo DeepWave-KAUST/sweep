@@ -15,7 +15,7 @@
 //   * State = Models + one SGradParam grad_ctx + launch/source/record configs + order + nx/nz/B; Workspace = ElasticAdjointWorkspaceTensor via bind_adjoint_workspace_required(p.adjoint_workspace, 2);
 //   * validate_forward / validate_backward and zero_adjoint_if_first_segment / zero_adjoint_if_first_segment_bs are no-ops (the adjoint buffers arrive Python-zeroed);
 //   * setup_ctx installs the per-edge free surface (set_per_edge(fs_faces, pad_lo, pad_hi)) and topo_rows / has_topo when p.has_topo;
-//   * init_aux_slabs = elastic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.allocate(pml_vals, 2);
+//   * init_aux_slabs = elastic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.bind(pml_vals, 2);
 //   * allt_shape = (nt, 2, B, nz, nx): u_allt stores the velocities only (Vx, Vz);
 //   * field_ptr = elastic_field_ptr(wf, 2, idx); view = wf.view();
 //   * forward: bind(p.wavefields, true) -- MANDATORY, no self-allocating fallback; velocity_substep = LAUNCH_ELASTIC_VELOCITY (rho), stress_substep = LAUNCH_ELASTIC_STRESS (lambda, mu, u_this_t); both also replay in the ckpt/recursive modes;
@@ -181,7 +181,7 @@ struct Driver {
     template <class P>
     static void alloc_cpml(CPML& cpml, const P& p)
     {
-        cpml.allocate(p.pml_vals, 2);
+        cpml.bind(p.pml_vals, 2);
     }
 
     static std::vector<int64_t> allt_shape(const eqdrv::Dims& d, int64_t nt)

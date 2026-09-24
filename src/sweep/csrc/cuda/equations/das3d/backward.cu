@@ -111,7 +111,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
+    cpml.bind(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     const auto& ws = workspace_slots(p);
@@ -264,7 +264,7 @@ BackwardOutput backward(const BackwardInput& in)
     adjoint.bind(p.adjoint_wavefields);
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
+    cpml.bind(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);

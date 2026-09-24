@@ -58,7 +58,7 @@ ForwardOutput forward(const ForwardInput& in)
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     int nsrc = p.sources_loc.size(1);

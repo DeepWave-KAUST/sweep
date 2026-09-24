@@ -116,7 +116,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     const auto& ws = workspace_slots(p, N_SLOTS_FULL);
@@ -248,7 +248,7 @@ BackwardOutput backward(const BackwardInput& in)
     adjoint.bind(p.adjoint_wavefields);
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
@@ -508,7 +508,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     copy_tensor_cuda_async(forward.tzz_t, p.u_last_two.select(0, 5).select(0, 0));
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     // last_two is bound but never read here: this backward seeds its

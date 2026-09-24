@@ -8,11 +8,15 @@
 namespace elastic_tti_sg2d {
 
 struct WavefieldTensor {
-    torch::Tensor vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t;
-    torch::Tensor m_vxx_t, m_vxz_t, m_vyx_t, m_vyz_t, m_vzx_t, m_vzz_t;
-    torch::Tensor m_txxx_t, m_txzz_t, m_txyx_t, m_tyzz_t, m_txzx_t, m_tzzz_t;
+    Buf vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t;
+    Buf m_vxx_t, m_vxz_t, m_vyx_t, m_vyz_t, m_vzx_t, m_vzz_t;
+    Buf m_txxx_t, m_txzz_t, m_txyx_t, m_tyzz_t, m_txzx_t, m_tzzz_t;
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
+
+    void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 20, "ElasticTTISG 2D expects 20 wavefield tensors");
         int i = 0;
@@ -42,7 +46,11 @@ struct WavefieldTensor {
     // first 8 slots of the bind() order); the 12 CPML memory tensors stay
     // undefined, so view() hands the kernels nullptr for them.  Only valid
     // for the NOPML reverse reconstruction, which never touches m_*.
-    void bind_physical(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind_physical(const std::vector<torch::Tensor>& tensors) { bind_physical(bufs_of(tensors)); }
+
+    void bind_physical(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 8,
                     "ElasticTTISG 2D expects 8 physical wavefield tensors "
@@ -56,8 +64,8 @@ struct WavefieldTensor {
         syz_t = tensors[i++];
         sxz_t = tensors[i++];
         sxy_t = tensors[i++];
-        m_vxx_t = m_vxz_t = m_vyx_t = m_vyz_t = m_vzx_t = m_vzz_t = torch::Tensor();
-        m_txxx_t = m_txzz_t = m_txyx_t = m_tyzz_t = m_txzx_t = m_tzzz_t = torch::Tensor();
+        m_vxx_t = m_vxz_t = m_vyx_t = m_vyz_t = m_vzx_t = m_vzz_t = Buf{};
+        m_txxx_t = m_txzz_t = m_txyx_t = m_tyzz_t = m_txzx_t = m_tzzz_t = Buf{};
     }
 
     WavefieldPointer view() const
@@ -87,7 +95,7 @@ struct WavefieldTensor {
         return out;
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t,
@@ -96,7 +104,7 @@ struct WavefieldTensor {
         };
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return state_tensors();
     }

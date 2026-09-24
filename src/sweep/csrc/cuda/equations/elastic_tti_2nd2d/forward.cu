@@ -59,7 +59,7 @@ ForwardOutput forward(const ForwardInput& in)
     auto model = stiffness_view(p.models);
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     const int nsrc = p.sources_loc.size(1);

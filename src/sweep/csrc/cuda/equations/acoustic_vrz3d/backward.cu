@@ -171,7 +171,7 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
     auto e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
     auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(in.pml_vals, 3);
+    cpml_tensor.bind(in.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
@@ -423,7 +423,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     int save_width = p.M + 1;
@@ -783,7 +783,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     );
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);

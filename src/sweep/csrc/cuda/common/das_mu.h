@@ -54,28 +54,32 @@ struct DasMuWavefieldPointer2D {
 };
 
 struct DasMuWavefieldTensor2D {
-    torch::Tensor vx_t;
-    torch::Tensor vz_t;
-    torch::Tensor sxx_t;
-    torch::Tensor szz_t;
-    torch::Tensor sxz_t;
-    torch::Tensor exx_t;
-    torch::Tensor ezz_t;
-    torch::Tensor exz_t;
-    torch::Tensor m_vxx_t;
-    torch::Tensor m_vxz_t;
-    torch::Tensor m_vzx_t;
-    torch::Tensor m_vzz_t;
-    torch::Tensor m_sxxx_t;
-    torch::Tensor m_sxxz_t;
-    torch::Tensor m_szzx_t;
-    torch::Tensor m_szzz_t;
-    torch::Tensor m_sxzx_t;
-    torch::Tensor m_sxzz_t;
+    Buf vx_t;
+    Buf vz_t;
+    Buf sxx_t;
+    Buf szz_t;
+    Buf sxz_t;
+    Buf exx_t;
+    Buf ezz_t;
+    Buf exz_t;
+    Buf m_vxx_t;
+    Buf m_vxz_t;
+    Buf m_vzx_t;
+    Buf m_vzz_t;
+    Buf m_sxxx_t;
+    Buf m_sxxz_t;
+    Buf m_szzx_t;
+    Buf m_szzz_t;
+    Buf m_sxzx_t;
+    Buf m_sxzz_t;
 
     bool allocated = false;
 
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true) { bind(bufs_of(tensors), use_pml); }
+
+    void bind(const std::vector<Buf>& tensors, bool use_pml = true)
     {
         int i = 0;
         SWEEP_CHECK(tensors.size() == (use_pml ? 18 : 8),
@@ -114,7 +118,11 @@ struct DasMuWavefieldTensor2D {
     // step it).  view()/elastic_view() hand out nullptr for every undefined
     // member; the field-index helper below returns those nullptrs and every
     // caller skips a nullptr field.
-    void bind_elastic(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind_elastic(const std::vector<torch::Tensor>& tensors) { bind_elastic(bufs_of(tensors)); }
+
+    void bind_elastic(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 5,
                     "DAS Mu 2D elastic-only wavefield bind expects 5 tensors "
@@ -125,19 +133,19 @@ struct DasMuWavefieldTensor2D {
         sxx_t = tensors[i++];
         szz_t = tensors[i++];
         sxz_t = tensors[i++];
-        exx_t = torch::Tensor();
-        ezz_t = torch::Tensor();
-        exz_t = torch::Tensor();
-        m_vxx_t = torch::Tensor();
-        m_vxz_t = torch::Tensor();
-        m_vzx_t = torch::Tensor();
-        m_vzz_t = torch::Tensor();
-        m_sxxx_t = torch::Tensor();
-        m_sxxz_t = torch::Tensor();
-        m_szzx_t = torch::Tensor();
-        m_szzz_t = torch::Tensor();
-        m_sxzx_t = torch::Tensor();
-        m_sxzz_t = torch::Tensor();
+        exx_t = Buf{};
+        ezz_t = Buf{};
+        exz_t = Buf{};
+        m_vxx_t = Buf{};
+        m_vxz_t = Buf{};
+        m_vzx_t = Buf{};
+        m_vzz_t = Buf{};
+        m_sxxx_t = Buf{};
+        m_sxxz_t = Buf{};
+        m_szzx_t = Buf{};
+        m_szzz_t = Buf{};
+        m_sxzx_t = Buf{};
+        m_sxzz_t = Buf{};
         allocated = true;
     }
 
@@ -213,7 +221,7 @@ struct DasMuWavefieldTensor2D {
         return v;
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return {
             vx_t, vz_t, sxx_t, szz_t, sxz_t, exx_t, ezz_t, exz_t,
@@ -222,7 +230,7 @@ struct DasMuWavefieldTensor2D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return checkpoint_tensors();
     }
@@ -325,43 +333,47 @@ struct DasMuWavefieldPointer3D {
 };
 
 struct DasMuWavefieldTensor3D {
-    torch::Tensor vx_t;
-    torch::Tensor vy_t;
-    torch::Tensor vz_t;
-    torch::Tensor sxx_t;
-    torch::Tensor syy_t;
-    torch::Tensor szz_t;
-    torch::Tensor sxy_t;
-    torch::Tensor sxz_t;
-    torch::Tensor syz_t;
-    torch::Tensor exx_t;
-    torch::Tensor eyy_t;
-    torch::Tensor ezz_t;
-    torch::Tensor exy_t;
-    torch::Tensor exz_t;
-    torch::Tensor eyz_t;
-    torch::Tensor m_vxx_t;
-    torch::Tensor m_vxy_t;
-    torch::Tensor m_vxz_t;
-    torch::Tensor m_vyx_t;
-    torch::Tensor m_vyy_t;
-    torch::Tensor m_vyz_t;
-    torch::Tensor m_vzx_t;
-    torch::Tensor m_vzy_t;
-    torch::Tensor m_vzz_t;
-    torch::Tensor m_sxxx_t;
-    torch::Tensor m_szzz_t;
-    torch::Tensor m_sxyx_t;
-    torch::Tensor m_sxyy_t;
-    torch::Tensor m_sxzx_t;
-    torch::Tensor m_sxzz_t;
-    torch::Tensor m_syyy_t;
-    torch::Tensor m_syzy_t;
-    torch::Tensor m_syzz_t;
+    Buf vx_t;
+    Buf vy_t;
+    Buf vz_t;
+    Buf sxx_t;
+    Buf syy_t;
+    Buf szz_t;
+    Buf sxy_t;
+    Buf sxz_t;
+    Buf syz_t;
+    Buf exx_t;
+    Buf eyy_t;
+    Buf ezz_t;
+    Buf exy_t;
+    Buf exz_t;
+    Buf eyz_t;
+    Buf m_vxx_t;
+    Buf m_vxy_t;
+    Buf m_vxz_t;
+    Buf m_vyx_t;
+    Buf m_vyy_t;
+    Buf m_vyz_t;
+    Buf m_vzx_t;
+    Buf m_vzy_t;
+    Buf m_vzz_t;
+    Buf m_sxxx_t;
+    Buf m_szzz_t;
+    Buf m_sxyx_t;
+    Buf m_sxyy_t;
+    Buf m_sxzx_t;
+    Buf m_sxzz_t;
+    Buf m_syyy_t;
+    Buf m_syzy_t;
+    Buf m_syzz_t;
 
     bool allocated = false;
 
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true) { bind(bufs_of(tensors), use_pml); }
+
+    void bind(const std::vector<Buf>& tensors, bool use_pml = true)
     {
         int i = 0;
         SWEEP_CHECK(tensors.size() == (use_pml ? 33 : 15),
@@ -415,7 +427,11 @@ struct DasMuWavefieldTensor3D {
     // (only the NOPML kernels step it).  view()/elastic_view() hand out
     // nullptr for every undefined member; the field-index helper below
     // returns those nullptrs and every caller skips a nullptr field.
-    void bind_elastic(const std::vector<torch::Tensor>& tensors)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind_elastic(const std::vector<torch::Tensor>& tensors) { bind_elastic(bufs_of(tensors)); }
+
+    void bind_elastic(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 9,
                     "DAS Mu 3D elastic-only wavefield bind expects 9 tensors "
@@ -431,30 +447,30 @@ struct DasMuWavefieldTensor3D {
         sxy_t = tensors[i++];
         sxz_t = tensors[i++];
         syz_t = tensors[i++];
-        exx_t = torch::Tensor();
-        eyy_t = torch::Tensor();
-        ezz_t = torch::Tensor();
-        exy_t = torch::Tensor();
-        exz_t = torch::Tensor();
-        eyz_t = torch::Tensor();
-        m_vxx_t = torch::Tensor();
-        m_vxy_t = torch::Tensor();
-        m_vxz_t = torch::Tensor();
-        m_vyx_t = torch::Tensor();
-        m_vyy_t = torch::Tensor();
-        m_vyz_t = torch::Tensor();
-        m_vzx_t = torch::Tensor();
-        m_vzy_t = torch::Tensor();
-        m_vzz_t = torch::Tensor();
-        m_sxxx_t = torch::Tensor();
-        m_szzz_t = torch::Tensor();
-        m_sxyx_t = torch::Tensor();
-        m_sxyy_t = torch::Tensor();
-        m_sxzx_t = torch::Tensor();
-        m_sxzz_t = torch::Tensor();
-        m_syyy_t = torch::Tensor();
-        m_syzy_t = torch::Tensor();
-        m_syzz_t = torch::Tensor();
+        exx_t = Buf{};
+        eyy_t = Buf{};
+        ezz_t = Buf{};
+        exy_t = Buf{};
+        exz_t = Buf{};
+        eyz_t = Buf{};
+        m_vxx_t = Buf{};
+        m_vxy_t = Buf{};
+        m_vxz_t = Buf{};
+        m_vyx_t = Buf{};
+        m_vyy_t = Buf{};
+        m_vyz_t = Buf{};
+        m_vzx_t = Buf{};
+        m_vzy_t = Buf{};
+        m_vzz_t = Buf{};
+        m_sxxx_t = Buf{};
+        m_szzz_t = Buf{};
+        m_sxyx_t = Buf{};
+        m_sxyy_t = Buf{};
+        m_sxzx_t = Buf{};
+        m_sxzz_t = Buf{};
+        m_syyy_t = Buf{};
+        m_syzy_t = Buf{};
+        m_syzz_t = Buf{};
         allocated = true;
     }
 
@@ -543,7 +559,7 @@ struct DasMuWavefieldTensor3D {
         return v;
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return {
             vx_t, vy_t, vz_t, sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t,
@@ -553,7 +569,7 @@ struct DasMuWavefieldTensor3D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return checkpoint_tensors();
     }

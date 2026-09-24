@@ -16,7 +16,7 @@
 //   * BwdWorkspace and BsScratch are empty: the fused adjoint keeps its scratch in the psi/zeta buffers and the NOPML kernel writes no per-step scratch field;
 //   * validate_forward / validate_backward are no-ops;
 //   * setup_ctx installs topo_rows / has_topo (topo_category = nullptr, use_apm = false) and the per-edge free surface via ctx.set_per_edge(fs_faces, pad_lo, pad_hi);
-//   * init_aux_slabs = acoustic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.allocate(pml_vals, 2);
+//   * init_aux_slabs = acoustic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.bind(pml_vals, 2);
 //   * allt_shape = (nt, B, nz, nx): u only, written in-kernel through u_thist (capture_allt is a no-op);
 //   * save_width = abcn > 0 ? M + 1 : M; boundary save/restore offset 0;
 //   * bind_or_alloc_forward / _adjoint / _recon bind p.wavefields / p.adjoint_wavefields / p.forward_wavefields -- all three are propagator-owned and MANDATORY (the recon list binds WITHOUT CPML, use_pml = false); no driver-side allocation is left;
@@ -165,7 +165,7 @@ struct Driver {
     template <class P>
     static void alloc_cpml(CPML& cpml, const P& p)
     {
-        cpml.allocate(p.pml_vals, 2);
+        cpml.bind(p.pml_vals, 2);
     }
 
     // The record this equation writes: one field, {N, nrec, nt}.  Moved here

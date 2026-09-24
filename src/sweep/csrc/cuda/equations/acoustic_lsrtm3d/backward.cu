@@ -604,7 +604,7 @@ void run_full_imaging(
     float* u_thist = nullptr;
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     int adjoint_nsrc = p.adjoint_sources_loc.size(1);
@@ -728,7 +728,7 @@ void run_bs_imaging(
     auto f_this = pool_required(p.adjoint_workspace, F_THIS, vp, "adjoint_workspace");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
@@ -966,7 +966,7 @@ void run_ckpt_imaging(
                                        "cuda_layout.checkpoint_replay_shapes)");
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
@@ -1127,7 +1127,7 @@ void run_recursive_imaging(
     checkpoint_runtime.zero_state(adjoint.state_tensors());
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);

@@ -100,7 +100,7 @@ ForwardOutput forward(const ForwardInput& in) {
     acoustic_init_aux_slabs(ctx, wavefield);
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 2);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
     // record_out is bound on every call: ViscoAcoustic.cuda_layout declares

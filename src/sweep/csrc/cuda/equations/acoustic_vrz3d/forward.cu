@@ -111,7 +111,7 @@ ForwardOutput forward(const ForwardInput& in)
     wavefield.bind(p.wavefields, 3, true);
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
     // record_out is bound on every call: AcousticVRZ3D.cuda_layout declares

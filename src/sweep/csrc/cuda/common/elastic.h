@@ -23,14 +23,17 @@ struct ElasticCPMLPointer {
 };
 
 struct ElasticCPMLTensor {
-    torch::Tensor ax_t, bx_t, axh_t, bxh_t;
-    torch::Tensor az_t, bz_t, azh_t, bzh_t;
-    torch::Tensor ay_t, by_t, ayh_t, byh_t;  // 3D only
+    Buf ax_t, bx_t, axh_t, bxh_t;
+    Buf az_t, bz_t, azh_t, bzh_t;
+    Buf ay_t, by_t, ayh_t, byh_t;  // 3D only
 
     int dim = 3;
     bool allocated = false;
 
-    void allocate(const std::vector<torch::Tensor>& pml_vals, int dim_)
+    // torch spelling, see bind() below.
+    void bind(const std::vector<torch::Tensor>& pml_vals, int dim_) { bind(bufs_of(pml_vals), dim_); }
+
+    void bind(const std::vector<Buf>& pml_vals, int dim_)
     {
         dim = dim_;
 
@@ -46,10 +49,10 @@ struct ElasticCPMLTensor {
             ayh_t = pml_vals[idx++];
             byh_t = pml_vals[idx++];
         } else {
-            ay_t = torch::Tensor();
-            by_t = torch::Tensor();
-            ayh_t = torch::Tensor();
-            byh_t = torch::Tensor();
+            ay_t = Buf{};
+            by_t = Buf{};
+            ayh_t = Buf{};
+            byh_t = Buf{};
         }
 
         ax_t = pml_vals[idx++];
@@ -219,25 +222,29 @@ struct ElasticWavefieldPointer {
 };
 
 struct ElasticWavefieldTensor {
-    torch::Tensor vx_t, vy_t, vz_t;
-    torch::Tensor sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t;
+    Buf vx_t, vy_t, vz_t;
+    Buf sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t;
 
-    torch::Tensor m_vxx_t, m_vxy_t, m_vxz_t;
-    torch::Tensor m_vyx_t, m_vyy_t, m_vyz_t;
-    torch::Tensor m_vzx_t, m_vzy_t, m_vzz_t;
+    Buf m_vxx_t, m_vxy_t, m_vxz_t;
+    Buf m_vyx_t, m_vyy_t, m_vyz_t;
+    Buf m_vzx_t, m_vzy_t, m_vzz_t;
 
-    torch::Tensor m_sxxx_t, m_sxxy_t, m_sxxz_t;
-    torch::Tensor m_syyx_t, m_syyy_t, m_syyz_t;
-    torch::Tensor m_szzx_t, m_szzy_t, m_szzz_t;
-    torch::Tensor m_sxyx_t, m_sxyy_t, m_sxyz_t;
-    torch::Tensor m_sxzx_t, m_sxzy_t, m_sxzz_t;
-    torch::Tensor m_syzx_t, m_syzy_t, m_syzz_t;
+    Buf m_sxxx_t, m_sxxy_t, m_sxxz_t;
+    Buf m_syyx_t, m_syyy_t, m_syyz_t;
+    Buf m_szzx_t, m_szzy_t, m_szzz_t;
+    Buf m_sxyx_t, m_sxyy_t, m_sxyz_t;
+    Buf m_sxzx_t, m_sxzy_t, m_sxzz_t;
+    Buf m_syzx_t, m_syzy_t, m_syzz_t;
 
     int dim = 2;
     bool use_pml = true;
     bool allocated = false;
 
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true) { bind(bufs_of(tensors), use_pml_); }
+
+    void bind(const std::vector<Buf>& tensors, bool use_pml_ = true)
     {
         int i = 0;
         use_pml = use_pml_;
@@ -365,7 +372,7 @@ struct ElasticWavefieldTensor {
         }
 
         if (use_pml) {
-            auto bn = [](const torch::Tensor& t) -> long {
+            auto bn = [](const Buf& t) -> long {
                 return t.defined() && t.numel() > 0 ? t.numel() / t.size(0) : -1;
             };
             v.aux_bn_x = bn(m_vxx_t);
@@ -376,7 +383,7 @@ struct ElasticWavefieldTensor {
         return v;
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         if (dim == 3) {
             return {
@@ -395,7 +402,7 @@ struct ElasticWavefieldTensor {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return checkpoint_tensors();
     }
@@ -403,42 +410,42 @@ struct ElasticWavefieldTensor {
 private:
     void reset_optional_3d()
     {
-        vy_t = torch::Tensor();
-        syy_t = torch::Tensor();
-        sxy_t = torch::Tensor();
-        syz_t = torch::Tensor();
+        vy_t = Buf{};
+        syy_t = Buf{};
+        sxy_t = Buf{};
+        syz_t = Buf{};
     }
 
     void reset_optional_pml()
     {
-        m_vxx_t = torch::Tensor();
-        m_vxy_t = torch::Tensor();
-        m_vxz_t = torch::Tensor();
-        m_vyx_t = torch::Tensor();
-        m_vyy_t = torch::Tensor();
-        m_vyz_t = torch::Tensor();
-        m_vzx_t = torch::Tensor();
-        m_vzy_t = torch::Tensor();
-        m_vzz_t = torch::Tensor();
+        m_vxx_t = Buf{};
+        m_vxy_t = Buf{};
+        m_vxz_t = Buf{};
+        m_vyx_t = Buf{};
+        m_vyy_t = Buf{};
+        m_vyz_t = Buf{};
+        m_vzx_t = Buf{};
+        m_vzy_t = Buf{};
+        m_vzz_t = Buf{};
 
-        m_sxxx_t = torch::Tensor();
-        m_sxxy_t = torch::Tensor();
-        m_sxxz_t = torch::Tensor();
-        m_syyx_t = torch::Tensor();
-        m_syyy_t = torch::Tensor();
-        m_syyz_t = torch::Tensor();
-        m_szzx_t = torch::Tensor();
-        m_szzy_t = torch::Tensor();
-        m_szzz_t = torch::Tensor();
-        m_sxyx_t = torch::Tensor();
-        m_sxyy_t = torch::Tensor();
-        m_sxyz_t = torch::Tensor();
-        m_sxzx_t = torch::Tensor();
-        m_sxzy_t = torch::Tensor();
-        m_sxzz_t = torch::Tensor();
-        m_syzx_t = torch::Tensor();
-        m_syzy_t = torch::Tensor();
-        m_syzz_t = torch::Tensor();
+        m_sxxx_t = Buf{};
+        m_sxxy_t = Buf{};
+        m_sxxz_t = Buf{};
+        m_syyx_t = Buf{};
+        m_syyy_t = Buf{};
+        m_syyz_t = Buf{};
+        m_szzx_t = Buf{};
+        m_szzy_t = Buf{};
+        m_szzz_t = Buf{};
+        m_sxyx_t = Buf{};
+        m_sxyy_t = Buf{};
+        m_sxyz_t = Buf{};
+        m_sxzx_t = Buf{};
+        m_sxzy_t = Buf{};
+        m_sxzz_t = Buf{};
+        m_syzx_t = Buf{};
+        m_syzy_t = Buf{};
+        m_syzz_t = Buf{};
     }
 
     void bind_common_pml_view(ElasticWavefieldPointer& v)
@@ -538,8 +545,8 @@ private:
 };
 
 struct ElasticAdjointWorkspaceTensor {
-    torch::Tensor qxx_t, qxy_t, qxz_t, qyx_t, qyy_t, qyz_t, qzx_t, qzy_t, qzz_t;
-    torch::Tensor pxx_t, pxy_t, pxz_t, pyx_t, pyy_t, pyz_t, pzx_t, pzy_t, pzz_t;
+    Buf qxx_t, qxy_t, qxz_t, qyx_t, qyy_t, qyz_t, qzx_t, qzy_t, qzz_t;
+    Buf pxx_t, pxy_t, pxz_t, pyx_t, pyy_t, pyz_t, pzx_t, pzy_t, pzz_t;
 
     int dim = 2;
     bool allocated = false;
@@ -552,7 +559,11 @@ struct ElasticAdjointWorkspaceTensor {
     // bind() accepts a longer list and takes only its head.
     static constexpr int nslots(int dim_) { return dim_ == 2 ? 8 : 18; }
 
-    void bind(const std::vector<torch::Tensor>& tensors, int dim_)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+    void bind(const std::vector<torch::Tensor>& tensors, int dim_) { bind(bufs_of(tensors), dim_); }
+
+    void bind(const std::vector<Buf>& tensors, int dim_)
     {
         int i = 0;
         dim = dim_;
