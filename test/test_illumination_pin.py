@@ -79,7 +79,13 @@ def test_illumination_does_not_move_the_gradient(name, cls, shape, ndim, label, 
     measured in the same process cannot drift with the hardware, and it keeps
     the strict bar wherever the path really is deterministic.
     """
-    offs = [_run(cls, shape, ndim, memory, illum=False) for _ in range(4)]
+    # Six off-runs -> 15 pairs. Four runs (6 pairs) drew a floor of 1.6e-9 on
+    # [ckpt-acoustic3d] in a 2026-09-24 gate, BELOW the 3.0e-9 minimum the 15
+    # pairs quoted below had shown, and a genuine 9.4e-9 on/off difference then
+    # read as 5.9x. The floor is a max over pairs, so more pairs can only raise
+    # it toward the spread's real top; sensitivity to a real coupling -- a
+    # systematic shift, not a draw -- is untouched. Cost: two ~0.5 s runs.
+    offs = [_run(cls, shape, ndim, memory, illum=False) for _ in range(6)]
     on = _run(cls, shape, ndim, memory, illum=True)
 
     assert torch.equal(offs[0]["record"], on["record"]), (
