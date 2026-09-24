@@ -160,10 +160,10 @@ ForwardOutput forward(const ForwardInput& in)
     );
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        tmp_sxx_x.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_z.zero_();
-        tmp_tzz_x.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tzz_x);
 
         LAUNCH_DAS2D_FIRST(
             order,
@@ -257,15 +257,15 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(wavefield.exx_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(wavefield.ezz_t);
-        boundary_saver.last_two_t.select(0, 2).select(0, 0).copy_(wavefield.sxx_t);
-        boundary_saver.last_two_t.select(0, 3).select(0, 0).copy_(wavefield.szz_t);
-        boundary_saver.last_two_t.select(0, 4).select(0, 0).copy_(wavefield.txx_t);
-        boundary_saver.last_two_t.select(0, 5).select(0, 0).copy_(wavefield.tzz_t);
-        boundary_saver.last_two_t.select(0, 6).select(0, 0).copy_(wavefield.das35_t);
-        boundary_saver.last_two_t.select(0, 7).select(0, 0).copy_(wavefield.das54x_t);
-        boundary_saver.last_two_t.select(0, 8).select(0, 0).copy_(wavefield.das54z_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 0).select(0, 0), wavefield.exx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 1).select(0, 0), wavefield.ezz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 2).select(0, 0), wavefield.sxx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 3).select(0, 0), wavefield.szz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 4).select(0, 0), wavefield.txx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 5).select(0, 0), wavefield.tzz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 6).select(0, 0), wavefield.das35_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 7).select(0, 0), wavefield.das54x_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 8).select(0, 0), wavefield.das54z_t);
     }
 
     boundary_runtime.synchronize();

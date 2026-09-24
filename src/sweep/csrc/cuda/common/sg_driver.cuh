@@ -1014,7 +1014,7 @@ BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
                                 source_fields, receiver_fields,
                                 next_segment_v, grads, prev_segment_next_v);
         for (int c = 0; Eq::IMAGING_USES_NEXT_V && c < Eq::N_VEL; ++c)
-            next_segment_v[c].copy_(prev_segment_next_v[c]);
+            copy_tensor_cuda_async(next_segment_v[c], prev_segment_next_v[c]);
     }
 
     BackwardOutput out;
@@ -1057,8 +1057,8 @@ void sg_replay_forward_to_time(
     // replay did: next_v is empty and current_v is always overwritten at the
     // capture.
     if (Eq::IMAGING_USES_NEXT_V) {
-        for (auto& t : current_v) t.zero_();
-        for (auto& t : next_v) t.zero_();
+        for (auto& t : current_v) zero_tensor_device_async(t);
+        for (auto& t : next_v) zero_tensor_device_async(t);
     }
 
     const int checkpoint_idx = sg_find_previous_checkpoint_idx(

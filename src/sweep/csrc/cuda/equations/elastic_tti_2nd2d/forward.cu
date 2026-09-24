@@ -214,10 +214,10 @@ ForwardOutput forward(const ForwardInput& in)
     if (p.use_boundary_saving) {
         // (storage, level): level 0 = W_{nt-1} (u_pre after final swap),
         // level 1 = W_nt (u_now after final swap).
-        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(wavefield.ux_pre_t);
-        boundary_saver.last_two_t.select(0, 0).select(0, 1).copy_(wavefield.ux_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(wavefield.uz_pre_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 1).copy_(wavefield.uz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 0).select(0, 0), wavefield.ux_pre_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 0).select(0, 1), wavefield.ux_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 1).select(0, 0), wavefield.uz_pre_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 1).select(0, 1), wavefield.uz_t);
     }
     boundary_runtime.synchronize();
 

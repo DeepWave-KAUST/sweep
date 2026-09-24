@@ -22,15 +22,15 @@ namespace {
 
 void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
 {
-    wf.u_prev_t.zero_();
-    wf.u_now_t.zero_();
-    wf.u_next_t.zero_();
-    wf.psix_t.zero_();
-    wf.psiy_t.zero_();
-    wf.psiz_t.zero_();
-    wf.zetax_t.zero_();
-    wf.zetay_t.zero_();
-    wf.zetaz_t.zero_();
+    zero_tensor_device_async(wf.u_prev_t);
+    zero_tensor_device_async(wf.u_now_t);
+    zero_tensor_device_async(wf.u_next_t);
+    zero_tensor_device_async(wf.psix_t);
+    zero_tensor_device_async(wf.psiy_t);
+    zero_tensor_device_async(wf.psiz_t);
+    zero_tensor_device_async(wf.zetax_t);
+    zero_tensor_device_async(wf.zetay_t);
+    zero_tensor_device_async(wf.zetaz_t);
 }
 
 // The checkpoint snapshot set (u_prev, u_now, psix, psiy, psiz, zetax, zetay,
@@ -395,7 +395,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     if (first_segment && do_advance) {
         forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
         forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
-        forward.u_next_t.zero_();
+        zero_tensor_device_async(forward.u_next_t);
     }
 
     // Stepped/DD accumulate the gradient into these across segments

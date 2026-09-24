@@ -385,11 +385,11 @@ struct Driver {
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
     {
-        saver.last_two_t.select(0, 0).select(0, 0).copy_(wf.vx_t);
-        saver.last_two_t.select(0, 1).select(0, 0).copy_(wf.vz_t);
-        saver.last_two_t.select(0, 2).select(0, 0).copy_(wf.sxx_t);
-        saver.last_two_t.select(0, 3).select(0, 0).copy_(wf.szz_t);
-        saver.last_two_t.select(0, 4).select(0, 0).copy_(wf.sxz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 0).select(0, 0), wf.vx_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 1).select(0, 0), wf.vz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 2).select(0, 0), wf.sxx_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 3).select(0, 0), wf.szz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 4).select(0, 0), wf.sxz_t);
     }
 
     // ===================================================================== //
@@ -677,11 +677,11 @@ public:
 
     static void seed_recon(Wavefield& forward, const BackwardInput& p)
     {
-        forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));   // px
-        forward.vz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));   // pz
-        forward.sxx_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
-        forward.szz_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
-        forward.sxz_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
+        copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0, 0).select(0, 0));   // px
+        copy_tensor_cuda_async(forward.vz_t, p.u_last_two.select(0, 1).select(0, 0));   // pz
+        copy_tensor_cuda_async(forward.sxx_t, p.u_last_two.select(0, 2).select(0, 0));
+        copy_tensor_cuda_async(forward.szz_t, p.u_last_two.select(0, 3).select(0, 0));
+        copy_tensor_cuda_async(forward.sxz_t, p.u_last_two.select(0, 4).select(0, 0));
     }
 
     static void uninject_forward_source(const State& s, const SolverContext& solver,
@@ -842,8 +842,8 @@ public:
     static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,
                             int slot)
     {
-        seg[0].select(0, slot).copy_(forward.vx_t);
-        seg[1].select(0, slot).copy_(forward.vz_t);
+        copy_tensor_cuda_async(seg[0].select(0, slot), forward.vx_t);
+        copy_tensor_cuda_async(seg[1].select(0, slot), forward.vz_t);
     }
 
     static void inject_forward_sources(const State& s, const SolverContext& solver,
@@ -880,8 +880,8 @@ public:
 
     static void capture_velocities(std::vector<torch::Tensor>& v, Wavefield& forward)
     {
-        v[0].copy_(forward.vx_t);
-        v[1].copy_(forward.vz_t);
+        copy_tensor_cuda_async(v[0], forward.vx_t);
+        copy_tensor_cuda_async(v[1], forward.vz_t);
     }
 
     static VelPtrs vel_ptrs_from_carriers(const std::vector<torch::Tensor>& current_v,

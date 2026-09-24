@@ -12,6 +12,7 @@
 
 #include "../buf_torch.h"
 #include "../context.h"
+#include "../cudautils.h"   // copy_tensor_cuda_async, zero_tensor_device_async
 #include "disk_io.cuh"
 #include "kernels.cuh"
 #include "types.cuh"
@@ -801,10 +802,10 @@ struct EffectiveBoundarySaver {
             auto copy_to = [&](torch::Tensor& dst, const torch::Tensor& src)
             {
                 if (dst.device() == src.device()) {
-                    dst.copy_(src);
+                    copy_tensor_cuda_async(dst, src);
                 }
                 else {
-                    dst.copy_(src, /*non_blocking=*/true);
+                    copy_tensor_cuda_async(dst, src);
                 }
             };
 

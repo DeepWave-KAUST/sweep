@@ -142,10 +142,10 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        tmp_sxx_x.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_z.zero_();
-        tmp_tzz_x.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tzz_x);
 
         LAUNCH_DAS2D_FIRST(
             order,
@@ -288,14 +288,14 @@ BackwardOutput backward(const BackwardInput& in)
             );
         }
 
-        bar_dxx_sxx.zero_();
-        bar_dzz_szz.zero_();
-        bar_dzz_txx.zero_();
-        bar_dxx_tzz.zero_();
-        bar_sxx_x.zero_();
-        bar_szz_z.zero_();
-        bar_txx_z.zero_();
-        bar_tzz_x.zero_();
+        zero_tensor_device_async(bar_dxx_sxx);
+        zero_tensor_device_async(bar_dzz_szz);
+        zero_tensor_device_async(bar_dzz_txx);
+        zero_tensor_device_async(bar_dxx_tzz);
+        zero_tensor_device_async(bar_sxx_x);
+        zero_tensor_device_async(bar_szz_z);
+        zero_tensor_device_async(bar_txx_z);
+        zero_tensor_device_async(bar_tzz_x);
 
         const float* exx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
         const float* ezz_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
@@ -501,12 +501,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.bind_recon(p.forward_wavefields);
     TORCH_CHECK(p.u_last_two.defined(), "DAS 2D boundary-saving backward requires the final forward state.");
     TORCH_CHECK(p.u_last_two.size(0) >= 6, "DAS 2D boundary-saving last_two must contain at least 6 fields.");
-    forward.exx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
-    forward.ezz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
-    forward.sxx_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
-    forward.szz_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
-    forward.txx_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
-    forward.tzz_t.copy_(p.u_last_two.select(0, 5).select(0, 0));
+    copy_tensor_cuda_async(forward.exx_t, p.u_last_two.select(0, 0).select(0, 0));
+    copy_tensor_cuda_async(forward.ezz_t, p.u_last_two.select(0, 1).select(0, 0));
+    copy_tensor_cuda_async(forward.sxx_t, p.u_last_two.select(0, 2).select(0, 0));
+    copy_tensor_cuda_async(forward.szz_t, p.u_last_two.select(0, 3).select(0, 0));
+    copy_tensor_cuda_async(forward.txx_t, p.u_last_two.select(0, 4).select(0, 0));
+    copy_tensor_cuda_async(forward.tzz_t, p.u_last_two.select(0, 5).select(0, 0));
 
     ElasticCPMLTensor cpml;
     cpml.allocate(p.pml_vals, 2);
@@ -623,8 +623,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
             );
         }
 
-        current_exx.copy_(forward.exx_t);
-        current_ezz.copy_(forward.ezz_t);
+        copy_tensor_cuda_async(current_exx, forward.exx_t);
+        copy_tensor_cuda_async(current_ezz, forward.ezz_t);
 
         // Un-inject the forward source (sign -1) before time-reversing the
         // step: exact sign flip in-kernel, no negated copy of the source.
@@ -674,10 +674,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
             );
         }
 
-        tmp_sxx_x.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_z.zero_();
-        tmp_tzz_x.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tzz_x);
 
         LAUNCH_DAS2D_FIRST_NOPML(
             order,
@@ -726,14 +726,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
             );
         }
 
-        bar_dxx_sxx.zero_();
-        bar_dzz_szz.zero_();
-        bar_dzz_txx.zero_();
-        bar_dxx_tzz.zero_();
-        bar_sxx_x.zero_();
-        bar_szz_z.zero_();
-        bar_txx_z.zero_();
-        bar_tzz_x.zero_();
+        zero_tensor_device_async(bar_dxx_sxx);
+        zero_tensor_device_async(bar_dzz_szz);
+        zero_tensor_device_async(bar_dzz_txx);
+        zero_tensor_device_async(bar_dxx_tzz);
+        zero_tensor_device_async(bar_sxx_x);
+        zero_tensor_device_async(bar_szz_z);
+        zero_tensor_device_async(bar_txx_z);
+        zero_tensor_device_async(bar_tzz_x);
 
         LAUNCH_DAS2D_PROJECT_MODEL_GRAD(
             order,
@@ -880,10 +880,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
         );
     }
 
-    bar_dxx_sxx.zero_();
-    bar_dzz_szz.zero_();
-    bar_dzz_txx.zero_();
-    bar_dxx_tzz.zero_();
+    zero_tensor_device_async(bar_dxx_sxx);
+    zero_tensor_device_async(bar_dzz_szz);
+    zero_tensor_device_async(bar_dzz_txx);
+    zero_tensor_device_async(bar_dxx_tzz);
 
     LAUNCH_DAS2D_PROJECT_MODEL_GRAD(
         order,

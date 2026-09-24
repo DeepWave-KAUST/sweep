@@ -416,15 +416,15 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
         forward.bind(p.forward_wavefields, false);
     else
         forward.allocate(vp, 3, false);
-    forward.vx_t.copy_(p.u_last_two.select(0,0).select(0,0));
-    forward.vy_t.copy_(p.u_last_two.select(0,1).select(0,0));
-    forward.vz_t.copy_(p.u_last_two.select(0,2).select(0,0));
-    forward.sxx_t.copy_(p.u_last_two.select(0,3).select(0,0));
-    forward.syy_t.copy_(p.u_last_two.select(0,4).select(0,0));
-    forward.szz_t.copy_(p.u_last_two.select(0,5).select(0,0));
-    forward.sxy_t.copy_(p.u_last_two.select(0,6).select(0,0));
-    forward.sxz_t.copy_(p.u_last_two.select(0,7).select(0,0));
-    forward.syz_t.copy_(p.u_last_two.select(0,8).select(0,0));
+    copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0,0).select(0,0));
+    copy_tensor_cuda_async(forward.vy_t, p.u_last_two.select(0,1).select(0,0));
+    copy_tensor_cuda_async(forward.vz_t, p.u_last_two.select(0,2).select(0,0));
+    copy_tensor_cuda_async(forward.sxx_t, p.u_last_two.select(0,3).select(0,0));
+    copy_tensor_cuda_async(forward.syy_t, p.u_last_two.select(0,4).select(0,0));
+    copy_tensor_cuda_async(forward.szz_t, p.u_last_two.select(0,5).select(0,0));
+    copy_tensor_cuda_async(forward.sxy_t, p.u_last_two.select(0,6).select(0,0));
+    copy_tensor_cuda_async(forward.sxz_t, p.u_last_two.select(0,7).select(0,0));
+    copy_tensor_cuda_async(forward.syz_t, p.u_last_two.select(0,8).select(0,0));
 
     auto for_view = forward.view();
     auto adj_view = adjoint.view();
@@ -555,9 +555,9 @@ BackwardOutput apm_backward_bs(const BackwardInput& in)
             cpml_view, grad_ctx, solver, workspace
         );
 
-        fvz_prev.copy_(forward.vz_t);
-        fvy_prev.copy_(forward.vy_t);
-        fvx_prev.copy_(forward.vx_t);
+        copy_tensor_cuda_async(fvz_prev, forward.vz_t);
+        copy_tensor_cuda_async(fvy_prev, forward.vy_t);
+        copy_tensor_cuda_async(fvx_prev, forward.vx_t);
 
         LAUNCH_3DELASTIC_VELOCITY_NOPML_APM(
             order, launch_config.grid, launch_config.block,

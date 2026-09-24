@@ -333,11 +333,11 @@ ForwardOutput forward(const ForwardInput& in)
 
     // ----- save final state for backward_bs (last_two) -----
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(wavefield.vx_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(wavefield.vy_t);
-        boundary_saver.last_two_t.select(0, 2).select(0, 0).copy_(wavefield.vz_t);
-        boundary_saver.last_two_t.select(0, 3).select(0, 0).copy_(wavefield.sH_t);
-        boundary_saver.last_two_t.select(0, 4).select(0, 0).copy_(wavefield.sV_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 0).select(0, 0), wavefield.vx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 1).select(0, 0), wavefield.vy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 2).select(0, 0), wavefield.vz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 3).select(0, 0), wavefield.sH_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 4).select(0, 0), wavefield.sV_t);
     }
 
     boundary_runtime.synchronize();

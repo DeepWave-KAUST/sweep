@@ -96,7 +96,7 @@ struct AdjointWorkspace {
                     external.size());
         for (int i = 0; i < 8; ++i) {
             t[i] = external[i];
-            t[i].zero_();
+            zero_tensor_device_async(t[i]);
         }
     }
 
@@ -249,7 +249,7 @@ BackwardOutput backward(const BackwardInput& in)
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
     for (auto& tsr : adjoint.state_tensors())
-        tsr.zero_();
+        zero_tensor_device_async(tsr);
 
     auto model = stiffness_view(p.models);
     auto grads = model_grads(p);
@@ -335,7 +335,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
     for (auto& tsr : adjoint.state_tensors())
-        tsr.zero_();
+        zero_tensor_device_async(tsr);
 
     // Reconstruction state: the RECON_WF_COUNT displacement grids bound from
     // BackwardInput.forward_wavefields (Python-zeroed, no CPML memory -- the
@@ -351,10 +351,10 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.bind_recon(p.forward_wavefields);
     // (storage, level): level 1 = W_nt goes to the pre slot (later time),
     // level 0 = W_{nt-1} becomes the current state — acoustic2d convention.
-    forward.ux_pre_t.copy_(p.u_last_two.select(0, 0).select(0, 1));
-    forward.ux_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
-    forward.uz_pre_t.copy_(p.u_last_two.select(0, 1).select(0, 1));
-    forward.uz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
+    copy_tensor_cuda_async(forward.ux_pre_t, p.u_last_two.select(0, 0).select(0, 1));
+    copy_tensor_cuda_async(forward.ux_t, p.u_last_two.select(0, 0).select(0, 0));
+    copy_tensor_cuda_async(forward.uz_pre_t, p.u_last_two.select(0, 1).select(0, 1));
+    copy_tensor_cuda_async(forward.uz_t, p.u_last_two.select(0, 1).select(0, 0));
 
     auto model = stiffness_view(p.models);
     auto grads = model_grads(p);
@@ -620,10 +620,10 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
         auto seg_ux = seg_ux_full.narrow(0, 0, seg_len + 2);
         auto seg_uz = seg_uz_full.narrow(0, 0, seg_len + 2);
-        seg_ux.select(0, 0).copy_(replay.ux_pre_t);
-        seg_uz.select(0, 0).copy_(replay.uz_pre_t);
-        seg_ux.select(0, 1).copy_(replay.ux_t);
-        seg_uz.select(0, 1).copy_(replay.uz_t);
+        copy_tensor_cuda_async(seg_ux.select(0, 0), replay.ux_pre_t);
+        copy_tensor_cuda_async(seg_uz.select(0, 0), replay.uz_pre_t);
+        copy_tensor_cuda_async(seg_ux.select(0, 1), replay.ux_t);
+        copy_tensor_cuda_async(seg_uz.select(0, 1), replay.uz_t);
 
         for (int it = start; it < end; ++it) {
             auto rep_view = replay.view();
@@ -652,8 +652,8 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 );
             }
 
-            seg_ux.select(0, it - start + 2).copy_(replay.ux_nxt_t);
-            seg_uz.select(0, it - start + 2).copy_(replay.uz_nxt_t);
+            copy_tensor_cuda_async(seg_ux.select(0, it - start + 2), replay.ux_nxt_t);
+            copy_tensor_cuda_async(seg_uz.select(0, it - start + 2), replay.uz_nxt_t);
 
             replay.swap_u();
         }

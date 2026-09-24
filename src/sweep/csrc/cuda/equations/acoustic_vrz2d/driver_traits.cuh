@@ -186,13 +186,13 @@ struct Driver {
     // (helper: fired inside make_bwd_workspace)
     static void zero_wavefield_state(Wavefield& wf)
     {
-        wf.u_prev_t.zero_();
-        wf.u_now_t.zero_();
-        wf.u_next_t.zero_();
-        wf.psix_t.zero_();
-        wf.psiz_t.zero_();
-        wf.zetax_t.zero_();
-        wf.zetaz_t.zero_();
+        zero_tensor_device_async(wf.u_prev_t);
+        zero_tensor_device_async(wf.u_now_t);
+        zero_tensor_device_async(wf.u_next_t);
+        zero_tensor_device_async(wf.psix_t);
+        zero_tensor_device_async(wf.psiz_t);
+        zero_tensor_device_async(wf.zetax_t);
+        zero_tensor_device_async(wf.zetaz_t);
     }
 
     static BwdWorkspace make_bwd_workspace(const BackwardInput& p,
@@ -394,11 +394,11 @@ struct Driver {
     static void capture_allt(torch::Tensor& u_allt, Wavefield& wf, int it)
     {
         if (!u_allt.defined()) return;
-        u_allt.select(0, it).select(0, 0).copy_(wf.u_now_t);
-        u_allt.select(0, it).select(0, 1).copy_(wf.psix_t);
-        u_allt.select(0, it).select(0, 2).copy_(wf.psiz_t);
-        u_allt.select(0, it).select(0, 3).copy_(wf.zetax_t);
-        u_allt.select(0, it).select(0, 4).copy_(wf.zetaz_t);
+        copy_tensor_cuda_async(u_allt.select(0, it).select(0, 0), wf.u_now_t);
+        copy_tensor_cuda_async(u_allt.select(0, it).select(0, 1), wf.psix_t);
+        copy_tensor_cuda_async(u_allt.select(0, it).select(0, 2), wf.psiz_t);
+        copy_tensor_cuda_async(u_allt.select(0, it).select(0, 3), wf.zetax_t);
+        copy_tensor_cuda_async(u_allt.select(0, it).select(0, 4), wf.zetaz_t);
     }
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
@@ -578,7 +578,7 @@ struct Driver {
     {
         forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
         forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
-        forward.u_next_t.zero_();
+        zero_tensor_device_async(forward.u_next_t);
         auto for_init = forward.view();
         set_boundary_zeros<<<s.launch_config.grid, s.launch_config.block>>>(
             for_init.u_prev, ctx.abcn + ctx.M, s.nx, s.nz,

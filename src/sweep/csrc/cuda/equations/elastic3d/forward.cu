@@ -233,15 +233,15 @@ ForwardOutput apm_forward(const ForwardInput& in)
     }
 
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(0,0).select(0,0).copy_(wavefield.vx_t);
-        boundary_saver.last_two_t.select(0,1).select(0,0).copy_(wavefield.vy_t);
-        boundary_saver.last_two_t.select(0,2).select(0,0).copy_(wavefield.vz_t);
-        boundary_saver.last_two_t.select(0,3).select(0,0).copy_(wavefield.sxx_t);
-        boundary_saver.last_two_t.select(0,4).select(0,0).copy_(wavefield.syy_t);
-        boundary_saver.last_two_t.select(0,5).select(0,0).copy_(wavefield.szz_t);
-        boundary_saver.last_two_t.select(0,6).select(0,0).copy_(wavefield.sxy_t);
-        boundary_saver.last_two_t.select(0,7).select(0,0).copy_(wavefield.sxz_t);
-        boundary_saver.last_two_t.select(0,8).select(0,0).copy_(wavefield.syz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,0).select(0,0), wavefield.vx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,1).select(0,0), wavefield.vy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,2).select(0,0), wavefield.vz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,3).select(0,0), wavefield.sxx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,4).select(0,0), wavefield.syy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,5).select(0,0), wavefield.szz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,6).select(0,0), wavefield.sxy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,7).select(0,0), wavefield.sxz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0,8).select(0,0), wavefield.syz_t);
     }
 
     boundary_runtime.synchronize();

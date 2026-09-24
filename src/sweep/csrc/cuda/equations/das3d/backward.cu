@@ -142,15 +142,15 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        tmp_sxx_x.zero_();
-        tmp_syy_y.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_y.zero_();
-        tmp_txx_z.zero_();
-        tmp_tyy_x.zero_();
-        tmp_tyy_z.zero_();
-        tmp_tzz_x.zero_();
-        tmp_tzz_y.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_syy_y);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_y);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tyy_x);
+        zero_tensor_device_async(tmp_tyy_z);
+        zero_tensor_device_async(tmp_tzz_x);
+        zero_tensor_device_async(tmp_tzz_y);
 
         LAUNCH_DAS3D_FIRST(
             order,
@@ -315,24 +315,24 @@ BackwardOutput backward(const BackwardInput& in)
             );
         }
 
-        q_dxx_sxx.zero_();
-        q_dyy_syy.zero_();
-        q_dzz_szz.zero_();
-        q_dyy_txx.zero_();
-        q_dzz_txx.zero_();
-        q_dxx_tyy.zero_();
-        q_dzz_tyy.zero_();
-        q_dxx_tzz.zero_();
-        q_dyy_tzz.zero_();
-        bar_sxx_x.zero_();
-        bar_syy_y.zero_();
-        bar_szz_z.zero_();
-        bar_txx_y.zero_();
-        bar_txx_z.zero_();
-        bar_tyy_x.zero_();
-        bar_tyy_z.zero_();
-        bar_tzz_x.zero_();
-        bar_tzz_y.zero_();
+        zero_tensor_device_async(q_dxx_sxx);
+        zero_tensor_device_async(q_dyy_syy);
+        zero_tensor_device_async(q_dzz_szz);
+        zero_tensor_device_async(q_dyy_txx);
+        zero_tensor_device_async(q_dzz_txx);
+        zero_tensor_device_async(q_dxx_tyy);
+        zero_tensor_device_async(q_dzz_tyy);
+        zero_tensor_device_async(q_dxx_tzz);
+        zero_tensor_device_async(q_dyy_tzz);
+        zero_tensor_device_async(bar_sxx_x);
+        zero_tensor_device_async(bar_syy_y);
+        zero_tensor_device_async(bar_szz_z);
+        zero_tensor_device_async(bar_txx_y);
+        zero_tensor_device_async(bar_txx_z);
+        zero_tensor_device_async(bar_tyy_x);
+        zero_tensor_device_async(bar_tyy_z);
+        zero_tensor_device_async(bar_tzz_x);
+        zero_tensor_device_async(bar_tzz_y);
 
         const float* exx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
         const float* eyy_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();

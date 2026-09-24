@@ -175,10 +175,10 @@ struct AdjWavefieldTensor3D {
 
     void zero_state() const
     {
-        vx_t.zero_(); vy_t.zero_(); vz_t.zero_();
-        sH_t.zero_(); sV_t.zero_();
-        m_sHx_t.zero_(); m_sHy_t.zero_(); m_sVz_t.zero_();
-        m_vxx_t.zero_(); m_vyy_t.zero_(); m_vzz_t.zero_();
+        zero_tensor_device_async(vx_t); vy_t.zero_(); vz_t.zero_();
+        zero_tensor_device_async(sH_t); sV_t.zero_();
+        zero_tensor_device_async(m_sHx_t); m_sHy_t.zero_(); m_sVz_t.zero_();
+        zero_tensor_device_async(m_vxx_t); m_vyy_t.zero_(); m_vzz_t.zero_();
     }
 };
 
@@ -468,11 +468,11 @@ BackwardOutput backward_bs(const BackwardInput& in)
     TORCH_CHECK(p.u_last_two.defined(),
                 "AcousticVTI1st3D backward_bs requires p.u_last_two from the "
                 "boundary-saving forward.");
-    forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
-    forward.vy_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
-    forward.vz_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
-    forward.sH_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
-    forward.sV_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
+    copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0, 0).select(0, 0));
+    copy_tensor_cuda_async(forward.vy_t, p.u_last_two.select(0, 1).select(0, 0));
+    copy_tensor_cuda_async(forward.vz_t, p.u_last_two.select(0, 2).select(0, 0));
+    copy_tensor_cuda_async(forward.sH_t, p.u_last_two.select(0, 3).select(0, 0));
+    copy_tensor_cuda_async(forward.sV_t, p.u_last_two.select(0, 4).select(0, 0));
 
     const auto& gs  = grad_slots(p);
     auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");

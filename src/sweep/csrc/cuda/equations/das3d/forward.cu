@@ -112,15 +112,15 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        tmp_sxx_x.zero_();
-        tmp_syy_y.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_y.zero_();
-        tmp_txx_z.zero_();
-        tmp_tyy_x.zero_();
-        tmp_tyy_z.zero_();
-        tmp_tzz_x.zero_();
-        tmp_tzz_y.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_syy_y);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_y);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tyy_x);
+        zero_tensor_device_async(tmp_tyy_z);
+        zero_tensor_device_async(tmp_tzz_x);
+        zero_tensor_device_async(tmp_tzz_y);
 
         LAUNCH_DAS3D_FIRST(
             order,

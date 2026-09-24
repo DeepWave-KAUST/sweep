@@ -341,21 +341,21 @@ struct Driver {
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
     {
-        saver.last_two_t.select(0, 0).select(0, 0).copy_(wf.vx_t);
-        saver.last_two_t.select(0, 1).select(0, 0).copy_(wf.vy_t);
-        saver.last_two_t.select(0, 2).select(0, 0).copy_(wf.vz_t);
-        saver.last_two_t.select(0, 3).select(0, 0).copy_(wf.sxx_t);
-        saver.last_two_t.select(0, 4).select(0, 0).copy_(wf.syy_t);
-        saver.last_two_t.select(0, 5).select(0, 0).copy_(wf.szz_t);
-        saver.last_two_t.select(0, 6).select(0, 0).copy_(wf.sxy_t);
-        saver.last_two_t.select(0, 7).select(0, 0).copy_(wf.sxz_t);
-        saver.last_two_t.select(0, 8).select(0, 0).copy_(wf.syz_t);
-        saver.last_two_t.select(0, 9).select(0, 0).copy_(wf.exx_t);
-        saver.last_two_t.select(0, 10).select(0, 0).copy_(wf.eyy_t);
-        saver.last_two_t.select(0, 11).select(0, 0).copy_(wf.ezz_t);
-        saver.last_two_t.select(0, 12).select(0, 0).copy_(wf.exy_t);
-        saver.last_two_t.select(0, 13).select(0, 0).copy_(wf.exz_t);
-        saver.last_two_t.select(0, 14).select(0, 0).copy_(wf.eyz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 0).select(0, 0), wf.vx_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 1).select(0, 0), wf.vy_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 2).select(0, 0), wf.vz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 3).select(0, 0), wf.sxx_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 4).select(0, 0), wf.syy_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 5).select(0, 0), wf.szz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 6).select(0, 0), wf.sxy_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 7).select(0, 0), wf.sxz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 8).select(0, 0), wf.syz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 9).select(0, 0), wf.exx_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 10).select(0, 0), wf.eyy_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 11).select(0, 0), wf.ezz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 12).select(0, 0), wf.exy_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 13).select(0, 0), wf.exz_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(0, 14).select(0, 0), wf.eyz_t);
     }
 
     // ===================================================================== //
@@ -471,7 +471,7 @@ public:
         // monolithic calls always have bw_begin == nt).
         if (!first_segment) return;
         for (auto& tensor : adjoint.state_tensors())
-            if (tensor.defined()) tensor.zero_();
+            if (tensor.defined()) zero_tensor_device_async(tensor);
     }
 
     // The model-gradient accumulators, MANDATORY in every mode: _c.py
@@ -727,15 +727,15 @@ public:
     // bound reconstruction does not even carry them).
     static void seed_recon(Wavefield& forward, const BackwardInput& p)
     {
-        forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
-        forward.vy_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
-        forward.vz_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
-        forward.sxx_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
-        forward.syy_t.copy_(p.u_last_two.select(0, 4).select(0, 0));
-        forward.szz_t.copy_(p.u_last_two.select(0, 5).select(0, 0));
-        forward.sxy_t.copy_(p.u_last_two.select(0, 6).select(0, 0));
-        forward.sxz_t.copy_(p.u_last_two.select(0, 7).select(0, 0));
-        forward.syz_t.copy_(p.u_last_two.select(0, 8).select(0, 0));
+        copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0, 0).select(0, 0));
+        copy_tensor_cuda_async(forward.vy_t, p.u_last_two.select(0, 1).select(0, 0));
+        copy_tensor_cuda_async(forward.vz_t, p.u_last_two.select(0, 2).select(0, 0));
+        copy_tensor_cuda_async(forward.sxx_t, p.u_last_two.select(0, 3).select(0, 0));
+        copy_tensor_cuda_async(forward.syy_t, p.u_last_two.select(0, 4).select(0, 0));
+        copy_tensor_cuda_async(forward.szz_t, p.u_last_two.select(0, 5).select(0, 0));
+        copy_tensor_cuda_async(forward.sxy_t, p.u_last_two.select(0, 6).select(0, 0));
+        copy_tensor_cuda_async(forward.sxz_t, p.u_last_two.select(0, 7).select(0, 0));
+        copy_tensor_cuda_async(forward.syz_t, p.u_last_two.select(0, 8).select(0, 0));
     }
 
     // A strain-field source (the equation admits them) resolves to nullptr on
@@ -850,9 +850,9 @@ public:
     {
         velocity_adjoint_half(s, solver, adjoint, workspace, cpml_view);
 
-        carriers.fvz_prev.copy_(forward.vz_t);
-        carriers.fvy_prev.copy_(forward.vy_t);
-        carriers.fvx_prev.copy_(forward.vx_t);
+        copy_tensor_cuda_async(carriers.fvz_prev, forward.vz_t);
+        copy_tensor_cuda_async(carriers.fvy_prev, forward.vy_t);
+        copy_tensor_cuda_async(carriers.fvx_prev, forward.vx_t);
 
         LAUNCH_3DELASTIC_VELOCITY_NOPML(
             s.order,
@@ -950,9 +950,9 @@ public:
     static void save_seg_velocities(std::vector<torch::Tensor>& seg, Wavefield& forward,
                             int slot)
     {
-        seg[0].select(0, slot).copy_(forward.vx_t);
-        seg[1].select(0, slot).copy_(forward.vy_t);
-        seg[2].select(0, slot).copy_(forward.vz_t);
+        copy_tensor_cuda_async(seg[0].select(0, slot), forward.vx_t);
+        copy_tensor_cuda_async(seg[1].select(0, slot), forward.vy_t);
+        copy_tensor_cuda_async(seg[2].select(0, slot), forward.vz_t);
     }
 
     static void inject_forward_sources(const State& s, const SolverContext& solver,
@@ -992,16 +992,16 @@ public:
     static void export_seg_next_v(std::vector<torch::Tensor>& prev,
                                    const std::vector<torch::Tensor>& seg)
     {
-        prev[0].copy_(seg[0].select(0, 1));
-        prev[1].copy_(seg[1].select(0, 1));
-        prev[2].copy_(seg[2].select(0, 1));
+        copy_tensor_cuda_async(prev[0], seg[0].select(0, 1));
+        copy_tensor_cuda_async(prev[1], seg[1].select(0, 1));
+        copy_tensor_cuda_async(prev[2], seg[2].select(0, 1));
     }
 
     static void capture_velocities(std::vector<torch::Tensor>& v, Wavefield& forward)
     {
-        v[0].copy_(forward.vx_t);
-        v[1].copy_(forward.vy_t);
-        v[2].copy_(forward.vz_t);
+        copy_tensor_cuda_async(v[0], forward.vx_t);
+        copy_tensor_cuda_async(v[1], forward.vy_t);
+        copy_tensor_cuda_async(v[2], forward.vz_t);
     }
 
     static VelPtrs vel_ptrs_from_carriers(const std::vector<torch::Tensor>& current_v,

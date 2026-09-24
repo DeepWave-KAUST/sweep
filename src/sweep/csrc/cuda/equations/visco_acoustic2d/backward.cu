@@ -219,6 +219,10 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
     if (d.disp) {
         auto X = visco_acoustic2d_real_alias(ws.C1);
         at::mul_out(X, d.Gd1, adj.u_now_t);                          // Gd1 * u_now
+        // NOT the memcpy helper: lop_into returns at::real(...) of a complex grid,
+        // a stride-2 view, and copy_ is the strided gather that reads it. The
+        // helper's contiguity assert caught exactly this (tier B, visco2d full/
+        // ckpt). Goes with visco's other at:: arithmetic in step 3.
         ws.R1.copy_(visco_acoustic2d_lop_into(X, d.Dk2, ws));        // R1 = L_Dk2
         at::mul_out(X, d.Gd2, adj.u_now_t);                          // Gd2 * u_now (L_Dk2 is in R1)
         ws.R1.sub_(visco_acoustic2d_lop_into(X, d.Dfrac, ws));       // R1 = L_Dk2 - L_Dfrac = e
