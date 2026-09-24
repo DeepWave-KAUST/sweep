@@ -298,13 +298,13 @@ ForwardOutput forward(const ForwardInput& in)
         wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
 
         if (u_allt.defined()) {
-            u_allt.select(0, it).select(0, 0).copy_(wavefield.u_now_t.squeeze(1));
-            u_allt.select(0, it).select(0, 1).copy_(wavefield.psix_t.squeeze(1));
-            u_allt.select(0, it).select(0, 2).copy_(wavefield.psiy_t.squeeze(1));
-            u_allt.select(0, it).select(0, 3).copy_(wavefield.psiz_t.squeeze(1));
-            u_allt.select(0, it).select(0, 4).copy_(wavefield.zetax_t.squeeze(1));
-            u_allt.select(0, it).select(0, 5).copy_(wavefield.zetay_t.squeeze(1));
-            u_allt.select(0, it).select(0, 6).copy_(wavefield.zetaz_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 0), wavefield.u_now_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 1), wavefield.psix_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 2), wavefield.psiy_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 3), wavefield.psiz_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 4), wavefield.zetax_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 5), wavefield.zetay_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 6), wavefield.zetaz_t.squeeze(1));
         }
 
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), wavefield.checkpoint_tensors());
@@ -315,8 +315,8 @@ ForwardOutput forward(const ForwardInput& in)
     // not swapped yet (u_prev/u_now roles would be wrong) — phase 2 of the same
     // step does this copy.
     if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
-        boundary_saver.last_two_t.select(1, 0).copy_(wavefield.u_prev_t);
-        boundary_saver.last_two_t.select(1, 1).copy_(wavefield.u_now_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(1, 0), wavefield.u_prev_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(1, 1), wavefield.u_now_t);
     }
 
     boundary_runtime.synchronize();

@@ -314,8 +314,8 @@ struct Driver {
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
     {
-        saver.last_two_t.select(1, 0).copy_(wf.u_prev_t);
-        saver.last_two_t.select(1, 1).copy_(wf.u_now_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(1, 0), wf.u_prev_t);
+        copy_tensor_cuda_async(saver.last_two_t.select(1, 1), wf.u_now_t);
     }
 
     // ===================================================================== //
@@ -504,8 +504,8 @@ struct Driver {
     static void seed_reconstruction(const State& s, const SolverContext& ctx,
                                     Wavefield& forward, const BackwardInput& p)
     {
-        forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
-        forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
+        copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(1, 1).squeeze(0));
+        copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(1, 0).squeeze(0));
         auto for_view = forward.view();
         set_boundary_zeros<<<s.launch_config.grid, s.launch_config.block>>>(
             for_view.u_prev, ctx.abcn + ctx.M, s.nx, s.nz,

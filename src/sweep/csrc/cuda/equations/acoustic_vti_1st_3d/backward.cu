@@ -175,10 +175,10 @@ struct AdjWavefieldTensor3D {
 
     void zero_state() const
     {
-        zero_tensor_device_async(vx_t); vy_t.zero_(); vz_t.zero_();
-        zero_tensor_device_async(sH_t); sV_t.zero_();
-        zero_tensor_device_async(m_sHx_t); m_sHy_t.zero_(); m_sVz_t.zero_();
-        zero_tensor_device_async(m_vxx_t); m_vyy_t.zero_(); m_vzz_t.zero_();
+        zero_tensor_device_async(vx_t); zero_tensor_device_async(vy_t); vz_t.zero_();
+        zero_tensor_device_async(sH_t); zero_tensor_device_async(sV_t);
+        zero_tensor_device_async(m_sHx_t); zero_tensor_device_async(m_sHy_t); m_sVz_t.zero_();
+        zero_tensor_device_async(m_vxx_t); zero_tensor_device_async(m_vyy_t); m_vzz_t.zero_();
     }
 };
 

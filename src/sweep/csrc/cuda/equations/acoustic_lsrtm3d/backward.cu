@@ -723,8 +723,8 @@ void run_bs_imaging(
                         "acoustic_lsrtm3d/backward_bs reconstruction "
                         "(cuda_layout.bs_reconstruction_nvar)");
     forward.bind(p.forward_wavefields, 3, /*use_pml=*/false);
-    forward.u_prev_t.copy_(p.u_last_two.select(1,1).squeeze(0));
-    forward.u_now_t.copy_(p.u_last_two.select(1,0).squeeze(0));
+    copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(1,1).squeeze(0));
+    copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(1,0).squeeze(0));
 
     auto f_this = pool_required(p.adjoint_workspace, F_THIS, vp, "adjoint_workspace");
 

@@ -217,8 +217,8 @@ ForwardOutput forward(const ForwardInput& in) {
     }
 
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(1, 0).copy_(bg.u_prev_t);
-        boundary_saver.last_two_t.select(1, 1).copy_(bg.u_now_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(1, 0), bg.u_prev_t);
+        copy_tensor_cuda_async(boundary_saver.last_two_t.select(1, 1), bg.u_now_t);
     }
 
     boundary_runtime.synchronize();

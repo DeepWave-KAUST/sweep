@@ -504,8 +504,8 @@ BackwardOutput backward_bs(const BackwardInput& in)
                         "acoustic_lsrtm2d/backward_bs reconstruction "
                         "(cuda_layout.bs_reconstruction_nvar)");
     forward.bind(p.forward_wavefields, 2, /*use_pml=*/false);
-    forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
-    forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
+    copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(1, 1).squeeze(0));
+    copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(1, 0).squeeze(0));
 
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);

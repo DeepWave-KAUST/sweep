@@ -178,9 +178,9 @@ ForwardOutput forward(const ForwardInput& in)
 
         if (u_allt.defined()) {
             auto history_t = u_allt.select(0, it);
-            history_t.select(0, 0).copy_(wavefield.exx_t.view({B, nz, ny, nx}));
-            history_t.select(0, 1).copy_(wavefield.eyy_t.view({B, nz, ny, nx}));
-            history_t.select(0, 2).copy_(wavefield.ezz_t.view({B, nz, ny, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 0), wavefield.exx_t.view({B, nz, ny, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 1), wavefield.eyy_t.view({B, nz, ny, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 2), wavefield.ezz_t.view({B, nz, ny, nx}));
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {

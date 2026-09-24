@@ -192,8 +192,8 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
         }
 
         auto history_t = history.select(0, it);
-        history_t.select(0, 0).copy_(wavefield.exx_t.view({B, nz, nx}));
-        history_t.select(0, 1).copy_(wavefield.ezz_t.view({B, nz, nx}));
+        copy_tensor_cuda_async(history_t.select(0, 0), wavefield.exx_t.view({B, nz, nx}));
+        copy_tensor_cuda_async(history_t.select(0, 1), wavefield.ezz_t.view({B, nz, nx}));
     }
 
     return history;

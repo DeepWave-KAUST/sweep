@@ -393,8 +393,8 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     // Seed the reverse reconstruction from the saved last two snapshots — FIRST
     // segment only; continuation segments carry the reconstruction state.
     if (first_segment && do_advance) {
-        forward.u_prev_t.copy_(p.u_last_two.select(1, 1).squeeze(0));
-        forward.u_now_t.copy_(p.u_last_two.select(1, 0).squeeze(0));
+        copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(1, 1).squeeze(0));
+        copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(1, 0).squeeze(0));
         zero_tensor_device_async(forward.u_next_t);
     }
 

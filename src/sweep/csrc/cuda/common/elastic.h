@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 
 #include "context.h"
+#include "cudautils.h"   // zero_tensor_device_async
 
 struct ElasticCPMLPointer {
     const float* __restrict__ ax;
@@ -748,51 +749,51 @@ inline void zero_wavefield_state(ElasticWavefieldTensor& wf)
     if (wf.dim == 3 && !wf.m_syzx_t.defined())
         wf.m_syzx_t = torch::zeros_like(wf.vx_t);
 
-    wf.vx_t.zero_();
-    wf.vz_t.zero_();
-    wf.sxx_t.zero_();
-    wf.szz_t.zero_();
-    wf.sxz_t.zero_();
+    zero_tensor_device_async(wf.vx_t);
+    zero_tensor_device_async(wf.vz_t);
+    zero_tensor_device_async(wf.sxx_t);
+    zero_tensor_device_async(wf.szz_t);
+    zero_tensor_device_async(wf.sxz_t);
 
     if (wf.dim == 3) {
-        wf.vy_t.zero_();
-        wf.syy_t.zero_();
-        wf.sxy_t.zero_();
-        wf.syz_t.zero_();
+        zero_tensor_device_async(wf.vy_t);
+        zero_tensor_device_async(wf.syy_t);
+        zero_tensor_device_async(wf.sxy_t);
+        zero_tensor_device_async(wf.syz_t);
     }
 
     if (!wf.use_pml)
         return;
 
-    wf.m_vxx_t.zero_();
-    wf.m_vxz_t.zero_();
-    wf.m_vzx_t.zero_();
-    wf.m_vzz_t.zero_();
-    wf.m_sxxx_t.zero_();
-    wf.m_sxxz_t.zero_();
-    wf.m_szzx_t.zero_();
-    wf.m_szzz_t.zero_();
-    wf.m_sxzx_t.zero_();
-    wf.m_sxzz_t.zero_();
+    zero_tensor_device_async(wf.m_vxx_t);
+    zero_tensor_device_async(wf.m_vxz_t);
+    zero_tensor_device_async(wf.m_vzx_t);
+    zero_tensor_device_async(wf.m_vzz_t);
+    zero_tensor_device_async(wf.m_sxxx_t);
+    zero_tensor_device_async(wf.m_sxxz_t);
+    zero_tensor_device_async(wf.m_szzx_t);
+    zero_tensor_device_async(wf.m_szzz_t);
+    zero_tensor_device_async(wf.m_sxzx_t);
+    zero_tensor_device_async(wf.m_sxzz_t);
 
     if (wf.dim == 3) {
-        wf.m_vxy_t.zero_();
-        wf.m_vyx_t.zero_();
-        wf.m_vyy_t.zero_();
-        wf.m_vyz_t.zero_();
-        wf.m_vzy_t.zero_();
-        wf.m_sxxy_t.zero_();
-        wf.m_syyx_t.zero_();
-        wf.m_syyy_t.zero_();
-        wf.m_syyz_t.zero_();
-        wf.m_szzy_t.zero_();
-        wf.m_sxyx_t.zero_();
-        wf.m_sxyy_t.zero_();
-        wf.m_sxyz_t.zero_();
-        wf.m_sxzy_t.zero_();
-        if (wf.m_syzx_t.defined()) wf.m_syzx_t.zero_();
-        wf.m_syzy_t.zero_();
-        wf.m_syzz_t.zero_();
+        zero_tensor_device_async(wf.m_vxy_t);
+        zero_tensor_device_async(wf.m_vyx_t);
+        zero_tensor_device_async(wf.m_vyy_t);
+        zero_tensor_device_async(wf.m_vyz_t);
+        zero_tensor_device_async(wf.m_vzy_t);
+        zero_tensor_device_async(wf.m_sxxy_t);
+        zero_tensor_device_async(wf.m_syyx_t);
+        zero_tensor_device_async(wf.m_syyy_t);
+        zero_tensor_device_async(wf.m_syyz_t);
+        zero_tensor_device_async(wf.m_szzy_t);
+        zero_tensor_device_async(wf.m_sxyx_t);
+        zero_tensor_device_async(wf.m_sxyy_t);
+        zero_tensor_device_async(wf.m_sxyz_t);
+        zero_tensor_device_async(wf.m_sxzy_t);
+        if (wf.m_syzx_t.defined()) zero_tensor_device_async(wf.m_syzx_t);
+        zero_tensor_device_async(wf.m_syzy_t);
+        zero_tensor_device_async(wf.m_syzz_t);
     }
 }
 

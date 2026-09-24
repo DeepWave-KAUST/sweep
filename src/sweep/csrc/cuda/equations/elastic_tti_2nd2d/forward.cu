@@ -202,8 +202,8 @@ ForwardOutput forward(const ForwardInput& in)
         }
 
         if (u_allt.defined()) {
-            u_allt[it].select(0, 0).copy_(wavefield.ux_nxt_t.view({B, nz, nx}));
-            u_allt[it].select(0, 1).copy_(wavefield.uz_nxt_t.view({B, nz, nx}));
+            copy_tensor_cuda_async(u_allt[it].select(0, 0), wavefield.ux_nxt_t.view({B, nz, nx}));
+            copy_tensor_cuda_async(u_allt[it].select(0, 1), wavefield.uz_nxt_t.view({B, nz, nx}));
         }
 
         wavefield.swap_u();
