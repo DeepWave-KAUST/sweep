@@ -1,9 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
 
 #include "elastic3d.h"
 #include "kernels.cuh"
@@ -45,21 +42,21 @@ ForwardOutput forward(const ForwardInput& in)
 // the kernel-internal AIR / traction-BC branches.
 ForwardOutput apm_forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.it_begin == 0 &&
+    SWEEP_CHECK(p.it_begin == 0 &&
                 (p.it_end < 0 || p.it_end == static_cast<int>(p.nt)) &&
                 p.step_phase == 0,
                 "stepped forward not supported for the elastic3d APM path");
-    TORCH_CHECK(p.models.size() >= 21,
+    SWEEP_CHECK(p.models.size() >= 21,
         "elastic3d::apm_forward expects 21-tensor models list "
         "[vp,vs,rho,lam,mu,lam_2mu,alpha_xx,alpha_yy,alpha_zz,"
         "lam_xx_yy,lam_xx_zz,lam_yy_xx,lam_yy_zz,lam_zz_xx,lam_zz_yy,"
         "mu_xy,mu_xz,mu_yz,inv_rho_x,inv_rho_y,inv_rho_z]; got ",
         p.models.size());
-    TORCH_CHECK(p.use_apm && p.topo_category.defined() && p.topo_category.numel() > 0,
+    SWEEP_CHECK(p.use_apm && p.topo_category.defined() && p.topo_category.numel() > 0,
         "apm_forward requires use_apm=true and topo_category tensor");
 
     float dx = p.spacing[0];
@@ -92,11 +89,11 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int B  = N * C;
 
     ElasticWavefieldTensor wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "elastic3d/apm_forward requires the propagator-bound wavefields "
                 "(36-slot layout); nothing allocates them here");
     wavefield.bind(p.wavefields, true);
-    TORCH_CHECK(wavefield.m_syzx_t.defined(),
+    SWEEP_CHECK(wavefield.m_syzx_t.defined(),
                 "elastic3d/apm_forward: the bound wavefield list must carry m_syzx");
     auto wf = wavefield.view();
 

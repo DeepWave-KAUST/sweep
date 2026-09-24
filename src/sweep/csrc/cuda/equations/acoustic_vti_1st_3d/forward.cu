@@ -21,7 +21,6 @@
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vti_1st_3d.h"
 #include "kernels.cuh"
 
@@ -48,7 +47,7 @@ struct VTIWavefieldTensor3D {
 
     void bind(const std::vector<torch::Tensor>& tensors, bool /*use_pml*/)
     {
-        TORCH_CHECK(tensors.size() == 11,
+        SWEEP_CHECK(tensors.size() == 11,
                     "AcousticVTI1st3D expects 11 wavefield tensors, got ",
                     tensors.size());
         vx_t    = tensors[0];
@@ -93,24 +92,24 @@ struct VTIWavefieldTensor3D {
 
 ForwardOutput forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D CUDA forward: free_surface=True is not yet "
                 "implemented (Robertsson 1996 / Mittet 2002 anisotropic FS — "
                 "follow-up).");
 
     // Cartesian-order spacing from PropTorch._cuda_spacing(): [dx, dy, dz].
-    TORCH_CHECK(p.spacing.size() >= 3,
+    SWEEP_CHECK(p.spacing.size() >= 3,
                 "AcousticVTI1st3D: spacing must have length >= 3");
     float dx = p.spacing[0];
     float dy = p.spacing[1];
     float dz = p.spacing[2];
 
     // Models (vp, epsilon, delta, rho) in this canonical order.
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st3D expects exactly 4 model tensors "
                 "[vp, epsilon, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -137,7 +136,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     // Wavefield binding: mandatory, see acoustic_vti_1st_2d/forward.cu
     VTIWavefieldTensor3D wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "acoustic_vti_1st_3d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     wavefield.bind(p.wavefields, true);

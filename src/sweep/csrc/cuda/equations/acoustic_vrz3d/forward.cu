@@ -2,7 +2,6 @@
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vrz3d.h"
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
@@ -23,11 +22,11 @@ namespace acoustic_vrz3d {
 
 ForwardOutput forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 2, "AcousticVRZ3D CUDA forward expects models [vp, z]");
+    SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D CUDA forward expects models [vp, z]");
 
     auto vp = p.models[0];
     auto z = p.models[1];
@@ -64,7 +63,7 @@ ForwardOutput forward(const ForwardInput& in)
     // stays absolute, so consecutive segments reproduce one full run.
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
-    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+    SWEEP_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
                 "AcousticVRZ3D stepped forward: require 0 <= it_begin <= it_end "
                 "<= nt, got [", it0, ", ", it1, ") with nt=", p.nt);
     const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
@@ -83,17 +82,17 @@ ForwardOutput forward(const ForwardInput& in)
     const bool cut_x_lo = (p.cut_face_mask & 1) != 0;
     const bool cut_x_hi = (p.cut_face_mask & 2) != 0;
     if (phase != 0) {
-        TORCH_CHECK(phase == 1 || phase == 2,
+        SWEEP_CHECK(phase == 1 || phase == 2,
                     "step_phase must be 0 (legacy), 1 (boundary strips) or 2 (interior)");
-        TORCH_CHECK(it1 == it0 + 1,
+        SWEEP_CHECK(it1 == it0 + 1,
                     "phased forward (step_phase != 0) drives a single step: "
                     "require it_end == it_begin + 1, got [", it0, ", ", it1, ")");
-        TORCH_CHECK(p.cut_face_mask != 0,
+        SWEEP_CHECK(p.cut_face_mask != 0,
                     "phased forward requires cut_face_mask != 0");
-        TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
+        SWEEP_CHECK((p.cut_face_mask & ~0x3) == 0,
                     "phased forward v1 supports x-face cuts only (bits 0/1), got ",
                     p.cut_face_mask);
-        TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
+        SWEEP_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
                     "tile too narrow for phase-split strips: nx_phys=",
                     ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
     }
@@ -106,7 +105,7 @@ ForwardOutput forward(const ForwardInput& in)
     // to keep those very tensors, since an internal allocation would zero the
     // propagation state mid-run.
     AcousticWavefieldTensor wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "acoustic_vrz3d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + pml_nvar = 12 tensors)");
     wavefield.bind(p.wavefields, 3, true);
@@ -121,14 +120,14 @@ ForwardOutput forward(const ForwardInput& in)
     // per-call allocation would lose every prior segment.
     auto record = bound_required(p.record_out, {N, nrec, p.nt}, vp.options(),
                                  "record_out (acoustic_vrz3d/forward, cuda_layout.record_shape)");
-    TORCH_CHECK(record.is_contiguous() &&
+    SWEEP_CHECK(record.is_contiguous() &&
                 record.size(-1) == static_cast<long>(p.nt),
                 "record_out must be contiguous with trailing dim nt");
 
     // save_all_wavefields keeps a fresh per-call buffer; it is a full-run-only
     // debug path (DD uses boundary saving), so forbid it under stepped where
     // segments would clobber each other.
-    TORCH_CHECK(!stepped || !p.save_all_wavefields,
+    SWEEP_CHECK(!stepped || !p.save_all_wavefields,
                 "AcousticVRZ3D stepped forward does not support save_all_wavefields");
     // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
     // declares save_all_shape, so cp.u_allt_shape is never None.
@@ -138,10 +137,10 @@ ForwardOutput forward(const ForwardInput& in)
                                 "u_allt_out (acoustic_vrz3d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
-        TORCH_CHECK(p.checkpoints.size() == 8, "AcousticVRZ3D checkpointing expects 8 checkpoint tensors");
+        SWEEP_CHECK(p.checkpoints.size() == 8, "AcousticVRZ3D checkpointing expects 8 checkpoint tensors");
     if (p.use_recursive_checkpoint) {
-        TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
-        TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+        SWEEP_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
+        SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
     }
 
     int save_width = p.M + 1;
@@ -152,7 +151,7 @@ ForwardOutput forward(const ForwardInput& in)
     // first would lose everything saved before them, so stepped runs need the
     // Python-bound persistent boundary buffers.
     if (stepped && p.use_boundary_saving)
-        TORCH_CHECK(!p.boundary_gpu.empty(),
+        SWEEP_CHECK(!p.boundary_gpu.empty(),
                     "AcousticVRZ3D stepped forward with boundary saving requires "
                     "Python-bound boundary_gpu");
     // tangent_pad MUST match the Python boundary layout (equations/acoustic_vrz.py

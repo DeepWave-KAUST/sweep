@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "kernels.cuh"

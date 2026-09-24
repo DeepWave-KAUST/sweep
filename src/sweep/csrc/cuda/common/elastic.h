@@ -99,7 +99,7 @@ inline void elastic_init_aux_slabs(SolverContext& ctx, const WF& wf) {
         if (wf.dim == 3 && wf.m_vyy_t.defined() && wf.m_vyy_t.numel() > 0)
             ly = wf.m_vyy_t.size(3);
     }
-    TORCH_CHECK(ctx.init_aux_slabs(lz, ly, lx),
+    SWEEP_CHECK(ctx.init_aux_slabs(lz, ly, lx),
                 "elastic memory-variable tensor axis lengths match neither the "
                 "full grid nor the strip layout: z=", lz, " y=", ly, " x=", lx,
                 " grid (", ctx.nz, ",", ctx.ny, ",", ctx.nx, ") M=", ctx.M);
@@ -249,7 +249,7 @@ struct ElasticWavefieldTensor {
         // fields only: 5 (2D) / 9 (3D).  The 9-tensor no-pml case falls
         // through to the 3D branch (which reads exactly 9 when use_pml
         // is false).
-        TORCH_CHECK(
+        SWEEP_CHECK(
             use_pml_ ? (tensors.size() == 15 || tensors.size() == 36)
                      : (tensors.size() == 5 || tensors.size() == 9),
             "ElasticWavefieldTensor::bind: expected ",
@@ -556,7 +556,7 @@ struct ElasticAdjointWorkspaceTensor {
     {
         int i = 0;
         dim = dim_;
-        TORCH_CHECK(static_cast<int>(tensors.size()) >= nslots(dim),
+        SWEEP_CHECK(static_cast<int>(tensors.size()) >= nslots(dim),
                     "Elastic adjoint workspace expects at least ", nslots(dim),
                     " tensors (", dim, "D q*/p* scratch; any further slots are the "
                     "checkpoint modes' velocity carriers), got ", tensors.size());
@@ -610,7 +610,7 @@ inline void bind_adjoint_workspace_required(
     const char* who
 )
 {
-    TORCH_CHECK(!tensors.empty(),
+    SWEEP_CHECK(!tensors.empty(),
                 who, " requires the propagator-bound adjoint_workspace "
                 "(cuda_layout.backward_workspace_shapes); got an empty pool");
     workspace.bind(tensors, dim);
@@ -618,7 +618,7 @@ inline void bind_adjoint_workspace_required(
 
 inline void zero_wavefield_state(ElasticWavefieldTensor& wf)
 {
-    TORCH_CHECK(wf.dim != 3 || wf.m_syzx_t.defined(),
+    SWEEP_CHECK(wf.dim != 3 || wf.m_syzx_t.defined(),
                 "zero_wavefield_state: a 3-D elastic wavefield must carry m_syzx "
                 "(the propagator binds all 36 slots; nothing allocates it here)");
 
@@ -699,7 +699,7 @@ inline std::vector<float> elastic_adjoint_source_signs(
     int dim
 )
 {
-    TORCH_CHECK(adjoint_source.is_contiguous(),
+    SWEEP_CHECK(adjoint_source.is_contiguous(),
                 "elastic adjoint_source must be contiguous (nfield, B, nrec, nt); "
                 "the residual injection reads it in place");
     const int64_t nfield = receiver_fields.numel();

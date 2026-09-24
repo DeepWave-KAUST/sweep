@@ -194,7 +194,7 @@ struct Driver {
     // the first: a data race whose output changes from run to run.
     static void init_aux_slabs(SolverContext& solver, Wavefield&)
     {
-        TORCH_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
+        SWEEP_CHECK(solver.init_aux_slabs(solver.nz, solver.ny, solver.nx),
                     "DAS Mu 3D: full-grid CPML memory variables rejected by "
                     "init_aux_slabs");
     }
@@ -234,7 +234,7 @@ struct Driver {
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.wavefields.size() == CKPT_NVAR,
+        SWEEP_CHECK((int)p.wavefields.size() == CKPT_NVAR,
                     "das_mu3d/forward requires the propagator-bound wavefields "
                     "(cuda_layout.base_nvar + cuda_layout.pml_nvar = ", CKPT_NVAR,
                     " tensors), got ", p.wavefields.size());
@@ -455,7 +455,7 @@ public:
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
+        SWEEP_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
                     "das_mu3d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
                     "adjoint_extra_nvar = ", ADJ_WF_COUNT, " tensors), got ",
@@ -480,7 +480,7 @@ public:
     // binds them as grads_out.
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        TORCH_CHECK(p.grads_out.size() == 3,
+        SWEEP_CHECK(p.grads_out.size() == 3,
                     "das_mu3d/backward requires the propagator-bound grads_out "
                     "holding exactly {grad_vp, grad_vs, grad_rho} "
                     "(cuda_layout.grads_out_has_wavelet == false), got ",
@@ -906,7 +906,7 @@ public:
                                          const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
+        SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "das_mu3d/ckpt requires the propagator-bound replay state "
                     "(cuda_layout.base_nvar + pml_nvar = ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
@@ -934,7 +934,7 @@ public:
     static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
                                                   const torch::Tensor& vp, int max_rows)
     {
-        TORCH_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
+        SWEEP_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
                     "das_mu3d/ckpt requires the propagator-bound checkpoint_replay "
                     "(cuda_layout.checkpoint_replay_shapes, ", N_VEL,
                     " velocity histories), got ", p.checkpoint_replay.size());

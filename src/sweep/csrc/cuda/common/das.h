@@ -60,7 +60,7 @@ struct DasWavefieldTensor2D {
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 17, "DAS 2D expects 17 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 17, "DAS 2D expects 17 wavefield tensors");
         int i = 0;
         exx_t = tensors[i++];
         ezz_t = tensors[i++];
@@ -93,7 +93,7 @@ struct DasWavefieldTensor2D {
 
     void bind_recon(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(static_cast<int>(tensors.size()) == RECON_NVAR,
+        SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_NVAR,
                     "DAS 2D reconstruction expects ", RECON_NVAR,
                     " wavefield tensors ", RECON_LIST_DESC, ", got ", tensors.size());
         int i = 0;
@@ -253,7 +253,7 @@ struct DasWavefieldTensor3D {
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 31, "DAS 3D expects 31 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 31, "DAS 3D expects 31 wavefield tensors");
         int i = 0;
         exx_t = tensors[i++];
         eyy_t = tensors[i++];

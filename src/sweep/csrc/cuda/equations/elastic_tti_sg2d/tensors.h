@@ -14,7 +14,7 @@ struct WavefieldTensor {
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 20, "ElasticTTISG 2D expects 20 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 20, "ElasticTTISG 2D expects 20 wavefield tensors");
         int i = 0;
         vx_t = tensors[i++];
         vy_t = tensors[i++];
@@ -44,7 +44,7 @@ struct WavefieldTensor {
     // for the NOPML reverse reconstruction, which never touches m_*.
     void bind_physical(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 8,
+        SWEEP_CHECK(tensors.size() == 8,
                     "ElasticTTISG 2D expects 8 physical wavefield tensors "
                     "[vx, vy, vz, sxx, szz, syz, sxz, sxy]; got ", tensors.size());
         int i = 0;
@@ -104,7 +104,7 @@ struct WavefieldTensor {
 
 inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
 {
-    TORCH_CHECK(models.size() == 16, "ElasticTTISG CUDA expects prepared models: rho plus 15 stiffness tensors");
+    SWEEP_CHECK(models.size() == 16, "ElasticTTISG CUDA expects prepared models: rho plus 15 stiffness tensors");
     StiffnessPointer out{};
     int i = 0;
     out.rho = models[i++].data_ptr<float>();
@@ -128,7 +128,7 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
 
 inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
 {
-    TORCH_CHECK(grads.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared model gradients");
+    SWEEP_CHECK(grads.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared model gradients");
     StiffnessGradPointer out{};
     int i = 0;
     out.rho = grads[i++].data_ptr<float>();

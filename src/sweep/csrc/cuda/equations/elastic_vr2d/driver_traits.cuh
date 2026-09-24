@@ -117,7 +117,7 @@ struct Driver {
 
     static Models parse_models(const ForwardInput& p)
     {
-        TORCH_CHECK(p.models.size() >= 6,
+        SWEEP_CHECK(p.models.size() >= 6,
                     "elastic_vr2d::forward expects 6 model tensors "
                     "(vp, vs, Rp_x, Rp_z, Rs_x, Rs_z)");
         return models_from(p);
@@ -184,7 +184,7 @@ struct Driver {
         // MANDATORY, like the adjoint-step half in make_workspace: the pool is
         // cuda_layout.backward_workspace_shapes (elastic_vrr.py), which the
         // propagator always binds for a gradient-bearing call.
-        TORCH_CHECK((int)p.adjoint_workspace.size() >= N_WORKSPACE,
+        SWEEP_CHECK((int)p.adjoint_workspace.size() >= N_WORKSPACE,
                     "elastic_vr2d backward requires the propagator-bound "
                     "adjoint_workspace (cuda_layout.backward_workspace_shapes) "
                     "holding at least ", static_cast<int>(N_WORKSPACE),
@@ -222,7 +222,7 @@ struct Driver {
 
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.adjoint_workspace.size() >= N_WORKSPACE,
+        SWEEP_CHECK((int)p.adjoint_workspace.size() >= N_WORKSPACE,
                     "elastic_vr2d backward requires the propagator-bound "
                     "adjoint_workspace (cuda_layout.backward_workspace_shapes) "
                     "holding at least ", static_cast<int>(N_WORKSPACE),
@@ -246,14 +246,14 @@ struct Driver {
     static void validate_backward(const BackwardInput& p, const char* mode)
     {
         if (std::strcmp(mode, "full") == 0) {
-            TORCH_CHECK(p.models.size() >= 6,
+            SWEEP_CHECK(p.models.size() >= 6,
                         "elastic_vr2d::backward expects 6 model tensors "
                         "(vp, vs, Rp_x, Rp_z, Rs_x, Rs_z)");
         } else if (std::strcmp(mode, "bs") == 0) {
-            TORCH_CHECK(p.models.size() >= 6,
+            SWEEP_CHECK(p.models.size() >= 6,
                         "elastic_vr2d::backward_bs expects 6 model tensors");
         } else if (std::strcmp(mode, "ckpt_recursive") == 0) {
-            TORCH_CHECK(p.checkpoint_steps.defined() && p.checkpoint_steps.dim() == 1,
+            SWEEP_CHECK(p.checkpoint_steps.defined() && p.checkpoint_steps.dim() == 1,
                         "recursive checkpointing expects 1-D checkpoint_steps");
         }
         // "ckpt": the interval/count checks run in the shared driver, in the
@@ -306,7 +306,7 @@ struct Driver {
         // propagation state (persistent _slice_wavefield_buffers in full mode,
         // per-call _transient_forward_wavefields otherwise), sized by
         // cuda_layout.base_nvar + pml_nvar = CKPT_NVAR slots.
-        TORCH_CHECK((int)p.wavefields.size() == CKPT_NVAR,
+        SWEEP_CHECK((int)p.wavefields.size() == CKPT_NVAR,
                     "elastic_vr2d/forward requires the propagator-bound wavefields "
                     "(cuda_layout.base_nvar + cuda_layout.pml_nvar = ", CKPT_NVAR,
                     " tensors), got ", p.wavefields.size());
@@ -469,7 +469,7 @@ public:
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
+        SWEEP_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
                     "elastic_vr2d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
                     "adjoint_extra_nvar = ", ADJ_WF_COUNT, " tensors), got ",
@@ -486,7 +486,7 @@ public:
     // MODEL_SPECS and cuda_layout.grads_out_has_wavelet is false).
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        TORCH_CHECK(p.grads_out.size() == 6,
+        SWEEP_CHECK(p.grads_out.size() == 6,
                     "elastic_vr2d/backward requires the propagator-bound grads_out "
                     "holding 6 tensors (vp, vs, Rp_x, Rp_z, Rs_x, Rs_z), got ",
                     p.grads_out.size());
@@ -500,7 +500,7 @@ public:
     static std::vector<float> adjoint_source_signs(
         const BackwardInput& p, const torch::Tensor& receiver_fields)
     {
-        TORCH_CHECK(p.adjoint_source.is_contiguous(),
+        SWEEP_CHECK(p.adjoint_source.is_contiguous(),
                     "elastic_vr2d backward: adjoint_source must be contiguous "
                     "(nfield, B, nrec, nt); the residual injection reads it in place");
         return std::vector<float>(static_cast<size_t>(receiver_fields.numel()), 1.0f);
@@ -797,7 +797,7 @@ public:
                                          const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
+        SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "elastic_vr2d/ckpt requires the propagator-bound replay state "
                     "(cuda_layout.base_nvar + pml_nvar = ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
@@ -826,7 +826,7 @@ public:
     static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
                                                   const torch::Tensor& vp, int max_rows)
     {
-        TORCH_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
+        SWEEP_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
                     "elastic_vr2d/ckpt requires the propagator-bound checkpoint_replay "
                     "(cuda_layout.checkpoint_replay_shapes, ", N_VEL,
                     " momentum histories), got ", p.checkpoint_replay.size());

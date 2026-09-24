@@ -117,11 +117,11 @@ struct ViscoSpectral {
 inline void visco_acoustic2d_check_grid(
     const torch::Tensor& g, int nz, int nx, const char* name)
 {
-    TORCH_CHECK(g.dim() == 2 && g.size(0) == nz && g.size(1) == nx,
+    SWEEP_CHECK(g.dim() == 2 && g.size(0) == nz && g.size(1) == nx,
                 "visco eq_aux grid ", name,
                 " must be (nz_runtime, nx_runtime) = (", nz, ", ", nx,
                 "), got ", g.sizes());
-    TORCH_CHECK(g.is_cuda() && g.scalar_type() == torch::kFloat32,
+    SWEEP_CHECK(g.is_cuda() && g.scalar_type() == torch::kFloat32,
                 "visco eq_aux grid ", name, " must be a float32 CUDA tensor");
 }
 
@@ -131,7 +131,7 @@ inline ViscoSpectral visco_acoustic2d_spectral_grids(
 {
     ViscoSpectral s;
     const size_t n = eq_aux.size();
-    TORCH_CHECK(n <= 3, "visco eq_aux takes at most 3 grids, got ", n);
+    SWEEP_CHECK(n <= 3, "visco eq_aux takes at most 3 grids, got ", n);
     s.active = (n == 1 || n == 3);
     s.disp = (n >= 2);
     if (s.active) {
@@ -161,7 +161,7 @@ inline ViscoSpectral visco_acoustic2d_make_spectral_from(
     const std::vector<torch::Tensor>& derived_models,
     derived::ViscoMode mode, float dt, int nz, int nx, const char* what)
 {
-    TORCH_CHECK(models.size() == 4, what, ": visco_acoustic2d expects the prepared models "
+    SWEEP_CHECK(models.size() == 4, what, ": visco_acoustic2d expects the prepared models "
                 "(vp_step, B1, B2, A); got ", models.size());
     ViscoSpectral s = visco_acoustic2d_spectral_grids(eq_aux, nz, nx);
     const float dt2 = dt * dt;   // float on the host: the scalar of the replaced ``model * (dt * dt)`` products
@@ -242,9 +242,9 @@ class ViscoFFT {
 public:
     // The cached plan for this geometry on ``device`` (built on first use;
     // never evicted -- a process sees a handful of geometries).
-    static std::shared_ptr<ViscoFFT> get(c10::DeviceIndex device, int64_t B, int64_t nz, int64_t nx);
+    static std::shared_ptr<ViscoFFT> get(int device, int64_t B, int64_t nz, int64_t nx);
 
-    c10::DeviceIndex device() const { return device_; }
+    int device() const { return device_; }
     int64_t batch() const { return B_; }
     int64_t nz() const { return nz_; }
     int64_t nx() const { return nx_; }
@@ -270,11 +270,11 @@ public:
     ViscoFFT& operator=(const ViscoFFT&) = delete;
 
 private:
-    ViscoFFT(c10::DeviceIndex device, int64_t B, int64_t nz, int64_t nx);
+    ViscoFFT(int device, int64_t B, int64_t nz, int64_t nx);
     void exec(const torch::Tensor& in, const torch::Tensor& out, const torch::Tensor& work_area,
               bool forward);
 
-    c10::DeviceIndex device_;
+    int device_;
     int64_t B_, nz_, nx_;
     double inverse_scale_;
     cufftHandle plan_ = 0;      // owned; destroyed in ~ViscoFFT
@@ -330,16 +330,16 @@ inline ViscoSlots visco_slots(bool damping, bool dispersion, derived::ViscoMode 
 inline torch::Tensor visco_acoustic2d_complex_slot(const std::vector<torch::Tensor>& pool, int idx,
                                                    const torch::Tensor& like, const char* what)
 {
-    TORCH_CHECK(pool_slot_bound(pool, idx),
+    SWEEP_CHECK(pool_slot_bound(pool, idx),
                 what, "[", idx, "] (complex spectrum) must be bound by the propagator "
                 "(cuda_layout forward_workspace_shapes / backward_workspace_shapes)");
     auto want = like.sizes().vec();
     want.push_back(2);
     const auto& raw = pool[idx];
-    TORCH_CHECK(raw.sizes().vec() == want,
+    SWEEP_CHECK(raw.sizes().vec() == want,
                 what, "[", idx, "] has shape ", raw.sizes(),
                 " but the complex slot layout is ", want, " (float32 pairs)");
-    TORCH_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
+    SWEEP_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
                 what, "[", idx, "] must be a contiguous float32 CUDA tensor");
     return at::view_as_complex(raw);
 }
@@ -354,13 +354,13 @@ inline torch::Tensor visco_acoustic2d_work_area_slot(const std::vector<torch::Te
                                                      const char* what)
 {
     const int64_t floats = std::max<int64_t>(1, (fft.workspace_bytes() + 3) / 4);
-    TORCH_CHECK(pool_slot_bound(pool, idx),
+    SWEEP_CHECK(pool_slot_bound(pool, idx),
                 what, "[", idx, "] (cuFFT work area) must be bound by the propagator "
                 "(cuda_layout forward_workspace_shapes / backward_workspace_shapes)");
     const auto& raw = pool[idx];
-    TORCH_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
+    SWEEP_CHECK(raw.scalar_type() == torch::kFloat && raw.is_cuda() && raw.is_contiguous(),
                 what, "[", idx, "] (cuFFT work area) must be a contiguous float32 CUDA tensor");
-    TORCH_CHECK(raw.numel() >= floats,
+    SWEEP_CHECK(raw.numel() >= floats,
                 what, "[", idx, "] (cuFFT work area) holds ", raw.numel(),
                 " floats but the plan needs ", floats,
                 " (visco_acoustic2d_fft_workspace_bytes on this device)");
@@ -402,14 +402,14 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
 {
     ViscoScratch ws;
     ws.slots = visco_slots(damping, dispersion, mode);
-    TORCH_CHECK(static_cast<int>(pool.size()) == ws.slots.count,
+    SWEEP_CHECK(static_cast<int>(pool.size()) == ws.slots.count,
                 what, ": requires the propagator-bound workspace pool of ", ws.slots.count,
                 " tensors (visco_slots for this mode and eq_aux composition), got ", pool.size());
     if (ws.slots.carrier >= 0)
         ws.CARRIER = pool_required(pool, ws.slots.carrier, like, what);
     if (!(damping || dispersion))
         return ws;
-    TORCH_CHECK(like.dim() >= 2 && like.is_cuda() && like.scalar_type() == torch::kFloat,
+    SWEEP_CHECK(like.dim() >= 2 && like.is_cuda() && like.scalar_type() == torch::kFloat,
                 what, ": the wavefield geometry must be a float32 CUDA grid, got ", like.sizes());
     const int64_t nz = like.size(-2);
     const int64_t nx = like.size(-1);
@@ -497,7 +497,7 @@ inline void visco_acoustic2d_apply_spectral_into(
 {
     if (!(s.active || s.disp)) return;
     if (s.disp) {
-        TORCH_CHECK(ws.C2.defined(), "visco_acoustic2d: the dispersion pipeline needs the C2 slot "
+        SWEEP_CHECK(ws.C2.defined(), "visco_acoustic2d: the dispersion pipeline needs the C2 slot "
                     "(bind the scratch with dispersion on, in forward / ckpt / recursive mode)");
         ws.C0.copy_(wf.u_now_t);
         ws.fft->forward(ws.C0, ws.C1, ws.fft_ws);            // C1 = F, alive across both products

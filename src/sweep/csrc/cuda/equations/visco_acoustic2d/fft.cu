@@ -17,22 +17,21 @@
 // same plan; what guarantees the bits is the gate, not the provenance of the
 // constructor.
 #include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAFunctions.h>
 
 #include <map>
 #include <tuple>
 
 #include "kernels.cuh"
 #include "visco_acoustic2d.h"
+#include "../../../core/check.h"
+#include "../../../core/device.h"
 
 // cuFFT status check.  ATen has one (at::native::CUFFT_CHECK) but it is in the
 // private header this file exists to stop including.
 #define VISCO_CUFFT_CHECK(call)                                                   \
     do {                                                                          \
         const cufftResult _st = (call);                                           \
-        TORCH_CHECK(_st == CUFFT_SUCCESS, "cuFFT error ", static_cast<int>(_st),   \
+        SWEEP_CHECK(_st == CUFFT_SUCCESS, "cuFFT error ", static_cast<int>(_st),   \
                     " from " #call);                                              \
     } while (0)
 
@@ -54,9 +53,9 @@ std::map<PlanKey, std::shared_ptr<ViscoFFT>>& plan_cache()
 
 }  // namespace
 
-std::shared_ptr<ViscoFFT> ViscoFFT::get(c10::DeviceIndex device, int64_t B, int64_t nz, int64_t nx)
+std::shared_ptr<ViscoFFT> ViscoFFT::get(int device, int64_t B, int64_t nz, int64_t nx)
 {
-    TORCH_CHECK(B >= 1 && nz >= 1 && nx >= 1,
+    SWEEP_CHECK(B >= 1 && nz >= 1 && nx >= 1,
                 "ViscoFFT: the transform geometry must be positive, got B=", B, " nz=", nz, " nx=", nx);
     std::lock_guard<std::mutex> lock(plan_cache_mutex());
     auto& cache = plan_cache();
@@ -67,7 +66,7 @@ std::shared_ptr<ViscoFFT> ViscoFFT::get(c10::DeviceIndex device, int64_t B, int6
     return it->second;
 }
 
-ViscoFFT::ViscoFFT(c10::DeviceIndex device, int64_t B, int64_t nz, int64_t nx)
+ViscoFFT::ViscoFFT(int device, int64_t B, int64_t nz, int64_t nx)
     : device_(device), B_(B), nz_(nz), nx_(nx)
 {
     // _fft_normalization_scale(fft_norm_mode::by_n, sizes, dims = {-2, -1}):
@@ -96,7 +95,7 @@ ViscoFFT::ViscoFFT(c10::DeviceIndex device, int64_t B, int64_t nz, int64_t nx)
     long long signal_sizes[2] = {static_cast<long long>(nz), static_cast<long long>(nx)};
 
     // cufftXtMakePlanMany binds the plan to the current device.
-    c10::cuda::CUDAGuard guard(device_);
+    sweep::DeviceGuard guard(device_);
     VISCO_CUFFT_CHECK(cufftCreate(&plan_));
     VISCO_CUFFT_CHECK(cufftSetAutoAllocation(plan_, /*autoAllocate=*/0));
     size_t ws_size_t = 0;
@@ -134,26 +133,26 @@ void ViscoFFT::exec(const torch::Tensor& in, const torch::Tensor& out, const tor
                     bool forward)
 {
     auto check = [&](const torch::Tensor& t, const char* name) {
-        TORCH_CHECK(t.defined() && t.is_cuda() && t.device().index() == device_,
+        SWEEP_CHECK(t.defined() && t.is_cuda() && t.device().index() == device_,
                     "ViscoFFT: ", name, " must live on CUDA device ", static_cast<int>(device_),
                     " (the plan's device)");
-        TORCH_CHECK(t.scalar_type() == torch::kComplexFloat && t.is_contiguous(),
+        SWEEP_CHECK(t.scalar_type() == torch::kComplexFloat && t.is_contiguous(),
                     "ViscoFFT: ", name, " must be a contiguous complex64 tensor, got ",
                     t.scalar_type());
-        TORCH_CHECK(t.dim() >= 2 && t.size(-2) == nz_ && t.size(-1) == nx_
+        SWEEP_CHECK(t.dim() >= 2 && t.size(-2) == nz_ && t.size(-1) == nx_
                         && t.numel() == B_ * nz_ * nx_,
                     "ViscoFFT: ", name, " has shape ", t.sizes(), " but the plan is for ",
                     B_, " x (", nz_, ", ", nx_, ")");
     };
     check(in, "in");
     check(out, "out");
-    TORCH_CHECK(in.data_ptr() != out.data_ptr(),
+    SWEEP_CHECK(in.data_ptr() != out.data_ptr(),
                 "ViscoFFT: the transform is out of place (in and out must be distinct slots)");
-    TORCH_CHECK(work_area.defined() && work_area.is_cuda() && work_area.device().index() == device_
+    SWEEP_CHECK(work_area.defined() && work_area.is_cuda() && work_area.device().index() == device_
                     && work_area.is_contiguous(),
                 "ViscoFFT: the work area must be a contiguous CUDA tensor on the plan's device");
     const int64_t have = static_cast<int64_t>(work_area.nbytes());
-    TORCH_CHECK(have >= workspace_bytes(),
+    SWEEP_CHECK(have >= workspace_bytes(),
                 "ViscoFFT: the work area holds ", have, " bytes but the plan needs ",
                 workspace_bytes(), " (size the slot with visco_acoustic2d_fft_workspace_bytes)");
 
@@ -163,9 +162,9 @@ void ViscoFFT::exec(const torch::Tensor& in, const torch::Tensor& out, const tor
     // (via its NVRTC stub, which the pip wheels do not ship); our call sites
     // always run after runtime calls on this thread (the CUDAGuard, the
     // stencil launches), so a current context is guaranteed here.
-    c10::cuda::CUDAGuard guard(device_);
+    sweep::DeviceGuard guard(device_);
     std::lock_guard<std::mutex> lock(mutex_);
-    VISCO_CUFFT_CHECK(cufftSetStream(plan_, at::cuda::getCurrentCUDAStream()));
+    VISCO_CUFFT_CHECK(cufftSetStream(plan_, sweep::current_stream()));
     VISCO_CUFFT_CHECK(cufftSetWorkArea(plan_, work_area.data_ptr()));
     VISCO_CUFFT_CHECK(cufftXtExec(plan_, in.data_ptr(), out.data_ptr(),
                                   forward ? CUFFT_FORWARD : CUFFT_INVERSE));
@@ -189,7 +188,7 @@ namespace visco_acoustic2d {
 
 size_t fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx)
 {
-    const auto plan = ViscoFFT::get(c10::cuda::current_device(), B, nz, nx);
+    const auto plan = ViscoFFT::get(sweep::current_device(), B, nz, nx);
     return static_cast<size_t>(plan->workspace_bytes());
 }
 

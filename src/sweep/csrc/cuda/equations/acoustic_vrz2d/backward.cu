@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "acoustic_vrz2d.h"
@@ -47,13 +46,13 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 2, "AcousticVRZ backward_ckpt expects models [vp, z].");
-    TORCH_CHECK(!p.checkpoints.empty(), "AcousticVRZ backward_ckpt expects checkpoints.");
-    TORCH_CHECK(p.checkpoint_interval > 0, "AcousticVRZ backward_ckpt expects positive checkpoint_interval.");
+    SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ backward_ckpt expects models [vp, z].");
+    SWEEP_CHECK(!p.checkpoints.empty(), "AcousticVRZ backward_ckpt expects checkpoints.");
+    SWEEP_CHECK(p.checkpoint_interval > 0, "AcousticVRZ backward_ckpt expects positive checkpoint_interval.");
 
     auto vp = p.models[0];
     auto z = p.models[1];
@@ -81,7 +80,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // (_ensure_wavefield_buffers: base_nvar 3 + pml_nvar 6 = 9 slots), the same
     // list Driver::bind_or_alloc_adjoint takes on the full/bs path.
     AcousticWavefieldTensor adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vrz2d/backward_ckpt requires the propagator-bound "
                 "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 9 tensors)");
     adjoint.bind(p.adjoint_wavefields, 2, true);
@@ -95,7 +94,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // slot_table.ACOUSTIC_VRZ2D's forward slots without the psi shadows), so
     // there is no unbound caller to allocate for.
     AcousticWavefieldTensor forward;
-    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
+    SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
                 "acoustic_vrz2d/backward_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.slots, the forward slots without the "
                 "psi double-buffer shadows): one replay state set of ",
@@ -108,7 +107,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     // grad_wavelet), zeroed by Python once per backward -- the binding the
     // full/bs skeleton takes (Driver::bind_backward_outputs).  _c.py builds it
     // for every backward, so it is never empty.
-    TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+    SWEEP_CHECK(p.grads_out.size() == p.models.size() + 1,
                 "acoustic_vrz2d/backward_ckpt requires the propagator-bound grads_out "
                 "(cuda_layout.grads_out_has_wavelet + one slot per model = "
                 "models.size()+1 tensors, slot 0 = grad_wavelet, unused for VRZ), got ",
@@ -182,7 +181,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
         num_segments = num_saved_checkpoints + 1;
         checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
-        TORCH_CHECK(
+        SWEEP_CHECK(
             static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
             "AcousticVRZ checkpoint buffer is smaller than required chunk count."
         );
@@ -193,7 +192,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
             max_segment_length = std::max(max_segment_length, end - start);
         }
     } else {
-        TORCH_CHECK(
+        SWEEP_CHECK(
             static_cast<int>(p.checkpoints[0].size(0)) >= num_chunks,
             "AcousticVRZ checkpoint buffer is smaller than required chunk count."
         );
@@ -325,7 +324,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_ckpt(in);
 }
 

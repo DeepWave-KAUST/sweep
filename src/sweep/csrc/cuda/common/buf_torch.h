@@ -15,6 +15,7 @@
 #include <torch/extension.h>
 
 #include "../../core/buf.h"
+#include "../../core/check.h"
 
 // Map a boundary-buffer tensor's dtype to the storage-dtype enum.  Python
 // allocates the buffers in the requested precision, so the tensor itself is
@@ -38,6 +39,12 @@ static inline BoundaryDtype boundary_dtype_from_tensor(const Buf& b) {
     return b.dtype();
 }
 
+// The torch twin of core/buf.h's device_index_of(const Buf&): what an
+// entry-point device guard reads while its input is still a tensor.
+static inline int device_index_of(const torch::Tensor& t) {
+    return t.is_cuda() ? static_cast<int>(t.device().index()) : -1;
+}
+
 // Describe ``t`` without owning it.  An UNDEFINED tensor becomes a default Buf
 // (defined() == false, numel() == 0, data_ptr() == nullptr), which is what
 // every ``!defined() || numel() == 0`` guard in the boundary layer expects.
@@ -51,7 +58,7 @@ static inline Buf buf_of(const torch::Tensor& t) {
         return b;
 
     const int64_t nd = t.dim();
-    TORCH_CHECK(nd >= 0 && nd <= BUF_MAX_DIMS,
+    SWEEP_CHECK(nd >= 0 && nd <= BUF_MAX_DIMS,
                 "buf_of: tensor has ", nd, " dimensions but Buf carries at most ",
                 BUF_MAX_DIMS, "; raise BUF_MAX_DIMS in csrc/core/buf.h.");
 
@@ -63,8 +70,8 @@ static inline Buf buf_of(const torch::Tensor& t) {
     // The tag drives the byte arithmetic downstream, so it must match the
     // tensor's real width. Checked HERE, not in Buf: Buf's guards are asserts,
     // and the two ways sweep ships disagree about NDEBUG (the JIT keeps asserts,
-    // a wheel build strips them) -- this TORCH_CHECK throws in both.
-    TORCH_CHECK(b.elem_size_ == buf_dtype_element_size(b.dtype_),
+    // a wheel build strips them) -- this SWEEP_CHECK throws in both.
+    SWEEP_CHECK(b.elem_size_ == buf_dtype_element_size(b.dtype_),
                 "buf_of: a ", t.scalar_type(), " tensor is ", b.elem_size_,
                 " bytes wide but the boundary storage tag implies ",
                 buf_dtype_element_size(b.dtype_),
@@ -73,6 +80,7 @@ static inline Buf buf_of(const torch::Tensor& t) {
     // numel == 0, and the boundary layer's copy primitives already skip a face
     // whose numel is 0 (they did so precisely because this pointer is null).
     b.is_cuda_ = t.is_cuda();
+    b.device_ = t.is_cuda() ? static_cast<int32_t>(t.device().index()) : -1;
     b.data_ = t.data_ptr();
     for (int64_t i = 0; i < nd; ++i) {
         b.sizes_[i] = t.size(i);

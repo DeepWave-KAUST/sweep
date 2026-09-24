@@ -26,7 +26,7 @@ struct WavefieldTensor {
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 14, "ElasticTTI2nd expects 14 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 14, "ElasticTTI2nd expects 14 wavefield tensors");
         int i = 0;
         ux_t = tensors[i++];
         uz_t = tensors[i++];
@@ -49,7 +49,7 @@ struct WavefieldTensor {
     // memory is bound (nor allocated) in this mode.
     void bind_recon(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
+        SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
                     "ElasticTTI2nd backward_bs reconstruction expects ", RECON_WF_COUNT,
                     " wavefield tensors ", RECON_LIST_DESC, ", got ", tensors.size());
         int i = 0;
@@ -116,7 +116,7 @@ struct WavefieldTensor {
 
 inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
 {
-    TORCH_CHECK(models.size() == 7, "ElasticTTI2nd CUDA expects prepared models: rho plus 6 stiffness tensors");
+    SWEEP_CHECK(models.size() == 7, "ElasticTTI2nd CUDA expects prepared models: rho plus 6 stiffness tensors");
     StiffnessPointer out{};
     int i = 0;
     out.rho = models[i++].data_ptr<float>();
@@ -131,7 +131,7 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
 
 inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
 {
-    TORCH_CHECK(grads.size() == 7, "ElasticTTI2nd CUDA backward expects 7 prepared model gradients");
+    SWEEP_CHECK(grads.size() == 7, "ElasticTTI2nd CUDA backward expects 7 prepared model gradients");
     StiffnessGradPointer out{};
     int i = 0;
     out.rho = grads[i++].data_ptr<float>();

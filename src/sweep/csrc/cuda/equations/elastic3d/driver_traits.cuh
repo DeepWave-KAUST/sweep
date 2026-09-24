@@ -143,7 +143,7 @@ struct Driver {
     {
         // DD cut faces: kernels switch the cut-side PML/interior band to the
         // interior branch; only x/y cuts are wired.
-        TORCH_CHECK((p.cut_face_mask & ~0x33) == 0,
+        SWEEP_CHECK((p.cut_face_mask & ~0x33) == 0,
                     "elastic3d forward cut_face_mask supports x/y bits only "
                     "(bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi), got ",
                     p.cut_face_mask);
@@ -187,7 +187,7 @@ struct Driver {
     // (also used by the ckpt/recursive binds in section [5])
     static void backfill_syzx(Wavefield& wf, const torch::Tensor& /*like*/)
     {
-        TORCH_CHECK(wf.m_syzx_t.defined(),
+        SWEEP_CHECK(wf.m_syzx_t.defined(),
                     "elastic3d: the bound wavefield list must carry m_syzx "
                     "(36-slot layout); nothing allocates it here");
     }
@@ -199,7 +199,7 @@ struct Driver {
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.wavefields.size() == CKPT_NVAR,
+        SWEEP_CHECK((int)p.wavefields.size() == CKPT_NVAR,
                     "elastic3d/forward requires the propagator-bound wavefields "
                     "(cuda_layout.base_nvar + cuda_layout.pml_nvar = ", CKPT_NVAR,
                     " tensors), got ", p.wavefields.size());
@@ -447,7 +447,7 @@ public:
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& vp)
     {
-        TORCH_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
+        SWEEP_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
                     "elastic3d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
                     "adjoint_extra_nvar = ", ADJ_WF_COUNT, " tensors), got ",
@@ -469,7 +469,7 @@ public:
     // binds them as grads_out.
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        TORCH_CHECK(p.grads_out.size() == 3,
+        SWEEP_CHECK(p.grads_out.size() == 3,
                     "elastic3d/backward requires the propagator-bound grads_out "
                     "holding exactly {grad_vp, grad_vs, grad_rho} "
                     "(cuda_layout.grads_out_has_wavelet == false), got ",
@@ -925,7 +925,7 @@ public:
         // / "recursive") derives CKPT_STATE_COUNT slots from the forward slot
         // table and Wrapper.backward binds them as forward_wavefields on both
         // checkpoint entries.
-        TORCH_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
+        SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "elastic3d/ckpt requires the propagator-bound replay state "
                     "(cuda_layout.slots, the forward slot list: ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
@@ -937,7 +937,7 @@ public:
     static void check_ckpt_aux_layout(const Wavefield& forward,
                                       const Wavefield& adjoint)
     {
-        TORCH_CHECK(!adjoint.m_vxx_t.defined() ||
+        SWEEP_CHECK(!adjoint.m_vxx_t.defined() ||
                     forward.m_vxx_t.sizes() == adjoint.m_vxx_t.sizes(),
                     "checkpoint aux layout differs from adjoint aux layout");
     }
@@ -955,7 +955,7 @@ public:
     static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
                                                   const torch::Tensor& vp, int max_rows)
     {
-        TORCH_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
+        SWEEP_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
                     "elastic3d/ckpt requires the propagator-bound checkpoint_replay "
                     "(cuda_layout.checkpoint_replay_shapes, ", N_VEL,
                     " velocity histories), got ", p.checkpoint_replay.size());

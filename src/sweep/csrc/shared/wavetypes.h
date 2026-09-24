@@ -176,11 +176,15 @@ struct BackwardOutput {
 struct IForwardRunner {
     virtual ~IForwardRunner() = default;
     virtual ForwardOutput run(int it_begin, int it_end, int step_phase) = 0;
+    // The CUDA device the bound inputs live on: the binding sets the core's
+    // current stream for it around every run() (bindings_utils.h).
+    virtual int device_index() const = 0;
 };
 
 struct IBackwardRunner {
     virtual ~IBackwardRunner() = default;
     virtual BackwardOutput run(int bw_it_begin, int bw_it_end, int step_phase) = 0;
+    virtual int device_index() const = 0;
 };
 
 using ForwardRunnerPtr = std::shared_ptr<IForwardRunner>;

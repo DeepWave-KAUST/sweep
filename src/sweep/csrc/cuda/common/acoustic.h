@@ -1,6 +1,7 @@
 #pragma once
 #include <torch/extension.h>
 #include "context.h"
+#include "../../core/check.h"
 
 struct AcousticCPMLPointer {
 
@@ -99,7 +100,7 @@ inline void acoustic_init_aux_slabs(SolverContext& ctx, const WF& wf) {
         if (wf.dim == 3 && wf.psiy_t.defined() && wf.psiy_t.numel() > 0)
             ly = wf.psiy_t.size(3);
     }
-    TORCH_CHECK(ctx.init_aux_slabs(lz, ly, lx),
+    SWEEP_CHECK(ctx.init_aux_slabs(lz, ly, lx),
                 "CPML aux tensor axis lengths match neither the full grid nor "
                 "the strip layout: z=", lz, " y=", ly, " x=", lx,
                 " grid (", ctx.nz, ",", ctx.ny, ",", ctx.nx, ") M=", ctx.M);
@@ -225,13 +226,13 @@ struct AcousticWavefieldTensor {
         use_pml = use_pml_;
 
         if (dim == 2) {
-            TORCH_CHECK(
+            SWEEP_CHECK(
                 !use_pml ? tensors.size() == 3
                          : (tensors.size() == 7 || tensors.size() == 9 || tensors.size() == 11),
                 "Acoustic 2D wavefields expect 3 (no PML), 7 (PML), 9 (PML+psi double-buffer), or 11 (PML+psi+zeta double-buffer) tensors"
             );
         } else {
-            TORCH_CHECK(
+            SWEEP_CHECK(
                 !use_pml ? tensors.size() == 3
                          : (tensors.size() == 9 || tensors.size() == 12 || tensors.size() == 15),
                 "Acoustic 3D wavefields expect 3 (no PML), 9 (PML), 12 (PML+psi double-buffer), or 15 (PML+psi+zeta double-buffer) tensors"
@@ -310,16 +311,16 @@ struct AcousticWavefieldTensor {
                            int dim_)
     {
         const size_t n = (dim_ == 2) ? 7 : 9;
-        TORCH_CHECK(tensors.size() == n,
+        SWEEP_CHECK(tensors.size() == n,
                     "acoustic ", dim_, "D checkpoint replay state expects ", n,
                     " tensors (u triple + CPML aux, no psi double-buffer), got ",
                     tensors.size());
         const size_t n_snaps = (dim_ == 2) ? 6 : 8;
-        TORCH_CHECK(snaps.size() == n_snaps,
+        SWEEP_CHECK(snaps.size() == n_snaps,
                     "acoustic ", dim_, "D checkpoint set expects ", n_snaps, " tensors");
         bind(tensors, dim_, /*use_pml_=*/true);
         auto check = [&](const torch::Tensor& t, c10::IntArrayRef want, const char* name) {
-            TORCH_CHECK(t.sizes() == want,
+            SWEEP_CHECK(t.sizes() == want,
                         "acoustic checkpoint replay state ", name, " has shape ",
                         t.sizes(), " but the driver's layout is ", want);
         };

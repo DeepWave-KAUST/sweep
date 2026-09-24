@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "kernels.cuh"
@@ -21,7 +20,7 @@ namespace acoustic_lsrtm3d {
 // zeros per slot.
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.size() == 3,
+    SWEEP_CHECK(p.grads_out.size() == 3,
                 "acoustic_lsrtm3d/backward requires the propagator-bound grads_out "
                 "(cuda_layout.grads_out_has_wavelet + one slot per model = 3 tensors: "
                 "{grad_wavelet, grad_vp, grad_mp}), got ", p.grads_out.size());
@@ -59,7 +58,7 @@ static constexpr int CKPT_STATE_NVAR = 9;
 // pool means the Python declaration drifted.
 static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
 {
-    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+    SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
                 "acoustic_lsrtm3d/backward requires the propagator-bound adjoint_workspace "
                 "(cuda_layout.backward_workspace_shapes): ", n_slots,
                 " tensors for this mode, got ", p.adjoint_workspace.size());
@@ -79,12 +78,12 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p,
 static void bind_replay_state_set(AcousticWavefieldTensor& wf, const BackwardInput& p,
                                   const torch::Tensor& vp, int set, const char* what)
 {
-    TORCH_CHECK(!p.forward_wavefields.empty(),
+    SWEEP_CHECK(!p.forward_wavefields.empty(),
                 what, " requires the propagator-bound forward_wavefields "
                 "(cuda_layout.checkpoint_state_nvar replay state sets)");
     auto tensors = wavefield_set(p.forward_wavefields, set, CKPT_STATE_NVAR, what);
     for (int i = 0; i < CKPT_STATE_NVAR; ++i)
-        TORCH_CHECK(tensors[i].sizes() == vp.sizes(),
+        SWEEP_CHECK(tensors[i].sizes() == vp.sizes(),
                     what, ": set ", set, " slot ", i, " has shape ", tensors[i].sizes(),
                     " but the replay state is model-shaped ", vp.sizes());
     wf.bind(tensors, 3, /*use_pml=*/true);
@@ -127,7 +126,7 @@ std::vector<torch::Tensor> slice_wavefields(
     size_t start,
     size_t count
 ) {
-    TORCH_CHECK(
+    SWEEP_CHECK(
         tensors.size() >= start + count,
         "Acoustic LSRTM 3D wavefield buffer does not contain enough tensors."
     );
@@ -145,7 +144,7 @@ std::vector<torch::Tensor> slice_wavefields(
 void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
                         const char* mode)
 {
-    TORCH_CHECK(p.adjoint_wavefields.size() >= 12,
+    SWEEP_CHECK(p.adjoint_wavefields.size() >= 12,
                 "acoustic_lsrtm3d/", mode, " requires the propagator-bound "
                 "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 24 tensors; "
                 "the background field takes the first 12), got ",
@@ -162,15 +161,15 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p);
 
 BackwardOutput backward(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_full_imaging_impl(in);
 }
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_bs_imaging_impl(in);
 }
 
@@ -228,7 +227,7 @@ void accumulate_imaging_3d(
         return;
     }
 
-    TORCH_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
+    SWEEP_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
     accumulate_rtm_3d(wave_grid, wave_block, forward_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
 }
 
@@ -262,7 +261,7 @@ void accumulate_imaging_utt_3d(
         return;
     }
 
-    TORCH_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
+    SWEEP_CHECK(rtm_out != nullptr, "Imaging accumulation requires grad or RTM output.");
     accumulate_rtm_3d(wave_grid, wave_block, u_now_ptr, adjoint_ptr, *rtm_out, B, nx, ny, nz);
 }
 
@@ -464,7 +463,7 @@ void process_recursive_interval_3d(
                 B, nx, ny, nz, p.dt
             );
         } else {
-            TORCH_CHECK(rtm_out != nullptr, "Recursive RTM accumulation requested without RTM output.");
+            SWEEP_CHECK(rtm_out != nullptr, "Recursive RTM accumulation requested without RTM output.");
             accumulate_rtm_3d(
                 wave_grid,
                 wave_block,
@@ -482,7 +481,7 @@ void process_recursive_interval_3d(
 
     int mid = start + (end - start) / 2;
 
-    TORCH_CHECK(level < static_cast<int>(scratch_states.size()),
+    SWEEP_CHECK(level < static_cast<int>(scratch_states.size()),
                 "Acoustic LSRTM 3D recursive checkpoint scratch depth exhausted: level ", level,
                 " of ", scratch_states.size(), " scratch states.");
     AcousticWavefieldTensor& mid_state = scratch_states[level];
@@ -672,7 +671,7 @@ void run_full_imaging(
 
 BackwardOutput backward_full_imaging_impl(const BackwardInput& p)
 {
-    c10::cuda::CUDAGuard device_guard(p.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
     BackwardOutput out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);
@@ -896,7 +895,7 @@ void run_bs_imaging(
 
 BackwardOutput backward_bs_imaging_impl(const BackwardInput& p)
 {
-    c10::cuda::CUDAGuard device_guard(p.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
     BackwardOutput out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_EXTRA);
@@ -940,7 +939,7 @@ void run_ckpt_imaging(
     // The chunk replay state: replay state set 0 of p.forward_wavefields, the
     // only set in chunk mode. Every chunk re-seeds all 9 tensors (load the 8
     // checkpointed fields + zero u_next) before any read.
-    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == CKPT_STATE_NVAR,
+    SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == CKPT_STATE_NVAR,
                 "acoustic_lsrtm3d/backward_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.checkpoint_state_nvar): one replay "
                 "state set of ", CKPT_STATE_NVAR, " tensors, got ",
@@ -1071,7 +1070,7 @@ void run_ckpt_imaging(
 
 BackwardOutput backward_ckpt_imaging_impl(const BackwardInput& p)
 {
-    c10::cuda::CUDAGuard device_guard(p.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
     BackwardOutput out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_PLAIN);
@@ -1093,7 +1092,7 @@ void run_recursive_imaging(
     auto vp = p.models[0];
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
-    TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
+    SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
         8,
@@ -1142,11 +1141,11 @@ void run_recursive_imaging(
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
-    TORCH_CHECK(
+    SWEEP_CHECK(
         p.checkpoint_count == num_saved_checkpoints || p.checkpoint_count == 0,
         "checkpoint_count does not match checkpoint_steps"
     );
-    TORCH_CHECK(
+    SWEEP_CHECK(
         static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
         "checkpoint buffer is smaller than checkpoint_steps"
     );
@@ -1167,7 +1166,7 @@ void run_recursive_imaging(
     // (_c.py _recursive_scratch_depth) mirroring recursive_scratch_depth on
     // the same longest segment.
     const int scratch_depth = recursive_scratch_depth(max_segment_length);
-    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == (1 + scratch_depth) * CKPT_STATE_NVAR,
+    SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == (1 + scratch_depth) * CKPT_STATE_NVAR,
                 "acoustic_lsrtm3d/backward_recursive_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.checkpoint_state_nvar + "
                 "recursive_state_depth): ", 1 + scratch_depth, " replay state sets of ",
@@ -1230,7 +1229,7 @@ void run_recursive_imaging(
 
 BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
 {
-    c10::cuda::CUDAGuard device_guard(p.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
     BackwardOutput out;
     const auto& gs = grad_slots(p);
     workspace_slots(p, N_SLOTS_EXTRA);
@@ -1246,15 +1245,15 @@ BackwardOutput backward_recursive_imaging_impl(const BackwardInput& p)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_ckpt_imaging_impl(in);
 }
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    TORCH_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 3D backward expects two models.");
     return backward_recursive_imaging_impl(in);
 }
 

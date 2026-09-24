@@ -80,7 +80,7 @@ static inline void boundary_bounds_check(
     const int64_t es = t.element_size();
     const int64_t have = t.numel() * es;
     const int64_t want = off_elems * es + (int64_t)bytes;
-    TORCH_CHECK(off_elems >= 0 && want <= have,
+    SWEEP_CHECK(off_elems >= 0 && want <= have,
                 "boundary staging out of range on ", what,
                 ": offset ", off_elems, " elems (", off_elems * es,
                 " B) + ", bytes, " B = ", want,
@@ -183,7 +183,7 @@ struct EffectiveBoundarySaver {
     )
     {
         if (dim == 3) {
-            TORCH_CHECK(tensors.size() == 6, role, " must contain 6 tensors for 3D");
+            SWEEP_CHECK(tensors.size() == 6, role, " must contain 6 tensors for 3D");
             top    = keep(tensors[0]);
             bottom = keep(tensors[1]);
             front  = keep(tensors[2]);
@@ -199,7 +199,7 @@ struct EffectiveBoundarySaver {
                 handles[5] = tensors[5];
             }
         } else {
-            TORCH_CHECK(tensors.size() == 4, role, " must contain 4 tensors for 2D");
+            SWEEP_CHECK(tensors.size() == 4, role, " must contain 4 tensors for 2D");
             top    = keep(tensors[0]);
             bottom = keep(tensors[1]);
             left   = keep(tensors[2]);
@@ -327,20 +327,20 @@ struct EffectiveBoundarySaver {
         const std::vector<torch::Tensor>& staging,
         const std::vector<std::vector<int64_t>>& shapes)
     {
-        TORCH_CHECK(staging.size() == shapes.size(),
+        SWEEP_CHECK(staging.size() == shapes.size(),
                     "boundary_staging must contain ", shapes.size(),
                     " tensors for ", dim, "D, got ", staging.size());
         for (size_t i = 0; i < shapes.size(); ++i) {
-            TORCH_CHECK(staging[i].sizes().vec() == shapes[i],
+            SWEEP_CHECK(staging[i].sizes().vec() == shapes[i],
                         "boundary_staging[", i, "] has shape ", staging[i].sizes(),
                         " but the saver's geometry is ", shapes[i],
                         " -- the Python Layout and this driver disagree on "
                         "save_width or tangent_pad (the staging is one timestep "
                         "of the same band as the persistent buffer).");
-            TORCH_CHECK(staging[i].scalar_type() == torch::kFloat,
+            SWEEP_CHECK(staging[i].scalar_type() == torch::kFloat,
                         "boundary_staging[", i, "] must be float32, got ",
                         staging[i].scalar_type());
-            TORCH_CHECK(staging[i].is_cuda(),
+            SWEEP_CHECK(staging[i].is_cuda(),
                         "boundary_staging[", i, "] must live on the GPU (a host "
                         "tensor here reads as an illegal address inside the "
                         "kernels), got ", staging[i].device());
@@ -379,7 +379,7 @@ struct EffectiveBoundarySaver {
         const std::vector<torch::Tensor>& staging)
     {
         const auto shapes = int8_staging_shapes(ctx, width, nx_boundary, ny_boundary, nz_boundary);
-        TORCH_CHECK(!staging.empty(),
+        SWEEP_CHECK(!staging.empty(),
                     "scaled (int8/fp16) boundary storage requires the propagator-bound "
                     "boundary_staging (Layout.staging_shapes); the saver no longer "
                     "allocates it.");
@@ -395,7 +395,7 @@ struct EffectiveBoundarySaver {
         // faces -- because PyTorch clamps a 0-size dim's stride to a nonzero
         // value, so a numel-0 slot would trip this very check.)
         if (dim == 3 && top_t.defined() && top_t.numel() > 0) {
-            TORCH_CHECK(top_staging_t.numel() >= top_t.stride(0) &&
+            SWEEP_CHECK(top_staging_t.numel() >= top_t.stride(0) &&
                         left_staging_t.numel() >= left_t.stride(0) &&
                         front_staging_t.numel() >= front_t.stride(0),
                         "INT8 FP32 staging is smaller than the persistent boundary "
@@ -417,7 +417,7 @@ struct EffectiveBoundarySaver {
         // back as out.last_two).  A caller that arrives without it used to get
         // a silent torch::zeros of the right shape; that fallback is what kept
         // a torch allocation inside the saver, and it hid a missing binding.
-        TORCH_CHECK(last_two.defined(),
+        SWEEP_CHECK(last_two.defined(),
                     "boundary saving requires the propagator-bound u_last_two "
                     "({nvar, 2, B, 1, nz[, ny], nx}); the saver no longer allocates it.");
         (void)last_two_nvar;
@@ -448,7 +448,7 @@ struct EffectiveBoundarySaver {
         // torch_refs_ would pin both, so a second allocate() would leave the
         // descriptors pointing at storage nothing else refers to. Every caller
         // allocates once, in its constructor; this says so out loud.
-        TORCH_CHECK(torch_refs_.empty(),
+        SWEEP_CHECK(torch_refs_.empty(),
                     "EffectiveBoundarySaver::allocate() was called twice on one saver.");
         enabled = use_boundary_saving;
         dim = dim_;
@@ -484,7 +484,7 @@ struct EffectiveBoundarySaver {
         } else if (!boundary_gpu.empty()) {
             runtime_dtype = boundary_dtype_from_tensor(boundary_gpu[0]);
         } else {
-            TORCH_CHECK(false, "boundary saving requires the propagator-bound boundary "
+            SWEEP_CHECK(false, "boundary saving requires the propagator-bound boundary "
                         "buffers (boundary_cpu / boundary_gpu); the saver no longer "
                         "allocates them.");
         }
@@ -515,7 +515,7 @@ struct EffectiveBoundarySaver {
             // = main, second half = scale).  We bind those here, and the
             // single-timestep FP32 staging comes from ``boundary_staging``
             // (Python-owned; self-allocated only for an unbound caller).
-            TORCH_CHECK(boundary_gpu.size() == 2 * scaled_faces,
+            SWEEP_CHECK(boundary_gpu.size() == 2 * scaled_faces,
                         "Scaled (int8/fp16) boundary_gpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_gpu.size());
@@ -536,11 +536,11 @@ struct EffectiveBoundarySaver {
             // the gpu rings to top_gpu/top_scale_gpu, and take the shared
             // single-timestep FP32 staging from ``boundary_staging`` (the same
             // Python-owned buffer as gpu-direct).
-            TORCH_CHECK(boundary_cpu.size() == 2 * scaled_faces,
+            SWEEP_CHECK(boundary_cpu.size() == 2 * scaled_faces,
                         "Scaled (int8/fp16) staged boundary_cpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_cpu.size());
-            TORCH_CHECK(boundary_gpu.size() == 2 * scaled_faces,
+            SWEEP_CHECK(boundary_gpu.size() == 2 * scaled_faces,
                         "Scaled (int8/fp16) staged boundary_gpu expects ", 2 * scaled_faces,
                         " tensors (", scaled_faces, " main + ", scaled_faces,
                         " scale), got ", boundary_gpu.size());
@@ -563,13 +563,13 @@ struct EffectiveBoundarySaver {
         } else if (store_on_gpu && !boundary_gpu.empty()) {
             bind_storage_tensors(boundary_gpu, "boundary_gpu");
         } else {
-            TORCH_CHECK(false, "boundary saving requires the propagator-bound boundary "
+            SWEEP_CHECK(false, "boundary saving requires the propagator-bound boundary "
                         "storage (boundary_cpu, or boundary_gpu for gpu-direct); the "
                         "saver no longer allocates it.");
         }
 
         if (!use_scaled && !store_on_gpu) {
-            TORCH_CHECK(!boundary_gpu.empty(),
+            SWEEP_CHECK(!boundary_gpu.empty(),
                         "cpu/disk boundary staging requires the propagator-bound "
                         "boundary_gpu ring; the saver no longer allocates it.");
             bind_staging_tensors(boundary_gpu, "boundary_gpu");
@@ -599,7 +599,7 @@ struct EffectiveBoundarySaver {
             // FP16 is per-block scaled storage (same two-pass flow as
             // INT8): persistent __half payload + FP32 per-block scales +
             // FP32 transient staging for the boundary kernels.
-            TORCH_CHECK(top_scale_t.defined(),
+            SWEEP_CHECK(top_scale_t.defined(),
                         "fp16 boundary storage requires per-block scale "
                         "buffers (allocated by the Python wrapper).");
             v.dtype = BoundaryDtype::FP16;
@@ -645,7 +645,7 @@ struct EffectiveBoundarySaver {
             // the scales were missing; a descriptor's typed data_ptr only
             // asserts (and is compiled out with -DNDEBUG), so state the
             // requirement here instead of handing a null scale to a kernel.
-            TORCH_CHECK(top_scale_t.defined(),
+            SWEEP_CHECK(top_scale_t.defined(),
                         "int8 boundary storage requires per-block scale "
                         "buffers (allocated by the Python wrapper).");
             v.dtype = BoundaryDtype::INT8;
@@ -871,7 +871,7 @@ struct EffectiveBoundarySaver {
             size_t top_bytes = (size_t)len * top_time_block * es;
             size_t left_bytes = (size_t)len * left_time_block * es;
 
-            TORCH_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+            SWEEP_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
             copy_2d_chunk_async(
                 boundary_byte_ptr(top_t, (int64_t)start * top_time_block),
                 top_var_block,
@@ -930,7 +930,7 @@ struct EffectiveBoundarySaver {
         size_t bottom_gpu_offset = static_cast<size_t>(gpu_start) * nvar * bottom_gpu_block;
 
 
-        TORCH_CHECK(boundary_storage_dtype_ok(left_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+        SWEEP_CHECK(boundary_storage_dtype_ok(left_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
         size_t es = left_t.element_size();
         boundary_memcpy_async(
             boundary_byte_ptr(left_t, (int64_t)start * nvar * left_block),
@@ -1433,7 +1433,7 @@ struct EffectiveBoundarySaver {
             size_t top_gpu_time_block = top_gpu.stride(1);
             size_t left_gpu_time_block = left_gpu.stride(1);
 
-            TORCH_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+            SWEEP_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
             boundary_bounds_check("top_t", top_t, (int64_t)start * top_time_block, top_bytes);
             boundary_bounds_check("top_gpu", top_gpu, (int64_t)gpu_start * top_gpu_time_block, top_bytes);
             copy_2d_chunk_async(
@@ -1499,7 +1499,7 @@ struct EffectiveBoundarySaver {
         size_t front_gpu_offset = static_cast<size_t>(gpu_start) * nvar * front_gpu_block;
         size_t left_gpu_offset = static_cast<size_t>(gpu_start) * nvar * left_gpu_block;
 
-        TORCH_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
+        SWEEP_CHECK(boundary_storage_dtype_ok(top_t), "Boundary storage must be float32 / float16 / bfloat16 / uint8.");
         size_t es = top_t.element_size();
         boundary_bounds_check("top_t", top_t, (int64_t)(start * nvar * top_block), top_elems * es);
         boundary_bounds_check("top_gpu", top_gpu, (int64_t)(top_gpu_offset), top_elems * es);

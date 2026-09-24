@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
 #include "visco_acoustic2d.h"
@@ -61,7 +60,7 @@ struct ViscoGrads {
 ViscoGrads bind_grads(const BackwardInput& p)
 {
     const auto& gs = p.grads_out;
-    TORCH_CHECK(gs.size() == N_GRADS,
+    SWEEP_CHECK(gs.size() == N_GRADS,
                 "visco_acoustic2d/backward requires the propagator-bound grads_out "
                 "(cuda_layout.grads_out_has_wavelet + one slot per model = ",
                 static_cast<int>(N_GRADS), " tensors: "
@@ -86,7 +85,7 @@ RTMOutput bind_illumination(const BackwardInput& p, bool always)
 {
     RTMOutput illumination;
     if (!p.illum_out.empty()) {
-        TORCH_CHECK(p.illum_out.size() == 2,
+        SWEEP_CHECK(p.illum_out.size() == 2,
                     "illum_out must be {source_illumination, receiver_illumination}");
         illumination.source_illumination =
             pool_slot_checked(p.illum_out, 0, p.models[0], "illum_out");
@@ -120,7 +119,7 @@ constexpr int CKPT_STATE_COUNT = 7;
 
 void check_replay_state_sets(const BackwardInput& p, int sets, const char* what)
 {
-    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == sets * CKPT_STATE_COUNT,
+    SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == sets * CKPT_STATE_COUNT,
                 what, " requires the propagator-bound forward_wavefields "
                 "(cuda_layout.checkpoint_state_nvar, recursive_state_depth): ", sets,
                 " replay state set(s) of ", CKPT_STATE_COUNT, " tensors, got ",
@@ -132,7 +131,7 @@ void check_replay_state_sets(const BackwardInput& p, int sets, const char* what)
 // allocates them whenever the forward required a gradient).
 void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p, const char* mode)
 {
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "visco_acoustic2d/", mode, " requires the propagator-bound "
                 "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
                 "adjoint_extra_nvar tensors)");
@@ -294,7 +293,7 @@ inline void run_visco2d_adjoint_step(
     GradParam grad_ctx_x, GradParam grad_ctx_z,
     AcousticCPMLPointer cpml, SolverContext ctx)
 {
-    TORCH_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
+    SWEEP_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
         "fused adjoint needs the adjoint wavefield bound with psi+zeta "
         "double-buffer (11 tensors in 2D); set cuda_layout.adjoint_extra_nvar=2.");
     ACOUSTIC2D_ADJOINT_FUSED(order, grid, block,
@@ -347,17 +346,17 @@ void image_step_from_raw(
 
 void check_visco_backward(const BackwardInput& p)
 {
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "visco_acoustic2d expects the prepared models "
                 "(vp_step, B1, B2, A); got ", p.models.size());
-    TORCH_CHECK(!p.bw_stepped() && p.step_phase == 0,
+    SWEEP_CHECK(!p.bw_stepped() && p.step_phase == 0,
                 "visco_acoustic2d does not support stepped backward segments");
-    TORCH_CHECK(p.cut_face_mask == 0,
+    SWEEP_CHECK(p.cut_face_mask == 0,
                 "visco_acoustic2d does not support domain decomposition");
-    TORCH_CHECK(!p.has_topo && !p.use_apm,
+    SWEEP_CHECK(!p.has_topo && !p.use_apm,
                 "visco_acoustic2d does not support topography on impl='c' yet; "
                 "use impl='eager'");
-    TORCH_CHECK(!p.compute_adcig,
+    SWEEP_CHECK(!p.compute_adcig,
                 "visco_acoustic2d does not support ADCIG yet");
 }
 
@@ -478,9 +477,9 @@ void run_full_imaging_visco(
 
 BackwardOutput backward(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
-    TORCH_CHECK(in.u_forward.defined() && in.u_forward.numel() > 0,
+    SWEEP_CHECK(in.u_forward.defined() && in.u_forward.numel() > 0,
                 "visco_acoustic2d backward (full) requires the raw forward "
                 "wavefield history");
     BackwardOutput out;
@@ -495,13 +494,13 @@ BackwardOutput backward(const BackwardInput& in)
 
 RTMOutput rtm(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
-    TORCH_CHECK(
+    SWEEP_CHECK(
         in.u_forward.defined() && in.u_forward.numel() > 0,
         "visco_acoustic2d RTM requires full forward wavefields (raw pressure)."
     );
-    TORCH_CHECK(
+    SWEEP_CHECK(
         in.checkpoints.empty(),
         "visco_acoustic2d RTM does not support checkpoint mode."
     );
@@ -513,7 +512,7 @@ RTMOutput rtm(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
-    TORCH_CHECK(false,
+    SWEEP_CHECK(false,
         "visco_acoustic2d does not support boundary saving: the amplitude "
         "damping is dissipative (reverse-time reconstruction amplifies) and "
         "global (the |k| filter reads the whole padded grid, which boundary "
@@ -523,7 +522,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
 
     const auto& p = in;
@@ -946,7 +945,7 @@ void process_recursive_interval_visco_2d(
 
     int mid = start + (end - start) / 2;
 
-    TORCH_CHECK(
+    SWEEP_CHECK(
         scratch_depth < static_cast<int>(scratch_states.size()),
         "Recursive checkpoint scratch depth exhausted."
     );
@@ -986,18 +985,18 @@ void process_recursive_interval_visco_2d(
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     check_visco_backward(in);
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(
+    SWEEP_CHECK(
         p.checkpoints.size() == 6,
         "visco_acoustic2d recursive checkpointing expects 6 checkpoint tensors"
     );
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
-    TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
+    SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
         6,
@@ -1069,11 +1068,11 @@ BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
         ViscoMode::Recursive, "visco_acoustic2d::backward_recursive_ckpt adjoint_workspace");
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
-    TORCH_CHECK(
+    SWEEP_CHECK(
         p.checkpoint_count == num_saved_checkpoints || p.checkpoint_count == 0,
         "checkpoint_count does not match checkpoint_steps"
     );
-    TORCH_CHECK(
+    SWEEP_CHECK(
         static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
         "checkpoint buffer is smaller than checkpoint_steps"
     );

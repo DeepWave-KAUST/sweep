@@ -12,6 +12,7 @@
 #include <string>
 
 #include "saver.cuh"
+#include "../../../core/check.h"
 
 // Bind one staged boundary face to the typed pointer matching the staging
 // tensor's dtype (fp32/fp16/bf16) at element offset OFF.  Mirrors view()'s
@@ -107,7 +108,7 @@ public:
         if (!enabled_ || !staged_)
             return;
 
-        TORCH_CHECK(
+        SWEEP_CHECK(
             !boundary_disk_async_read_ || ring_buffers_ >= 2,
             "boundary_disk_async_read requires boundary_ring_buffers >= 2."
         );
@@ -371,7 +372,7 @@ public:
         int field_idx
     )
     {
-        TORCH_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
+        SWEEP_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
 
         if (dim_ == 2) {
             GeneralBoundaryPointer ptr{};
@@ -914,7 +915,7 @@ public:
         int field_idx
     )
     {
-        TORCH_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
+        SWEEP_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
 
         if (dim_ == 2) {
             GeneralBoundaryPointer ptr{};

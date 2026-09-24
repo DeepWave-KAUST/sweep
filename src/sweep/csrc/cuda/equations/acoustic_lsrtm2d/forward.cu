@@ -1,6 +1,5 @@
 #include <cuda_runtime.h>
 
-#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
 #include "acoustic_lsrtm2d.h"
@@ -26,7 +25,7 @@ std::vector<torch::Tensor> slice_wavefields(
     size_t start,
     size_t count
 ) {
-    TORCH_CHECK(
+    SWEEP_CHECK(
         tensors.size() >= start + count,
         "Acoustic LSRTM 2D wavefield buffer does not contain enough tensors."
     );
@@ -37,11 +36,11 @@ std::vector<torch::Tensor> slice_wavefields(
 } // namespace
 
 ForwardOutput forward(const ForwardInput& in) {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D expects two models: vp and mp.");
+    SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D expects two models: vp and mp.");
 
     auto vp = p.models[0];
     auto mp = p.models[1];
@@ -70,7 +69,7 @@ ForwardOutput forward(const ForwardInput& in) {
     // never empty and there is no unbound caller left to allocate for.
     AcousticWavefieldTensor bg;
     AcousticWavefieldTensor sc;
-    TORCH_CHECK(p.wavefields.size() == 18,
+    SWEEP_CHECK(p.wavefields.size() == 18,
                 "acoustic_lsrtm2d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + pml_nvar = 18 tensors: bg+sc, each 9 with the "
                 "psi double-buffer), got ", p.wavefields.size());
@@ -94,10 +93,10 @@ ForwardOutput forward(const ForwardInput& in) {
                                     "u_allt_out (acoustic_lsrtm2d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
-        TORCH_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D checkpointing expects 6 checkpoint tensors.");
+        SWEEP_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D checkpointing expects 6 checkpoint tensors.");
     if (p.use_recursive_checkpoint) {
-        TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps.");
-        TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D.");
+        SWEEP_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps.");
+        SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D.");
     }
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;

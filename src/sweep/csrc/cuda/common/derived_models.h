@@ -90,7 +90,7 @@ void derive_scale(const torch::Tensor& in, float s, torch::Tensor& out);
 inline std::vector<torch::Tensor> slots(const std::vector<torch::Tensor>& bound, int n,
                                         const torch::Tensor& like, const char* what)
 {
-    TORCH_CHECK(static_cast<int>(bound.size()) == n,
+    SWEEP_CHECK(static_cast<int>(bound.size()) == n,
                 what, ": derived_models must hold ", n,
                 " tensors (cuda_layout.derived_model_nvar), got ", bound.size());
     std::vector<torch::Tensor> out;

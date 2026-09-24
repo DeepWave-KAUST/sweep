@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 #include <array>
 
@@ -26,12 +25,12 @@ namespace elastic_tti_2nd2d {
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
 static std::vector<torch::Tensor> model_grads(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.size() == p.models.size(),
+    SWEEP_CHECK(p.grads_out.size() == p.models.size(),
                 "elastic_tti_2nd2d/backward requires the propagator-bound grads_out "
                 "(one tensor per model, ",
                 p.models.size(), "), got ", p.grads_out.size());
     for (size_t i = 0; i < p.models.size(); ++i)
-        TORCH_CHECK(p.grads_out[i].sizes() == p.models[i].sizes(),
+        SWEEP_CHECK(p.grads_out[i].sizes() == p.models[i].sizes(),
                     "grads_out[", i, "] has shape ", p.grads_out[i].sizes(),
                     " but model ", i, " is ", p.models[i].sizes());
     return p.grads_out;
@@ -62,7 +61,7 @@ enum WorkspaceSlot : int {
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
 const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p, int n_slots)
 {
-    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
+    SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
                 "elastic_tti_2nd2d/backward requires the propagator-bound adjoint_workspace (",
                 n_slots, " tensors for this mode, "
                 "cuda_layout.backward_workspace_shapes), got ", p.adjoint_workspace.size());
@@ -89,7 +88,7 @@ struct AdjointWorkspace {
     // exact count for this mode.
     void init(const std::vector<torch::Tensor>& external)
     {
-        TORCH_CHECK(external.size() >= N_POOL,
+        SWEEP_CHECK(external.size() >= N_POOL,
                     "elastic_tti_2nd2d/backward requires the propagator-bound "
                     "adjoint_workspace (at least ", static_cast<int>(N_POOL),
                     " tensors, cuda_layout.backward_workspace_shapes), got ",
@@ -213,14 +212,14 @@ void rho_source_correction(
 
 BackwardOutput backward(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 7, "ElasticTTI2nd backward expects prepared models");
-    TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd backward expects cpmls PML profiles");
-    TORCH_CHECK(p.u_forward.defined(), "ElasticTTI2nd full backward expects saved forward wavefields");
-    TORCH_CHECK(p.u_forward.dim() == 5 && p.u_forward.size(1) == 2,
+    SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd backward expects prepared models");
+    SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd backward expects cpmls PML profiles");
+    SWEEP_CHECK(p.u_forward.defined(), "ElasticTTI2nd full backward expects saved forward wavefields");
+    SWEEP_CHECK(p.u_forward.dim() == 5 && p.u_forward.size(1) == 2,
                 "ElasticTTI2nd full backward expects u_forward with shape (nt, 2, B, nz, nx)");
 
     const auto& rho = p.models[0];
@@ -244,7 +243,7 @@ BackwardOutput backward(const BackwardInput& in)
     // Mandatory: propagator/_c.py Wrapper.backward always binds
     // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`.
     WavefieldTensor adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "elastic_tti_2nd2d/full requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
@@ -303,13 +302,13 @@ BackwardOutput backward(const BackwardInput& in)
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 7, "ElasticTTI2nd boundary-saving backward expects prepared models");
-    TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd boundary-saving backward expects cpmls PML profiles");
-    TORCH_CHECK(p.u_last_two.defined(), "ElasticTTI2nd boundary-saving backward expects last-two wavefield tensor");
+    SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd boundary-saving backward expects prepared models");
+    SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd boundary-saving backward expects cpmls PML profiles");
+    SWEEP_CHECK(p.u_last_two.defined(), "ElasticTTI2nd boundary-saving backward expects last-two wavefield tensor");
 
     const auto& rho = p.models[0];
     const int N = rho.size(0);
@@ -330,7 +329,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     WavefieldTensor adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "elastic_tti_2nd2d/bs requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
@@ -499,14 +498,14 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 7, "ElasticTTI2nd checkpoint backward expects prepared models");
-    TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd checkpoint backward expects cpmls PML profiles");
-    TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
-    TORCH_CHECK(static_cast<int>(p.checkpoints.size()) == CKPT_STATE_COUNT,
+    SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd checkpoint backward expects prepared models");
+    SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd checkpoint backward expects cpmls PML profiles");
+    SWEEP_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+    SWEEP_CHECK(static_cast<int>(p.checkpoints.size()) == CKPT_STATE_COUNT,
                 "ElasticTTI2nd checkpointing expects ", CKPT_STATE_COUNT, " checkpoint tensors, got ",
                 p.checkpoints.size());
 
@@ -545,7 +544,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     auto grad_view = stiffness_grad_view(grads);
 
     WavefieldTensor adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "elastic_tti_2nd2d/ckpt requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
@@ -581,7 +580,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     WavefieldTensor replay;
     {
         const char* what = "elastic_tti_2nd2d ckpt replay state";
-        TORCH_CHECK(!p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
                     "elastic_tti_2nd2d/ckpt requires the propagator-bound "
                     "forward_wavefields replay state (cuda_layout base_nvar + pml_nvar slots)");
         auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT, what);

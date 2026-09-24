@@ -31,6 +31,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <ostream>
 #include <initializer_list>
 
 #include "../cuda/common/boundary/types.cuh"   // BoundaryDtype
@@ -74,6 +75,9 @@ struct Buf {
     // it.  Filled in by buf_of() from the tensor; a default Buf is "not CUDA",
     // which is the safe answer for every `is_cuda() ||` guard in the tree.
     bool is_cuda_ = false;
+    // CUDA device ordinal for a device buffer, -1 for host memory.  What
+    // torch's device().index() answered; the entry-point device guards read it.
+    int32_t device_ = -1;
 
     // --- torch::Tensor-compatible read API ---------------------------------
 
@@ -86,6 +90,8 @@ struct Buf {
     bool defined() const { return defined_; }
     // torch: whether the buffer is device memory.  See is_cuda_.
     bool is_cuda() const { return is_cuda_; }
+    // torch: device().index() for a CUDA buffer; -1 on the host.
+    int device_index() const { return static_cast<int>(device_); }
 
     // torch: number of dimensions.
     int64_t dim() const { return static_cast<int64_t>(ndim_); }
@@ -274,3 +280,19 @@ struct Buf {
         return (d >= 0 && d < n) ? d : -1;
     }
 };
+
+// The Buf twin of ``tensor.device().index()``; the torch twin lives in
+// cuda/common/buf_torch.h, so an entry-point guard spells the same thing for
+// either type: ``sweep::DeviceGuard g(device_index_of(models[0]))``.
+inline int device_index_of(const Buf& b) { return b.device_index(); }
+
+// sizes() in an error message, printed as c10 printed an IntArrayRef: [a, b].
+inline std::ostream& operator<<(std::ostream& o, const Buf::Span& s)
+{
+    o << "[";
+    for (int64_t i = 0; i < s.size(); ++i) {
+        if (i) o << ", ";
+        o << s[i];
+    }
+    return o << "]";
+}

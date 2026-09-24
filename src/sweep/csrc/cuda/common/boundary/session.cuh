@@ -85,7 +85,7 @@ public:
         } else {
             Cfg want{dim, use_boundary_saving, boundary_on_cpu, boundary_on_disk,
                      boundary_disk_async_read, transfer_interval, ring_buffers};
-            TORCH_CHECK(
+            SWEEP_CHECK(
                 want == cfg_,
                 "BoundarySession reused with a different staging configuration "
                 "(dim/use_bs/cpu/disk/async_read/transfer_interval/ring_buffers). "
@@ -118,7 +118,7 @@ public:
     // first bind() built it.
     AsyncCopyContext& async_ctx()
     {
-        TORCH_CHECK(async_.has_value(),
+        SWEEP_CHECK(async_.has_value(),
                     "BoundarySession::async_ctx() before the first bind()");
         return *async_;
     }

@@ -43,24 +43,24 @@ public:
         if (!enabled_)
             return;
 
-        TORCH_CHECK(expected_tensors_ >= 0, "CheckpointRuntime expected_tensors must be non-negative");
-        TORCH_CHECK(
+        SWEEP_CHECK(expected_tensors_ >= 0, "CheckpointRuntime expected_tensors must be non-negative");
+        SWEEP_CHECK(
             static_cast<int>(checkpoints_.size()) == expected_tensors_,
             label_, " checkpointing expects ", expected_tensors_, " checkpoint tensors"
         );
-        TORCH_CHECK(checkpoint_interval_ >= 1, "checkpoint_interval must be >= 1");
+        SWEEP_CHECK(checkpoint_interval_ >= 1, "checkpoint_interval must be >= 1");
         for (const auto& checkpoint : checkpoints_) {
-            TORCH_CHECK(checkpoint.defined(), label_, " checkpoint tensor must be defined");
-            TORCH_CHECK(checkpoint.is_contiguous(), label_, " checkpoint tensor must be contiguous");
+            SWEEP_CHECK(checkpoint.defined(), label_, " checkpoint tensor must be defined");
+            SWEEP_CHECK(checkpoint.is_contiguous(), label_, " checkpoint tensor must be contiguous");
             if (checkpoint_on_cpu_) {
-                TORCH_CHECK(!checkpoint.is_cuda() && checkpoint.device().is_cpu(), label_, " CPU checkpoint storage expects CPU tensors");
+                SWEEP_CHECK(!checkpoint.is_cuda() && checkpoint.device().is_cpu(), label_, " CPU checkpoint storage expects CPU tensors");
             } else {
-                TORCH_CHECK(checkpoint.is_cuda(), label_, " GPU checkpoint storage expects CUDA tensors");
+                SWEEP_CHECK(checkpoint.is_cuda(), label_, " GPU checkpoint storage expects CUDA tensors");
             }
         }
         if (recursive_) {
-            TORCH_CHECK(checkpoint_steps_.defined(), "Recursive checkpointing expects checkpoint_steps");
-            TORCH_CHECK(checkpoint_steps_.dim() == 1, "checkpoint_steps must be 1-D");
+            SWEEP_CHECK(checkpoint_steps_.defined(), "Recursive checkpointing expects checkpoint_steps");
+            SWEEP_CHECK(checkpoint_steps_.dim() == 1, "checkpoint_steps must be 1-D");
             // Stepped forward: checkpoints at steps <= it_begin were taken by
             // earlier segments; the cursor consumes steps in ascending order.
             if (it_begin > 0) {
@@ -135,7 +135,7 @@ public:
         const std::vector<torch::Tensor>& src_tensors
     )
     {
-        TORCH_CHECK(
+        SWEEP_CHECK(
             dst_tensors.size() == src_tensors.size(),
             "CheckpointRuntime state copy expects matching tensor counts"
         );
@@ -203,11 +203,11 @@ private:
         span.kind = kind;
         span.tensors = tensors;
         span.bytes = bytes;
-        C10_CUDA_CHECK(cudaEventCreate(&span.start));
-        C10_CUDA_CHECK(cudaEventCreate(&span.end));
-        C10_CUDA_CHECK(cudaEventRecord(span.start, at::cuda::getCurrentCUDAStream()));
+        SWEEP_CUDA_CHECK(cudaEventCreate(&span.start));
+        SWEEP_CUDA_CHECK(cudaEventCreate(&span.end));
+        SWEEP_CUDA_CHECK(cudaEventRecord(span.start, sweep::current_stream()));
         fn();
-        C10_CUDA_CHECK(cudaEventRecord(span.end, at::cuda::getCurrentCUDAStream()));
+        SWEEP_CUDA_CHECK(cudaEventRecord(span.end, sweep::current_stream()));
         spans_.push_back(span);
     }
 
@@ -247,7 +247,7 @@ private:
         const char* op
     )
     {
-        TORCH_CHECK(
+        SWEEP_CHECK(
             static_cast<int>(tensors.size()) == expected,
             "CheckpointRuntime ", op, " expects ", expected, " tensors, got ", tensors.size()
         );
@@ -306,9 +306,9 @@ private:
 
         ProfileTotals totals;
         for (auto& span : spans_) {
-            C10_CUDA_CHECK(cudaEventSynchronize(span.end));
+            SWEEP_CUDA_CHECK(cudaEventSynchronize(span.end));
             float milliseconds = 0.0f;
-            C10_CUDA_CHECK(cudaEventElapsedTime(&milliseconds, span.start, span.end));
+            SWEEP_CUDA_CHECK(cudaEventElapsedTime(&milliseconds, span.start, span.end));
             accumulate(totals, span, 0.001 * static_cast<double>(milliseconds));
             cudaEventDestroy(span.start);
             cudaEventDestroy(span.end);

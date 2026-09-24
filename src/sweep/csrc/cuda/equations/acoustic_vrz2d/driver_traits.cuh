@@ -115,7 +115,7 @@ struct Driver {
                             fdtd::LaunchConfig source_config,
                             fdtd::LaunchConfig record_config)
     {
-        TORCH_CHECK(p.models.size() == 2,
+        SWEEP_CHECK(p.models.size() == 2,
                     "AcousticVRZ CUDA driver expects models [vp, z]");
         float dx = p.spacing[0];
         float dz = p.spacing[1];
@@ -175,7 +175,7 @@ struct Driver {
     // pool means the Python declaration drifted.
     static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
     {
-        TORCH_CHECK(p.adjoint_workspace.size() == N_SLOTS,
+        SWEEP_CHECK(p.adjoint_workspace.size() == N_SLOTS,
                     "acoustic_vrz2d/backward requires the propagator-bound "
                     "adjoint_workspace (cuda_layout.backward_workspace_shapes): ",
                     static_cast<int>(N_SLOTS), " tensors ([0-3]=c_x,c_z,e_x,e_z coupling, "
@@ -237,24 +237,24 @@ struct Driver {
     static void validate_forward(const ForwardInput& p)
     {
         if (p.use_checkpoint)
-            TORCH_CHECK(p.checkpoints.size() == 6,
+            SWEEP_CHECK(p.checkpoints.size() == 6,
                         "AcousticVRZ checkpointing expects 6 checkpoint tensors");
         if (p.use_recursive_checkpoint) {
-            TORCH_CHECK(p.checkpoint_steps.defined(),
+            SWEEP_CHECK(p.checkpoint_steps.defined(),
                         "Recursive checkpointing expects checkpoint_steps");
-            TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+            SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
         }
     }
 
     static void validate_backward(const BackwardInput& p, bool need_recon)
     {
         if (need_recon) {
-            TORCH_CHECK(p.u_last_two.defined() && p.u_last_two.numel() > 0,
+            SWEEP_CHECK(p.u_last_two.defined() && p.u_last_two.numel() > 0,
                         "AcousticVRZ backward_bs expects saved last_two wavefields.");
         } else {
-            TORCH_CHECK(p.u_forward.defined() && p.u_forward.numel() > 0,
+            SWEEP_CHECK(p.u_forward.defined() && p.u_forward.numel() > 0,
                         "AcousticVRZ backward expects saved full forward wavefields.");
-            TORCH_CHECK(p.u_forward.dim() == 6 && p.u_forward.size(1) == 5,
+            SWEEP_CHECK(p.u_forward.dim() == 6 && p.u_forward.size(1) == 5,
                         "AcousticVRZ backward expects forward wavefields with "
                         "shape (nt, 5, B, 1, nz, nx).");
         }
@@ -301,7 +301,7 @@ struct Driver {
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& /*vp*/)
     {
-        TORCH_CHECK(!p.wavefields.empty(),
+        SWEEP_CHECK(!p.wavefields.empty(),
                     "acoustic_vrz2d/forward requires the propagator-bound wavefields "
                     "(cuda_layout.base_nvar + pml_nvar = 9 tensors)");
         wf.bind(p.wavefields, 2, true);
@@ -315,7 +315,7 @@ struct Driver {
     {
         // The VRZ2D kernels do not honour ctx.x_base/x_limit; the DD
         // phase-split strips would silently compute the wrong cells.
-        TORCH_CHECK(xb == 0 && xe == s.nx,
+        SWEEP_CHECK(xb == 0 && xe == s.nx,
                     "acoustic_vrz2d kernels are not ranged: phase-split "
                     "(step_phase) strips are unsupported");
         // History is captured post-swap by capture_allt (tensor copies), so
@@ -423,7 +423,7 @@ struct Driver {
         // every backward (_gradient_buffers from
         // cuda_layout.grads_out_has_wavelet = true plus one slot per model),
         // and the DD runner rebinds the same list, so it is never empty.
-        TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+        SWEEP_CHECK(p.grads_out.size() == p.models.size() + 1,
                     "acoustic_vrz2d/backward requires the propagator-bound grads_out "
                     "(cuda_layout.grads_out_has_wavelet + one slot per model = "
                     "models.size()+1 tensors, slot 0 = grad_wavelet, unused for VRZ), got ",
@@ -457,7 +457,7 @@ struct Driver {
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& /*vp*/)
     {
-        TORCH_CHECK(!p.adjoint_wavefields.empty(),
+        SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                     "acoustic_vrz2d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
                     "adjoint_extra_nvar = 9 tensors)");

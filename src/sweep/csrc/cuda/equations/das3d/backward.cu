@@ -1,7 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <c10/cuda/CUDAGuard.h>
 
 #include "das3d.h"
 #include "kernels.cuh"
@@ -24,7 +23,7 @@ namespace das3d {
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.size() == 3,
+    SWEEP_CHECK(p.grads_out.size() == 3,
                 "das3d/backward requires the propagator-bound grads_out "
                 "(3 tensors {grad_vp, grad_vs, grad_rho}), got ", p.grads_out.size());
     return p.grads_out;
@@ -52,7 +51,7 @@ enum WorkspaceSlot : int {
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
 const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
+    SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
                 "das3d/backward requires the propagator-bound adjoint_workspace (",
                 static_cast<int>(N_SLOTS), " tensors, "
                 "cuda_layout.backward_workspace_nvar), got ", p.adjoint_workspace.size());
@@ -81,7 +80,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     const auto lame = derived::lame(p, vp, vs, rho, "das3d::recompute_strain_history");
     auto mu = lame.mu;
     auto lambda = lame.lambda;
-    c10::cuda::CUDAGuard device_guard(vp.device());
+    sweep::DeviceGuard device_guard(device_index_of(vp));
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -101,7 +100,7 @@ torch::Tensor recompute_strain_history(const BackwardInput& p)
     DasWavefieldTensor3D wavefield;
     {
         const char* what = "das3d ckpt replay state";
-        TORCH_CHECK(!p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
                     "das3d/ckpt requires the propagator-bound forward_wavefields "
                     "replay state (cuda_layout base_nvar + pml_nvar slots)");
         auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT, what);
@@ -222,15 +221,15 @@ BackwardOutput backward(const BackwardInput& in)
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.u_forward.defined(), "DAS 3D full backward requires saved exx/eyy/ezz wavefields.");
-    TORCH_CHECK(p.u_forward.dim() == 6, "DAS 3D saved wavefields must have shape (nt, 3, B, nz, ny, nx).");
-    TORCH_CHECK(p.u_forward.size(0) == p.nt, "DAS 3D saved wavefield time dimension does not match nt.");
-    TORCH_CHECK(p.u_forward.size(1) == 3, "DAS 3D full backward saves only exx/eyy/ezz histories.");
+    SWEEP_CHECK(p.u_forward.defined(), "DAS 3D full backward requires saved exx/eyy/ezz wavefields.");
+    SWEEP_CHECK(p.u_forward.dim() == 6, "DAS 3D saved wavefields must have shape (nt, 3, B, nz, ny, nx).");
+    SWEEP_CHECK(p.u_forward.size(0) == p.nt, "DAS 3D saved wavefield time dimension does not match nt.");
+    SWEEP_CHECK(p.u_forward.size(1) == 3, "DAS 3D full backward saves only exx/eyy/ezz histories.");
 
     auto vp = p.models[0];
     auto vs = p.models[1];
     auto rho = p.models[2];
-    c10::cuda::CUDAGuard device_guard(vp.device());
+    sweep::DeviceGuard device_guard(device_index_of(vp));
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -259,7 +258,7 @@ BackwardOutput backward(const BackwardInput& in)
     // Mandatory: propagator/_c.py Wrapper.backward always binds
     // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`.
     DasWavefieldTensor3D adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "das3d/backward requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);

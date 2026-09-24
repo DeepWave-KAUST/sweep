@@ -2,7 +2,6 @@
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "elastic2d.h"
 #include "kernels.cuh"
 
@@ -35,20 +34,20 @@ ForwardOutput forward(const ForwardInput& in)
 // APM moduli themselves carry the free-surface BC.
 ForwardOutput apm_forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
 
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.it_begin == 0 &&
+    SWEEP_CHECK(p.it_begin == 0 &&
                 (p.it_end < 0 || p.it_end == static_cast<int>(p.nt)) &&
                 p.step_phase == 0,
                 "stepped forward not supported for the elastic2d APM path");
-    TORCH_CHECK(p.models.size() >= 11,
+    SWEEP_CHECK(p.models.size() >= 11,
                 "elastic2d::apm_forward expects 11 model tensors: "
                 "[vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu, "
                 "lam_eff, mu_eff, mu_xz_node, rho_x_eff, rho_z_eff]");
-    TORCH_CHECK(p.topo_category.defined() && p.topo_category.numel() > 0,
+    SWEEP_CHECK(p.topo_category.defined() && p.topo_category.numel() > 0,
                 "elastic2d::apm_forward requires topo_category int32 tensor");
 
     float dx = p.spacing[0];
@@ -68,7 +67,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int B = N * C;
 
     ElasticWavefieldTensor wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "elastic2d/apm_forward requires the propagator-bound wavefields "
                 "(15-slot layout); nothing allocates them here");
     wavefield.bind(p.wavefields, true);

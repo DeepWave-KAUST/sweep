@@ -78,7 +78,7 @@ struct DasMuWavefieldTensor2D {
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
     {
         int i = 0;
-        TORCH_CHECK(tensors.size() == (use_pml ? 18 : 8),
+        SWEEP_CHECK(tensors.size() == (use_pml ? 18 : 8),
                     "DAS Mu 2D wavefield expects ", (use_pml ? 18 : 8), " tensors (8 base fields",
                     (use_pml ? " plus 10 CPML memory tensors)" : ", no CPML memory)"),
                     ", got ", tensors.size());
@@ -116,7 +116,7 @@ struct DasMuWavefieldTensor2D {
     // caller skips a nullptr field.
     void bind_elastic(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 5,
+        SWEEP_CHECK(tensors.size() == 5,
                     "DAS Mu 2D elastic-only wavefield bind expects 5 tensors "
                     "[vx, vz, sxx, szz, sxz], got ", tensors.size());
         int i = 0;
@@ -364,7 +364,7 @@ struct DasMuWavefieldTensor3D {
     void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
     {
         int i = 0;
-        TORCH_CHECK(tensors.size() == (use_pml ? 33 : 15),
+        SWEEP_CHECK(tensors.size() == (use_pml ? 33 : 15),
                     "DAS Mu 3D wavefield expects ", (use_pml ? 33 : 15), " tensors (15 base fields",
                     (use_pml ? " plus 18 CPML memory tensors)" : ", no CPML memory)"),
                     ", got ", tensors.size());
@@ -417,7 +417,7 @@ struct DasMuWavefieldTensor3D {
     // returns those nullptrs and every caller skips a nullptr field.
     void bind_elastic(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 9,
+        SWEEP_CHECK(tensors.size() == 9,
                     "DAS Mu 3D elastic-only wavefield bind expects 9 tensors "
                     "[vx, vy, vz, sxx, syy, szz, sxy, sxz, syz], got ",
                     tensors.size());

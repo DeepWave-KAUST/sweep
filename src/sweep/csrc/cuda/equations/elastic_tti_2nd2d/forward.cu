@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 
 #include "elastic_tti_2nd2d.h"
 #include "kernels.cuh"
@@ -25,17 +24,17 @@ enum ForwardWorkspaceSlot : int { SXX_WS = 0, SZZ_WS, SXZ_WS, N_FORWARD_SLOTS };
 
 ForwardOutput forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 7, "ElasticTTI2nd forward expects prepared models: rho plus 6 stiffness tensors");
-    TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd forward expects cpmls PML profiles");
-    TORCH_CHECK(!p.free_surface, "ElasticTTI2nd has no free-surface support (anisotropic media reject the image method)");
+    SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd forward expects prepared models: rho plus 6 stiffness tensors");
+    SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd forward expects cpmls PML profiles");
+    SWEEP_CHECK(!p.free_surface, "ElasticTTI2nd has no free-surface support (anisotropic media reject the image method)");
     if (p.use_checkpoint) {
-        TORCH_CHECK(!p.use_recursive_checkpoint, "ElasticTTI2nd recursive checkpointing is not implemented yet");
-        TORCH_CHECK(p.checkpoints.size() == 14, "ElasticTTI2nd checkpointing expects 14 checkpoint tensors");
-        TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+        SWEEP_CHECK(!p.use_recursive_checkpoint, "ElasticTTI2nd recursive checkpointing is not implemented yet");
+        SWEEP_CHECK(p.checkpoints.size() == 14, "ElasticTTI2nd checkpointing expects 14 checkpoint tensors");
+        SWEEP_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
     }
 
     const auto& rho = p.models[0];
@@ -53,7 +52,7 @@ ForwardOutput forward(const ForwardInput& in)
     // `params.wavefields = cp.forward_wavefields`), in every mode -- the
     // persistent save_all pool or the per-call transient one.
     WavefieldTensor wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "elastic_tti_2nd2d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     wavefield.bind(p.wavefields);
@@ -94,7 +93,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     // Mandatory: cuda_layout.forward_workspace_nvar = 3, so
     // _transient_forward_workspace always hands over three grids.
-    TORCH_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+    SWEEP_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
                 "elastic_tti_2nd2d/forward requires the propagator-bound forward_workspace "
                 "(cuda_layout.forward_workspace_nvar = ",
                 static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());

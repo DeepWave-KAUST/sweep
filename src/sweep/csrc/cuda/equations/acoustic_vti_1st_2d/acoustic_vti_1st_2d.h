@@ -8,7 +8,7 @@ ForwardOutput forward(const ForwardInput& in);
 
 // Backward implementations are stubs until the dedicated CUDA backward
 // pass for the Duveneck 2008 acoustic VTI system lands.  They throw a
-// TORCH_CHECK so accidental adjoint use surfaces immediately.
+// SWEEP_CHECK so accidental adjoint use surfaces immediately.
 BackwardOutput backward(const BackwardInput& in);
 BackwardOutput backward_bs(const BackwardInput& in);
 BackwardOutput backward_ckpt(const BackwardInput& in);

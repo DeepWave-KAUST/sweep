@@ -1,7 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <c10/cuda/CUDAGuard.h>
 #include "visco_acoustic2d.h"
 #include "kernels.cuh"
 #include "../acoustic2d/kernels.cuh"   // reused CPML stencil (ODR-safe: same header)
@@ -38,25 +37,25 @@ namespace visco_acoustic2d {
 // of the in-place Scalar ops (div_(dt), the ifft normalisation), exactly as the
 // ATen expressions had.
 ForwardOutput forward(const ForwardInput& in) {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
 
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "visco_acoustic2d expects the prepared models "
                 "(vp_step, B1, B2, A); got ", p.models.size());
-    TORCH_CHECK(p.models[0].is_cuda(),
+    SWEEP_CHECK(p.models[0].is_cuda(),
                 "visco_acoustic2d impl='c' is CUDA-only; use impl='eager' on CPU");
-    TORCH_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
+    SWEEP_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
                 "visco_acoustic2d does not support domain decomposition (the "
                 "amplitude damping is a global FFT)");
-    TORCH_CHECK(p.it_begin == 0 && (p.it_end < 0 || p.it_end == (int)p.nt),
+    SWEEP_CHECK(p.it_begin == 0 && (p.it_end < 0 || p.it_end == (int)p.nt),
                 "visco_acoustic2d does not support stepped forward segments");
-    TORCH_CHECK(!p.has_topo && !p.use_apm,
+    SWEEP_CHECK(!p.has_topo && !p.use_apm,
                 "visco_acoustic2d does not support topography on impl='c' yet; "
                 "use impl='eager'");
-    TORCH_CHECK(!p.use_boundary_saving,
+    SWEEP_CHECK(!p.use_boundary_saving,
                 "visco_acoustic2d does not support boundary saving (dissipative "
                 "step is not reverse-time reconstructible); use "
                 "memory=Ckpt() or memory=Full()");
@@ -94,7 +93,7 @@ ForwardOutput forward(const ForwardInput& in) {
     // ViscoAcoustic.cuda_layout base_nvar 3 + pml_nvar 6, the CPML aux as
     // per-axis slabs via pml_slot_axes).
     AcousticWavefieldTensor wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "visco_acoustic2d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + pml_nvar = 9 tensors)");
     wavefield.bind(p.wavefields, 2, true);

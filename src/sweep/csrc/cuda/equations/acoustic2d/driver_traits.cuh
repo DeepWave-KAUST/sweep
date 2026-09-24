@@ -201,7 +201,7 @@ struct Driver {
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& /*vp*/)
     {
-        TORCH_CHECK(!p.wavefields.empty(),
+        SWEEP_CHECK(!p.wavefields.empty(),
                     "acoustic2d/forward requires the propagator-bound wavefields "
                     "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
         wf.bind(p.wavefields, 2, true);
@@ -371,7 +371,7 @@ struct Driver {
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& /*vp*/)
     {
-        TORCH_CHECK(!p.adjoint_wavefields.empty(),
+        SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                     "acoustic2d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.adjoint_extra_nvar on top of "
                     "base_nvar + pml_nvar)");
@@ -388,7 +388,7 @@ struct Driver {
                              AcousticCPMLPointer cpml, BwdWorkspace&,
                              const float* grad_forward_img, float* grad_out)
     {
-        TORCH_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
+        SWEEP_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
             "fused adjoint needs the adjoint wavefield bound with psi+zeta "
             "double-buffer (11 tensors in 2D); set cuda_layout.adjoint_extra_nvar=2.");
         ACOUSTIC2D_ADJOINT_FUSED(s.order, s.launch_config.grid, s.launch_config.block,
@@ -492,7 +492,7 @@ struct Driver {
     static void bind_or_alloc_recon(Wavefield& wf, const BackwardInput& p,
                                     const torch::Tensor& /*vp*/)
     {
-        TORCH_CHECK(!p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
                     "acoustic2d/backward_bs requires the propagator-bound "
                     "reconstruction state forward_wavefields "
                     "(cuda_layout.bs_reconstruction_nvar / slots.recon)");
@@ -690,7 +690,7 @@ struct Driver {
     static void bind_or_alloc_recon_ckpt(Wavefield& wf, const BackwardInput& p,
                                          const torch::Tensor& vp)
     {
-        TORCH_CHECK(!p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
                     "acoustic2d/ckpt backward requires the propagator-bound replay "
                     "state forward_wavefields (cuda_layout.checkpoint_state_nvar / "
                     "the forward slot table)");
@@ -706,7 +706,7 @@ struct Driver {
                                                 const torch::Tensor& vp, int set,
                                                 const Wavefield& /*start_state*/)
     {
-        TORCH_CHECK(!p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
                     "acoustic2d/recursive backward requires the propagator-bound "
                     "replay state sets forward_wavefields "
                     "(cuda_layout.recursive_state_depth)");

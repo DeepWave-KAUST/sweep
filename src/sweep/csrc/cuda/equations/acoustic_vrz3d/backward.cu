@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
 #include "acoustic_vrz3d.h"
@@ -80,7 +79,7 @@ enum WorkspaceSlot : int {
 // Python declaration drifted.
 static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.adjoint_workspace.size() == N_SLOTS,
+    SWEEP_CHECK(p.adjoint_workspace.size() == N_SLOTS,
                 "acoustic_vrz3d/backward requires the propagator-bound adjoint_workspace "
                 "(cuda_layout.backward_workspace_nvar): ",
                 static_cast<int>(N_SLOTS), " tensors ([0-5]=c_x..e_z coupling, "
@@ -97,7 +96,7 @@ static const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 // runner rebinds the same list, so it is never empty.
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(p.grads_out.size() == p.models.size() + 1,
+    SWEEP_CHECK(p.grads_out.size() == p.models.size() + 1,
                 "acoustic_vrz3d/backward requires the propagator-bound grads_out "
                 "(cuda_layout.grads_out_has_wavelet + one slot per model = "
                 "models.size()+1 tensors, slot 0 = grad_wavelet), got ", p.grads_out.size());
@@ -110,7 +109,7 @@ static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput& p,
                                const char* mode)
 {
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vrz3d/", mode, " requires the propagator-bound "
                 "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 12 tensors)");
     wf.bind(p.adjoint_wavefields, 3, true);
@@ -118,13 +117,13 @@ static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInput&
 
 BackwardOutput backward_full_impl(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    TORCH_CHECK(
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    SWEEP_CHECK(
         in.u_forward.defined() && in.u_forward.numel() > 0,
         "AcousticVRZ3D backward expects saved full forward wavefields."
     );
-    TORCH_CHECK(in.models.size() == 2, "AcousticVRZ3D backward expects models [vp, z].");
-    TORCH_CHECK(
+    SWEEP_CHECK(in.models.size() == 2, "AcousticVRZ3D backward expects models [vp, z].");
+    SWEEP_CHECK(
         in.u_forward.dim() == 6 && in.u_forward.size(1) == 7,
         "AcousticVRZ3D backward expects forward wavefields with shape (nt, 7, B, nz, ny, nx)."
     );
@@ -282,12 +281,12 @@ BackwardOutput backward_full_impl(const BackwardInput& in)
 
 BackwardOutput backward_bs_impl(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_bs expects models [vp, z].");
-    TORCH_CHECK(p.u_last_two.defined() && p.u_last_two.numel() > 0,
+    SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_bs expects models [vp, z].");
+    SWEEP_CHECK(p.u_last_two.defined() && p.u_last_two.numel() > 0,
                 "AcousticVRZ3D backward_bs expects last two wavefields.");
 
     auto vp = p.models[0];
@@ -321,7 +320,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     const int it_hi = p.bw_begin();
     const int it_lo = p.bw_it_end;
     const bool first_segment = (it_hi == static_cast<int>(p.nt));
-    TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+    SWEEP_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
                 "AcousticVRZ3D stepped backward: require 0 <= bw_it_end < "
                 "bw_it_begin <= nt, got [", it_lo, ", ", it_hi, ") with nt=", p.nt);
     // Phased DD backward (Fix A). The variable-density gradient is a spatial
@@ -334,7 +333,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     //   phase 2 = build c/e from the POST-exchange lambda,p (split kernel)
     //   phase 3 = divergence of the POST-exchange c/e -> gradient accumulate
     // step_phase 0 stays the monolithic single-GPU path (AUTO/fused; unchanged).
-    TORCH_CHECK(p.step_phase >= 0 && p.step_phase <= 4,
+    SWEEP_CHECK(p.step_phase >= 0 && p.step_phase <= 4,
                 "AcousticVRZ3D backward step_phase must be 0, 1, 2, 3 or 4");
     const bool phased     = (p.step_phase != 0);
     const bool do_advance = (p.step_phase == 0 || p.step_phase == 1);
@@ -342,19 +341,19 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
     const bool do_grad    = (p.step_phase == 0 || p.step_phase == 3);
     const bool do_coeff   = (p.step_phase == 0 || p.step_phase == 4);   // 4 = build adjoint coeffs only
     if (phased) {
-        TORCH_CHECK(it_hi == it_lo + 1,
+        SWEEP_CHECK(it_hi == it_lo + 1,
                     "AcousticVRZ3D phased backward requires a single-step segment "
                     "(bw_it_begin == bw_it_end + 1)");
-        TORCH_CHECK(p.adjoint_workspace.size() == 10,
+        SWEEP_CHECK(p.adjoint_workspace.size() == 10,
                     "AcousticVRZ3D phased/DD backward requires 10 adjoint_workspace "
                     "tensors ([0-5]=c_x..e_z coupling, [6-9]=C0,Cx,Cy,Cz adjoint coeffs); "
                     "bind them from Python (see ModelParallel._capture)");
     }
     if (p.bw_stepped()) {
-        TORCH_CHECK(!p.adjoint_wavefields.empty() && !p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.adjoint_wavefields.empty() && !p.forward_wavefields.empty(),
                     "AcousticVRZ3D stepped backward requires Python-bound adjoint "
                     "and forward (reconstruction) wavefields");
-        TORCH_CHECK(!p.boundary_on_disk,
+        SWEEP_CHECK(!p.boundary_on_disk,
                     "AcousticVRZ3D stepped backward supports gpu-direct or cpu "
                     "boundary storage only (boundary_on_disk unsupported in v1)");
         // The persistent runtime keeps a pointer to the saver, and this file's
@@ -364,7 +363,7 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
         // SYNCHRONOUS disk path calls saver_->load_disk_to_cpu_3d from
         // prefetch_backward_chunk, i.e. through that pointer between calls. That
         // is a second, independent reason disk stays refused here.
-        TORCH_CHECK(!p.boundary_on_cpu || p.cut_face_mask != 0,
+        SWEEP_CHECK(!p.boundary_on_cpu || p.cut_face_mask != 0,
                     "AcousticVRZ3D stepped backward_bs cpu boundary staging "
                     "requires a DD cut mask (cut_face_mask != 0); single-tile "
                     "cpu staging is unsupported here (use gpu-direct or a "
@@ -702,13 +701,13 @@ BackwardOutput backward_bs_impl(const BackwardInput& in)
 
 BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_ckpt expects models [vp, z].");
-    TORCH_CHECK(!p.checkpoints.empty(), "AcousticVRZ3D backward_ckpt expects checkpoints.");
-    TORCH_CHECK(p.checkpoint_interval > 0, "AcousticVRZ3D backward_ckpt expects positive checkpoint_interval.");
+    SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_ckpt expects models [vp, z].");
+    SWEEP_CHECK(!p.checkpoints.empty(), "AcousticVRZ3D backward_ckpt expects checkpoints.");
+    SWEEP_CHECK(p.checkpoint_interval > 0, "AcousticVRZ3D backward_ckpt expects positive checkpoint_interval.");
 
     auto vp = p.models[0];
     auto z = p.models[1];
@@ -745,7 +744,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
     // slot_table.ACOUSTIC_VRZ3D's forward slots without the psi shadows), so
     // there is no unbound caller to allocate for.
     AcousticWavefieldTensor forward;
-    TORCH_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
+    SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
                 "acoustic_vrz3d/backward_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.slots, the forward slots without the "
                 "psi double-buffer shadows): one replay state set of ",
@@ -809,7 +808,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
         num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
         num_segments = num_saved_checkpoints + 1;
         checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
-        TORCH_CHECK(
+        SWEEP_CHECK(
             static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
             "AcousticVRZ3D checkpoint buffer is smaller than required chunk count."
         );
@@ -820,7 +819,7 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
             max_segment_length = std::max(max_segment_length, end - start);
         }
     } else {
-        TORCH_CHECK(
+        SWEEP_CHECK(
             static_cast<int>(p.checkpoints[0].size(0)) >= num_chunks,
             "AcousticVRZ3D checkpoint buffer is smaller than required chunk count."
         );
@@ -987,25 +986,25 @@ BackwardOutput backward_ckpt_impl(const BackwardInput& in)
 
 BackwardOutput backward(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_full_impl(in);
 }
 
 BackwardOutput backward_bs(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_bs_impl(in);
 }
 
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_ckpt_impl(in);
 }
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_ckpt_impl(in);
 }
 

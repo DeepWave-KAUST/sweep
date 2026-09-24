@@ -1,8 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 
 #include "das3d.h"
 #include "kernels.cuh"
@@ -39,7 +37,7 @@ ForwardOutput forward(const ForwardInput& in)
     const auto lame = derived::lame(p, vp, vs, rho, "das3d::forward");
     auto mu = lame.mu;
     auto lambda = lame.lambda;
-    c10::cuda::CUDAGuard device_guard(vp.device());
+    sweep::DeviceGuard device_guard(device_index_of(vp));
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -56,7 +54,7 @@ ForwardOutput forward(const ForwardInput& in)
     // (cuda_layout.base_nvar + pml_nvar = 31, propagator/_c.py Wrapper.forward
     // `params.wavefields = cp.forward_wavefields`), in every mode.
     DasWavefieldTensor3D wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "das3d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     wavefield.bind(p.wavefields);
@@ -78,7 +76,7 @@ ForwardOutput forward(const ForwardInput& in)
 
     // Mandatory: cuda_layout.forward_workspace_nvar = 9, so
     // _transient_forward_workspace always hands over nine grids.
-    TORCH_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+    SWEEP_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
                 "das3d/forward requires the propagator-bound forward_workspace "
                 "(cuda_layout.forward_workspace_nvar = ",
                 static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());

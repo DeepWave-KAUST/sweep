@@ -5,7 +5,7 @@
 // Boundary saving, checkpointing, and CPU fallback are deliberately NOT
 // implemented in this first cut — the goal is to land a working forward kernel
 // that matches the Python step function bit-for-bit on the interior.  When
-// gradients are needed, the backward.cu stubs raise TORCH_CHECK so the absent
+// gradients are needed, the backward.cu stubs raise SWEEP_CHECK so the absent
 // adjoint surfaces immediately.
 //
 // References:
@@ -18,7 +18,6 @@
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vti_1st_2d.h"
 #include "kernels.cuh"
 
@@ -44,7 +43,7 @@ struct VTIWavefieldTensor {
 
     void bind(const std::vector<torch::Tensor>& tensors, bool /*use_pml*/)
     {
-        TORCH_CHECK(tensors.size() == 8,
+        SWEEP_CHECK(tensors.size() == 8,
                     "AcousticVTI1st2D expects 8 wavefield tensors, got ",
                     tensors.size());
         vx_t    = tensors[0];
@@ -82,11 +81,11 @@ struct VTIWavefieldTensor {
 
 ForwardOutput forward(const ForwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     ForwardOutput out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st2D CUDA forward: free_surface=True is not yet "
                 "implemented (Robertsson 1996 / Mittet 2002 anisotropic FS — "
                 "follow-up).");
@@ -95,13 +94,13 @@ ForwardOutput forward(const ForwardInput& in)
     // backward_ckpt replays each chunk and runs adjoint over it.
 
     // Parse spacing (Python sends in axis-0..n-1 order: [dz, dx] in 2D).
-    TORCH_CHECK(p.spacing.size() >= 2,
+    SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D: spacing must have length >= 2");
     float dz = p.spacing[0];
     float dx = p.spacing[1];
 
     // Models (vp, epsilon, delta, rho) in this canonical order.
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st2D expects exactly 4 model tensors "
                 "[vp, epsilon, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -130,7 +129,7 @@ ForwardOutput forward(const ForwardInput& in)
     // Wrapper.forward `params.wavefields = cp.forward_wavefields`), in every
     // mode -- the persistent save_all pool or the per-call transient one.
     VTIWavefieldTensor wavefield;
-    TORCH_CHECK(!p.wavefields.empty(),
+    SWEEP_CHECK(!p.wavefields.empty(),
                 "acoustic_vti_1st_2d/forward requires the propagator-bound wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     wavefield.bind(p.wavefields, true);

@@ -155,7 +155,7 @@ struct Driver {
 
     static Workspace make_workspace(const BackwardInput& p, const torch::Tensor& rho)
     {
-        TORCH_CHECK((int)p.adjoint_workspace.size() >= N_WORKSPACE,
+        SWEEP_CHECK((int)p.adjoint_workspace.size() >= N_WORKSPACE,
                     "elastic_tti_sg2d backward requires the propagator-bound "
                     "adjoint_workspace (cuda_layout.backward_workspace_shapes) "
                     "holding at least ", static_cast<int>(N_WORKSPACE),
@@ -168,28 +168,28 @@ struct Driver {
 
     static void validate_forward(const ForwardInput& p)
     {
-        TORCH_CHECK(!p.models.empty(), "ElasticTTISG forward expects model tensors");
-        TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTISG forward expects cpmls PML profiles");
+        SWEEP_CHECK(!p.models.empty(), "ElasticTTISG forward expects model tensors");
+        SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTISG forward expects cpmls PML profiles");
         if (p.use_checkpoint)
-            TORCH_CHECK(!p.use_recursive_checkpoint,
+            SWEEP_CHECK(!p.use_recursive_checkpoint,
                         "ElasticTTISG recursive checkpointing is not implemented yet");
     }
 
     static void validate_backward(const BackwardInput& p, const char* mode)
     {
         if (std::strcmp(mode, "full") == 0) {
-            TORCH_CHECK(p.models.size() == 16, "ElasticTTISG backward expects prepared models");
-            TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTISG backward expects cpmls PML profiles");
-            TORCH_CHECK(p.u_forward.defined(), "ElasticTTISG full backward expects saved forward wavefields");
-            TORCH_CHECK(p.u_forward.dim() == 5 && p.u_forward.size(1) == 8,
+            SWEEP_CHECK(p.models.size() == 16, "ElasticTTISG backward expects prepared models");
+            SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTISG backward expects cpmls PML profiles");
+            SWEEP_CHECK(p.u_forward.defined(), "ElasticTTISG full backward expects saved forward wavefields");
+            SWEEP_CHECK(p.u_forward.dim() == 5 && p.u_forward.size(1) == 8,
                         "ElasticTTISG full backward expects u_forward with shape (nt, 8, B, nz, nx)");
         } else if (std::strcmp(mode, "bs") == 0) {
-            TORCH_CHECK(p.models.size() == 16, "ElasticTTISG boundary-saving backward expects prepared models");
-            TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTISG boundary-saving backward expects cpmls PML profiles");
-            TORCH_CHECK(p.u_last_two.defined(), "ElasticTTISG boundary-saving backward expects last-two wavefield tensor");
+            SWEEP_CHECK(p.models.size() == 16, "ElasticTTISG boundary-saving backward expects prepared models");
+            SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTISG boundary-saving backward expects cpmls PML profiles");
+            SWEEP_CHECK(p.u_last_two.defined(), "ElasticTTISG boundary-saving backward expects last-two wavefield tensor");
         } else {
-            TORCH_CHECK(p.models.size() == 16, "ElasticTTISG checkpoint backward expects prepared models");
-            TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTISG checkpoint backward expects cpmls PML profiles");
+            SWEEP_CHECK(p.models.size() == 16, "ElasticTTISG checkpoint backward expects prepared models");
+            SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTISG checkpoint backward expects cpmls PML profiles");
         }
     }
 
@@ -232,7 +232,7 @@ struct Driver {
     static void bind_or_alloc_forward(Wavefield& wf, const ForwardInput& p,
                                       const torch::Tensor& rho)
     {
-        TORCH_CHECK((int)p.wavefields.size() == CKPT_NVAR,
+        SWEEP_CHECK((int)p.wavefields.size() == CKPT_NVAR,
                     "elastic_tti_sg2d/forward requires the propagator-bound "
                     "wavefields (cuda_layout.base_nvar + cuda_layout.pml_nvar = ",
                     CKPT_NVAR, " tensors), got ", p.wavefields.size());
@@ -426,7 +426,7 @@ public:
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInput& p,
                                       const torch::Tensor& rho)
     {
-        TORCH_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
+        SWEEP_CHECK((int)p.adjoint_wavefields.size() == ADJ_WF_COUNT,
                     "elastic_tti_sg2d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
                     "adjoint_extra_nvar = ", ADJ_WF_COUNT, " tensors), got ",
@@ -443,7 +443,7 @@ public:
     // cuda_layout.grads_out_has_wavelet is false here).
     static void bind_grads(const BackwardInput& p, std::vector<torch::Tensor>& grads)
     {
-        TORCH_CHECK(p.grads_out.size() == p.models.size(),
+        SWEEP_CHECK(p.grads_out.size() == p.models.size(),
                     "elastic_tti_sg2d/backward requires the propagator-bound "
                     "grads_out, one tensor per prepared model (",
                     p.models.size(), "), got ", p.grads_out.size());
@@ -803,7 +803,7 @@ public:
                                          const BackwardInput& p,
                                          const torch::Tensor& rho)
     {
-        TORCH_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
+        SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "elastic_tti_sg2d/ckpt requires the propagator-bound replay "
                     "state (cuda_layout.base_nvar + pml_nvar = ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
@@ -829,7 +829,7 @@ public:
     static std::vector<torch::Tensor> seg_buffers(const BackwardInput& p,
                                                   const torch::Tensor& rho, int max_rows)
     {
-        TORCH_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
+        SWEEP_CHECK((int)p.checkpoint_replay.size() >= N_VEL,
                     "elastic_tti_sg2d/ckpt requires the propagator-bound "
                     "checkpoint_replay (cuda_layout.checkpoint_replay_shapes, ",
                     N_VEL, " velocity histories), got ", p.checkpoint_replay.size());

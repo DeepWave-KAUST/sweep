@@ -7,10 +7,10 @@
 // coefficients bit-identical to ``rho * vs * vs`` and friends evaluated by
 // torch one elementwise op at a time.
 #include "derived_models.h"
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include "../../core/check.h"
+#include "../../core/device.h"
 
 namespace {
 
@@ -69,9 +69,9 @@ __global__ void scale_kernel(const float* __restrict__ in, float s, float* __res
 
 void check_operand(const torch::Tensor& t, const torch::Tensor& like, const char* name)
 {
-    TORCH_CHECK(t.defined() && t.is_cuda() && t.scalar_type() == torch::kFloat && t.is_contiguous(),
+    SWEEP_CHECK(t.defined() && t.is_cuda() && t.scalar_type() == torch::kFloat && t.is_contiguous(),
                 "derived_models: ", name, " must be a contiguous float32 CUDA tensor");
-    TORCH_CHECK(t.numel() == like.numel(),
+    SWEEP_CHECK(t.numel() == like.numel(),
                 "derived_models: ", name, " has ", t.numel(), " elements, expected ", like.numel());
 }
 
@@ -89,11 +89,11 @@ void derive_lame(const torch::Tensor& vp, const torch::Tensor& vs, const torch::
     check_operand(lambda, vp, "lambda");
     const int64_t n = vp.numel();
     if (n == 0) return;
-    c10::cuda::CUDAGuard guard(vp.device());
-    lame_kernel<<<grid_for(n), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    sweep::DeviceGuard guard(device_index_of(vp));
+    lame_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
         vp.data_ptr<float>(), vs.data_ptr<float>(), rho.data_ptr<float>(),
         mu.data_ptr<float>(), lambda.data_ptr<float>(), n);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
 void derive_vti_stiffness(const torch::Tensor& vp, const torch::Tensor& epsilon,
@@ -111,12 +111,12 @@ void derive_vti_stiffness(const torch::Tensor& vp, const torch::Tensor& epsilon,
     check_operand(inv_rho, vp, "inv_rho");
     const int64_t n = vp.numel();
     if (n == 0) return;
-    c10::cuda::CUDAGuard guard(vp.device());
-    vti_stiffness_kernel<<<grid_for(n), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    sweep::DeviceGuard guard(device_index_of(vp));
+    vti_stiffness_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
         vp.data_ptr<float>(), epsilon.data_ptr<float>(), delta.data_ptr<float>(),
         rho.data_ptr<float>(), c11.data_ptr<float>(), c13.data_ptr<float>(),
         c33.data_ptr<float>(), inv_rho.data_ptr<float>(), n);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
 void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z)
@@ -125,23 +125,23 @@ void derive_reciprocal(const torch::Tensor& z, torch::Tensor& inv_z)
     check_operand(inv_z, z, "inv_z");
     const int64_t n = z.numel();
     if (n == 0) return;
-    c10::cuda::CUDAGuard guard(z.device());
-    reciprocal_kernel<<<grid_for(n), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    sweep::DeviceGuard guard(device_index_of(z));
+    reciprocal_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
         z.data_ptr<float>(), inv_z.data_ptr<float>(), n);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
 void derive_scale(const torch::Tensor& in, float s, torch::Tensor& out)
 {
     check_operand(in, in, "in");
     check_operand(out, in, "out");
-    TORCH_CHECK(in.data_ptr() != out.data_ptr(), "derived_models: derive_scale is out of place");
+    SWEEP_CHECK(in.data_ptr() != out.data_ptr(), "derived_models: derive_scale is out of place");
     const int64_t n = in.numel();
     if (n == 0) return;
-    c10::cuda::CUDAGuard guard(in.device());
-    scale_kernel<<<grid_for(n), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    sweep::DeviceGuard guard(device_index_of(in));
+    scale_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
         in.data_ptr<float>(), s, out.data_ptr<float>(), n);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace derived

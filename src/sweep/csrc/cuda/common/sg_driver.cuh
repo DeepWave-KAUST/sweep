@@ -84,7 +84,6 @@
 
 #include <torch/extension.h>
 #include <cuda_runtime.h>
-#include <c10/cuda/CUDAGuard.h>
 
 #include <algorithm>
 #include <optional>
@@ -120,7 +119,7 @@ public:
     explicit SgForwardRunner(const ForwardInput& in)
         : p(in)
     {
-        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+        sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
         models = Eq::parse_models(p);
         const auto& vp = p.models[0];
@@ -143,7 +142,7 @@ public:
         // propagation state — the caller must keep binding the same tensors.
         // (No buffer-role rotation: every field updates in place, so the caller
         // binds the SAME tensor list for every segment.)
-        TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
+        SWEEP_CHECK(it0 == 0 || !p.wavefields.empty(),
                     "stepped continuation (it_begin>0) requires Python-bound wavefields");
         Eq::bind_or_alloc_forward(wavefield, p, vp);
         wf = Eq::view(wavefield);
@@ -158,12 +157,12 @@ public:
         source_fields = p.source_field_indices.to(torch::kCPU);
         receiver_fields = p.receiver_field_indices.to(torch::kCPU);
         // An empty tensor counts as unbound: nothing could be recorded into it.
-        TORCH_CHECK(!stepped || (p.record_out.defined() && p.record_out.numel() > 0),
+        SWEEP_CHECK(!stepped || (p.record_out.defined() && p.record_out.numel() > 0),
                     "stepped forward requires record_out bound from Python");
         // MANDATORY, every mode: every staggered equation declares
         // cuda_layout.record_shape (record_multi), so _c.py Wrapper.forward
         // always allocates the record and binds it as ForwardInput.record_out.
-        TORCH_CHECK(p.record_out.defined() && p.record_out.numel() > 0,
+        SWEEP_CHECK(p.record_out.defined() && p.record_out.numel() > 0,
                     Eq::NAME, "/forward requires the propagator-bound record_out "
                     "(cuda_layout.record_shape)");
         record = bound_required(p.record_out, {nrec_fields, d.B, nrec, p.nt}, vp.options(),
@@ -172,23 +171,23 @@ public:
         Eq::validate_forward(p);
 
         if (p.use_checkpoint) {
-            TORCH_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
+            SWEEP_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                         Eq::CKPT_COUNT_MSG);
             if (p.use_recursive_checkpoint) {
-                TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
-                TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+                SWEEP_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
+                SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
             } else {
-                TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+                SWEEP_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
             }
         }
 
         if (p.save_all_wavefields) {
-            TORCH_CHECK(!stepped || p.u_allt_out.defined(),
+            SWEEP_CHECK(!stepped || p.u_allt_out.defined(),
                         "stepped + save_all_wavefields requires u_allt_out bound from Python");
             // MANDATORY whenever save_all_wavefields is on: every staggered
             // equation declares cuda_layout.save_all_shape, and _c.py
             // Wrapper.forward binds u_allt_out in exactly that case.
-            TORCH_CHECK(p.u_allt_out.defined() && p.u_allt_out.numel() > 0,
+            SWEEP_CHECK(p.u_allt_out.defined() && p.u_allt_out.numel() > 0,
                         Eq::NAME, "/full requires the propagator-bound u_allt_out "
                         "(cuda_layout.save_all_shape)");
             u_allt = bound_required(p.u_allt_out, Eq::allt_shape(d, p.nt), vp.options(),
@@ -205,7 +204,7 @@ public:
         // The internal full-storage fallback ring is per-call; segments after the
         // first would lose everything saved before them.
         if (stepped && p.use_boundary_saving)
-            TORCH_CHECK(!p.boundary_gpu.empty(),
+            SWEEP_CHECK(!p.boundary_gpu.empty(),
                         "stepped forward with boundary saving requires Python-bound boundary_gpu");
         staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
         if (staged_boundary)
@@ -263,22 +262,24 @@ public:
         );
     }
 
+    int device_index() const override { return device_index_of(p.models[0]); }
+
     ForwardOutput run(int run_it_begin, int run_it_end, int run_step_phase) override
     {
-        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+        sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& solver = *solver_;
 
         const int it0 = run_it_begin;
         const int it1 = (run_it_end < 0) ? static_cast<int>(p.nt) : run_it_end;
         check_run_args(it0, it1, run_step_phase, p.nt);
         if (run_calls++ > 0)
-            TORCH_CHECK(!p.use_checkpoint && !staged_boundary,
+            SWEEP_CHECK(!p.use_checkpoint && !staged_boundary,
                         "persistent stepped runner reuse requires gpu-direct "
                         "boundary storage and no checkpointing");
 
         const bool do_v = (run_step_phase == 0 || run_step_phase == 1);
         const bool do_s = (run_step_phase == 0 || run_step_phase == 2);
-        TORCH_CHECK(run_step_phase == 0 || it1 == it0 + 1,
+        SWEEP_CHECK(run_step_phase == 0 || it1 == it0 + 1,
                     "elastic phase-split requires a single step (it_end == it_begin + 1)");
 
         float* u_this_t = nullptr;
@@ -349,10 +350,10 @@ public:
 private:
     static void check_run_args(int it0, int it1, int step_phase, int64_t nt)
     {
-        TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(nt),
+        SWEEP_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(nt),
                     "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
                     it0, ", ", it1, ") with nt=", nt);
-        TORCH_CHECK(step_phase == 0 || step_phase == 1 || step_phase == 2,
+        SWEEP_CHECK(step_phase == 0 || step_phase == 1 || step_phase == 2,
                     "elastic step_phase must be 0, 1 or 2");
     }
 
@@ -402,26 +403,26 @@ void sg_check_stepped_backward(const BackwardInput& p, bool need_recon,
 {
     const int it_hi = (bw_it_begin < 0) ? static_cast<int>(p.nt) : bw_it_begin;
     const int it_lo = bw_it_end;
-    TORCH_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+    SWEEP_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
                 "stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
                 it_lo, ", ", it_hi, ") with nt=", p.nt);
-    TORCH_CHECK((p.cut_face_mask & ~Eq::CUT_MASK_BITS) == 0,
+    SWEEP_CHECK((p.cut_face_mask & ~Eq::CUT_MASK_BITS) == 0,
                 Eq::NDIM, "D cut_face_mask uses ", Eq::CUT_MASK_DESC,
                 " only, got ", p.cut_face_mask);
-    TORCH_CHECK(step_phase >= 0 && step_phase <= 3,
+    SWEEP_CHECK(step_phase >= 0 && step_phase <= 3,
                 "elastic backward step_phase must be 0, 1, 2 or 3 "
                 "(3 = residual/source injections only)");
     const bool phased = (step_phase != 0);
     if (phased) {
-        TORCH_CHECK(need_recon,
+        SWEEP_CHECK(need_recon,
                     "phased elastic backward (step_phase) is only supported "
                     "for the boundary-saving path (backward_bs)");
-        TORCH_CHECK(it_hi == it_lo + 1,
+        SWEEP_CHECK(it_hi == it_lo + 1,
                     "elastic backward phase-split requires a single-step "
                     "segment (bw_it_begin == bw_it_end + 1)");
     }
     if (need_recon && p.cut_face_mask != 0) {
-        TORCH_CHECK(!p.boundary_on_disk,
+        SWEEP_CHECK(!p.boundary_on_disk,
                     "domain-decomposed backward_bs (cut_face_mask) supports "
                     "gpu-direct or cpu boundary storage only "
                     "(boundary_on_disk unsupported in v1)");
@@ -429,22 +430,22 @@ void sg_check_stepped_backward(const BackwardInput& p, bool need_recon,
     const bool stepped = (it_hi < static_cast<int>(p.nt)) || (it_lo > 0);   // == bw_stepped()
     if (!stepped && !phased)
         return;
-    TORCH_CHECK((int)p.adjoint_wavefields.size() == Eq::ADJ_WF_COUNT,
+    SWEEP_CHECK((int)p.adjoint_wavefields.size() == Eq::ADJ_WF_COUNT,
                 "stepped elastic backward requires the ", Eq::ADJ_WF_COUNT,
                 "-tensor adjoint wavefield list bound from Python");
-    TORCH_CHECK(p.grads_out.size() == p.models.size(),
+    SWEEP_CHECK(p.grads_out.size() == p.models.size(),
                 "stepped elastic backward requires Python-bound grads_out "
                 "(one per model: vp, vs, rho — elastic computes no "
                 "grad_wavelet)");
-    TORCH_CHECK(p.illum_out.empty(),
+    SWEEP_CHECK(p.illum_out.empty(),
                 "elastic backward computes no illuminations; illum_out must "
                 "be empty");
     if (need_recon) {
-        TORCH_CHECK((int)p.forward_wavefields.size() == Eq::RECON_WF_COUNT,
+        SWEEP_CHECK((int)p.forward_wavefields.size() == Eq::RECON_WF_COUNT,
                     "stepped elastic backward_bs requires the ", Eq::RECON_WF_COUNT,
                     "-tensor reconstruction list ", Eq::RECON_LIST_DESC,
                     " bound from Python");
-        TORCH_CHECK(!p.boundary_on_disk,
+        SWEEP_CHECK(!p.boundary_on_disk,
                     "stepped backward_bs supports gpu-direct or cpu boundary "
                     "storage only (boundary_on_disk unsupported in v1)");
     }
@@ -492,7 +493,7 @@ template <class Eq>
 void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char* mode)
 {
     const int expected = Eq::WS_CARRIERS + n_carriers;
-    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == expected,
+    SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == expected,
                 Eq::NAME, " backward_", mode, ": requires the propagator-bound "
                 "adjoint_workspace (cuda_layout.backward_workspace_shapes) holding ",
                 expected, " tensors ([0-", Eq::WS_CARRIERS - 1, "] = the adjoint scratch, then ",
@@ -503,7 +504,7 @@ void sg_check_ckpt_workspace(const BackwardInput& p, int n_carriers, const char*
 template <class Eq>
 BackwardOutput sg_generic_backward(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     // Per-equation entry validation (model/PML counts, mode-specific input
     // tensors) with the equation's own per-mode message texts.  Runs FIRST,
@@ -619,7 +620,7 @@ public:
     explicit SgBackwardBsRunner(const BackwardInput& in)
         : p(in)
     {
-        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+        sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
 
         Eq::validate_backward(p, "bs");
         sg_check_stepped_backward<Eq>(p, /*need_recon=*/true,
@@ -711,9 +712,11 @@ public:
         adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
     }
 
+    int device_index() const override { return device_index_of(p.models[0]); }
+
     BackwardOutput run(int bw_it_begin, int bw_it_end, int run_step_phase) override
     {
-        c10::cuda::CUDAGuard device_guard(p.models[0].device());
+        sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
         SolverContext& solver = *solver_;
         BackwardOutput out;
 
@@ -735,7 +738,7 @@ public:
         const bool do_p2 = !inject_only && (run_step_phase != 1);
 
         if (run_calls++ > 0)
-            TORCH_CHECK(!staged_boundary,
+            SWEEP_CHECK(!staged_boundary,
                         "persistent stepped runner reuse requires gpu-direct "
                         "boundary storage");
 
@@ -925,15 +928,15 @@ void sg_backward_segment(
 template <class Eq>
 BackwardOutput sg_generic_backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     Eq::validate_backward(p, "ckpt");
-    TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
+    SWEEP_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
                 "checkpoint backward does not support bw_it_begin/bw_it_end, "
                 "step_phase or cut_face_mask in v1");
 
-    TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
-    TORCH_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR, Eq::CKPT_COUNT_MSG);
+    SWEEP_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+    SWEEP_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR, Eq::CKPT_COUNT_MSG);
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints, Eq::CKPT_NVAR, true, false,
         p.checkpoint_interval, p.checkpoint_steps, p.checkpoint_on_cpu,
@@ -1098,18 +1101,18 @@ void sg_replay_forward_to_time(
 template <class Eq>
 BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     Eq::validate_backward(p, "ckpt_recursive");
-    TORCH_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
+    SWEEP_CHECK(!in.bw_stepped() && in.step_phase == 0 && in.cut_face_mask == 0,
                 "checkpoint backward does not support bw_it_begin/bw_it_end, "
                 "step_phase or cut_face_mask in v1");
 
-    TORCH_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
+    SWEEP_CHECK((int)p.checkpoints.size() == Eq::CKPT_NVAR,
                 Eq::CKPT_RECURSIVE_COUNT_MSG);
 
     auto checkpoint_steps_cpu = p.checkpoint_steps.to(torch::kCPU).to(torch::kInt32).contiguous();
-    TORCH_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
+    SWEEP_CHECK(checkpoint_steps_cpu.dim() == 1, "checkpoint_steps must be 1-D");
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints, Eq::CKPT_NVAR, true, true,
         p.checkpoint_interval, checkpoint_steps_cpu, p.checkpoint_on_cpu,
@@ -1145,9 +1148,9 @@ BackwardOutput sg_generic_backward_recursive_ckpt(const BackwardInput& in)
     typename Eq::Workspace workspace = Eq::make_workspace(p, vp);
 
     const int num_saved_checkpoints = static_cast<int>(checkpoint_steps_cpu.numel());
-    TORCH_CHECK(p.checkpoint_count == num_saved_checkpoints || p.checkpoint_count == 0,
+    SWEEP_CHECK(p.checkpoint_count == num_saved_checkpoints || p.checkpoint_count == 0,
                 "checkpoint_count does not match checkpoint_steps");
-    TORCH_CHECK(static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
+    SWEEP_CHECK(static_cast<int>(p.checkpoints[0].size(0)) >= num_saved_checkpoints,
                 "checkpoint buffer is smaller than checkpoint_steps");
 
     const int* checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();

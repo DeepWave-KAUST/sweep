@@ -17,7 +17,7 @@
 //                                  BackwardInput.forward_wavefields set 0
 //                                  (cuda_layout checkpoint_state_nvar), or
 //                                  allocated here when unbound)
-//   * backward_recursive_ckpt() — stub (TORCH_CHECK)
+//   * backward_recursive_ckpt() — stub (SWEEP_CHECK)
 //
 // Adjoint PML memory variables are NOT tracked → interior gradients are
 // correct; gradients inside the PML band are approximate.  Standard FWI/RTM
@@ -33,7 +33,6 @@
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vti_1st_3d.h"
 #include "kernels.cuh"
 
@@ -61,7 +60,7 @@ enum GradSlot : int { GRAD_VP = 0, GRAD_EPS, GRAD_DELTA, GRAD_RHO, N_GRADS };
 // (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
 static const std::vector<torch::Tensor>& grad_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(static_cast<int>(p.grads_out.size()) == N_GRADS,
+    SWEEP_CHECK(static_cast<int>(p.grads_out.size()) == N_GRADS,
                 "acoustic_vti_1st_3d/backward requires the propagator-bound grads_out (",
                 static_cast<int>(N_GRADS), " tensors {grad_vp, grad_eps, grad_delta, grad_rho}), got ",
                 p.grads_out.size());
@@ -81,7 +80,7 @@ enum WorkspaceSlot : int { SCRATCH_A = 0, SCRATCH_B, SCRATCH_C, ZERO_PREV, SEED_
 // `params.adjoint_workspace = list(cp.adjoint_workspace)`.
 const std::vector<torch::Tensor>& workspace_slots(const BackwardInput& p)
 {
-    TORCH_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
+    SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
                 "acoustic_vti_1st_3d/backward requires the propagator-bound adjoint_workspace (",
                 static_cast<int>(N_SLOTS), " tensors, cuda_layout.backward_workspace_nvar), got ",
                 p.adjoint_workspace.size());
@@ -112,7 +111,7 @@ struct AdjWavefieldTensor3D {
 
     void bind(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 11,
+        SWEEP_CHECK(tensors.size() == 11,
                     "AcousticVTI1st3D backward: expects 11 adjoint wavefield tensors, got ",
                     tensors.size());
         vx_t    = tensors[0];
@@ -133,7 +132,7 @@ struct AdjWavefieldTensor3D {
     // m_vzz_t stay undefined.
     void bind_physical(const std::vector<torch::Tensor>& tensors)
     {
-        TORCH_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
+        SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
                     "AcousticVTI1st3D backward_bs: reconstruction list must hold ",
                     RECON_WF_COUNT, " tensors ", RECON_LIST_DESC, ", got ",
                     tensors.size());
@@ -227,21 +226,21 @@ void vti_adjoint_B_3d(
 // ===========================================================================
 BackwardOutput backward(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D CUDA backward: free_surface=True not supported "
                 "(Robertsson 1996 / Mittet 2002 anisotropic FS — follow-up).");
 
-    TORCH_CHECK(p.spacing.size() >= 3,
+    SWEEP_CHECK(p.spacing.size() >= 3,
                 "AcousticVTI1st3D backward: spacing must have length >= 3");
     float dx = p.spacing[0];
     float dy = p.spacing[1];
     float dz = p.spacing[2];
 
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st3D backward expects 4 model tensors "
                 "[vp, epsilon, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -263,20 +262,20 @@ BackwardOutput backward(const BackwardInput& in)
     auto c13_t   = stiff.c13;
     auto inv_rho_t = stiff.inv_rho;
 
-    TORCH_CHECK(p.u_forward.defined(),
+    SWEEP_CHECK(p.u_forward.defined(),
                 "AcousticVTI1st3D backward (full mode) requires the forward to "
                 "be run with save_all_wavefields=True so u_forward is populated.");
-    TORCH_CHECK(p.u_forward.dim() == 6,
+    SWEEP_CHECK(p.u_forward.dim() == 6,
                 "u_forward must be (nt, 5, B, nz, ny, nx); got dim ",
                 p.u_forward.dim());
-    TORCH_CHECK(p.u_forward.size(1) == 5,
+    SWEEP_CHECK(p.u_forward.size(1) == 5,
                 "u_forward second dim must be 5 (vx, vy, vz, sH, sV); got ",
                 p.u_forward.size(1));
 
     // Mandatory: propagator/_c.py Wrapper.backward always binds
     // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`.
     AdjWavefieldTensor3D adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vti_1st_3d/full requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
@@ -400,19 +399,19 @@ BackwardOutput backward(const BackwardInput& in)
 // alongside the adjoint pass.
 BackwardOutput backward_bs(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D backward_bs: free_surface=True not supported.");
-    TORCH_CHECK(p.spacing.size() >= 3,
+    SWEEP_CHECK(p.spacing.size() >= 3,
                 "AcousticVTI1st3D backward_bs: spacing length >= 3 required.");
     float dx = p.spacing[0];
     float dy = p.spacing[1];
     float dz = p.spacing[2];
 
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st3D backward_bs expects 4 models "
                 "[vp, eps, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -445,7 +444,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     AdjWavefieldTensor3D adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vti_1st_3d/bs requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
@@ -465,7 +464,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
     forward.bind_physical(p.forward_wavefields);
     auto for_view = forward.view();
 
-    TORCH_CHECK(p.u_last_two.defined(),
+    SWEEP_CHECK(p.u_last_two.defined(),
                 "AcousticVTI1st3D backward_bs requires p.u_last_two from the "
                 "boundary-saving forward.");
     copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0, 0).select(0, 0));
@@ -529,7 +528,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
         ? fdtd::Geom::make(forward_nsrc, B) : fdtd::Geom::make(1, B);
-    TORCH_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
+    SWEEP_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
                 "AcousticVTI1st3D backward_bs: forward_source must be defined "
                 "when source fields are un-injected.");
 
@@ -652,18 +651,18 @@ BackwardOutput backward_bs(const BackwardInput& in)
 // ===========================================================================
 BackwardOutput backward_ckpt(const BackwardInput& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
     BackwardOutput out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st3D backward_ckpt: free_surface=True not supported.");
-    TORCH_CHECK(p.checkpoint_interval >= 1,
+    SWEEP_CHECK(p.checkpoint_interval >= 1,
                 "checkpoint_interval must be >= 1");
-    TORCH_CHECK(p.checkpoints.size() == 11,
+    SWEEP_CHECK(p.checkpoints.size() == 11,
                 "AcousticVTI1st3D backward_ckpt expects 11 checkpoint tensors "
                 "(5 physical + 6 PML memory); got ", p.checkpoints.size());
-    TORCH_CHECK(p.spacing.size() >= 3,
+    SWEEP_CHECK(p.spacing.size() >= 3,
                 "spacing length >= 3 required.");
 
     float dx = p.spacing[0];
@@ -700,7 +699,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     AdjWavefieldTensor3D adjoint;
-    TORCH_CHECK(!p.adjoint_wavefields.empty(),
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vti_1st_3d/ckpt requires the propagator-bound adjoint_wavefields "
                 "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
     adjoint.bind(p.adjoint_wavefields);
@@ -719,7 +718,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     AdjWavefieldTensor3D fwd_state;
     {
         const char* what = "acoustic_vti_1st_3d ckpt replay state";
-        TORCH_CHECK(!p.forward_wavefields.empty(),
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
                     "acoustic_vti_1st_3d/ckpt requires the propagator-bound "
                     "forward_wavefields replay state (cuda_layout base_nvar + pml_nvar slots)");
         auto state = wavefield_set(p.forward_wavefields, 0, AdjWavefieldTensor3D::CKPT_STATE_COUNT, what);
@@ -934,7 +933,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
 BackwardOutput backward_recursive_ckpt(const BackwardInput& /*in*/)
 {
-    TORCH_CHECK(false,
+    SWEEP_CHECK(false,
         "AcousticVTI1st3D CUDA backward_recursive_ckpt is not yet implemented.");
     return {};
 }

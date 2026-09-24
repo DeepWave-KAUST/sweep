@@ -6,6 +6,7 @@
 #include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"   // reuses ElasticCPMLPointer (8 vals in 2D)
+#include "../../../core/check.h"
 
 
 namespace acoustic_vti_1st_2d {
@@ -724,7 +725,7 @@ __global__ void calculate_grad_kernel(
 // ---------------------------------------------------------------------------
 inline VTIWavefieldPointer make_wf_pointer(const std::vector<torch::Tensor>& w)
 {
-    TORCH_CHECK(w.size() == 8,
+    SWEEP_CHECK(w.size() == 8,
                 "AcousticVTI1st 2D expects 8 wavefield tensors; got ", w.size());
     VTIWavefieldPointer p{};
     p.vx    = w[0].data_ptr<float>();
