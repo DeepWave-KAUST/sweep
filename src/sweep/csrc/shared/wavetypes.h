@@ -331,9 +331,16 @@ struct BackwardInput {
     // (zeros_like(forward_source), raw CUDA layout (B,nsrc,nt)), slots
     // 1..N = model grads (zeros_like(models[i])).
     std::vector<torch::Tensor> grads_out;
-    // illum_out = {source_illumination, receiver_illumination}, shapes
-    // identical to what init_rtm_output_{2d,3d} allocates.
+    // illum_out = {source_illumination, receiver_illumination}, model-shaped
+    // (N, C, nz, nx[, ny]), zeroed per backward call; bound whenever the
+    // caller asked for illumination.
     std::vector<torch::Tensor> illum_out;
+    // adcig_out: the space-lag ADCIG cube the backward accumulates into when
+    // compute_adcig is set, (nlag = 2*adcig_max_lag+1, N, C, nz, nx[, ny])
+    // over the padded model, zeroed per backward call.  Bound by _c.py
+    // Wrapper.backward exactly when compute_adcig; returned as
+    // BackwardOutput.adcig.
+    torch::Tensor adcig_out;
 
     // ---- DD cut faces ----
     // Bitmask of tile faces that are interior cuts (a neighbour tile

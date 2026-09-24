@@ -430,6 +430,14 @@ class Wrapper(torch.autograd.Function):
                 "Enable boundary saving via boundary_saving_config={'enabled': True} "
                 "or memory=BoundarySaving()."
             )
+        # The cube the driver accumulates into, Python-owned like the
+        # illumination pair: (nlag, N, C, nz, nx[, ny]) over the padded model,
+        # zeroed per backward call, handed over as adcig_out and returned as
+        # gradients[4] for the model-shaped fit below.
+        if params.compute_adcig:
+            like = ctx.models[0]
+            params.adcig_out = torch.zeros((2 * params.adcig_max_lag + 1, *like.shape),
+                                           dtype=like.dtype, device=like.device)
         params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]
         params.adjoint_workspace = list(cp.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]

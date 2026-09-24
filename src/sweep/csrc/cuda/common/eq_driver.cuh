@@ -561,18 +561,6 @@ void check_stepped_backward(const BackwardInput& p, bool need_recon,
     }
 }
 
-inline void init_rtm_output(RTMOutput& out, const torch::Tensor& vp,
-                            bool want_adcig, int nlag)
-{
-    out.source_illumination = torch::zeros_like(vp);
-    out.receiver_illumination = torch::zeros_like(vp);
-    if (want_adcig) {
-        std::vector<int64_t> shape{(long)nlag};
-        for (auto s : vp.sizes()) shape.push_back(s);
-        out.adcig = torch::zeros(shape, vp.options());
-    }
-}
-
 // Acoustic-flavoured output binding: grads = {grad_wavelet, grad_model} with
 // Python-owned accumulators on the stepped path, plus the RTM/illumination
 // buffers.  Traits whose equation has no wavelet gradient or illumination
@@ -599,31 +587,37 @@ void acoustic_bind_backward_outputs(const BackwardInput& p,
     torch::Tensor grad = p.grads_out[1];
     // OPTIONAL, deliberately: the propagator binds illum_out only when the
     // caller asked for illumination (_c.py Wrapper.backward: ``if
-    // params.compute_illumination and cp.illum_nvar > 0``), and it never binds
-    // the ADCIG cube at all -- so an ADCIG-only backward (compute_adcig with
-    // compute_illumination off) legitimately arrives with an empty list and the
-    // allocation below is the only way it gets its buffers.
+    // params.compute_illumination and cp.illum_nvar > 0``); a backward that
+    // asked for none arrives with an empty list and the two fields stay
+    // undefined, which ``pack_outputs`` hands Python as None.  Nothing is
+    // allocated here: illumination asked for without a bound pair is a
+    // Python/driver contract break.
     if (!p.illum_out.empty()) {
         SWEEP_CHECK(p.illum_out.size() == 2,
                     "illum_out must be {source_illumination, receiver_illumination}");
         illumination.source_illumination = p.illum_out[0];
         illumination.receiver_illumination = p.illum_out[1];
-        SWEEP_CHECK(!p.compute_adcig,
+    } else {
+        SWEEP_CHECK(!p.compute_illumination,
+                    Eq::NAME, " backward: compute_illumination requires the "
+                    "propagator-bound illum_out {source, receiver} "
+                    "(cuda_layout.illum_nvar); nothing allocates it here");
+    }
+    // The space-lag ADCIG cube, Python-owned like the illumination pair:
+    // (nlag, N, C, nz, nx[, ny]) over the padded model, bound as adcig_out
+    // exactly when compute_adcig.  Single-segment backwards only: the cube has
+    // no cross-segment accumulator.
+    if (want_adcig && p.compute_adcig) {
+        SWEEP_CHECK(!p.bw_stepped(),
                     "compute_adcig is not supported on the segmented "
                     "(stepped / domain-decomposed) backward: the ADCIG cube "
                     "has no cross-segment accumulator. Run ADCIG on the "
                     "single-segment backward instead.");
-    } else if (p.compute_illumination || p.compute_adcig) {
-        // Only when something will read them.  ``rtm_out_full`` / ``rtm_out_bs``
-        // already return nullptr on exactly this predicate, so the three
-        // ``zeros_like(vp)`` fields were allocated and memset on EVERY backward
-        // -- a plain FWI gradient included -- for kernels that never ran and a
-        // Python side that drops them (``compute_illumination`` is itself
-        // derived from whether Python allocated a real buffer).  Left
-        // undefined, ``pack_outputs`` hands Python None and its
-        // ``isinstance(..., torch.Tensor)`` guards skip the copy.
-        init_rtm_output(illumination, p.models[0],
-                        want_adcig && p.compute_adcig, 2 * p.adcig_max_lag + 1);
+        const auto& vp = p.models[0];
+        std::vector<int64_t> shape{static_cast<int64_t>(2 * p.adcig_max_lag + 1)};
+        for (auto s : vp.sizes()) shape.push_back(s);
+        illumination.adcig = bound_required(p.adcig_out, shape, vp.options(),
+                                            "adcig_out (space-lag ADCIG cube, (nlag, N, C, grid))");
     }
     grads = {grad_wavelet, grad};
 }

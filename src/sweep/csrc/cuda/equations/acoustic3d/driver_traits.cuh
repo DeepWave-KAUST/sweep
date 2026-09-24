@@ -556,7 +556,11 @@ struct Driver {
                 );
             }
         }
-        if (rtm_out != nullptr) {
+        // Illumination only when asked for -- its buffers are bound then and
+        // only then (the 2-D twin's guard); with ADCIG alone this used to
+        // accumulate into a pair of zeros the driver had allocated and Python
+        // dropped.  The ADCIG cube rides the same time levels on its own toggle.
+        if (rtm_out != nullptr && p.compute_illumination) {
             // The three time levels calculate_grad_utt_3d_band just used, so
             // boundary saving reports the same pseudo-Hessian the full store
             // does. Its own kernel: no gradient arithmetic is touched.
@@ -571,17 +575,17 @@ struct Driver {
                 ctx.phys_x0(), ctx.phys_x1(), ctx.phys_y0(), ctx.phys_y1(),
                 ctx.phys_z0(), ctx.phys_z1()
             );
-            if (rtm_out->adcig.defined() && rtm_out->adcig.numel() > 0) {
-                int nlag = rtm_out->adcig.size(0);
-                int Bloc = rtm_out->adcig.size(1) * rtm_out->adcig.size(2);
-                int max_lag = (nlag - 1) / 2;
-                accumulate_adcig_3d<<<s.launch_config.grid, s.launch_config.block>>>(
-                    for_view.u_next,
-                    adjoint.u_now_t.data_ptr<float>(),
-                    rtm_out->adcig.data_ptr<float>(),
-                    nlag, max_lag, Bloc, s.nx, s.ny, s.nz
-                );
-            }
+        }
+        if (rtm_out != nullptr && rtm_out->adcig.defined() && rtm_out->adcig.numel() > 0) {
+            int nlag = rtm_out->adcig.size(0);
+            int Bloc = rtm_out->adcig.size(1) * rtm_out->adcig.size(2);
+            int max_lag = (nlag - 1) / 2;
+            accumulate_adcig_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+                for_view.u_next,
+                adjoint.u_now_t.data_ptr<float>(),
+                rtm_out->adcig.data_ptr<float>(),
+                nlag, max_lag, Bloc, s.nx, s.ny, s.nz
+            );
         }
         add_source_3d<<<s.source_config.grid, s.source_config.block>>>(
             for_view.u_next,

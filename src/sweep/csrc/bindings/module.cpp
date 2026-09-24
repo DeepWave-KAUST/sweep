@@ -305,6 +305,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("step_phase", &BackwardInput::step_phase)
         .def_readwrite("grads_out", &BackwardInput::grads_out)
         .def_readwrite("illum_out", &BackwardInput::illum_out)
+        .def_readwrite("adcig_out", &BackwardInput::adcig_out)
         .def_readwrite("cut_face_mask", &BackwardInput::cut_face_mask)
         .def_readwrite("forward_wavefields", &BackwardInput::forward_wavefields)
         .def_readwrite("adjoint_wavefields", &BackwardInput::adjoint_wavefields)

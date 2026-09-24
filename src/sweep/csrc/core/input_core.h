@@ -120,6 +120,7 @@ struct BackwardInputCore {
     int step_phase = 0;
     BufList grads_out;
     BufList illum_out;
+    Buf adcig_out;
     int cut_face_mask = 0;
     // (skipped non-field line: int bw_begin() const { return bw_it_begin < 0 ? static_cast<)
     // (skipped non-field line: bool bw_stepped() const { return bw_begin() < static_cast<in)
