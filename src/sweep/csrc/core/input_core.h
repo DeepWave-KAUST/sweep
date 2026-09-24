@@ -127,3 +127,9 @@ struct BackwardInputCore {
     bool compute_adcig = false;
     int adcig_max_lag = 0;
 };
+
+
+#include <type_traits>
+// These cross the C boundary (core/capi.h): plain memory, no std:: members.
+static_assert(std::is_standard_layout<ForwardInputCore>::value, "ForwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<BackwardInputCore>::value, "BackwardInputCore crosses the C boundary");

@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
+#include <type_traits>
 #include <vector>
 #include <initializer_list>
 
@@ -331,3 +332,5 @@ inline std::ostream& operator<<(std::ostream& o, const Buf::Span& s)
     }
     return o << "]";
 }
+
+static_assert(std::is_standard_layout<Buf>::value, "Buf crosses the C boundary");

@@ -48,6 +48,9 @@ for name in ("ForwardInput", "BackwardInput"):
         init = "" if ct in ("Buf", "BufList", "IntSpan", "FloatSpan", "CStrList") else (" = nullptr" if ct.endswith("*") else (default or "").replace("=", "= ").strip() and " " + default.strip() or "{}")
         out.append(f"    {ct} {n}{init};" + (f"   {comment}" if comment else ""))
     out.append("};\n")
+out += ["", "#include <type_traits>", "// These cross the C boundary (core/capi.h): plain memory, no std:: members.",
+        "static_assert(std::is_standard_layout<ForwardInputCore>::value, \"ForwardInputCore crosses the C boundary\");",
+        "static_assert(std::is_standard_layout<BackwardInputCore>::value, \"BackwardInputCore crosses the C boundary\");", ""]
 open(sys.argv[2], "w").write("\n".join(out))
 
 # ---- the adapter: fill a twin from the torch struct, once per call ---------
