@@ -1,5 +1,5 @@
 #pragma once
-#include <torch/extension.h>
+#include <cuda_runtime.h>
 #include "cudautils.h"   // Buf, bufs_of, SWEEP_CHECK
 #include "context.h"
 #include "../../core/check.h"
@@ -30,15 +30,6 @@ struct AcousticCPMLTensor {
 
     int dim = 3;
     bool allocated = false;
-
-    // =========================
-    // Bind (from pml_vals)
-    // =========================
-    // torch spelling, see bind() below.
-    void bind(
-        const std::vector<torch::Tensor>& pml_vals,
-        int dim_
-    ) { bind(bufs_of(pml_vals), dim_); }
 
     void bind(
         const std::vector<Buf>& pml_vals,
@@ -219,17 +210,6 @@ struct AcousticWavefieldTensor {
     bool double_buffer_psi = false;   // true when psi*n_t are present
     bool double_buffer_aux = false;   // true when zeta*n_t are present (fused adjoint)
 
-    // No allocate(): the propagator binds every wavefield the compiled
-    // drivers step (acoustic2d / acoustic3d through the skeleton, the
-    // hand-written acoustic-family drivers through their own binds).
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(
-        const std::vector<torch::Tensor>& tensors,
-        int dim_,
-        bool use_pml_ = true
-    ) { bind(bufs_of(tensors), dim_, use_pml_); }
-
     void bind(
         const std::vector<Buf>& tensors,
         int dim_,
@@ -312,22 +292,6 @@ struct AcousticWavefieldTensor {
 
         allocated = true;
     }
-
-    // Bind one checkpoint replay state set: the 7 (2-D) / 9 (3-D) tensors of
-    // the in-place psi layout (use_pml, no psi double-buffer -- the replay
-    // pairs with the u-only swap()), then check the geometry: the u triple
-    // model-shaped, the CPML aux shaped like the checkpoint slot it is loaded
-    // from.  bind()
-    // checks the count only, and a slot of the wrong shape would read as
-    // garbage inside the kernels rather than fail.
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind_replay_state(
-        const std::vector<torch::Tensor>& tensors,
-        const torch::Tensor& vp,
-        const std::vector<torch::Tensor>& snaps,
-        int dim_
-    ) { bind_replay_state(bufs_of(tensors), buf_of(vp), bufs_of(snaps), dim_); }
 
     void bind_replay_state(
         const std::vector<Buf>& tensors,

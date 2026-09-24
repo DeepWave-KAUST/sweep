@@ -1,6 +1,6 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "elastic.h"
 #include "cudautils.h"
@@ -75,10 +75,6 @@ struct DasMuWavefieldTensor2D {
 
     bool allocated = false;
 
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true) { bind(bufs_of(tensors), use_pml); }
-
     void bind(const std::vector<Buf>& tensors, bool use_pml = true)
     {
         int i = 0;
@@ -108,19 +104,6 @@ struct DasMuWavefieldTensor2D {
         }
         allocated = true;
     }
-
-    // The backward_bs reconstruction: the five elastic fields only, in the
-    // family's bind order [vx, vz, sxx, szz, sxz] (elastic2d's list).  The
-    // strain members stay undefined -- the bs reverse loop steps the
-    // reconstruction with the elastic NOPML kernels (through elastic_view())
-    // and images with the elastic bs kernel, so the strains are never read
-    // or written there -- and so does the CPML memory (only the NOPML kernels
-    // step it).  view()/elastic_view() hand out nullptr for every undefined
-    // member; the field-index helper below returns those nullptrs and every
-    // caller skips a nullptr field.
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind_elastic(const std::vector<torch::Tensor>& tensors) { bind_elastic(bufs_of(tensors)); }
 
     void bind_elastic(const std::vector<Buf>& tensors)
     {
@@ -369,10 +352,6 @@ struct DasMuWavefieldTensor3D {
 
     bool allocated = false;
 
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true) { bind(bufs_of(tensors), use_pml); }
-
     void bind(const std::vector<Buf>& tensors, bool use_pml = true)
     {
         int i = 0;
@@ -417,19 +396,6 @@ struct DasMuWavefieldTensor3D {
         }
         allocated = true;
     }
-
-    // The backward_bs reconstruction: the nine elastic fields only, in the
-    // family's bind order [vx, vy, vz, sxx, syy, szz, sxy, sxz, syz]
-    // (elastic3d's list).  The strain members stay undefined -- the bs
-    // reverse loop steps the reconstruction with the elastic NOPML kernels
-    // (through elastic_view()) and images with the elastic bs kernel, so the
-    // strains are never read or written there -- and so does the CPML memory
-    // (only the NOPML kernels step it).  view()/elastic_view() hand out
-    // nullptr for every undefined member; the field-index helper below
-    // returns those nullptrs and every caller skips a nullptr field.
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind_elastic(const std::vector<torch::Tensor>& tensors) { bind_elastic(bufs_of(tensors)); }
 
     void bind_elastic(const std::vector<Buf>& tensors)
     {

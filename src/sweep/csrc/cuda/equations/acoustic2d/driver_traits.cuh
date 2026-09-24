@@ -38,7 +38,6 @@
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
 
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -50,7 +49,8 @@
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
-#include "../../common/wavetypes.h"
+#include "../../core/input_core.h"
+#include "../../core/outputs.h"
 #include "../../common/eq_driver.cuh"
 #include "../../launch/config.h"
 #include "../../operators/laplace.cuh"

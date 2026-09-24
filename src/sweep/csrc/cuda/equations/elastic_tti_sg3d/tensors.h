@@ -1,6 +1,6 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "kernels.cuh"
 #include "../../../core/check.h"

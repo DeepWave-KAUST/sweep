@@ -17,24 +17,6 @@ enum class CheckpointProfileKind {
 
 class CheckpointRuntime {
 public:
-    // torch spelling: the drivers hand over the input struct's checkpoint
-    // list and the CPU int32 step table; descriptors are what is kept.
-    CheckpointRuntime(
-        const std::vector<torch::Tensor>& checkpoints,
-        int expected_tensors,
-        bool enabled,
-        bool recursive,
-        int checkpoint_interval,
-        const torch::Tensor& checkpoint_steps,
-        bool checkpoint_on_cpu,
-        const char* role,
-        const char* label = "checkpoint",
-        int it_begin = 0
-    )
-        : CheckpointRuntime(bufs_of(checkpoints), expected_tensors, enabled, recursive,
-                            checkpoint_interval, buf_of(checkpoint_steps), checkpoint_on_cpu,
-                            role, label, it_begin)
-    {}
 
     CheckpointRuntime(
         std::vector<Buf> checkpoints,

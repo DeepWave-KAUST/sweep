@@ -31,14 +31,6 @@ static inline BoundaryDtype boundary_dtype_from_tensor(const torch::Tensor& t) {
     }
 }
 
-// Same question asked of an already-converted descriptor: the tag was computed
-// by the overload above at conversion time, so this is the identity.  It exists
-// so call sites that asked a saver member for its storage dtype keep compiling
-// once that member is a Buf.
-static inline BoundaryDtype boundary_dtype_from_tensor(const Buf& b) {
-    return b.dtype();
-}
-
 // The torch twin of core/buf.h's device_index_of(const Buf&): what an
 // entry-point device guard reads while its input is still a tensor.
 static inline int device_index_of(const torch::Tensor& t) {

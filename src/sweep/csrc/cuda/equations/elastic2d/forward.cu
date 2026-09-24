@@ -15,6 +15,7 @@
 #include "../../launch/config.h"
 #include "../../common/wavetypes.h"
 #include "driver_traits.cuh"
+#include "../../common/adapt_inputs.h"   // *InputCore, InputArena, to_torch
 
 namespace elastic2d {
 
@@ -32,12 +33,12 @@ ForwardOutput forward(const ForwardInput& in)
 // and the per-cell category tensor.  The propagator is expected to have set
 // ``in.free_surface=false`` and ``in.has_topo=false`` for this path; the
 // APM moduli themselves carry the free-surface BC.
-ForwardOutput apm_forward(const ForwardInput& in)
+ForwardOutputCore apm_forward_core(const ForwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
 
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     SWEEP_CHECK(p.it_begin == 0 &&
                 (p.it_end < 0 || p.it_end == static_cast<int>(p.nt)) &&
@@ -79,14 +80,14 @@ ForwardOutput apm_forward(const ForwardInput& in)
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, vp.options(), "record_out");
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
-    torch::Tensor u_allt;
-    if (p.save_all_wavefields) u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, vp.options(), "u_allt_out");
+    Buf u_allt;
+    if (p.save_all_wavefields) u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, "u_allt_out");
 
     SolverContext solver{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn,
                          /* free_surface */ false,
@@ -119,15 +120,16 @@ ForwardOutput apm_forward(const ForwardInput& in)
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver, 2, p.use_boundary_saving, p.boundary_on_cpu,
         p.boundary_on_disk, p.boundary_disk_async_read, p.transfer_interval,
-        p.boundary_ring_buffers, p.boundary_disk_files,
+        p.boundary_ring_buffers, disk_files,
         async_copy.compute_stream, async_copy.copy_stream
     );
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+        u_this_t = u_allt.defined() ? u_allt.select(0, it).data_ptr<float>() : nullptr;
 
         LAUNCH_ELASTIC_VELOCITY_APM(
             order, launch_config.grid, launch_config.block,
@@ -150,7 +152,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = elastic_field_ptr(wf, 2, source_fields[isrc].item<int>());
+            float* field = elastic_field_ptr(wf, 2, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field, p.source.data_ptr<float>(), p.sources_loc.data_ptr<int>(),
@@ -169,10 +171,10 @@ ForwardOutput apm_forward(const ForwardInput& in)
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = elastic_field_ptr(wf, 2, receiver_fields[irec].item<int>());
+            float* field = elastic_field_ptr(wf, 2, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel<<<record_config.grid, record_config.block>>>(
-                field, record[irec].data_ptr<float>(),
+                field, record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(), it, nrec, solver
             );
         }
@@ -189,7 +191,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = p.use_boundary_saving ? p.last_two : torch::Tensor();   // the tensor Python bound
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
 }
@@ -197,6 +199,14 @@ ForwardOutput apm_forward(const ForwardInput& in)
 ForwardRunnerPtr forward_runner(const ForwardInput& in)
 {
     return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
+}
+
+
+ForwardOutput apm_forward(const ForwardInput& in_torch)
+{
+    InputArena arena;
+    const ForwardInputCore in = adapt_input(in_torch, arena);
+    return to_torch(apm_forward_core(in), in_torch);
 }
 
 }

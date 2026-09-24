@@ -1,6 +1,6 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "kernels.cuh"
 #include "../../common/cudautils.h"
@@ -24,10 +24,6 @@ struct WavefieldTensor {
     // adjoint, the bs reconstruction and the checkpoint replay -- is bound by
     // the propagator, so the driver owns no wavefield storage.
 
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
-
     void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 14, "ElasticTTI2nd expects 14 wavefield tensors");
@@ -47,13 +43,6 @@ struct WavefieldTensor {
         m_sxzx_t = tensors[i++];
         m_szzz_t = tensors[i++];
     }
-
-    // Partial bind for backward_bs: BackwardInput.forward_wavefields holds
-    // exactly the RECON_WF_COUNT Python-zeroed displacement grids; no CPML
-    // memory is bound (nor allocated) in this mode.
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind_recon(const std::vector<torch::Tensor>& tensors) { bind_recon(bufs_of(tensors)); }
 
     void bind_recon(const std::vector<Buf>& tensors)
     {

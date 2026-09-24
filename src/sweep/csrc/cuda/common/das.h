@@ -1,6 +1,6 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "cudautils.h"
 
@@ -58,10 +58,6 @@ struct DasWavefieldTensor2D {
     // propagator (ForwardInput.wavefields, BackwardInput.adjoint_wavefields /
     // forward_wavefields), so the driver owns no wavefield storage.
 
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
-
     void bind(const std::vector<Buf>& tensors)
     {
         SWEEP_CHECK(tensors.size() == 17, "DAS 2D expects 17 wavefield tensors");
@@ -94,10 +90,6 @@ struct DasWavefieldTensor2D {
     static constexpr int RECON_NVAR = 9;
     static constexpr const char* RECON_LIST_DESC =
         "[exx, ezz, sxx, szz, txx, tzz, das35, das54x, das54z]";
-
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind_recon(const std::vector<torch::Tensor>& tensors) { bind_recon(bufs_of(tensors)); }
 
     void bind_recon(const std::vector<Buf>& tensors)
     {
@@ -258,10 +250,6 @@ struct DasWavefieldTensor3D {
 
     // No allocate(): see DasWavefieldTensor2D -- the propagator binds every
     // DAS 3-D state list.
-
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
 
     void bind(const std::vector<Buf>& tensors)
     {

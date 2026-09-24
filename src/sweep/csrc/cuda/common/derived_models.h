@@ -1,4 +1,5 @@
 #pragma once
+#include <cuda_runtime.h>
 // Model coefficients the drivers derive from the bound models once per call
 // (Lame parameters from vp/vs/rho, VTI stiffness from vp/eps/delta/rho, 1/z
 // for VRZ).  The propagator hands the driver ``cuda_layout.derived_model_nvar``
@@ -11,7 +12,6 @@
 // Bit-exactness: each kernel evaluates the formula in the order and rounding
 // of the torch expression it replaced (see derived_models.cu), so records and
 // gradients are unchanged to the bit.
-#include <torch/extension.h>
 #include <vector>
 #include "cudautils.h"
 
@@ -98,16 +98,7 @@ inline std::vector<Buf> slots(const BufList& bound, int n, const Buf& like, cons
         out.push_back(pool_required(bound, i, like, "derived_models"));
     return out;
 }
-// torch spelling (the hand-written drivers, still on the torch input struct).
-inline std::vector<Buf> slots(const std::vector<torch::Tensor>& bound, int n, const Buf& like, const char* what)
-{
-    const std::vector<Buf> b = bufs_of(bound);
-    return slots(BufList{b.data(), static_cast<int64_t>(b.size())}, n, like, what);
-}
 
-template <class P>
-inline Lame lame(const P& p, const torch::Tensor& vp, const torch::Tensor& vs,
-                 const torch::Tensor& rho, const char* what);   // torch spelling, below
 template <class P>
 inline Lame lame(const P& p, const Buf& vp, const Buf& vs,
                  const Buf& rho, const char* what)
@@ -118,10 +109,6 @@ inline Lame lame(const P& p, const Buf& vp, const Buf& vs,
 }
 
 template <class P>
-inline VtiStiffness vti_stiffness(const P& p, const torch::Tensor& vp, const torch::Tensor& epsilon,
-                                  const torch::Tensor& delta, const torch::Tensor& rho,
-                                  const char* what);   // torch spelling, below
-template <class P>
 inline VtiStiffness vti_stiffness(const P& p, const Buf& vp, const Buf& epsilon,
                                   const Buf& delta, const Buf& rho,
                                   const char* what)
@@ -131,8 +118,6 @@ inline VtiStiffness vti_stiffness(const P& p, const Buf& vp, const Buf& epsilon,
     return {s[C11], s[C13], s[C33], s[INV_RHO]};
 }
 
-template <class P>
-inline Buf reciprocal(const P& p, const torch::Tensor& z, const char* what);   // torch spelling, below
 template <class P>
 inline Buf reciprocal(const P& p, const Buf& z, const char* what)
 {
@@ -164,29 +149,6 @@ inline ViscoCoefficients visco_coefficients(const BufList& bound,
     if (c.tables.gd1 >= 0)  { c.gd1  = s[c.tables.gd1];  derive_scale(B1, dt2, c.gd1); }
     if (c.tables.gd2 >= 0)  { c.gd2  = s[c.tables.gd2];  derive_scale(B2, dt2, c.gd2); }
     return c;
-}
-
-// ---- torch spellings, for the hand-written drivers still on the torch struct ----
-template <class P>
-inline Lame lame(const P& p, const torch::Tensor& vp, const torch::Tensor& vs,
-                 const torch::Tensor& rho, const char* what)
-{ return lame(p, buf_of(vp), buf_of(vs), buf_of(rho), what); }
-template <class P>
-inline VtiStiffness vti_stiffness(const P& p, const torch::Tensor& vp, const torch::Tensor& epsilon,
-                                  const torch::Tensor& delta, const torch::Tensor& rho,
-                                  const char* what)
-{ return vti_stiffness(p, buf_of(vp), buf_of(epsilon), buf_of(delta), buf_of(rho), what); }
-template <class P>
-inline Buf reciprocal(const P& p, const torch::Tensor& z, const char* what)
-{ return reciprocal(p, buf_of(z), what); }
-inline ViscoCoefficients visco_coefficients(const std::vector<torch::Tensor>& bound,
-                                            const torch::Tensor& B1, const torch::Tensor& B2,
-                                            const torch::Tensor& A, bool damping, bool dispersion,
-                                            ViscoMode mode, float dt, float dt2, const char* what)
-{
-    const std::vector<Buf> b = bufs_of(bound);
-    return visco_coefficients(BufList{b.data(), static_cast<int64_t>(b.size())},
-                              buf_of(B1), buf_of(B2), buf_of(A), damping, dispersion, mode, dt, dt2, what);
 }
 
 }  // namespace derived

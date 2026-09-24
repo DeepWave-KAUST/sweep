@@ -3,7 +3,6 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <cufftXt.h>
-#include <ATen/ATen.h>
 #include <algorithm>
 #include <memory>
 #include <mutex>

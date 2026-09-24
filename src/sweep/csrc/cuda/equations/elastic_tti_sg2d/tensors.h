@@ -1,6 +1,6 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "kernels.cuh"
 #include "../../common/cudautils.h"   // ptr_or_null
@@ -11,10 +11,6 @@ struct WavefieldTensor {
     Buf vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t;
     Buf m_vxx_t, m_vxz_t, m_vyx_t, m_vyz_t, m_vzx_t, m_vzz_t;
     Buf m_txxx_t, m_txzz_t, m_txyx_t, m_tyzz_t, m_txzx_t, m_tzzz_t;
-
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors) { bind(bufs_of(tensors)); }
 
     void bind(const std::vector<Buf>& tensors)
     {
@@ -41,14 +37,6 @@ struct WavefieldTensor {
         m_txzx_t = tensors[i++];
         m_tzzz_t = tensors[i++];
     }
-
-    // Boundary-saving reconstruction bind: the 8 physical fields only (the
-    // first 8 slots of the bind() order); the 12 CPML memory tensors stay
-    // undefined, so view() hands the kernels nullptr for them.  Only valid
-    // for the NOPML reverse reconstruction, which never touches m_*.
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind_physical(const std::vector<torch::Tensor>& tensors) { bind_physical(bufs_of(tensors)); }
 
     void bind_physical(const std::vector<Buf>& tensors)
     {

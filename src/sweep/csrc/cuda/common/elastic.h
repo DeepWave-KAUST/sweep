@@ -1,6 +1,6 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "context.h"
 #include "cudautils.h"   // zero_tensor_device_async
@@ -29,9 +29,6 @@ struct ElasticCPMLTensor {
 
     int dim = 3;
     bool allocated = false;
-
-    // torch spelling, see bind() below.
-    void bind(const std::vector<torch::Tensor>& pml_vals, int dim_) { bind(bufs_of(pml_vals), dim_); }
 
     void bind(const std::vector<Buf>& pml_vals, int dim_)
     {
@@ -239,10 +236,6 @@ struct ElasticWavefieldTensor {
     int dim = 2;
     bool use_pml = true;
     bool allocated = false;
-
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true) { bind(bufs_of(tensors), use_pml_); }
 
     void bind(const std::vector<Buf>& tensors, bool use_pml_ = true)
     {
@@ -558,10 +551,6 @@ struct ElasticAdjointWorkspaceTensor {
     // follow them (sg_driver.cuh SgCarrierSlots, from Eq::WS_CARRIERS on), so
     // bind() accepts a longer list and takes only its head.
     static constexpr int nslots(int dim_) { return dim_ == 2 ? 8 : 18; }
-
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the descriptors are what the struct keeps.
-    void bind(const std::vector<torch::Tensor>& tensors, int dim_) { bind(bufs_of(tensors), dim_); }
 
     void bind(const std::vector<Buf>& tensors, int dim_)
     {

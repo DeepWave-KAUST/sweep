@@ -8,14 +8,16 @@
 #include <thread>
 #include <vector>
 
-#include <torch/extension.h>
 
-#include "../buf_torch.h"
 #include "../context.h"
 #include "../cudautils.h"   // copy_tensor_cuda_async, zero_tensor_device_async
 #include "disk_io.cuh"
 #include "kernels.cuh"
 #include "types.cuh"
+
+// The storage dtype of a bound boundary buffer is its descriptor's tag (the
+// adapter computed it from the tensor at conversion time).
+static inline BoundaryDtype boundary_dtype_from_tensor(const Buf& b) { return b.dtype(); }
 
 // boundary_dtype_from_tensor() now lives in ../buf_torch.h, next to buf_of()
 // which needs it to tag a descriptor; the torch::Tensor overload is unchanged
@@ -382,37 +384,6 @@ struct EffectiveBoundarySaver {
         this->last_two = last_two;
     }
 
-    // torch spelling: the drivers still hand over the input struct's tensor
-    // lists; the saver keeps descriptors only, so temporaries suffice.
-    void allocate(
-        bool use_boundary_saving,
-        int dim_,
-        int nvar_,
-        const SolverContext& ctx,
-        const torch::Tensor& ref_tensor,
-        int width = -1,
-        int last_two_nvar = 2,
-        bool override_storage = false,
-        bool store_on_gpu_override = false,
-        int transfer_interval = 1,
-        const std::vector<torch::Tensor>& boundary_cpu = {},
-        const std::vector<torch::Tensor>& boundary_gpu = {},
-        const torch::Tensor& last_two = {},
-        bool use_pinned_memory_ = false,
-        int tangent_pad = 0,
-        const std::vector<torch::Tensor>& boundary_staging = {}
-    )
-    {
-        const std::vector<Buf> cpu = bufs_of(boundary_cpu), gpu = bufs_of(boundary_gpu),
-                               staging = bufs_of(boundary_staging);
-        allocate(use_boundary_saving, dim_, nvar_, ctx, buf_of(ref_tensor), width, last_two_nvar,
-                 override_storage, store_on_gpu_override, transfer_interval,
-                 BufList{cpu.data(), static_cast<int64_t>(cpu.size())},
-                 BufList{gpu.data(), static_cast<int64_t>(gpu.size())},
-                 buf_of(last_two), use_pinned_memory_, tangent_pad,
-                 BufList{staging.data(), static_cast<int64_t>(staging.size())});
-    }
-
     void allocate(
         bool use_boundary_saving,
         int dim_,
@@ -679,13 +650,6 @@ struct EffectiveBoundarySaver {
         }
 
         return v;
-    }
-
-    // torch spelling, see below.
-    void load_from_vector(const std::vector<torch::Tensor>& u_boundary, const torch::Tensor& ref_tensor)
-    {
-        const std::vector<Buf> ub = bufs_of(u_boundary);
-        load_from_vector(BufList{ub.data(), static_cast<int64_t>(ub.size())}, buf_of(ref_tensor));
     }
 
     void load_from_vector(
