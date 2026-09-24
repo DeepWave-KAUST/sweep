@@ -257,21 +257,21 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     if (p.use_boundary_saving) {
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 0).select(0, 0), wavefield.exx_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 1).select(0, 0), wavefield.ezz_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 2).select(0, 0), wavefield.sxx_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 3).select(0, 0), wavefield.szz_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 4).select(0, 0), wavefield.txx_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 5).select(0, 0), wavefield.tzz_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 6).select(0, 0), wavefield.das35_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 7).select(0, 0), wavefield.das54x_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(0, 8).select(0, 0), wavefield.das54z_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), wavefield.exx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 0), wavefield.ezz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 2).select(0, 0), wavefield.sxx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 3).select(0, 0), wavefield.szz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 4).select(0, 0), wavefield.txx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 5).select(0, 0), wavefield.tzz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 6).select(0, 0), wavefield.das35_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 7).select(0, 0), wavefield.das54x_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 8).select(0, 0), wavefield.das54z_t);
     }
 
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
+    out.last_two = boundary_saver.last_two_th_;
     out.record = record;
     return out;
 }

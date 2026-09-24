@@ -31,17 +31,18 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 #include "../cuda/common/boundary/types.cuh"   // BoundaryDtype
 
-// Maximum rank a Buf can describe.  Every buffer the boundary layer binds is
-// rank 3..5 (persistent face / staging ring: 5, per-block int8 scale: 3 in 3-D,
-// 4 in 2-D -- see Layout in src/sweep/memory/shape.py and
-// PropagatorC._int8_scale_shapes).  The one 7-D buffer in the saver
-// (``last_two``, {nvar, 2, B, 1, nz[, ny], nx}) is deliberately NOT a Buf: the
-// equation drivers use it as a real tensor (``select(...).copy_(...)``).
-// buf_of() hard-fails rather than truncating if this is ever too small.
-inline constexpr int BUF_MAX_DIMS = 6;   // inline: odr-used from inline functions in other TUs
+// Maximum rank a Buf can describe.  The boundary layer's buffers are rank
+// 3..5; ``last_two`` is 7 ({storage_nvar, 2, B, 1, nz[, ny], nx}) and was
+// kept a torch::Tensor in the pilot because the drivers ``select(...).copy_``
+// on it.  Those copies now go through the cudautils.h async helpers, so the
+// only thing that stood between last_two and a Buf was this constant: 8 gives
+// it a slot and one of headroom.  buf_of() still hard-fails rather than
+// truncating if a tensor ever exceeds it.
+inline constexpr int BUF_MAX_DIMS = 8;   // inline: odr-used from inline functions in other TUs
 
 // Byte width implied by a storage-dtype tag.  Kept next to the tag so a
 // descriptor's element_size() can be validated against its dtype().
@@ -61,13 +62,18 @@ inline int64_t buf_dtype_element_size(BoundaryDtype dt)
 // without a constructor that would drag torch into this header.
 struct Buf {
     void* data_ = nullptr;
-    int64_t sizes_[BUF_MAX_DIMS] = {0, 0, 0, 0, 0, 0};
-    int64_t strides_[BUF_MAX_DIMS] = {0, 0, 0, 0, 0, 0};
+    int64_t sizes_[BUF_MAX_DIMS] = {0, 0, 0, 0, 0, 0, 0, 0};
+    int64_t strides_[BUF_MAX_DIMS] = {0, 0, 0, 0, 0, 0, 0, 0};
     int64_t numel_ = 0;
     int32_t ndim_ = 0;
     int32_t elem_size_ = 0;
     BoundaryDtype dtype_ = BoundaryDtype::FP32;
     bool defined_ = false;
+    // Where the bytes live.  torch answers this with is_cuda()/device(); the
+    // memcpy helpers pick H2D / D2H / D2D from it, and 80-odd sites assert on
+    // it.  Filled in by buf_of() from the tensor; a default Buf is "not CUDA",
+    // which is the safe answer for every `is_cuda() ||` guard in the tree.
+    bool is_cuda_ = false;
 
     // --- torch::Tensor-compatible read API ---------------------------------
 
@@ -78,6 +84,8 @@ struct Buf {
     // guards with ``!defined() || numel() == 0``, so the two agree there, and
     // the Buf answer is the safe one ("nothing to copy", "face is cut").
     bool defined() const { return defined_; }
+    // torch: whether the buffer is device memory.  See is_cuda_.
+    bool is_cuda() const { return is_cuda_; }
 
     // torch: number of dimensions.
     int64_t dim() const { return static_cast<int64_t>(ndim_); }
@@ -160,6 +168,99 @@ struct Buf {
             }
         }
         return true;
+    }
+
+    // --- torch::Tensor-compatible VIEW API ----------------------------------
+    // These return a new Buf over the same memory.  Like torch they never copy
+    // and never allocate; unlike torch they do not keep the source alive --
+    // nothing here does, see OWNERSHIP above.
+
+    // torch: drop dimension d, keeping index i of it (i may be negative and
+    // counts from the end).  Pointer moves by i * stride(d) elements; the other
+    // sizes and strides are untouched, so a select on a non-leading dim yields
+    // a strided view exactly as torch's does -- is_contiguous() will say so.
+    Buf select(int64_t d, int64_t i) const
+    {
+        if (!defined_) return Buf{};   // the undefined tensor stays undefined, no assert
+        const int64_t k = normalize_dim(d);
+        if (k < 0) return Buf{};
+        if (i < 0) i += sizes_[k];
+        assert(i >= 0 && i < sizes_[k] && "Buf::select: index out of range");
+        Buf r = *this;
+        r.data_ = offset_ptr(i * strides_[k]);
+        for (int64_t j = k; j + 1 < static_cast<int64_t>(ndim_); ++j) {
+            r.sizes_[j] = sizes_[j + 1];
+            r.strides_[j] = strides_[j + 1];
+        }
+        r.sizes_[ndim_ - 1] = 0; r.strides_[ndim_ - 1] = 0;
+        r.ndim_ = ndim_ - 1;
+        r.numel_ = (sizes_[k] == 0) ? 0 : numel_ / sizes_[k];
+        return r;
+    }
+
+    // torch: keep dimension d but restrict it to [start, start + len).  Pointer
+    // moves by start * stride(d); the stride of d is unchanged, so the result
+    // is contiguous only when the source was and d is the outermost dim of
+    // size != 1 -- again exactly torch's rule, which is_contiguous() applies.
+    Buf narrow(int64_t d, int64_t start, int64_t len) const
+    {
+        if (!defined_) return Buf{};   // the undefined tensor stays undefined, no assert
+        const int64_t k = normalize_dim(d);
+        if (k < 0) return Buf{};
+        if (start < 0) start += sizes_[k];
+        assert(start >= 0 && len >= 0 && start + len <= sizes_[k] && "Buf::narrow: range out of range");
+        Buf r = *this;
+        r.data_ = offset_ptr(start * strides_[k]);
+        r.sizes_[k] = len;
+        r.numel_ = (sizes_[k] == 0) ? 0 : (numel_ / sizes_[k]) * len;
+        return r;
+    }
+
+    // torch: reinterpret a CONTIGUOUS buffer with new sizes whose product is
+    // numel(); one entry may be -1 and is inferred.  Strides are recomputed as
+    // row-major, which is the only layout a view of a contiguous buffer can
+    // have.  torch throws on a non-contiguous source; here that is an assert,
+    // and the result of violating it is a Buf that is_contiguous() but points
+    // at strided memory -- so the assert is not decoration.
+    Buf view(std::initializer_list<int64_t> new_sizes) const
+    {
+        if (!defined_) return Buf{};   // the undefined tensor stays undefined, no assert
+        assert(is_contiguous() && "Buf::view: source must be contiguous");
+        Buf r = *this;
+        int64_t n = 0, infer = -1, prod = 1;
+        for (int64_t sz : new_sizes) {
+            assert(n < BUF_MAX_DIMS && "Buf::view: too many dimensions");
+            if (sz == -1) { assert(infer < 0 && "Buf::view: only one -1"); infer = n; r.sizes_[n++] = 0; }
+            else { r.sizes_[n++] = sz; prod *= sz; }
+        }
+        if (infer >= 0) r.sizes_[infer] = (prod == 0) ? 0 : numel_ / prod;
+        for (int64_t j = n; j < BUF_MAX_DIMS; ++j) { r.sizes_[j] = 0; r.strides_[j] = 0; }
+        int64_t st = 1;
+        for (int64_t j = n - 1; j >= 0; --j) { r.strides_[j] = st; st *= r.sizes_[j]; }
+        assert((infer >= 0 || prod == numel_) && "Buf::view: sizes do not multiply to numel");
+        r.ndim_ = static_cast<int32_t>(n);
+        return r;
+    }
+
+    // torch: sizes() as a lightweight span.  Enough for the ways this tree uses
+    // it -- indexing, size(), iteration, passing to a shape-taking helper --
+    // without pulling in c10::ArrayRef.
+    struct Span {
+        const int64_t* p; int64_t n;
+        int64_t size() const { return n; }
+        int64_t operator[](int64_t i) const { return p[i]; }
+        const int64_t* begin() const { return p; }
+        const int64_t* end() const { return p + n; }
+        const int64_t* data() const { return p; }
+    };
+    Span sizes() const { return Span{sizes_, static_cast<int64_t>(ndim_)}; }
+    Span strides() const { return Span{strides_, static_cast<int64_t>(ndim_)}; }
+
+    // Byte-exact pointer arithmetic for the views above: offsets are in
+    // ELEMENTS, and the element width is what buf_of() copied from the tensor.
+    void* offset_ptr(int64_t elements) const
+    {
+        return data_ ? static_cast<char*>(data_) + elements * elem_size_ : nullptr;
     }
 
     // torch's dimension wrapping, shared by size()/stride().  Returns -1 for an

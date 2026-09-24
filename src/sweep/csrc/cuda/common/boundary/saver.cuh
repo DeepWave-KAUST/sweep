@@ -99,11 +99,14 @@ struct EffectiveBoundarySaver {
     Buf left_t, right_t;
     Buf front_t, back_t;
     Buf bottom_t, top_t;
-    // NOT a Buf: the equation drivers use last_two as a real tensor
-    // (``saver.last_two_t.select(...).copy_(...)`` in ~20 driver files, and
-    // ``out.last_two = saver.last_two_t``), and at 7 dimensions it is the one
-    // buffer here that exceeds BUF_MAX_DIMS anyway.
-    torch::Tensor last_two_t;
+    // last_two is a Buf like every other buffer here since step 2 of the
+    // torch-free line: the drivers' ``select(...).copy_(...)`` on it now go
+    // through the memcpy helpers, which take a Buf, and BUF_MAX_DIMS is 8, so
+    // its 7 dimensions fit.  The tensor itself is kept beside it for the one
+    // thing that still needs a tensor -- handing it back to Python as
+    // ``out.last_two`` -- the way storage_th_ sits beside the storage faces.
+    Buf last_two;
+    torch::Tensor last_two_th_;
 
     Buf left_gpu, right_gpu;
     Buf front_gpu, back_gpu;
@@ -492,13 +495,18 @@ struct EffectiveBoundarySaver {
         const torch::TensorOptions& options
     )
     {
-        if (last_two.defined()) {
-            last_two_t = last_two;
-        } else if (dim == 3) {
-            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.ny, ctx.nx}, options);
-        } else {
-            last_two_t = torch::zeros({nvar, last_two_nvar, ctx.B, 1, ctx.nz, ctx.nx}, options);
-        }
+        // Binding is mandatory, as it is for every driver buffer since the
+        // propagator took over allocation: _c.py binds u_last_two whenever
+        // boundary saving is on (.contiguous(), the very tensor that comes
+        // back as out.last_two).  A caller that arrives without it used to get
+        // a silent torch::zeros of the right shape; that fallback is what kept
+        // a torch allocation inside the saver, and it hid a missing binding.
+        TORCH_CHECK(last_two.defined(),
+                    "boundary saving requires the propagator-bound u_last_two "
+                    "({nvar, 2, B, 1, nz[, ny], nx}); the saver no longer allocates it.");
+        (void)options; (void)last_two_nvar;
+        last_two_th_ = last_two;
+        this->last_two = keep(last_two);
     }
 
     void allocate(
@@ -677,7 +685,7 @@ struct EffectiveBoundarySaver {
         if (!enabled) return v;
 
         // last_two is always FP32 (we forced it in allocate above).
-        v.last_two = last_two_t.data_ptr<float>();
+        v.last_two = last_two.data_ptr<float>();
 
         // Detect storage dtype on the persistent face buffer (left_t) to
         // decide which set of pointers to populate.

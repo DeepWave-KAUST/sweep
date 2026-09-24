@@ -340,7 +340,7 @@ public:
 
         ForwardOutput out;
         out.wavefield = u_allt;
-        out.last_two = boundary_saver.last_two_t;
+        out.last_two = boundary_saver.last_two_th_;
         out.record = record;
 
         return out;

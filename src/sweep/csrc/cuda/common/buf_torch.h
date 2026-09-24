@@ -72,6 +72,7 @@ static inline Buf buf_of(const torch::Tensor& t) {
     // Safe for an empty tensor: torch's storage_initialized() is true when
     // numel == 0, and the boundary layer's copy primitives already skip a face
     // whose numel is 0 (they did so precisely because this pointer is null).
+    b.is_cuda_ = t.is_cuda();
     b.data_ = t.data_ptr();
     for (int64_t i = 0; i < nd; ++i) {
         b.sizes_[i] = t.size(i);

@@ -341,21 +341,21 @@ struct Driver {
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
     {
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 0).select(0, 0), wf.vx_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 1).select(0, 0), wf.vy_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 2).select(0, 0), wf.vz_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 3).select(0, 0), wf.sxx_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 4).select(0, 0), wf.syy_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 5).select(0, 0), wf.szz_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 6).select(0, 0), wf.sxy_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 7).select(0, 0), wf.sxz_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 8).select(0, 0), wf.syz_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 9).select(0, 0), wf.exx_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 10).select(0, 0), wf.eyy_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 11).select(0, 0), wf.ezz_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 12).select(0, 0), wf.exy_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 13).select(0, 0), wf.exz_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(0, 14).select(0, 0), wf.eyz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 0).select(0, 0), wf.vx_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 1).select(0, 0), wf.vy_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 2).select(0, 0), wf.vz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 3).select(0, 0), wf.sxx_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 4).select(0, 0), wf.syy_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 5).select(0, 0), wf.szz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 6).select(0, 0), wf.sxy_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 7).select(0, 0), wf.sxz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 8).select(0, 0), wf.syz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 9).select(0, 0), wf.exx_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 10).select(0, 0), wf.eyy_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 11).select(0, 0), wf.ezz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 12).select(0, 0), wf.exy_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 13).select(0, 0), wf.exz_t);
+        copy_tensor_cuda_async(saver.last_two.select(0, 14).select(0, 0), wf.eyz_t);
     }
 
     // ===================================================================== //

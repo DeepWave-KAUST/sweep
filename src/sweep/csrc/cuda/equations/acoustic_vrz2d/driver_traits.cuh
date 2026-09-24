@@ -403,8 +403,8 @@ struct Driver {
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
     {
-        copy_tensor_cuda_async(saver.last_two_t.select(1, 0), wf.u_prev_t);
-        copy_tensor_cuda_async(saver.last_two_t.select(1, 1), wf.u_now_t);
+        copy_tensor_cuda_async(saver.last_two.select(1, 0), wf.u_prev_t);
+        copy_tensor_cuda_async(saver.last_two.select(1, 1), wf.u_now_t);
     }
 
     // ===================================================================== //

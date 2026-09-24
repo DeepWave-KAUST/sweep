@@ -315,14 +315,14 @@ ForwardOutput forward(const ForwardInput& in)
     // not swapped yet (u_prev/u_now roles would be wrong) — phase 2 of the same
     // step does this copy.
     if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(1, 0), wavefield.u_prev_t);
-        copy_tensor_cuda_async(boundary_saver.last_two_t.select(1, 1), wavefield.u_now_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(1, 0), wavefield.u_prev_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(1, 1), wavefield.u_now_t);
     }
 
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
+    out.last_two = boundary_saver.last_two_th_;
     out.record = record;
 
     return out;

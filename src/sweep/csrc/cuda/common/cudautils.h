@@ -4,6 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
+#include "buf_torch.h"   // Buf + buf_of, for the Buf overloads below
 
 inline void validate_cuda_copy_tensors(
     const torch::Tensor& dst,
@@ -78,6 +79,58 @@ inline void zero_tensor_device_async(const torch::Tensor& dst)
         at::cuda::getCurrentCUDAStream()
     ));
 }
+
+// ---- Buf overloads of the async copy/zero helpers (unit 1 of step 2) --------
+// The torch::Tensor overloads above stay as they are; these are the same three
+// operations on descriptors, so a call site whose operands became Bufs keeps
+// its spelling. Direction comes from the descriptor's is_cuda bit, exactly as
+// the tensor overload reads it off the tensor. A Buf is a non-owning view, so
+// these do not touch lifetime -- whoever built the Buf keeps the memory alive
+// until the stream has consumed it, which is the same rule the tensor
+// overloads rely on through torch's own refcount.
+inline void validate_cuda_copy_bufs(const Buf& dst, const Buf& src, const char* label)
+{
+    TORCH_CHECK(dst.defined() && src.defined(), label, " expects defined buffers.");
+    TORCH_CHECK(dst.element_size() == src.element_size(), label, " expects matching element widths.");
+    TORCH_CHECK(dst.dtype() == src.dtype(), label, " expects matching storage dtypes.");
+    TORCH_CHECK(dst.numel() == src.numel(), label, " expects matching numel.");
+    TORCH_CHECK(dst.is_contiguous(), label, " destination must be contiguous.");
+    TORCH_CHECK(src.is_contiguous(), label, " source must be contiguous.");
+}
+
+inline void copy_tensor_cuda_async(const Buf& dst, const Buf& src)
+{
+    validate_cuda_copy_bufs(dst, src, "CUDA async copy");
+    TORCH_CHECK(dst.is_cuda() || src.is_cuda(), "CUDA async copy expects at least one CUDA buffer.");
+    const cudaMemcpyKind kind = (dst.is_cuda() && src.is_cuda()) ? cudaMemcpyDeviceToDevice
+                              : dst.is_cuda()                    ? cudaMemcpyHostToDevice
+                                                                 : cudaMemcpyDeviceToHost;
+    if (dst.numel() == 0) return;
+    C10_CUDA_CHECK(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(),
+                                   static_cast<size_t>(dst.numel() * dst.element_size()),
+                                   kind, at::cuda::getCurrentCUDAStream()));
+}
+
+inline void copy_tensor_device_to_device_async(const Buf& dst, const Buf& src)
+{
+    TORCH_CHECK(dst.is_cuda() && src.is_cuda(), "CUDA device copy expects CUDA buffers.");
+    copy_tensor_cuda_async(dst, src);
+}
+
+inline void zero_tensor_device_async(const Buf& dst)
+{
+    TORCH_CHECK(dst.defined(), "CUDA zero expects a defined buffer.");
+    TORCH_CHECK(dst.is_cuda(), "CUDA zero expects a CUDA buffer.");
+    TORCH_CHECK(dst.is_contiguous(), "CUDA zero destination must be contiguous.");
+    if (dst.numel() == 0) return;
+    C10_CUDA_CHECK(cudaMemsetAsync(dst.data_ptr(), 0,
+                                   static_cast<size_t>(dst.numel() * dst.element_size()),
+                                   at::cuda::getCurrentCUDAStream()));
+}
+// Mixed spellings while the tree converts one file at a time: a torch tensor on
+// one side and a Buf on the other should not force a site to spell buf_of().
+inline void copy_tensor_cuda_async(const Buf& dst, const torch::Tensor& src) { copy_tensor_cuda_async(dst, buf_of(src)); }
+inline void copy_tensor_cuda_async(const torch::Tensor& dst, const Buf& src) { copy_tensor_cuda_async(buf_of(dst), src); }
 
 #define SWEEP_CUDA_SYNC_CHECK(label)                                                \
     do {                                                                            \
