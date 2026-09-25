@@ -1,6 +1,7 @@
 import glob
 import inspect
 import os
+import platform
 import sys
 from distutils import log
 
@@ -201,6 +202,54 @@ def make_build_extension(BuildExtension):
             emit("Finished C++/CUDA compilation")
 
     return SweepBuildExtension
+
+
+def shipped_core_paths(root_dir=ROOT_DIR):
+    return sorted(glob.glob(os.path.join(root_dir, "src", "sweep", "lib", "*", "libsweep_core.so")))
+
+
+def require_shipped_core(root_dir=ROOT_DIR):
+    """SWEEP_REQUIRE_CORE=1 (the release script sets it): refuse to package a
+    wheel without a prebuilt core.  MANIFEST.in prunes src/sweep/lib from the
+    sdist, so a bare ``python -m build`` packs the wheel from that sdist and
+    silently ships no core; the release path is ``python -m sweep.build --core``
+    then ``python -m build --wheel`` from the same tree."""
+    if not env_flag_enabled("SWEEP_REQUIRE_CORE"):
+        return
+    if shipped_core_paths(root_dir):
+        return
+    raise SystemExit(
+        "SWEEP_REQUIRE_CORE=1 but no src/sweep/lib/*/libsweep_core.so is present. "
+        "A bare `python -m build` packs the wheel from the sdist, which prunes "
+        "src/sweep/lib, so the wheel would ship no core. Build the core first "
+        "(`python -m sweep.build --core`), then run `python -m build --wheel` "
+        "from the same tree."
+    )
+
+
+def host_wheel_platform():
+    """manylinux tag of the build host, or plain linux when glibc is unknown."""
+    machine = platform.machine() or "x86_64"
+    if not sys.platform.startswith("linux"):
+        return f"{sys.platform}_{machine}"
+    libc, version = platform.libc_ver()
+    parts = version.split(".") if libc == "glibc" else []
+    if len(parts) >= 2 and all(p.isdigit() for p in parts[:2]):
+        return f"manylinux_{parts[0]}_{parts[1]}_{machine}"
+    return f"linux_{machine}"
+
+
+def wheel_platform_kwargs(root_dir=ROOT_DIR):
+    """``options`` for setup(): pin the wheel to the build host's platform only
+    when a prebuilt core sits under src/sweep/lib -- the core is a native .so
+    but the shim still compiles on first use, so the wheel stays py3-none and
+    only its platform tag changes. Without a core the wheel is ...-any."""
+    cores = shipped_core_paths(root_dir)
+    if not cores:
+        return {}
+    plat = host_wheel_platform()
+    log.info("shipped core(s) %s -> platform wheel %s", ", ".join(cores), plat)
+    return {"options": {"bdist_wheel": {"plat_name": plat}}}
 
 
 def build_ext_kwargs(build_cuda=None):

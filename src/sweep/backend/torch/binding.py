@@ -15,8 +15,10 @@ import os
 def is_available() -> bool:
     """True when the compiled ``sweep._C`` backend is **usable** — either it is
     already compiled on disk (needing no toolkit), or PyTorch, a CUDA GPU and a
-    suitable ``nvcc`` (>=12.4) are present so it can be JIT-compiled on first
-    use. Does NOT trigger the compile."""
+    CUDA core (the wheel's prebuilt one plus the CUDA runtime headers torch's
+    pip wheels bring -- no nvcc -- else a suitable ``nvcc`` >=12.4 to build it)
+    are present so the shim can be JIT-compiled on first use. Does NOT trigger
+    the compile."""
     try:
         from sweep import is_torch_binding_available
         return is_torch_binding_available()
@@ -45,9 +47,10 @@ def is_compiled() -> bool:
 def diagnostics() -> dict:
     """Diagnostics for the compiled backend — usable / why-not / nvcc / built.
 
-    ``prebuilt`` is the one that explains an otherwise confusing pair: with an
-    ahead-of-time extension the backend is usable even though ``cuda_home`` is
-    None, because nothing has to be compiled.
+    ``prebuilt`` and ``shipped_core`` explain the otherwise confusing pairs:
+    with an ahead-of-time extension, or with the wheel's prebuilt CUDA core
+    fitting this torch and GPU, the backend is usable even though ``cuda_home``
+    is None, because nothing needs nvcc.
     """
     try:
         from sweep import _jit, _prebuilt_binding_present
@@ -59,10 +62,12 @@ def diagnostics() -> dict:
             "cuda_home": _jit._find_cuda_home(),
             "already_compiled": is_compiled(),
             "prebuilt": prebuilt,            # compiled ahead of time, no toolkit needed
+            "shipped_core": _jit.shipped_core_info(),   # {path, reason, tag}
         }
     except Exception as exc:  # pragma: no cover
         return {"usable": False, "reason": f"{type(exc).__name__}: {exc}",
-                "cuda_home": None, "already_compiled": False, "prebuilt": False}
+                "cuda_home": None, "already_compiled": False, "prebuilt": False,
+                "shipped_core": {"path": None, "reason": "not probed", "tag": ""}}
 
 
 __all__ = ["diagnostics", "is_available", "is_compiled"]

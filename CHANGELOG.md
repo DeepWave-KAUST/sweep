@@ -10,6 +10,45 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **The wheel ships a prebuilt CUDA core; first use of `impl='c'` no longer
+  needs nvcc.**  The compiled backend now builds in two stages: `libsweep_core.so`
+  (every `.cu`, nvcc, torch-free) and a thin torch shim (`module.cpp` + the CPU
+  binding, plain C++) linked against it.  It is one wheel, carrying the core for
+  CUDA 12 as a fat binary (`sweep/lib/cu12/libsweep_core.so` + a `core.json`
+  sidecar with ABI version, CUDA release, archs, PTX and sha256; more CUDA tags
+  can ride along later), so `pip install sweepx` followed by the first `impl='c'`
+  call, or `sweep.precompile()`, compiles only the shim -- about a minute, no
+  nvcc, and no toolkit as long as the CUDA runtime headers are present: torch's
+  pip cu12 wheels bring them (`nvidia-cuda-runtime-cu12`), a toolkit's include
+  dir serves too.  `_jit.load()` picks the shipped core when its ABI, CUDA major
+  and archs fit this process (PTX makes newer cards fit; a GPU outside the
+  shipped archs and older than the shipped PTX, e.g. Pascal sm_6x, does not) and
+  otherwise falls back to the unchanged local core build, which is also what a
+  torch built for another CUDA major, an sdist or a clone gets, since neither
+  carries a core; `SWEEP_CORE=<path>` overrides the lookup,
+  `_jit.shipped_core_info()` reports what was chosen and why, and
+  `sweep.backend.torch.binding.diagnostics()` gains a `shipped_core` key with
+  the same answer.  `can_compile()` is satisfied by a fitting core with no nvcc
+  on the machine, and `python -m sweep.build --no-gpu-required` no longer
+  demands `TORCH_CUDA_ARCH_LIST` when a shipped core fits (the arch list only
+  names the target of a local core build).  cuFFT is linked dynamically and
+  preloaded from torch's `nvidia-cufft` wheel (or `<cuda_home>/lib64`) before
+  the shim imports; the optional extra `sweepx[cuda12]` pulls
+  `nvidia-cufft-cu12` and `nvidia-cuda-runtime-cu12` when a torch wheel did not.
+  Release side: `python -m sweep.build --core [--archs ...] [--out DIR]
+  [--cuda-home DIR]` produces the core and sidecar without a GPU (`--out`
+  defaults to inside the installed `sweep` package, `sweep/lib/<tag>`,
+  `manylinux_<glibc>_x86_64` tag is the build host's glibc, so build on the
+  oldest one you support.  Measured size: a 134 MB `.so` and a 38 MB wheel
+  for the default arch list (six SASS targets + sm_90 PTX), against PyPI's 100 MB per-file limit -- keep a
+  single `+PTX` entry, the newest arch.  A tree holding a core turns the wheel
+  into a platform wheel, otherwise it stays `py3-none-any`.  `src/sweep/lib/` is
+  git-ignored and pruned from the sdist, so build the core, then `python -m
+  build --wheel` from the same tree: a bare `python -m build` packs the wheel
+  from the pruned sdist and ships no core.  `SWEEP_REQUIRE_CORE=1` (the release
+  script sets it) makes `setup.py` refuse such a tree instead of quietly
+  producing a core-less wheel.
+
 - **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
   repository ran the tests before, and nothing could: `pytest test/` was unable
   to return 0.  With that fixed, every push and pull request to `dev` runs the

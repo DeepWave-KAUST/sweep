@@ -6,7 +6,11 @@
 #include <tuple>
 #include <vector>
 
-#include <ATen/cuda/CUDAContext.h>
+// c10's stream header, not ATen/cuda/CUDAContext.h: that one drags in
+// cublas_v2.h -> cuda_fp16.h -> nv/target, which torch's pip wheels do not
+// ship (they bring cuda_runtime_api.h and little else), so the shim would only
+// compile with a full toolkit.  Same stream object either way.
+#include <c10/cuda/CUDAStream.h>
 
 #include "shared/wavetypes.h"
 #include "core/capi.h"
@@ -14,7 +18,7 @@
 inline cudaStream_t torch_stream_for_device(int device_index)
 {
     if (device_index < 0) return nullptr;
-    return at::cuda::getCurrentCUDAStream(device_index).stream();
+    return c10::cuda::getCurrentCUDAStream(device_index).stream();
 }
 
 inline cudaStream_t torch_stream_for(const std::vector<torch::Tensor>& models)

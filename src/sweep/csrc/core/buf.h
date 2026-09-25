@@ -21,7 +21,7 @@
 // the method itself.
 //
 // DEPENDENCY NOTE.  The only sweep header this pulls in is the storage-dtype
-// tag ``BoundaryDtype`` (cuda/common/boundary/types.cuh), which is itself
+// tag ``BoundaryDtype`` (core/dtype.h), which is itself
 // torch-free.  That is an upward include from core/ into cuda/common/ and
 // should be resolved -- by moving the dtype tag down into core/ -- when more of
 // the core is carved out; it is left alone here so this pilot changes no
@@ -36,7 +36,7 @@
 #include <vector>
 #include <initializer_list>
 
-#include "../cuda/common/boundary/types.cuh"   // BoundaryDtype
+#include "dtype.h"   // BoundaryDtype (torch- and CUDA-free)
 
 // Maximum rank a Buf can describe.  The boundary layer's buffers are rank
 // 3..5; ``last_two`` is 7 ({storage_nvar, 2, B, 1, nz[, ny], nx}) and was

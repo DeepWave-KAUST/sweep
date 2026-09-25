@@ -2,12 +2,16 @@
 (``libsweep_core.so``, nvcc) and the thin torch shim (``sweep._C``, a plain C++
 compile against the *user's* torch, linked to the core).
 
-This is why a single ``py3-none`` wheel of sweep works with **any** torch version
-and any Python 3: nothing torch-specific ships pre-built.  The core depends on
-CUDA only, so it is built once per machine (or shipped, step 5); the shim is
-what a torch upgrade rebuilds, in about a minute, without nvcc.  First use of
-``impl='c'`` pays the one-time compile; every run after that loads the cached
-libraries instantly.
+This is why one wheel of sweep works with **any** torch version and any Python
+3: nothing torch-specific ships pre-built.  The core depends on CUDA only, so
+the wheel ships it prebuilt under ``sweep/lib/cu<major>/`` (CUDA 12 today, a
+fat binary, see ``python -m sweep.build --core``) and first use compiles only
+the shim, in about a minute, without nvcc: a C++ compiler plus the CUDA runtime
+headers torch's pip wheels bring (``nvidia-cuda-runtime-cu12``) or a toolkit's
+include dir.  When no shipped core fits -- a torch built for another CUDA
+major, a GPU outside the shipped archs and older than the shipped PTX, an sdist
+install -- the core is built here once with nvcc.  Every run after the first
+loads the cached libraries instantly.
 
 The C++ sources ship inside the wheel under ``sweep/csrc/`` (package data).
 """
@@ -18,12 +22,14 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent
 _CSRC = _PKG / "csrc"
+_LIB = _PKG / "lib"      # shipped cores: lib/<cu tag>/libsweep_core.so + core.json
 
 _module = None          # cached compiled module (process-local)
 
@@ -46,13 +52,28 @@ def _nvidia_pip_includes() -> list[str]:
     return incs
 
 
-def _torch_cuda_major() -> int | None:
+def _pip_cuda_runtime_headers() -> bool:
+    """Whether the CUDA runtime headers the shim needs are around without a
+    toolkit.  c10/cuda/CUDAStream.h brings cuda_runtime_api.h (the pip
+    ``nvidia-cuda-runtime`` wheel), which itself includes crt/host_defines.h
+    (the pip ``nvidia-cuda-nvcc`` wheel) -- both must be visible."""
+    dirs = _nvidia_pip_includes()
+    return all(any(os.path.isfile(os.path.join(d, h)) for d in dirs)
+               for h in ("cuda_runtime_api.h", os.path.join("crt", "host_defines.h")))
+
+
+def _torch_cuda_version() -> str | None:
+    """torch's CUDA release, e.g. "12.8"; None for a CPU-only torch."""
     try:
         import torch
-        v = torch.version.cuda            # e.g. "12.8"
-        return int(v.split(".")[0]) if v else None
+        return torch.version.cuda or None
     except Exception:
         return None
+
+
+def _torch_cuda_major() -> int | None:
+    v = _torch_cuda_version()
+    return int(v.split(".")[0]) if v else None
 
 
 def _nvcc_version(nvcc: str):
@@ -155,14 +176,174 @@ def _ensure_ninja_on_path() -> None:
         pass
 
 
+# --------------------------------------------------------------------------- #
+# the shipped core (wheel-bundled libsweep_core.so)
+# --------------------------------------------------------------------------- #
+def _core_tag(cuda_version: str) -> str:
+    """"12.8" -> "cu12": the drawer a shipped core is filed under -- torch's
+    CUDA major, the unit the driver ABI and torch's own wheel tags go by."""
+    return "cu" + str(cuda_version).strip().split(".")[0]
+
+
+def _shim_abi() -> int | None:
+    """SWEEP_CORE_ABI_VERSION the shim compiles against, read from the header
+    that defines it, so the shim and the core it links can never disagree
+    silently about the C boundary."""
+    try:
+        text = (_CSRC / "core" / "capi.h").read_text()
+        m = re.search(r"^\s*#define\s+SWEEP_CORE_ABI_VERSION\s+(\d+)", text, re.M)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _device_arch() -> str | None:
+    """"<maj><min>" of the visible device (e.g. "90"), None without one."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        maj, minr = torch.cuda.get_device_capability()
+        return f"{maj}{minr}"
+    except Exception:
+        return None
+
+
+def _sm(arch: str) -> tuple[int, int] | None:
+    """"86" -> (8, 6); the last digit is the minor, so "100" -> (10, 0)."""
+    try:
+        return int(arch[:-1]), int(arch[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _core_fits(sidecar: dict) -> str:
+    """"" when this process can use a core described by ``sidecar``, else why not."""
+    abi = _shim_abi()
+    if sidecar.get("abi") != abi:
+        return f"core ABI {sidecar.get('abi')} != shim ABI {abi}"
+    want = _torch_cuda_major()
+    if want is None:
+        return "torch has no CUDA build"
+    have = str(sidecar.get("cuda", "")).split(".")[0]
+    if have != str(want):
+        return f"core is CUDA {sidecar.get('cuda')}, torch is CUDA {_torch_cuda_version()}"
+    arch = _device_arch()
+    if arch is None:
+        return ""                          # no device: nothing to check the SASS against
+    archs = [str(a) for a in sidecar.get("archs", [])]
+    if arch in archs:
+        return ""
+    # SASS is binary-compatible within a major: an sm_80 cubin runs on sm_86.
+    dev = _sm(arch)
+    for a in archs:
+        s = _sm(a)
+        if dev and s and s[0] == dev[0] and s[1] <= dev[1]:
+            return ""
+    # PTX embedded for an older arch is JIT-ed forward by the driver.
+    for p in sidecar.get("ptx", []):
+        try:
+            if int(p) <= int(arch):
+                return ""
+        except (TypeError, ValueError):
+            continue
+    return (f"GPU sm_{arch} is not among the core's archs {archs} (nor above one "
+            f"of its major) and no PTX is older")
+
+
+def _shipped_core() -> tuple[Path | None, str]:
+    """The shipped ``libsweep_core.so`` this process can link, or (None, why).
+
+    ``SWEEP_CORE=<path>`` wins (a custom core, checked through the ``core.json``
+    beside it; accepted blind when there is none, as long as torch has a CUDA
+    build to run it under).  Otherwise the wheel's ``lib/<cu tag>/`` for torch's
+    CUDA major.  The core does not depend on torch, so a fitting one skips nvcc
+    entirely: only the shim is compiled here.
+    """
+    env = os.environ.get("SWEEP_CORE", "").strip()
+    if env:
+        # Resolved: the shim's rpath is this directory, and a symlink that is
+        # later repointed would silently change what gets loaded.
+        so = Path(env).expanduser().resolve()
+        if not so.is_file():
+            return None, f"SWEEP_CORE={env} is not a file"
+        if so.name != "libsweep_core.so":
+            # -lsweep_core is what the link line says, so the name is fixed.
+            return None, "SWEEP_CORE must point at a file named libsweep_core.so"
+        side = so.parent / "core.json"
+        if not side.is_file():
+            if _torch_cuda_major() is None:
+                return None, f"SWEEP_CORE={env}: torch has no CUDA build"
+            return so, "SWEEP_CORE without sidecar"
+        try:
+            sidecar = json.loads(side.read_text())
+        except (OSError, ValueError) as exc:
+            return None, f"SWEEP_CORE sidecar {side} is unreadable: {exc}"
+        why = _core_fits(sidecar)
+        return (so, "ok (SWEEP_CORE)") if not why else (None, f"SWEEP_CORE={env}: {why}")
+
+    ver = _torch_cuda_version()
+    if ver is None:
+        return None, "torch has no CUDA build"
+    d = _LIB / _core_tag(ver)
+    so = d / "libsweep_core.so"
+    if not so.is_file():
+        return None, f"no shipped core for {_core_tag(ver)} (no {so})"
+    try:
+        sidecar = json.loads((d / "core.json").read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"shipped core {so} has no readable core.json: {exc}"
+    why = _core_fits(sidecar)
+    return (so, "ok") if not why else (None, why)
+
+
+def shipped_core_info() -> dict:
+    """For diagnostics: which shipped core (if any) this process would use."""
+    so, why = _shipped_core()
+    ver = _torch_cuda_version()
+    return {"path": str(so) if so else None, "reason": why,
+            "tag": _core_tag(ver) if ver else ""}
+
+
+def _cufft_soname(major: int | None) -> str | None:
+    # cuFFT's soname trails the CUDA major by one (cu12 -> .so.11, cu13 -> .so.12).
+    return f"libcufft.so.{major - 1}" if major in (12, 13) else None
+
+
+def _preload_cufft(cuda_home: str | None) -> None:
+    """Load the cuFFT runtime the core needs into the global namespace before
+    the shim is imported, so a core whose rpath does not reach the pip
+    ``nvidia-cufft`` wheel (a custom SWEEP_CORE, a moved site-packages) still
+    resolves.  Nothing found: fall through to the dynamic loader silently."""
+    import ctypes
+    dirs = _nvidia_pip_libs()
+    if cuda_home:
+        dirs += [os.path.join(cuda_home, "lib64"), os.path.join(cuda_home, "lib")]
+    soname = _cufft_soname(_torch_cuda_major())
+    for d in dirs:
+        cands = [os.path.join(d, soname)] if soname else \
+            sorted(glob.glob(os.path.join(d, "libcufft.so.*")), key=len)
+        for c in cands:
+            if os.path.isfile(c):
+                try:
+                    ctypes.CDLL(c, mode=ctypes.RTLD_GLOBAL)
+                    return
+                except OSError:
+                    continue
+
+
 def can_compile() -> tuple[bool, str]:
     """(usable, reason) — True when the backend can be COMPILED here.
 
-    Compiling needs torch, an nvcc, and a target architecture. It does **not**
-    need a visible device: ``TORCH_CUDA_ARCH_LIST`` names the target explicitly,
-    which is how wheels are cross-built, and it is what lets a CI job or a
-    CPU-partition allocation warm the cache a later GPU run reuses. Gating the
-    compile on a device forces every build to occupy a scarce GPU.
+    With a shipped core that fits (see :func:`_shipped_core`) only the shim is
+    compiled: plain C++ against torch, no nvcc, no target arch -- a C++ compiler
+    and the CUDA runtime headers, from torch's pip cu12 wheels
+    (``nvidia-cuda-runtime-cu12``) or a toolkit's include dir.  Otherwise the
+    core is built locally, which needs an nvcc and a target architecture -- but
+    **not** a visible device: ``TORCH_CUDA_ARCH_LIST`` names the target
+    explicitly, which is how wheels are cross-built, and it is what lets a CI
+    job or a CPU-partition allocation warm the cache a later GPU run reuses.
+    Gating the compile on a device forces every build to occupy a scarce GPU.
 
     RUNNING the result still needs a device -- that is :func:`can_build`.
     """
@@ -170,6 +351,14 @@ def can_compile() -> tuple[bool, str]:
         import torch
     except Exception:
         return False, "PyTorch is not installed"
+    core, core_why = _shipped_core()
+    if core is not None:
+        if _find_cuda_home() is None and not _pip_cuda_runtime_headers():
+            return False, (
+                f"a shipped CUDA core fits ({core_why}) but the torch shim needs the "
+                "CUDA runtime headers: pip install nvidia-cuda-runtime-cu12 nvidia-cuda-nvcc-cu12, or a "
+                "CUDA toolkit")
+        return True, "ok"
     if not torch.cuda.is_available() and not os.environ.get("TORCH_CUDA_ARCH_LIST"):
         return False, (
             "no CUDA GPU is visible and TORCH_CUDA_ARCH_LIST is unset, so there "
@@ -177,12 +366,13 @@ def can_compile() -> tuple[bool, str]:
             "TORCH_CUDA_ARCH_LIST=8.9 to build for a card this machine has not got)")
     if _find_cuda_home() is None:
         return False, (
-            "no suitable CUDA toolkit found (need nvcc >=12.4 matching your "
-            "torch's CUDA major — 12.0-12.3 ship a broken <cuda/std> bf16 header). "
-            "sweep compiles its GPU backend on first use; provide a recent nvcc "
-            "via `module load cuda`, a system CUDA Toolkit, or "
-            "`conda install -c nvidia cuda-toolkit`. To try an older toolkit "
-            "anyway, set SWEEP_JIT_ALLOW_OLD_CUDA=1)")
+            f"no shipped CUDA core fits ({core_why}) and no suitable CUDA toolkit "
+            "was found to build one (need nvcc >=12.4 matching your torch's CUDA "
+            "major — 12.0-12.3 ship a broken <cuda/std> bf16 header). "
+            "Provide a recent nvcc via `module load cuda`, a system CUDA Toolkit, "
+            "or `conda install -c nvidia cuda-toolkit`, or point SWEEP_CORE at a "
+            "libsweep_core.so built elsewhere. To try an older toolkit anyway, "
+            "set SWEEP_JIT_ALLOW_OLD_CUDA=1)")
     return True, "ok"
 
 
@@ -445,20 +635,25 @@ def _ninja_has_work(d: Path) -> bool:
         return True
 
 
-def _will_build(build_dir: Path) -> bool:
+def _will_build(build_dir: Path, core_shipped: bool = False) -> bool:
     """Whether the next load() will actually *compile* (vs reuse the cached
     libraries): the core's ninja graph or the shim's has work.  A cached .so can
     still be rebuilt -- e.g. after the user upgrades torch, whose changed headers
     make the shim recompile -- so "the .so exists" is not the signal; ninja is.
     This drives the one-time "compiling..." notice + verbose output, so a genuine
-    rebuild is never a silent hang that looks frozen."""
+    rebuild is never a silent hang that looks frozen.  With a shipped core only
+    the shim's graph counts: the local core dir is not touched.  A shipped core
+    that merely MOVED (relocated site-packages, SWEEP_CORE repointed) changes
+    only the shim's link line, so ninja relinks it silently: no notice, no
+    core build."""
     core = build_dir / "core"
-    if not (core / "libsweep_core.so").exists() or not (core / "build.ninja").exists():
+    if not core_shipped and (not (core / "libsweep_core.so").exists()
+                             or not (core / "build.ninja").exists()):
         return True
     if not (build_dir / "sweep_C.so").exists() or not (build_dir / "build.ninja").exists():
         return True
     _ensure_ninja_on_path()
-    return _ninja_has_work(core) or _ninja_has_work(build_dir)
+    return (not core_shipped and _ninja_has_work(core)) or _ninja_has_work(build_dir)
 
 
 # --------------------------------------------------------------------------- #
@@ -485,32 +680,48 @@ def load(compile_only: bool = False):
         raise RuntimeError(
             f"sweep's compiled backend (impl='c') is unavailable: {why}. "
             "Use impl='eager' for a pure-Python (slower) CPU/GPU path.")
-    cuda_home = _find_cuda_home()
-    os.environ["CUDA_HOME"] = cuda_home
-    os.environ["PATH"] = os.path.join(cuda_home, "bin") + os.pathsep + os.environ.get("PATH", "")
+    core_so, core_why = _shipped_core()
+    cuda_home = _find_cuda_home()          # may be None with a shipped core: no nvcc needed then
+    if cuda_home:
+        os.environ["CUDA_HOME"] = cuda_home
+        os.environ["PATH"] = os.path.join(cuda_home, "bin") + os.pathsep + os.environ.get("PATH", "")
     _ensure_ninja_on_path()
     build_dir = Path(cpp_extension._get_build_directory("sweep_C", verbose=False))
     build_dir.mkdir(parents=True, exist_ok=True)
     sources, inc = _stage(build_dir)
-    # Use ONLY the selected CUDA toolkit's own headers (version-consistent with
-    # its nvcc). Do NOT mix in the pip nvidia-*/include dirs: for a torch built
-    # against an older CUDA (torch 2.5 = cu121 -> 12.1 headers) those clash with a
-    # newer toolkit and break the <cuda/std> bf16 compile.
-    inc = inc + [p for p in (os.path.join(cuda_home, "include"),
-                             os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
-                 if os.path.isdir(p)]
-    building = _will_build(build_dir)
+    # The shim includes c10/cuda/CUDAStream.h, hence cuda_runtime_api.h.  Use
+    # ONLY the selected CUDA toolkit's own headers (version-consistent with its
+    # nvcc); do NOT mix in the pip nvidia-*/include dirs next to a toolkit: for
+    # a torch built against an older CUDA (torch 2.5 = cu121 -> 12.1 headers)
+    # those clash with a newer toolkit and break the <cuda/std> bf16 compile.
+    # Without a toolkit (shipped core) the pip headers are the only ones, and
+    # they match torch; can_compile() already refused when they are missing.
+    if cuda_home:
+        inc = inc + [p for p in (os.path.join(cuda_home, "include"),
+                                 os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
+                     if os.path.isdir(p)]
+    else:
+        inc = inc + _nvidia_pip_includes()
+    building = _will_build(build_dir, core_shipped=core_so is not None)
     if building:
         if torch.cuda.is_available():
             cap = torch.cuda.get_device_capability()
             target = f"your GPU (sm_{cap[0]}{cap[1]})"
         else:
             target = f"TORCH_CUDA_ARCH_LIST={os.environ.get('TORCH_CUDA_ARCH_LIST')}"
-        print(f"[sweep] compiling the CUDA backend for {target} -- "
-              f"one-time, ~2-5 min, then cached at {build_dir} ...",
-              file=sys.stderr, flush=True)
-    core_so = _build_core(build_dir, _core_sources(sources), inc, cuda_home, verbose=building)
+        if core_so is not None:
+            print(f"[sweep] compiling the torch shim of the CUDA backend against torch "
+                  f"{torch.__version__} (prebuilt core {core_so.parent.name}) -- "
+                  f"one-time, ~1 min, no nvcc, then cached at {build_dir} ...",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[sweep] no prebuilt CUDA core fits ({core_why}); compiling the "
+                  f"CUDA backend for {target} -- one-time, ~2-5 min, then cached at "
+                  f"{build_dir} ...", file=sys.stderr, flush=True)
+    if core_so is None:
+        core_so = _build_core(build_dir, _core_sources(sources), inc, cuda_home, verbose=building)
     core_dir = str(core_so.parent)
+    _preload_cufft(cuda_home)
     _module = cpp_extension.load(
         name="sweep_C",
         sources=_shim_sources(sources),                 # module.cpp + the CPU binding: C++ only, no nvcc

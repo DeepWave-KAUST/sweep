@@ -113,9 +113,10 @@ def _prebuilt_binding_present() -> bool:
 
 def is_torch_binding_available() -> bool:
     """Return True when ``sweep._C`` can be used for ``impl='c'`` — either it is
-    already compiled on disk, or PyTorch + a CUDA GPU + nvcc are present so it
-    can be JIT-compiled against your torch on first use. Does NOT trigger the
-    compile itself (see ``sweep._jit``)."""
+    already compiled on disk, or PyTorch + a CUDA GPU are present and the CUDA
+    core is at hand (the prebuilt one the wheel ships for your torch's CUDA
+    major and GPU, else an nvcc to build it) so the torch shim can be compiled
+    on first use. Does NOT trigger the compile itself (see ``sweep._jit``)."""
     if find_spec("torch") is None:
         return False
     # A pre-built extension answers this on its own: the kernels exist, and
@@ -134,21 +135,29 @@ def is_torch_binding_available() -> bool:
 def precompile(require_gpu: bool = True) -> bool:
     """Build the compiled CUDA backend (``sweep._C``) now.
 
-    Runs the one-time, per-GPU-arch JIT compile (~3-5 min) up front — e.g. right
-    after ``pip install`` — so it does NOT surprise you on first use of
-    ``impl='c'``. A no-op once cached. Raises a clear error if PyTorch, a CUDA
-    GPU, or a suitable ``nvcc`` (>=12.6) is missing::
+    Runs the one-time compile up front — e.g. right after ``pip install`` — so
+    it does NOT surprise you on first use of ``impl='c'``. A no-op once cached.
+    With the prebuilt CUDA core the wheel ships (built for CUDA 12, a fat
+    binary over the common archs) this compiles only the thin torch shim: about
+    a minute, plain C++, no nvcc -- a C++ compiler and the CUDA runtime headers
+    torch's pip cu12 wheels bring (``nvidia-cuda-runtime-cu12``) or a toolkit's
+    include dir. When no shipped core fits -- a torch built for another CUDA
+    major, a GPU outside the shipped archs and older than the shipped PTX, an
+    sdist/clone install -- the core is built here first with nvcc (~2-5 min).
+    Raises a clear error if PyTorch, a CUDA GPU, or (when the core must be
+    built) a suitable ``nvcc`` (>=12.4) is missing::
 
         python -c "import sweep; sweep.precompile()"
 
     ``require_gpu=False`` builds **without a visible device**, for CI and for
-    warming the cache from a CPU allocation that a later GPU job reuses;
-    ``TORCH_CUDA_ARCH_LIST`` must then name the target architecture::
+    warming the cache from a CPU allocation that a later GPU job reuses; when
+    the core has to be built, ``TORCH_CUDA_ARCH_LIST`` must then name the
+    target architecture::
 
         TORCH_CUDA_ARCH_LIST=7.0 python -m sweep.build
 
-    Compiling needs nvcc and a target arch, not a card — gating it on a device
-    forces every build to occupy a GPU it does not use.
+    Compiling needs a core and a target arch, not a card — gating it on a
+    device forces every build to occupy a GPU it does not use.
     """
     import sweep._C as _C
 

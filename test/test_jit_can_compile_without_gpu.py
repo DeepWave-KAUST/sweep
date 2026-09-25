@@ -10,6 +10,11 @@ Split: ``can_compile()`` = torch + nvcc + an architecture to target;
 ``can_build()`` = that, plus a device. ``is_torch_binding_available()`` keeps
 asking ``can_build()``, because a machine that can only cross-compile cannot
 serve ``impl='c'``.
+
+Every test here is about the nvcc path, so the shipped-core lookup is pinned
+away: on a tree where ``python -m sweep.build --core`` has run, ``src/sweep/lib``
+holds a core that fits and ``can_compile()`` would say "ok" without ever
+looking at nvcc or the arch.
 """
 import sys
 
@@ -19,8 +24,16 @@ from sweep import _jit
 
 
 @pytest.fixture
-def no_gpu(monkeypatch):
+def no_shipped_core(monkeypatch, tmp_path):
+    monkeypatch.setattr(_jit, "_LIB", tmp_path / "lib")
+    monkeypatch.delenv("SWEEP_CORE", raising=False)
+    return monkeypatch
+
+
+@pytest.fixture
+def no_gpu(no_shipped_core):
     import torch
+    monkeypatch = no_shipped_core
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(_jit, "_find_cuda_home", lambda: "/usr/local/cuda")
     return monkeypatch
@@ -54,16 +67,20 @@ def test_binding_availability_still_follows_can_build(no_gpu, monkeypatch):
     assert sweep.is_torch_binding_available() is False
 
 
-def test_can_build_reports_the_toolkit_problem_when_there_is_a_device(monkeypatch):
+def test_can_build_reports_the_toolkit_problem_when_there_is_a_device(no_shipped_core):
     import torch
+    monkeypatch = no_shipped_core
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(_jit, "_find_cuda_home", lambda: None)
     ok, why = _jit.can_build()
     assert not ok and "CUDA toolkit" in why
 
 
-def test_build_cli_refuses_without_an_arch(monkeypatch, capsys):
+def test_build_cli_refuses_without_an_arch(no_shipped_core, capsys):
+    """The arch gate exists for the nvcc path; a fitting shipped core would
+    skip it, hence the pin."""
     from sweep import build
+    monkeypatch = no_shipped_core
     monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
     assert build.main(["--no-gpu-required"]) == 2
     assert "TORCH_CUDA_ARCH_LIST" in capsys.readouterr().err
