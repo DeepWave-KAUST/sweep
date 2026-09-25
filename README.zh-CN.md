@@ -25,18 +25,19 @@
 
 ```bash
 pip install sweepx
-python -c "import sweep; sweep.precompile()"   # 可选:现在就预热 torch shim(~1 分钟,无需 nvcc)
+python -c "import sweep; sweep.precompile()"   # 可选:确认 CUDA core 已就位(有自带 core 时什么都不做)
 ```
 
-wheel 自带面向 CUDA 12 的**预编译 CUDA core**(`sweep/lib/cu12/libsweep_core.so`,sm_70–sm_90 + PTX 的 fat binary;以后可以在同一个 wheel 里再搭上别的 CUDA tag)。编译版后端(`impl='c'`)只剩一层薄 torch shim 要对着**你自己的** torch 编 —— 纯 C++,约一分钟,不需要 nvcc,之后缓存在 `~/.cache/torch_extensions`。这一步只要一个 C++ 编译器和 CUDA runtime 头文件;torch 的 pip cu12 wheel 自带这些头文件(`nvidia-cuda-runtime-cu12` 和 `nvidia-cuda-nvcc-cu12`),toolkit 的 include 目录也行,所以只要这套 pip CUDA runtime 在,就不需要 toolkit。上面 `precompile()` 那行让它**现在就完成**;去掉它则在**第一次使用 `impl='c'` 时**自动编。**不锁 torch/CUDA 版本**。只有在没有合适的预编 core 时才需要 `nvcc >= 12.4` —— 你的 torch 是另一个 CUDA 大版本,或 GPU 既不在自带的架构列表里**又**比自带的 PTX 更老(例如 Pascal sm_6x;PTX 只能让更新的卡适配)—— 这时 core 会在本地按你的卡编一遍(2–5 分钟);从 sdist / 克隆安装同样需要 nvcc。`SWEEP_CORE=<path/to/libsweep_core.so>` 可指定自定义 core。如果你的 torch wheel 没带 cuFFT 或 CUDA runtime 头文件,`pip install "sweepx[cuda12]"` 补上。纯 Python 的 **eager** / **JAX** 后端这些都不需要。
+wheel 自带面向 CUDA 12 的**预编译 CUDA core**(`sweep/lib/cu12/libsweep_core.so`,sm_70–sm_90 + PTX 的 fat binary;以后可以在同一个 wheel 里再搭上别的 CUDA tag)。编译版后端(`impl='c'`)通过一层纯 Python 的 `ctypes` 层(`sweep._capi`)驱动这个 core:直接用每个张量的 `data_ptr()`、shape、stride 和 dtype 填 core 的 C 结构体 —— 所以 `pip install` 之后**什么都不用编译**:不需要 nvcc、不需要 C++ 编译器、不需要 CUDA 头文件(依赖里的 `ninja` 只在本地编 core 时才会跑)。全程不经过 torch 的 C++ ABI,因此同一个 wheel 任意 torch 版本都能用。只有在没有合适的预编 core 时才需要 `nvcc >= 12.4` —— 你的 torch 是另一个 CUDA 大版本,或 GPU 既不在自带的架构列表里**又**比自带的 PTX 更老(例如 Pascal sm_6x;PTX 只能让更新的卡适配)—— 或者从 sdist / 克隆安装(两者都不带 core)。即便这时,也只编 CUDA core 本身,在本地按你的卡编一遍(2–5 分钟,`python -m sweep.build` 时或首次使用时),之后的运行直接复用,不再需要 nvcc;从来不需要编 torch shim。`SWEEP_CORE=<path/to/libsweep_core.so>` 可指定自定义 core。core 运行时链接 cuFFT;torch 的 cu12 wheel 自带它,没带的话 `pip install "sweepx[cuda12]"` 补上。纯 Python 的 **eager** / **JAX** 后端这些都不需要。
 
 **从源码安装**(克隆仓库):
 
 ```bash
-# 纯 Python(PyTorch / JAX eager 路径);impl='c' 首次使用时 JIT 编译
+# 纯 Python(PyTorch / JAX eager 路径);克隆里没有预编 core,所以
+# 首次使用 impl='c' 时会在本地编 CUDA core(需要 nvcc)
 pip install .
 
-# 现在就预编译 C++/CUDA 扩展 —— 跳过首次使用时的编译(克隆里没有预编 core,
+# 现在就预编译 C++/CUDA 扩展 —— 跳过首次使用时的 core 编译(克隆里没有预编 core,
 # 这一步和首次使用时的编译都需要 nvcc)
 SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 ```

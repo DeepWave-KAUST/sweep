@@ -10,17 +10,41 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **`impl='c'` talks to the prebuilt core through a pure-Python `ctypes`
+  layer; after `pip install` nothing compiles.**  `sweep._capi` fills the
+  core's C structs from each tensor's `data_ptr()`, shape, strides and dtype
+  and calls into `libsweep_core.so` directly, so the default path no longer
+  builds a torch shim at all: no nvcc, no C++ compiler, no CUDA headers, no
+  ninja run (the `ninja` dependency serves a local core build only), and no
+  torch C++ ABI in the loop -- the same wheel works with any
+  torch version by construction.  `nvcc` is needed only when no shipped core
+  fits (a torch built for another CUDA major, a GPU outside the shipped archs
+  and older than the shipped PTX) or for an sdist/clone install, and then only
+  the CUDA core is compiled (`python -m sweep.build`, or the first `impl='c'`
+  use); a local core built once is reused by later runs without nvcc, on the
+  strength of a source stamp (`sources.sha256`: the csrc tree plus the nvcc
+  flags) written beside it.  `sweep.precompile()` now just makes sure a core
+  exists and loads it: a no-op with a shipped core, the local core build
+  otherwise.  The compiled pybind shim plus the CPU engine survive as the
+  developer path behind `SWEEP_JIT_FULL=1` (needs torch's C++ headers and a
+  compiler; nvcc only when no shipped core fits).  A core that fits a GPU only
+  through its PTX is refused when the driver's CUDA release is older than the
+  toolkit that emitted it (the driver could not JIT it), with the versions in
+  the reason.
+  `sweep.backend.torch.binding.diagnostics()` gains a `shim` key, `"ctypes"`
+  or `"pybind"`.
+
 - **The wheel ships a prebuilt CUDA core; first use of `impl='c'` no longer
-  needs nvcc.**  The compiled backend now builds in two stages: `libsweep_core.so`
-  (every `.cu`, nvcc, torch-free) and a thin torch shim (`module.cpp` + the CPU
-  binding, plain C++) linked against it.  It is one wheel, carrying the core for
+  needs nvcc.**  The CUDA kernels are built once, ahead of the wheel, as a
+  torch-free `libsweep_core.so` (every `.cu`, nvcc) behind a plain C
+  interface; the torch side binds to it without compiling (the ctypes layer
+  above -- the compiled pybind shim, `module.cpp` + the CPU binding, is the
+  `SWEEP_JIT_FULL=1` developer path).  It is one wheel, carrying the core for
   CUDA 12 as a fat binary (`sweep/lib/cu12/libsweep_core.so` + a `core.json`
   sidecar with ABI version, CUDA release, archs, PTX and sha256; more CUDA tags
   can ride along later), so `pip install sweepx` followed by the first `impl='c'`
-  call, or `sweep.precompile()`, compiles only the shim -- about a minute, no
-  nvcc, and no toolkit as long as the CUDA runtime headers are present: torch's
-  pip cu12 wheels bring them (`nvidia-cuda-runtime-cu12`), a toolkit's include
-  dir serves too.  `_jit.load()` picks the shipped core when its ABI, CUDA major
+  call, or `sweep.precompile()`, compiles nothing: no nvcc and no toolkit.
+  `_jit.core_path()` picks the shipped core when its ABI, CUDA major
   and archs fit this process (PTX makes newer cards fit; a GPU outside the
   shipped archs and older than the shipped PTX, e.g. Pascal sm_6x, does not) and
   otherwise falls back to the unchanged local core build, which is also what a
@@ -33,13 +57,13 @@ and this project adheres to
   demands `TORCH_CUDA_ARCH_LIST` when a shipped core fits (the arch list only
   names the target of a local core build).  cuFFT is linked dynamically and
   preloaded from torch's `nvidia-cufft` wheel (or `<cuda_home>/lib64`) before
-  the shim imports; the optional extra `sweepx[cuda12]` pulls
-  `nvidia-cufft-cu12` and `nvidia-cuda-runtime-cu12` when a torch wheel did not.
+  the core is loaded; the optional extra `sweepx[cuda12]` pulls
+  `nvidia-cufft-cu12` when a torch wheel did not.
   Release side: `python -m sweep.build --core [--archs ...] [--out DIR]
   [--cuda-home DIR]` produces the core and sidecar without a GPU (`--out`
   defaults to inside the installed `sweep` package, `sweep/lib/<tag>`,
   `manylinux_<glibc>_x86_64` tag is the build host's glibc, so build on the
-  oldest one you support.  Measured size: a 134 MB `.so` and a 38 MB wheel
+  oldest one you support.  Measured size: a 126 MB `.so` and a 37 MB wheel
   for the default arch list (six SASS targets + sm_90 PTX), against PyPI's 100 MB per-file limit -- keep a
   single `+PTX` entry, the newest arch.  A tree holding a core turns the wheel
   into a platform wheel, otherwise it stays `py3-none-any`.  `src/sweep/lib/` is

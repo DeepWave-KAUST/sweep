@@ -112,40 +112,42 @@ def _prebuilt_binding_present() -> bool:
 
 
 def is_torch_binding_available() -> bool:
-    """Return True when ``sweep._C`` can be used for ``impl='c'`` — either it is
-    already compiled on disk, or PyTorch + a CUDA GPU are present and the CUDA
-    core is at hand (the prebuilt one the wheel ships for your torch's CUDA
-    major and GPU, else an nvcc to build it) so the torch shim can be compiled
-    on first use. Does NOT trigger the compile itself (see ``sweep._jit``)."""
+    """Return True when ``sweep._C`` can be used for ``impl='c'`` — either a
+    compiled extension is already on disk, or PyTorch + a CUDA GPU are present
+    and the CUDA core is at hand: the prebuilt one the wheel ships for your
+    torch's CUDA major and GPU (nothing compiles on first use; the shim is
+    ctypes), else an nvcc to build one.  Does NOT load or build anything (see
+    ``sweep._jit``)."""
     if find_spec("torch") is None:
         return False
     # A pre-built extension answers this on its own: the kernels exist, and
-    # asking `can_build()` would demand an nvcc the run does not need. Checking
-    # this first is what keeps a `SWEEP_BUILD_CUDA=1` install from silently
-    # falling back to eager on a node with no CUDA toolkit loaded.
+    # asking `can_build()` would demand a device the check does not need.
+    # Checking this first is what keeps a `SWEEP_BUILD_CUDA=1` install from
+    # silently falling back to eager on a node with no CUDA toolkit loaded.
     if _prebuilt_binding_present():
         return True
     try:
         from sweep import _jit
+        # A shipped core that fits needs no nvcc -- can_build() knows, its
+        # can_compile() stops at the shipped core.  What it still needs is a
+        # device: the ctypes shim serves the CUDA core only, so without one
+        # 'auto' must resolve to eager, not to a backend with no CPU engine.
         return _jit.can_build()[0]
     except Exception:
         return False
 
 
 def precompile(require_gpu: bool = True) -> bool:
-    """Build the compiled CUDA backend (``sweep._C``) now.
+    """Make sure a CUDA core for ``sweep._C`` exists now.
 
-    Runs the one-time compile up front — e.g. right after ``pip install`` — so
-    it does NOT surprise you on first use of ``impl='c'``. A no-op once cached.
-    With the prebuilt CUDA core the wheel ships (built for CUDA 12, a fat
-    binary over the common archs) this compiles only the thin torch shim: about
-    a minute, plain C++, no nvcc -- a C++ compiler and the CUDA runtime headers
-    torch's pip cu12 wheels bring (``nvidia-cuda-runtime-cu12``) or a toolkit's
-    include dir. When no shipped core fits -- a torch built for another CUDA
-    major, a GPU outside the shipped archs and older than the shipped PTX, an
-    sdist/clone install -- the core is built here first with nvcc (~2-5 min).
-    Raises a clear error if PyTorch, a CUDA GPU, or (when the core must be
-    built) a suitable ``nvcc`` (>=12.4) is missing::
+    Nothing compiles on first use: the shim is ctypes and the wheel ships the
+    core prebuilt (CUDA 12, a fat binary over the common archs), so with a
+    fitting core this is a no-op — e.g. right after ``pip install``.  When no
+    shipped core fits -- a torch built for another CUDA major, a GPU outside
+    the shipped archs and older than the shipped PTX, an sdist/clone install --
+    the core is built here once with nvcc (~2-5 min) and cached, and that is
+    the surprise this call moves up front.  Raises a clear error if PyTorch, a
+    CUDA GPU, or (for that build) a suitable ``nvcc`` (>=12.4) is missing::
 
         python -c "import sweep; sweep.precompile()"
 
@@ -154,10 +156,16 @@ def precompile(require_gpu: bool = True) -> bool:
     the core has to be built, ``TORCH_CUDA_ARCH_LIST`` must then name the
     target architecture::
 
-        TORCH_CUDA_ARCH_LIST=7.0 python -m sweep.build
+        TORCH_CUDA_ARCH_LIST=7.0 python -m sweep.build --no-gpu-required
 
     Compiling needs a core and a target arch, not a card — gating it on a
     device forces every build to occupy a GPU it does not use.
+    ``SWEEP_JIT_FULL=1`` (the compiled developer path) also compiles the pybind
+    shim here, against your torch, as it always did.
+
+    On the default path the core is also loaded into this process (a dlopen
+    and the ABI guard, no CUDA call), so
+    ``sweep.backend.torch.binding.is_compiled()`` answers True afterwards.
     """
     import sweep._C as _C
 
@@ -169,7 +177,22 @@ def precompile(require_gpu: bool = True) -> bool:
         # calling one would be an AttributeError on exactly the install the
         # README tells people to do (SWEEP_BUILD_CUDA=1 pip install).
         return True
-    loader(compile_only=not require_gpu)
+    from sweep import _jit
+    if _jit.jit_full():
+        loader(compile_only=not require_gpu)
+        return True
+    # The ctypes shim needs only the core.  The device check is what
+    # require_gpu relaxes: a local build then targets TORCH_CUDA_ARCH_LIST.
+    ok, why = _jit.can_compile() if not require_gpu else _jit.can_build()
+    if not ok:
+        raise RuntimeError(
+            f"sweep's compiled backend (impl='c') is unavailable: {why}. "
+            "Use impl='eager' for a pure-Python (slower) CPU/GPU path.")
+    _jit.core_path()
+    # Load it too: is_compiled() reads the shim's cache (_capi._lib), and a
+    # core that fits on paper but fails the ABI guard is better found now.
+    from . import _capi
+    _capi.core_lib()
     return True
 
 

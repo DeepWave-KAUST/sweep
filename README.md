@@ -25,35 +25,37 @@
 
 ```bash
 pip install sweepx
-python -c "import sweep; sweep.precompile()"   # optional: warm up the torch shim now (~1 min, no nvcc)
+python -c "import sweep; sweep.precompile()"   # optional: check that a CUDA core is in place (a no-op with the shipped one)
 ```
 
 The wheel carries a **prebuilt CUDA core** for CUDA 12 (`sweep/lib/cu12/libsweep_core.so`,
 a fat binary for sm_70–sm_90 plus PTX; more CUDA tags can ride along later). The
-compiled backend (`impl='c'`) then only needs a thin torch shim compiled against
-**your** torch — plain C++, about a minute, no nvcc — cached in
-`~/.cache/torch_extensions`. That compile needs a C++ compiler and the CUDA runtime
-headers, which torch's pip cu12 wheels bring (`nvidia-cuda-runtime-cu12` and
-`nvidia-cuda-nvcc-cu12`) or a toolkit's include dir provides, so no toolkit is needed
-as long as that pip CUDA runtime is present. The `precompile()`
-line does it up front; drop it and it happens automatically on first use of
-`impl='c'`. No torch/CUDA version lock-in. `nvcc >= 12.4` is needed only when no
-shipped core fits — a torch built for another CUDA major, or a GPU outside the
-shipped archs *and* older than the shipped PTX (e.g. Pascal sm_6x; PTX is what makes
-newer cards fit) — in which case the core is built locally for your card (2–5 min),
-or when installing from an sdist/clone. `SWEEP_CORE=<path/to/libsweep_core.so>`
-points at a custom core. If your torch wheel did not bring cuFFT or the CUDA runtime
-headers, `pip install "sweepx[cuda12]"` pulls them. The pure-Python **eager** /
-**JAX** backends need none of this.
+compiled backend (`impl='c'`) drives that core through a pure-Python `ctypes` layer
+(`sweep._capi`) that fills the core's C structs straight from each tensor's
+`data_ptr()`, shape, strides and dtype — so after `pip install` **nothing compiles**:
+no nvcc, no C++ compiler, no CUDA headers (the `ninja` dependency only runs for a
+local core build). No torch C++ ABI is involved,
+which is why the same wheel works with any torch version. `nvcc >= 12.4` is needed
+only when no shipped core fits — a torch built for another CUDA major, or a GPU
+outside the shipped archs *and* older than the shipped PTX (e.g. Pascal sm_6x; PTX
+is what makes newer cards fit) — or when installing from an sdist/clone, which carry
+no core. Even then only the CUDA core is compiled, locally for your card (2–5 min,
+at `python -m sweep.build` or on first use) and reused by later runs without nvcc;
+there is never a torch shim to build.
+`SWEEP_CORE=<path/to/libsweep_core.so>` points at a custom core. The core links
+cuFFT at run time; torch's cu12 wheels bring it, and `pip install "sweepx[cuda12]"`
+pulls it if yours did not. The pure-Python **eager** / **JAX** backends need none of
+this.
 
 **From source** (a clone):
 
 ```bash
-# pure-Python (PyTorch / JAX eager path); impl='c' JIT-compiles on first use
+# pure-Python (PyTorch / JAX eager path); a clone has no shipped core, so the
+# first use of impl='c' builds the CUDA core locally (nvcc)
 pip install .
 
-# prebuild the C++/CUDA extension now — skips the first-use compile (a clone has no
-# shipped core, so this and the first-use compile both need nvcc)
+# prebuild the C++/CUDA extension now — skips the first-use core build (a clone has
+# no shipped core, so this and the first-use build both need nvcc)
 SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 ```
 

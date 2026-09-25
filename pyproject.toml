@@ -26,13 +26,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# JIT distribution: ONE wheel ships the C++/CUDA *sources* plus a prebuilt,
-# torch-free CUDA core for CUDA 12 (sweep/lib/cu12/libsweep_core.so; more tags
-# can ride along later) and compiles only the thin torch shim sweep._C against
-# the user's OWN torch on first use (see sweep/_jit.py) -- plain C++, about a
-# minute, needs a C++ compiler and the CUDA runtime headers torch's pip cu12
-# wheels bring (or a toolkit's include dir), no nvcc -- so the wheel works with
-# any torch version + any Python 3. torch is unpinned.
+# ONE wheel ships the C++/CUDA *sources* plus a prebuilt, torch-free CUDA core
+# for CUDA 12 (sweep/lib/cu12/libsweep_core.so; more tags can ride along later).
+# sweep._C is a pure-Python ctypes layer over that core's C API (sweep/_capi.py):
+# nothing compiles after pip install -- no nvcc, no C++ compiler, no CUDA
+# headers -- and no torch C++ ABI is involved, so the wheel works with any torch
+# version + any Python 3. torch is unpinned.
 # nvcc (system / `module load cuda` / `conda install -c nvidia cuda-nvcc`) is
 # needed only when no shipped core fits (torch built for another CUDA major, a
 # card outside the shipped archs and older than the shipped PTX, sdist/clone
@@ -47,11 +46,10 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda  = ["torch"]
-# The shipped core links cuFFT dynamically and the shim compiles against the
-# CUDA runtime headers; both come from the pip nvidia-* wheels torch's cu12
-# builds pull in. This extra is for a torch that did not (conda torch, a CPU
-# wheel plus a system driver).
-cuda12 = ["nvidia-cufft-cu12", "nvidia-cuda-runtime-cu12"]
+# The shipped core links cuFFT dynamically; torch's cu12 pip builds pull that
+# wheel in. This extra is for a torch that did not (conda torch, a CPU wheel plus
+# a system driver).
+cuda12 = ["nvidia-cufft-cu12"]
 torch = ["torch"]
 jax   = ["jax", "jaxlib"]
 all   = ["torch", "jax", "jaxlib"]
@@ -76,8 +74,10 @@ where = ["src"]
 include = ["sweep*", "geophyai*"]
 exclude = ["sweep.csrc*", "sweep.lib*"]
 
-# Ship the C++/CUDA sources inside the wheel — sweep._C is JIT-compiled from them
-# on first use (csrc is data, not an importable package, hence excluded above).
+# Ship the C++/CUDA sources inside the wheel: sweep._C is a ctypes shim over the
+# prebuilt core below, so nothing compiles; csrc is for the local core build when
+# no shipped core fits, and the SWEEP_JIT_FULL=1 developer path (csrc is data,
+# not an importable package, hence excluded above).
 [tool.setuptools.package-data]
 sweep = [
     "csrc/**/*.cu", "csrc/**/*.cuh", "csrc/**/*.cpp",

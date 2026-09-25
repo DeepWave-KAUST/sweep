@@ -1,9 +1,9 @@
-"""The C boundary (core/capi.h) is compiled into the extension: its symbols
-load through ctypes, the entry table names exactly the module's bound
-<equation>_<op> functions (same names, every kind right), the stepped-runner
-equations are the ten with runner factories, the session and the stream round
-trip, and the visco FFT query answers.  The dispatcher itself is exercised by
-the torch shim once it calls through this boundary (4c)."""
+"""The C boundary (core/capi.h) of the prebuilt ``libsweep_core.so``: its
+symbols load through ctypes (``sweep._capi.core_lib()``, no compiled module
+file exists on the default path any more), the entry table names exactly the
+functions ``sweep._C``'s namespace binds (same names, every kind right), the
+session and the stream round trip, and the visco FFT query answers.  The
+dispatcher itself is exercised by the ctypes shim (test_capi_shim.py)."""
 import ctypes
 import pytest
 
@@ -13,19 +13,39 @@ OPS = ("forward", "apm_forward", "backward", "backward_bs", "backward_ckpt", "ba
 
 
 def _lib():
-    from sweep import _jit
-    mod = _jit.load()                      # the compiled module (sweep._C proxies its attributes)
-    return mod, ctypes.CDLL(mod.__file__)
+    """The core at hand, or a skip -- never a build.  Only a core that needs
+    no compiling counts (the shipped one that fits, ``SWEEP_CORE``, or a cached
+    local build whose source stamp is current); one that is there but cannot
+    be loaded (the ABI guard: a core older than the shim's mirror, a missing
+    cuFFT) skips with the reason rather than failing on the binary."""
+    from sweep import _capi, _jit
+    if _jit._shipped_core()[0] is None and _jit._cached_local_core() is None:
+        pytest.skip(f"no core at hand without compiling: {_jit._shipped_core()[1]}")
+    try:
+        _jit.core_path()
+        lib = _capi.core_lib()
+    except (RuntimeError, OSError) as exc:
+        pytest.skip(f"the core at hand cannot be loaded: {exc}")
+    import sweep._C as mod                 # the pure-Python namespace over the core
+    return mod, lib
+
+
+def _bound(mod):
+    """The ``<equation>_<op>`` names ``sweep._C`` exposes.  The namespace is
+    filled on first attribute access, so touch one before listing."""
+    getattr(mod, "acoustic2d_forward")
+    return sorted(a for a in dir(mod) if any(a.endswith("_" + op) for op in OPS) and not a.startswith("_"))
 
 
 def test_abi_version_and_entry_table_match_the_module():
+    from sweep import _core_abi
     mod, lib = _lib()
-    assert lib.sweep_core_abi_version() == 1
+    assert lib.sweep_core_abi_version() == _core_abi.ABI_VERSION
     n = lib.sweep_entry_count()
     lib.sweep_entry_name.restype = ctypes.c_char_p
     names = [lib.sweep_entry_name(i).decode() for i in range(n)]
     assert lib.sweep_entry_name(n) is None and lib.sweep_entry_kind(n) == -1
-    bound = sorted(a for a in dir(mod) if any(a.endswith("_" + op) for op in OPS) and not a.startswith("_"))
+    bound = _bound(mod)
     assert sorted(names) == bound, set(names) ^ set(bound)
     for i, nm in enumerate(names):
         op = next(op for op in OPS if nm.endswith("_" + op))

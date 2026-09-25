@@ -23,10 +23,30 @@ import pytest
 from sweep import _jit
 
 
+@pytest.fixture(autouse=True)
+def _no_compile(monkeypatch):
+    """Nothing here may compile: every test is about the *answer* of the nvcc
+    path, never the path itself.  Staging is the first step of any core build
+    and the shim compile is torch's ``cpp_extension.load``, so both are
+    refused, together with the build entries behind them."""
+    from torch.utils import cpp_extension
+
+    def refuse(*_a, **_k):
+        raise AssertionError("a compile was attempted; these tests only ask, never build")
+
+    monkeypatch.setattr(cpp_extension, "load", refuse)
+    for entry in ("_stage", "_build_core"):        # _jit.load itself stays: a test inspects its signature
+        monkeypatch.setattr(_jit, entry, refuse)
+    yield
+
+
 @pytest.fixture
 def no_shipped_core(monkeypatch, tmp_path):
     monkeypatch.setattr(_jit, "_LIB", tmp_path / "lib")
     monkeypatch.delenv("SWEEP_CORE", raising=False)
+    # ...and no cached local core either: the host's ~/.cache/torch_extensions
+    # must not answer "a core is at hand" for tests about the nvcc path.
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path / "ext"))
     return monkeypatch
 
 

@@ -75,13 +75,15 @@ class TestAvailabilityProbe:
 
     def test_probe_never_triggers_the_jit_compile(self, monkeypatch, torch_present):
         """The whole point of the probe is to answer without a surprise ~3 min
-        build, so it must not reach ``_jit.load()`` on either path."""
+        build, so it must not reach ``_jit.load()`` (the compiled shim) nor
+        ``core_path()`` and the local core build behind it, on either path."""
         from sweep import _jit
 
-        def explode():
+        def explode(*_a, **_k):
             raise AssertionError("is_torch_binding_available() triggered a compile")
 
-        monkeypatch.setattr(_jit, "load", explode)
+        for entry in ("load", "core_path", "_local_core", "_build_core", "_stage"):
+            monkeypatch.setattr(_jit, entry, explode)
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
         sweep.is_torch_binding_available()
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: True)

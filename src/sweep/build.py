@@ -1,18 +1,20 @@
-"""``python -m sweep.build`` — compile the CUDA backend ahead of time.
+"""``python -m sweep.build`` — make sure the CUDA core exists, ahead of time.
 
-Exists so the build can happen where builds are cheap. Compiling needs a C++
-compiler and, only when no shipped core fits, nvcc plus a target architecture --
-not a card -- so this runs on a CPU node or in a CI image
-and leaves a cached ``sweep_C.so`` that the GPU run picks up::
+A no-op with the wheel's prebuilt core.  When no shipped core fits, the core is
+compiled locally, which needs nvcc plus a target architecture -- not a card -- so
+this runs on a CPU node or in a CI image and leaves a cached
+``libsweep_core.so`` that the GPU run picks up without nvcc (a source stamp
+beside it says it is current; nothing torch-specific is compiled by default:
+sweep._C is a ctypes layer)::
 
-    TORCH_CUDA_ARCH_LIST=7.0 TORCH_EXTENSIONS_DIR=/scratch/ext python -m sweep.build
+    TORCH_CUDA_ARCH_LIST=7.0 TORCH_EXTENSIONS_DIR=/scratch/ext python -m sweep.build --no-gpu-required
 
 Without ``--no-gpu-required`` it behaves exactly like ``sweep.precompile()`` and
 insists on a visible device.
 
 ``--core`` is the release-side mode: it builds the torch-free core alone as a
 fat binary and drops it where the wheel picks it up (``sweep/lib/<cuN>/``) with
-its ``core.json`` sidecar, so a user's first import compiles only the shim::
+its ``core.json`` sidecar, so a user's first import compiles nothing::
 
     python -m sweep.build --core --archs '7.0;7.5;8.0;8.6;8.9;9.0+PTX'
 """
@@ -202,7 +204,7 @@ def main(argv=None) -> int:
             return 1
         return 0
 
-    # With a shipped core that fits, only the plain-C++ shim compiles here, so
+    # With a shipped core that fits nothing compiles here (sweep._C is ctypes), so
     # there is no architecture to name.
     if (a.no_gpu_required and not os.environ.get("TORCH_CUDA_ARCH_LIST")
             and not _shipped_core_fits()):
@@ -219,9 +221,13 @@ def main(argv=None) -> int:
         print(f"build failed: {exc}", file=sys.stderr)
         return 1
 
-    from torch.utils import cpp_extension
-    where = cpp_extension._get_build_directory("sweep_C", verbose=False)
-    print(f"sweep._C is built and cached at {where}")
+    from sweep import _jit
+    if _jit.jit_full():
+        from torch.utils import cpp_extension
+        print(f"sweep._C (compiled developer path) is built and cached at "
+              f"{cpp_extension._get_build_directory('sweep_C', verbose=False)}")
+    else:
+        print(f"the CUDA core is at {_jit.core_path()}; sweep._C is the ctypes layer, nothing else to build")
     return 0
 
 
