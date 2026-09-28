@@ -282,11 +282,15 @@ Three rules for a core that is going to PyPI:
   refuse a tree missing either `src/sweep/lib/<tag>/libsweep_core.so`, naming the
   missing tag, instead of quietly producing a wheel with one core or none
   (`SWEEP_REQUIRE_CORE=1` asks only for at least one).
-- **Build on the oldest glibc host you support.** The wheel's `manylinux_X_Y` tag
-  is the build host's glibc, and pip rejects the wheel on anything older. The core
-  links the host's `libstdc++` dynamically as well, so the same host sets the
-  `libstdc++` floor: a user machine with an older one fails at import with a
-  `GLIBCXX_...` version error.
+- **Build inside the manylinux container, not on a developer box.**
+  `utils/build_cores_manylinux.sh` runs both `--core` builds and the wheel build in
+  PyTorch's `manylinux2_28-builder` images (glibc 2.28, a 2018-era `libstdc++`), so
+  the shipped `.so` needs only `GLIBC_2.17` / `GLIBCXX_3.4.22` and the wheel is
+  tagged `manylinux_2_28`, exactly like torch's own wheels. A core linked on a
+  developer box binds to that box's `libstdc++`: one built on an updated Ubuntu
+  20.04 required `GLIBCXX_3.4.30` (GCC 12) and failed to load on a stock Debian 11
+  or RHEL 9 with a `GLIBCXX_...` version error -- conda environments hide this,
+  because they carry their own `libstdc++`.
 - **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 126 MB
   `.so` and a 37 MB wheel; the cu13 core adds a second `.so` of similar size to the
   same wheel. PyPI's per-file limit is 100 MB. Add SASS entries sparingly and keep

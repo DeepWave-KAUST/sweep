@@ -633,6 +633,38 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 
+class _FileBaton:
+    """torch.utils.file_baton.FileBaton, torch-free: an O_EXCL lock file.
+    ``try_acquire()`` wins by creating it; a loser ``wait()``s until the
+    winner's ``release()`` removes it."""
+
+    def __init__(self, lock_file_path: str, wait_seconds: float = 0.1):
+        self.lock_file_path = lock_file_path
+        self.wait_seconds = wait_seconds
+        self.fd = None
+
+    def try_acquire(self) -> bool:
+        try:
+            self.fd = os.open(self.lock_file_path, os.O_CREAT | os.O_EXCL)
+            return True
+        except FileExistsError:
+            return False
+
+    def wait(self) -> None:
+        import time
+        while os.path.exists(self.lock_file_path):
+            time.sleep(self.wait_seconds)
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            os.remove(self.lock_file_path)
+        except FileNotFoundError:
+            pass
+
+
 def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
     """Mirror csrc into a staging dir with unique compiled-source basenames.
 
@@ -661,13 +693,12 @@ def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
     # staging runs concurrently. It happens BEFORE cpp_extension.load()'s own
     # lock, so nothing else serialises it: two ranks used to race in
     # rmtree+copytree and one lost with FileExistsError on the stage directory
-    # (seen on a 2-rank DD benchmark). Torch's own baton is the same mechanism
-    # its extension build uses -- the loser waits for the winner to finish
-    # rather than staging on top of it.
-    from torch.utils.file_baton import FileBaton
-
+    # (seen on a 2-rank DD benchmark). The baton is the mechanism torch's
+    # extension build uses (an O_EXCL lock file; the loser polls until the
+    # winner removes it), written out here so the core builds without torch
+    # -- a manylinux container has none.
     build_dir.mkdir(parents=True, exist_ok=True)
-    baton = FileBaton(str(build_dir / "sweep_stage_lock"))
+    baton = _FileBaton(str(build_dir / "sweep_stage_lock"))
     if not baton.try_acquire():
         baton.wait()
         return _staged_paths(stage)
@@ -724,11 +755,17 @@ def _shim_sources(sources: list[str]) -> list[str]:
 def _target_archs() -> list[tuple[str, bool]]:
     """The archs a local core build targets, as ("86", wants PTX too) pairs:
     the visible device's arch, else what TORCH_CUDA_ARCH_LIST names
-    ("7.0;8.0+PTX", as torch spells it)."""
-    import torch
-    if torch.cuda.is_available() and not os.environ.get("TORCH_CUDA_ARCH_LIST"):
-        maj, minr = torch.cuda.get_device_capability()
-        return [(f"{maj}{minr}", False)]
+    ("7.0;8.0+PTX", as torch spells it).  An explicit list needs no torch at
+    all (a manylinux container building the wheel's cores has none); the
+    device is consulted only when nothing is named."""
+    if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                maj, minr = torch.cuda.get_device_capability()
+                return [(f"{maj}{minr}", False)]
+        except ImportError:
+            pass
     targets: list[tuple[str, bool]] = []
     for a in os.environ.get("TORCH_CUDA_ARCH_LIST", "").replace(",", ";").split(";"):
         a = a.strip()
@@ -925,7 +962,6 @@ def _build_core(build_dir: Path, sources: list[str], inc: list[str], cuda_home: 
     :func:`_source_stamp`), which is what lets the next process reuse it
     without a toolkit."""
     import subprocess
-    from torch.utils.file_baton import FileBaton
     core_dir = build_dir / "core"
     core_dir.mkdir(parents=True, exist_ok=True)
     text = _core_ninja(core_dir, sources, inc, cuda_home)
@@ -933,7 +969,7 @@ def _build_core(build_dir: Path, sources: list[str], inc: list[str], cuda_home: 
     if not ninja_file.exists() or ninja_file.read_text() != text:
         ninja_file.write_text(text)
     _ensure_ninja_on_path()
-    baton = FileBaton(str(build_dir / "sweep_core_lock"))
+    baton = _FileBaton(str(build_dir / "sweep_core_lock"))
     if not baton.try_acquire():
         baton.wait()
     else:

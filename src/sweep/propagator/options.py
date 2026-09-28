@@ -1,3 +1,4 @@
+from __future__ import annotations
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from sweep.core.arguments import warn_deprecated_spelling
 from typing import Any

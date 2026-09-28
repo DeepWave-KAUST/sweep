@@ -63,8 +63,13 @@ and this project adheres to
   Release side: `python -m sweep.build --core [--archs ...] [--out DIR]
   [--cuda-home DIR]` produces the core and sidecar without a GPU (`--out`
   defaults to inside the installed `sweep` package, `sweep/lib/<tag>`,
-  `manylinux_<glibc>_x86_64` tag is the build host's glibc, so build on the
-  oldest one you support.  Measured size: a 126 MB `.so` and a 37 MB wheel
+  `manylinux_<glibc>_x86_64` tag is the build host's glibc and the core binds
+  the host's `libstdc++`, so build in the manylinux_2_28 container
+  (`utils/build_cores_manylinux.sh`): floors `GLIBC_2.17` / `GLIBCXX_3.4.22`,
+  tag `manylinux_2_28`.  Also: the package now really imports on Python 3.9
+  (`propagator/options.py` evaluated a `str | None` annotation at runtime),
+  and `sweep.build --core` no longer needs torch (its lock and its arch list
+  do not import it), which is what lets it run in that container.  Measured size: a 126 MB `.so` and a 37 MB wheel
   for the default arch list (six SASS targets + sm_90 PTX), against PyPI's 100 MB per-file limit -- keep a
   single `+PTX` entry, the newest arch.  A tree holding a core turns the wheel
   into a platform wheel, otherwise it stays `py3-none-any`.  `src/sweep/lib/` is
