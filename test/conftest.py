@@ -9,6 +9,24 @@ from pathlib import Path
 
 import pytest
 
+
+def _fp32_reference():
+    """The eager backend is the reference the compiled core is compared to.
+    On Ampere and newer, torch lets cuDNN run convolutions in TF32 by
+    default (10-bit mantissa), which moves eager 3-D forwards by ~1e-4 and
+    their gradients by 1e-2..1e-1 relative -- every 3-D c-vs-eager test
+    went red on an A100 for that reason alone while passing on an Ada.
+    A reference must be FP32: force it for the whole session."""
+    try:
+        import torch
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+    except Exception:  # no torch: nothing to force
+        pass
+
+
+_fp32_reference()
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SRC = ROOT / "src"

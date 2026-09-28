@@ -5,7 +5,7 @@ import warnings
 import torch
 
 from sweep.propagator._torch_eager import _PropTorchEager
-from sweep.core.arguments import warn_deprecated_spelling
+from sweep.core.arguments import warn_deprecated_spelling, resolve_device
 from sweep.propagator.options import (
     CUDAOptions,
     EAGER_OPTION_KEYS,
@@ -310,6 +310,37 @@ def _apply_eager_memory(backend_impl, memory):
     raise ValueError(f"Unsupported memory strategy '{strategy}' for impl='eager'.")
 
 
+_TF32_WARNED = False
+
+
+def _warn_tf32_once(dev) -> None:
+    """The eager stencils are cuDNN convolutions.  On Ampere and newer torch
+    lets cuDNN run them in TF32 by default (a 10-bit mantissa), which moves
+    an eager 3-D forward by ~1e-4 and its gradients by 1e-2..1e-1 relative
+    against FP32 -- enough to fail a comparison with the compiled core, which
+    is always FP32.  Say so once; the user decides."""
+    global _TF32_WARNED
+    if _TF32_WARNED:
+        return
+    try:
+        import torch
+        device = torch.device(dev) if dev is not None else torch.device("cpu")
+        if device.type != "cuda" or not torch.backends.cudnn.allow_tf32:
+            return
+        major, _ = torch.cuda.get_device_capability(device)
+        if major < 8:
+            return
+    except Exception:
+        return
+    _TF32_WARNED = True
+    warnings.warn(
+        "impl='eager' on this GPU runs its stencil convolutions in TF32 "
+        "(torch.backends.cudnn.allow_tf32 is True): expect ~1e-4 relative "
+        "error in 3-D forwards and 1e-2..1e-1 in their gradients against FP32. "
+        "Set torch.backends.cudnn.allow_tf32 = False for full precision; "
+        "impl='c' is always FP32.", stacklevel=3)
+
+
 def _resolve_backend_init_kwargs(*, impl, kwargs, backend_options, eager_options, cuda_options, equation=None):
     if eager_options is not None and impl != "eager":
         raise ValueError("eager_options can only be used with impl='eager'.")
@@ -435,6 +466,8 @@ class PropTorch(torch.nn.Module):
         self.backend = backend
         self.impl = impl
         self.legacy_backend = "eager" if impl == "eager" else "c"
+        if impl == "eager":
+            _warn_tf32_once(resolve_device(kwargs.get("device"), kwargs.get("dev"), equation))
         init_kwargs = _resolve_backend_init_kwargs(
             impl=impl,
             kwargs=kwargs,

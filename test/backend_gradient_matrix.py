@@ -34,6 +34,9 @@ import sys
 import traceback
 
 import torch
+# The eager side is the reference: FP32, never cuDNN TF32 (Ampere+ default).
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
