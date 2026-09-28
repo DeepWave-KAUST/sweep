@@ -54,22 +54,29 @@ def _equation_supports_c(equation):
     return callable(getattr(equation, "_C", None))
 
 
-def _resolve_impl_with_fallback(impl, *, explicit, equation=None):
+def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None):
     """Resolve 'auto' / 'c' to a concrete impl, falling back to 'eager' when
-    the compiled binding is unavailable or the equation has no ``_C`` hook.
+    the compiled binding is unavailable, the equation has no ``_C`` hook, or
+    the propagator's device is not a CUDA device: the compiled backend is the
+    CUDA core, there is no CPU engine on the default path, and handing the
+    core host tensors is a hard error further down.
 
     When the user explicitly asked for 'c' but the path isn't available, emit
     a UserWarning so the slowdown is visible.
     """
     binding_ok = _compiled_binding_available()
     equation_ok = _equation_supports_c(equation)
+    device_ok = device is None or getattr(device, "type", str(device)) == "cuda"
 
     if impl == "auto":
-        return "c" if (binding_ok and equation_ok) else "eager"
+        return "c" if (binding_ok and equation_ok and device_ok) else "eager"
 
-    if impl == "c" and not (binding_ok and equation_ok):
+    if impl == "c" and not (binding_ok and equation_ok and device_ok):
         if explicit:
-            if not binding_ok:
+            if not device_ok:
+                reason = f"the compiled backend runs on CUDA only and this propagator is on {device}"
+                remedy = "Move to a CUDA device (dev='cuda') for the compiled path."
+            elif not binding_ok:
                 reason = "the compiled binding (sweep._C) is unavailable"
                 remedy = (
                     "Rebuild with `pip install -e .` in a CUDA-enabled env "
@@ -89,7 +96,7 @@ def _resolve_impl_with_fallback(impl, *, explicit, equation=None):
     return impl
 
 
-def _normalize_backend_impl(backend, impl, *, equation=None):
+def _normalize_backend_impl(backend, impl, *, equation=None, device=None):
     backend = str(backend).lower()
     if backend == "pytorch":
         backend = "torch"
@@ -102,7 +109,7 @@ def _normalize_backend_impl(backend, impl, *, equation=None):
             raise ValueError(
                 f"Legacy PropTorch backend='{backend}' implies impl='{legacy_impl}', got impl='{impl}'."
             )
-        return "torch", _resolve_impl_with_fallback(legacy_impl, explicit=explicit_impl, equation=equation)
+        return "torch", _resolve_impl_with_fallback(legacy_impl, explicit=explicit_impl, equation=equation, device=device)
 
     if backend not in SUPPORTED_BACKENDS:
         raise ValueError(
@@ -111,7 +118,7 @@ def _normalize_backend_impl(backend, impl, *, equation=None):
         )
 
     normalized = _normalize_impl("auto" if impl is None else impl)
-    return backend, _resolve_impl_with_fallback(normalized, explicit=explicit_impl, equation=equation)
+    return backend, _resolve_impl_with_fallback(normalized, explicit=explicit_impl, equation=equation, device=device)
 
 
 def _merge_option_dict(base, extra, *, label):
@@ -407,7 +414,7 @@ class PropTorch(torch.nn.Module):
             # because its operators were already built against it.
             backend = getattr(equation, 'backend', 'torch')
         requested_impl = impl
-        backend, impl = _normalize_backend_impl(backend, impl, equation=equation)
+        backend, impl = _normalize_backend_impl(backend, impl, equation=equation, device=resolve_device(kwargs.get("device"), kwargs.get("dev"), equation))
 
         # ``memory=`` is the impl-agnostic, dataclass-style memory-strategy API
         # (dict-style config still goes through boundary_saving_config=/use_ckpt=).
