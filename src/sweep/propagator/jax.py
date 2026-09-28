@@ -2,7 +2,15 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from sweep.core.arguments import warn_deprecated_spelling
 from sweep.propagator.base import PropBase
+from sweep.propagator.options import (
+    BoundarySaving,
+    Ckpt,
+    Full,
+    as_memory_strategy,
+    resolve_memory_strategy,
+)
 from sweep.sources.jax import SourceJax
 from sweep.receivers.jax import ReceiverJax
 from sweep.utils.jax import edge_pad
@@ -25,15 +33,39 @@ class _RolloutSetup(NamedTuple):
     receiver_idx_at: list         # static wavefield indices of receiver fields
 
 
+def _normalize_jax_backend(backend):
+    """``PropJax`` is the ``backend='jax'`` propagator; the keyword exists so
+    the two propagators share one call signature (``PropTorch(...,
+    backend='torch')`` / ``PropJax(..., backend='jax')``).  ``None`` means
+    'jax'.  Anything else is a misrouted request, not a typo to ignore."""
+    if backend is None:
+        return "jax"
+    name = str(backend).lower()
+    if name != "jax":
+        raise ValueError(
+            f"Unsupported PropJax backend {backend!r}. Expected backend='jax'. "
+            "Use PropTorch for backend='torch'."
+        )
+    return name
+
+
 class PropJax(PropBase):
     """JAX wave propagator: a functional ``lax.scan`` time loop with plain
     autodiff gradients and optional memory strategies.
 
-    Memory strategies (mutually exclusive):
+    ``backend`` is accepted for symmetry with :class:`PropTorch`; only
+    ``'jax'`` (or ``None``) is valid.
 
-    * default — differentiate through the scan tape (XLA stores the
-      activations it needs; largest memory, fastest backward);
-    * ``use_ckpt=True`` — chunked ``jax.checkpoint`` rematerialisation;
+    Memory strategies (mutually exclusive -- resolved ONCE at construction by
+    ``options.resolve_memory_strategy``, the same resolver PropTorch uses, so
+    a contradictory request such as ``memory=BoundarySaving()`` together with
+    ``use_ckpt=True`` is refused there rather than carried to call time):
+
+    * ``memory=Full()`` / ``use_ckpt=False`` — differentiate through the scan
+      tape (XLA stores the activations it needs; largest memory, fastest
+      backward);
+    * ``memory=Ckpt(chunks=...)`` / ``use_ckpt=True`` (the jax default when
+      nothing is requested) — chunked ``jax.checkpoint`` rematerialisation;
     * ``memory=BoundarySaving(...)`` — boundary saving:
       O(nt × ring) residuals with a reverse-time reconstructing custom VJP
       (see ``_jax_boundary_saving``; ~3x-forward backward cost, the right
@@ -49,52 +81,119 @@ class PropJax(PropBase):
       bandwidth-bound large grids lose a few percent — keep the default 1.
     """
 
-    def __init__(self, *args, memory=None, scan_unroll=1, **kwargs):
+    def __init__(self, *args, backend=None, memory=None, scan_unroll=1,
+                 **kwargs):
+        # ``backend=`` has to be consumed HERE: PropBase refuses every keyword
+        # it does not know (that is what catches typos), so the documented
+        # ``PropJax(..., backend='jax')`` would otherwise be a TypeError.
+        backend = _normalize_jax_backend(backend)
+        # Deprecation warnings fire at the boundary the caller crosses (same
+        # as PropTorch); below this point the legacy dict is the internal wire
+        # format PropBase reads, so warning there would warn about the new API.
+        if "boundary_saving_config" in kwargs:
+            warn_deprecated_spelling(
+                "boundary_saving_config={...}",
+                "memory=BoundarySaving(...) / Full() / Ckpt(...)")
+        if memory is not None:
+            # Full()/BoundarySaving()/Ckpt() are the current spelling; a legacy
+            # MemoryOptions or dict is normalised (and warned about) once, on
+            # what the CALLER passed.
+            memory = as_memory_strategy(memory)
+        # ONE resolution of the gradient-memory mode, BEFORE construction, by
+        # the resolver PropTorch uses.  ``memory=BoundarySaving()`` together
+        # with ``use_ckpt=True`` is a contradiction and is refused here.  It
+        # used to build -- PropBase recorded 'ckpt' from the flag and
+        # _apply_memory_options then overwrote it with 'boundary' -- and only
+        # the forward noticed.  With no request at all the jax default stays
+        # 'ckpt', as it always was.
+        strategy = resolve_memory_strategy(
+            "jax", memory, kwargs.get("use_ckpt"),
+            kwargs.get("boundary_saving_config"))
+        kwargs["use_ckpt"] = (strategy == "ckpt")
 
         super().__init__(*args, **kwargs)
+        self.backend = backend
         self._bs_options = None
         # lax.scan unroll factor for the time loop (forward and the
         # boundary-saving reverse scan).  Launch-bound small grids gain
         # substantially (512^2: ~1.6x at unroll=2-4); bandwidth-bound large
         # grids lose a few percent — hence default 1.
         self._scan_unroll = int(scan_unroll)
+        self._set_memory_strategy(strategy)
         if memory is not None:
             self._apply_memory_options(memory)
+        elif strategy == "boundary":
+            # Legacy dict route (boundary_saving_config={'enabled': True}).
+            # PropBase records the strategy, but the jax rollout only switches
+            # driver through ``_bs_options`` -- wire it, or the run reports
+            # 'boundary' and differentiates through the scan tape.
+            cfg = self.boundary_saving_config
+            self._enable_boundary_saving_from(
+                storage=cfg.get("storage", "gpu"),
+                storage_dtype=cfg.get("storage_dtype", "fp32"),
+                tail_steps=cfg.get("tail_steps"))
+        self._assert_built_strategy(strategy)
 
     def _apply_memory_options(self, memory):
-        """Apply a ``MemoryOptions`` dataclass (the impl-agnostic memory API,
-        same as PropTorch's ``memory=``): ``strategy='boundary'`` enables
-        boundary-saving reconstruction, ``strategy='ckpt'`` enables chunked
-        ``jax.checkpoint`` rematerialisation.  The two are mutually exclusive.
+        """Apply a memory strategy -- ``Full()`` / ``BoundarySaving(...)`` /
+        ``Ckpt(...)``, the impl-agnostic API shared with PropTorch (a legacy
+        ``MemoryOptions`` or dict is normalised first).  The three are mutually
+        exclusive: each sets the single ``memory_strategy`` and the
+        boundary-saving driver together, so the object never holds two answers
+        to one question.
         """
-        from sweep.propagator.options import MemoryOptions
-        if not isinstance(memory, MemoryOptions):
-            raise TypeError("memory= expects a MemoryOptions instance.")
-        if memory.strategy == "boundary":
-            boundary = memory.boundary
-            storage = getattr(boundary, "storage", "gpu")
-            if storage != "gpu":
-                raise ValueError(
-                    "JAX boundary saving keeps the ring storage on device "
-                    "(BoundaryOptions.storage='gpu'); cpu/disk staging is "
-                    "available on the torch paths."
-                )
-            self._set_memory_strategy("boundary")
-            self.enable_boundary_saving(
-                True, storage_dtype=getattr(boundary, "storage_dtype", "fp32")
-            )
-        elif memory.strategy == "ckpt":
-            ckpt = memory.ckpt
-            mode = getattr(ckpt, "mode", "chunk") if ckpt is not None else "chunk"
-            if mode != "chunk":
+        memory = as_memory_strategy(memory)
+        if isinstance(memory, Full):
+            self._bs_options = None
+            self._set_memory_strategy("full")
+        elif isinstance(memory, BoundarySaving):
+            self._enable_boundary_saving_from(
+                storage=memory.storage, storage_dtype=memory.storage_dtype,
+                tail_steps=memory.tail_steps)
+        elif isinstance(memory, Ckpt):
+            if memory.mode != "chunk":
                 raise ValueError("JAX checkpointing supports mode='chunk' only.")
             self._bs_options = None
             self._set_memory_strategy("ckpt")
-            if ckpt is not None and getattr(ckpt, "chunks", None):
-                self.ckpt_chunks = ckpt.chunks
+            if memory.chunks:
+                self.ckpt_chunks = memory.chunks
         else:
+            raise TypeError(
+                "memory= expects Full(), BoundarySaving(...) or Ckpt(...).")
+
+    def _enable_boundary_saving_from(self, *, storage="gpu",
+                                     storage_dtype="fp32", tail_steps=None):
+        """What the jax boundary-saving path implements, refused up front: the
+        ring stays on device (no cpu/disk staging) and the backward is
+        full-length (no ``tail_steps`` truncation).  Accepting and ignoring
+        either would report one strategy and compute another."""
+        if storage != "gpu":
             raise ValueError(
-                f"Unsupported memory strategy {memory.strategy!r} for PropJax."
+                "JAX boundary saving keeps the ring storage on device "
+                "(BoundarySaving(storage='gpu')); cpu/disk staging is "
+                "available on the torch paths."
+            )
+        if tail_steps:
+            raise NotImplementedError(
+                "JAX boundary saving does not implement tail_steps (truncated "
+                "backward); it would be accepted and ignored, returning a "
+                "full-length gradient. Use PropTorch impl='c' for "
+                f"tail_steps={tail_steps!r}."
+            )
+        self.enable_boundary_saving(True, storage_dtype=storage_dtype)
+        self._set_memory_strategy("boundary")
+
+    def _assert_built_strategy(self, strategy):
+        """The built state must agree with the resolved strategy (the jax twin
+        of PropTorch's ``_assert_backend_matches_strategy``).  The strategy is
+        one attribute and the boundary driver another, and a drift between
+        them is silent: the run would measure one and report the other."""
+        bs_on = self._bs_options is not None
+        if self.memory_strategy != strategy or bs_on != (strategy == "boundary"):
+            raise RuntimeError(
+                f"PropJax resolved gradient-memory strategy {strategy!r} but "
+                f"built {self.memory_strategy!r} with boundary saving "
+                f"{'on' if bs_on else 'off'}."
             )
 
     def enable_boundary_saving(self, flag=True, mode=None, storage_dtype="fp32"):

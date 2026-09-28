@@ -68,6 +68,28 @@ def step_visco_cpml(
     return u_next, u_prev, psixn, psizn, zetaxn, zetazn
 
 
+def _zero_outer_halo(u, halo, backend):
+    """Zero the ``halo``-wide band on all four edges of the trailing (z, x)
+    axes.  Dispatch is on the equation's declared ``backend``, not on
+    duck-typing: under ``torch.compile`` Dynamo answers ``hasattr(tensor,
+    "clone")`` with False, which would route the traced step into the numpy
+    branch.  torch: one clone + in-place slice writes (the historical code
+    path, unchanged); jax (array or tracer): functional ``.at[].set`` --
+    in-place under jit; anything else: numpy copy + writes."""
+    if halo <= 0:
+        return u
+    if backend == 'jax':
+        u = u.at[..., :halo, :].set(0)
+        u = u.at[..., -halo:, :].set(0)
+        u = u.at[..., :, :halo].set(0)
+        u = u.at[..., :, -halo:].set(0)
+        return u
+    out = u.clone() if backend == 'torch' else np.array(u, copy=True)
+    out[..., :halo, :] = 0; out[..., -halo:, :] = 0
+    out[..., :, :halo] = 0; out[..., :, -halo:] = 0
+    return out
+
+
 def _fft_work_area_slot(B, grid):
     """The cuFFT work area of the spectral step's 2-D C2C plan for this batch
     and grid, as one flat float32 slot: the compiled backend builds the very
@@ -277,15 +299,27 @@ class ViscoAcoustic(SecondOrderEquation):
         if cache is not None and cache[0] is gbar and cache[1].shape == k.shape:
             return cache[2]
         op = self.op
+        # ``k`` is numpy on jax (see init_abc): the mask / k^2 table stay
+        # numpy constants folded into the trace; the fractional powers take
+        # the traced exponent and come out as jnp.
         mask = k > 0
         k_safe = op.where(mask, k, op.ones_like(k))
         zeros = op.zeros_like(k)
         D_k2 = k * k
-        e = gbar.detach() if hasattr(gbar, 'detach') else gbar
+        if hasattr(gbar, 'detach'):
+            e = gbar.detach()
+        elif self.backend == 'jax':
+            import jax
+            e = jax.lax.stop_gradient(gbar)
+        else:
+            e = gbar
         D_frac = op.where(mask, k_safe ** (2.0 * e + 2.0), zeros)
         D_loss = op.where(mask, k_safe ** (2.0 * e + 1.0), zeros)
         grids = (D_k2, D_frac, D_loss)
-        self._D_cache = (gbar, k, grids)
+        if self.backend != 'jax':
+            # On jax these are trace-local (built once per scan-body trace);
+            # caching them on the instance would leak tracers across traces.
+            self._D_cache = (gbar, k, grids)
         return grids
 
     def c_eq_aux(self, prop):
@@ -413,7 +447,10 @@ class ViscoAcoustic(SecondOrderEquation):
         k_np, _, _ = init_wavenumbers(shape, h_scalar)
         # Same rule as the PML profiles above: keep numpy on jax, where this
         # runs inside the user's trace and a jnp array would leak as a tracer.
-        self.k = k_np if self.backend == 'jax' else to_backend(k_np, self.backend, self.device)
+        if self.backend == 'jax':
+            self.k = k_np.astype(np.float32)
+        else:
+            self.k = to_backend(k_np, self.backend, self.device)
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
@@ -443,10 +480,7 @@ class ViscoAcoustic(SecondOrderEquation):
             # padding the FD taps read, and on free-surface faces this IS the
             # pressure-release condition).
             halo = self.so // 2
-            u = out[0].clone()
-            u[..., :halo, :] = 0; u[..., -halo:, :] = 0
-            u[..., :, :halo] = 0; u[..., :, -halo:] = 0
-            out = (u,) + tuple(out[1:])
+            out = (_zero_outer_halo(out[0], halo, self.backend),) + tuple(out[1:])
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)
             if topo_rows is not None:

@@ -756,16 +756,24 @@ def test_jax_backend_parity():
     models = _models_2d(shape, eps=0.15, delta=0.05)
     rec_torch, _, _ = _run_2d(models)
 
+    # backend='jax' lives on its own propagator (PropTorch is torch-only and
+    # raises on backend='jax'); PropJax takes numpy geometry and jnp models
+    # and returns the record in PropTorch's (B, nt, nrec, nfield) layout.
+    import jax.numpy as jnp
+    from sweep.propagator.jax import PropJax
+
     eq_jax = AcousticVTI1st(spatial_order=4, device="cpu", backend="jax")
-    src = _src(*shape)
-    prop_jax = PropTorch(
+    src = _src(*shape).numpy()
+    prop_jax = PropJax(
         eq_jax, shape,
         source_type=["sH", "sV"], receiver_type=["vz"],
-        abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu",
+        abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu", use_ckpt=False,
     )
-    with torch.no_grad():
-        rec_jax = prop_jax(_wavelet(), src, src, models=models)
+    rec_jax = prop_jax(_wavelet().numpy(), src, src,
+                       models=[jnp.asarray(m.numpy()) for m in models])
+    rec_jax = torch.tensor(np.asarray(rec_jax))
 
+    assert rec_jax.shape == rec_torch.shape, (rec_jax.shape, rec_torch.shape)
     assert torch.allclose(rec_torch, rec_jax, atol=1e-5, rtol=1e-4), (
         f"JAX/torch parity failed: max diff={float((rec_torch - rec_jax).abs().max()):.3e}"
     )
