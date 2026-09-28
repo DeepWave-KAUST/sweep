@@ -21,18 +21,27 @@ and this project adheres to
   fits (a torch built for another CUDA major, a GPU outside the shipped archs
   and older than the shipped PTX) or for an sdist/clone install, and then only
   the CUDA core is compiled (`python -m sweep.build`, or the first `impl='c'`
-  use); a local core built once is reused by later runs without nvcc, on the
+  use).  That local build needs nvcc >= 12.4 (12.0-12.3 ship a broken
+  `<cuda/std>` bf16 header; `SWEEP_JIT_ALLOW_OLD_CUDA=1` tries anyway), >= 12.8
+  when the target list reaches Blackwell (sm_100 / sm_120), or a CUDA 13 nvcc,
+  and is refused up front with the toolkit and the version named otherwise.  A
+  local core built once is reused by later runs without nvcc, on the
   strength of a source stamp (`sources.sha256`: the csrc tree plus the nvcc
   flags) written beside it.  `sweep.precompile()` now just makes sure a core
   exists and loads it: a no-op with a shipped core, the local core build
   otherwise.  The compiled pybind shim plus the CPU engine survive as the
-  developer path behind `SWEEP_JIT_FULL=1` (needs torch's C++ headers and a
-  compiler; nvcc only when no shipped core fits).  A core that fits a GPU only
+  developer path behind `SWEEP_JIT_FULL=1` (needs torch's C++ headers, the CUDA
+  runtime headers -- torch's pip CUDA wheels bring them -- and a C++ compiler;
+  nvcc only when no shipped core fits).  A core that fits a GPU only
   through its PTX is refused when the driver's CUDA release is older than the
   toolkit that emitted it (the driver could not JIT it), with the versions in
   the reason.
   `sweep.backend.torch.binding.diagnostics()` gains a `shim` key, `"ctypes"`
   or `"pybind"`.
+  A core sitting under `sweep/lib/<cuN>/` is loaded as it is: in a clone that
+  holds one (after `utils/build_cores_manylinux.sh`), edits under `csrc/` do not
+  reach `impl='c'` until that core is rebuilt or removed (`SWEEP_CORE`,
+  `diagnostics()['shipped_core']` show which core is in use).
 
 - **The wheel ships a prebuilt CUDA core; first use of `impl='c'` no longer
   needs nvcc.**  The CUDA kernels are built once, ahead of the wheel, as a
@@ -58,26 +67,30 @@ and this project adheres to
   demands `TORCH_CUDA_ARCH_LIST` when a shipped core fits (the arch list only
   names the target of a local core build).  cuFFT is linked dynamically and
   preloaded from torch's `nvidia-cufft` wheel (or `<cuda_home>/lib64`) before
-  the core is loaded; the optional extra `sweepx[cuda12]` pulls
+  the core is loaded; the optional extra `sweep-solver[cuda12]` pulls
   `nvidia-cufft-cu12` when a torch wheel did not.
   Release side: `python -m sweep.build --core [--archs ...] [--out DIR]
-  [--cuda-home DIR]` produces the core and sidecar without a GPU (`--out`
-  defaults to inside the installed `sweep` package, `sweep/lib/<tag>`,
-  `manylinux_<glibc>_x86_64` tag is the build host's glibc and the core binds
-  the host's `libstdc++`, so build in the manylinux_2_28 container
-  (`utils/build_cores_manylinux.sh`): floors `GLIBC_2.17` / `GLIBCXX_3.4.22`,
-  tag `manylinux_2_28`.  Also: the package now really imports on Python 3.9
+  [--cuda-home DIR]` produces the core and its sidecar without a GPU (`--out`
+  defaults to `sweep/lib/<tag>` inside the installed package, `src/sweep/lib/<tag>`
+  in a clone).  The wheel's platform tag is the build host's glibc
+  (`manylinux_<glibc>_x86_64`) and the core binds the host's `libstdc++`, so the
+  release builds both cores and the wheel inside PyTorch's `manylinux2_28-builder`
+  containers (`utils/build_cores_manylinux.sh`): the shipped cores need only
+  `GLIBC_2.17` / `GLIBCXX_3.4.22` and the wheel is tagged `manylinux_2_28`.
+  Also: the package now really imports on Python 3.9
   (`propagator/options.py` evaluated a `str | None` annotation at runtime),
   and `sweep.build --core` no longer needs torch (its lock and its arch list
-  do not import it), which is what lets it run in that container.  Measured size: a 126 MB `.so` and a 37 MB wheel
-  for the default arch list (six SASS targets + sm_90 PTX), against PyPI's 100 MB per-file limit -- keep a
-  single `+PTX` entry, the newest arch.  A tree holding a core turns the wheel
+  do not import it), which is what lets it run in that container.  Measured
+  size (both cores, container build): the cu12 `.so` is 127 MiB, the cu13 `.so`
+  155 MiB, and the two-core wheel about 76 MiB, against PyPI's 100 MB per-file
+  limit -- keep a single `+PTX` entry per core, the newest arch.  A tree holding a core turns the wheel
   into a platform wheel, otherwise it stays `py3-none-any`.  `src/sweep/lib/` is
   git-ignored and pruned from the sdist, so build the core, then `python -m
   build --wheel` from the same tree: a bare `python -m build` packs the wheel
-  from the pruned sdist and ships no core.  `SWEEP_REQUIRE_CORE=1` (the release
-  script sets it) makes `setup.py` refuse such a tree instead of quietly
-  producing a core-less wheel.
+  from the pruned sdist and ships no core.  `SWEEP_REQUIRE_CORE` (the release
+  script sets `cu12,cu13`) makes `setup.py` refuse such a tree instead of quietly
+  producing a core-less wheel: `1` asks for at least one core, a comma list names
+  the tags that must all be present.
 
 - **A second prebuilt core, for CUDA 13 (`sweep/lib/cu13/`).**  The wheel
   ships cu12 and cu13 side by side and the loader picks the tag torch's CUDA
@@ -88,7 +101,7 @@ and this project adheres to
   since nvcc 13 dropped offline compilation for compute capability < 7.5 -- and
   needs driver >= 580, exactly what torch cu130 needs.  The core's rpath now
   reaches cuFFT in both pip layouts (`nvidia/cufft/lib` for the CUDA 12 wheels,
-  `nvidia/cu13/lib` for the CUDA 13 ones), and the new extra `sweepx[cuda13]`
+  `nvidia/cu13/lib` for the CUDA 13 ones), and the new extra `sweep-solver[cuda13]`
   pulls `nvidia-cufft` 12.x (the unsuffixed wheel is the CUDA 13 line; `-cu12`
   stays for CUDA 12) when a torch wheel did not.  Release side: `python -m
   sweep.build --core` files the core under the tag of the nvcc it uses
@@ -98,7 +111,7 @@ and this project adheres to
   up front), so a release is one command per toolkit.  `SWEEP_REQUIRE_CORE`
   accepts a comma list of tags (`cu12,cu13`) that must all be present, naming
   the missing one, next to `1` for "at least one".  The cu13 core is a second
-  `.so` of similar size to the cu12 one.
+  `.so` (155 MiB against cu12's 127 MiB); the wheel with both is about 76 MiB.
 
 - **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
   repository ran the tests before, and nothing could: `pytest test/` was unable

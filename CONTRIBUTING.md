@@ -5,8 +5,10 @@ you need to know to set up a development environment and submit a change.
 
 ## Development install
 
-Clone the repository and install in editable mode. The compiled CUDA
-extension is optional for most documentation and Python-level changes:
+Clone the repository and install in editable mode. A clone carries no prebuilt
+CUDA core (`src/sweep/lib/` is git-ignored), so `impl='c'` needs a one-time local
+core build (below); the eager / JAX backends and documentation work need nothing
+compiled:
 
 ```bash
 git clone https://github.com/DeepWave-KAUST/sweep.git
@@ -16,16 +18,26 @@ cd sweep
 pip install -e .
 ```
 
-For the compiled C++ / CUDA extension (needed when working on the
-`impl="c"` path):
+For `impl='c'` from a clone, build the CUDA core once. It needs an nvcc >= 12.4 on
+`PATH` or `CUDA_HOME` (of your torch's CUDA major; >= 12.8 for Blackwell targets,
+or a CUDA 13 nvcc; `ninja` comes with the package) and is cached under
+`TORCH_EXTENSIONS_DIR` (default `~/.cache/torch_extensions/...`) with a source
+stamp, so an edit under `src/sweep/csrc/` triggers an incremental rebuild on the
+next run:
 
 ```bash
-SWEEP_BUILD_CUDA=1 pip install -v -e ".[cuda]" --no-build-isolation
+python -m sweep.build                    # or just use impl='c': the core builds itself on first use
+SWEEP_JIT_FULL=1 python -m sweep.build   # developer path: also the pybind shim + the CPU C++ engine (torch headers, C++ compiler)
 ```
 
-See [Installation](docs/getting-started/installation.md) for
-CUDA-architecture configuration if the build cannot detect your GPU
-automatically.
+Do not keep a wheel-style core under `src/sweep/lib/<cuN>/` (what
+`utils/build_cores_manylinux.sh` writes) while editing kernels: a fitting core
+there is loaded as it is and `csrc/` edits are ignored until it is rebuilt.
+`python -c "from sweep.backend.torch import binding; print(binding.diagnostics())"`
+shows which core and which shim (`ctypes` / `pybind`) a process uses.
+
+See [Installation](docs/getting-started/installation.md) for building the core
+on a machine with no visible GPU (`TORCH_CUDA_ARCH_LIST` names the target).
 
 ## Branch convention
 
@@ -47,11 +59,17 @@ Before opening a PR, please confirm:
 
 ## Adding a new equation
 
-SWEEP discovers equation classes by reflecting over `sweep.equations`'s
-namespace — there is no manual registry to update. A new equation is one
-Python file under `src/sweep/equations/` (eager) plus, optionally, a CUDA
-equation directory under `src/sweep/csrc/cuda/equations/` and a five-line
-entry in `src/sweep/csrc/bindings/module.cpp` (`impl="c"`).
+An equation registers itself: decorate the class with `@register_equation()`
+(`src/sweep/equations/_registry.py`) and import its module from
+`src/sweep/equations/__init__.py`; nothing reflects over the namespace. A new
+equation is one Python file under `src/sweep/equations/` (eager) plus,
+optionally for `impl="c"`, a CUDA equation directory under
+`src/sweep/csrc/cuda/equations/`, `C_NAME = "<prefix>"` on the class (the base
+derives `_C()` from it) with a `cuda_layout`, and five `<prefix>_*` entries in
+the core's C API table (`SweepEntry` in `src/sweep/csrc/core/capi.h`;
+`ENTRY_NAMES` / `ENTRY_KINDS` / `dispatch()` in
+`src/sweep/csrc/cuda/common/capi.cu`). `src/sweep/csrc/bindings/module.cpp`
+mirrors that table and is compiled only on the `SWEEP_JIT_FULL=1` developer path.
 
 Two entry points:
 

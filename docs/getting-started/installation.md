@@ -2,11 +2,11 @@
 
 ## From PyPI (recommended)
 
-One wheel, any PyTorch version, any Python 3:
+One wheel, any PyTorch version, Python >= 3.9:
 
 ```bash
 pip install sweepx
-python -c "import sweep; sweep.precompile()"   # optional: check that a CUDA core is in place (a no-op with the shipped one)
+python -c "import sweep; sweep.precompile()"   # optional: make sure a CUDA core is in place and load it (compiles nothing with the shipped one)
 ```
 
 The wheel carries a **prebuilt CUDA core** per CUDA major — `sweep/lib/cu12/` and
@@ -25,18 +25,22 @@ straight from each tensor's `data_ptr()`, shape, strides and dtype. So after
 involved, which is why the same wheel works with any torch version — there is no
 torch/CUDA version lock-in.
 
-`nvcc >= 12.4` is needed only when no shipped core fits your process — your torch was
+An nvcc of your torch's CUDA major (`>= 12.4` for CUDA 12, `>= 12.8` to target
+Blackwell; any CUDA 13 nvcc, which cannot target sm_70) is needed only when no
+shipped core fits your process — your torch was
 built for a CUDA major with no shipped core (neither 12 nor 13), or your GPU is outside the
 shipped archs *and* older than the shipped PTX (e.g. Pascal sm_6x; PTX is what makes
 newer cards fit). Then the core is built locally for your card (2–5 min, the same
 local build a clone uses) at `python -m sweep.build` or on the first use of
-`impl='c'`, and cached under `TORCH_EXTENSIONS_DIR` (default
-`~/.cache/torch_extensions`). Installing from an sdist or a clone always takes that
+`impl='c'`, and cached under `TORCH_EXTENSIONS_DIR/sweep_C/core/` (default
+`~/.cache/torch_extensions/py<ver>_cu<ver>/sweep_C/core/`, `XDG_CACHE_HOME`
+honoured). Installing from an sdist or a clone always takes that
 path, because neither carries a core. Even then only the CUDA core is compiled:
 there is never a torch shim to build.
 
-- `sweep.precompile()` just makes sure a core is there and loads it — a no-op with
-  a shipped core that fits, the local core build otherwise. Optional: the first
+- `sweep.precompile()` just makes sure a core is there and loads it — loads the
+  shipped core when it fits (a dlopen plus the ABI guard, nothing compiles), runs
+  the local core build otherwise. Optional: the first
   `impl='c'` call does the same. A local core built once is reused by later runs
   without nvcc: a source stamp (`sources.sha256`, the csrc tree plus the nvcc
   flags) beside it says whether it is current.
@@ -51,7 +55,7 @@ there is never a torch shim to build.
   (`nvidia-cufft-cu12` with a cu12 torch; the unsuffixed `nvidia-cufft` 12.x with a
   cu13 one — the core's rpath reaches both pip layouts, `nvidia/cufft/lib` and
   `nvidia/cu13/lib`). If yours did not (conda torch, a CPU wheel plus a system
-  driver), `pip install "sweepx[cuda12]"` or `"sweepx[cuda13]"` adds the one your
+  driver), `pip install "sweep-solver[cuda12]"` or `"sweep-solver[cuda13]"` adds the one your
   core needs.
 - The pure-Python eager/JAX backends need neither the core nor nvcc.
 
@@ -78,14 +82,19 @@ cd sweep
 
 === "PyTorch + Extension Binding"
 
-    Use this from a clone to **pre-build** the compiled `sweep._C` now — the same
-    kernels the PyPI `sweepx` wheel ships as a prebuilt core, but built here from
-    source (a clone has no core, so nvcc is required) and ahead of time so there is
-    no first-use core build. (A prebuilt `_C` extension takes precedence over the
-    JIT loader automatically.)
+    Use this from a clone to build the **ahead-of-time** `sweep._C` extension: the
+    compiled pybind shim plus the CPU engine, compiled against **your** torch (the
+    same CUDA kernels the PyPI wheel ships as a prebuilt core, plus the torch-bound
+    C++). It is tied to the torch it was built against. If you only want to avoid
+    the first-use core build, `pip install .` then `python -m sweep.build` (nvcc
+    only, no torch headers) is the lighter path -- see "Building where there is no
+    GPU" below. (A prebuilt `_C` extension takes precedence over the ctypes layer
+    automatically.)
 
     1. Install a compatible PyTorch + CUDA environment first.
-    2. Make sure `nvcc >= 12.4` and your NVIDIA driver are available for builds.
+    2. Make sure an nvcc of your torch's CUDA major (`>= 12.4` for CUDA 12, `>= 12.8`
+       for Blackwell targets; any CUDA 13 nvcc), a C++ compiler and your NVIDIA
+       driver are available for builds.
     3. Build and install SWEEP with the CUDA extra:
 
     ```bash
@@ -105,9 +114,10 @@ cd sweep
     solver = PropTorch(..., impl="eager")  # force pure-PyTorch
     ```
 
-    - The compiled binding currently supports:
-      - 2D/3D acoustic equations
-      - 2D/3D elastic equations
+    - The compiled binding covers every equation the CUDA core exposes: acoustic /
+      acoustic_lsrtm / acoustic_vrz / acoustic_vti_1st (2D and 3D), das / das_mu
+      (2D and 3D), elastic (2D and 3D), elastic_tti_sg (2D and 3D),
+      elastic_tti_2nd2d, elastic_vr2d, visco_acoustic2d.
 
 === "PyTorch"
 
@@ -153,8 +163,10 @@ compiles nothing. `SWEEP_JIT_FULL=1` switches to the developer path instead: the
 old pybind torch shim (`module.cpp`, compiled against **your** torch through
 `torch.utils.cpp_extension`) plus the CPU engine (`csrc/cpu`), built by the JIT
 loader on first use and cached under `TORCH_EXTENSIONS_DIR`. That path needs
-torch's C++ headers, a C++ compiler and `nvcc`, and the result is tied to the
-torch it was built against. Use it to work on the binding or the CPU engine, or to
+torch's C++ headers, a C++ compiler and the CUDA runtime headers (torch's pip
+`nvidia-cuda-runtime[-cu12]` + `nvidia-cuda-nvcc[-cu12]` wheels, or a toolkit's
+include dir); `nvcc` only when no shipped core fits and the core itself must be
+built. The result is tied to the torch it was built against. Use it to work on the binding or the CPU engine, or to
 A/B the two shims; `sweep.backend.torch.binding.diagnostics()["shim"]` says which
 one is loaded (`"ctypes"` or `"pybind"`).
 
@@ -167,13 +179,14 @@ one is loaded (`"ctypes"` or `"pybind"`).
 - For the compiled `impl='c'` backend: a CUDA GPU with compatible NVIDIA drivers.
   From the PyPI wheel that is all: the CUDA core is prebuilt and the binding is
   pure Python, so nothing compiles — no nvcc, no C++ compiler, no CUDA headers, no
-  toolkit. A CUDA toolkit with `nvcc >= 12.4` (12.0–12.3 ship a broken
-  `<cuda/std>` bf16 header; set `SWEEP_JIT_ALLOW_OLD_CUDA=1` to try one anyway) is
-  needed only when no shipped core fits (a torch built for a CUDA major with no
-  shipped core, or
-  a GPU outside the shipped archs and older than the shipped PTX), for a source
-  build, or for the `SWEEP_JIT_FULL=1` developer path — and outside that path only
-  the core is compiled
+  toolkit. An nvcc of your torch's CUDA major (`>= 12.4` for CUDA 12 -- 12.0–12.3
+  ship a broken `<cuda/std>` bf16 header; set `SWEEP_JIT_ALLOW_OLD_CUDA=1` to try
+  one anyway -- `>= 12.8` to target Blackwell; any CUDA 13 nvcc) is needed only
+  when no shipped core fits (a torch built for a CUDA major with no shipped core,
+  or a GPU outside the shipped archs and older than the shipped PTX) or for a
+  source build; the `SWEEP_JIT_FULL=1` developer path needs it only in those same
+  cases, plus a C++ compiler and the CUDA runtime headers. Outside that path only
+  the core is compiled.
 
 ## Verify the Installation
 
@@ -215,13 +228,13 @@ To see which core `impl='c'` would use — the shipped one, `SWEEP_CORE`, or non
 ```python
 from sweep.backend.c.jit import shipped_core_info
 
-print(shipped_core_info())   # {'path': ..., 'reason': ..., 'tag': 'cu12'}; the tag is your torch's CUDA major, cu12 or cu13
+print(shipped_core_info())   # {'path': ..., 'reason': ..., 'tag': 'cu12', 'available': ['cu12', 'cu13']}; tag is your torch's CUDA major, available lists the cores this install carries
 ```
 
 To make sure a core is in place up front **and confirm it** (optional), run:
 
 ```bash
-python -c "import sweep; sweep.precompile()"   # exits 0 on success (a no-op with a shipped core); raises a clear error if the GPU (or nvcc, when the core must be built) is missing
+python -c "import sweep; sweep.precompile()"   # exits 0 on success (loads the shipped core, compiles nothing); raises a clear error if the GPU (or nvcc, when the core must be built) is missing
 ```
 
 Afterwards `sweep.backend.torch.binding.is_compiled()` returns `True`.
@@ -291,9 +304,9 @@ Three rules for a core that is going to PyPI:
   20.04 required `GLIBCXX_3.4.30` (GCC 12) and failed to load on a stock Debian 11
   or RHEL 9 with a `GLIBCXX_...` version error -- conda environments hide this,
   because they carry their own `libstdc++`.
-- **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 126 MB
-  `.so` and a 37 MB wheel; the cu13 core adds a second `.so` of similar size to the
-  same wheel. PyPI's per-file limit is 100 MB. Add SASS entries sparingly and keep
+- **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 127 MB
+  `.so`, the cu13 list (seven SASS targets + `sm_120` PTX) a 155 MB one; compressed
+  together they make a ~76 MB wheel. PyPI's per-file limit is 100 MB. Add SASS entries sparingly and keep
   exactly one `+PTX` entry per core, the newest arch: each embedded PTX is another
   copy of every kernel, and a card newer than every SASS entry only ever needs the
   newest one.
@@ -302,7 +315,8 @@ Three rules for a core that is going to PyPI:
 
 - Lazy imports mean you do not need to install both JAX and PyTorch unless you
   plan to use both.
-- From a clone, use the `PyTorch + Extension Binding` path if you want the compiled
-  backend built ahead of time; from the PyPI wheel the base install already has it.
+- From a clone, `python -m sweep.build` builds the CUDA core ahead of time; the
+  `PyTorch + Extension Binding` path builds the torch-bound developer extension
+  instead. From the PyPI wheel the base install already has the core.
 - CUDA source files are needed for source builds, but not for normal runtime
   imports after installation.

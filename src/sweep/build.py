@@ -18,6 +18,12 @@ its ``core.json`` sidecar, so a user's first import compiles nothing.  The tag
 is the nvcc's CUDA major (``_core_tag``): a CUDA 12 nvcc lands in ``lib/cu12/``,
 a CUDA 13 nvcc in ``lib/cu13/``, so the release is one command per toolkit and
 the wheel ships both; the loader picks the tag torch's CUDA major names.
+The release runs it inside the ``pytorch/manylinux2_28-builder`` images through
+``utils/build_cores_manylinux.sh`` (cu12 then cu13, then ``python -m build
+--wheel`` under ``SWEEP_REQUIRE_CORE=cu12,cu13``, which makes setup.py refuse a
+tree missing either core; ``SWEEP_REQUIRE_CORE=1`` asks for at least one), so
+the shipped ``.so`` needs only GLIBC_2.17 / GLIBCXX_3.4.22 and the wheel is
+tagged ``manylinux_2_28``.
 Without ``--archs`` each toolkit gets its recommended list::
 
     python -m sweep.build --core --cuda-home /usr/local/cuda-12.9   # lib/cu12: 7.0;7.5;8.0;8.6;8.9;9.0+PTX
@@ -63,7 +69,9 @@ CUFFT_RPATH = ("$$ORIGIN/../../../nvidia/cufft/lib",
 # No -static-libstdc++: a static libstdc++ inside a shared library leaves its
 # locale/iostream globals uninitialised (the core's error text lost every
 # number: "sweep_call: no entry " with the id missing).  The release core links
-# the host's libstdc++ dynamically; build it on the oldest host you support.
+# libstdc++ dynamically, so build it in the manylinux_2_28 container
+# (utils/build_cores_manylinux.sh; floors GLIBC_2.17 / GLIBCXX_3.4.22), never on
+# a developer box whose libstdc++ is newer.
 RELEASE_LINK_FLAGS: list = []
 
 

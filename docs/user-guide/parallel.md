@@ -130,7 +130,8 @@ than an unpadded one, so compare like against like — the example scripts'
 - Equations: those with stepped compiled kernels — `Acoustic` (2-D),
   `Acoustic3D`, `AcousticVRZ3D`, `Elastic` (2-D) and `Elastic3D`. Everything
   else is refused at construction with an error that names the equation,
-  including the **2-D** `AcousticVRZ` (only its 3-D sibling is stepped),
+  including the **2-D** `AcousticVRZ` (stepped, but its backward has no
+  coupling-exchange phases),
   `AcousticVTI`/`AcousticVTI1st`, `AcousticTTI`, `ElasticTTI`, `ElasticVRR`
   and `ViscoAcoustic`.
 - Cuts: x strips in 2-D (`py=1`); x/y tile grids in 3-D.

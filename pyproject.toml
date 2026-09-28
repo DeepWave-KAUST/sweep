@@ -35,8 +35,9 @@ classifiers = [
 # sweep._C is a pure-Python ctypes layer over that core's C API (sweep/backend/c/):
 # nothing compiles after pip install -- no nvcc, no C++ compiler, no CUDA
 # headers -- and no torch C++ ABI is involved, so the wheel works with any torch
-# version + any Python 3. torch is unpinned.
-# nvcc (system / `module load cuda` / `conda install -c nvidia cuda-nvcc`) is
+# version + any Python >= 3.9. torch is unpinned.
+# nvcc of torch's CUDA major (system / `module load cuda` / `conda install -c
+# nvidia cuda-toolkit`; >= 12.4 for CUDA 12, >= 12.8 for Blackwell targets) is
 # needed only when no shipped core fits (a torch built for a CUDA major with no
 # core, a card outside the shipped archs and older than the shipped PTX, sdist/clone
 # install): then the core is built locally. The pip `nvidia-cuda-nvcc-cu12`

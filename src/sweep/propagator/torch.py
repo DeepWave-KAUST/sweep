@@ -347,6 +347,17 @@ def _public_forward_signature(forward):
 
 
 class PropTorch(torch.nn.Module):
+    """PyTorch propagator.  ``impl='eager'`` is pure torch (CPU or GPU);
+    ``impl='c'`` is the prebuilt CUDA core (``sweep/lib/cu<major>/libsweep_core.so``)
+    driven through the pure-Python ctypes layer ``sweep.backend.c`` -- CUDA GPU only,
+    nothing compiles after ``pip install``.  ``impl=None`` means ``'auto'``: ``'c'``
+    when ``sweep.is_torch_binding_available()`` and the equation declares ``C_NAME``,
+    else ``'eager'``; an explicit ``impl='c'`` that cannot be honoured falls back to
+    eager with a UserWarning.  ``backend=None`` inherits the equation's backend.
+    ``cuda_options=`` applies to ``impl='c'`` only, ``eager_options=`` to
+    ``impl='eager'``; ``memory=`` (``Full()`` / ``BoundarySaving()`` / ``Ckpt()``)
+    is impl-agnostic (default: boundary saving on 'c', chunked ckpt on eager).
+    """
     def __init__(
         self,
         *args,

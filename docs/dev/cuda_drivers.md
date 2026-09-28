@@ -55,9 +55,11 @@ two modes whose cross-call state lives entirely in Python-bound buffers. The
 motivation is that DD paid the ~1–2 ms host prologue on every step (30–100× the
 launch floor), and a CUDA graph cannot fix host logic; after the move to runners,
 end-to-end DD is 1.8–4.4× on elastic 2-D, ~1.5× on Elastic3D and 1.05–1.8× on
-acoustic. `module.cpp` binds `ForwardRunner.run` / `BackwardRunner.run` through
-`py::class_` and exports the factories as `{C_NAME}_forward_runner` /
-`{C_NAME}_backward_bs_runner`; on the Python side
+acoustic. On the default path `sweep.backend.c.runners` wraps the core's runner C
+API (`core/capi.h`, `core/runner.h`) in `ForwardRunner` / `BackwardRunner` and
+exports the factories as `{C_NAME}_forward_runner` / `{C_NAME}_backward_bs_runner`
+for the equations listed in `sweep.backend.c.RUNNER_EQUATIONS` (`module.cpp` does
+the same through `py::class_` for the `SWEEP_JIT_FULL=1` shim); on the Python side
 `WaveEquation._compiled_runner_factories()` resolves the same convention and falls
 back to the per-call stepped path when a factory is missing.
 
@@ -526,18 +528,25 @@ steps 1–4 run once more at `it = 0`.
    `forward_runner` / `backward_bs_runner` factories; do not instantiate the
    recursive driver if you do not offer that mode (templates instantiate lazily, so
    the hooks may be absent).
-5. **`bindings/module.cpp`**: `m.def` the five `{C_NAME}_*` entries and the two
-   `{C_NAME}_*_runner` factories.
+5. **C API table**: add the five `{C_NAME}_*` ids to `SweepEntry` in `core/capi.h`
+   (bump `SWEEP_ENTRY_COUNT`), the matching rows to `ENTRY_NAMES` / `ENTRY_KINDS`
+   and the `dispatch()` cases in `cuda/common/capi.cu`; for a stepped equation also
+   the two runner-factory `case`s there and its name in
+   `sweep.backend.c.RUNNER_EQUATIONS`. `bindings/module.cpp` mirrors the table for
+   the `SWEEP_JIT_FULL=1` shim only.
 6. **Python**: `C_NAME` and `cuda_layout` (`base_nvar`, `pml_nvar`, `last_two_nvar`,
    `checkpoint_nvar`, `adjoint_extra_nvar`, `boundary_tangent_pad`, `slots`,
    `grads_out_has_wavelet`, …). Set `stepped=True` once migrated, and
    `dd_backward_phases=True` once the backward implements numbered phases. Without
    recursive checkpointing set `C_HAS_RECURSIVE_CKPT = False`. For DD, also pick or
    declare a schedule in `parallel/dd_spec.py`.
-7. **Rebuild the extension**: `rm -rf $TORCH_EXTENSIONS_DIR` and recompile with
-   `SWEEP_JIT_FULL=1` **in the same command** — the `.staged` sentinel keys on the
-   version number and not on the mode, so an edited `.cu` compiles the stale copy in
-   silence.
+7. **Rebuild the core**: `python -m sweep.build` (or the next `impl='c'` use)
+   re-stages only the files whose SHA-256 changed and runs the core's ninja graph
+   incrementally; no `rm -rf` is needed (under `SWEEP_JIT_FULL=1` the pybind shim is
+   rebuilt the same way). Make sure no wheel-style core sits under
+   `src/sweep/lib/<cuN>/` and `SWEEP_CORE` is unset: a fitting shipped core is loaded
+   as it is and `csrc/` edits are silently ignored
+   (`sweep.backend.torch.binding.diagnostics()['shipped_core']` tells).
 8. **Put it under the gate**: add it to `test/solver_gradient_mode_suite.py::SOLVERS`
    and `gate/bitgate.py::ALL_SOLVERS`, and record a baseline before migrating.
 
@@ -549,12 +558,13 @@ configuration runs in its own subprocess; `gate/run_gate.sh` is the only approve
 to run (never through a pipe, a missing verdict line is a failure, and
 `ran == PASS+FAIL+MISSING+NEW` is checked against truncation). Environment:
 `. gate/env.sh` pins `PY`, `PYTHONPATH=worktree/src` and a dedicated
-`TORCH_EXTENSIONS_DIR`; the gate and pytest never share a shell (a leaked
-`SWEEP_JIT_FULL` produces screens of false red). Acceptance for each migration step:
+`TORCH_EXTENSIONS_DIR` (the local core's cache); the gate runs on the default ctypes
+path, and a leaked `SWEEP_JIT_FULL` switches it to the pybind shim and produces
+screens of false red. Acceptance for each migration step:
 tiers A/C/T/dd1 bit-exact green plus no new pytest failures, with tier B added when a
-family is finished. After touching `csrc/`, `rm -rf` the extension directory and
-rebuild, then check that the `.so` mtime is later than the edit and earlier than the
-gate log.
+family is finished. After touching `csrc/`, rebuild the core (`python -m sweep.build`) and check
+that `libsweep_core.so`'s mtime is later than the edit and earlier than the gate
+log.
 
 | Tool | Coverage | Usage |
 |---|---|---|
@@ -567,4 +577,4 @@ gate log.
 | `gate/ddgate.py` world≥2 | Real tiles, NCCL halo exchange, `cut_face_mask` — the only rung that can catch a wrong send-field list. On ibex: `torchrun --nproc-per-node=2 gate/ddgate.py --ranks 2 …`, with the baseline re-recorded from dev inside the same job | `dd_reverify.sbatch` |
 | `gate/evr_ab.py` | `ElasticVRR` (elastic_vr2d) is not in the suite, so A/B/C/T can all be green without testing it: 4 backward modes × free surface, comparing the record plus 6 gradients — 56 tensors — bit for bit | `$PY gate/evr_ab.py --out new.pt --compare gate/evr_base.pt` |
 | `gate/check_equations_api.py` | Freezes the public surface of `sweep.equations` (name count, registered equation count, alias identity) | Run when touching `equations/` |
-| pytest | ~886 passing (`test_import_does_not_pull_optional_deps` is a known order-dependent noise case and is green on its own). Driver-related: `test_stepped_forward{,_elastic}.py`, `test_stepped_backward{,_elastic}.py`, `test_dd_*two_tile*.py`, `test_dd_tiles_3d.py`, `test_cut_face_mask.py`, `test_slot_table_consistency.py`, `test_dd_supported_equations.py`, `test_boundary_tail_truncation.py`; C-vs-eager gradient consistency lives in `test/solver_gradient_mode_suite.py` | `SWEEP_JIT_FULL=1 $PY -m pytest test/` |
+| pytest | the suite exits 0 (`test_import_does_not_pull_optional_deps` runs in a fresh interpreter). Driver-related: `test_stepped_forward{,_elastic}.py`, `test_stepped_backward{,_elastic}.py`, `test_dd_*two_tile*.py`, `test_dd_tiles_3d.py`, `test_cut_face_mask.py`, `test_slot_table_consistency.py`, `test_dd_supported_equations.py`, `test_boundary_tail_truncation.py`; C-vs-eager gradient consistency lives in `test/solver_gradient_mode_suite.py` | `$PY -m pytest test/` (the default ctypes path, what the wheel ships); a second run under `SWEEP_JIT_FULL=1` covers the pybind shim and the CPU engine |

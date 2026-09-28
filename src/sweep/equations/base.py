@@ -232,8 +232,10 @@ class WaveEquation:
         ``{C_NAME}_forward`` plus ``_backward`` / ``_backward_bs`` /
         ``_backward_ckpt`` / ``_backward_recursive_ckpt`` -- so the naming
         convention lives here once instead of as a hand-copied import block per
-        equation.  Attribute access on ``sweep._C`` is what triggers the
-        one-time JIT compile, exactly as those blocks did.
+        equation.  Attribute access on ``sweep._C`` is what loads the backend on
+        first use (the ctypes layer over the prebuilt CUDA core; a local nvcc
+        core build only when no shipped core fits, the pybind compile only under
+        ``SWEEP_JIT_FULL=1``), exactly as those blocks did.
 
         Installed as ``_C`` on every subclass that declares ``C_NAME``; see
         :meth:`__init_subclass__`.
@@ -260,9 +262,10 @@ class WaveEquation:
         """(forward_runner, backward_bs_runner) persistent-runner factories.
 
         Same ``C_NAME`` convention as :meth:`_compiled_funcs`; returns
-        ``(None, None)`` when the equation has no compiled bindings or the
-        compiled module predates the runner entries, so callers can fall back
-        to the per-call stepped path.
+        ``(None, None)`` when the equation has no compiled bindings or the core
+        has no persistent runner for this equation (see
+        ``sweep.backend.c.RUNNER_EQUATIONS``), so callers can fall back to the
+        per-call stepped path.
         """
         import sweep._C as _C
 

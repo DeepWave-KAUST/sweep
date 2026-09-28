@@ -1,6 +1,6 @@
 """Where sweep's CUDA core comes from -- and, for developers, the compiled shim.
 
-One wheel serves **any** torch version and any Python 3, and nothing compiles
+One wheel serves **any** torch version and any Python >= 3.9, and nothing compiles
 after ``pip install``: the core depends on CUDA only, so the wheel ships it
 prebuilt (``libsweep_core.so`` under ``sweep/lib/cu<major>/``: two cores, ``cu12``
 and ``cu13``, one per CUDA major torch is built for, each a fat binary; see
@@ -489,8 +489,8 @@ def can_compile() -> tuple[bool, str]:
     see :func:`_cached_local_core` -- needs at run time only the CUDA driver
     and the cuFFT runtime it links (``nvidia-cufft-cu12`` for the cu12 core,
     the unsuffixed ``nvidia-cufft`` for cu13: torch's own CUDA wheels bring
-    it, the ``sweepx[cuda12]`` / ``sweepx[cuda13]`` extra names it for a torch
-    that did not); no headers.  ``SWEEP_JIT_FULL=1`` (the compiled shim, a C++
+    it, the ``sweep-solver[cuda12]`` / ``sweep-solver[cuda13]`` extra
+    (pyproject.toml) names it for a torch that did not); no headers.  ``SWEEP_JIT_FULL=1`` (the compiled shim, a C++
     compile against torch) adds the CUDA runtime headers to that: torch's pip
     CUDA wheels bring them (``nvidia-cuda-runtime[-cu12]``, plus
     ``nvidia-cuda-nvcc[-cu12]`` for crt/host_defines.h), or a toolkit's

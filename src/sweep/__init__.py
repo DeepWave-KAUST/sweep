@@ -142,12 +142,14 @@ def precompile(require_gpu: bool = True) -> bool:
 
     Nothing compiles on first use: the shim is ctypes and the wheel ships the
     core prebuilt (one per CUDA major, ``lib/cu12/`` and ``lib/cu13/``, each a
-    fat binary over the common archs), so with a fitting core this is a no-op — e.g. right after ``pip install``.  When no
+    fat binary over the common archs), so with a fitting core this is a no-op —
+    e.g. right after ``pip install``.  When no
     shipped core fits -- a torch built for another CUDA major, a GPU outside
     the shipped archs and older than the shipped PTX, an sdist/clone install --
     the core is built here once with nvcc (~2-5 min) and cached, and that is
     the surprise this call moves up front.  Raises a clear error if PyTorch, a
-    CUDA GPU, or (for that build) a suitable ``nvcc`` (>=12.4) is missing::
+    CUDA GPU, or (for that build) a suitable ``nvcc`` (torch's CUDA major; >= 12.4
+    for CUDA 12, >= 12.8 for a Blackwell target, or a CUDA 13 nvcc) is missing::
 
         python -c "import sweep; sweep.precompile()"
 

@@ -41,8 +41,9 @@ jobs:
           # The CUDA wheel is ~2.5 GB and nothing here can use it.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e . pytest
-          # sweep._C is JIT-compiled on first use, never at install time, so
-          # there is no CUDA toolchain to provide here. Tests that need it skip.
+          # sweep._C is a pure-Python ctypes layer over a prebuilt CUDA core; a clone
+          # carries none (src/sweep/lib is git-ignored) and the core needs a GPU anyway,
+          # so nothing compiles at install and the tests that need it skip.
 
       - name: Run the suite
         env:

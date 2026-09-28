@@ -12,7 +12,7 @@ backend by `resolve_memory_strategy`.
 
 ::: sweep.propagator.options.EagerOptions
 
-## Compiled CUDA / C++ (`impl='c'`)
+## CUDA core (`impl='c'`)
 
 ::: sweep.propagator.options.CUDAOptions
 

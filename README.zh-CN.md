@@ -21,28 +21,30 @@
 
 ## 安装
 
-**从 PyPI 安装** —— 一个 wheel,通吃任意 PyTorch 版本、任意 Python 3:
+**从 PyPI 安装** —— 一个 wheel,通吃任意 PyTorch 版本、Python >= 3.9:
 
 ```bash
 pip install sweepx
-python -c "import sweep; sweep.precompile()"   # 可选:确认 CUDA core 已就位(有自带 core 时什么都不做)
+python -c "import sweep; sweep.precompile()"   # 可选:确认 CUDA core 已就位并加载它(自带 core 时不编译任何东西)
 ```
 
-wheel 按 CUDA 大版本各自带一个**预编译 CUDA core** —— `sweep/lib/cu12/` 与 `sweep/lib/cu13/`(各是一个 `libsweep_core.so` fat binary)—— 加载时按你 torch 的 CUDA 大版本选。cu12 覆盖 V100 及更新的卡直到 H100/H200(sm_70–sm_90 SASS),Blackwell 靠 sm_90 PTX;cu13 覆盖 T4/RTX 20 及更新的卡(sm_75–sm_90 SASS),Blackwell 原生(sm_100、sm_120)—— 不含 V100,因为 nvcc 13 编不出 sm_70,所以 V100 要用面向 CUDA 12 的 torch(本地编译也救不了:nvcc 13 同样编不出 sm_70)—— 且需要驱动 >= 580,和 torch cu130 的要求一样。编译版后端(`impl='c'`)通过一层纯 Python 的 `ctypes` 层(`sweep.backend.c`)驱动这个 core:直接用每个张量的 `data_ptr()`、shape、stride 和 dtype 填 core 的 C 结构体 —— 所以 `pip install` 之后**什么都不用编译**:不需要 nvcc、不需要 C++ 编译器、不需要 CUDA 头文件(依赖里的 `ninja` 只在本地编 core 时才会跑)。全程不经过 torch 的 C++ ABI,因此同一个 wheel 任意 torch 版本都能用。只有在没有合适的预编 core 时才需要 `nvcc >= 12.4` —— 你的 torch 是没带 core 的 CUDA 大版本(cu12、cu13 之外),或 GPU 既不在自带的架构列表里**又**比自带的 PTX 更老(例如 Pascal sm_6x;PTX 只能让更新的卡适配)—— 或者从 sdist / 克隆安装(两者都不带 core)。即便这时,也只编 CUDA core 本身,在本地按你的卡编一遍(2–5 分钟,`python -m sweep.build` 时或首次使用时),之后的运行直接复用,不再需要 nvcc;从来不需要编 torch shim。`SWEEP_CORE=<path/to/libsweep_core.so>` 可指定自定义 core。core 运行时链接 cuFFT;torch 的 CUDA wheel 自带它,没带的话 `pip install "sweepx[cuda12]"`(或 `"sweepx[cuda13]"`,按你的 core 选)补上。纯 Python 的 **eager** / **JAX** 后端这些都不需要。
+wheel 按 CUDA 大版本各自带一个**预编译 CUDA core** —— `sweep/lib/cu12/` 与 `sweep/lib/cu13/`(各是一个 `libsweep_core.so` fat binary)—— 加载时按你 torch 的 CUDA 大版本选。cu12 覆盖 V100 及更新的卡直到 H100/H200(sm_70–sm_90 SASS),Blackwell 靠 sm_90 PTX;cu13 覆盖 T4/RTX 20 及更新的卡(sm_75–sm_90 SASS),Blackwell 原生(sm_100、sm_120)—— 不含 V100,因为 nvcc 13 编不出 sm_70,所以 V100 要用面向 CUDA 12 的 torch(本地编译也救不了:nvcc 13 同样编不出 sm_70)—— 且需要驱动 >= 580,和 torch cu130 的要求一样。编译版后端(`impl='c'`)通过一层纯 Python 的 `ctypes` 层(`sweep.backend.c`)驱动这个 core:直接用每个张量的 `data_ptr()`、shape、stride 和 dtype 填 core 的 C 结构体 —— 所以 `pip install` 之后**什么都不用编译**:不需要 nvcc、不需要 C++ 编译器、不需要 CUDA 头文件(依赖里的 `ninja` 只在本地编 core 时才会跑)。全程不经过 torch 的 C++ ABI,因此同一个 wheel 任意 torch 版本都能用。只有在没有合适的预编 core 时才需要 nvcc,且 nvcc 的 CUDA 大版本必须和你的 torch 一致(CUDA 12 要 >= 12.4,目标 Blackwell 要 >= 12.8;CUDA 13 的任意 nvcc 都行,但它编不出 sm_70)—— 你的 torch 是没带 core 的 CUDA 大版本(cu12、cu13 之外),或 GPU 既不在自带的架构列表里**又**比自带的 PTX 更老(例如 Pascal sm_6x;PTX 只能让更新的卡适配)—— 或者从 sdist / 克隆安装(两者都不带 core)。即便这时,也只编 CUDA core 本身,在本地按你的卡编一遍(2–5 分钟,`python -m sweep.build` 时或首次使用时),之后的运行直接复用,不再需要 nvcc;从来不需要编 torch shim。`SWEEP_CORE=<path/to/libsweep_core.so>` 可指定自定义 core。core 运行时链接 cuFFT;torch 的 CUDA wheel 自带它,没带的话 `pip install "sweep-solver[cuda12]"`(或 `"sweep-solver[cuda13]"`,按你的 core 选)补上。纯 Python 的 **eager** / **JAX** 后端这些都不需要。
 
 **从源码安装**(克隆仓库):
 
 ```bash
 # 纯 Python(PyTorch / JAX eager 路径);克隆里没有预编 core,所以
-# 首次使用 impl='c' 时会在本地编 CUDA core(需要 nvcc)
+# 首次使用 impl='c' 时会在本地编 CUDA core(需要和 torch 同 CUDA 大版本的 nvcc)
 pip install .
 
-# 现在就预编译 C++/CUDA 扩展 —— 跳过首次使用时的 core 编译(克隆里没有预编 core,
-# 这一步和首次使用时的编译都需要 nvcc)
+# 现在就把这个 core 编好,不等首次使用(只需 nvcc;不需要 torch 头文件和 C++ 编译器)
+python -m sweep.build            # 没有 GPU 的节点上加 TORCH_CUDA_ARCH_LIST=8.0 --no-gpu-required
+
+# 仅开发者:把 pybind shim + CPU engine 预编成绑定当前 torch 版本的 sweep._C 扩展(需要 nvcc、C++ 编译器、torch 头文件)
 SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 ```
 
-如果预编译无法自动检测 GPU 架构,在第二条命令前先设置 `TORCH_CUDA_ARCH_LIST`(如 V100 用 `"7.0"`、A100 用 `"8.0"`、RTX 6000 Ada 用 `"8.9"`)。
+如果预编译无法自动检测 GPU 架构,在两条编译命令之前先设置 `TORCH_CUDA_ARCH_LIST`(如 V100 用 `"7.0"`、A100 用 `"8.0"`、RTX 6000 Ada 用 `"8.9"`)。
 
 <sub>`sweepx` 是 PyPI 发行名,导入用 `import sweep`(类似 `scikit-learn` → `import sklearn`,因为裸名 `sweep` 在 PyPI 已被占)。`pip install sweep-solver` 等价。完整说明见[文档](https://sweepx.deepwave.group/solver/getting-started/installation/)。</sub>
 

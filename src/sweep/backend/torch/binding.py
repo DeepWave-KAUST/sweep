@@ -2,8 +2,8 @@
 
 ``sweep._C`` reaches a process one of three ways.  By default it is the ctypes
 layer (``sweep.backend.c``) over the prebuilt core the wheel ships, loaded on
-first use (see ``sweep/backend/c/jit.py``), so a plain ``import sweep._C`` always succeeds and
-says nothing about whether the core can run here.  ``SWEEP_JIT_FULL=1`` makes
+first use (see ``sweep/backend/c/jit.py``), so a plain ``import sweep._C``
+always succeeds and says nothing about whether the core can run here.  ``SWEEP_JIT_FULL=1`` makes
 it the compiled pybind shim instead, JIT-compiled against your torch on first
 use -- the developer path.  And a wheel built with ``SWEEP_BUILD_CUDA=1`` -- or
 ``setup.py build_ext --inplace`` -- ships a real compiled extension, which
@@ -37,8 +37,9 @@ def _core_loaded() -> bool:
 def is_available() -> bool:
     """True when the ``sweep._C`` backend is **usable** here -- an ahead-of-time
     extension is on disk, or PyTorch, a CUDA GPU and a CUDA core (the wheel's
-    prebuilt one, nothing to compile; else a suitable ``nvcc`` >=12.4 to build
-    one) are present.  Does NOT load or compile anything."""
+    prebuilt one, nothing to compile; else a suitable ``nvcc`` -- torch's CUDA
+    major, >= 12.4 for CUDA 12, >= 12.8 for a Blackwell target, or a CUDA 13
+    nvcc -- to build one) are present.  Does NOT load or compile anything."""
     try:
         from sweep import is_torch_binding_available
         return is_torch_binding_available()

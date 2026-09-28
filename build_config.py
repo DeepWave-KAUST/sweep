@@ -288,9 +288,10 @@ def host_wheel_platform():
 
 def wheel_platform_kwargs(root_dir=ROOT_DIR):
     """``options`` for setup(): pin the wheel to the build host's platform only
-    when a prebuilt core sits under src/sweep/lib -- the core is a native .so
-    but the shim still compiles on first use, so the wheel stays py3-none and
-    only its platform tag changes. Without a core the wheel is ...-any."""
+    when a prebuilt core sits under src/sweep/lib -- the core is a native .so,
+    but the shim over it is pure Python (ctypes), so no CPython ABI is involved:
+    the wheel stays py3-none and only its platform tag changes (manylinux_2_28
+    from the release container). Without a core the wheel is ...-any."""
     cores = shipped_core_paths(root_dir)
     if not cores:
         return {}
@@ -302,12 +303,15 @@ def wheel_platform_kwargs(root_dir=ROOT_DIR):
 def build_ext_kwargs(build_cuda=None):
     """Return setup() kwargs for the optional AOT C++/CUDA extension.
 
-    The default distribution is **JIT** (see ``sweep/backend/c/jit.py``): one ``py3-none``
-    wheel ships the C++/CUDA sources and compiles ``sweep._C`` against the user's
-    own torch on first use — so this returns NO ``ext_modules`` and every dep
-    comes from ``pyproject.toml``. The ``SWEEP_BUILD_CUDA=1`` path is kept only
-    for building optional pre-compiled fast-path wheels (e.g. a GitHub release),
-    never for the PyPI wheel.
+    The default distribution compiles NOTHING at install or first use: the wheel
+    ships the C++/CUDA sources plus prebuilt torch-free cores (src/sweep/lib/cu12,
+    cu13) and ``sweep._C`` is a pure-Python ctypes layer over them
+    (``sweep/backend/c/``); a local core build (``python -m sweep.build``, nvcc
+    only) happens only when no shipped core fits. So this returns NO
+    ``ext_modules`` and every dep comes from ``pyproject.toml``. The
+    ``SWEEP_BUILD_CUDA=1`` path is kept only for an ahead-of-time ``sweep._C``
+    extension (the pybind shim + CPU engine, bound to one torch) -- the
+    developer/GitHub-release variant, never the PyPI wheel.
     """
     if build_cuda is None:
         build_cuda = env_flag_enabled("SWEEP_BUILD_CUDA")

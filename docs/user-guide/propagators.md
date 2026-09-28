@@ -15,20 +15,21 @@ are:
   (`"torch"` for PyTorch eager / `torch.compile`; `"jax"` for JAX on
   `PropJax`).
 - `impl` — the **implementation path** under that framework (`"eager"` =
-  pure-Python operators with PyTorch autograd; `"c"` = compiled C++ / CUDA
-  kernels through the `sweep._C` extension).
+  pure-Python operators with PyTorch autograd; `"c"` = the prebuilt CUDA core
+  (`libsweep_core.so`) driven through the pure-Python `sweep._C` ctypes layer).
 
 The two axes are orthogonal:
 
 | Backend | Impl | Device | What runs |
 | --- | --- | --- | --- |
 | `torch` | `eager` | CPU or CUDA | Pure-Python operators + PyTorch autograd |
-| `torch` | `c` | CPU or CUDA | Compiled C++ / CUDA kernels via `sweep._C` |
+| `torch` | `c` | CUDA | Prebuilt CUDA core via the `sweep._C` ctypes layer |
 | `jax` | — | CPU or CUDA | JAX implementation via `PropJax` |
 
 `"cuda"` is **not** a backend or `impl` value — it is a device choice driven by
-the tensors you pass in. The compiled extension runs C++ CPU kernels on CPU
-tensors and CUDA kernels on CUDA tensors.
+the tensors you pass in. The compiled path runs on CUDA tensors only; a host
+model tensor is refused with a clear error. (The C++ CPU engine is a
+`SWEEP_JIT_FULL=1` developer-path feature.)
 
 A minimal invocation for each path:
 
@@ -284,6 +285,12 @@ machine, not on the problem. All are read once per run; none changes results.
 | `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
 | `SWEEP_BOUNDARY_DTYPE` | Default `storage_dtype` for the boundary ring; an explicit `BoundarySaving(storage_dtype=...)` wins. |
 | `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
+| `SWEEP_JIT_FULL=1` | Developer path: compile the pybind shim + CPU engine against your torch instead of using the ctypes layer over the prebuilt core. |
+| `SWEEP_CORE=<path>/libsweep_core.so` | Use a custom CUDA core; its `core.json` sidecar gets the same fit check as the shipped one. |
+| `SWEEP_JIT_ALLOW_OLD_CUDA=1` | Try an nvcc 12.0–12.3 for a local core build. |
+| `TORCH_CUDA_ARCH_LIST` | Target arch(s) for a local core build with no visible device. |
+| `TORCH_EXTENSIONS_DIR` | Where a locally built core is cached. |
+| `CUDA_HOME` / `CUDA_PATH` | Toolkit for a local core build, version-checked against torch's CUDA major. |
 
 ## Consistency testing
 
