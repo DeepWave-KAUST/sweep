@@ -96,6 +96,20 @@ def test_can_build_reports_the_toolkit_problem_when_there_is_a_device(no_shipped
     assert not ok and "CUDA toolkit" in why
 
 
+@pytest.mark.parametrize("cuda, major", [("12.8", "12"), ("13.0", "13")])
+def test_toolkit_message_names_the_torch_cuda_major(no_gpu, cuda, major):
+    """Two shipped cores, cu12 and cu13, and a local build wants the nvcc of
+    the same major as torch: the refusal says which one, not a bare
+    "matching your torch"."""
+    import torch
+    no_gpu.setattr(torch.version, "cuda", cuda)
+    no_gpu.setenv("TORCH_CUDA_ARCH_LIST", "8.9")
+    no_gpu.setattr(_jit, "_find_cuda_home", lambda: None)
+    ok, why = _jit.can_compile()
+    assert not ok and "CUDA toolkit" in why
+    assert f"an nvcc of CUDA {major}" in why, why
+
+
 def test_build_cli_refuses_without_an_arch(no_shipped_core, capsys):
     """The arch gate exists for the nvcc path; a fitting shipped core would
     skip it, hence the pin."""

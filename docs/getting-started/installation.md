@@ -9,9 +9,15 @@ pip install sweepx
 python -c "import sweep; sweep.precompile()"   # optional: check that a CUDA core is in place (a no-op with the shipped one)
 ```
 
-The wheel carries a **prebuilt CUDA core** for CUDA 12 (`sweep/lib/cu12/libsweep_core.so`,
-a fat binary for sm_70–sm_90 plus PTX for forward compatibility; more CUDA tags can
-ride along in the same wheel later). The compiled backend (`impl='c'`) is that core
+The wheel carries a **prebuilt CUDA core** per CUDA major — `sweep/lib/cu12/` and
+`sweep/lib/cu13/`, each a `libsweep_core.so` fat binary — and loads the one your
+torch's CUDA major names. cu12 covers V100 and newer through H100/H200 (sm_70–sm_90
+SASS) and Blackwell through its sm_90 PTX; cu13 covers T4/RTX 20 and newer
+(sm_75–sm_90 SASS) with Blackwell native (sm_100, sm_120) — no V100, since nvcc 13
+cannot emit sm_70, so a V100 needs a torch built for CUDA 12 (a local build cannot
+help: nvcc 13 cannot target it either) — and needs driver >= 580, exactly what torch
+cu130 needs. The
+compiled backend (`impl='c'`) is that core
 plus a pure-Python `ctypes` layer (`sweep._capi`) that fills the core's C structs
 straight from each tensor's `data_ptr()`, shape, strides and dtype. So after
 `pip install` **nothing compiles**: no nvcc, no C++ compiler, no CUDA headers; the
@@ -20,7 +26,7 @@ involved, which is why the same wheel works with any torch version — there is 
 torch/CUDA version lock-in.
 
 `nvcc >= 12.4` is needed only when no shipped core fits your process — your torch was
-built for a different CUDA major than the shipped core, or your GPU is outside the
+built for a CUDA major with no shipped core (neither 12 nor 13), or your GPU is outside the
 shipped archs *and* older than the shipped PTX (e.g. Pascal sm_6x; PTX is what makes
 newer cards fit). Then the core is built locally for your card (2–5 min, the same
 local build a clone uses) at `python -m sweep.build` or on the first use of
@@ -41,9 +47,12 @@ there is never a torch shim to build.
   a PTX entry the driver can JIT forward — which needs a driver at least as new as
   the toolkit that emitted it). Without a sidecar only a CUDA build of torch is
   required and none of that is checked.
-- The core links cuFFT dynamically, at run time. Torch's pip cu12 wheels bring it
-  (`nvidia-cufft-cu12`); if yours did not (conda torch, a CPU wheel plus a system
-  driver), `pip install "sweepx[cuda12]"` adds it.
+- The core links cuFFT dynamically, at run time. Torch's pip CUDA wheels bring it
+  (`nvidia-cufft-cu12` with a cu12 torch; the unsuffixed `nvidia-cufft` 12.x with a
+  cu13 one — the core's rpath reaches both pip layouts, `nvidia/cufft/lib` and
+  `nvidia/cu13/lib`). If yours did not (conda torch, a CPU wheel plus a system
+  driver), `pip install "sweepx[cuda12]"` or `"sweepx[cuda13]"` adds the one your
+  core needs.
 - The pure-Python eager/JAX backends need neither the core nor nvcc.
 
 !!! note
@@ -160,7 +169,8 @@ one is loaded (`"ctypes"` or `"pybind"`).
   pure Python, so nothing compiles — no nvcc, no C++ compiler, no CUDA headers, no
   toolkit. A CUDA toolkit with `nvcc >= 12.4` (12.0–12.3 ship a broken
   `<cuda/std>` bf16 header; set `SWEEP_JIT_ALLOW_OLD_CUDA=1` to try one anyway) is
-  needed only when no shipped core fits (a torch built for another CUDA major, or
+  needed only when no shipped core fits (a torch built for a CUDA major with no
+  shipped core, or
   a GPU outside the shipped archs and older than the shipped PTX), for a source
   build, or for the `SWEEP_JIT_FULL=1` developer path — and outside that path only
   the core is compiled
@@ -205,7 +215,7 @@ To see which core `impl='c'` would use — the shipped one, `SWEEP_CORE`, or non
 ```python
 from sweep._jit import shipped_core_info
 
-print(shipped_core_info())   # {'path': ..., 'reason': ..., 'tag': 'cu12'}
+print(shipped_core_info())   # {'path': ..., 'reason': ..., 'tag': 'cu12'}; the tag is your torch's CUDA major, cu12 or cu13
 ```
 
 To make sure a core is in place up front **and confirm it** (optional), run:
@@ -240,38 +250,48 @@ there, only produce the `.so`.
 
 ### Building a shippable core (release machines)
 
-The core the wheel carries is a fat binary built once, with no GPU in sight:
+The wheel carries one core per CUDA major, each a fat binary built once, with no
+GPU in sight — one command per nvcc:
 
 ```bash
-python -m sweep.build --core                        # defaults: archs 7.0;7.5;8.0;8.6;8.9;9.0+PTX
-python -m sweep.build --core --archs "8.0;9.0+PTX" --out /path/to/lib/cu12 --cuda-home /usr/local/cuda-12.9
+python -m sweep.build --core --cuda-home /usr/local/cuda-12.9   # -> src/sweep/lib/cu12, archs 7.0;7.5;8.0;8.6;8.9;9.0+PTX
+python -m sweep.build --core --cuda-home /usr/local/cuda-13.0   # -> src/sweep/lib/cu13, archs 7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX
+python -m sweep.build --core --archs "8.0;9.0+PTX" --out /path/to/lib/cu12 --cuda-home /usr/local/cuda-12.9   # a custom list
 ```
 
-It stages the sources, runs the core's own ninja graph with `nvcc`, and writes
-`libsweep_core.so` plus a `core.json` sidecar (ABI version, CUDA release, archs,
-PTX, sha256, flags). `--out` defaults to inside the installed `sweep` package,
-`sweep/lib/<tag>` — `src/sweep/lib/<tag>` in a clone, `cu12` for a CUDA 12 toolkit. A wheel built from
-a tree that contains such a core becomes a `manylinux` platform wheel that ships
-it; without one the wheel stays `py3-none-any` and users build the core locally
-(nvcc) as before.
+Each run stages the sources, runs the core's own ninja graph with that `nvcc`, and
+writes `libsweep_core.so` plus a `core.json` sidecar (ABI version, CUDA release,
+archs, PTX, sha256, flags). `--out` defaults to inside the installed `sweep` package,
+`sweep/lib/<tag>` — `src/sweep/lib/<tag>` in a clone — where `<tag>` is the nvcc's
+CUDA major: `cu12` for a CUDA 12 toolkit, `cu13` for CUDA 13. The loader picks the
+tag torch's CUDA major names, so both cores ride in the same wheel. Without
+`--archs` each toolkit gets its recommended list above; they differ because nvcc 13
+dropped offline compilation for compute capability < 7.5 (an `sm_70` entry under
+nvcc 13 is refused up front), so the cu13 core has no V100 and adds Blackwell
+(sm_100, sm_120) natively, which the cu12 core reaches only through its sm_90 PTX.
+A wheel built from a tree that contains such a core becomes a `manylinux` platform
+wheel that ships it; without one the wheel stays `py3-none-any` and users build the
+core locally (nvcc) as before.
 
 Three rules for a core that is going to PyPI:
 
-- **Build the core, then `python -m build --wheel` from the same tree.**
+- **Build both cores, then `python -m build --wheel` from the same tree.**
   `src/sweep/lib/` is git-ignored and pruned from the sdist (`MANIFEST.in`), so a
   bare `python -m build` packs the wheel from the pruned sdist and ships no core.
-  The release script sets `SWEEP_REQUIRE_CORE=1`, which makes `setup.py` refuse a
-  tree with no `src/sweep/lib/*/libsweep_core.so` instead of quietly producing a
-  core-less wheel.
+  The release script sets `SWEEP_REQUIRE_CORE=cu12,cu13`, which makes `setup.py`
+  refuse a tree missing either `src/sweep/lib/<tag>/libsweep_core.so`, naming the
+  missing tag, instead of quietly producing a wheel with one core or none
+  (`SWEEP_REQUIRE_CORE=1` asks only for at least one).
 - **Build on the oldest glibc host you support.** The wheel's `manylinux_X_Y` tag
   is the build host's glibc, and pip rejects the wheel on anything older. The core
   links the host's `libstdc++` dynamically as well, so the same host sets the
   `libstdc++` floor: a user machine with an older one fails at import with a
   `GLIBCXX_...` version error.
-- **Mind the size.** The default arch list (six SASS targets + `sm_90` PTX) gives a 126 MB `.so`
-  and a 37 MB wheel; PyPI's per-file limit is 100 MB. Add SASS entries sparingly and
-  keep exactly one `+PTX` entry, the newest arch: each embedded PTX is another copy
-  of every kernel, and a card newer than every SASS entry only ever needs the
+- **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 126 MB
+  `.so` and a 37 MB wheel; the cu13 core adds a second `.so` of similar size to the
+  same wheel. PyPI's per-file limit is 100 MB. Add SASS entries sparingly and keep
+  exactly one `+PTX` entry per core, the newest arch: each embedded PTX is another
+  copy of every kernel, and a card newer than every SASS entry only ever needs the
   newest one.
 
 ## Notes

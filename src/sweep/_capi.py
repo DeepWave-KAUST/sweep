@@ -155,7 +155,8 @@ def core_lib():
     Opened ``RTLD_GLOBAL``.  That is not what makes cuFFT or the driver
     resolve: the core links cudart statically under ``-fvisibility=hidden``
     (``nm -D`` on the shipped core exports no ``cuda*`` symbol at all, and its
-    NEEDED list is ``libcufft.so.11`` plus the system libraries -- no
+    NEEDED list is the cuFFT of its CUDA major -- ``libcufft.so.11`` for the
+    cu12 core, ``libcufft.so.12`` for cu13 -- plus the system libraries, no
     libcudart, no libcuda), so cuFFT comes through NEEDED/RUNPATH (or the
     ``_preload_cufft`` seat) and the driver through cudart's own dlopen of
     ``libcuda.so.1``, both inside the core's own scope whichever mode it is

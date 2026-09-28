@@ -75,7 +75,11 @@ def diagnostics() -> dict:
     ``prebuilt`` and ``shipped_core`` explain the otherwise confusing pairs:
     with an ahead-of-time extension, or with the wheel's prebuilt CUDA core
     fitting this torch and GPU, the backend is usable even though ``cuda_home``
-    is None, because nothing needs nvcc.
+    is None, because nothing needs nvcc.  ``shipped_core`` carries ``path``
+    and ``reason`` (the core this process would use, or why none), ``tag``
+    (the ``lib/cu<major>/`` drawer torch's CUDA major points at) and
+    ``available`` (the sorted drawers the install holds a core in, e.g.
+    ``["cu12", "cu13"]``, so a mismatch between the two is visible).
     """
     shim = "pybind" if _jit_full() else "ctypes"
     try:
@@ -89,12 +93,13 @@ def diagnostics() -> dict:
             "cuda_home": _jit._find_cuda_home(),
             "already_compiled": is_compiled(),
             "prebuilt": prebuilt,            # compiled ahead of time, no toolkit needed
-            "shipped_core": _jit.shipped_core_info(),   # {path, reason, tag}
+            "shipped_core": _jit.shipped_core_info(),   # {path, reason, tag, available}
         }
     except Exception as exc:  # pragma: no cover
         return {"usable": False, "reason": f"{type(exc).__name__}: {exc}", "shim": shim,
                 "cuda_home": None, "already_compiled": False, "prebuilt": False,
-                "shipped_core": {"path": None, "reason": "not probed", "tag": ""}}
+                "shipped_core": {"path": None, "reason": "not probed", "tag": "",
+                                 "available": []}}
 
 
 __all__ = ["diagnostics", "is_available", "is_compiled"]

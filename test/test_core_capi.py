@@ -68,7 +68,13 @@ def test_session_stream_and_fft_query_round_trip():
     lib.sweep_set_stream(ctypes.c_void_p(0))
     assert (lib.sweep_get_stream() or 0) == 0
     if torch.cuda.is_available():
-        assert lib.sweep_visco_fft_workspace_bytes(1, 64, 64) > 0
+        # cuFFT's work area for a small 2-D C2C plan is a library decision:
+        # cuFFT 11 (CUDA 12) asks for a few KB, cuFFT 12 (CUDA 13) answers 0
+        # on an A100.  Both are legitimate; the Python side sizes the pool
+        # slot as max(1, ceil(bytes / 4)).  The query must answer, not throw,
+        # and answer the same twice.
+        n = lib.sweep_visco_fft_workspace_bytes(1, 64, 64)
+        assert n >= 0 and n == lib.sweep_visco_fft_workspace_bytes(1, 64, 64)
 
 
 def test_call_with_a_bad_entry_returns_a_message_not_an_exception():

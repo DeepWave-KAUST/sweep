@@ -2,6 +2,7 @@ import glob
 import inspect
 import os
 import platform
+import re
 import sys
 from distutils import log
 
@@ -205,25 +206,71 @@ def make_build_extension(BuildExtension):
 
 
 def shipped_core_paths(root_dir=ROOT_DIR):
+    """Every prebuilt core under src/sweep/lib/<tag>/, one per CUDA major the
+    wheel ships (cu12, cu13), sorted by tag."""
     return sorted(glob.glob(os.path.join(root_dir, "src", "sweep", "lib", "*", "libsweep_core.so")))
 
 
+def shipped_core_tags(root_dir=ROOT_DIR):
+    """The <tag> of each core ``shipped_core_paths`` finds: ``["cu12", "cu13"]``."""
+    return [os.path.basename(os.path.dirname(p)) for p in shipped_core_paths(root_dir)]
+
+
+_CORE_TAG_RE = re.compile(r"^cu\d+$")
+
+
+def required_core_tags(value):
+    """Parse SWEEP_REQUIRE_CORE.  Unset / 0 / false: ``None`` (no requirement).
+    1 / true / yes / on: ``[]`` (at least one core, any tag).  A comma list such
+    as ``cu12,cu13``: those tags, which must ALL be present."""
+    value = (value or "").strip()
+    if value.lower() in {"", "0", "false", "no", "off"}:
+        return None
+    if value.lower() in {"1", "true", "yes", "on"}:
+        return []
+    tags = [t.strip() for t in value.split(",") if t.strip()]
+    bad = [t for t in tags if not _CORE_TAG_RE.match(t)]
+    if bad or not tags:
+        raise SystemExit(
+            f"SWEEP_REQUIRE_CORE={value!r} is neither 1 (any core) nor a comma list "
+            "of core tags such as cu12,cu13"
+        )
+    return tags
+
+
 def require_shipped_core(root_dir=ROOT_DIR):
-    """SWEEP_REQUIRE_CORE=1 (the release script sets it): refuse to package a
-    wheel without a prebuilt core.  MANIFEST.in prunes src/sweep/lib from the
-    sdist, so a bare ``python -m build`` packs the wheel from that sdist and
-    silently ships no core; the release path is ``python -m sweep.build --core``
-    then ``python -m build --wheel`` from the same tree."""
-    if not env_flag_enabled("SWEEP_REQUIRE_CORE"):
+    """SWEEP_REQUIRE_CORE (the release script sets it): refuse to package a
+    wheel without the prebuilt core(s).  ``1`` means at least one core under
+    src/sweep/lib/<tag>/; ``cu12,cu13`` names the tags that must ALL be there,
+    so a release meant to carry both cannot quietly ship one, and the error
+    names the missing tag.  MANIFEST.in prunes src/sweep/lib from the sdist, so
+    a bare ``python -m build`` packs the wheel from that sdist and silently
+    ships no core; the release path is ``python -m sweep.build --core`` once
+    per nvcc (CUDA 12 and CUDA 13) then ``python -m build --wheel`` from the
+    same tree."""
+    wanted = required_core_tags(os.environ.get("SWEEP_REQUIRE_CORE", ""))
+    if wanted is None:
         return
-    if shipped_core_paths(root_dir):
+    have = shipped_core_tags(root_dir)
+    if wanted:
+        missing = [t for t in wanted if t not in have]
+        if not missing:
+            return
+        raise SystemExit(
+            f"SWEEP_REQUIRE_CORE={','.join(wanted)} but src/sweep/lib/<tag>/libsweep_core.so "
+            f"is missing for: {', '.join(missing)} (present: {', '.join(have) or 'none'}). "
+            f"Build each with the matching nvcc first (`python -m sweep.build --core "
+            f"--cuda-home <CUDA {missing[0][2:]} toolkit>`; the tag follows the nvcc's "
+            "CUDA major), then run `python -m build --wheel` from the same tree."
+        )
+    if have:
         return
     raise SystemExit(
         "SWEEP_REQUIRE_CORE=1 but no src/sweep/lib/*/libsweep_core.so is present. "
         "A bare `python -m build` packs the wheel from the sdist, which prunes "
         "src/sweep/lib, so the wheel would ship no core. Build the core first "
-        "(`python -m sweep.build --core`), then run `python -m build --wheel` "
-        "from the same tree."
+        "(`python -m sweep.build --core`, once per nvcc), then run "
+        "`python -m build --wheel` from the same tree."
     )
 
 

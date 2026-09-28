@@ -39,10 +39,11 @@ and this project adheres to
   torch-free `libsweep_core.so` (every `.cu`, nvcc) behind a plain C
   interface; the torch side binds to it without compiling (the ctypes layer
   above -- the compiled pybind shim, `module.cpp` + the CPU binding, is the
-  `SWEEP_JIT_FULL=1` developer path).  It is one wheel, carrying the core for
-  CUDA 12 as a fat binary (`sweep/lib/cu12/libsweep_core.so` + a `core.json`
-  sidecar with ABI version, CUDA release, archs, PTX and sha256; more CUDA tags
-  can ride along later), so `pip install sweepx` followed by the first `impl='c'`
+  `SWEEP_JIT_FULL=1` developer path).  It is one wheel, carrying one core per
+  CUDA major as a fat binary (`sweep/lib/cu12/` and `sweep/lib/cu13/`, each a
+  `libsweep_core.so` + a `core.json` sidecar with ABI version, CUDA release,
+  archs, PTX and sha256; the cu13 entry below has the per-core coverage), so
+  `pip install sweepx` followed by the first `impl='c'`
   call, or `sweep.precompile()`, compiles nothing: no nvcc and no toolkit.
   `_jit.core_path()` picks the shipped core when its ABI, CUDA major
   and archs fit this process (PTX makes newer cards fit; a GPU outside the
@@ -72,6 +73,27 @@ and this project adheres to
   from the pruned sdist and ships no core.  `SWEEP_REQUIRE_CORE=1` (the release
   script sets it) makes `setup.py` refuse such a tree instead of quietly
   producing a core-less wheel.
+
+- **A second prebuilt core, for CUDA 13 (`sweep/lib/cu13/`).**  The wheel
+  ships cu12 and cu13 side by side and the loader picks the tag torch's CUDA
+  major names, so a torch cu130 install compiles nothing either.  Per core:
+  cu12 (nvcc 12.9) covers V100 and newer through H100/H200 as SASS
+  (sm_70-sm_90) and Blackwell through its sm_90 PTX; cu13 covers T4/RTX 20 and
+  newer (sm_75-sm_90) with Blackwell native (sm_100, sm_120 + PTX) -- no V100,
+  since nvcc 13 dropped offline compilation for compute capability < 7.5 -- and
+  needs driver >= 580, exactly what torch cu130 needs.  The core's rpath now
+  reaches cuFFT in both pip layouts (`nvidia/cufft/lib` for the CUDA 12 wheels,
+  `nvidia/cu13/lib` for the CUDA 13 ones), and the new extra `sweepx[cuda13]`
+  pulls `nvidia-cufft` 12.x (the unsuffixed wheel is the CUDA 13 line; `-cu12`
+  stays for CUDA 12) when a torch wheel did not.  Release side: `python -m
+  sweep.build --core` files the core under the tag of the nvcc it uses
+  (`--cuda-home`) and, without `--archs`, builds that major's recommended list
+  (cu12 `7.0;7.5;8.0;8.6;8.9;9.0+PTX`, cu13
+  `7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX`; an sm_70 entry under nvcc 13 is refused
+  up front), so a release is one command per toolkit.  `SWEEP_REQUIRE_CORE`
+  accepts a comma list of tags (`cu12,cu13`) that must all be present, naming
+  the missing one, next to `1` for "at least one".  The cu13 core is a second
+  `.so` of similar size to the cu12 one.
 
 - **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
   repository ran the tests before, and nothing could: `pytest test/` was unable

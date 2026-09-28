@@ -154,3 +154,28 @@ class TestBindingDiagnostics:
         assert d["usable"] is False
         assert d["prebuilt"] is False
         assert d["reason"] == "no nvcc"
+
+    SHIPPED_CORE_KEYS = {"path", "reason", "tag", "available"}
+
+    def test_shipped_core_lists_the_cores_the_install_carries(self, monkeypatch):
+        """``shipped_core.available`` -- the ``lib/<tag>/`` drawers holding a
+        core -- is a list on the probed path and on the fallback the except
+        branch builds when the probe itself blows up, so a reader can always
+        test it the same way."""
+        from sweep import _jit
+        from sweep.backend.torch import binding
+
+        monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
+        monkeypatch.setattr(_jit, "_find_cuda_home", lambda: None)
+        monkeypatch.setattr(_jit, "can_build", lambda: (False, "no nvcc"))
+        monkeypatch.setattr(_jit, "_shipped_tags", lambda: ["cu12", "cu13"])
+        core = binding.diagnostics()["shipped_core"]
+        assert set(core) == self.SHIPPED_CORE_KEYS
+        assert core["available"] == ["cu12", "cu13"]
+
+        def boom():
+            raise RuntimeError("probe exploded")
+        monkeypatch.setattr(_jit, "can_build", boom)
+        core = binding.diagnostics()["shipped_core"]
+        assert set(core) == self.SHIPPED_CORE_KEYS
+        assert core == {"path": None, "reason": "not probed", "tag": "", "available": []}

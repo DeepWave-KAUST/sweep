@@ -26,15 +26,19 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# ONE wheel ships the C++/CUDA *sources* plus a prebuilt, torch-free CUDA core
-# for CUDA 12 (sweep/lib/cu12/libsweep_core.so; more tags can ride along later).
+# ONE wheel ships the C++/CUDA *sources* plus two prebuilt, torch-free CUDA
+# cores, one per CUDA major (sweep/lib/cu12/ and sweep/lib/cu13/, each a
+# libsweep_core.so + core.json); the loader picks the one torch's CUDA major
+# names. cu12: V100 through H100/H200 as SASS, Blackwell via PTX. cu13: T4/RTX 20
+# and newer with Blackwell native (nvcc 13 cannot emit sm_70, so no V100); it
+# needs driver >= 580, exactly what torch cu130 needs.
 # sweep._C is a pure-Python ctypes layer over that core's C API (sweep/_capi.py):
 # nothing compiles after pip install -- no nvcc, no C++ compiler, no CUDA
 # headers -- and no torch C++ ABI is involved, so the wheel works with any torch
 # version + any Python 3. torch is unpinned.
 # nvcc (system / `module load cuda` / `conda install -c nvidia cuda-nvcc`) is
-# needed only when no shipped core fits (torch built for another CUDA major, a
-# card outside the shipped archs and older than the shipped PTX, sdist/clone
+# needed only when no shipped core fits (a torch built for a CUDA major with no
+# core, a card outside the shipped archs and older than the shipped PTX, sdist/clone
 # install): then the core is built locally. The pip `nvidia-cuda-nvcc-cu12`
 # wheel ships only ptxas, not the nvcc frontend.
 dependencies = [
@@ -46,10 +50,14 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda  = ["torch"]
-# The shipped core links cuFFT dynamically; torch's cu12 pip builds pull that
-# wheel in. This extra is for a torch that did not (conda torch, a CPU wheel plus
-# a system driver).
+# The shipped cores link cuFFT dynamically; torch's pip CUDA builds pull the
+# matching wheel in. These extras are for a torch that did not (conda torch, a
+# CPU wheel plus a system driver), one per core. cuFFT for CUDA 12 is the
+# "-cu12"-suffixed wheel (11.x, nvidia/cufft/lib); cuFFT for CUDA 13 is the
+# UNSUFFIXED "nvidia-cufft" 12.x (soname libcufft.so.12), which lands in
+# nvidia/cu13/lib -- the core's rpath reaches both.
 cuda12 = ["nvidia-cufft-cu12"]
+cuda13 = ["nvidia-cufft>=12,<13"]
 torch = ["torch"]
 jax   = ["jax", "jaxlib"]
 all   = ["torch", "jax", "jaxlib"]

@@ -141,8 +141,8 @@ def precompile(require_gpu: bool = True) -> bool:
     """Make sure a CUDA core for ``sweep._C`` exists now.
 
     Nothing compiles on first use: the shim is ctypes and the wheel ships the
-    core prebuilt (CUDA 12, a fat binary over the common archs), so with a
-    fitting core this is a no-op — e.g. right after ``pip install``.  When no
+    core prebuilt (one per CUDA major, ``lib/cu12/`` and ``lib/cu13/``, each a
+    fat binary over the common archs), so with a fitting core this is a no-op — e.g. right after ``pip install``.  When no
     shipped core fits -- a torch built for another CUDA major, a GPU outside
     the shipped archs and older than the shipped PTX, an sdist/clone install --
     the core is built here once with nvcc (~2-5 min) and cached, and that is
