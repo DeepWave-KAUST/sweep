@@ -1,9 +1,9 @@
 """The C boundary (core/capi.h) of the prebuilt ``libsweep_core.so``: its
-symbols load through ctypes (``sweep._capi.core_lib()``, no compiled module
+symbols load through ctypes (``sweep.backend.c.loader.core_lib()``, no compiled module
 file exists on the default path any more), the entry table names exactly the
 functions ``sweep._C``'s namespace binds (same names, every kind right), the
 session and the stream round trip, and the visco FFT query answers.  The
-dispatcher itself is exercised by the ctypes shim (test_capi_shim.py)."""
+dispatcher itself is exercised by the ctypes layer (test_backend_c.py)."""
 import ctypes
 import pytest
 
@@ -18,12 +18,12 @@ def _lib():
     local build whose source stamp is current); one that is there but cannot
     be loaded (the ABI guard: a core older than the shim's mirror, a missing
     cuFFT) skips with the reason rather than failing on the binary."""
-    from sweep import _capi, _jit
-    if _jit._shipped_core()[0] is None and _jit._cached_local_core() is None:
-        pytest.skip(f"no core at hand without compiling: {_jit._shipped_core()[1]}")
+    from sweep.backend.c import jit, loader
+    if jit._shipped_core()[0] is None and jit._cached_local_core() is None:
+        pytest.skip(f"no core at hand without compiling: {jit._shipped_core()[1]}")
     try:
-        _jit.core_path()
-        lib = _capi.core_lib()
+        jit.core_path()
+        lib = loader.core_lib()
     except (RuntimeError, OSError) as exc:
         pytest.skip(f"the core at hand cannot be loaded: {exc}")
     import sweep._C as mod                 # the pure-Python namespace over the core
@@ -38,9 +38,9 @@ def _bound(mod):
 
 
 def test_abi_version_and_entry_table_match_the_module():
-    from sweep import _core_abi
+    from sweep.backend.c import abi
     mod, lib = _lib()
-    assert lib.sweep_core_abi_version() == _core_abi.ABI_VERSION
+    assert lib.sweep_core_abi_version() == abi.ABI_VERSION
     n = lib.sweep_entry_count()
     lib.sweep_entry_name.restype = ctypes.c_char_p
     names = [lib.sweep_entry_name(i).decode() for i in range(n)]

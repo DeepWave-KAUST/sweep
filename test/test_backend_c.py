@@ -1,7 +1,8 @@
-"""The pure-Python ctypes shim (``sweep._capi`` over ``sweep._core_abi``) that
-replaces the compiled pybind shim: after ``pip install`` nothing compiles, the
-prebuilt ``libsweep_core.so`` is dlopen'd and every torch tensor is described to
-it through the generated ctypes mirrors.
+"""The pure-Python ctypes layer (``sweep.backend.c``: ``loader`` / ``adapt`` /
+``entries`` / ``runners`` over the generated ``abi`` mirror) that replaces the
+compiled pybind shim: after ``pip install`` nothing compiles, the prebuilt
+``libsweep_core.so`` is dlopen'd and every torch tensor is described to it
+through the generated ctypes mirrors.
 
 What is pinned here, and why each check exists:
 
@@ -22,12 +23,11 @@ What is pinned here, and why each check exists:
 * input validation -- a plain list for a host int field works, a single
   tensor where a list is due is refused by field name, CPU models are refused
   before the core dereferences them;
-* the per-params cache -- host copies and Buf arrays are reused for an
-  unchanged tensor and rebuilt after an in-place write or a replacement;
 * the boundary session -- close() destroys the handle the core handed out,
   once; a closed session raises rather than passing NULL;
-* output mapping -- a driver hands back descriptors of buffers the propagator
-  bound, mapped back to the very tensor object by pointer identity;
+* the entries and the runners return nothing -- the drivers allocate no
+  output, so what the core wrote is in the tensors the caller bound on the
+  params object, and a failed call is the core's message, not a crash;
 * the error path -- a bad entry / a bad runner is a message, not a crash;
 * the stream scope and the runner round trip (GPU): the core launches on
   torch's current stream and puts it back; the persistent runner is the same
@@ -58,10 +58,13 @@ BWD = "BackwardInputCore"
 
 
 def _mods():
-    """The two shim modules, imported lazily so a missing one fails the test
-    that needs it (a red, which is wanted) instead of erroring the module."""
-    from sweep import _capi, _core_abi
-    return _capi, _core_abi
+    """``adapt()`` and the generated mirror, imported lazily so a missing one
+    fails the test that needs it (a red, which is wanted) instead of erroring
+    the module.  The loader, the entries and the runners are imported the same
+    way, in the tests that reach them."""
+    from sweep.backend.c import abi
+    from sweep.backend.c.adapt import adapt
+    return adapt, abi
 
 
 class _CompileRefused(AssertionError):
@@ -79,29 +82,29 @@ def _no_compile(monkeypatch):
     compiled path with SWEEP_JIT_FULL=1, which these tests do not cover.
 
     A locally built core that is already cached with nothing to rebuild is not
-    a compile: ``_jit._build_core`` is let through when ninja has no work (so
+    a compile: ``jit._build_core`` is let through when ninja has no work (so
     ``core_path()`` can resolve it) and refused otherwise."""
     if os.environ.get("SWEEP_JIT_FULL", "").lower() in ("1", "true", "yes", "on"):
         yield
         return
     from torch.utils import cpp_extension
-    from sweep import _jit
+    from sweep.backend.c import jit
 
     def refuse(*_a, **_k):
         raise _CompileRefused("a compile was attempted; the ctypes shim must not build anything")
 
     monkeypatch.setattr(cpp_extension, "load", refuse)
     monkeypatch.setattr(cpp_extension, "load_inline", refuse)
-    if hasattr(_jit, "_build_core"):
-        real_build_core = _jit._build_core
-        will_build = getattr(_jit, "_core_will_build", None)
+    if hasattr(jit, "_build_core"):
+        real_build_core = jit._build_core
+        will_build = getattr(jit, "_core_will_build", None)
 
         def build_core(build_dir, *a, **k):
             if will_build is None or will_build(Path(build_dir)):
                 refuse()
             return real_build_core(build_dir, *a, **k)
 
-        monkeypatch.setattr(_jit, "_build_core", build_core)
+        monkeypatch.setattr(jit, "_build_core", build_core)
     yield
 
 
@@ -109,23 +112,22 @@ def _core_or_skip():
     """The loaded core, or a pytest skip.
 
     These tests never compile, so a core is at hand only when the shipped one
-    fits this torch/GPU (``_jit._shipped_core``) or a locally built one is
-    cached with nothing left to rebuild; ``_jit.core_path()`` resolves both
+    fits this torch/GPU (``jit._shipped_core``) or a locally built one is
+    cached with nothing left to rebuild; ``jit.core_path()`` resolves both
     and is the one call that would otherwise build -- which ``_no_compile``
     turns into ``_CompileRefused``, here a skip.  A core that IS there but is
     refused by the ABI/layout guard is a red, not a skip: that is the guard
     doing its job on a stale binary."""
-    from sweep import _jit
-    _capi, _ = _mods()
-    if _capi._lib is not None:
-        return _capi._lib
-    so, why = _jit._shipped_core()
+    from sweep.backend.c import jit, loader
+    if loader._lib is not None:
+        return loader._lib
+    so, why = jit._shipped_core()
     if so is None:
         try:
-            _jit.core_path()
+            jit.core_path()
         except (RuntimeError, OSError, _CompileRefused) as exc:
             pytest.skip(f"no CUDA core without compiling: {why}; {exc}")
-    return _capi.core_lib()
+    return loader.core_lib()
 
 
 # --------------------------------------------------------------------------- #
@@ -192,38 +194,6 @@ def _buf_values(buf):
     return list((ctypes.c_int32 * int(buf.numel_)).from_address(buf.data_)) if buf.numel_ else []
 
 
-def _buf_like(tensor):
-    """A Buf describing ``tensor``, made the only way the contract gives (through
-    adapt) so this file does not assume a buf_of helper."""
-    _capi, abi = _mods()
-    fi = abi.ForwardInput()
-    fi.record_out = tensor
-    core, keep = _capi.adapt(FWD, fi)
-    return core.record_out, keep
-
-
-def _map_forward_outputs(_capi, out, params):
-    """The output-mapping helper, by whichever name the shim exposes it.
-
-    First choice: the public ``_capi.map_forward_outputs(out, params)``.
-    Second: the pair every forward entry runs -- ``_map_forward(out,
-    _forward_candidates(params))`` -- so the test exercises the entries' own
-    code, not a re-implementation.  No route: fail, and say so, rather than
-    pass on a fake.  (Going through an entry function with ``lib.sweep_call``
-    swapped is deliberately not attempted: it needs a loaded core, and the
-    mapping is meant to be pinned without one.)
-    """
-    helper = getattr(_capi, "map_forward_outputs", None)
-    if helper is not None:
-        return helper(out, params)
-    map_forward = getattr(_capi, "_map_forward", None)
-    candidates = getattr(_capi, "_forward_candidates", None)
-    if map_forward is not None and candidates is not None:
-        return map_forward(out, candidates(params))
-    pytest.fail("no output-mapping helper reachable from outside sweep._capi: neither "
-                "map_forward_outputs(out, params) nor _map_forward(out, _forward_candidates(params))")
-
-
 class _FakeFn:
     """A ctypes-function stand-in: ``_declare`` stamps argtypes/restype on it,
     and it runs ``fn`` when called (or fails, for a name no test expects)."""
@@ -285,8 +255,8 @@ class _FakeSessionLib:
 
 
 def _fake_session(lib, addr=0x1234):
-    _capi, _ = _mods()
-    s = _capi.BoundarySession.__new__(_capi.BoundarySession)
+    from sweep.backend.c.runners import BoundarySession
+    s = BoundarySession.__new__(BoundarySession)
     s._lib = lib
     s.handle = ctypes.c_void_p(addr)
     return s
@@ -297,14 +267,15 @@ def _fake_session(lib, addr=0x1234):
 # --------------------------------------------------------------------------- #
 class TestAbiGuard:
     def test_core_loads_and_the_abi_version_matches(self):
-        _capi, abi = _mods()
+        from sweep.backend.c import loader
+        _, abi = _mods()
         lib = _core_or_skip()
         assert isinstance(lib, ctypes.CDLL)
         assert lib.sweep_core_abi_version() == abi.ABI_VERSION
-        assert _capi.core_lib() is lib, "core_lib() must hand back the one loaded library"
+        assert loader.core_lib() is lib, "core_lib() must hand back the one loaded library"
 
     def test_every_layout_probe_entry_matches_the_mirror(self):
-        _capi, abi = _mods()
+        _, abi = _mods()
         lib = _core_or_skip()
         lib.sweep_layout_count.restype = ctypes.c_int64
         lib.sweep_layout_probe.restype = ctypes.c_int64
@@ -350,31 +321,35 @@ class TestAbiGuard:
 
     # -- the guard against a fake core: what the binary cannot prove --------
     def test_a_matching_core_passes_and_every_entry_is_probed(self):
-        _capi, abi = _mods()
+        from sweep.backend.c import loader
+        _, abi = _mods()
         fake = _FakeCore(abi.ABI_VERSION, abi.ctypes_layout())
-        _capi._check_abi(fake, "<fake>")
+        loader._check_abi(fake, "<fake>")
         assert fake.probed == list(range(len(abi.LAYOUT_PROBE))), \
             "the guard must compare every LAYOUT_PROBE entry, the enum ones included"
 
     def test_abi_version_mismatch_names_both_numbers(self, monkeypatch):
-        _capi, abi = _mods()
+        from sweep.backend.c import loader
+        _, abi = _mods()
         monkeypatch.setattr(abi, "ABI_VERSION", 7)
         fake = _FakeCore(2, abi.ctypes_layout())
         with pytest.raises(RuntimeError, match=r"core ABI 2 .*shim's ABI 7") as ei:
-            _capi._check_abi(fake, "<fake>")
+            loader._check_abi(fake, "<fake>")
         assert "<fake>" in str(ei.value)
         assert fake.probed == [], "a version mismatch is refused before any layout probe"
 
     def test_probe_count_mismatch_names_both_counts(self):
-        _capi, abi = _mods()
+        from sweep.backend.c import loader
+        _, abi = _mods()
         want = list(abi.ctypes_layout())
         fake = _FakeCore(abi.ABI_VERSION, want[:-4])      # a core built before the enum probes
         with pytest.raises(RuntimeError, match=rf"{len(want) - 4} entries.*{len(want)}"):
-            _capi._check_abi(fake, "<fake>")
+            loader._check_abi(fake, "<fake>")
 
     @pytest.mark.parametrize("which", ["first", "middle", "last"])
     def test_layout_mismatch_names_the_entry_expected_and_got(self, which):
-        _capi, abi = _mods()
+        from sweep.backend.c import loader
+        _, abi = _mods()
         probe = list(abi.LAYOUT_PROBE)
         want = list(abi.ctypes_layout())
         i = {"first": 0, "middle": probe.index(("ForwardInputCore", "boundary_session")),
@@ -384,7 +359,7 @@ class TestAbiGuard:
         fake = _FakeCore(abi.ABI_VERSION, bad)
         name, member = probe[i]
         with pytest.raises(RuntimeError) as ei:
-            _capi._check_abi(fake, "<fake>")
+            loader._check_abi(fake, "<fake>")
         msg = str(ei.value)
         assert f"probe {i}" in msg
         assert name in msg and str(member) in msg
@@ -397,19 +372,21 @@ class TestAbiGuard:
 # --------------------------------------------------------------------------- #
 class TestLoader:
     def test_load_lock_is_reentrant(self):
-        _capi, _ = _mods()
-        assert isinstance(_capi._load_lock, type(threading.RLock()))
+        from sweep.backend.c import loader
+        assert isinstance(loader._load_lock, type(threading.RLock()))
 
     def _fake_loader(self, monkeypatch, cdll):
-        _capi, abi = _mods()
-        from sweep import _jit
+        """``(loader, abi, calls)`` with the core path, the cuFFT seat and the
+        toolkit probe faked (``calls`` records the last two) and no core cached."""
+        from sweep.backend.c import jit, loader
+        _, abi = _mods()
         calls = []
-        monkeypatch.setattr(_capi, "_lib", None)
-        monkeypatch.setattr(_jit, "core_path", lambda: Path("/nowhere/libsweep_core.so"))
-        monkeypatch.setattr(_jit, "_preload_cufft", lambda home: calls.append(("preload", home)))
-        monkeypatch.setattr(_jit, "_find_cuda_home", lambda: calls.append(("find_cuda_home",)) or "/fake/cuda")
+        monkeypatch.setattr(loader, "_lib", None)
+        monkeypatch.setattr(jit, "core_path", lambda: Path("/nowhere/libsweep_core.so"))
+        monkeypatch.setattr(jit, "_preload_cufft", lambda home: calls.append(("preload", home)))
+        monkeypatch.setattr(jit, "_find_cuda_home", lambda: calls.append(("find_cuda_home",)) or "/fake/cuda")
         monkeypatch.setattr(ctypes, "CDLL", cdll)
-        return _capi, abi, calls
+        return loader, abi, calls
 
     def test_cufft_is_seated_from_the_wheel_first_and_a_toolkit_only_on_a_libcufft_error(self, monkeypatch):
         attempts = []
@@ -421,10 +398,10 @@ class TestLoader:
                 raise OSError("libcufft.so.11: cannot open shared object file: No such file or directory")
             return fake
 
-        _capi, abi, calls = self._fake_loader(monkeypatch, cdll)
+        loader, abi, calls = self._fake_loader(monkeypatch, cdll)
         fake = _FakeCore(abi.ABI_VERSION, abi.ctypes_layout())
-        lib = _capi.core_lib()
-        assert lib is fake and _capi.core_lib() is fake
+        lib = loader.core_lib()
+        assert lib is fake and loader.core_lib() is fake
         assert calls == [("preload", None), ("find_cuda_home",), ("preload", "/fake/cuda")], \
             "the wheel seat first (no toolkit probe), the toolkit only after the libcufft failure"
         assert [m for _, m in attempts] == [ctypes.RTLD_GLOBAL, ctypes.RTLD_GLOBAL]
@@ -437,22 +414,22 @@ class TestLoader:
             attempts.append(str(path))
             raise OSError("/nowhere/libsweep_core.so: cannot open shared object file")
 
-        _capi, abi, calls = self._fake_loader(monkeypatch, cdll)
+        loader, abi, calls = self._fake_loader(monkeypatch, cdll)
         with pytest.raises(OSError, match="cannot open"):
-            _capi.core_lib()
+            loader.core_lib()
         assert calls == [("preload", None)], "no toolkit probe for an unrelated load error"
         assert len(attempts) == 1
-        assert _capi._lib is None, "a failed load leaves nothing cached"
+        assert loader._lib is None, "a failed load leaves nothing cached"
 
     def test_a_refused_core_is_not_cached(self, monkeypatch):
-        _capi, abi, calls = self._fake_loader(
+        loader, abi, calls = self._fake_loader(
             monkeypatch, lambda path, mode=None, **k: _FakeCore(abi.ABI_VERSION + 1, abi.ctypes_layout()))
         with pytest.raises(RuntimeError, match="ABI"):
-            _capi.core_lib()
-        assert _capi._lib is None
+            loader.core_lib()
+        assert loader._lib is None
 
     def test_concurrent_first_loads_share_one_library(self, monkeypatch):
-        _capi, _ = _mods()
+        from sweep.backend.c import loader
         _core_or_skip()
         real_cdll = ctypes.CDLL
         loads = []
@@ -463,14 +440,14 @@ class TestLoader:
             return real_cdll(path, mode=mode, **k) if mode is not None else real_cdll(path, **k)
 
         monkeypatch.setattr(ctypes, "CDLL", counting)
-        monkeypatch.setattr(_capi, "_lib", None)
+        monkeypatch.setattr(loader, "_lib", None)
         got, errors = [], []
         gate = threading.Barrier(8)
 
         def worker():
             try:
                 gate.wait()
-                got.append(_capi.core_lib())
+                got.append(loader.core_lib())
             except Exception as exc:      # noqa: BLE001 - reported below
                 errors.append(exc)
 
@@ -489,25 +466,25 @@ class TestLoader:
 # --------------------------------------------------------------------------- #
 class TestAdapt:
     def test_defaults_of_the_input_classes(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         for cls, key in ((abi.ForwardInput, FWD), (abi.BackwardInput, BWD)):
             obj = cls()
             for name, _kind, default in abi.FIELDS[key]:
                 assert getattr(obj, name) == default, f"{key}.{name}"
-        fwd, _ = _capi.adapt(FWD, abi.ForwardInput())
+        fwd, _ = adapt(FWD, abi.ForwardInput())
         assert (fwd.it_begin, fwd.it_end, fwd.fs_faces, fwd.transfer_interval) == (0, -1, -1, 1)
         assert fwd.boundary_session is None
         assert fwd.models.n == 0 and fwd.source.defined_ is False
-        bwd, _ = _capi.adapt(BWD, abi.BackwardInput())
+        bwd, _ = adapt(BWD, abi.BackwardInput())
         assert (bwd.bw_it_begin, bwd.bw_it_end, bwd.compute_illumination) == (-1, 0, True)
         assert bwd.grads_out.n == 0 and bwd.adcig_out.defined_ is False
 
     def test_float32_tensor_becomes_a_buf(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         t = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
         fi = abi.ForwardInput()
         fi.source = t
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         b = core.source
         assert b.defined_ is True
         assert b.data_ == t.data_ptr()
@@ -518,33 +495,33 @@ class TestAdapt:
         assert list(b.sizes_)[3:] == [0] * 5 and list(b.strides_)[3:] == [0] * 5
 
     def test_non_contiguous_view_keeps_torch_strides_verbatim(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         base = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
         v = base[:, ::2]
         assert not v.is_contiguous()
         fi = abi.ForwardInput()
         fi.source = v
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         b = core.source
         assert _sizes(b) == tuple(v.shape) == (2, 2, 4)
         assert _strides(b) == tuple(v.stride()) == (12, 8, 1)
         assert b.numel_ == 16 and b.data_ == v.data_ptr()
 
     def test_none_is_an_undefined_buf(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.source = None
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         b = core.source
         assert b.defined_ is False and b.numel_ == 0 and b.ndim_ == 0
         assert b.data_ is None
 
     def test_nine_dims_is_refused(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.source = torch.zeros((1,) * 9)
         with pytest.raises(RuntimeError):
-            _capi.adapt(FWD, fi)
+            adapt(FWD, fi)
 
     @pytest.mark.parametrize("dtype, tag, width", [
         (torch.uint8, "INT8", 1),
@@ -553,28 +530,28 @@ class TestAdapt:
         (torch.float32, "FP32", 4),
     ])
     def test_storage_dtype_tags(self, dtype, tag, width):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.source = torch.zeros(3, 5, dtype=dtype)
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert core.source.dtype_ == getattr(abi, tag)
         assert core.source.elem_size_ == width
 
     def test_float64_is_refused(self):
         """8 bytes wide, but 'anything else' tags FP32 (4): the width check
         buf_of made is the shim's too."""
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.source = torch.zeros(3, 5, dtype=torch.float64)
         with pytest.raises(RuntimeError):
-            _capi.adapt(FWD, fi)
+            adapt(FWD, fi)
 
     def test_list_of_tensors_becomes_a_buflist(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         ts = [torch.zeros(2, 2), torch.ones(3, 1), torch.zeros(4)]
         fi = abi.ForwardInput()
         fi.models = ts
-        core, keep = _capi.adapt(FWD, fi)
+        core, keep = adapt(FWD, fi)
         assert core.models.n == 3
         for i, t in enumerate(ts):
             assert core.models.p[i].data_ == t.data_ptr()
@@ -584,12 +561,12 @@ class TestAdapt:
             "the Buf array a BufList points into must be in the keepalive"
 
     def test_host_int_span_from_an_int64_tensor(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         idx = torch.tensor([0, 2, 5, 7], dtype=torch.int64)
         fi = abi.ForwardInput()
         fi.source_field_indices = idx
         fi.receiver_field_indices = torch.tensor([1], dtype=torch.int64)
-        core, keep = _capi.adapt(FWD, fi)
+        core, keep = adapt(FWD, fi)
         span = core.source_field_indices
         assert span.n == 4
         assert _span_values(span) == [0, 2, 5, 7]
@@ -602,11 +579,11 @@ class TestAdapt:
         assert _ptr_addr(core.receiver_field_indices.p) in addrs
 
     def test_host_buf_for_checkpoint_steps(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         steps = torch.tensor([0, 10, 20, 30, 40], dtype=torch.int64)
         fi = abi.ForwardInput()
         fi.checkpoint_steps = steps
-        core, keep = _capi.adapt(FWD, fi)
+        core, keep = adapt(FWD, fi)
         b = core.checkpoint_steps
         assert b.defined_ is True and b.numel_ == 5 and b.elem_size_ == 4
         assert b.is_cuda_ is False
@@ -615,13 +592,13 @@ class TestAdapt:
         assert _buf_values(b) == [0, 10, 20, 30, 40]
 
     def test_int_lists_float_lists_and_string_lists(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.pad_lo = [10, 0, 20]
         fi.pad_hi = [10, 20]
         fi.spacing = [10.0, 12.5]
         fi.boundary_disk_files = ["/tmp/a.bin", "/tmp/bé.bin"]
-        core, keep = _capi.adapt(FWD, fi)
+        core, keep = adapt(FWD, fi)
         assert _span_values(core.pad_lo) == [10, 0, 20]
         assert _span_values(core.pad_hi) == [10, 20]
         assert _span_values(core.spacing) == [10.0, 12.5]
@@ -633,15 +610,15 @@ class TestAdapt:
             assert _ptr_addr(span.p) in addrs, "span arrays must be in the keepalive"
 
     def test_empty_lists_are_empty_spans(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         for span in (core.pad_lo, core.pad_hi, core.spacing, core.boundary_disk_files,
                      core.source_field_indices, core.receiver_field_indices):
             assert span.n == 0
 
     def test_scalars_are_copied(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.M = 4
         fi.abcn = 20
@@ -656,7 +633,7 @@ class TestAdapt:
         fi.step_phase = 2
         fi.cut_face_mask = 1
         fi.boundary_ring_buffers = 3
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert (core.M, core.abcn, core.nt) == (4, 20, 1000)
         assert core.dt == pytest.approx(0.001, rel=1e-6)
         assert core.save_all_wavefields is True and core.use_boundary_saving is False
@@ -670,30 +647,31 @@ class TestAdapt:
         bi.bw_it_end = 25
         bi.compute_adcig = True
         bi.adcig_max_lag = 4
-        bcore, _ = _capi.adapt(BWD, bi)
+        bcore, _ = adapt(BWD, bi)
         assert bcore.compute_illumination is False
         assert (bcore.bw_it_begin, bcore.bw_it_end) == (50, 25)
         assert bcore.compute_adcig is True and bcore.adcig_max_lag == 4
 
     def test_boundary_session_handle_crosses_as_a_pointer(self):
-        _capi, abi = _mods()
+        from sweep.backend.c.runners import BoundarySession
+        adapt, abi = _mods()
         _core_or_skip()
-        sess = _capi.BoundarySession()
+        sess = BoundarySession()
         assert sess.used() is False
         sess.finish()                         # nothing outstanding: no error
         h = _as_int(sess.handle)
         assert h, "a session carries a non-null core handle"
         fi = abi.ForwardInput()
         fi.boundary_session = sess
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert _as_int(core.boundary_session) == h
         fi.boundary_session = None
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert core.boundary_session is None
         sess.close()
 
     def test_backward_input_lists_and_outputs_bind(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         bi = abi.BackwardInput()
         g0 = torch.zeros(1, 3, 10)
         g1 = torch.zeros(1, 1, 8, 8)
@@ -701,7 +679,7 @@ class TestAdapt:
         bi.grads_out = [g0, g1]
         bi.illum_out = illum
         bi.adcig_out = torch.zeros(3, 1, 1, 8, 8)
-        core, keep = _capi.adapt(BWD, bi)
+        core, keep = adapt(BWD, bi)
         assert core.grads_out.n == 2
         assert core.grads_out.p[0].data_ == g0.data_ptr()
         assert core.grads_out.p[1].data_ == g1.data_ptr()
@@ -715,10 +693,10 @@ class TestAdapt:
 class TestInputValidation:
     @pytest.mark.parametrize("steps", [[0, 10, 20], (0, 10, 20), np.array([0, 10, 20])])
     def test_checkpoint_steps_from_a_plain_sequence(self, steps):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.checkpoint_steps = steps
-        core, keep = _capi.adapt(FWD, fi)
+        core, keep = adapt(FWD, fi)
         b = core.checkpoint_steps
         assert b.defined_ is True and b.numel_ == 3 and b.elem_size_ == 4 and b.is_cuda_ is False
         assert _buf_values(b) == [0, 10, 20]
@@ -727,28 +705,28 @@ class TestInputValidation:
     def test_checkpoint_steps_empty_list_is_the_propagators_empty_sentinel(self):
         """The propagator passes ``torch.empty(0, int32)`` for 'no checkpoints':
         a defined, zero-numel Buf.  A plain ``[]`` must mean the same."""
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.checkpoint_steps = []
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert core.checkpoint_steps.defined_ is True and core.checkpoint_steps.numel_ == 0
         fi.checkpoint_steps = torch.empty(0, dtype=torch.int32)
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert core.checkpoint_steps.defined_ is True and core.checkpoint_steps.numel_ == 0
 
     def test_checkpoint_steps_scalar_is_refused(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.checkpoint_steps = 5
         with pytest.raises(RuntimeError, match="checkpoint_steps"):
-            _capi.adapt(FWD, fi)
+            adapt(FWD, fi)
 
     def test_host_int_spans_from_plain_sequences(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.source_field_indices = [0, 2]
         fi.receiver_field_indices = (1,)
-        core, keep = _capi.adapt(FWD, fi)
+        core, keep = adapt(FWD, fi)
         assert _span_values(core.source_field_indices) == [0, 2]
         assert _span_values(core.receiver_field_indices) == [1]
         addrs = _addresses(keep)
@@ -757,25 +735,25 @@ class TestInputValidation:
 
     @pytest.mark.parametrize("key, field", [(FWD, "models"), (FWD, "wavefields"), (BWD, "grads_out")])
     def test_single_tensor_for_a_buflist_is_refused_by_name(self, key, field):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         obj = abi.ForwardInput() if key == FWD else abi.BackwardInput()
         setattr(obj, field, torch.zeros(2, 2))
         with pytest.raises(RuntimeError, match=rf"{key}\.{field} takes a list of tensors"):
-            _capi.adapt(key, obj)
+            adapt(key, obj)
 
     def test_non_tensor_element_in_a_buflist_is_refused_by_name(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.models = [torch.zeros(2, 2), [1.0, 2.0]]
         with pytest.raises(RuntimeError, match=r"ForwardInputCore\.models\[1\]"):
-            _capi.adapt(FWD, fi)
+            adapt(FWD, fi)
 
     def test_none_entries_in_a_buflist_stay_undefined(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         t = torch.zeros(2, 2)
         fi.models = [t, None]
-        core, _ = _capi.adapt(FWD, fi)
+        core, _ = adapt(FWD, fi)
         assert core.models.n == 2
         assert core.models.p[0].data_ == t.data_ptr()
         assert core.models.p[1].defined_ is False
@@ -785,23 +763,25 @@ class TestInputValidation:
         ``_launch_stream``, which refuses host models before the core can
         dereference them; the bare ``_stream_for_models`` probe keeps
         answering 0 for host models (test_core_stream_scope pins that)."""
-        _capi, abi = _mods()
+        from sweep.backend.c import entries
+        _, abi = _mods()
         fi = abi.ForwardInput()
         fi.models = [torch.zeros(1, 1, 8, 8)]
         with pytest.raises(RuntimeError, match=r"acoustic2d_forward: models\[0\] is a cpu tensor.*expected a CUDA tensor"):
-            _capi._launch_stream(fi, "acoustic2d_forward")
-        assert _capi._stream_for_models(fi.models) == 0
+            entries._launch_stream(fi, "acoustic2d_forward")
+        assert entries._stream_for_models(fi.models) == 0
         fi.models = []
-        assert _capi._launch_stream(fi, "acoustic2d_forward") == 0
+        assert entries._launch_stream(fi, "acoustic2d_forward") == 0
 
     def test_single_tensor_for_models_is_refused_before_indexing(self):
-        _capi, abi = _mods()
+        from sweep.backend.c import entries
+        _, abi = _mods()
         fi = abi.ForwardInput()
         fi.models = torch.zeros(1, 1, 8, 8)
         with pytest.raises(RuntimeError, match="list of tensors"):
-            _capi._stream_for_models(fi.models)
+            entries._stream_for_models(fi.models)
         with pytest.raises(RuntimeError, match="list of tensors"):
-            _capi._launch_stream(fi, "x")
+            entries._launch_stream(fi, "x")
 
     @requires_binding()
     def test_cpu_models_through_an_entry_are_a_message(self):
@@ -814,156 +794,7 @@ class TestInputValidation:
 
 
 # --------------------------------------------------------------------------- #
-# 5. the per-params cache
-# --------------------------------------------------------------------------- #
-class TestHostCache:
-    def _params(self, abi):
-        fi = abi.ForwardInput()
-        fi.source_field_indices = torch.tensor([0, 2, 5], dtype=torch.int64)
-        fi.receiver_field_indices = torch.tensor([1, 3], dtype=torch.int64)
-        fi.checkpoint_steps = torch.tensor([0, 10, 20], dtype=torch.int64)
-        return fi
-
-    def test_same_object_twice_reuses_the_host_copies(self):
-        _capi, abi = _mods()
-        fi = self._params(abi)
-        c1, k1 = _capi.adapt(FWD, fi)
-        cache = fi._capi_host_cache
-        assert isinstance(cache, dict)
-        src, ver, h1 = cache["source_field_indices"]
-        assert src is fi.source_field_indices and ver == fi.source_field_indices._version
-        r1 = cache["receiver_field_indices"][2]
-        s1 = cache["checkpoint_steps"][2]
-        c2, k2 = _capi.adapt(FWD, fi)
-        assert cache["source_field_indices"][2] is h1
-        assert cache["receiver_field_indices"][2] is r1
-        assert cache["checkpoint_steps"][2] is s1
-        assert _ptr_addr(c2.source_field_indices.p) == _ptr_addr(c1.source_field_indices.p) == h1.data_ptr()
-        assert _ptr_addr(c2.receiver_field_indices.p) == r1.data_ptr()
-        assert c2.checkpoint_steps.data_ == c1.checkpoint_steps.data_ == s1.data_ptr()
-        assert any(k is h1 for k in k2) and any(k is s1 for k in k2), \
-            "a reused copy is still in the keepalive of the call that reused it"
-        assert _span_values(c2.source_field_indices) == [0, 2, 5]
-
-    def test_in_place_write_invalidates_the_host_copy(self):
-        _capi, abi = _mods()
-        fi = self._params(abi)
-        _capi.adapt(FWD, fi)
-        h1 = fi._capi_host_cache["source_field_indices"][2]
-        fi.source_field_indices[1] = 99
-        c2, _ = _capi.adapt(FWD, fi)
-        h2 = fi._capi_host_cache["source_field_indices"][2]
-        assert h2 is not h1
-        assert _span_values(c2.source_field_indices) == [0, 99, 5]
-        # a write through a view shares the base's version counter
-        fi.source_field_indices[:1].fill_(7)
-        c3, _ = _capi.adapt(FWD, fi)
-        assert fi._capi_host_cache["source_field_indices"][2] is not h2
-        assert _span_values(c3.source_field_indices) == [7, 99, 5]
-        # and the host Buf the same way
-        fi.checkpoint_steps.mul_(2)
-        c4, _ = _capi.adapt(FWD, fi)
-        assert _buf_values(c4.checkpoint_steps) == [0, 20, 40]
-
-    def test_replaced_tensor_invalidates_the_host_copy(self):
-        _capi, abi = _mods()
-        fi = self._params(abi)
-        _capi.adapt(FWD, fi)
-        h1 = fi._capi_host_cache["source_field_indices"][2]
-        fi.source_field_indices = torch.tensor([4, 4], dtype=torch.int64)     # same values would not matter
-        c2, _ = _capi.adapt(FWD, fi)
-        h2 = fi._capi_host_cache["source_field_indices"][2]
-        assert h2 is not h1
-        assert fi._capi_host_cache["source_field_indices"][0] is fi.source_field_indices
-        assert _span_values(c2.source_field_indices) == [4, 4]
-        fi.checkpoint_steps = torch.tensor([5], dtype=torch.int64)
-        c3, _ = _capi.adapt(FWD, fi)
-        assert _buf_values(c3.checkpoint_steps) == [5]
-
-    def test_a_cpu_int32_source_still_tracks_writes(self):
-        """A CPU int32 contiguous tensor needs no copy (the copy IS the
-        source); the version check still refreshes the span's view of it."""
-        _capi, abi = _mods()
-        fi = abi.ForwardInput()
-        fi.source_field_indices = torch.tensor([1, 2], dtype=torch.int32)
-        c1, _ = _capi.adapt(FWD, fi)
-        assert _span_values(c1.source_field_indices) == [1, 2]
-        fi.source_field_indices[0] = 5
-        c2, _ = _capi.adapt(FWD, fi)
-        assert _span_values(c2.source_field_indices) == [5, 2]
-
-    def test_buflist_arrays_are_reused_and_rebuilt(self):
-        _capi, abi = _mods()
-        fi = abi.ForwardInput()
-        a, b = torch.zeros(4, 4), torch.ones(2, 3)
-        fi.models = [a, b]
-        c1, _ = _capi.adapt(FWD, fi)
-        key1, arr1, held = fi._capi_host_cache["models"]
-        assert held[0] is a and held[1] is b, "the cache holds the tensors, so their ids cannot be recycled"
-        c2, k2 = _capi.adapt(FWD, fi)
-        assert fi._capi_host_cache["models"][1] is arr1
-        assert _ptr_addr(c2.models.p) == _ptr_addr(c1.models.p) == ctypes.addressof(arr1)
-        assert any(k is arr1 for k in k2)
-        # a new list of the same unchanged tensors: still the same array
-        fi.models = [a, b]
-        c3, _ = _capi.adapt(FWD, fi)
-        assert fi._capi_host_cache["models"][1] is arr1
-        # an in-place write bumps a's version: rebuilt
-        a.fill_(3)
-        c4, _ = _capi.adapt(FWD, fi)
-        arr4 = fi._capi_host_cache["models"][1]
-        assert arr4 is not arr1
-        assert c4.models.p[0].data_ == a.data_ptr() and c4.models.p[1].data_ == b.data_ptr()
-        # a reorder is a different key: rebuilt, and the descriptors follow
-        fi.models = [b, a]
-        c5, _ = _capi.adapt(FWD, fi)
-        assert fi._capi_host_cache["models"][1] is not arr4
-        assert c5.models.p[0].data_ == b.data_ptr() and _sizes(c5.models.p[1]) == (4, 4)
-        # a replaced tensor: rebuilt
-        fi.models = [b, torch.zeros(4, 4)]
-        c6, _ = _capi.adapt(FWD, fi)
-        assert c6.models.p[1].data_ == fi.models[1].data_ptr()
-
-    def test_metadata_change_in_place_rebuilds_the_descriptor(self):
-        _capi, abi = _mods()
-        fi = abi.ForwardInput()
-        t = torch.zeros(4, 4)
-        fi.models = [t]
-        c1, _ = _capi.adapt(FWD, fi)
-        assert _sizes(c1.models.p[0]) == (4, 4)
-        t.resize_(2, 8)
-        c2, _ = _capi.adapt(FWD, fi)
-        assert _sizes(c2.models.p[0]) == (2, 8) and _strides(c2.models.p[0]) == (8, 1)
-        t.transpose_(0, 1)
-        c3, _ = _capi.adapt(FWD, fi)
-        assert _sizes(c3.models.p[0]) == (8, 2) and _strides(c3.models.p[0]) == (1, 8)
-
-    def test_an_object_that_refuses_attributes_adapts_uncached(self):
-        _capi, abi = _mods()
-
-        class P:
-            __slots__ = ("models", "source_field_indices")
-
-        p = P()
-        p.models = [torch.zeros(2, 2)]
-        p.source_field_indices = torch.tensor([3, 1], dtype=torch.int64)
-        for _ in range(2):
-            core, keep = _capi.adapt(FWD, p)
-            assert core.models.n == 1 and _span_values(core.source_field_indices) == [3, 1]
-        assert not hasattr(p, "_capi_host_cache")
-
-    def test_cache_attribute_is_admitted_by_the_input_classes_and_hidden_from_repr(self):
-        _capi, abi = _mods()
-        fi = self._params(abi)
-        _capi.adapt(FWD, fi)
-        assert "_capi_host_cache" in vars(fi)
-        assert "_capi_host_cache" not in repr(fi)
-        with pytest.raises(AttributeError):
-            fi.no_such_field = 1                    # the typo guard still stands
-
-
-# --------------------------------------------------------------------------- #
-# 6. the boundary session
+# 5. the boundary session
 # --------------------------------------------------------------------------- #
 class TestBoundarySession:
     def test_close_destroys_the_very_handle_once(self):
@@ -994,32 +825,32 @@ class TestBoundarySession:
 
     @pytest.mark.parametrize("key", [FWD, BWD])
     def test_adapt_refuses_a_closed_session(self, key):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         obj = abi.ForwardInput() if key == FWD else abi.BackwardInput()
         s = _fake_session(_FakeSessionLib(), addr=0xBEEF)
         obj.boundary_session = s
-        core, _ = _capi.adapt(key, obj)
+        core, _ = adapt(key, obj)
         assert _as_int(core.boundary_session) == 0xBEEF
         s.close()
         with pytest.raises(RuntimeError, match=rf"{key}\.boundary_session: BoundarySession is closed"):
-            _capi.adapt(key, obj)
+            adapt(key, obj)
         obj.boundary_session = None
-        core, _ = _capi.adapt(key, obj)
+        core, _ = adapt(key, obj)
         assert core.boundary_session is None
 
     def test_raw_handles_still_cross(self):
-        _capi, abi = _mods()
+        adapt, abi = _mods()
         fi = abi.ForwardInput()
         fi.boundary_session = ctypes.c_void_p(0x40)
-        assert _as_int(_capi.adapt(FWD, fi)[0].boundary_session) == 0x40
+        assert _as_int(adapt(FWD, fi)[0].boundary_session) == 0x40
         fi.boundary_session = 0x50
-        assert _as_int(_capi.adapt(FWD, fi)[0].boundary_session) == 0x50
+        assert _as_int(adapt(FWD, fi)[0].boundary_session) == 0x50
         fi.boundary_session = 0
-        assert _capi.adapt(FWD, fi)[0].boundary_session is None
+        assert adapt(FWD, fi)[0].boundary_session is None
 
     def test_del_and_close_are_safe_on_a_half_built_session(self):
-        _capi, _ = _mods()
-        s = _capi.BoundarySession.__new__(_capi.BoundarySession)   # __init__ never ran
+        from sweep.backend.c.runners import BoundarySession
+        s = BoundarySession.__new__(BoundarySession)   # __init__ never ran
         assert s.closed is True
         s.close()
         s.__del__()
@@ -1027,9 +858,10 @@ class TestBoundarySession:
             s.used()
 
     def test_real_session_lifecycle(self):
-        _capi, abi = _mods()
+        from sweep.backend.c.runners import BoundarySession
+        adapt, abi = _mods()
         _core_or_skip()
-        s = _capi.BoundarySession()
+        s = BoundarySession()
         assert s.used() is False
         s.finish()
         s.close()
@@ -1040,46 +872,118 @@ class TestBoundarySession:
         fi = abi.ForwardInput()
         fi.boundary_session = s
         with pytest.raises(RuntimeError, match="closed"):
-            _capi.adapt(FWD, fi)
+            adapt(FWD, fi)
         s.close()
 
 
 # --------------------------------------------------------------------------- #
-# 7. output mapping
+# 6. the entries and the runners return nothing (the outputs are the bound
+#    tensors); a core error is the core's message
 # --------------------------------------------------------------------------- #
-class TestOutputMapping:
-    def test_defined_buf_maps_to_the_bound_tensor_object(self):
-        _capi, abi = _mods()
-        rec = torch.zeros(1, 4, 10)
-        fi = abi.ForwardInput()
-        fi.record_out = rec
-        fi.nt = 10
-        core, keep = _capi.adapt(FWD, fi)
-        out = abi.ForwardOutputCore()
-        out.record = core.record_out            # the descriptor the driver would hand back
-        assert out.record.data_ == rec.data_ptr()
-        mapped = _map_forward_outputs(_capi, out, fi)
-        assert isinstance(mapped, tuple) and len(mapped) == 3
-        wavefield, last_two, record = mapped
-        assert record is rec
-        assert wavefield is None and last_two is None
+class _FakeCallCore(_FakeCore):
+    """A fake core whose ``sweep_call`` / runner calls succeed (or fail with
+    ``message``) without a GPU: the stream scope and the runner handle are
+    stubbed, everything else is ``_FakeCore``."""
 
-    def test_unknown_pointer_is_a_contract_break(self):
-        _capi, abi = _mods()
-        rec = torch.zeros(1, 4, 10)
-        fi = abi.ForwardInput()
-        fi.record_out = rec
-        fi.nt = 10
-        stray = torch.zeros(1, 4, 10)          # never bound on fi
-        stray_buf, keep = _buf_like(stray)
-        out = abi.ForwardOutputCore()
-        out.record = stray_buf
-        with pytest.raises(RuntimeError, match="did not bind"):
-            _map_forward_outputs(_capi, out, fi)
+    def __init__(self, abi, rc=0, message=b""):
+        super().__init__(abi.ABI_VERSION, abi.ctypes_layout())
+        self.calls = []
+        self.stream = 0
+
+        def call(entry, core_p, out_p, err, cap):
+            self.calls.append(("call", int(entry), int(core_p), int(out_p)))
+            ctypes.memmove(err, message + b"\0", len(message) + 1)
+            return rc
+
+        def runner_create(entry, core_p, h_ref, err, cap):
+            self.calls.append(("create", int(entry)))
+            h_ref._obj.value = 0xC0FE
+            return 0
+
+        def runner_run(h, a, b, phase, out_p, err, cap):
+            self.calls.append(("run", int(a), int(b), int(phase), int(out_p)))
+            ctypes.memmove(err, message + b"\0", len(message) + 1)
+            return rc
+
+        self.sweep_call = _FakeFn(call)
+        self.sweep_get_stream = _FakeFn(lambda: self.stream)
+        # c_void_p(0).value is None: NULL, i.e. the legacy default stream, is 0 here
+        self.sweep_set_stream = _FakeFn(lambda s: setattr(self, "stream", (s.value if isinstance(s, ctypes.c_void_p) else s) or 0))
+        self.sweep_forward_runner_create = _FakeFn(runner_create)
+        self.sweep_forward_runner_run = _FakeFn(runner_run)
+        self.sweep_forward_runner_device_index = _FakeFn(lambda h: -1)
+        self.sweep_forward_runner_destroy = _FakeFn(lambda h: self.calls.append(("destroy", h.value)))
+
+
+def _cpu_input(abi):
+    """A ForwardInput with no models: ``_launch_stream`` then needs no device
+    (and refuses nothing), and ``adapt`` runs on host tensors alone."""
+    fi = abi.ForwardInput()
+    fi.record_out = torch.zeros(1, 4, 10)
+    fi.nt = 10
+    return fi
+
+
+class TestReturnNothing:
+    def test_an_entry_returns_none_and_the_record_is_the_bound_tensor(self):
+        from sweep.backend.c import entries
+        _, abi = _mods()
+        fake = _FakeCallCore(abi)
+        fn = entries._make_entry(fake, 3, "acoustic2d_forward", 0)
+        fi = _cpu_input(abi)
+        rec = fi.record_out
+        assert fn(fi) is None, "the entry hands back nothing: the caller reads what it bound"
+        assert fi.record_out is rec
+        assert [c[:2] for c in fake.calls] == [("call", 3)]
+        assert fake.stream == 0, "the stream scope put the previous stream back"
+        assert fn.__name__ == "acoustic2d_forward" and "None" in fn.__doc__
+
+    def test_an_entry_error_is_the_cores_message(self):
+        from sweep.backend.c import entries
+        _, abi = _mods()
+        fake = _FakeCallCore(abi, rc=7, message=b"acoustic2d_forward: nt must be positive")
+        fn = entries._make_entry(fake, 3, "acoustic2d_forward", 0)
+        with pytest.raises(RuntimeError, match="nt must be positive"):
+            fn(_cpu_input(abi))
+        fake = _FakeCallCore(abi, rc=7)
+        fn = entries._make_entry(fake, 3, "acoustic2d_forward", 0)
+        with pytest.raises(RuntimeError, match=r"acoustic2d_forward failed \(rc=7\) without a message"):
+            fn(_cpu_input(abi))
+
+    def test_an_unknown_entry_kind_is_refused_by_name(self):
+        from sweep.backend.c import entries
+        _, abi = _mods()
+        with pytest.raises(RuntimeError, match="acoustic2d_forward has unknown kind 9"):
+            entries._make_entry(_FakeCallCore(abi), 3, "acoustic2d_forward", 9)
+
+    def test_a_runner_run_returns_none_and_close_destroys_once(self, monkeypatch):
+        from sweep.backend.c import runners
+        _, abi = _mods()
+        fake = _FakeCallCore(abi)
+        monkeypatch.setattr(runners, "core_lib", lambda: fake)
+        r = runners.ForwardRunner(5, _cpu_input(abi))
+        assert fake.calls == [("create", 5)]
+        assert r.run(0, 4, 0) is None and r.run(4, 8, 2) is None
+        assert [c[:4] for c in fake.calls[1:]] == [("run", 0, 4, 0), ("run", 4, 8, 2)]
+        assert r.device_index() == -1
+        r.close()
+        r.close()
+        assert fake.calls[-1] == ("destroy", 0xC0FE) and fake.calls.count(("destroy", 0xC0FE)) == 1
+        with pytest.raises(RuntimeError, match="forward runner is closed"):
+            r.run(0, 1, 0)
+
+    def test_a_runner_error_is_the_cores_message(self, monkeypatch):
+        from sweep.backend.c import runners
+        _, abi = _mods()
+        fake = _FakeCallCore(abi, rc=3, message=b"segment out of range")
+        monkeypatch.setattr(runners, "core_lib", lambda: fake)
+        r = runners.ForwardRunner(5, _cpu_input(abi))
+        with pytest.raises(RuntimeError, match="segment out of range"):
+            r.run(0, 99, 0)
 
 
 # --------------------------------------------------------------------------- #
-# 8. errors come back as messages
+# 7. errors come back as messages
 # --------------------------------------------------------------------------- #
 class TestErrors:
     def test_bad_entry_is_a_message(self):
@@ -1100,7 +1004,7 @@ class TestErrors:
 
 
 # --------------------------------------------------------------------------- #
-# 9. stream scope (GPU)
+# 8. stream scope (GPU)
 # --------------------------------------------------------------------------- #
 @requires_binding()
 def test_core_stream_follows_torch_and_is_restored():
@@ -1128,7 +1032,7 @@ def test_core_stream_follows_torch_and_is_restored():
 
 
 # --------------------------------------------------------------------------- #
-# 10. runner round trip (GPU)
+# 9. runner round trip (GPU)
 # --------------------------------------------------------------------------- #
 @requires_binding()
 def test_forward_runner_matches_the_monolithic_entry_bit_for_bit():
@@ -1145,7 +1049,7 @@ def test_forward_runner_matches_the_monolithic_entry_bit_for_bit():
     L = list(p.wavefields) or [torch.zeros_like(p.models[0]) for _ in range(9)]
     p.wavefields = L
     nt = int(p.nt)
-    raw_record = cap["raw_out"][2]
+    raw_record = p.record_out          # what the public run wrote (the entry returns nothing)
 
     def fresh():
         for t in L:
@@ -1156,22 +1060,20 @@ def test_forward_runner_matches_the_monolithic_entry_bit_for_bit():
 
     rec_runner = fresh()
     runner = _C.acoustic2d_forward_runner(p)
-    out = runner.run(0, nt, 0)
-    assert isinstance(out, tuple) and len(out) == 3
-    assert out[2].data_ptr() == rec_runner.data_ptr(), "run() hands back the bound record"
-    got = out[2].clone()
+    assert runner.run(0, nt, 0) is None, "run() hands back nothing: the record is the bound record_out"
+    got = rec_runner.clone()
     runner.close()
     runner.close()                                          # twice is harmless
 
-    fresh()
-    ref = _C.acoustic2d_forward(p)[2]
-    assert torch.equal(got, ref)
+    rec_entry = fresh()
+    assert _C.acoustic2d_forward(p) is None, "the entry hands back nothing either"
+    assert torch.equal(got, rec_entry)
     assert torch.equal(got, raw_record), "and both reproduce the public run"
     assert float(got.abs().max()) > 0.0, "a record with no energy proves nothing"
 
 
 # --------------------------------------------------------------------------- #
-# 11. only the ten stepped equations have a factory
+# 10. only the ten stepped equations have a factory
 # --------------------------------------------------------------------------- #
 def test_non_runner_equations_expose_no_factory():
     _core_or_skip()

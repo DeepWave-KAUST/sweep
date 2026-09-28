@@ -50,9 +50,8 @@ def capture(prop):
     orig = impl.forward_func
 
     def wrapper(p):
-        out = orig(p)
-        cap["params"], cap["raw_out"] = p, out
-        return out
+        orig(p)
+        cap["params"] = p
 
     impl.forward_func = wrapper
     cap["func"] = orig
@@ -87,7 +86,7 @@ def main():
     L = list(p.wavefields) or [torch.zeros_like(p.models[0]) for _ in range(9)]
     for t in L:
         t.zero_()
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
     p.record_out = record
     r = SteppedBindingRunner(func, p, L, acoustic_psi_pairs(2))
     with torch.no_grad():

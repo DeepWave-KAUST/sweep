@@ -32,7 +32,7 @@ classifiers = [
 # names. cu12: V100 through H100/H200 as SASS, Blackwell via PTX. cu13: T4/RTX 20
 # and newer with Blackwell native (nvcc 13 cannot emit sm_70, so no V100); it
 # needs driver >= 580, exactly what torch cu130 needs.
-# sweep._C is a pure-Python ctypes layer over that core's C API (sweep/_capi.py):
+# sweep._C is a pure-Python ctypes layer over that core's C API (sweep/backend/c/):
 # nothing compiles after pip install -- no nvcc, no C++ compiler, no CUDA
 # headers -- and no torch C++ ABI is involved, so the wheel works with any torch
 # version + any Python 3. torch is unpinned.

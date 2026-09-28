@@ -117,7 +117,7 @@ def is_torch_binding_available() -> bool:
     and the CUDA core is at hand: the prebuilt one the wheel ships for your
     torch's CUDA major and GPU (nothing compiles on first use; the shim is
     ctypes), else an nvcc to build one.  Does NOT load or build anything (see
-    ``sweep._jit``)."""
+    ``sweep.backend.c.jit``)."""
     if find_spec("torch") is None:
         return False
     # A pre-built extension answers this on its own: the kernels exist, and
@@ -127,12 +127,12 @@ def is_torch_binding_available() -> bool:
     if _prebuilt_binding_present():
         return True
     try:
-        from sweep import _jit
+        from sweep.backend.c import jit
         # A shipped core that fits needs no nvcc -- can_build() knows, its
         # can_compile() stops at the shipped core.  What it still needs is a
         # device: the ctypes shim serves the CUDA core only, so without one
         # 'auto' must resolve to eager, not to a backend with no CPU engine.
-        return _jit.can_build()[0]
+        return jit.can_build()[0]
     except Exception:
         return False
 
@@ -177,22 +177,23 @@ def precompile(require_gpu: bool = True) -> bool:
         # calling one would be an AttributeError on exactly the install the
         # README tells people to do (SWEEP_BUILD_CUDA=1 pip install).
         return True
-    from sweep import _jit
-    if _jit.jit_full():
+    from sweep.backend.c import jit
+    if jit.jit_full():
         loader(compile_only=not require_gpu)
         return True
     # The ctypes shim needs only the core.  The device check is what
     # require_gpu relaxes: a local build then targets TORCH_CUDA_ARCH_LIST.
-    ok, why = _jit.can_compile() if not require_gpu else _jit.can_build()
+    ok, why = jit.can_compile() if not require_gpu else jit.can_build()
     if not ok:
         raise RuntimeError(
             f"sweep's compiled backend (impl='c') is unavailable: {why}. "
             "Use impl='eager' for a pure-Python (slower) CPU/GPU path.")
-    _jit.core_path()
-    # Load it too: is_compiled() reads the shim's cache (_capi._lib), and a
-    # core that fits on paper but fails the ABI guard is better found now.
-    from . import _capi
-    _capi.core_lib()
+    jit.core_path()
+    # Load it too: is_compiled() reads the loader's cache
+    # (sweep.backend.c.loader._lib), and a core that fits on paper but fails
+    # the ABI guard is better found now.
+    from sweep.backend.c import loader as core_loader
+    core_loader.core_lib()
     return True
 
 

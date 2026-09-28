@@ -69,10 +69,8 @@ def capture(prop):
     orig = impl.forward_func
 
     def wrapper(params):
-        out = orig(params)
+        orig(params)
         cap["params"] = params
-        cap["raw_out"] = out
-        return out
 
     impl.forward_func = wrapper
     cap["func"] = orig
@@ -154,7 +152,7 @@ def main():
     L = list(p.wavefields)
     if not L:
         L = [torch.zeros_like(p.models[0]) for _ in range(NWF[ndim])]
-    p.record_out = torch.zeros_like(cap["raw_out"][2])
+    p.record_out = torch.zeros_like(p.record_out)
 
     cut_mask = ((X_LO_BIT if rank > 0 else 0)
                 | (X_HI_BIT if rank < world - 1 else 0))

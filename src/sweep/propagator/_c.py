@@ -295,7 +295,14 @@ class Wrapper(torch.autograd.Function):
         params.checkpoint_steps = cp.checkpoint_steps if cp.checkpoint_steps is not None else torch.empty(0, dtype=torch.int32)
 
         # -------- CUDA forward --------
-        (u_allt, last, syn) = cp.forward_func(params)
+        # The entry returns nothing: the core writes into the tensors bound
+        # above.  The history exists only when save_all_wavefields asked for
+        # it, last_two is filled only under boundary saving (the driver hands
+        # it back only then), and the record is always record_out.
+        cp.forward_func(params)
+        u_allt = params.u_allt_out if save_all_wavefields else None
+        last = params.last_two if use_boundary_saving else None
+        syn = params.record_out
 
         # Permute to canonical (B, nt, nrec, nfield) for the user-facing
         # output; remember the raw CUDA ndim so backward can invert it.
@@ -432,8 +439,8 @@ class Wrapper(torch.autograd.Function):
             )
         # The cube the driver accumulates into, Python-owned like the
         # illumination pair: (nlag, N, C, nz, nx[, ny]) over the padded model,
-        # zeroed per backward call, handed over as adcig_out and returned as
-        # gradients[4] for the model-shaped fit below.
+        # zeroed per backward call, handed over as adcig_out and read back
+        # from there for the model-shaped fit below.
         if params.compute_adcig:
             like = ctx.models[0]
             params.adcig_out = torch.zeros((2 * params.adcig_max_lag + 1, *like.shape),
@@ -509,14 +516,14 @@ class Wrapper(torch.autograd.Function):
             params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes,
                                                                params.models[0].device)
             if ctx.use_recursive_checkpoint:
-                gradients = cp.backward_recursive_ckpt_func(params)
+                cp.backward_recursive_ckpt_func(params)
             else:
-                gradients = cp.backward_ckpt_func(params)
+                cp.backward_ckpt_func(params)
         elif not ctx.use_boundary_saving:
             params.u_forward = u_allt.contiguous()
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
-            gradients = cp.backward_func(params)
+            cp.backward_func(params)
         else:
             params.boundary_cpu = list(cp.boundary_cpu) if cp.boundary_on_cpu else []
             params.boundary_gpu = list(cp.boundary_gpu) if ctx.use_boundary_saving else []
@@ -538,11 +545,14 @@ class Wrapper(torch.autograd.Function):
                                                               params.models[0].device)
             params.forward_source = ctx.forward_source.contiguous()
             params.forward_sources_loc = forward_sources_loc.contiguous()
-            gradients = cp.backward_bs_func(params)
+            cp.backward_bs_func(params)
 
-        returned_grads = gradients[1] if len(gradients) >= 2 else gradients[-1]
-        if len(gradients) >= 4:
-            source_illumination, receiver_illumination = gradients[2], gradients[3]
+        # The backward entries return nothing: the core accumulated into the
+        # tensors bound above -- the gradients in ``grads_out``, the
+        # illumination pair in ``illum_out`` (bound only when illumination was
+        # asked for) and the ADCIG cube in ``adcig_out``.
+        if params.illum_out:
+            source_illumination, receiver_illumination = params.illum_out[0], params.illum_out[1]
             source_buffer = cp.source_illumination_buffer
             receiver_buffer = cp.receiver_illumination_buffer
 
@@ -587,13 +597,13 @@ class Wrapper(torch.autograd.Function):
             except RuntimeError as e:
                 warnings.warn(f"receiver illumination left as zeros: crop-to-model failed ({e})")
 
-        # Space-lag ADCIG cube (gradients[4]): (nlag, N, C, nz, nx[, ny]) on the
-        # runtime-padded grid.  Sum over the batch (N, C) — keeping the leading
-        # lag axis — then crop the PML/halo padding, and copy into the
+        # Space-lag ADCIG cube (``adcig_out``): (nlag, N, C, nz, nx[, ny]) on
+        # the runtime-padded grid.  Sum over the batch (N, C) — keeping the
+        # leading lag axis — then crop the PML/halo padding, and copy into the
         # model-shaped buffer the user reads back as ``solver.adcig``.
         adcig_buffer = cp.adcig_buffer
-        if len(gradients) >= 5 and _wants_illum(adcig_buffer):
-            adcig_returned = gradients[4]
+        if params.compute_adcig:
+            adcig_returned = params.adcig_out
             if isinstance(adcig_returned, torch.Tensor) and adcig_returned.numel() > 0:
                 def fit_adcig_to_model(adcig, target):
                     # collapse batch dims (dim 1 == N, then C); keep lag at dim 0
@@ -617,10 +627,17 @@ class Wrapper(torch.autograd.Function):
                 except RuntimeError as e:
                     warnings.warn(f"ADCIG cube left as zeros: crop-to-model failed ({e})")
 
+        # grads_out is [grad_wavelet?, *model_grads]; the prefix is declared
+        # (cuda_layout.grads_out_has_wavelet), the same rule _gradient_buffers
+        # bound it by.  A driver that declares the slot but never writes it
+        # (acoustic_vrz*, grads_out_wavelet_written=False) leaves the wavelet
+        # gradient None, as before.
+        returned_grads = list(params.grads_out)
         wavelet_grad = None
         model_grads = returned_grads
-        if len(returned_grads) == len(ctx.models) + 1:
-            wavelet_grad = returned_grads[0]
+        if cp.grads_out_has_wavelet:
+            if cp.grads_out_wavelet_written:
+                wavelet_grad = returned_grads[0]
             model_grads = returned_grads[1:]
 
         # ctx.cp is the only reference to the params object, so this releases
@@ -1988,6 +2005,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     u_allt_shape=self._history_shape(batch_size),
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
+                    grads_out_wavelet_written=bool(self._cuda_layout().grads_out_wavelet_written),
                     n_grad_models=len(models) if use_apm_arg else None,
                     illum_nvar=int(self._cuda_layout().illum_nvar),
                     adjoint_wavefields=adjoint_wavefields,

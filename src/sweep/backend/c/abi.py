@@ -539,8 +539,8 @@ class _Input(object):
 
     def __setattr__(self, name, value):
         # A typo'd field would otherwise be accepted and silently ignored by
-        # the shim (the pybind class raised).  Underscore names are the shim's
-        # per-object cache and pass.
+        # the shim (the pybind class raised).  Underscore names pass: private
+        # bookkeeping a caller hangs on the object is not a field.
         if name not in self._names and not name.startswith("_"):
             raise AttributeError("%s has no field %r" % (type(self).__name__, name))
         object.__setattr__(self, name, value)

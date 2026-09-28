@@ -11,7 +11,7 @@ and this project adheres to
 
 ### Added
 - **`impl='c'` talks to the prebuilt core through a pure-Python `ctypes`
-  layer; after `pip install` nothing compiles.**  `sweep._capi` fills the
+  layer; after `pip install` nothing compiles.**  `sweep.backend.c` fills the
   core's C structs from each tensor's `data_ptr()`, shape, strides and dtype
   and calls into `libsweep_core.so` directly, so the default path no longer
   builds a torch shim at all: no nvcc, no C++ compiler, no CUDA headers, no
@@ -45,13 +45,13 @@ and this project adheres to
   archs, PTX and sha256; the cu13 entry below has the per-core coverage), so
   `pip install sweepx` followed by the first `impl='c'`
   call, or `sweep.precompile()`, compiles nothing: no nvcc and no toolkit.
-  `_jit.core_path()` picks the shipped core when its ABI, CUDA major
+  `sweep.backend.c.jit.core_path()` picks the shipped core when its ABI, CUDA major
   and archs fit this process (PTX makes newer cards fit; a GPU outside the
   shipped archs and older than the shipped PTX, e.g. Pascal sm_6x, does not) and
   otherwise falls back to the unchanged local core build, which is also what a
   torch built for another CUDA major, an sdist or a clone gets, since neither
   carries a core; `SWEEP_CORE=<path>` overrides the lookup,
-  `_jit.shipped_core_info()` reports what was chosen and why, and
+  `sweep.backend.c.jit.shipped_core_info()` reports what was chosen and why, and
   `sweep.backend.torch.binding.diagnostics()` gains a `shipped_core` key with
   the same answer.  `can_compile()` is satisfied by a fitting core with no nvcc
   on the machine, and `python -m sweep.build --no-gpu-required` no longer
@@ -172,6 +172,12 @@ and this project adheres to
   name any more.
 
 ### Changed
+- **The ctypes layer is the package `sweep/backend/c/`** (`loader.py`,
+  `adapt.py`, `entries.py`, `runners.py`, the generated `abi.py`, and `jit.py`,
+  which decides where the core comes from), replacing `sweep/_capi.py`,
+  `_core_abi.py` and `_jit.py`; `sweep._C` stays the lazy entry point.  It
+  lost its output mapping and per-call cache: entries and runners return
+  nothing, callers read the tensors they bound.
 - **`source_illumination` means the same thing under every memory strategy.**
   It was accumulated by one kernel that both backward paths call, but they
   handed it different fields: `Full()` / `Ckpt()` passed the forward store,

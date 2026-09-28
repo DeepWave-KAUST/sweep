@@ -5,7 +5,7 @@ after ``pip install``: the core depends on CUDA only, so the wheel ships it
 prebuilt (``libsweep_core.so`` under ``sweep/lib/cu<major>/``: two cores, ``cu12``
 and ``cu13``, one per CUDA major torch is built for, each a fat binary; see
 ``python -m sweep.build --core``), and the shim that calls it is pure Python
-(``sweep._capi``, ctypes over the core's C API).
+(``sweep.backend.c``, ctypes over the core's C API).
 :func:`core_path` hands the shim that core; first use is instant.  nvcc enters
 only when no shipped core fits -- a torch built for another CUDA major, a GPU
 outside the shipped archs and older than the shipped PTX, an sdist install --
@@ -33,7 +33,7 @@ import shutil
 import sys
 from pathlib import Path
 
-_PKG = Path(__file__).resolve().parent
+_PKG = Path(__file__).resolve().parents[2]   # the ``sweep`` package: this module lives in sweep/backend/c/
 _CSRC = _PKG / "csrc"
 _LIB = _PKG / "lib"      # shipped cores: lib/<cu tag>/libsweep_core.so + core.json
 
@@ -241,14 +241,15 @@ def _core_tag(cuda_version: str) -> str:
 
 
 def _shim_abi() -> int | None:
-    """SWEEP_CORE_ABI_VERSION the shim speaks: ``sweep._core_abi.ABI_VERSION``,
-    the generated mirror the ctypes shim is built from and what its ABI guard
-    compares the loaded core against -- so the fit check here and the guard
-    there can never disagree.  The header that defines the number
-    (core/capi.h) is the fallback when the mirror cannot be imported."""
+    """SWEEP_CORE_ABI_VERSION the shim speaks: ``sweep.backend.c.abi.ABI_VERSION``,
+    the generated mirror the ctypes layer is built from and what its ABI guard
+    (``loader._check_abi``) compares the loaded core against -- so the fit
+    check here and the guard there can never disagree.  The header that
+    defines the number (core/capi.h) is the fallback when the mirror cannot be
+    imported."""
     try:
-        from . import _core_abi
-        return int(_core_abi.ABI_VERSION)
+        from . import abi
+        return int(abi.ABI_VERSION)
     except Exception:
         pass
     try:
@@ -1081,9 +1082,9 @@ def core_path() -> Path:
     incremental) into the drawer the ``SWEEP_JIT_FULL`` path uses too, so the
     core is never built twice; the toolkit/env setup that build needs --
     CUDA_HOME, nvcc and ninja on PATH -- happens on that branch only.
-    ``torch.utils.cpp_extension`` is never imported: the ctypes shim
-    (``sweep._capi``) dlopens the result directly -- after :func:`_preload_cufft`,
-    which is its call to make -- and nothing compiles.
+    ``torch.utils.cpp_extension`` is never imported: the ctypes loader
+    (``sweep.backend.c.loader``) dlopens the result directly -- after
+    :func:`_preload_cufft`, which is its call to make -- and nothing compiles.
     """
     global _core_so
     if _core_so is not None:
@@ -1139,13 +1140,13 @@ def load(compile_only: bool = False):
     on a machine with no GPU -- the point is the cached libraries.
 
     Without ``SWEEP_JIT_FULL`` this raises: ``sweep._C`` is then the ctypes
-    shim (``sweep._capi``) over :func:`core_path`, and nothing compiles.
+    layer (``sweep.backend.c``) over :func:`core_path`, and nothing compiles.
     """
     global _module, _core_so
     if _module is not None:
         return _module
     if not jit_full():
-        raise RuntimeError("sweep._C is the ctypes shim (sweep._capi); set "
+        raise RuntimeError("sweep._C is the ctypes layer (sweep.backend.c); set "
                            "SWEEP_JIT_FULL=1 for the compiled developer path")
     import torch
     from torch.utils import cpp_extension

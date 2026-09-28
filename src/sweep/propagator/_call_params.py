@@ -87,6 +87,9 @@ class CompiledCallParams:
     # Whether the equation's BackwardOutput.grads starts with grad_wavelet
     # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
     grads_out_has_wavelet: bool = False
+    # (cuda_layout.grads_out_wavelet_written): False when the driver sizes the
+    # slot but never writes it (acoustic_vrz*), so the wavelet gradient stays None.
+    grads_out_wavelet_written: bool = True
     # How many leading models receive a gradient of their own; the rest (the
     # derived APM tensors) share one zero placeholder. None = all of them.
     n_grad_models: int = None

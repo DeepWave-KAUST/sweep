@@ -141,7 +141,7 @@ def test_precompile_loads_the_core_and_never_the_shim_by_default(monkeypatch):
     (core_path) and loads it (core_lib) so is_compiled() is True afterwards,
     and never calls the pybind loader -- nothing compiles."""
     import sweep
-    from sweep import _jit, _capi
+    from sweep.backend.c import jit, loader
 
     monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
     loads, cores, libs, gates = [], [], [], []
@@ -149,10 +149,10 @@ def test_precompile_loads_the_core_and_never_the_shim_by_default(monkeypatch):
     mod._load = lambda **kw: loads.append(kw)
     monkeypatch.setitem(sys.modules, "sweep._C", mod)
     monkeypatch.setattr(sweep, "_C", mod, raising=False)
-    monkeypatch.setattr(_jit, "can_build", lambda: (gates.append("build"), (True, ""))[1])
-    monkeypatch.setattr(_jit, "can_compile", lambda: (gates.append("compile"), (True, ""))[1])
-    monkeypatch.setattr(_jit, "core_path", lambda: cores.append(1) or Path("/fake/libsweep_core.so"))
-    monkeypatch.setattr(_capi, "core_lib", lambda: libs.append(1) or object())
+    monkeypatch.setattr(jit, "can_build", lambda: (gates.append("build"), (True, ""))[1])
+    monkeypatch.setattr(jit, "can_compile", lambda: (gates.append("compile"), (True, ""))[1])
+    monkeypatch.setattr(jit, "core_path", lambda: cores.append(1) or Path("/fake/libsweep_core.so"))
+    monkeypatch.setattr(loader, "core_lib", lambda: libs.append(1) or object())
 
     assert sweep.precompile() is True
     assert loads == [] and cores == [1] and libs == [1] and gates == ["build"]
@@ -165,14 +165,14 @@ def test_precompile_loads_the_core_and_never_the_shim_by_default(monkeypatch):
 
 def test_precompile_refuses_with_the_gate_reason_by_default(monkeypatch):
     import sweep
-    from sweep import _jit
+    from sweep.backend.c import jit
 
     monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
     mod = types.ModuleType("sweep._C")
     mod._load = lambda **kw: (_ for _ in ()).throw(AssertionError("loader must not run"))
     monkeypatch.setitem(sys.modules, "sweep._C", mod)
     monkeypatch.setattr(sweep, "_C", mod, raising=False)
-    monkeypatch.setattr(_jit, "can_build", lambda: (False, "no nvcc and no shipped core fits"))
+    monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc and no shipped core fits"))
     with pytest.raises(RuntimeError, match="no nvcc and no shipped core fits"):
         sweep.precompile()
 

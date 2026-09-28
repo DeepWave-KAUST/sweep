@@ -611,11 +611,11 @@ class ModelParallel:
         # such case; x stays safe only because its per-tile interior is wider.
         def fwrap(p):
             p.cut_face_mask = self.cut_mask
-            out = f_orig(p); cap["fp"] = p; cap["fraw"] = out; return out
+            f_orig(p); cap["fp"] = p
 
         def bwrap(p):
             p.cut_face_mask = self.cut_mask
-            out = b_orig(p); cap["bp"] = p; return out
+            b_orig(p); cap["bp"] = p
 
         # Allocate the probe's models BEFORE the try: this is the one full-tile
         # allocation in _capture, i.e. where a real run OOMs, and nothing is
@@ -717,23 +717,18 @@ class ModelParallel:
             self.gbufs, self.illum = [], []
             self.adj_ws = []
         # The record is the buffer _c.py bound as fp.record_out and the probe
-        # forward wrote into: the drivers' bound_or_zeros hands back the bound
-        # tensor itself, so the probe's raw record IS record_out.  Keep that
-        # one instead of a second zeros_like -- every stepped call already
-        # writes there, and _set_geometry re-allocates it only on an nrec
-        # change.  The identity check makes a driver that allocated its own
-        # record loud here, where a stepped forward would otherwise return
-        # the zeros nobody wrote into.
+        # forward wrote into: the drivers allocate nothing, so the record IS
+        # record_out (the entry returns nothing; the caller reads the tensor
+        # it bound).  Keep that one instead of a second zeros_like -- every
+        # stepped call already writes there, and _set_geometry re-allocates it
+        # only on an nrec change.  A probe that bound no record is loud here,
+        # where a stepped forward would otherwise have nowhere to write.
         self.record = self.fp.record_out
-        _probe_rec = cap["fraw"][2]
-        if (self.record is None
-                or self.record.data_ptr() != _probe_rec.data_ptr()
-                or tuple(self.record.shape) != tuple(_probe_rec.shape)):
+        if self.record is None:
             raise RuntimeError(
-                "ModelParallel: the probe forward did not return the record "
-                "bound as ForwardInput.record_out (the compiled forward "
-                "allocated its own); the stepped forward writes record_out, "
-                "so this capture cannot be driven.")
+                "ModelParallel: the probe forward bound no "
+                "ForwardInput.record_out; the stepped forward writes its "
+                "record there, so this capture cannot be driven.")
         # Cache the canonical wavelet shape + the per-tile source/receiver counts
         # so per-shot _set_geometry can validate and reshape. Read it off
         # ``fp.source``, which a forward-only capture also has: the binding is

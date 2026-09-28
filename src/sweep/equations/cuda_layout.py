@@ -155,6 +155,11 @@ class CUDALayoutSpec:
     #   vs grads_out.size() == models.size()
     #     (elastic2d/backward.cu:306, elastic3d:528)
     grads_out_has_wavelet: bool = False
+    # A driver may declare the wavelet slot (it sizes grads_out) yet never write
+    # it: acoustic_vrz2d/3d bind models+1 buffers and return only the model
+    # gradients.  False keeps wavelet.grad = None there, as the pybind shim did,
+    # instead of handing autograd the untouched zero buffer.
+    grads_out_wavelet_written: bool = True
     # illum_out.size() == 2 (acoustic2d/backward.cu:104, acoustic3d:128) vs
     # illum_out.empty() (elastic2d/backward.cu:310, elastic3d:532).
     #

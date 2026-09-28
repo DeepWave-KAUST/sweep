@@ -302,7 +302,7 @@ def wheel_platform_kwargs(root_dir=ROOT_DIR):
 def build_ext_kwargs(build_cuda=None):
     """Return setup() kwargs for the optional AOT C++/CUDA extension.
 
-    The default distribution is **JIT** (see ``sweep/_jit.py``): one ``py3-none``
+    The default distribution is **JIT** (see ``sweep/backend/c/jit.py``): one ``py3-none``
     wheel ships the C++/CUDA sources and compiles ``sweep._C`` against the user's
     own torch on first use — so this returns NO ``ext_modules`` and every dep
     comes from ``pyproject.toml``. The ``SWEEP_BUILD_CUDA=1`` path is kept only

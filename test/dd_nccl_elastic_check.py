@@ -122,10 +122,8 @@ def capture(prop):
     orig = impl.forward_func
 
     def wrapper(params):
-        out = orig(params)
+        orig(params)
         cap["params"] = params
-        cap["raw_out"] = out
-        return out
 
     impl.forward_func = wrapper
     cap["func"] = orig
@@ -144,7 +142,7 @@ def make_runner(prop, wavelet, sources, receivers, model_arrays, ndim, dev):
     assert len(L) == NWF[ndim]
     for t in L:
         t.zero_()
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
     p.record_out = record
     return SteppedBindingRunner(func, p, L, psi_pairs=(), u_blocks=()), record
 

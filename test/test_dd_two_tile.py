@@ -98,7 +98,7 @@ def make_runner(prop, wavelet, sources, receivers, vp_np):
     assert len(L) == 9
     for t in L:
         t.zero_()
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
     p.record_out = record
     return SteppedBindingRunner(func, p, L, acoustic_psi_pairs(2)), record
 

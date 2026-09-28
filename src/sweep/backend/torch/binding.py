@@ -1,8 +1,8 @@
 """Capability helpers for sweep's CUDA backend (``sweep._C``, ``impl='c'``).
 
 ``sweep._C`` reaches a process one of three ways.  By default it is the ctypes
-shim (``sweep._capi``) over the prebuilt core the wheel ships, loaded on first
-use (see ``sweep/_jit.py``), so a plain ``import sweep._C`` always succeeds and
+layer (``sweep.backend.c``) over the prebuilt core the wheel ships, loaded on
+first use (see ``sweep/backend/c/jit.py``), so a plain ``import sweep._C`` always succeeds and
 says nothing about whether the core can run here.  ``SWEEP_JIT_FULL=1`` makes
 it the compiled pybind shim instead, JIT-compiled against your torch on first
 use -- the developer path.  And a wheel built with ``SWEEP_BUILD_CUDA=1`` -- or
@@ -19,18 +19,19 @@ import sys
 
 def _jit_full() -> bool:
     try:
-        from sweep import _jit
-        return _jit.jit_full()
+        from sweep.backend.c import jit
+        return jit.jit_full()
     except Exception:
         return False
 
 
-def _capi_loaded() -> bool:
-    """Whether the ctypes shim already holds the core library -- asked without
-    importing it (never imported: nothing is loaded).  ``_capi._lib`` is its
-    module-level cache, set by ``_capi.core_lib()``."""
-    capi = sys.modules.get("sweep._capi")
-    return capi is not None and getattr(capi, "_lib", None) is not None
+def _core_loaded() -> bool:
+    """Whether the ctypes loader already holds the core library -- asked
+    without importing it (never imported: nothing is loaded).
+    ``sweep.backend.c.loader._lib`` is its module-level cache, set by
+    ``loader.core_lib()``."""
+    loader = sys.modules.get("sweep.backend.c.loader")
+    return loader is not None and getattr(loader, "_lib", None) is not None
 
 
 def is_available() -> bool:
@@ -55,9 +56,9 @@ def is_compiled() -> bool:
         if _prebuilt_binding_present():
             return True
         if not _jit_full():
-            return _capi_loaded()
-        from sweep import _jit
-        if _jit._module is not None:
+            return _core_loaded()
+        from sweep.backend.c import jit
+        if jit._module is not None:
             return True
         from torch.utils import cpp_extension
         build_dir = cpp_extension._get_build_directory("sweep_C", verbose=False)
@@ -70,7 +71,7 @@ def diagnostics() -> dict:
     """Diagnostics for the compiled backend -- usable / why-not / nvcc / built.
 
     ``shim`` names which ``sweep._C`` this process gets: ``"ctypes"`` (the
-    default -- ``sweep._capi`` over the prebuilt core, nothing compiles) or
+    default -- ``sweep.backend.c`` over the prebuilt core, nothing compiles) or
     ``"pybind"`` (``SWEEP_JIT_FULL=1``, the compiled developer path).
     ``prebuilt`` and ``shipped_core`` explain the otherwise confusing pairs:
     with an ahead-of-time extension, or with the wheel's prebuilt CUDA core
@@ -83,17 +84,18 @@ def diagnostics() -> dict:
     """
     shim = "pybind" if _jit_full() else "ctypes"
     try:
-        from sweep import _jit, _prebuilt_binding_present
+        from sweep import _prebuilt_binding_present
+        from sweep.backend.c import jit
         prebuilt = _prebuilt_binding_present()
-        can_jit, reason = _jit.can_build()
+        can_jit, reason = jit.can_build()
         return {
             "usable": prebuilt or can_jit,   # can impl='c' be used at all?
             "reason": "ok (pre-built extension)" if prebuilt else reason,
             "shim": shim,
-            "cuda_home": _jit._find_cuda_home(),
+            "cuda_home": jit._find_cuda_home(),
             "already_compiled": is_compiled(),
             "prebuilt": prebuilt,            # compiled ahead of time, no toolkit needed
-            "shipped_core": _jit.shipped_core_info(),   # {path, reason, tag, available}
+            "shipped_core": jit.shipped_core_info(),   # {path, reason, tag, available}
         }
     except Exception as exc:  # pragma: no cover
         return {"usable": False, "reason": f"{type(exc).__name__}: {exc}", "shim": shim,

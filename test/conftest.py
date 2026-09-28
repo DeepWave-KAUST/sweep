@@ -141,16 +141,18 @@ def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
 
 
 def capture(prop):
-    """Wrap the compiled forward so the populated ForwardInput is kept."""
+    """Wrap the compiled forward so the populated ForwardInput is kept.
+
+    The entry returns nothing: what the core wrote is in the tensors bound on
+    ``cap["params"]`` (``record_out``, ``u_allt_out``, ``last_two``).
+    """
     cap = {}
     impl = prop._backend_impl
     orig = impl.forward_func
 
     def wrapper(params):
-        out = orig(params)
+        orig(params)
         cap["params"] = params
-        cap["raw_out"] = out
-        return out
 
     impl.forward_func = wrapper
     cap["func"] = orig
@@ -172,12 +174,10 @@ def capture_backward(prop):
 
         def make(orig, name):
             def wrapper(params):
-                out = orig(params)
+                orig(params)
                 cap["params"] = params
-                cap["raw_out"] = out
                 cap["func"] = orig
                 cap["mode"] = name
-                return out
             return wrapper
 
         setattr(impl, name, make(orig, name))
@@ -185,28 +185,26 @@ def capture_backward(prop):
 
 
 def capture_both(prop):
-    """Wrap forward_func + backward_bs_func so both raw inputs survive one run."""
+    """Wrap forward_func + backward_bs_func so both raw inputs survive one run
+    (the record the public run produced is ``cap["fp"].record_out``)."""
     cap = {}
     impl = prop._backend_impl
 
     fwd_orig = impl.forward_func
 
     def fwd_wrapper(params):
-        out = fwd_orig(params)
+        fwd_orig(params)
         cap["fp"] = params
-        cap["fwd_raw_out"] = out
         cap["fwd_func"] = fwd_orig
-        return out
 
     impl.forward_func = fwd_wrapper
 
     bwd_orig = impl.backward_bs_func
 
     def bwd_wrapper(params):
-        out = bwd_orig(params)
+        bwd_orig(params)
         cap["bp"] = params
         cap["bwd_func"] = bwd_orig
-        return out
 
     impl.backward_bs_func = bwd_wrapper
     return cap

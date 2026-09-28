@@ -248,6 +248,7 @@ class AcousticVRZ(SecondOrderEquation):
             slots=slot_table.ACOUSTIC_VRZ2D,
             stepped=True,
             grads_out_has_wavelet=True,
+            grads_out_wavelet_written=False,
             illum_nvar=2,
             # Same divergence-form gradient as the 3-D sibling.  DD still
             # refuses this class -- no longer for want of stepped kernels
@@ -372,6 +373,7 @@ class AcousticVRZ3D(SecondOrderEquation):
             stepped=True,
             dd_backward_phases=True,
             grads_out_has_wavelet=True,
+            grads_out_wavelet_written=False,
             illum_nvar=2,
             # DD: the variable-density gradient is div(c/e) with
             # c/e = lambda*vp*grad(p), so a cut seam needs the

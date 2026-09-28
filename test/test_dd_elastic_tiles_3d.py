@@ -123,7 +123,7 @@ def make_runner(prop, wavelet, sources, receivers, model_arrays):
     assert len(L) == NWF
     for t in L:
         t.zero_()
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
     p.record_out = record
     return SteppedBindingRunner(func, p, L, psi_pairs=(), u_blocks=()), record
 

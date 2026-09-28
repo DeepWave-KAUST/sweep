@@ -1,7 +1,7 @@
 """``is_torch_binding_available()`` must not require a CUDA toolkit when the
 compiled ``sweep._C`` is already built.
 
-The regression it guards: the probe used to ask ``_jit.can_build()`` — "could I
+The regression it guards: the probe used to ask ``jit.can_build()`` — "could I
 JIT-compile this?" — which needs nvcc. On a machine that installed with
 ``SWEEP_BUILD_CUDA=1`` (or ran ``setup.py build_ext --inplace``) and then ran
 without a CUDA toolkit on PATH, the answer was False even though ``sweep._C``
@@ -54,36 +54,36 @@ def torch_present(monkeypatch):
 class TestAvailabilityProbe:
     def test_prebuilt_binding_beats_a_missing_toolkit(self, monkeypatch, torch_present):
         """This is the bug: built kernels + no nvcc must still report available."""
-        from sweep import _jit
+        from sweep.backend.c import jit
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: True)
         monkeypatch.setattr(
-            _jit, "can_build",
+            jit, "can_build",
             lambda: (False, "no suitable CUDA toolkit found (need nvcc >=12.4 ...)"))
 
         assert sweep.is_torch_binding_available() is True
 
     def test_without_a_prebuilt_binding_the_toolkit_decides(self, monkeypatch, torch_present):
         """The JIT path is unchanged: no binary on disk means nvcc is required."""
-        from sweep import _jit
+        from sweep.backend.c import jit
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
 
-        monkeypatch.setattr(_jit, "can_build", lambda: (False, "no nvcc"))
+        monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc"))
         assert sweep.is_torch_binding_available() is False
 
-        monkeypatch.setattr(_jit, "can_build", lambda: (True, "ok"))
+        monkeypatch.setattr(jit, "can_build", lambda: (True, "ok"))
         assert sweep.is_torch_binding_available() is True
 
     def test_probe_never_triggers_the_jit_compile(self, monkeypatch, torch_present):
         """The whole point of the probe is to answer without a surprise ~3 min
-        build, so it must not reach ``_jit.load()`` (the compiled shim) nor
+        build, so it must not reach ``jit.load()`` (the compiled shim) nor
         ``core_path()`` and the local core build behind it, on either path."""
-        from sweep import _jit
+        from sweep.backend.c import jit
 
         def explode(*_a, **_k):
             raise AssertionError("is_torch_binding_available() triggered a compile")
 
         for entry in ("load", "core_path", "_local_core", "_build_core", "_stage"):
-            monkeypatch.setattr(_jit, entry, explode)
+            monkeypatch.setattr(jit, entry, explode)
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
         sweep.is_torch_binding_available()
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: True)
@@ -127,12 +127,12 @@ class TestBindingDiagnostics:
         assert binding.is_compiled() is True
 
     def test_diagnostics_explains_usable_without_a_toolkit(self, monkeypatch):
-        from sweep import _jit
+        from sweep.backend.c import jit
         from sweep.backend.torch import binding
 
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: True)
-        monkeypatch.setattr(_jit, "can_build", lambda: (False, "no nvcc"))
-        monkeypatch.setattr(_jit, "_find_cuda_home", lambda: None)
+        monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc"))
+        monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
 
         d = binding.diagnostics()
         assert d["usable"] is True
@@ -143,12 +143,12 @@ class TestBindingDiagnostics:
         assert "pre-built" in d["reason"]
 
     def test_diagnostics_unchanged_on_the_jit_path(self, monkeypatch):
-        from sweep import _jit
+        from sweep.backend.c import jit
         from sweep.backend.torch import binding
 
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
-        monkeypatch.setattr(_jit, "can_build", lambda: (False, "no nvcc"))
-        monkeypatch.setattr(_jit, "_find_cuda_home", lambda: None)
+        monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc"))
+        monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
 
         d = binding.diagnostics()
         assert d["usable"] is False
@@ -162,20 +162,20 @@ class TestBindingDiagnostics:
         core -- is a list on the probed path and on the fallback the except
         branch builds when the probe itself blows up, so a reader can always
         test it the same way."""
-        from sweep import _jit
+        from sweep.backend.c import jit
         from sweep.backend.torch import binding
 
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
-        monkeypatch.setattr(_jit, "_find_cuda_home", lambda: None)
-        monkeypatch.setattr(_jit, "can_build", lambda: (False, "no nvcc"))
-        monkeypatch.setattr(_jit, "_shipped_tags", lambda: ["cu12", "cu13"])
+        monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
+        monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc"))
+        monkeypatch.setattr(jit, "_shipped_tags", lambda: ["cu12", "cu13"])
         core = binding.diagnostics()["shipped_core"]
         assert set(core) == self.SHIPPED_CORE_KEYS
         assert core["available"] == ["cu12", "cu13"]
 
         def boom():
             raise RuntimeError("probe exploded")
-        monkeypatch.setattr(_jit, "can_build", boom)
+        monkeypatch.setattr(jit, "can_build", boom)
         core = binding.diagnostics()["shipped_core"]
         assert set(core) == self.SHIPPED_CORE_KEYS
         assert core == {"path": None, "reason": "not probed", "tag": "", "available": []}

@@ -23,7 +23,7 @@ GEN = ROOT / "utils" / "gen_input_core.py"
 
 def test_generated_twins_match_wavetypes(tmp_path):
     core = tmp_path / "input_core.h"; adapt = tmp_path / "adapt_inputs.h"
-    abi = tmp_path / "_core_abi.py"; layout = tmp_path / "layout.cu"   # the ctypes mirror + the layout probe ride along
+    abi = tmp_path / "abi.py"; layout = tmp_path / "layout.cu"   # the ctypes mirror + the layout probe ride along
     r = subprocess.run([sys.executable, str(GEN), str(CSRC / "shared" / "wavetypes.h"), str(core), str(adapt), str(abi), str(layout)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -32,8 +32,8 @@ def test_generated_twins_match_wavetypes(tmp_path):
     assert filecmp.cmp(adapt, CSRC / "cuda" / "common" / "adapt_inputs.h", shallow=False), \
         "cuda/common/adapt_inputs.h is stale: re-run utils/gen_input_core.py"
 
-    assert abi.read_text() == (CSRC.parent / "_core_abi.py").read_text(), \
-        "sweep/_core_abi.py is stale: re-run utils/gen_input_core.py"
+    assert abi.read_text() == (CSRC.parent / "backend" / "c" / "abi.py").read_text(), \
+        "sweep/backend/c/abi.py is stale: re-run utils/gen_input_core.py"
     assert layout.read_text() == (CSRC / "cuda" / "common" / "layout.cu").read_text(), \
         "cuda/common/layout.cu is stale: re-run utils/gen_input_core.py"
 

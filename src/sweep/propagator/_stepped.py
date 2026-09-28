@@ -401,24 +401,25 @@ class SteppedBackwardRunner:
                 self._recon_cache[rk] = rec
             p.forward_wavefields = rec
 
-    def run_segment(self, bw_it_begin: int, bw_it_end: int):
+    def run_segment(self, bw_it_begin: int, bw_it_end: int) -> None:
         """Run the segment [bw_it_end, bw_it_begin); segments must be issued
-        in descending order and partition [0, nt) exactly."""
+        in descending order and partition [0, nt) exactly.  Returns nothing:
+        the gradients accumulate into the bound ``grads_out`` (and
+        ``illum_out``), which the caller owns."""
         b, e = int(bw_it_begin), int(bw_it_end)
         if self._cr is not None:
-            out = self._cr.run(b, e, 0)
+            self._cr.run(b, e, 0)
             self.k_adj += b - e
             self.k_f += b - max(e, 1)
-            return out
+            return
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         self._bind_lists()
-        out = self.func(p)
+        self.func(p)
         self.k_adj += b - e
         self.k_f += b - max(e, 1)
-        return out
 
-    def run_phase(self, bw_it_begin: int, bw_it_end: int, phase: int):
+    def run_phase(self, bw_it_begin: int, bw_it_end: int, phase: int) -> None:
         """Phase-split single backward step (elastic backward_bs only).
 
         ``phase == 1`` runs the adjoint-source injection, the stress
@@ -444,25 +445,24 @@ class SteppedBackwardRunner:
                 f"run_phase drives exactly one step: got segment [{e}, {b})"
             )
         if self._cr is not None:
-            out = self._cr.run(b, e, int(phase))
+            self._cr.run(b, e, int(phase))
             if phase == 2:
                 self.k_adj += 1
                 self.k_f += 1 if e >= 1 else 0
-            return out
+            return
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         p.step_phase = int(phase)
         self._bind_lists()
         try:
-            out = self.func(p)
+            self.func(p)
         finally:
             p.step_phase = 0
         if phase == 2:
             self.k_adj += 1
             self.k_f += 1 if e >= 1 else 0
-        return out
 
-    def run_vrz_phase(self, bw_it_begin: int, bw_it_end: int, phase: int):
+    def run_vrz_phase(self, bw_it_begin: int, bw_it_end: int, phase: int) -> None:
         """Phase-split single VRZ backward_bs step (domain-decomposition only).
 
         The variable-density gradient is a spatial divergence of the coupling
@@ -498,16 +498,15 @@ class SteppedBackwardRunner:
         p.step_phase = int(phase)
         self._bind_lists()
         try:
-            out = self.func(p)
+            self.func(p)
         finally:
             p.step_phase = 0
         if phase == 1:
             self.k_adj += 1
             self.k_f += 1 if e >= 1 else 0
-        return out
 
     def run(self, bw_it_begin: int, bw_it_end: int, phase: int | None = None,
-            advance: bool = True):
+            advance: bool = True) -> None:
         """Unified entry; ``phase=None`` is the legacy unphased segment.
 
         The advance arithmetic is the SAME rule in every variant: over a
@@ -518,28 +517,28 @@ class SteppedBackwardRunner:
         """
         b, e = int(bw_it_begin), int(bw_it_end)
         if phase is None:
-            return self.run_segment(b, e)
+            self.run_segment(b, e)
+            return
         if b != e + 1:
             raise ValueError(
                 f"phased backward drives exactly one step: got segment [{e}, {b})")
         if self._cr is not None:
-            out = self._cr.run(b, e, int(phase))
+            self._cr.run(b, e, int(phase))
             if advance:
                 self.k_adj += b - e
                 self.k_f += b - max(e, 1)
-            return out
+            return
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         p.step_phase = int(phase)
         self._bind_lists()
         try:
-            out = self.func(p)
+            self.func(p)
         finally:
             p.step_phase = 0
         if advance:
             self.k_adj += b - e
             self.k_f += b - max(e, 1)
-        return out
 
     def at(self, buf: str, role: str) -> torch.Tensor:
         """The tensor currently holding ``role`` in the adjoint / recon list."""

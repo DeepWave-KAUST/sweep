@@ -20,7 +20,7 @@ import sys
 
 import pytest
 
-from sweep import _jit
+from sweep.backend.c import jit
 
 
 @pytest.fixture(autouse=True)
@@ -35,14 +35,14 @@ def _no_compile(monkeypatch):
         raise AssertionError("a compile was attempted; these tests only ask, never build")
 
     monkeypatch.setattr(cpp_extension, "load", refuse)
-    for entry in ("_stage", "_build_core"):        # _jit.load itself stays: a test inspects its signature
-        monkeypatch.setattr(_jit, entry, refuse)
+    for entry in ("_stage", "_build_core"):        # jit.load itself stays: a test inspects its signature
+        monkeypatch.setattr(jit, entry, refuse)
     yield
 
 
 @pytest.fixture
 def no_shipped_core(monkeypatch, tmp_path):
-    monkeypatch.setattr(_jit, "_LIB", tmp_path / "lib")
+    monkeypatch.setattr(jit, "_LIB", tmp_path / "lib")
     monkeypatch.delenv("SWEEP_CORE", raising=False)
     # ...and no cached local core either: the host's ~/.cache/torch_extensions
     # must not answer "a core is at hand" for tests about the nvcc path.
@@ -55,19 +55,19 @@ def no_gpu(no_shipped_core):
     import torch
     monkeypatch = no_shipped_core
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(_jit, "_find_cuda_home", lambda: "/usr/local/cuda")
+    monkeypatch.setattr(jit, "_find_cuda_home", lambda: "/usr/local/cuda")
     return monkeypatch
 
 
 def test_can_compile_without_a_device_when_the_arch_is_named(no_gpu):
     no_gpu.setenv("TORCH_CUDA_ARCH_LIST", "7.0")
-    ok, why = _jit.can_compile()
+    ok, why = jit.can_compile()
     assert ok, why
 
 
 def test_can_compile_refuses_when_there_is_no_target_arch(no_gpu):
     no_gpu.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
-    ok, why = _jit.can_compile()
+    ok, why = jit.can_compile()
     assert not ok
     assert "TORCH_CUDA_ARCH_LIST" in why, why
 
@@ -75,7 +75,7 @@ def test_can_compile_refuses_when_there_is_no_target_arch(no_gpu):
 def test_can_build_still_requires_a_device(no_gpu):
     """Cross-compiling does not make impl='c' runnable here."""
     no_gpu.setenv("TORCH_CUDA_ARCH_LIST", "7.0")
-    ok, why = _jit.can_build()
+    ok, why = jit.can_build()
     assert not ok
     assert "no CUDA GPU is visible" in why
 
@@ -91,8 +91,8 @@ def test_can_build_reports_the_toolkit_problem_when_there_is_a_device(no_shipped
     import torch
     monkeypatch = no_shipped_core
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(_jit, "_find_cuda_home", lambda: None)
-    ok, why = _jit.can_build()
+    monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
+    ok, why = jit.can_build()
     assert not ok and "CUDA toolkit" in why
 
 
@@ -104,8 +104,8 @@ def test_toolkit_message_names_the_torch_cuda_major(no_gpu, cuda, major):
     import torch
     no_gpu.setattr(torch.version, "cuda", cuda)
     no_gpu.setenv("TORCH_CUDA_ARCH_LIST", "8.9")
-    no_gpu.setattr(_jit, "_find_cuda_home", lambda: None)
-    ok, why = _jit.can_compile()
+    no_gpu.setattr(jit, "_find_cuda_home", lambda: None)
+    ok, why = jit.can_compile()
     assert not ok and "CUDA toolkit" in why
     assert f"an nvcc of CUDA {major}" in why, why
 
@@ -122,6 +122,6 @@ def test_build_cli_refuses_without_an_arch(no_shipped_core, capsys):
 
 def test_load_signature_carries_the_flag():
     import inspect
-    assert "compile_only" in inspect.signature(_jit.load).parameters
+    assert "compile_only" in inspect.signature(jit.load).parameters
     import sweep
     assert "require_gpu" in inspect.signature(sweep.precompile).parameters

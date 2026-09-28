@@ -178,13 +178,13 @@ def run_equivalence(ndim, k, **build_kw):
     has_bs = bool(p.use_boundary_saving)
     has_ckpt = bool(p.use_checkpoint)
 
-    raw_record = cap["raw_out"][2]
+    raw_record = p.record_out          # what the public run wrote (the entry returns nothing)
     record = torch.zeros_like(raw_record)
     p.record_out = record
 
     u_allt = None
     if p.save_all_wavefields:
-        u_allt = torch.zeros_like(cap["raw_out"][0])
+        u_allt = torch.zeros_like(p.u_allt_out)
         p.u_allt_out = u_allt
 
     state_kw = dict(record=record, u_allt=u_allt, has_bs=has_bs, has_ckpt=has_ckpt)
@@ -279,7 +279,7 @@ def test_stepped_guards():
         prop(wavelet, sources, receivers, models=models)
     p, func = cap["params"], cap["func"]
     L = list(p.wavefields)
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
 
     # it range out of bounds
     p.record_out = record

@@ -221,7 +221,7 @@ class TileState:
         self.fwd_func = cap["fwd_func"]
         self.bp = cap["bp"]
         self.bwd_func = cap["bwd_func"]
-        self.fwd_record_raw = cap["fwd_raw_out"][2]
+        self.fwd_record_raw = self.fp.record_out      # what the public run wrote
 
         L = list(self.fp.wavefields)
         if not L:

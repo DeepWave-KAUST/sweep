@@ -68,14 +68,14 @@ RELEASE_LINK_FLAGS: list = []
 
 
 def _core_tag(cuda_version: str) -> str:
-    from sweep import _jit
-    tag = getattr(_jit, "_core_tag", None)
+    from sweep.backend.c import jit
+    tag = getattr(jit, "_core_tag", None)
     return tag(cuda_version) if tag else "cu" + cuda_version.split(".")[0]
 
 
-def _core_abi() -> int:
-    from sweep import _jit
-    text = (_jit._CSRC / "core" / "capi.h").read_text()
+def _header_abi_version() -> int:
+    from sweep.backend.c import jit
+    text = (jit._CSRC / "core" / "capi.h").read_text()
     m = re.search(r"^\s*#define\s+SWEEP_CORE_ABI_VERSION\s+(\d+)", text, re.M)
     if not m:
         raise RuntimeError("SWEEP_CORE_ABI_VERSION not found in csrc/core/capi.h")
@@ -133,7 +133,7 @@ def write_core_sidecar(out_dir: Path, archs: list[str], ptx: list[str],
     with open(so, "rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
             h.update(block)
-    meta = {"abi": _core_abi(), "cuda": cuda_version, "archs": list(archs),
+    meta = {"abi": _header_abi_version(), "cuda": cuda_version, "archs": list(archs),
             "ptx": list(ptx), "sha256": h.hexdigest(), "flags": list(flags)}
     path = Path(out_dir) / "core.json"
     path.write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n")
@@ -147,7 +147,7 @@ def _with_release_link_flags(text: str) -> str:
     the release build is the only caller that wants them."""
     anchor = "  command = $nvcc -shared -o $out $in"
     if text.count(anchor) != 1:
-        raise RuntimeError("sweep._jit._core_ninja link rule changed; update build.py")
+        raise RuntimeError("sweep.backend.c.jit._core_ninja link rule changed; update build.py")
     extra = " ".join([f"-Xlinker '-rpath={p}'" for p in CUFFT_RPATH] + RELEASE_LINK_FLAGS)
     return text.replace(anchor, f"{anchor} {extra}")
 
@@ -169,16 +169,16 @@ def build_core(archs: str | None = None, out: Path | None = None,
     """Build the core with the nvcc at ``cuda_home`` and file it under
     ``lib/<tag>``, the tag being that nvcc's CUDA major.  ``archs=None`` takes
     the tag's recommended list (``RECOMMENDED_ARCHS``)."""
-    from sweep import _jit
+    from sweep.backend.c import jit
 
     if cuda_home is None:
-        cuda_home = _jit._find_cuda_home()
+        cuda_home = jit._find_cuda_home()
         if cuda_home is None:
             raise RuntimeError("no suitable nvcc found; pass --cuda-home or set CUDA_HOME")
     nvcc = os.path.join(cuda_home, "bin", "nvcc")
     if not os.path.exists(nvcc):
         raise RuntimeError(f"{nvcc} does not exist")
-    ver = _jit._nvcc_version(nvcc)
+    ver = jit._nvcc_version(nvcc)
     if ver is None:
         raise RuntimeError(f"cannot read the release of {nvcc}")
     cuda_version = f"{ver[0]}.{ver[1]}"
@@ -194,11 +194,11 @@ def build_core(archs: str | None = None, out: Path | None = None,
     os.environ["CUDA_HOME"] = cuda_home
     build_dir = _scratch_dir(tag)
     build_dir.mkdir(parents=True, exist_ok=True)
-    sources, inc = _jit._stage(build_dir)
+    sources, inc = jit._stage(build_dir)
     inc = inc + [p for p in (os.path.join(cuda_home, "include"),
                              os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
                  if os.path.isdir(p)]
-    flags = _jit._CORE_DEFINES + _jit._gencode_flags() + _jit._CORE_FLAGS
+    flags = jit._CORE_DEFINES + jit._gencode_flags() + jit._CORE_FLAGS
 
     if verbose:
         print(f"[sweep] building libsweep_core.so ({tag}, nvcc {cuda_version}) for "
@@ -206,14 +206,14 @@ def build_core(archs: str | None = None, out: Path | None = None,
               file=sys.stderr, flush=True)
     # _build_core looks _core_ninja up on the module, so the link flags ride
     # in on a temporary wrapper; restored whatever happens.
-    orig = _jit._core_ninja
-    _jit._core_ninja = lambda *a, **k: _with_release_link_flags(orig(*a, **k))
+    orig = jit._core_ninja
+    jit._core_ninja = lambda *a, **k: _with_release_link_flags(orig(*a, **k))
     try:
-        so = _jit._build_core(build_dir, _jit._core_sources(sources), inc, cuda_home, verbose)
+        so = jit._build_core(build_dir, jit._core_sources(sources), inc, cuda_home, verbose)
     finally:
-        _jit._core_ninja = orig
+        jit._core_ninja = orig
 
-    out_dir = Path(out) if out is not None else _jit._PKG / "lib" / tag
+    out_dir = Path(out) if out is not None else jit._PKG / "lib" / tag
     out_dir.mkdir(parents=True, exist_ok=True)
     dst = out_dir / "libsweep_core.so"
     dst.write_bytes(so.read_bytes())
@@ -225,8 +225,8 @@ def build_core(archs: str | None = None, out: Path | None = None,
 
 def _shipped_core_fits() -> bool:
     try:
-        from sweep import _jit
-        return _jit._shipped_core()[0] is not None
+        from sweep.backend.c import jit
+        return jit._shipped_core()[0] is not None
     except Exception:
         return False
 
@@ -283,13 +283,13 @@ def main(argv=None) -> int:
         print(f"build failed: {exc}", file=sys.stderr)
         return 1
 
-    from sweep import _jit
-    if _jit.jit_full():
+    from sweep.backend.c import jit
+    if jit.jit_full():
         from torch.utils import cpp_extension
         print(f"sweep._C (compiled developer path) is built and cached at "
               f"{cpp_extension._get_build_directory('sweep_C', verbose=False)}")
     else:
-        print(f"the CUDA core is at {_jit.core_path()}; sweep._C is the ctypes layer, nothing else to build")
+        print(f"the CUDA core is at {jit.core_path()}; sweep._C is the ctypes layer, nothing else to build")
     return 0
 
 

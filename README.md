@@ -37,7 +37,7 @@ cannot emit sm_70, so a V100 needs a torch built for CUDA 12 (a local build cann
 help: nvcc 13 cannot target it either) — and needs driver >= 580, exactly what torch
 cu130 needs. The
 compiled backend (`impl='c'`) drives the core through a pure-Python `ctypes` layer
-(`sweep._capi`) that fills the core's C structs straight from each tensor's
+(`sweep.backend.c`) that fills the core's C structs straight from each tensor's
 `data_ptr()`, shape, strides and dtype — so after `pip install` **nothing compiles**:
 no nvcc, no C++ compiler, no CUDA headers (the `ninja` dependency only runs for a
 local core build). No torch C++ ABI is involved,
