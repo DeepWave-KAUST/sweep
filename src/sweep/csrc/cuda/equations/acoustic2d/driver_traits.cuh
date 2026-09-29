@@ -30,7 +30,7 @@
 //   * image_step = calculate_grad (vp gradient) + accumulate_illumination_2d; no ADCIG launch here (the full store is not raw pressure);
 //   * rtm_out_bs opens on compute_illumination || compute_adcig (consumed in-step by the 3-D twin; 2-D images after the prefetch in bs_rtm_tap);
 //   * seed_reconstruction: u_prev <- u_last_two[:, 1], u_now <- u_last_two[:, 0], then set_boundary_zeros on both over the abcn + M rim with the cut faces excluded (ctx.cut_mask()); make_bs_scratch returns {};
-//   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
+//   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> sub_source_in_restore_strip (strip source cells back to w^{it-1} - s^{it}) -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
 //   * bs_rtm_tap, after the prefetch: accumulate_illumination_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
 //   * ckpt: CKPT_STATE_COUNT = 7 (u triple + the 4 CPML aux slabs, bind order) per replay state set of p.forward_wavefields; bind_or_alloc_recon_ckpt binds set 0 (bind_replay_state: wavefield_set + geometry check), bind_or_alloc_recursive_scratch sets 1..depth -- both MANDATORY;
 //   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
@@ -519,9 +519,10 @@ struct Driver {
     { return {}; }
 
     // One boundary-saving reverse-reconstruction step, in THIS equation's
-    // bit-load-bearing order: NOPML step, strip restore, u_tt gradient
-    // imaging, forward source injection, swap.  (The 3-D twin images before
-    // the injection; VRZ injects before the restore — order lives here.)
+    // bit-load-bearing order: NOPML step, strip restore, strip-source
+    // un-injection, u_tt gradient imaging, forward source injection, swap.
+    // (The 3-D twin images before the injection; VRZ injects before the
+    // restore — order lives here.)
     // Receiver-only illumination for the it == 0 tail; see the call site.
     static void bs_illum_tail(const State& s, const SolverContext& ctx,
                               Wavefield& adjoint, RTMOutputCore& illumination)
@@ -574,6 +575,21 @@ struct Driver {
             bs,
             save_width,
             0,
+            ctx
+        );
+        // The restore wrote the saved TRUE w^{it-1} (source included) over the
+        // strips; the NOPML left w^{it-1} - s^{it} everywhere else.  Take s^{it}
+        // back out of a source cell the restore overwrote, so the strip imaging
+        // below and the add_source that completes w^{it-1} see what they see at
+        // any other source cell.  Same (width, offset, tangent_pad = 0) as the
+        // restore; same source / time index as the add_source below.
+        sub_source_in_restore_strip<<<s.source_config.grid, s.source_config.block>>>(
+            for_view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            /*nsrc=*/(int)p.forward_sources_loc.size(1),
+            save_width, /*offset=*/0, /*tangent_pad=*/0,
             ctx
         );
         {

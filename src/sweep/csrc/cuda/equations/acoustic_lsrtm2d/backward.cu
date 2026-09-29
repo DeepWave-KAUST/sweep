@@ -601,6 +601,20 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             ctx
         );
 
+        // The restore wrote the sourced w^{it-1} over the strips; the NOPML
+        // left w^{it-1} - s^{it} elsewhere.  Take s^{it} back out of a strip
+        // source cell before the mp imaging and the add_source below (see
+        // common.cuh).  Restore's (width, offset, tangent_pad = 0).
+        sub_source_in_restore_strip<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view_iter.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            save_width, /*offset=*/0, /*tangent_pad=*/0,
+            ctx
+        );
+
         calculate_grad_lsrtm_mp_utt<<<launch_config.grid, launch_config.block>>>(
             forward.u_prev_t.data_ptr<float>(),
             for_view_iter.u_next,

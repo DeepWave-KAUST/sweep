@@ -832,6 +832,18 @@ void run_bs_imaging(
             ctx
         );
 
+        // Strip source cells back to w^{it-1} - s^{it} before the imaging and
+        // the add_source below (see common.cuh).
+        sub_source_in_restore_strip_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            for_view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            save_width, /*offset=*/0, /*tangent_pad=*/0,
+            ctx
+        );
+
         accumulate_imaging_utt_3d(
             launch_config.grid,
             launch_config.block,

@@ -102,6 +102,47 @@ __global__ void add_source_3d_signed(
     SolverContext solver
 );
 
+// Boundary-saving reverse reconstruction, for equations that restore the strips
+// AFTER the time-reversed step and inject the forward source after that
+// (acoustic2d/3d, acoustic_lsrtm2d/3d, elastic_tti_2nd2d).  The reversed step
+// leaves w^{it-1} - s^{it} in u (the source term is the one thing it cannot
+// reverse); the restore then overwrites the strips with the saved TRUE
+// w^{it-1}, which already carries s^{it}.  A source cell inside a strip would
+// therefore get s^{it} twice from the add_source that completes w^{it-1}, and
+// anything imaged between the restore and that add_source would see a
+// different field there than at a source cell outside the strips.
+//
+// Launch right after the restore, with add_source's own (grid, block, source,
+// sources_loc, it, nsrc) and the restore's (width, offset, tangent_pad): for
+// every source whose cell the restore just overwrote -- the membership test is
+// boundary/strip.cuh's bs_in_restore_strip_2d/3d, the predicate the restore
+// kernels themselves use -- it subtracts that same sample (exact sign flip), so
+// the cell holds w^{it-1} - s^{it} like every other source cell.  Sources
+// outside the strips are not touched, so a configuration with none in a strip
+// is bit-identical with or without this launch.
+__global__ void sub_source_in_restore_strip(
+    float* __restrict__ u,                 // (B, nz, nx)
+    const float* __restrict__ source,      // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,   // (B, nsrc, 2)
+    int it,
+    int nsrc,
+    int width,
+    int offset,
+    int tangent_pad,
+    SolverContext solver
+);
+__global__ void sub_source_in_restore_strip_3d(
+    float* __restrict__ u,                 // (B, nz, ny, nx)
+    const float* __restrict__ source,      // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,   // (B, nsrc, 3)
+    int it,
+    int nsrc,
+    int width,
+    int offset,
+    int tangent_pad,
+    SolverContext solver
+);
+
 __global__ void record_kernel_3d(
     const float* __restrict__ u,           // (B, nz, ny, nx)
     float* __restrict__ record,            // (B, nrec, nt)

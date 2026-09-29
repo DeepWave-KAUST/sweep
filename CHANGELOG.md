@@ -185,6 +185,23 @@ and this project adheres to
   name any more.
 
 ### Changed
+- **Boundary saving no longer re-injects a source that sits in the restore
+  strip.**  In the boundary-saving reverse pass the strip cells (the M+1 cells
+  inside every non-cut physical edge, i.e. physical rows 0..M under a free
+  surface) are restored to the true, source-included field, and the source was
+  then added a second time; the strip's finite-difference `u_tt` also kept the
+  source term, and the error leaked into the interior through the stencil.
+  Any shot within M+1 cells of an edge was affected -- in particular a shallow
+  source under a free surface, the common marine setup.  Measured before the
+  fix: vp gradient vs `Full()` 4e-4..2e-2 of max|g| (source-row), ~1e-3 in the
+  interior, source illumination 1.4e-2; after: <=1.2e-6, and vs eager (FP32)
+  identical to `Full()` vs eager.  Fixed for Acoustic, Acoustic3D, AcousticLSRTM
+  (2-D/3-D) and ElasticTTI2nd (whose strip is the outermost row/column only);
+  VRZ, VTI, DAS, the staggered-grid family and the eager/JAX paths inject in an
+  order that never had it.  Sources outside the strips are bit-identical; the
+  restore kernels and the new un-injection share one strip predicate
+  (`csrc/cuda/common/boundary/strip.cuh`).  `test/test_bs_strip_source.py`
+  covers every restore variant (gpu/cpu/disk, fp32/fp16/bf16/int8).
 - **Host-staged boundaries under DD no longer pay a per-step Python call.**
   The persistent stepped runners (forward and backward) now accept
   `storage='cpu'`; the core keyed its saves and flushes on the global step

@@ -1,6 +1,7 @@
 
 #include "common.cuh"
 #include "context.h"
+#include "boundary/strip.cuh"
 #include <cuda_runtime.h>
 #include <stdio.h>
 
@@ -241,6 +242,81 @@ __global__ void add_source_3d_signed(
 
     const float v = source[src_idx];
     atomicAdd(&u[u_idx], sign < 0.0f ? -v : v);   // exact sign flip, see common.cuh
+}
+
+// See common.cuh.  Thread/source/sample indexing is add_source's, line for
+// line; the only additions are the strip test and the sign.
+__global__ void sub_source_in_restore_strip(
+    float* __restrict__ u,
+    const float* __restrict__ source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    int width,
+    int offset,
+    int tangent_pad,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 2;
+    int ix = sources_loc[base + 0];
+    int iz = sources_loc[base + 1];
+
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
+        return;
+    if (!bs_in_restore_strip_2d(solver, width, offset, tangent_pad, ix, iz))
+        return;   // not overwritten by the restore: u already lacks s^it here
+
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    atomicAdd(&u[u_idx], -source[src_idx]);   // exact sign flip
+}
+
+__global__ void sub_source_in_restore_strip_3d(
+    float* __restrict__ u,
+    const float* __restrict__ source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    int width,
+    int offset,
+    int tangent_pad,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 3;
+
+    int ix = sources_loc[base + 0];
+    int iy = sources_loc[base + 1];
+    int iz = sources_loc[base + 2];
+
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz)
+        return;
+    if (!bs_in_restore_strip_3d(solver, width, offset, tangent_pad, ix, iy, iz))
+        return;   // not overwritten by the restore: u already lacks s^it here
+
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
+
+    long long u_idx = (long long)b * spatial_size
+              + (long long)iz * solver.ny * solver.nx
+              + iy * solver.nx
+              + ix;
+
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    atomicAdd(&u[u_idx], -source[src_idx]);   // exact sign flip
 }
 
 __global__ void record_kernel_3d(

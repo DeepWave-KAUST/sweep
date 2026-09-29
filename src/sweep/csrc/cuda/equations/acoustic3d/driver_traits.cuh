@@ -471,7 +471,8 @@ struct Driver {
         return {Buf{}};   // f_this retired: nothing consumed the field
     }
 
-    // 3-D bs reverse step: NOPML(f_this) -> strip restore -> u_tt gradient +
+    // 3-D bs reverse step: NOPML(f_this) -> strip restore -> strip-source
+    // un-injection -> u_tt gradient +
     // rtm + ADCIG imaging (BEFORE the forward source injection — the 2-D twin
     // images after injection + swap) -> inject -> swap.
     // Receiver-only illumination for the it == 0 tail; see the call site.
@@ -523,6 +524,18 @@ struct Driver {
             bs,
             save_width,
             0,
+            ctx
+        );
+        // Strip source cells back to w^{it-1} - s^{it} (the restore wrote the
+        // sourced w^{it-1}); see the 2-D twin.  Before the strip imaging, the
+        // illumination and the ADCIG, which all read u_next below.
+        sub_source_in_restore_strip_3d<<<s.source_config.grid, s.source_config.block>>>(
+            for_view.u_next,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            (int)p.forward_sources_loc.size(1),
+            save_width, /*offset=*/0, /*tangent_pad=*/0,
             ctx
         );
         {

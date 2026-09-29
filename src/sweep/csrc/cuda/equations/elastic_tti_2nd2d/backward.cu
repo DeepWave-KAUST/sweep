@@ -459,6 +459,25 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             );
         }
 
+        // The ring restore wrote the sourced W_{it-1} into its band (offset -M:
+        // physical row/column 0 and nz-1 / nx-1 plus M pad cells), so a source
+        // there would get S_it twice from the re-add below.  Take it back out of
+        // exactly those cells first -- same fields, source and time index as the
+        // re-add, the restore's (width, offset = -M, tangent_pad = 0).
+        for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
+            float* field = field_ptr(for_view, source_fields[isrc]);
+            if (field == nullptr) continue;
+            sub_source_in_restore_strip<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                field,
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                save_width, /*offset=*/-p.M, /*tangent_pad=*/0,
+                solver
+            );
+        }
+
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
