@@ -690,6 +690,41 @@ class TestAdapt:
 # --------------------------------------------------------------------------- #
 # 4. input validation
 # --------------------------------------------------------------------------- #
+class TestHostCopyCache:
+    """The per-call path copies the host index tensors once per params object
+    while they stay the same object at the same version (two device syncs per
+    step otherwise); a write or a replacement invalidates the copy."""
+
+    def test_same_object_reuses_the_copy_and_changes_invalidate(self):
+        torch = pytest.importorskip("torch")
+        import sweep.backend.c.adapt as adapt
+        from sweep.backend.c import abi
+        p = abi.ForwardInput()
+        idx = torch.arange(6, dtype=torch.int64)
+        p.source_field_indices = idx
+        h1 = adapt._host_int32_cached(p, "source_field_indices", idx)
+        h2 = adapt._host_int32_cached(p, "source_field_indices", idx)
+        assert h2 is h1 and h1.dtype == torch.int32 and h1.tolist() == list(range(6))
+        idx[0] = 41                                             # in-place write bumps _version
+        h3 = adapt._host_int32_cached(p, "source_field_indices", idx)
+        assert h3 is not h1 and h3[0].item() == 41
+        other = torch.arange(6, dtype=torch.int64) + 7         # a new tensor, new identity
+        h4 = adapt._host_int32_cached(p, "source_field_indices", other)
+        assert h4 is not h3 and h4[0].item() == 7
+        assert adapt._host_int32_cached(p, "source_field_indices", other) is h4
+
+    def test_an_object_that_refuses_attributes_still_works(self):
+        torch = pytest.importorskip("torch")
+        import sweep.backend.c.adapt as adapt
+
+        class Rigid:
+            __slots__ = ()
+
+        idx = torch.arange(3, dtype=torch.int64)
+        h = adapt._host_int32_cached(Rigid(), "receiver_field_indices", idx)
+        assert h.dtype == torch.int32 and h.tolist() == [0, 1, 2]
+
+
 class TestInputValidation:
     @pytest.mark.parametrize("steps", [[0, 10, 20], (0, 10, 20), np.array([0, 10, 20])])
     def test_checkpoint_steps_from_a_plain_sequence(self, steps):

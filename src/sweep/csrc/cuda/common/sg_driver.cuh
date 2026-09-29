@@ -270,10 +270,13 @@ public:
         const int it0 = run_it_begin;
         const int it1 = (run_it_end < 0) ? static_cast<int>(p.nt) : run_it_end;
         check_run_args(it0, it1, run_step_phase, p.nt);
+        // Reuse across segments: the boundary runtime keys its saves and its
+        // chunk flushes on the GLOBAL step, so host-staged storage composes
+        // like gpu-direct (measured bit-identical); only checkpointing, whose
+        // schedule is per call, keeps the per-call path.
         if (run_calls++ > 0)
-            SWEEP_CHECK(!p.use_checkpoint && !staged_boundary,
-                        "persistent stepped runner reuse requires gpu-direct "
-                        "boundary storage and no checkpointing");
+            SWEEP_CHECK(!p.use_checkpoint,
+                        "persistent stepped runner reuse requires no checkpointing");
 
         const bool do_v = (run_step_phase == 0 || run_step_phase == 1);
         const bool do_s = (run_step_phase == 0 || run_step_phase == 2);
@@ -738,10 +741,12 @@ public:
         const bool do_p1 = !inject_only && (run_step_phase != 2);
         const bool do_p2 = !inject_only && (run_step_phase != 1);
 
-        if (run_calls++ > 0)
-            SWEEP_CHECK(!staged_boundary,
-                        "persistent stepped runner reuse requires gpu-direct "
-                        "boundary storage");
+        // Reuse across segments with host-staged storage: the initial chunk
+        // prefetch below happens on the FIRST call only; prefetch_next_..._if_needed
+        // walks the chunks by global step from there.  (Re-priming per call
+        // re-copied the whole chunk prefix every step.)
+        const bool first_call = (run_calls++ == 0);
+        (void)staged_boundary;
 
         // Equations whose hand-written backward_bs zeroed the adjoint state after
         // binding hook it here (FIRST segment only — a continuation segment must
@@ -758,7 +763,8 @@ public:
         // Without it_hi the default primes the chunk holding step nt-1 -- the
         // TAIL chunk -- on every segment, so a stepped or domain-decomposed
         // reverse loop fetched the wrong slabs on all but its first call.
-        boundary_runtime->prefetch_initial_backward_chunk((int)p.nt, it_hi);
+        if (first_call)
+            boundary_runtime->prefetch_initial_backward_chunk((int)p.nt, it_hi);
 
         // Residual / source injections for reverse index jt, one unit (the rho
         // correction must read the adjoint velocity BEFORE jt's residuals land):

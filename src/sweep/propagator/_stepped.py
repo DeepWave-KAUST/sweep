@@ -176,14 +176,15 @@ class SteppedBindingRunner:
         # constructed at k == 0 with the ORIGINAL list order; the buffer-role
         # rotation then lives in the C++ wavefield object, so the per-call
         # re-binding below is skipped entirely (self.k keeps counting for the
-        # u_now/u_next role resolution the DD driver reads).  Only gpu-direct,
-        # checkpoint-free runs qualify -- the same contract the C++ side
-        # enforces on reuse.  A None factory (or staged storage) keeps the
-        # legacy per-call path.
+        # u_now/u_next role resolution the DD driver reads).  Checkpoint-free
+        # runs with gpu-direct or host-staged boundaries qualify; the core's
+        # runner carries the staging session like the per-call path does
+        # (measured bit-identical), and the per-call path cost two host syncs
+        # per step.  Disk staging keeps the per-call path.  A None factory
+        # keeps it too.
         self._cr = None
         if (c_factory is not None
                 and not params.use_checkpoint
-                and not params.boundary_on_cpu
                 and not params.boundary_on_disk):
             params.it_begin, params.it_end, params.step_phase = 0, -1, 0
             params.wavefields = list(self.L)
@@ -362,12 +363,12 @@ class SteppedBackwardRunner:
         self.k_adj = 0
         self.k_f = 0
         # Persistent C++ runner -- same contract as the forward one: original
-        # list order at construction, rotation state lives in C++, gpu-direct
-        # only.  The vrz coupling schedule keeps the per-call path (its extra
-        # phases have their own semantics; the caller passes c_factory=None).
+        # list order at construction, rotation state lives in C++; gpu-direct
+        # or host-staged boundaries (disk keeps the per-call path).  The vrz
+        # coupling schedule keeps the per-call path (its extra phases have
+        # their own semantics; the caller passes c_factory=None).
         self._cr = None
         if (c_factory is not None
-                and not params.boundary_on_cpu
                 and not params.boundary_on_disk):
             params.bw_it_begin, params.bw_it_end, params.step_phase = -1, 0, 0
             params.adjoint_wavefields = list(self.L_adj)

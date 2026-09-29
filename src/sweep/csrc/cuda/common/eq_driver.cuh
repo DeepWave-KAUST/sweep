@@ -344,10 +344,13 @@ public:
         const int it1 = (run_it_end < 0) ? static_cast<int>(p.nt) : run_it_end;
         check_run_args(it0, it1, run_step_phase);
         const int phase = run_step_phase;
+        // Reuse across segments: the boundary runtime keys its saves and its
+        // chunk flushes on the GLOBAL step, so host-staged storage composes
+        // like gpu-direct (measured bit-identical); only checkpointing, whose
+        // schedule is per call, keeps the per-call path.
         if (run_calls++ > 0)
-            SWEEP_CHECK(!p.use_checkpoint && !staged_boundary,
-                        "persistent stepped runner reuse requires gpu-direct "
-                        "boundary storage and no checkpointing");
+            SWEEP_CHECK(!p.use_checkpoint,
+                        "persistent stepped runner reuse requires no checkpointing");
 
         float* u_thist = nullptr;
 
@@ -795,18 +798,21 @@ public:
         const int it_lo = bw_it_end;
         const bool first_segment = (it_hi == static_cast<int>(p.nt));
 
-        if (run_calls++ > 0)
-            SWEEP_CHECK(!staged_boundary,
-                        "persistent stepped runner reuse requires gpu-direct "
-                        "boundary storage");
+        // Reuse across segments with host-staged storage: the initial chunk
+        // prefetch below happens on the FIRST call only; prefetch_next_..._if_needed
+        // walks the chunks by global step from there.  (Re-priming per call
+        // re-copied the whole chunk prefix every step.)
+        const bool first_call = (run_calls++ == 0);
+        (void)staged_boundary;
 
         // FIRST segment only: re-running the seeding (last-state copy + any
         // rim-zeroing) mid-stream would clobber the carried reconstruction state.
         if (first_segment)
             Eq::seed_reconstruction(*state, ctx, forward, p);
 
-        boundary_runtime->prefetch_initial_backward_chunk((int)p.nt - bs_it0,
-                                                          it_hi - bs_it0);
+        if (first_call)
+            boundary_runtime->prefetch_initial_backward_chunk((int)p.nt - bs_it0,
+                                                              it_hi - bs_it0);
 
         for (int it = it_hi - 1; it >= std::max(std::max(it_lo, 1), bs_stop); --it) {
             auto adj_view = adjoint.view();

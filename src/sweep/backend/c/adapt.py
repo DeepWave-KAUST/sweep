@@ -81,6 +81,34 @@ def _fill_buf(b, t) -> None:
         strides_[i] = strides[i]
 
 
+_HOST_CACHE_ATTR = "_capi_host_copies"
+
+
+def _host_int32_cached(obj, name: str, t):
+    """``_host_int32(t)`` reused across calls on the same params object while
+    the tensor is the same object with the same version counter.  The DD time
+    loop hands the same indices to every step; each fresh copy is a device
+    sync, and two syncs per step drained the GPU queue on the per-call path
+    (measured: +170 us/step).  In-place writes bump ``_version``, a new tensor
+    fails the identity check, and holding the reference keeps its storage from
+    being recycled under the same id.  Objects that refuse the attribute get no
+    cache."""
+    ver = getattr(t, "_version", None)
+    cache = getattr(obj, _HOST_CACHE_ATTR, None)
+    if cache is None:
+        try:
+            cache = {}
+            setattr(obj, _HOST_CACHE_ATTR, cache)
+        except (AttributeError, TypeError):
+            return _host_int32(t)
+    hit = cache.get(name)
+    if hit is not None and hit[0] is t and hit[1] == ver:
+        return hit[2]
+    h = _host_int32(t)
+    cache[name] = (t, ver, h)
+    return h
+
+
 def _host_int32(t):
     """The int32 host copy of ``t`` the drivers read (what InputArena made;
     a CPU int32 contiguous tensor is its own copy)."""
@@ -137,7 +165,7 @@ def adapt(struct_name: str, obj):
                 # A tensor the drivers read on the host: an int32 host copy
                 # (what InputArena made); a plain list is made one directly.
                 if _is_tensor(val):
-                    val = _host_int32(val)
+                    val = _host_int32_cached(obj, name, val)
                 else:
                     val = _host_int32_of_list(f"{struct_name}.{name}", val)
             if val is not None:
@@ -169,7 +197,7 @@ def adapt(struct_name: str, obj):
                 # A tensor the drivers read on the host: one int32 host copy
                 # (what InputArena::host_ints_of made); empty -> n=0.
                 if math.prod(val.shape) > 0:
-                    h = _host_int32(val)
+                    h = _host_int32_cached(obj, name, val)
                     keep.append(h)
                     setattr(core, name, _abi.IntSpan(
                         p=ctypes.cast(c_void_p(h.data_ptr()), POINTER(c_int32)),

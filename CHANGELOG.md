@@ -185,6 +185,15 @@ and this project adheres to
   name any more.
 
 ### Changed
+- **Host-staged boundaries under DD no longer pay a per-step Python call.**
+  The persistent stepped runners (forward and backward) now accept
+  `storage='cpu'`; the core keyed its saves and flushes on the global step
+  already, and the backward primes its first chunk once per propagation instead
+  of once per step (which re-copied the whole chunk prefix every step).  The
+  per-call path caches the host copies of the index tensors per parameter
+  object, so it no longer synchronizes the device twice per step.  Measured on
+  A100 vs dev: cpu-staged DD forward from 1.4-4x slower to parity, cpu-staged
+  DD forward+backward 0.74x (faster), all records and gradients bit-identical.
 - **The ctypes layer is the package `sweep/backend/c/`** (`loader.py`,
   `adapt.py`, `entries.py`, `runners.py`, the generated `abi.py`, and `jit.py`,
   which decides where the core comes from), replacing `sweep/_capi.py`,
