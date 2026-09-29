@@ -826,9 +826,8 @@ class TestLoadWithAShippedCore:
         build_dir = tmp_path / "ext"
         stage = tmp_path / "stage"
         stage.mkdir()
-        for name in ("module.cpp", "cpu_binding_stub.cpp"):
-            (stage / name).write_text("")
-        shim = [str(stage / "module.cpp"), str(stage / "cpu_binding_stub.cpp")]
+        (stage / "module.cpp").write_text("")
+        shim = [str(stage / "module.cpp")]
         # a .cu in the staged list must be dropped, not compiled, as before
         monkeypatch.setattr(jit, "_stage", lambda _b: (shim + [str(stage / "k.cu")], [str(stage)]))
         monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)

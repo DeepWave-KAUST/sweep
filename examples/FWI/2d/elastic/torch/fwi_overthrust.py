@@ -502,7 +502,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Elastic Overthrust FWI example. Choose backend with --backend, implementation with --impl, "
-            "and device with --device. Use --backend torch --impl c --device cpu for the C++ CPU binding."
+            "and device with --device. CPU runs use --impl eager --device cpu."
         )
     )
     parser.add_argument(
@@ -515,7 +515,7 @@ def parse_args():
     parser.add_argument(
         "--mpi",
         action="store_true",
-        help="Enable MPI shot parallelism for --backend torch --impl c --device cpu. Launch with mpirun or mpiexec.",
+        help="Enable MPI shot parallelism for CPU eager runs (--impl eager --device cpu). Launch with mpirun or mpiexec.",
     )
     parser.add_argument(
         "--mpi-forward-batchsize",

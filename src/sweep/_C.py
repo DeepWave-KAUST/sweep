@@ -6,8 +6,9 @@ use of ``impl='c'``) loads the prebuilt core through ctypes
 ``is_torch_binding_available()`` / plain imports never do any work and
 eager/JAX-only users never touch the core at all.  ``SWEEP_JIT_FULL=1``
 selects the compiled developer path instead: the pybind shim, compiled against
-your torch on first use and cached (see ``sweep/backend/c/jit.py``), where the
-CPU engine lives.  ``sweep.precompile()`` does the one-time part up front.
+your torch on first use and cached (see ``sweep/backend/c/jit.py``); it
+reaches the same CUDA core.  ``sweep.precompile()`` does the one-time part up
+front.
 """
 
 from .backend.c import jit as _jit

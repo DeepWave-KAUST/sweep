@@ -29,7 +29,7 @@ for path in (SRC_ROOT, TEST_ROOT):
         sys.path.insert(0, path_str)
 
 from backend_gradient_matrix import BACKENDS, backend_supported, run_backend  # noqa: E402
-from cpu_binding_gradient_consistency import CASES, MODES, config_for_scale, scaled_cases  # noqa: E402
+from gradient_cases import CASES, MODES, config_for_scale, scaled_cases  # noqa: E402
 
 
 def safe_name(value: str) -> str:

@@ -64,7 +64,7 @@ pip install .
 # build that core now instead of on first use (nvcc only; no torch headers, no C++ compiler)
 python -m sweep.build            # add TORCH_CUDA_ARCH_LIST=8.0 --no-gpu-required on a node without a GPU
 
-# developer only: the compiled pybind shim + CPU engine as an ahead-of-time sweep._C
+# developer only: the compiled pybind shim as an ahead-of-time sweep._C
 # extension, tied to the torch it is built against (needs nvcc, a C++ compiler, torch headers)
 SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 ```

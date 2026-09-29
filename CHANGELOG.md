@@ -29,7 +29,7 @@ and this project adheres to
   strength of a source stamp (`sources.sha256`: the csrc tree plus the nvcc
   flags) written beside it.  `sweep.precompile()` now just makes sure a core
   exists and loads it: a no-op with a shipped core, the local core build
-  otherwise.  The compiled pybind shim plus the CPU engine survive as the
+  otherwise.  The compiled pybind shim survives as the
   developer path behind `SWEEP_JIT_FULL=1` (needs torch's C++ headers, the CUDA
   runtime headers -- torch's pip CUDA wheels bring them -- and a C++ compiler;
   nvcc only when no shipped core fits).  A core that fits a GPU only
@@ -203,43 +203,17 @@ and this project adheres to
   (`csrc/cuda/common/boundary/strip.cuh`).  `test/test_bs_strip_source.py`
   covers every restore variant (gpu/cpu/disk, fp32/fp16/bf16/int8).
 - **`impl` resolution by device.**  `impl='auto'` picks the compiled backend
-  on CUDA only; on a CPU it is always eager.  An explicit `impl='c'` on a CPU
-  uses the compiled CPU engine where one exists (`SWEEP_JIT_FULL=1` or an
-  AOT-built extension) and the equation has a CPU kernel, and is demoted to
-  eager with a warning saying why otherwise.  The CPU engine is a developer
-  path with known accuracy gaps (its adjoint-source scaling differs from the
-  CUDA core and from eager; checkpoint modes fail; stress receivers flip the
-  gradient sign), so nothing lands on it unasked.  Also fixed: a device given
-  as a string with an index (`dev='cuda:0'`) was read as "not CUDA", so
-  `impl='auto'` silently resolved to eager there.
+  on CUDA only; on a CPU it is eager, and an explicit `impl='c'` on a CPU falls
+  back to eager with a warning, in every build (see Removed: the compiled CPU
+  engine).  Also fixed: a device given as a string with an index
+  (`dev='cuda:0'`) was read as "not CUDA", so `impl='auto'` silently resolved
+  to eager there.
 - **A legacy `boundary_saving_config` dict that sets staging knobs its storage
   ignores reads again.**  `{'storage': 'gpu', 'pinned_memory': True, ...}` was
   accepted (the knob ignored) until the dict route gained the typed capability
   check, which then raised `pinned_memory is only valid when storage='cpu'`.
   The check now validates only the knobs the chosen storage accepts; the typed
   `BoundarySaving(...)` stays strict.
-- **The compiled CPU engine (`SWEEP_JIT_FULL=1`) had the same strip-source
-  defect, and returned nothing to the caller.**  Its boundary-saving backward
-  (Acoustic, Acoustic3D, AcousticLSRTM 2-D/3-D) restored the strip and then
-  imaged and re-injected the source the same way; after the restore, sources
-  inside the strip are now subtracted once, with the strip geometry shared by
-  the save/restore bands and the un-injection (`csrc/cpu/common/bs_strip.h`).
-  Measured vs `Full()` on the CPU engine: in-strip sources 1.6e-3..2.8e-1 of
-  max|g| before, <=1.9e-6 after; out-of-strip BS gradients bit-identical.
-  Found on the way: since the entries stopped returning their outputs, every
-  CPU-engine record, gradient and illumination came back as the zeros Python
-  had bound; `sweep_cpu::forward/backward` now write into the bound
-  `record_out` / `u_allt_out` / `last_two` / `grads_out` / `illum_out` /
-  `adcig_out` (sizes must match exactly, else a clear error).  And the CPU
-  Acoustic (2-D) Full/checkpoint store imaged `vp^2 * Laplacian` while the CPML
-  terms still act on the first M physical rows/columns; it now images the u_tt
-  of the update (`vp^2 * wsum`), like AcousticLSRTM (the CUDA core keeps
-  `vp^2 * Lap(u)`: its physical box runs a fast path with no CPML terms, so
-  there that is the update) -- the
-  Full gradient moves on those rows/columns only (BS vs Full there: up to
-  6.4e-4 before, <=6e-7 after).  The CPU group of
-  `test/test_bs_strip_source.py` runs under `SWEEP_JIT_FULL=1` and skips,
-  saying why, elsewhere.
 - **Host-staged boundaries under DD no longer pay a per-step Python call.**
   The persistent stepped runners (forward and backward) now accept
   `storage='cpu'`; the core keyed its saves and flushes on the global step
@@ -331,6 +305,21 @@ and this project adheres to
   (`use_ckpt=` is NOT deprecated — it is still a plain supported keyword.)
 
 ### Removed
+- **The compiled CPU engine** (`csrc/cpu/**`, about 20k lines), which the
+  `SWEEP_JIT_FULL=1` pybind shim and an AOT-built `sweep._C` compiled in, with
+  `SWEEP_SKIP_CPU` and its stub.  The wheel never shipped it, and its gradients
+  disagreed with eager and with the CUDA core (adjoint-source scaling,
+  checkpoint modes that crashed, stress receivers with the wrong sign, VRZ, no
+  free-surface backward): the CUDA backward moved to exact discrete adjoints
+  and the CPU copy never followed.  **Migration:** run CPU propagators with
+  `impl='eager'`, which is what `impl='auto'` already picked there.  An
+  explicit `impl='c'` on a CPU falls back to eager with a warning, and a host
+  tensor handed to a compiled entry is refused with the same message by the
+  ctypes layer and by the pybind shim.  The examples' legacy `--backend cpu`
+  now means eager on the CPU, and `--impl c --device cpu` is refused.
+  `test/cpu_binding_gradient_consistency.py` became `test/gradient_cases.py`,
+  the case library of `test/backend_gradient_matrix.py`, which lost its
+  `c-cpu` column.
 - **`solver.rtm()` and its three compiled bindings** (`acoustic2d_rtm`,
   `acoustic3d_rtm`, `visco_acoustic2d_rtm`), together with `_C_rtm` on the
   equations and the 2-D host wrapper, the four 3-D `rtm_*_impl` wrappers and

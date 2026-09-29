@@ -15,9 +15,9 @@ tree plus the nvcc flags it was built with) says when that cache is current,
 and a current one is reused without a toolkit in sight.
 
 The compiled pybind shim (``sweep_C``, a C++ compile against the *user's*
-torch, linked to the core) survives as the developer path behind
-``SWEEP_JIT_FULL=1``: the CPU engine lives there.  :func:`load` builds it
-through ``torch.utils.cpp_extension``, as it always did.
+torch, linked to the same core) survives as the developer path behind
+``SWEEP_JIT_FULL=1``.  :func:`load` builds it through
+``torch.utils.cpp_extension``, as it always did.
 
 The C++ sources ship inside the wheel under ``sweep/csrc/`` (package data).
 """
@@ -42,8 +42,8 @@ _core_so = None         # cached Path of the core this process runs on
 
 
 def jit_full() -> bool:
-    """``SWEEP_JIT_FULL=1``: the compiled pybind shim (the developer path, where
-    the CPU engine lives) instead of the ctypes shim."""
+    """``SWEEP_JIT_FULL=1``: the compiled pybind shim (the developer path)
+    instead of the ctypes shim.  Both reach the same CUDA core."""
     return os.environ.get("SWEEP_JIT_FULL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -593,17 +593,12 @@ def _cufft_link_flag(cuda_home: str) -> str:
 
 def _sources() -> list[str]:
     """C++/CUDA sources, mirroring build_config.get_sources(): the core's .cu
-    files plus the compiled shim's C++ (the heavy CPU tree under
-    SWEEP_JIT_FULL=1, where that shim lives; a stub otherwise)."""
+    files plus the compiled shim's C++ (``bindings/module.cpp``, built only
+    under SWEEP_JIT_FULL=1)."""
     cu = (glob.glob(str(_CSRC / "cuda/common/**/*.cu"), recursive=True)
           + glob.glob(str(_CSRC / "cuda/equations/**/*.cu"), recursive=True))
     binding = [str(_CSRC / "bindings/module.cpp")]
-    if jit_full():
-        cpu = [s for s in glob.glob(str(_CSRC / "cpu/**/*.cpp"), recursive=True)
-               if not s.endswith("cpu_binding_stub.cpp")]
-    else:
-        cpu = [str(_CSRC / "cpu/cpu_binding_stub.cpp")]
-    return cpu + cu + binding
+    return cu + binding
 
 
 def _staged_name(rel: Path) -> Path:
@@ -1194,10 +1189,10 @@ def load(compile_only: bool = False):
     _preload_cufft(cuda_home)
     _module = cpp_extension.load(
         name="sweep_C",
-        sources=_shim_sources(sources),                 # module.cpp + the CPU binding: C++ only, no nvcc
+        sources=_shim_sources(sources),                 # module.cpp: C++ only, no nvcc
         extra_include_paths=inc,
-        extra_cflags=["-O3", "-Wno-attributes", "-fopenmp"],
-        extra_ldflags=["-fopenmp", f"-L{core_dir}", "-lsweep_core", f"-Wl,-rpath,{core_dir}"]
+        extra_cflags=["-O3", "-Wno-attributes"],
+        extra_ldflags=[f"-L{core_dir}", "-lsweep_core", f"-Wl,-rpath,{core_dir}"]
                       + [f"-L{d}" for d in _nvidia_pip_libs()],
         build_directory=str(build_dir),
         verbose=building,

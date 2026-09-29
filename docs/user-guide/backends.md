@@ -35,9 +35,9 @@ install. See [Installation](../getting-started/installation.md).
 
 `cuda` is not a separate top-level backend alongside `torch` and `jax`. It is a
 device choice. `impl="c"` runs CUDA kernels only: the models must be CUDA
-tensors (a host tensor is refused with a clear error). The C++ CPU engine exists
-only on the `SWEEP_JIT_FULL=1` developer path (see Installation). On a machine
-with no GPU, `impl=None` resolves to `"eager"`.
+tensors (a host tensor is refused with a clear error). There is no compiled CPU
+path: on a CPU device, or on a machine with no GPU, `impl=None` resolves to
+`"eager"` and an explicit `impl="c"` falls back to eager with a warning.
 
 Typical Torch-family usage:
 

@@ -28,8 +28,8 @@ The two axes are orthogonal:
 
 `"cuda"` is **not** a backend or `impl` value — it is a device choice driven by
 the tensors you pass in. The compiled path runs on CUDA tensors only; a host
-model tensor is refused with a clear error. (The C++ CPU engine is a
-`SWEEP_JIT_FULL=1` developer-path feature.)
+model tensor is refused with a clear error, and a CPU propagator resolves to
+`impl="eager"`.
 
 A minimal invocation for each path:
 
@@ -285,7 +285,7 @@ machine, not on the problem. All are read once per run; none changes results.
 | `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
 | `SWEEP_BOUNDARY_DTYPE` | Default `storage_dtype` for the boundary ring; an explicit `BoundarySaving(storage_dtype=...)` wins. |
 | `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
-| `SWEEP_JIT_FULL=1` | Developer path: compile the pybind shim + CPU engine against your torch instead of using the ctypes layer over the prebuilt core. |
+| `SWEEP_JIT_FULL=1` | Developer path: compile the pybind shim against your torch instead of using the ctypes layer over the prebuilt core. |
 | `SWEEP_CORE=<path>/libsweep_core.so` | Use a custom CUDA core; its `core.json` sidecar gets the same fit check as the shipped one. |
 | `SWEEP_JIT_ALLOW_OLD_CUDA=1` | Try an nvcc 12.0–12.3 for a local core build. |
 | `TORCH_CUDA_ARCH_LIST` | Target arch(s) for a local core build with no visible device. |

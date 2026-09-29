@@ -27,7 +27,7 @@ next run:
 
 ```bash
 python -m sweep.build                    # or just use impl='c': the core builds itself on first use
-SWEEP_JIT_FULL=1 python -m sweep.build   # developer path: also the pybind shim + the CPU C++ engine (torch headers, C++ compiler)
+SWEEP_JIT_FULL=1 python -m sweep.build   # developer path: also the pybind shim (torch headers, C++ compiler)
 ```
 
 Do not keep a wheel-style core under `src/sweep/lib/<cuN>/` (what

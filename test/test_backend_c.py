@@ -832,15 +832,22 @@ class TestInputValidation:
         with pytest.raises(RuntimeError, match="list of tensors"):
             entries._launch_stream(fi, "x")
 
-    @_ctypes_only
     @requires_binding()
     def test_cpu_models_through_an_entry_are_a_message(self):
+        """Host models are refused before the core sees them, on both layers
+        (ctypes here, the pybind shim under SWEEP_JIT_FULL=1) and for every
+        entry: there is no CPU engine to route them to."""
         _core_or_skip()
         import sweep._C as _C
         fi = _C.ForwardInput()
         fi.models = [torch.zeros(1, 1, 8, 8)]
+        for fn in (_C.acoustic2d_forward, _C.elastic_tti_2nd2d_forward):
+            with pytest.raises(RuntimeError, match="expected a CUDA tensor"):
+                fn(fi)
+        bi = _C.BackwardInput()
+        bi.models = [torch.zeros(1, 1, 8, 8)]
         with pytest.raises(RuntimeError, match="expected a CUDA tensor"):
-            _C.acoustic2d_forward(fi)
+            _C.acoustic2d_backward(bi)
 
 
 # --------------------------------------------------------------------------- #

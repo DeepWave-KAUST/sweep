@@ -83,7 +83,7 @@ cd sweep
 === "PyTorch + Extension Binding"
 
     Use this from a clone to build the **ahead-of-time** `sweep._C` extension: the
-    compiled pybind shim plus the CPU engine, compiled against **your** torch (the
+    compiled pybind shim, compiled against **your** torch (the
     same CUDA kernels the PyPI wheel ships as a prebuilt core, plus the torch-bound
     C++). It is tied to the torch it was built against. If you only want to avoid
     the first-use core build, `pip install .` then `python -m sweep.build` (nvcc
@@ -161,12 +161,12 @@ cd sweep
 `impl='c'` normally reaches the core through the pure-Python `ctypes` layer and
 compiles nothing. `SWEEP_JIT_FULL=1` switches to the developer path instead: the
 old pybind torch shim (`module.cpp`, compiled against **your** torch through
-`torch.utils.cpp_extension`) plus the CPU engine (`csrc/cpu`), built by the JIT
+`torch.utils.cpp_extension`), built by the JIT
 loader on first use and cached under `TORCH_EXTENSIONS_DIR`. That path needs
 torch's C++ headers, a C++ compiler and the CUDA runtime headers (torch's pip
 `nvidia-cuda-runtime[-cu12]` + `nvidia-cuda-nvcc[-cu12]` wheels, or a toolkit's
 include dir); `nvcc` only when no shipped core fits and the core itself must be
-built. The result is tied to the torch it was built against. Use it to work on the binding or the CPU engine, or to
+built. The result is tied to the torch it was built against. Use it to work on the binding, or to
 A/B the two shims; `sweep.backend.torch.binding.diagnostics()["shim"]` says which
 one is loaded (`"ctypes"` or `"pybind"`).
 

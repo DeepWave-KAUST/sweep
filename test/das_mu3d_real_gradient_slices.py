@@ -354,7 +354,6 @@ def main() -> None:
     parser.add_argument("--spatial-order", type=int, default=4)
     parser.add_argument("--receiver-stride", type=int, default=3)
     parser.add_argument("--free-surface", action="store_true")
-    parser.add_argument("--include-cpu", action="store_true")
     parser.add_argument("--cpu-only", action="store_true")
     parser.add_argument("--percentiles", type=float, nargs=2, default=(2.0, 98.0))
     args = parser.parse_args()
@@ -395,15 +394,7 @@ def main() -> None:
                 ("c-gpu rckpt", "c", "ckpt_recursive", torch.device("cuda")),
             ]
         )
-    cases.append(("eager-cpu", "eager", "full", torch.device("cpu")))
-    if args.include_cpu or args.cpu_only:
-        cases.extend(
-            [
-                ("c-cpu full", "c", "full", torch.device("cpu")),
-                ("c-cpu bs", "c", "bs", torch.device("cpu")),
-                ("c-cpu ckpt", "c", "ckpt_chunk", torch.device("cpu")),
-            ]
-        )
+    cases.append(("eager-cpu", "eager", "full", torch.device("cpu")))   # impl="c" is CUDA-only
 
     results = []
     for name, impl, mode, device in cases:

@@ -359,7 +359,7 @@ SWEEP_CORE=/path/to/libsweep_core.so python ...
 
 A shipped core under `src/sweep/lib/<tag>/` wins over the local build, so after
 editing csrc either rerun `--core` or remove that directory. `SWEEP_JIT_FULL=1`
-is needed only to rebuild the pybind shim / CPU engine.
+is needed only to rebuild the pybind shim.
 
 Then verify the binding is wired up:
 

@@ -130,8 +130,8 @@ def is_torch_binding_available() -> bool:
         from sweep.backend.c import jit
         # A shipped core that fits needs no nvcc -- can_build() knows, its
         # can_compile() stops at the shipped core.  What it still needs is a
-        # device: the ctypes shim serves the CUDA core only, so without one
-        # 'auto' must resolve to eager, not to a backend with no CPU engine.
+        # device: the compiled backend serves the CUDA core only, so without
+        # one 'auto' must resolve to eager.
         return jit.can_build()[0]
     except Exception:
         return False

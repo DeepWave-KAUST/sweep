@@ -40,11 +40,6 @@ all-zero ``source_illumination`` from the gradient backward under both
 strategies (it is an RTM-mode output there), so for them only the gradients are
 compared -- but a non-zero illumination from either strategy is compared too,
 so wiring one up later cannot slip past this file.
-
-The compiled CPU engine (``SWEEP_JIT_FULL=1``) carried the same defect in its
-own boundary-saving backward; its group is at the end of this file and skips,
-saying why, wherever that engine is not what ``PropTorch(dev='cpu',
-impl='c')`` runs.
 """
 from __future__ import annotations
 
@@ -115,10 +110,10 @@ def _in_strip(pos, shape, M, offset):
     return False
 
 
-def _positions(eq, order, fs, shape=None):
+def _positions(eq, order, fs):
     """(label, physical (z, x) / (z, y, x)) source positions for one config."""
     M = order // 2
-    shape = _shape(eq) if shape is None else shape
+    shape = _shape(eq)
     nz, nx = shape[0], shape[-1]
     zm, xm = nz // 2, nx // 2
 
@@ -200,11 +195,11 @@ def _models(eq, shape):
     return [vp + 150.0 * box], [vp], [True]
 
 
-def _geometry(eq, order, phys_positions, shape=None):
+def _geometry(eq, order, phys_positions):
     """sweep order: sources (nshot, ndim) as (x, z) / (x, y, z); receivers
     (nshot, nrec, ndim) on a shallow line just below the widest strip."""
     M = order // 2
-    shape = _shape(eq) if shape is None else shape
+    shape = _shape(eq)
     nx = shape[-1]
     zr = M + 3
     src = np.array([tuple(reversed(p)) for p in phys_positions], np.int64)
@@ -219,29 +214,26 @@ def _geometry(eq, order, phys_positions, shape=None):
     return src, rec
 
 
-def _run(eq, order, fs, memory, phys_positions, obs=None, dev=DEV, shape=None, nt=None):
+def _run(eq, order, fs, memory, phys_positions, obs=None):
     """One forward + backward. Returns (obs, [grad per differentiated model],
-    source_illumination); ``obs`` is computed with this propagator when None.
-    ``dev``/``shape``/``nt`` default to the CUDA suite's; the CPU-engine group
-    passes its own."""
-    shape = _shape(eq) if shape is None else shape
-    if nt is None:
-        nt = NT2D if eq.ndim == 2 else NT3D
-    prop = PropTorch(eq.cls(spatial_order=order, device=dev), backend="torch",
+    source_illumination); ``obs`` is computed with this propagator when None."""
+    shape = _shape(eq)
+    nt = NT2D if eq.ndim == 2 else NT3D
+    prop = PropTorch(eq.cls(spatial_order=order, device=DEV), backend="torch",
                      impl="c", shape=shape, dh=DH, dt=DT, nt=nt, abcn=ABCN,
-                     dev=dev, free_surface=fs, memory=memory,
+                     dev=DEV, free_surface=fs, memory=memory,
                      source_type=list(eq.source_type),
                      receiver_type=list(eq.receiver_type))
     assert prop.impl == "c", prop.impl
     prop.compute_illumination = True
-    src, rec = _geometry(eq, order, phys_positions, shape)
-    wav = torch.tensor(ricker(nt, DT, FM, DELAY, scale=1e3), device=dev)
+    src, rec = _geometry(eq, order, phys_positions)
+    wav = torch.tensor(ricker(nt, DT, FM, DELAY, scale=1e3), device=DEV)
     true, init, flags = _models(eq, shape)
     if obs is None:
         with torch.no_grad():
             obs = prop(wav, src, rec,
-                       models=[torch.tensor(a, device=dev) for a in true]).detach()
-    ms = [torch.tensor(a, device=dev, requires_grad=g) for a, g in zip(init, flags)]
+                       models=[torch.tensor(a, device=DEV) for a in true]).detach()
+    ms = [torch.tensor(a, device=DEV, requires_grad=g) for a, g in zip(init, flags)]
     syn = prop(wav, src, rec, models=ms)
     ((syn - obs) ** 2).sum().backward()
     grads = [m.grad.detach().double().cpu() for m, g in zip(ms, flags) if g]
@@ -370,173 +362,3 @@ def test_every_restore_variant_agrees_on_the_strip(cid, eqkey, fs, positions, la
         f"from Full by {local:.3e} of its own value (> {LOCAL_TOL:.0e}, 4x the "
         f"{label.split('-')[1]} quantisation floor there). The source is being "
         f"injected twice through this restore variant.")
-
-
-# --------------------------------------------------------------------------- #
-# The compiled CPU engine (csrc/cpu/**)
-# --------------------------------------------------------------------------- #
-# The CPU engine's boundary-saving backward (backward_*_bs_impl in
-# csrc/cpu/equations/{acoustic2d,acoustic3d,acoustic_lsrtm2d,acoustic_lsrtm3d})
-# runs the same reverse step -- NOPML, restore_*_boundary(_disk), the strip's
-# difference u_tt imaged, add_source -- so it carried the same defect. That
-# engine exists only in the pybind shim (SWEEP_JIT_FULL=1, or an AOT-built
-# sweep._C): on the default ctypes path PropTorch(dev='cpu', impl='c')
-# resolves to eager and this group skips.
-#
-# What differs from the CUDA group above, and why:
-#
-# * Small grids, order 4 only (CPU_SHAPE / CPU_NT).
-# * Free surface: none of the four has a free-surface backward on the CPU
-#   engine (can_use_*_raw_backward refuses free_surface, and the forward falls
-#   to the generic engine, which keeps no history / last_two). The fs=True
-#   cases skip on the error the engine raises, quoting it, and start running
-#   by themselves once the engine grows one.
-# * Illumination is not compared. The CPU engine's BS backward accumulates
-#   sum(u^2) of the reconstructed forward field, its Full backward
-#   sum((vp^2 Lap u)^2): two different quantities, rel ~1.0 on every case,
-#   out-of-strip controls included, with or without this fix. That split is
-#   pre-existing and unrelated to the strip, so only gradients are compared.
-# * The Full gradient must be non-zero. When the entries stopped returning
-#   their outputs (51871c0f) every CPU record and gradient came back as the
-#   zeros the caller had bound, and zero-vs-zero passes any relative bar.
-#
-# Measured (fs=False; outputs bound through cpu_binding.cpp):
-#
-# * unfixed engine: in-strip sources 1.6e-3..2.8e-1 (acoustic2d
-#   1.9e-3..8.2e-3, acoustic3d 3.3e-3..2.8e-1, lsrtm2d 2.1e-3..8.0e-3,
-#   lsrtm3d 1.6e-3..5.4e-2; disk storage the same as in-memory); controls
-#   3.4e-8..4.7e-7 -- except Acoustic, whose controls sat at 1.1e-5..6.4e-4
-#   for a reason of its own: its Full store imaged vp^2 * bare Laplacian,
-#   while the CPML terms still act on the first M physical rows/cols, so
-#   there it was not the u_tt of the update that the BS strip images
-#   (acoustic_lsrtm2d images the full operator; the CUDA core's physical box
-#   has no CPML terms, so its vp^2 * Lap(u) store is the update). Fixed with
-#   it; the Full gradient moved on those 2*M rows/cols only, bit-identical
-#   inside.
-# * fixed engine: every case here 3.4e-8..1.9e-6 (the top is acoustic3d with
-#   the source at y=1); controls' BS gradients bit-identical to the unfixed
-#   ones. A sweep of the source over every cell within M+1 of an edge (2-D,
-#   512 positions per equation, 396 of them in a strip) finds a floor of its
-#   own at the source cell: up to 1.06e-5 (acoustic2d) / 1.30e-5 (lsrtm2d) in
-#   a strip and 5.6e-6 / 8.2e-6 outside one, where the fix changes nothing --
-#   fp32 cancellation in the difference u_tt of the large field there. The
-#   3-D sweep (acoustic3d, 728 positions: every combination of
-#   {0..3, mid, n-4..n-1} per axis) tops out at 5.2e-6.
-#
-# CPU_TOL sits ~4x above that floor and 32x below the smallest red here.
-CPU_SHAPE = {2: (32, 40), 3: (16, 14, 18)}    # (nz, nx) / (nz, ny, nx)
-CPU_NT = {2: 150, 3: 100}
-CPU_EQS = ("acoustic2d", "acoustic3d", "lsrtm2d", "lsrtm3d")
-CPU_ORDER = 4
-CPU_TOL = 5e-5
-
-
-def _cpu_engine_status():
-    """(ok, reason): is PropTorch(dev='cpu', impl='c') the compiled CPU engine
-    in this process? Answers without compiling anything."""
-    import warnings
-
-    import sweep
-    from sweep.backend.c import jit
-    from sweep.backend.torch import binding
-    from sweep.equations import Acoustic as _Acoustic
-
-    if not (jit.jit_full() or sweep._prebuilt_binding_present()):
-        return False, ("the compiled CPU engine (csrc/cpu/**) is built only under "
-                       "SWEEP_JIT_FULL=1 or into an AOT sweep._C; the default ctypes "
-                       "path serves the CUDA core alone")
-    diag = binding.diagnostics()
-    if not diag["usable"]:
-        return False, f"compiled sweep._C unavailable: {diag['reason']}"
-    if not diag["prebuilt"] and diag["shim"] != "pybind":
-        return False, (f"sweep._C is the {diag['shim']} shim, not the pybind one "
-                       "that carries the CPU engine")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        prop = PropTorch(_Acoustic(spatial_order=CPU_ORDER, device="cpu"), backend="torch",
-                         impl="c", shape=CPU_SHAPE[2], dh=DH, dt=DT, nt=8, abcn=ABCN,
-                         dev="cpu")
-    if prop.impl != "c":
-        return False, (f"PropTorch(dev='cpu', impl='c') resolved to impl={prop.impl!r}"
-                       + "".join(f"; {w.message}" for w in caught))
-    return True, ""
-
-
-@pytest.fixture(scope="module")
-def cpu_engine():
-    ok, reason = _cpu_engine_status()
-    if not ok:
-        pytest.skip(reason)
-
-
-def _cpu_cases():
-    cases = []
-    for key in CPU_EQS:
-        eq = EQ[key]
-        shape = CPU_SHAPE[eq.ndim]
-        M = CPU_ORDER // 2
-        for fs in (False, True):
-            for label, pos in _positions(eq, CPU_ORDER, fs, shape):
-                inside = _in_strip(pos, shape, M, eq.strip_offset_in_M * M)
-                cid = (f"cpu-{key}-o{CPU_ORDER}-{'fs' if fs else 'nofs'}-"
-                       f"{'strip' if inside else 'ctrl'}-{label}")
-                cases.append(pytest.param(eq, fs, [pos], "cpu", id=cid))
-    nz, nx = CPU_SHAPE[2]
-    _, ny3, nx3 = CPU_SHAPE[3]
-    # Several shots, each in a different strip: per-shot indexing of the fix.
-    cases.append(pytest.param(EQ["acoustic2d"], False,
-                              [(1, nx // 2), (nz // 2, 1), (nz - 2, nx // 3)], "cpu",
-                              id="cpu-acoustic2d-o4-nofs-strip-B3-top-left-bottom"))
-    cases.append(pytest.param(EQ["acoustic2d"], False,
-                              [(4, nx // 2), (nz // 2, 4), (nz // 2, nx // 3)], "cpu",
-                              id="cpu-acoustic2d-o4-nofs-ctrl-B3-interior"))
-    # Disk storage restores through restore_*_boundary_disk instead.
-    cases.append(pytest.param(EQ["acoustic2d"], False, [(nz // 2, 1)], "disk",
-                              id="cpu-acoustic2d-o4-nofs-strip-left-x1-disk"))
-    cases.append(pytest.param(EQ["lsrtm3d"], False, [(1, ny3 // 2, nx3 // 2)], "disk",
-                              id="cpu-lsrtm3d-o4-nofs-strip-top-z1-disk"))
-    cases.append(pytest.param(EQ["lsrtm3d"], False, [(4, ny3 // 2, nx3 // 2)], "disk",
-                              id="cpu-lsrtm3d-o4-nofs-ctrl-top-z4-disk"))
-    return cases
-
-
-@pytest.mark.parametrize("eq,fs,positions,storage", _cpu_cases())
-def test_cpu_engine_boundary_saving_matches_full_with_source_in_restore_strip(
-        cpu_engine, eq, fs, positions, storage, tmp_path):
-    shape = CPU_SHAPE[eq.ndim]
-    nt = CPU_NT[eq.ndim]
-    kw = dict(storage=storage)
-    if storage == "disk":
-        kw.update(disk_dir=str(tmp_path), transfer_interval=4)
-    run = dict(dev="cpu", shape=shape, nt=nt)
-    try:
-        obs, g_full, _ = _run(eq, CPU_ORDER, fs, Full(), positions, **run)
-        _, g_bs, _ = _run(eq, CPU_ORDER, fs, BoundarySaving(**kw), positions, obs=obs, **run)
-    except RuntimeError as exc:
-        # Skip only the engine's own "no free-surface backward" refusals, by
-        # their text; anything else under a free surface is a real failure.
-        known = ("the engine produced nothing",
-                 "requires the handwritten raw float32 path")
-        if not fs or not any(k in str(exc) for k in known):
-            raise
-        pytest.skip(f"{eq.cls.__name__}: the CPU engine has no free-surface backward "
-                    f"here: {str(exc).splitlines()[0]}")
-
-    scale = [float(f.abs().max()) for f in g_full]
-    assert min(scale) > 0.0, (
-        f"{eq.cls.__name__}: the CPU engine's Full gradient is all zero "
-        f"(max per model {scale}); its outputs are not reaching the caller")
-
-    grad_rel = [_rel(b, f) for b, f in zip(g_bs, g_full)]
-    k = int(np.argmax(grad_rel))
-    d = (g_bs[k] - g_full[k]).abs()
-    where = tuple(int(i) for i in np.unravel_index(int(d.argmax()), tuple(d.shape)))
-    print(f"[bs-strip:cpu-{storage}] grad_rel={' '.join(f'{r:.2e}' for r in grad_rel)} "
-          f"argmax={where} src(phys)={positions}")
-    assert grad_rel[k] <= CPU_TOL, (
-        f"CPU engine {eq.cls.__name__} order {CPU_ORDER} fs={fs} ({storage} storage), "
-        f"source(s) at physical {positions}: the BoundarySaving gradient differs from "
-        f"Full by max|d|/max|g_full| = {grad_rel[k]:.3e} > {CPU_TOL:.0e} (per model: "
-        f"{', '.join(f'{r:.2e}' for r in grad_rel)}), worst cell {where}. A source "
-        f"inside a restore strip is injected twice by the boundary-saving "
-        f"reconstruction.")

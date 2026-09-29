@@ -1,40 +1,24 @@
-"""CPU C++ binding gradient mode consistency checks.
+"""The case library of the gradient consistency matrix.
 
-Run from the repository root after installing the package, for example:
-
-    SWEEP_JIT_FULL=1 PYTHONPATH=src python test/cpu_binding_gradient_consistency.py
-
-``SWEEP_JIT_FULL=1`` is required: this script runs ``impl='c'`` on the CPU, and
-the default JIT build compiles only the CUDA tree plus a CPU stub, so without it
-every case dies with ``CUDAGuardImpl initialized with non-CUDA DeviceType: cpu``.
-
-The script intentionally keeps the grids small.  It compares the CPU path of
-``backend="torch", impl="c"`` across full, boundary-saving,
-chunk-checkpoint, and recursive-checkpoint backward requests for every
-equation currently exported through the compiled binding.  When CUDA is
-available it also compares each C/CPU mode against the matching C/CUDA mode.
-Gradient checks report max absolute error, relative L2 error, and cosine
-similarity because small gradients can have tiny pointwise errors even when
-their direction is wrong.
-
-NOTE ON WHAT THIS FILE CAN AND CANNOT SEE.  Every comparison here is C-vs-C.
-That makes it a mode-consistency check, not a correctness check: a defect
-present in both C paths — which is what every elastic adjoint bug found so far
-turned out to be — is invisible from here.  ``backend_gradient_matrix.py``
-imports this module's ``Case``/``CASES``/``run_case`` and adds the eager leg;
-that is the file to run when the question is "is the compiled gradient right",
-as opposed to "do the memory modes agree".
+``backend_gradient_matrix.py`` (eager against the compiled CUDA backend, every
+memory mode) and ``save_backend_gradient_plots.py`` import ``Case``/``CASES``/
+``run_case``/``make_solver`` and the comparison helpers from here.  The grids
+are small on purpose.  Gradient checks report max absolute error, relative L2
+error and cosine similarity, because small gradients can have tiny pointwise
+errors even when their direction is wrong.
 
 ``Case`` carries the source and receiver loading as axes (``source_type``,
 ``receiver_type``).  They are not decoration: with the elastic defaults alone
 (explosive stress source, velocity receivers) whole families of defect are
-unreachable — see the comments on ``Case.source_type`` and on the
+unreachable -- see the comments on ``Case.source_type`` and on the
 ``*_src_*`` / ``*_rec_*`` entries in ``CASES``.
+
+This file used to be a runnable C/CPU-vs-C/CUDA mode check as well; that went
+with the compiled CPU engine.
 """
 
 from __future__ import annotations
 
-import argparse
 import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
@@ -381,7 +365,7 @@ def make_equation(case: Case, device: torch.device | None = None, config: RunCon
 
 
 def make_solver(case: Case, mode: str, device: torch.device | None = None, config: RunConfig = DEFAULT_CONFIG) -> PropTorch:
-    device = device or torch.device("cpu")
+    device = device or torch.device("cuda")      # impl="c" runs on CUDA only
     equation = make_equation(case, device, config)
     common = dict(
         shape=case.shape,
@@ -681,168 +665,3 @@ def compare_result_to_reference(
     if errors and strict:
         raise AssertionError("\n".join(errors))
     return not errors, summaries, errors, missing
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--cases",
-        nargs="*",
-        default=[case.name for case in CASES],
-        choices=[case.name for case in CASES],
-        help="Case names to run. Defaults to all compiled CPU binding cases.",
-    )
-    parser.add_argument(
-        "--modes",
-        nargs="*",
-        default=list(MODES),
-        choices=list(MODES),
-        help="Gradient modes to compare against full. Defaults to all modes.",
-    )
-    parser.add_argument(
-        "--scale",
-        choices=("tiny", "cuda-suite"),
-        default="tiny",
-        help=(
-            "Problem size profile. 'cuda-suite' matches the older CUDA gradient "
-            "suite defaults: 2D=48x56, 3D=24x20x24, nt=120, so=4, abcn=30."
-        ),
-    )
-    parser.add_argument("--rtol", type=float, default=1e-5)
-    parser.add_argument("--atol", type=float, default=1e-7)
-    parser.add_argument(
-        "--cosine-threshold",
-        type=float,
-        default=0.999,
-        help="Minimum cosine similarity for nonzero gradients.",
-    )
-    parser.add_argument(
-        "--cosine-eps",
-        type=float,
-        default=1e-30,
-        help="Gradient norm below this value is treated as zero for cosine checks.",
-    )
-    parser.add_argument(
-        "--compare-cuda",
-        choices=("auto", "always", "never"),
-        default="auto",
-        help=(
-            "Compare each C/CPU mode against matching C/CUDA mode. "
-            "'auto' runs the comparison only when CUDA is available."
-        ),
-    )
-    parser.add_argument(
-        "--cuda-rtol",
-        type=float,
-        default=5e-4,
-        help="Relative tolerance for C/CPU vs C/CUDA comparisons.",
-    )
-    parser.add_argument(
-        "--cuda-atol",
-        type=float,
-        default=1e-5,
-        help="Absolute tolerance for C/CPU vs C/CUDA comparisons.",
-    )
-    parser.add_argument(
-        "--cuda-cosine-threshold",
-        type=float,
-        default=0.999,
-        help="Minimum gradient cosine for C/CPU vs C/CUDA comparisons.",
-    )
-    parser.add_argument(
-        "--cuda-strict",
-        action="store_true",
-        help="Fail on C/CPU vs C/CUDA mismatch instead of reporting and continuing.",
-    )
-    parser.add_argument("--threads", type=int, default=max(1, min(8, torch.get_num_threads())))
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    torch.set_num_threads(max(1, args.threads))
-    torch.manual_seed(0)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(0)
-
-    cuda_available = torch.cuda.is_available()
-    compare_cuda = args.compare_cuda == "always" or (args.compare_cuda == "auto" and cuda_available)
-    if args.compare_cuda == "always" and not cuda_available:
-        raise RuntimeError("Requested --compare-cuda always, but CUDA is not available.")
-    if args.compare_cuda == "auto" and not cuda_available:
-        print("C/CUDA comparison skipped because torch.cuda.is_available() is false.")
-
-    selected_cases = [case for case in CASES if case.name in set(args.cases)]
-    config = config_for_scale(args.scale)
-    selected_cases = list(scaled_cases(config, tuple(selected_cases)))
-    selected_modes = list(dict.fromkeys(["full", *args.modes]))
-    cuda_ok_count = 0
-    cuda_mismatch_count = 0
-    cuda_mismatches: list[str] = []
-    for case in selected_cases:
-        reference = run_case(make_solver(case, "full", torch.device("cpu"), config), case, torch.device("cpu"), config)
-        print(f"{case.name:20s} full           c/cpu reference")
-        for mode in selected_modes:
-            if mode == "full":
-                candidate = reference
-            else:
-                candidate = run_case(make_solver(case, mode, torch.device("cpu"), config), case, torch.device("cpu"), config)
-                if (case.name, mode) in CUDA_MODE_REFERENCE_ONLY:
-                    print(f"{case.name:20s} {mode:14s} c/cpu full check skipped")
-                    print(f"{'':20s} {'':14s} follows matching c/cuda mode, not c/cpu full mode")
-                else:
-                    summaries = assert_result_consistent(
-                        case.name,
-                        mode,
-                        reference,
-                        candidate,
-                        reference_label="c/cpu full mode",
-                        rtol=args.rtol,
-                        atol=args.atol,
-                        cosine_threshold=args.cosine_threshold,
-                        cosine_eps=args.cosine_eps,
-                    )
-                    print(f"{case.name:20s} {mode:14s} c/cpu ok")
-                    for summary in summaries:
-                        print(f"{'':20s} {'':14s} {summary}")
-
-            if not compare_cuda:
-                continue
-
-            cuda_device = torch.device("cuda")
-            cuda_reference = run_case(make_solver(case, mode, cuda_device, config), case, cuda_device, config)
-            ok, summaries, errors, missing = compare_result_to_reference(
-                case.name,
-                f"{mode}/c-cuda",
-                cuda_reference,
-                candidate,
-                reference_label=f"c/cuda {mode} mode",
-                rtol=args.cuda_rtol,
-                atol=args.cuda_atol,
-                cosine_threshold=args.cuda_cosine_threshold,
-                cosine_eps=args.cosine_eps,
-                strict=args.cuda_strict,
-            )
-            status = "c/cuda ok" if ok else "c/cuda mismatch"
-            if ok:
-                cuda_ok_count += 1
-            else:
-                cuda_mismatch_count += 1
-                cuda_mismatches.append(f"{case.name}/{mode}")
-            print(f"{case.name:20s} {mode:14s} {status}")
-            for summary in summaries:
-                print(f"{'':20s} {'':14s} {summary}")
-            for error in errors:
-                print(f"{'':20s} {'':14s} ! {error}")
-
-    if compare_cuda:
-        print(
-            f"C/CUDA comparison summary: ok={cuda_ok_count}, "
-            f"mismatch={cuda_mismatch_count}"
-        )
-        if cuda_mismatches:
-            print("C/CUDA mismatches: " + ", ".join(cuda_mismatches))
-
-
-if __name__ == "__main__":
-    main()

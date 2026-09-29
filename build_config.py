@@ -26,14 +26,6 @@ def env_flag_enabled(name):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def openmp_flags():
-    if sys.platform == "win32":
-        return ["/openmp"]
-    if sys.platform == "darwin":
-        return []
-    return ["-fopenmp"]
-
-
 # Carries +PTX on purpose: a binary built for one architecture and nothing else
 # dies with "no kernel image is available for execution on the device" the
 # moment it meets a newer card, whereas PTX is JIT-ed by the driver and runs.
@@ -97,40 +89,15 @@ def patch_packaging_compat():
 
 
 def get_sources():
-    """Collect C++/CUDA sources for the ``sweep._C`` extension.
-
-    Honours the ``SWEEP_SKIP_CPU`` environment variable: when set to a
-    truthy value (1, true, yes, on), the heavy ``cpu/equations/*`` tree
-    (~19k lines, often the build-time bottleneck) is *excluded* and a tiny
-    stub is linked in its place.  The stub keeps `bindings/module.cpp`
-    linking and routes every call to the CUDA path; attempting to use a
-    CPU tensor raises a clear TORCH_CHECK message.
-
-    This is intended for users who only ever run on CUDA — typically HPC
-    deployments where the CPU C++ path would be dead weight.
-    """
+    """Collect C++/CUDA sources for the ``sweep._C`` extension: the CUDA core's
+    .cu files plus the pybind shim.  The extension serves CUDA tensors only; a
+    host tensor is refused with a clear message (``bindings/module.cpp``)."""
     cuda_sources = (
         glob.glob("src/sweep/csrc/cuda/common/**/*.cu", recursive=True)
         + glob.glob("src/sweep/csrc/cuda/equations/**/*.cu", recursive=True)
     )
     binding_sources = ["src/sweep/csrc/bindings/module.cpp"]
-
-    if env_flag_enabled("SWEEP_SKIP_CPU"):
-        log.warn(
-            "SWEEP_SKIP_CPU=1: skipping cpu/equations/* (~19k LoC); linking "
-            "cpu_binding_stub.cpp instead. CPU tensors will raise a clear "
-            "error at call time."
-        )
-        cpu_sources = ["src/sweep/csrc/cpu/cpu_binding_stub.cpp"]
-    else:
-        cpu_sources = glob.glob("src/sweep/csrc/cpu/**/*.cpp", recursive=True)
-        # Defensive: don't accidentally include the stub if it's globbed
-        cpu_sources = [
-            s for s in cpu_sources
-            if not s.endswith("cpu_binding_stub.cpp")
-        ]
-
-    return cpu_sources + cuda_sources + binding_sources
+    return cuda_sources + binding_sources
 
 
 def _check_ninja_on_path():
@@ -310,7 +277,7 @@ def build_ext_kwargs(build_cuda=None):
     only) happens only when no shipped core fits. So this returns NO
     ``ext_modules`` and every dep comes from ``pyproject.toml``. The
     ``SWEEP_BUILD_CUDA=1`` path is kept only for an ahead-of-time ``sweep._C``
-    extension (the pybind shim + CPU engine, bound to one torch) -- the
+    extension (the pybind shim, bound to one torch) -- the
     developer/GitHub-release variant, never the PyPI wheel.
     """
     if build_cuda is None:
@@ -342,7 +309,6 @@ def build_ext_kwargs(build_cuda=None):
         ) from exc
 
     SweepBuildExtension = make_build_extension(BuildExtension)
-    omp_flags = openmp_flags()
     configure_cuda_arch_list()
 
     # Optional extra nvcc flags (e.g. -DELASTIC3D_LB_MINBLOCKS=6 to retune a
@@ -362,7 +328,7 @@ def build_ext_kwargs(build_cuda=None):
                 os.path.join(ROOT_DIR, "src/sweep/csrc/cuda/equations"),
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-Wno-attributes", *omp_flags],
+                "cxx": ["-O3", "-Wno-attributes"],
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
@@ -378,7 +344,7 @@ def build_ext_kwargs(build_cuda=None):
             # (csrc/cuda/equations/visco_acoustic2d/fft.cu); torch links cuFFT
             # itself (libcufft.so.<major> is loaded before sweep._C) but does
             # not re-export it.
-            extra_link_args=[*omp_flags, "-lcufft", "-Wl,-rpath,$ORIGIN/../torch/lib"],
+            extra_link_args=["-lcufft", "-Wl,-rpath,$ORIGIN/../torch/lib"],
         )
     ]
     kwargs["cmdclass"] = {

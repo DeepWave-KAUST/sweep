@@ -40,7 +40,7 @@ pip install .
 # 现在就把这个 core 编好,不等首次使用(只需 nvcc;不需要 torch 头文件和 C++ 编译器)
 python -m sweep.build            # 没有 GPU 的节点上加 TORCH_CUDA_ARCH_LIST=8.0 --no-gpu-required
 
-# 仅开发者:把 pybind shim + CPU engine 预编成绑定当前 torch 版本的 sweep._C 扩展(需要 nvcc、C++ 编译器、torch 头文件)
+# 仅开发者:把 pybind shim 预编成绑定当前 torch 版本的 sweep._C 扩展(需要 nvcc、C++ 编译器、torch 头文件)
 SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
 ```
 
