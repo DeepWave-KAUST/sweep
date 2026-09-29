@@ -671,7 +671,7 @@ class TestAdapt:
         adapt, abi = _mods()
         _core_or_skip()
         sess = BoundarySession()
-        assert sess.used() is False
+        assert sess.used is False
         sess.finish()                         # nothing outstanding: no error
         h = _as_int(sess.handle)
         assert h, "a session carries a non-null core handle"
@@ -864,14 +864,38 @@ class TestBoundarySession:
         lib = _FakeSessionLib()
         s = _fake_session(lib)
         s.finish()
-        assert s.used() is True
+        assert s.used is True
         assert lib.finished == [s.handle] and lib.used_with == [s.handle]
         s.close()
         with pytest.raises(RuntimeError, match="BoundarySession is closed"):
             s.finish()
         with pytest.raises(RuntimeError, match="BoundarySession is closed"):
-            s.used()
+            s.used
         assert len(lib.finished) == 1 and len(lib.used_with) == 1, "nothing reached the core"
+
+    def test_used_is_a_read_only_property_as_on_dev(self):
+        """dev's pybind binding exposes ``used`` as a read-only property.  As a
+        method, ``if session.used:`` is always true and a caller that records
+        it gets a bound method (dd_session_bench failed to json-dump it)."""
+        import inspect
+        import json
+        from sweep.backend.c.runners import BoundarySession
+        assert isinstance(inspect.getattr_static(BoundarySession, "used"), property)
+        s = _fake_session(_FakeSessionLib())
+        assert s.used is True
+        assert json.loads(json.dumps({"used": s.used})) == {"used": True}
+        with pytest.raises(AttributeError):
+            s.used = False
+
+    def test_the_session_dd_builds_answers_used_as_a_bool(self):
+        """The object the DD propagator gets from ``sweep._C.BoundarySession``
+        -- the ctypes class, or the pybind shim's under SWEEP_JIT_FULL=1."""
+        _core_or_skip()
+        from sweep import _C
+        s = _C.BoundarySession()
+        assert s.used is False
+        s.finish()
+        assert s.used is False
 
     @pytest.mark.parametrize("key", [FWD, BWD])
     def test_adapt_refuses_a_closed_session(self, key):
@@ -905,18 +929,18 @@ class TestBoundarySession:
         s.close()
         s.__del__()
         with pytest.raises(RuntimeError, match="closed"):
-            s.used()
+            s.used
 
     def test_real_session_lifecycle(self):
         from sweep.backend.c.runners import BoundarySession
         adapt, abi = _mods()
         _core_or_skip()
         s = BoundarySession()
-        assert s.used() is False
+        assert s.used is False
         s.finish()
         s.close()
         assert s.closed and s.handle is None
-        for call in (s.finish, s.used):
+        for call in (s.finish, lambda: s.used):
             with pytest.raises(RuntimeError, match="BoundarySession is closed"):
                 call()
         fi = abi.ForwardInput()

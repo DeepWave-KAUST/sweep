@@ -247,7 +247,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def(py::init<>())
         .def("finish", &BoundarySessionHandle::finish,
              "Let every outstanding copy land and close the current phase.")
-        .def("used", &BoundarySessionHandle::used,
+        .def_property_readonly("used", &BoundarySessionHandle::used,
              "False when no call site ever bound this session.");
 
     m.def("acoustic2d_forward", wrap_forward(dispatch_forward([](const ForwardInput& in) { return call_forward(ID_acoustic2d_forward, in); }, EK::Acoustic2D)));

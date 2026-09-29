@@ -108,7 +108,7 @@ class BoundarySession:
 
     ``handle`` is the ``c_void_p`` the core handed out; ``close()`` destroys it
     exactly once (idempotent, and what ``__del__`` does), after which
-    ``handle`` is None and ``finish()`` / ``used()`` -- and ``adapt()`` of an
+    ``handle`` is None and ``finish()`` / ``used`` -- and ``adapt()`` of an
     input that still names this session -- raise instead of passing NULL to
     the core."""
 
@@ -136,8 +136,11 @@ class BoundarySession:
         if rc != 0:
             _raise_core(err, "BoundarySession.finish", rc)
 
+    @property
     def used(self) -> bool:
-        """False when no call site ever bound this session."""
+        """False when no call site ever bound this session.  A read-only
+        property, as on dev's pybind binding: a method would make
+        ``if session.used:`` always true."""
         h = self._live()
         return bool(self._lib.sweep_session_used(h))
 
