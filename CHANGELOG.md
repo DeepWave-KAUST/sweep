@@ -202,6 +202,22 @@ and this project adheres to
   restore kernels and the new un-injection share one strip predicate
   (`csrc/cuda/common/boundary/strip.cuh`).  `test/test_bs_strip_source.py`
   covers every restore variant (gpu/cpu/disk, fp32/fp16/bf16/int8).
+- **`impl` resolution by device.**  `impl='auto'` picks the compiled backend
+  on CUDA only; on a CPU it is always eager.  An explicit `impl='c'` on a CPU
+  uses the compiled CPU engine where one exists (`SWEEP_JIT_FULL=1` or an
+  AOT-built extension) and the equation has a CPU kernel, and is demoted to
+  eager with a warning saying why otherwise.  The CPU engine is a developer
+  path with known accuracy gaps (its adjoint-source scaling differs from the
+  CUDA core and from eager; checkpoint modes fail; stress receivers flip the
+  gradient sign), so nothing lands on it unasked.  Also fixed: a device given
+  as a string with an index (`dev='cuda:0'`) was read as "not CUDA", so
+  `impl='auto'` silently resolved to eager there.
+- **A legacy `boundary_saving_config` dict that sets staging knobs its storage
+  ignores reads again.**  `{'storage': 'gpu', 'pinned_memory': True, ...}` was
+  accepted (the knob ignored) until the dict route gained the typed capability
+  check, which then raised `pinned_memory is only valid when storage='cpu'`.
+  The check now validates only the knobs the chosen storage accepts; the typed
+  `BoundarySaving(...)` stays strict.
 - **Host-staged boundaries under DD no longer pay a per-step Python call.**
   The persistent stepped runners (forward and backward) now accept
   `storage='cpu'`; the core keyed its saves and flushes on the global step

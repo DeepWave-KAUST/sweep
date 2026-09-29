@@ -228,7 +228,9 @@ def main():
     ap.add_argument("--solvers", default="acoustic2d,elastic2d")
     ap.add_argument("--modes", default="full,bs_gpu,ckpt_chunk")
     ap.add_argument("--backend", default="c", choices=("c", "eager"))
-    ap.add_argument("--iters", type=int, default=8)
+    # verdict() needs >= 16 measured iterations to tell a trend from an
+    # alternating steady state, so the default must satisfy it.
+    ap.add_argument("--iters", type=int, default=16)
     ap.add_argument("--warmup", type=int, default=3,
                     help="iterations discarded before measuring; the lazily "
                          "allocated buffers must already exist or their first "

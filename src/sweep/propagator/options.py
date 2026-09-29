@@ -164,6 +164,28 @@ class BoundaryOptions:
             )
 
 
+# The staging knobs only some storages accept; BoundaryOptions.__post_init__
+# refuses them anywhere else.  The legacy boundary_saving_config dict route
+# never validated them, so a config that set them once for every storage
+# (``pinned_memory: True`` with ``storage: 'gpu'``) was read, the knob simply
+# ignored.  Validating such a dict must keep reading it.
+_STORAGE_ONLY_KNOBS = {
+    "transfer_interval": ("cpu", "disk"),
+    "ring_buffers": ("cpu", "disk"),
+    "pinned_memory": ("cpu",),
+    "disk_async_read": ("disk",),
+}
+
+
+def _applicable_boundary_knobs(knobs: dict) -> dict:
+    """``knobs`` without the staging knobs its storage ignores (the legacy dict
+    semantics).  The typed ``BoundarySaving(...)`` stays strict; this is for
+    reading a legacy dict only."""
+    storage = knobs.get("storage", BOUNDARY_DEFAULTS.storage)
+    return {k: v for k, v in knobs.items()
+            if storage in _STORAGE_ONLY_KNOBS.get(k, (storage,))}
+
+
 @dataclass
 class CkptOptions:
     # mode='chunk' uses periodic replay; mode='recursive' uses a fixed checkpoint budget.

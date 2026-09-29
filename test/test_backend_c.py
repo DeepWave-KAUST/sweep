@@ -57,6 +57,20 @@ FWD = "ForwardInputCore"
 BWD = "BackwardInputCore"
 
 
+def _jit_full():
+    """The compiled pybind shim (SWEEP_JIT_FULL=1) replaces this ctypes layer:
+    tests of ctypes-only behaviour have nothing to test there."""
+    try:
+        from sweep.backend.c import jit
+        return jit.jit_full()
+    except Exception:
+        return False
+
+
+_ctypes_only = pytest.mark.skipif(_jit_full(), reason="SWEEP_JIT_FULL=1 routes sweep._C "
+                                  "through the pybind shim; this tests the ctypes layer")
+
+
 def _mods():
     """``adapt()`` and the generated mirror, imported lazily so a missing one
     fails the test that needs it (a red, which is wanted) instead of erroring
@@ -818,6 +832,7 @@ class TestInputValidation:
         with pytest.raises(RuntimeError, match="list of tensors"):
             entries._launch_stream(fi, "x")
 
+    @_ctypes_only
     @requires_binding()
     def test_cpu_models_through_an_entry_are_a_message(self):
         _core_or_skip()
@@ -1069,6 +1084,7 @@ def test_core_stream_follows_torch_and_is_restored():
 # --------------------------------------------------------------------------- #
 # 9. runner round trip (GPU)
 # --------------------------------------------------------------------------- #
+@_ctypes_only
 @requires_binding()
 def test_forward_runner_matches_the_monolithic_entry_bit_for_bit():
     _core_or_skip()

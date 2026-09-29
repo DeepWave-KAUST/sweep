@@ -7,6 +7,7 @@ import torch
 from sweep.propagator._torch_eager import _PropTorchEager
 from sweep.core.arguments import warn_deprecated_spelling, resolve_device
 from sweep.propagator.options import (
+    _applicable_boundary_knobs,
     CUDAOptions,
     EAGER_OPTION_KEYS,
     CUDA_OPTION_KEYS,
@@ -54,38 +55,118 @@ def _equation_supports_c(equation):
     return callable(getattr(equation, "_C", None))
 
 
+def _device_type(device):
+    """``'cuda'`` / ``'cpu'`` / ... for a torch.device, a string (``'cuda:0'``)
+    or an index; None when no device was given."""
+    if device is None:
+        return None
+    if isinstance(device, torch.device):
+        return device.type
+    try:
+        return torch.device(device).type
+    except (TypeError, RuntimeError, ValueError):
+        return str(device).split(":", 1)[0].lower()
+
+
+def _cpu_engine_available():
+    """True when ``sweep._C`` carries the compiled CPU engine (``csrc/cpu/**``).
+
+    Two builds compile it: an ahead-of-time ``sweep._C`` extension
+    (``SWEEP_BUILD_CUDA=1`` install or ``setup.py build_ext --inplace``;
+    ``build_config.get_sources()`` puts ``cpu/**`` in it unless the build set
+    ``SWEEP_SKIP_CPU=1``) and the ``SWEEP_JIT_FULL=1`` pybind shim
+    (``jit._sources()``).  An AOT extension shadows the ctypes ``_C.py``
+    whatever the environment says, so it answers first.  The default path, the
+    ctypes layer over the prebuilt core, serves the CUDA core only.
+    """
+    import sweep
+    if sweep._prebuilt_binding_present():
+        return True
+    from sweep.backend.c import jit
+    return jit.jit_full()
+
+
+def _equation_has_cpu_kernel(equation):
+    """True when the compiled CPU engine has a kernel for this equation.
+
+    Read off the tree both builds compile: ``csrc/cpu/equations/<C_NAME>/``
+    (``jit._sources()`` / ``build_config.get_sources()`` glob ``cpu/**/*.cpp``).
+    The CUDA-only equations (``elastic_tti_2nd2d``, the VTI-1st pair,
+    ``elastic_vr2d``, ``elastic_tti_sg3d``, ``visco_acoustic2d``) are bound
+    straight to the CUDA core and have no CPU dispatch there.
+    """
+    if equation is None:
+        return True
+    name = getattr(equation, "C_NAME", None)
+    if not name:
+        return False
+    from sweep.backend.c import jit
+    return any((jit._CSRC / "cpu" / "equations" / name).glob("*.cpp"))
+
+
 def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None):
     """Resolve 'auto' / 'c' to a concrete impl, falling back to 'eager' when
     the compiled binding is unavailable, the equation has no ``_C`` hook, or
-    the propagator's device is not a CUDA device: the compiled backend is the
-    CUDA core, there is no CPU engine on the default path, and handing the
-    core host tensors is a hard error further down.
+    the compiled backend cannot run on the propagator's device.
+
+    Devices: CUDA always.  CPU only for an EXPLICIT ``impl='c'``, and only when
+    ``sweep._C`` carries the compiled CPU engine (``SWEEP_JIT_FULL=1`` or an
+    AOT-built extension, see :func:`_cpu_engine_available`) AND that engine has
+    a kernel for the equation.  ``'auto'`` on a CPU is always eager: the CPU
+    engine is a developer path with known accuracy gaps (e.g. its adjoint-source
+    scaling differs from the CUDA core and from eager), so nobody should land
+    on it without asking for it.  On the default path (the ctypes layer over the
+    prebuilt CUDA core) there is no CPU engine at all, and handing the core host
+    tensors is a hard error further down.  Any other device type never gets the
+    compiled path.
 
     When the user explicitly asked for 'c' but the path isn't available, emit
     a UserWarning so the slowdown is visible.
     """
     binding_ok = _compiled_binding_available()
     equation_ok = _equation_supports_c(equation)
-    device_ok = device is None or getattr(device, "type", str(device)) == "cuda"
+    dtype = _device_type(device)
+    if dtype is None or dtype == "cuda":
+        device_ok = True
+    elif dtype == "cpu":
+        device_ok = _cpu_engine_available() and _equation_has_cpu_kernel(equation)
+    else:
+        device_ok = False
 
     if impl == "auto":
-        return "c" if (binding_ok and equation_ok and device_ok) else "eager"
+        on_cuda = dtype is None or dtype == "cuda"
+        return "c" if (binding_ok and equation_ok and on_cuda) else "eager"
 
     if impl == "c" and not (binding_ok and equation_ok and device_ok):
         if explicit:
-            if not device_ok:
-                reason = f"the compiled backend runs on CUDA only and this propagator is on {device}"
+            eq_name = type(equation).__name__ if equation is not None else "<unknown>"
+            if not device_ok and dtype != "cpu":
+                reason = (f"the compiled backend runs on CUDA (and, with the compiled "
+                          f"CPU engine, on CPU) only and this propagator is on {device}")
                 remedy = "Move to a CUDA device (dev='cuda') for the compiled path."
+            elif dtype == "cpu" and not _cpu_engine_available():
+                reason = (
+                    f"this propagator is on {device} and the default compiled backend "
+                    "(the ctypes layer over the prebuilt CUDA core) has no CPU engine; "
+                    "the compiled CPU engine exists only under SWEEP_JIT_FULL=1 or in an "
+                    "AOT-built sweep._C extension (SWEEP_BUILD_CUDA=1 install)"
+                )
+                remedy = ("Move to a CUDA device (dev='cuda'), or set SWEEP_JIT_FULL=1 / "
+                          "install with SWEEP_BUILD_CUDA=1 for the compiled CPU engine.")
             elif not binding_ok:
                 reason = "the compiled binding (sweep._C) is unavailable"
                 remedy = (
                     "Rebuild with `pip install -e .` in a CUDA-enabled env "
                     "to use the compiled path."
                 )
-            else:
-                eq_name = type(equation).__name__ if equation is not None else "<unknown>"
+            elif not equation_ok:
                 reason = f"equation '{eq_name}' does not expose a compiled CUDA kernel"
                 remedy = "Use impl='eager' (or omit impl) for this equation."
+            else:
+                reason = (f"equation '{eq_name}' has no kernel in the compiled CPU engine "
+                          f"(no csrc/cpu/equations/{getattr(equation, 'C_NAME', None)}/) and "
+                          f"this propagator is on {device}")
+                remedy = "Move to a CUDA device (dev='cuda') for the compiled path."
             warnings.warn(
                 f"PropTorch(impl='c') requested but {reason}; falling back to "
                 f"impl='eager' (pure-PyTorch, ~10-30x slower). {remedy}",
@@ -511,9 +592,13 @@ class PropTorch(torch.nn.Module):
             # equivalent typed request for validation only.
             if strategy == "boundary":
                 cfg = init_kwargs.get("boundary_saving_config") or {}
-                probe = BoundarySaving(**{f.name: cfg[f.name]
-                                          for f in dataclasses.fields(BoundaryOptions)
-                                          if f.name in cfg})
+                # Only the knobs the chosen storage accepts: the dict route
+                # always ignored the rest (pinned_memory under storage='gpu'),
+                # and this probe exists to check capability, not to turn a
+                # config that read fine into a construction error.
+                probe = BoundarySaving(**_applicable_boundary_knobs(
+                    {f.name: cfg[f.name]
+                     for f in dataclasses.fields(BoundaryOptions) if f.name in cfg}))
             elif init_kwargs.get("ckpt_mode", CKPT_DEFAULTS.mode) == "recursive":
                 probe = Ckpt(mode="recursive",
                              count=max(1, int(init_kwargs.get("ckpt_num") or 1)))
