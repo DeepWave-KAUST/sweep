@@ -218,6 +218,28 @@ and this project adheres to
   check, which then raised `pinned_memory is only valid when storage='cpu'`.
   The check now validates only the knobs the chosen storage accepts; the typed
   `BoundarySaving(...)` stays strict.
+- **The compiled CPU engine (`SWEEP_JIT_FULL=1`) had the same strip-source
+  defect, and returned nothing to the caller.**  Its boundary-saving backward
+  (Acoustic, Acoustic3D, AcousticLSRTM 2-D/3-D) restored the strip and then
+  imaged and re-injected the source the same way; after the restore, sources
+  inside the strip are now subtracted once, with the strip geometry shared by
+  the save/restore bands and the un-injection (`csrc/cpu/common/bs_strip.h`).
+  Measured vs `Full()` on the CPU engine: in-strip sources 1.6e-3..2.8e-1 of
+  max|g| before, <=1.9e-6 after; out-of-strip BS gradients bit-identical.
+  Found on the way: since the entries stopped returning their outputs, every
+  CPU-engine record, gradient and illumination came back as the zeros Python
+  had bound; `sweep_cpu::forward/backward` now write into the bound
+  `record_out` / `u_allt_out` / `last_two` / `grads_out` / `illum_out` /
+  `adcig_out` (sizes must match exactly, else a clear error).  And the CPU
+  Acoustic (2-D) Full/checkpoint store imaged `vp^2 * Laplacian` while the CPML
+  terms still act on the first M physical rows/columns; it now images the u_tt
+  of the update (`vp^2 * wsum`), like AcousticLSRTM (the CUDA core keeps
+  `vp^2 * Lap(u)`: its physical box runs a fast path with no CPML terms, so
+  there that is the update) -- the
+  Full gradient moves on those rows/columns only (BS vs Full there: up to
+  6.4e-4 before, <=6e-7 after).  The CPU group of
+  `test/test_bs_strip_source.py` runs under `SWEEP_JIT_FULL=1` and skips,
+  saying why, elsewhere.
 - **Host-staged boundaries under DD no longer pay a per-step Python call.**
   The persistent stepped runners (forward and backward) now accept
   `storage='cpu'`; the core keyed its saves and flushes on the global step

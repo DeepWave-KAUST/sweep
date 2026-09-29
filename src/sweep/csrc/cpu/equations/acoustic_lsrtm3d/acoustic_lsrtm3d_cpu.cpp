@@ -2,6 +2,7 @@
 
 #include "../../common/cpu_engine.h"
 #include "../../operators/fd.h"
+#include "../../common/bs_strip.h"
 
 #include <ATen/Parallel.h>
 #include <torch/extension.h>
@@ -246,6 +247,17 @@ int acoustic_lsrtm3d_phys_z1(int64_t nz, int abcn, int M)
     return static_cast<int>(nz) - abcn - M;
 }
 
+// The boundary-saving strip geometry (common/bs_strip.h): the save/restore
+// bands below and the strip-source un-injection of the boundary-saving
+// backward all read this one box.
+sweep_cpu::bs_strip::BsStripBox3D acoustic_lsrtm3d_strip_box(int64_t nz, int64_t ny, int64_t nx, int M,
+    int abcn, bool free_surface, int width)
+{
+    return {acoustic_lsrtm3d_phys_x0(abcn, M), acoustic_lsrtm3d_phys_x1(nx, abcn, M),
+            acoustic_lsrtm3d_phys_y0(abcn, M), acoustic_lsrtm3d_phys_y1(ny, abcn, M),
+            acoustic_lsrtm3d_phys_z0(abcn, M, free_surface), acoustic_lsrtm3d_phys_z1(nz, abcn, M), width};
+}
+
 int acoustic_lsrtm3d_checkpoint_index(int it, int nt, int interval)
 {
     if (interval < 1) return -1;
@@ -342,12 +354,8 @@ void save_acoustic_lsrtm3d_boundary(
 {
     if (boundary.empty()) return;
     check_acoustic_lsrtm3d_boundary_tensors(boundary);
-    const int x0 = acoustic_lsrtm3d_phys_x0(abcn, M);
-    const int x1 = acoustic_lsrtm3d_phys_x1(nx, abcn, M);
-    const int y0 = acoustic_lsrtm3d_phys_y0(abcn, M);
-    const int y1 = acoustic_lsrtm3d_phys_y1(ny, abcn, M);
-    const int z0 = acoustic_lsrtm3d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic_lsrtm3d_phys_z1(nz, abcn, M);
+    const auto box = acoustic_lsrtm3d_strip_box(nz, ny, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, y0 = box.y0, y1 = box.y1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int ny_boundary = y1 - y0;
     const int nz_boundary = z1 - z0;
@@ -407,12 +415,8 @@ void restore_acoustic_lsrtm3d_boundary(
 {
     TORCH_CHECK(!boundary.empty(), "AcousticLSRTM3D boundary-saving backward requires saved boundaries");
     check_acoustic_lsrtm3d_boundary_tensors(boundary);
-    const int x0 = acoustic_lsrtm3d_phys_x0(abcn, M);
-    const int x1 = acoustic_lsrtm3d_phys_x1(nx, abcn, M);
-    const int y0 = acoustic_lsrtm3d_phys_y0(abcn, M);
-    const int y1 = acoustic_lsrtm3d_phys_y1(ny, abcn, M);
-    const int z0 = acoustic_lsrtm3d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic_lsrtm3d_phys_z1(nz, abcn, M);
+    const auto box = acoustic_lsrtm3d_strip_box(nz, ny, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, y0 = box.y0, y1 = box.y1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int ny_boundary = y1 - y0;
     const int nz_boundary = z1 - z0;
@@ -497,12 +501,8 @@ void save_acoustic_lsrtm3d_boundary_disk(
 )
 {
     TORCH_CHECK(files.size() == 6, "AcousticLSRTM3D disk boundary saving expects 6 files");
-    const int x0 = acoustic_lsrtm3d_phys_x0(abcn, M);
-    const int x1 = acoustic_lsrtm3d_phys_x1(nx, abcn, M);
-    const int y0 = acoustic_lsrtm3d_phys_y0(abcn, M);
-    const int y1 = acoustic_lsrtm3d_phys_y1(ny, abcn, M);
-    const int z0 = acoustic_lsrtm3d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic_lsrtm3d_phys_z1(nz, abcn, M);
+    const auto box = acoustic_lsrtm3d_strip_box(nz, ny, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, y0 = box.y0, y1 = box.y1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int ny_boundary = y1 - y0;
     const int nz_boundary = z1 - z0;
@@ -568,12 +568,8 @@ void restore_acoustic_lsrtm3d_boundary_disk(
 )
 {
     TORCH_CHECK(files.size() == 6, "AcousticLSRTM3D disk boundary saving expects 6 files");
-    const int x0 = acoustic_lsrtm3d_phys_x0(abcn, M);
-    const int x1 = acoustic_lsrtm3d_phys_x1(nx, abcn, M);
-    const int y0 = acoustic_lsrtm3d_phys_y0(abcn, M);
-    const int y1 = acoustic_lsrtm3d_phys_y1(ny, abcn, M);
-    const int z0 = acoustic_lsrtm3d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic_lsrtm3d_phys_z1(nz, abcn, M);
+    const auto box = acoustic_lsrtm3d_strip_box(nz, ny, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, y0 = box.y0, y1 = box.y1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int ny_boundary = y1 - y0;
     const int nz_boundary = z1 - z0;
@@ -1565,6 +1561,7 @@ BackwardOutput backward_acoustic_lsrtm3d_bs_impl(const BackwardInput& p)
     zero_acoustic_lsrtm3d_boundary_width(fwd.u_prev, B, nz, ny, nx, p.abcn + M);
     zero_acoustic_lsrtm3d_boundary_width(fwd.u_now, B, nz, ny, nx, p.abcn + M);
 
+    const auto strip_box = acoustic_lsrtm3d_strip_box(nz, ny, nx, M, p.abcn, p.free_surface, save_width);
     std::vector<float> u_tt(total, 0.0f);
     for (int64_t it = nt - 1; it >= 1; --it) {
         acoustic_lsrtm3d_adjoint_step<Order>(
@@ -1606,6 +1603,13 @@ BackwardOutput backward_acoustic_lsrtm3d_bs_impl(const BackwardInput& p)
                 save_width
             );
         }
+        // The restore wrote the saved TRUE w^{it-1} (source included) over
+        // the strips; the NOPML left w^{it-1} - s^{it} everywhere else.  Take
+        // s^{it} back out of a source cell the restore overwrote, so the u_tt
+        // imaging below and the add_source that completes w^{it-1} see what
+        // they see at any other source cell (common/bs_strip.h).
+        sweep_cpu::bs_strip::sub_source_in_restore_strip_3d(
+            fwd.u_next, forward_source, forward_sources, B, forward_nsrc, nt, it, nz, ny, nx, strip_box);
 
         const float* fwd_prev = fwd.u_now.data();
         const float* fwd_now = fwd.u_next.data();

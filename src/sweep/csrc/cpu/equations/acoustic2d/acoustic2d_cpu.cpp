@@ -2,6 +2,7 @@
 
 #include "../../common/cpu_engine.h"
 #include "../../operators/fd.h"
+#include "../../common/bs_strip.h"
 
 #include <ATen/Parallel.h>
 #include <torch/extension.h>
@@ -200,6 +201,16 @@ int acoustic2d_phys_z1(int64_t nz, int abcn, int M)
     return static_cast<int>(nz) - abcn - M;
 }
 
+// The boundary-saving strip geometry (common/bs_strip.h): the save/restore
+// bands below and the strip-source un-injection of the boundary-saving
+// backward all read this one box.
+sweep_cpu::bs_strip::BsStripBox2D acoustic2d_strip_box(int64_t nz, int64_t nx, int M, int abcn,
+    bool free_surface, int width)
+{
+    return {acoustic2d_phys_x0(abcn, M), acoustic2d_phys_x1(nx, abcn, M),
+            acoustic2d_phys_z0(abcn, M, free_surface), acoustic2d_phys_z1(nz, abcn, M), width};
+}
+
 int acoustic2d_checkpoint_index(int it, int nt, int interval)
 {
     if (interval < 1) return -1;
@@ -279,10 +290,8 @@ void save_acoustic2d_boundary(
 {
     if (boundary.empty()) return;
     TORCH_CHECK(boundary.size() == 4, "Acoustic2D boundary saving expects 4 boundary tensors");
-    const int x0 = acoustic2d_phys_x0(abcn, M);
-    const int x1 = acoustic2d_phys_x1(nx, abcn, M);
-    const int z0 = acoustic2d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic2d_phys_z1(nz, abcn, M);
+    const auto box = acoustic2d_strip_box(nz, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int nz_boundary = z1 - z0;
     auto top = boundary[0];
@@ -331,10 +340,8 @@ void restore_acoustic2d_boundary(
 {
     TORCH_CHECK(!boundary.empty(), "Acoustic2D boundary-saving backward requires saved boundaries");
     TORCH_CHECK(boundary.size() == 4, "Acoustic2D boundary saving expects 4 boundary tensors");
-    const int x0 = acoustic2d_phys_x0(abcn, M);
-    const int x1 = acoustic2d_phys_x1(nx, abcn, M);
-    const int z0 = acoustic2d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic2d_phys_z1(nz, abcn, M);
+    const auto box = acoustic2d_strip_box(nz, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int nz_boundary = z1 - z0;
     auto top = boundary[0];
@@ -408,10 +415,8 @@ void save_acoustic2d_boundary_disk(
 )
 {
     TORCH_CHECK(files.size() == 4, "Acoustic2D disk boundary saving expects 4 files");
-    const int x0 = acoustic2d_phys_x0(abcn, M);
-    const int x1 = acoustic2d_phys_x1(nx, abcn, M);
-    const int z0 = acoustic2d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic2d_phys_z1(nz, abcn, M);
+    const auto box = acoustic2d_strip_box(nz, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int nz_boundary = z1 - z0;
     const size_t top_elems = static_cast<size_t>(B) * width * nx_boundary;
@@ -457,10 +462,8 @@ void restore_acoustic2d_boundary_disk(
 )
 {
     TORCH_CHECK(files.size() == 4, "Acoustic2D disk boundary saving expects 4 files");
-    const int x0 = acoustic2d_phys_x0(abcn, M);
-    const int x1 = acoustic2d_phys_x1(nx, abcn, M);
-    const int z0 = acoustic2d_phys_z0(abcn, M, free_surface);
-    const int z1 = acoustic2d_phys_z1(nz, abcn, M);
+    const auto box = acoustic2d_strip_box(nz, nx, M, abcn, free_surface, width);
+    const int x0 = box.x0, x1 = box.x1, z0 = box.z0, z1 = box.z1;
     const int nx_boundary = x1 - x0;
     const int nz_boundary = z1 - z0;
     const size_t top_elems = static_cast<size_t>(B) * width * nx_boundary;
@@ -576,7 +579,13 @@ void advance_acoustic2d_cpml(
                 zetaz_next_ptr[idx] = zetaz_new;
                 zetax_next_ptr[idx] = zetax_new;
                 if (imaging != nullptr) {
-                    imaging[idx] = v * v * (lap_x + lap_z);
+                    // u_tt of the update above (source excluded), as
+                    // acoustic_lsrtm2d images: in this engine the CPML terms reach
+                    // the first M physical rows/cols through dpsi/db, where the
+                    // bare Laplacian is not the operator that moved u.  (The CUDA
+                    // core stores vp^2 * Lap(u): its physical box takes a fast
+                    // path with no CPML terms, so there that IS the update.)
+                    imaging[idx] = v * v * wsum;
                 }
             }
         }
@@ -1415,6 +1424,7 @@ BackwardOutput backward_acoustic2d_bs_impl(const BackwardInput& p)
     zero_acoustic2d_boundary_width(fwd.u_prev, B, nz, nx, p.abcn + M);
     zero_acoustic2d_boundary_width(fwd.u_now, B, nz, nx, p.abcn + M);
 
+    const auto strip_box = acoustic2d_strip_box(nz, nx, M, p.abcn, p.free_surface, save_width);
     std::vector<float> u_tt(total, 0.0f);
     for (int64_t it = nt - 1; it >= 1; --it) {
         acoustic2d_adjoint_step<Order>(
@@ -1476,6 +1486,13 @@ BackwardOutput backward_acoustic2d_bs_impl(const BackwardInput& p)
                 save_width
             );
         }
+        // The restore wrote the saved TRUE w^{it-1} (source included) over
+        // the strips; the NOPML left w^{it-1} - s^{it} everywhere else.  Take
+        // s^{it} back out of a source cell the restore overwrote, so the u_tt
+        // imaging below and the add_source that completes w^{it-1} see what
+        // they see at any other source cell (common/bs_strip.h).
+        sweep_cpu::bs_strip::sub_source_in_restore_strip_2d(
+            fwd.u_next, forward_source, forward_sources, B, forward_nsrc, nt, it, nz, nx, strip_box);
 
         const float* fwd_prev = fwd.u_now.data();
         const float* fwd_now = fwd.u_next.data();
@@ -1680,7 +1697,7 @@ BackwardOutput backward_acoustic2d_raw_impl(const BackwardInput& p)
                     psix_next_ptr[idx] = psix_new;
                     zetaz_next_ptr[idx] = zetaz_new;
                     zetax_next_ptr[idx] = zetax_new;
-                    imaging_ptr[idx] = v * v * (lap_x + lap_z);
+                    imaging_ptr[idx] = v * v * wsum;   // u_tt of this update; see advance_acoustic2d_cpml
                 }
             }
         });
