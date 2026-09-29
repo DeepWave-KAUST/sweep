@@ -217,9 +217,13 @@ and this project adheres to
   path forms `u_tt` from the same three reconstruction time levels
   `calculate_grad_utt_band` uses, in its **own** kernel: no gradient arithmetic
   is touched, and `test/test_illumination_pin.py` pins that enabling
-  illumination cannot move the gradient.  `receiver_illumination` is unchanged
-  (`sum_t lambda^2` on both paths).  The contract is now written down in
-  `_CompiledPropagator.__init__`.
+  illumination cannot move the gradient.  `receiver_illumination` stays
+  `sum_t lambda^2`; under `BoundarySaving()` it used to differ from `Full()` by
+  ~0.5% (measured on dev) and now matches it bit for bit.  The contract is now
+  written down in `_CompiledPropagator.__init__`.  Notebook 08 (RTM) shows the
+  consequence: its illumination-compensated image is now the image divided by
+  the illumination of the same (original-wavelet) field, a dimensionless ratio
+  (colour scale ~0.05 instead of ~4e5).
 - `SecondOrderEquation._apply_free_surface` — the per-edge pressure-release
   zeroing moved from `Acoustic` to the shared base (bit-identical) so
   ViscoAcoustic reuses it.
