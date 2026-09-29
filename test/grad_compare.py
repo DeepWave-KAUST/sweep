@@ -174,6 +174,8 @@ def main():
                     help='If set, only run eager + c-impl and save to this .npz, then exit. '
                          'Used internally by --include-dev to invoke a different sweep install.')
     args = p.parse_args()
+    for path in (args.out_png, args.out_npz):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     device = torch.device('cuda')
     shape, sources, receivers, vp_init, vp_true = make_setup()
@@ -209,7 +211,8 @@ def main():
 
     # 3) optional dev pristine via subprocess
     if args.include_dev:
-        snap_path = '/tmp/regression/_dev_snapshot.npz'
+        snap_path = os.path.join(os.path.dirname(os.path.abspath(args.out_npz)),
+                                 '_dev_snapshot.npz')
         cmd = [sys.executable, __file__,
                 '--snapshot-out', snap_path]
         if free_surface:

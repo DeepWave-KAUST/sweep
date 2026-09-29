@@ -34,10 +34,10 @@ def ricker(nt, dt, fm=10.0, delay=0.06, scale=1e6):
 
 
 def per_field_group(self, halo, tensors):
-    """OLD behavior: one exchange (batch_isend_irecv + wait) per field."""
-    if halo is not None:
-        for t in tensors:
-            halo.exchange(self._halo_view(t))
+    """OLD behavior: one exchange (batch_isend_irecv + wait) per field and
+    cut axis, i.e. ModelParallel._exchange once per field."""
+    for t in tensors:
+        self._exchange(halo, t)
 
 
 def main():
@@ -81,8 +81,7 @@ def main():
         ddp._exchange_group = types.MethodType(ModelParallel._exchange_group, ddp)
 
         if rank == 0:
-            nphys = ddp._nphys
-            print(f"[rank0] elastic2d tile({nz}x{nxp}) px{world} nt{nt} nphys={nphys}: "
+            print(f"[rank0] elastic2d tile({nz}x{nxp}) px{world} nt{nt}: "
                   f"per-field={old_ms:.2f} ms  batched={new_ms:.2f} ms  "
                   f"speedup={old_ms / new_ms:.3f}x")
     dist.destroy_process_group()

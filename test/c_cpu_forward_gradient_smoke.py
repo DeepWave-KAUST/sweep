@@ -181,14 +181,8 @@ def make_solver(case: Case, backend: str, mode: str, device: torch.device | None
 
 
 def standard_record(case: Case, backend: str, record: torch.Tensor) -> torch.Tensor:
-    record = record.cpu()
-    if backend == "pytorch":
-        return record.detach()
-    if case.name in {"acoustic2d", "acoustic3d"}:
-        return record.detach().transpose(1, 2).unsqueeze(-1)
-    if case.name == "elastic2d":
-        return record.detach().permute(1, 3, 2, 0)
-    raise ValueError(case.name)
+    # Every impl returns (B, nt, nrec, C): nothing to reorder.
+    return record.detach().cpu()
 
 
 def run_once(
@@ -352,6 +346,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    from sweep.propagator.torch import _cpu_engine_available
+    if not _cpu_engine_available():
+        # PropTorch would run eager and this script compare eager with itself.
+        print("SKIP: impl='c' on CPU needs the compiled CPU engine "
+              "(SWEEP_JIT_FULL=1 or an ahead-of-time build); this build has none.")
+        return
     torch.set_num_threads(max(1, args.threads))
     torch.manual_seed(0)
 
