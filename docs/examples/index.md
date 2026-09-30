@@ -4,8 +4,7 @@
 
 Runnable example scripts and notebooks live in the `examples/` directory of
 the repository. The **notebooks** under `docs/notebooks/` (cards below)
-are cell-by-cell tutorials and the easiest entry point; for a flat overview
-of all of them see the [home page gallery](../index.md). Scripts for
+are cell-by-cell tutorials and the easiest entry point. Scripts for
 workflows that don't fit a notebook (e.g. multi-process multi-GPU FWI) are
 linked at the bottom of this page.
 
@@ -116,9 +115,10 @@ linked at the bottom of this page.
 
     ---
 
-    Same forward + backward step run under five memory strategies (eager
-    full vs. eager ckpt vs. c boundary-saving / chunk-ckpt / recursive-ckpt)
-    with side-by-side peak-memory and wallclock charts.
+    Same forward + backward step run under every memory strategy (eager
+    full / chunk-ckpt / boundary-saving on gpu × dtype vs. c full /
+    boundary-saving on `{gpu, cpu, disk}` × dtype / chunk-ckpt /
+    recursive-ckpt) with side-by-side peak-memory and wallclock charts.
 
     [:material-notebook-outline: Open notebook](../notebooks/07_memory_strategies.ipynb)
 
@@ -191,9 +191,9 @@ linked at the bottom of this page.
 
     ---
 
-    Acoustic FWI on a 3-D Overthrust volume — `Acoustic3D` solver,
-    boundary-saving for memory, depth/inline/crossline slices of the
-    recovered `vp` cube vs ground truth.
+    Acoustic FWI on a 3-D Overthrust volume — `Acoustic3D` solver on
+    `impl='eager'`, chunked checkpointing for memory, depth/inline/crossline
+    slices of the recovered `vp` cube vs ground truth.
 
     [:material-notebook-outline: Open notebook](../notebooks/11_fwi_acoustic_overthrust_3d.ipynb)
 
@@ -204,8 +204,8 @@ linked at the bottom of this page.
     ---
 
     `torchrun --nproc_per_node=N` driver that shards shots across GPUs and
-    syncs gradients via `torch.distributed`. Hits 3.79× speedup on 4× V100
-    for Marmousi FWI compared to a single-GPU baseline.
+    syncs gradients via `torch.distributed`, timed against a single-GPU
+    baseline on a two-layer toy model (the saved run: 3.53× on 4 GPUs).
 
     [:material-notebook-outline: Open notebook](../notebooks/12_multi_gpu.ipynb)
 
@@ -362,8 +362,8 @@ linked at the bottom of this page.
 
     `storage_dtype` (fp16/bf16/int8) shrinks the saved boundary wavefield while
     compute stays FP32. Marmousi FWI across the full `{gpu, cpu, disk} × dtype`
-    matrix (compiled **and** eager) — identical convergence, plus a runtime
-    GPU-memory breakdown.
+    matrix on the compiled path, plus gpu × dtype on eager — identical
+    convergence, plus a runtime GPU-memory breakdown.
 
     [:material-notebook-outline: Open notebook](../notebooks/19_fwi_boundary_dtype.ipynb)
 
@@ -407,8 +407,10 @@ multi-GPU FWI — see:
 - [**Model-parallel FWI** (`dd_fwi_marmousi_2d.py`, `dd_fwi_marmousi_elastic_2d.py`,
   `dd_fwi_overthrust_update.py`)](../user-guide/parallel.md) — the other axis:
   one model split across GPUs instead of one shot per GPU. Acoustic and elastic
-  2-D on Marmousi, plus a 3-D Overthrust model update; each script has a
-  `--check` mode that runs the same problem undivided and compares.
+  2-D on Marmousi, plus a 3-D Overthrust model update. The two Marmousi
+  scripts take `--check <tag>` to compare against an earlier run in `--outdir`
+  (e.g. the same problem undivided, `--px 1`); the Overthrust script has no
+  comparison mode.
 
 Browse [`examples/`](https://github.com/DeepWave-KAUST/sweep/tree/dev/examples)
 on GitHub for the full collection of runnable scripts.

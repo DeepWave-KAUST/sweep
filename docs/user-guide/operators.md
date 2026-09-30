@@ -123,12 +123,14 @@ dudz = self.gradient(u_now, h, axis=-2, kernels=self.grad_kernels)
 populates it with ``{-2: gkernel_z, -1: gkernel_x}`` and the
 ``gradient(..., kernels=…)`` call automatically picks the fast path.
 
-`Acoustic.step_cpml` is the canonical reference.
+`sweep.equations.acoustic.step_cpml` (the module-level function
+`Acoustic.func` calls) is the canonical reference.
 
 ## Path 2 — `FirstOrderEquation`
 
 `FirstOrderEquation.__init__` constructs `self.pd = StaggeredDerivative(...)`
-for you. It exposes 6 (2-D) or 12 (3-D) methods on a Mac-grid stencil:
+for you. It exposes 4 methods in 2-D (x/z × forward/backward) and 6 in 3-D
+(adds `y_*`) on a Mac-grid stencil:
 
 | Method | Returns | Stencil |
 | --- | --- | --- |
@@ -138,7 +140,9 @@ for you. It exposes 6 (2-D) or 12 (3-D) methods on a Mac-grid stencil:
 | `self.pd.z_backward(u, h=None)` | — | — |
 | `self.pd.y_forward / y_backward` | only present when `ndim=3` | — |
 
-`h=None` makes the call divide by `self._spacing[axis]`, which you set once:
+`h=None` makes the call divide by `self._spacing[axis]`. The propagator sets
+it for you at construction (`PropBase` calls `equation.pd.set_spacing(dh)`);
+outside a propagator, set it yourself:
 
 ```python
 self.pd.set_spacing((dz, dx))     # or (dz, dy, dx) in 3-D
@@ -148,22 +152,24 @@ self.pd.set_spacing((dz, dx))     # or (dz, dy, dx) in 3-D
 
 ### Recipe — first-order velocity-stress (acoustic)
 
-`Acoustic1st` writes one half-step of `(v, p)` in eager mode like this:
+`Acoustic1st` (`acoustic1st.step_cpml`; its CPML memory terms are left out
+here) advances one step of `(p, v)` like this — velocities first, then
+pressure:
 
 ```python
 def func(self, wavefields, models, dt, h, b, **kwargs):
-    vx, vz, p = wavefields
+    p, vx, vz = wavefields
     vp, rho = models
-    # Pressure update from velocity divergence:
-    dvx_dx = self.pd.x_backward(vx)
-    dvz_dz = self.pd.z_backward(vz)
-    p_next = p - dt * (vp * vp * rho) * (dvx_dx + dvz_dz)
     # Velocity update from pressure gradient:
-    dp_dx = self.pd.x_forward(p_next)
-    dp_dz = self.pd.z_forward(p_next)
+    dp_dx = self.pd.x_backward(p)
+    dp_dz = self.pd.z_backward(p)
     vx_next = vx - dt / rho * dp_dx
     vz_next = vz - dt / rho * dp_dz
-    return vx_next, vz_next, p_next
+    # Pressure update from velocity divergence:
+    dvx_dx = self.pd.x_forward(vx_next)
+    dvz_dz = self.pd.z_forward(vz_next)
+    p_next = p - dt * (vp * vp * rho) * (dvx_dx + dvz_dz)
+    return p_next, vx_next, vz_next
 ```
 
 Forward and backward sweeps are paired by the **staggering convention** —
@@ -179,13 +185,15 @@ yourself, mirroring `ElasticTTI`:
 
 ```python
 from sweep.operators import RSGDerivative
+from sweep.equations.base import FirstOrderEquation
+from sweep.equations.utils import to_backend
 
 class MyTTI(FirstOrderEquation):
     def __init__(self, spatial_order=8, device="cpu", backend="torch"):
         super().__init__(spatial_order, device, backend, ndim=2)
         self.rsg = RSGDerivative(spatial_order, device, backend, ndim=2)
         self.rsg.to_backend(to_backend)
-        self.rsg.set_spacing((dz, dx))   # call once after building
+        self.pd = self.rsg   # the propagator calls equation.pd.set_spacing(dh)
 ```
 
 The operator exposes four `(forward, backward) × (x, z)` methods:
@@ -213,7 +221,6 @@ would offset the result by one rotated cell.
 def func(self, wavefields, models, dt, h, b, **kwargs):
     vx, vz, sxx, szz, sxz = wavefields
     vp, vs, rho = models
-    self.rsg.set_spacing(self._spacings_2d(h))
 
     # 1) Velocity update from stress divergence — backward stencil.
     dsxx_dx = self.rsg.lx_bwd(sxx)
@@ -239,9 +246,10 @@ def func(self, wavefields, models, dt, h, b, **kwargs):
     return vx_next, vz_next, sxx_next, szz_next, sxz_next
 ```
 
-For the full anisotropic TTI case, `ElasticTTI.func` wraps these
-derivatives with a stiffness-tensor Bond rotation that mixes the four
-components — but the RSG calls themselves are the same eight lines.
+For the full anisotropic TTI case, `ElasticTTI` Bond-rotates the stiffness
+tensor once per call (`prepare_models`), and its step makes twelve RSG calls
+instead of eight: it is 2-D-3C, so `vy`, `sxy` and `syz` get the same
+backward / forward pairing.
 
 ## Spacing helpers on the base class
 

@@ -6,11 +6,12 @@ own `PropTorch`, owns a slice of the global shot list, and exchanges
 gradients through NCCL.
 
 This page documents the production script
-[`examples/multi-gpu/torch/fwi_marmousi_dist.py`](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/multi-gpu/torch/fwi_marmousi_dist.py) — it is **not** a notebook because notebooks run inside one Python kernel, while DDP requires *N* independent interpreters. See the [single-process variant](../notebooks/12_multi_gpu.ipynb) for the in-kernel demo.
+[`examples/multi-gpu/torch/fwi_marmousi_dist.py`](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/multi-gpu/torch/fwi_marmousi_dist.py) — it is **not** a notebook because notebooks run inside one Python kernel, while DDP requires *N* independent interpreters. The [multi-GPU notebook](../notebooks/12_multi_gpu.ipynb) drives the same pattern from a notebook: it writes a small DDP driver, launches it with `torchrun`, and times it against a single-GPU loop.
 
 ## Launch
 
-Prepare the Marmousi `.npy` files first (one-time, same as the 2-D notebook):
+Prepare the Marmousi `.npy` files the script reads first (one-time; the
+notebooks use the embedded `sweep.datasets` model instead):
 
 ```bash
 python3 examples/models/marmousi/download_marmousi.py --extract
@@ -65,15 +66,14 @@ process pins itself to one GPU and joins the NCCL group.
 ### 2. Build the solver (each rank, identical args)
 
 ```python
+from sweep.propagator.options import BoundarySaving
+
 solver = PropTorch(
     Acoustic(spatial_order=cfg['spatial_order'], device=device),
-    shape=shape, dev=device, dh=cfg['dh'], dt=cfg['dt'],
+    shape=shape, device=device, dh=cfg['dh'], dt=cfg['dt'],
     source_type=['h1'], receiver_type=['h1'],
     pml_type='cpmlr', impl='c',
-    cuda_options=CUDAOptions(
-        memory=MemoryOptions(strategy='boundary',
-                             boundary=BoundaryOptions(storage='gpu')),
-    ),
+    memory=BoundarySaving(storage='gpu'),
 )
 ```
 
@@ -84,9 +84,8 @@ the only thing that differs is `device`.
 
 ```python
 if rank == 0:
-    obs = chunked_observed_data(solver, wave, sources, receivers,
-                                models=[true_vp],
-                                forward_batchsize=cfg['forward_batchsize'])
+    obs, _ = chunked_observed_data(solver, wave, sources, receivers, true_vp,
+                                   forward_batchsize=cfg['forward_batchsize'])
 else:
     obs = None
 obs = broadcast_observed_data(rank, device, obs)
@@ -140,10 +139,10 @@ The diminishing returns come from the all-reduce (one synchronous step per
 optimizer iteration) and from the work that is *not* per-shot — observed
 data preparation, figure writing, optimizer step. For very small jobs
 (few shots, low spatial order) the per-step kernel time can become
-comparable to the NCCL handshake and you may want to stay on
-[single-process multi-GPU](../notebooks/12_multi_gpu.ipynb).
+comparable to the NCCL handshake and you may want to stay on one GPU (the
+[multi-GPU notebook](../notebooks/12_multi_gpu.ipynb) times both).
 
 ## See also
 
 - [`examples/multi-gpu/jax/fwi_marmousi_pmap.py`](https://github.com/DeepWave-KAUST/sweep/blob/dev/examples/multi-gpu/jax/fwi_marmousi_pmap.py) — the same idea with `jax.pmap` (single-process, but truly multi-device thanks to XLA SPMD).
-- [Single-process multi-GPU notebook](../notebooks/12_multi_gpu.ipynb) — when you don't want to deal with launchers.
+- [Multi-GPU notebook](../notebooks/12_multi_gpu.ipynb) — a 1-GPU baseline against a `torchrun` DDP run launched from the notebook.

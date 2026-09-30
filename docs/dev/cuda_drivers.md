@@ -18,20 +18,24 @@ in whichever copies happened to implement them. Now:
 | Skeleton (acoustic family) | `common/eq_driver.cuh` | `template <class Eq>`: `generic_forward` / `generic_backward` (full) / `generic_backward_bs` / `generic_backward_ckpt` / `generic_backward_recursive_ckpt`, plus `GenericForwardRunner` / `GenericBackwardBsRunner`. Second-order displacement form: `u_prev/u_now/u_next` buffer rotation, single-field sources and receivers, boundary saving stores one field, backward produces `grad_wavelet` and illumination. Members: acoustic2d, acoustic3d, acoustic_vrz2d. |
 | Skeleton (staggered family) | `common/sg_driver.cuh` | The five `sg_generic_*` entries plus `SgForwardRunner` / `SgBackwardBsRunner`. First-order velocity–stress form: fields update in place (no rotation), each step is a velocity substep followed by a stress substep, sources and receivers loop over field indices, boundary saving stores a list of fields per step, `last_two` is a snapshot of the final field set, and backward has neither `grad_wavelet` nor illumination. Members: elastic2d/3d, das_mu2d/3d, elastic_tti_sg2d/3d, elastic_vr2d. |
 | Per-equation traits | `equations/<eq>/driver_traits.cuh` | One `struct Driver`: constants, type aliases, and all-static composite launch hooks, laid out in five sections — [1] identity, [2] forward, [3] full, [4] bs, [5] ckpt+recursive — and within a section in skeleton call order. Reading the traits top to bottom is close to reading the execution flow. |
-| Thin entries | `equations/<eq>/forward.cu`, `backward.cu` | One line per entry: `return eqdrv::generic_forward<Driver>(in);` and so on, plus the `forward_runner` / `backward_bs_runner` factories. Exceptions: the APM entries of elastic2d/3d (`apm_forward` / `apm_backward*`) are still hand-written in the same file, and acoustic_vrz2d's chunk and recursive checkpoint backwards stay hand-written because they scan linear segments rather than bisecting the way the acoustic ones do. |
+| Thin entries | `equations/<eq>/forward.cu`, `backward.cu` | One line per entry: `return eqdrv::generic_forward<Driver>(in);` and so on, plus the `forward_runner` / `backward_bs_runner` factories. Exceptions: the APM forward entry of elastic2d/3d (`apm_forward`; there is no compiled APM backward) is still hand-written in `forward.cu`, and acoustic_vrz2d's chunk and recursive checkpoint backwards stay hand-written because they scan linear segments rather than bisecting the way the acoustic ones do. |
 
 `eq_driver.cuh` is a line-for-line transcription of acoustic2d's hand-written driver
 and `sg_driver.cuh` of elastic2d's; not one line of physics kernel changed. The hook
 granularity is deliberately **coarse** — one composite operation per step, not one
 hook per kernel — because family members differ in the **order** of operations within
-a step (2-D acoustic images after source injection and the swap, 3-D images before
-injection, VRZ injects before the restore). That order is load-bearing to the bit, so
+a step (2-D acoustic samples its ADCIG after the swap and the prefetch, 3-D inside the
+reconstruction step before the source is re-injected; VRZ injects the source before
+the strip restore, acoustic after it). That order is load-bearing to the bit, so
 the differences live in the equation's hooks and the skeleton carries no per-equation
 branch. The skeleton owns only what is genuinely shared: input validation,
-stepped/phase bookkeeping, buffer binding with the legacy fallback allocation,
-boundary and checkpoint runtime orchestration, the time loop, and output packing.
+stepped/phase bookkeeping, binding the propagator-allocated buffers (a missing
+required binding is a `SWEEP_CHECK`; only `illum_out` and the ADCIG cube keep a
+fallback allocation), boundary and checkpoint runtime orchestration, the time loop,
+and output packing.
 Still hand-written: das2d/3d (a third shape — derivative-buffer form),
-elastic_tti_2nd2d, acoustic_lsrtm2d/3d, acoustic_vrz3d, acoustic_vti_1st_2d/3d.
+elastic_tti_2nd2d, acoustic_lsrtm2d/3d, acoustic_vrz3d, acoustic_vti_1st_2d/3d,
+visco_acoustic2d.
 
 ### Persistent runners
 
@@ -59,7 +63,8 @@ acoustic. On the default path `sweep.backend.c.runners` wraps the core's runner 
 API (`core/capi.h`, `core/runner.h`) in `ForwardRunner` / `BackwardRunner` and
 exports the factories as `{C_NAME}_forward_runner` / `{C_NAME}_backward_bs_runner`
 for the equations listed in `sweep.backend.c.RUNNER_EQUATIONS` (`module.cpp` does
-the same through `py::class_` for the `SWEEP_JIT_FULL=1` shim); on the Python side
+the same through `py::class_` for the pybind shim: `SWEEP_JIT_FULL=1`, or a
+`SWEEP_BUILD_CUDA=1` ahead-of-time build); on the Python side
 `WaveEquation._compiled_runner_factories()` resolves the same convention and falls
 back to the per-call stepped path when a factory is missing.
 
@@ -68,8 +73,9 @@ back to the per-call stepped path when a factory is missing.
 * **forward** advances `[it_begin, it_end)` (`it_end < 0` means `nt`). A continuation
   with `it_begin > 0` must bind the Python-side `wavefields`, `record_out`,
   `u_allt_out` (when `save_all_wavefields`) and `boundary_gpu` (under boundary
-  saving) — otherwise the internal `allocate()` silently zeroes the propagation
-  state. `save_last_state` runs only on the final segment, `it_end == nt`. Acoustic
+  saving); each is checked, and a stepped call without it is refused with a
+  `SWEEP_CHECK` (the drivers have no fallback allocation that could zero the
+  propagation state). `save_last_state` runs only on the final segment, `it_end == nt`. Acoustic
   boundary-tail truncation (`boundary_tail_steps = K`) shifts `bs_it0` using the
   global `it`, so it composes transparently with segmentation.
 * **backward** runs in reverse from `bw_it_begin` (exclusive upper end, `< 0` means
@@ -78,24 +84,25 @@ back to the per-call stepped path when a factory is missing.
   bound, and in bs mode also `forward_wavefields` (the `RECON_WF_COUNT`
   reconstruction list). DD (`cut_face_mask != 0`) **supports `backward_bs` only**:
   the full path calls `set_cut_mask(0)`, and both checkpoint modes refuse stepped,
-  phased and cut inputs. Acoustic DD supports gpu-direct or cpu storage (not disk);
-  staggered DD supports gpu-direct only.
+  phased and cut inputs. Both families support gpu-direct or cpu boundary storage
+  under DD (not disk).
 * Scratch is declared, not allocated: `forward_workspace_nvar` and
   `backward_workspace_nvar` (or `backward_workspace_shapes`) in `cuda_layout` say how
   many padded grids per shot the propagator hands the driver as `forward_workspace`
   (transient, one call) and `adjoint_workspace` (persistent, zeroed before every
-  gradient-bearing forward). A driver takes each slot with `pool_or_zeros`
+  gradient-bearing forward). A driver takes each slot with `pool_required`
   (`common/cudautils.h`), names the slots in an enum, checks the declared count at
-  entry, and allocates nothing of its own; an unbound pool still falls back to a
-  fresh zero tensor per slot.
+  entry, and allocates nothing of its own; an unbound slot is refused with a
+  `SWEEP_CHECK` ("the compiled drivers no longer allocate it").
   Gradient outputs follow the same rule: the propagator allocates `grads_out`
   (zeroed; `grads_out_has_wavelet` decides whether slot 0 is `grad_wavelet`) on the
   monolithic path as well as the stepped one, and every driver binds them
-  (`bind_grads`, or slot by slot with `pool_or_zeros`) rather than allocating.
+  (`bind_grads` / `bind_backward_outputs`, or slot by slot with `pool_required`)
+  rather than allocating.
   The full-mode history is the same story: `cuda_layout.save_all_shape(B, nt, grid)`
   declares the driver's own `u_allt` layout, the propagator allocates it per
   gradient-bearing full-mode call and binds it as `u_allt_out`, and the driver
-  takes it through `bound_or_zeros` (shape-checked).
+  takes it through `bound_required` (shape-checked, refused when unbound).
   The record is the same: `cuda_layout.record_shape(B, nrec, nfield, nt)` declares the
   driver's layout (`record_single` / `record_multi`), the propagator allocates it per
   call and binds it as `record_out` on the monolithic path as well as the stepped one.
@@ -116,26 +123,28 @@ back to the per-call stepped path when a factory is missing.
   hands the bs backward as `forward_wavefields` (the physical fields it steps
   backwards from `u_last_two`, plus the carriers the imaging reads; no CPML memory,
   the reverse loop injects boundaries instead). A driver takes the list through
-  `wavefields_bound` (count + per-slot geometry check, `common/cudautils.h`), binds
+  `wavefields_required` (count + per-slot geometry check, `common/cudautils.h`; an
+  unbound list is refused -- there is no fallback allocation), binds
   the physical fields with `use_pml=false` (or a `bind_physical`/`bind_recon` of its
   own struct that leaves the memory members undefined -- `view()` then hands
-  `ptr_or_null` for them) and the carriers from the tail of the list, and allocates
-  only when nothing was bound.
+  `ptr_or_null` for them) and the carriers from the tail of the list.
   The checkpoint modes take the same route: `forward_wavefields` holds the replay
   STATE sets (one set = the forward slot list without the psi double-buffer
   shadows, `cuda_layout.checkpoint_state_nvar` when declared; `1 + depth(max_segment)`
   sets for a bisecting driver that declares `recursive_state_depth`), taken with
   `wavefield_set(list, k, n, what)` and bound with the struct's full bind; the
   segment histories come from `checkpoint_replay` (`checkpoint_replay_shapes(B, nt,
-  shape, max_segment, mode)`, bound once per call and narrowed per segment with
-  `pool_rows`); the velocity carriers and other per-call scratch come from the
+  shape, max_segment, mode)`, bound once per call and required in the mode that
+  reads it; the acoustic skeleton replays each chunk into a prefix of its rows, the
+  staggered one `narrow`s it per chunk); the velocity carriers and other per-call scratch come from the
   adjoint workspace pool (`backward_workspace_shapes(..., mode)`). A driver whose state
   set is not the forward slot list declares `checkpoint_state_nvar` explicitly (LSRTM: 7 / 9).
-  Scratch that is not a padded grid (complex spectra as float32 `[B, 1, *grid, 2]`
-  slots viewed with `torch::view_as_complex`, a cuFFT work area as a flat slot) is
+  Scratch that is not a padded grid (complex spectra as interleaved float32
+  `[B, 1, *grid, 2]` slots, a cuFFT work area as a flat slot) is
   declared by shape: `forward_workspace_shapes(B, shape)` (uninitialised, transient) and
-  `backward_workspace_shapes`; the visco driver runs its FFTs on the plan ATen itself
-  would build (`at::native::detail::CuFFTConfig`, work area from the pool), so the
+  `backward_workspace_shapes`; the visco driver builds its cuFFT plans itself, with the
+  parameters ATen's `_exec_fft` derives (`cufftXtMakePlanMany` in
+  `visco_acoustic2d/fft.cu`, work area from the pool, no private ATen header), so the
   spectra are bit-identical to `at::fft_fft2` and nothing is allocated per step.
   Illumination accumulators come as `illum_out` (`cuda_layout.illum_nvar`, bound by the
   monolithic backward when illumination was asked for) and are allocated in C++ only for
@@ -192,6 +201,17 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 
 ## 2. Hook timing map (verbatim from the two skeleton file headers)
 
+Three statements in the `eq_driver.cuh` header predate later changes and are kept
+verbatim; the code differs:
+
+- its ordering example: 2-D acoustic now images inside the reverse NOPML step and
+  on the restore strips before re-injecting the source, as 3-D does;
+- "buffer binding with legacy fallback allocation": the "Buffer ownership"
+  paragraph below it is current (a missing required binding is a `SWEEP_CHECK`);
+- `generic_forward`: `capture_allt` runs **before** `rotate_buffers`
+  (`eq_driver.cuh` forward loop), and only acoustic_vrz2d uses it (acoustic2d/3d
+  capture in-kernel through `u_thist`).
+
 `common/eq_driver.cuh`:
 
 ```text
@@ -220,12 +240,22 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 // equation's copy disagreed with acoustic2d in loop structure, the difference
 // lives in that equation's hooks, never in a per-equation branch here.
 //
+// Buffer ownership: every buffer these drivers read or write is allocated by
+// the propagator (src/sweep/propagator/_c.py, the only place that builds a
+// ForwardInput / BackwardInput) and bound on the input struct.  A binding the
+// propagator makes unconditionally for every equation and mode reaching a site
+// is REQUIRED here -- a missing one is a SWEEP_CHECK naming the cuda_layout
+// field that declares it, never a quiet driver-side allocation.  The two
+// conditional bindings keep their fallback and say why at the site:
+// ``illum_out`` (bound only when the caller asked for illumination) and the
+// ADCIG cube (allocated by init_rtm_output for an ADCIG-only backward).
+//
 // ---------------------------------------------------------------------------
 // HOOK TIMING MAP — read this before any equation's driver_traits.cuh.
 // Per entry point, the traits hooks fire in exactly this order; everything
 // not named here is shared runtime (checkpoint / boundary machinery).
 // Prologue of every entry (in call order): validate_forward / (backward:
-// check_stepped + validate_backward + bind_backward_outputs / alloc_grads +
+// check_stepped + validate_backward + bind_backward_outputs +
 // rtm gate), bind_or_alloc_* wavefields, alloc_cpml, setup_ctx,
 // init_aux_slabs, make_state, make_bwd_workspace.
 //
@@ -244,7 +274,7 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 //
 // generic_backward (full storage) — per reverse it:
 //   adjoint_step               adjoint stencil; with HAS_FUSED_FULL_IMG the
-//                              imaging of u_forward[it+1] fuses into it
+//                              imaging of u_forward.select(0, it+1) fuses into it
 //   inject_adjoint_source      residual injection
 //   rotate_adjoint_buffers     adjoint buffer-role rotation
 //   accumulate_source_grad     grad_wavelet sampling
@@ -270,6 +300,13 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 // generic_backward_recursive_ckpt — bisection over each ckpt segment; a
 //   leaf runs one replay triple, then the reverse-five of ckpt mode with
 //   the imaging fed from the leaf's scratch u.
+//
+// Propagator-owned buffers of the two checkpoint skeletons (see the
+// AcousticCkptReplaySlot / AcousticRecursiveWorkspaceSlot enums): the replay STATE rides
+// p.forward_wavefields as K sets of Eq::CKPT_STATE_COUNT tensors (set 0 via
+// bind_or_alloc_recon_ckpt; recursive mode adds one scratch set per bisection
+// level via bind_or_alloc_recursive_scratch), the chunk history rides
+// p.checkpoint_replay, the leaf scratch p.adjoint_workspace.
 // ---------------------------------------------------------------------------
 ```
 
@@ -303,19 +340,22 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 // not named here is shared runtime (checkpoint / boundary machinery).
 // Prologue of every entry (in call order): validate_backward (backward only),
 // parse_models, setup_ctx, bind_or_alloc_* wavefields, init_aux_slabs,
-// alloc_cpml, bind_grads / alloc_grads, make_workspace, make_state,
+// alloc_cpml, bind_grads, make_workspace, make_state,
 // adjoint_source_signs.
 //
 // sg_generic_forward — per it in [it_begin, it_end):
 //   velocity_substep           v: t -> t+1/2           (DD step_phase 1)
-//   stress_substep             s: t -> t+1, u_allt[it] (DD step_phase 2 from here)
+//   stress_substep             s: t -> t+1, u_allt.select(0, it) (DD step_phase 2 from here)
 //   inject_source              per source field
 //   <checkpoint save>          shared runtime, not a hook
 //   save_boundary_fields       BS strips (when use_boundary_saving)
 //   record_field               per receiver field
 //   after the loop: save_last_state (final 5-field snapshot for backward_bs)
 //
-// sg_generic_backward (full storage) — per reverse it:
+// sg_generic_backward (full storage) — prologue: the read-only zero grid the
+//   imaging reads as v(nt) at it = nt-1, adjoint_workspace slot
+//   SgCarrierSlots::FULL_ZERO (IMAGING_USES_NEXT_V equations only).  Per
+//   reverse it:
 //   fix_rho_grad_at_sources    body-force rho correction (pre-residual)
 //   inject_residuals           signed residuals into the adjoint fields
 //   vel_ptrs_from_u_forward    v(it) / v(it+1) pointers from u_forward
@@ -332,7 +372,13 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 //   before the loop (first segment): seed_recon from u_last_two.
 //   (DD runs step_phase 3 = injections, then 1, then 2 — same op order.)
 //
-// sg_generic_backward_ckpt — per chunk (sg_backward_segment):
+// sg_generic_backward_ckpt — prologue: bind_or_alloc_recon_ckpt (the replay
+//   state = forward_wavefields set 0, CKPT_STATE_COUNT tensors, one for the
+//   whole call), seg_buffers (the N_VEL velocity histories, checkpoint_replay
+//   slots sized for the longest chunk), the cross-chunk carriers from
+//   adjoint_workspace (SgCarrierSlots, after the equation's WS_CARRIERS
+//   scratch slots).  Per chunk (sg_backward_segment; the chunk's snapshot is
+//   loaded straight into the replay state, chunk 0 zeroes it):
 //   replay:  velocity_substep / stress_substep / save_seg_velocities /
 //            inject_forward_sources
 //   reverse: fix_rho_grad_at_sources / inject_residuals / vel_ptrs_from_seg /
@@ -340,7 +386,9 @@ mask in the same `SolverContext` uses the opposite axis order (bit0 = z_lo);
 //            (it > 0) plain_adjoint_step
 //   after each chunk: export_seg_next_v hands v(start+1) to the older chunk.
 //
-// sg_generic_backward_recursive_ckpt — per reverse it:
+// sg_generic_backward_recursive_ckpt — prologue: bind_or_alloc_recon_ckpt
+//   (replay state = forward_wavefields set 0), current_v / next_v from
+//   adjoint_workspace (SgCarrierSlots).  Per reverse it:
 //   fix_rho_grad_at_sources / inject_residuals
 //   sg_replay_forward_to_time: velocity/stress substeps + capture_velocities
 //                              (IMAGING_USES_NEXT_V eqs also capture v at it+1)
@@ -365,23 +413,24 @@ Constants: `NDIM`, `NAME`, `CKPT_NVAR`, `BS_NVAR` (how many fields the saver sto
 `CUT_MASK_BITS`/`CUT_MASK_DESC`, `ADJ_WF_COUNT`, `RECON_WF_COUNT`,
 `HAS_FUSED_FULL_IMG` (mode B folds the lagged imaging into the adjoint kernel),
 `ADCIG_IN_FULL_MODES`, `BS_HAS_IT0_ADJOINT_TAIL` (whether the BS loop is followed by
-the four adjoint hooks at `it == 0`).
+the four adjoint hooks at `it == 0`), `CKPT_STATE_COUNT` (tensors per checkpoint
+replay-state set in `forward_wavefields`).
 Types: `Wavefield`, `CPML`, `State`, `BwdWorkspace`, `BsScratch`.
 
 | Hook | Purpose | Modes |
 |---|---|---|
 | `make_state(p, d, ctx, launch, src_cfg, rec_cfg)` | Model pointers, operator parameter blocks and launch configuration, built once outside the loop | all |
-| `make_bwd_workspace(p, state, ctx, adjoint)` | Adjoint scratch (empty for acoustic; VRZ zeroes the adjoint state here and builds the C0/Cx/Cz coefficients) | B, BS, CK, RC |
-| `make_bs_scratch(p, vp)` | Per-step BS scratch (the 3-D NOPML output field `f_this`) | BS |
+| `make_bwd_workspace(p, state, ctx, adjoint)` | Adjoint scratch (empty for acoustic; VRZ takes its seven grids from the bound `adjoint_workspace`, zeroes the adjoint state and builds the C0/Cx/Cz coefficients) | B, BS, CK, RC |
+| `make_bs_scratch(p, vp)` | Per-step BS scratch (empty in every member; 3-D's former NOPML output field `f_this` is retired) | BS |
 | `validate_forward(p)` / `validate_backward(p, need_recon)` | The equation's own entry validation, hand-written text preserved | F / B, BS |
 | `setup_ctx(ctx, p)` | `SolverContext` extras for the family: topography rows, per-edge free-surface faces, APM flags | all |
 | `init_aux_slabs(ctx, wf)` | Install the CPML aux strip (slab) geometry | all |
-| `alloc_cpml(cpml, p)` | Allocate the CPML profile tensors | all |
+| `alloc_cpml(cpml, p)` | Bind the propagator's CPML profile tensors (`cpml.bind(p.pml_vals, …)`) | all |
 | `allt_shape(d, nt)` | Shape of the `u_allt` / ckpt chunk buffer | F, CK |
 | `save_width(abcn, M)` | Boundary strip width | F, BS |
-| `bind_or_alloc_forward` / `_adjoint` / `_recon` / `_recon_ckpt`, `bind_or_alloc_recursive_scratch` | Bind the Python wavefield lists, allocating internally when empty (ckpt shapes follow the checkpoint slot layout) | F / B,BS,CK,RC / BS / CK,RC / RC |
-| `bind_backward_outputs(p, grads, illum, want_adcig)` | Bind or allocate `grads` (slot 0 is `grad_wavelet`) and the illumination outputs; VRZ implements its own | B, BS |
-| `alloc_grads(p, grads)` / `pack_outputs(out, grads, illum)` | Internal gradient allocation for ckpt / packing the `BackwardOutput` | CK, RC / B, BS, CK, RC |
+| `bind_or_alloc_forward` / `_adjoint` / `_recon` / `_recon_ckpt`, `bind_or_alloc_recursive_scratch` | Bind the propagator's wavefield lists — mandatory, an empty list is refused with a `SWEEP_CHECK` (ckpt sets follow the checkpoint slot layout) | F / B,BS,CK,RC / BS / CK,RC / RC |
+| `bind_backward_outputs(p, grads, illum, want_adcig)` | Bind `grads_out` (mandatory; slot 0 is `grad_wavelet`) and the illumination outputs (`illum_out` keeps its fallback); VRZ implements its own | B, BS, CK, RC |
+| `pack_outputs(out, grads, illum)` | Packing the `BackwardOutput` | B, BS, CK, RC |
 | `rtm_out_full` / `rtm_out_bs` | Whether RTM/illumination/ADCIG are on (returns a pointer or nullptr) | B, CK, RC / BS |
 | `fused_grad_ptr(grads)` / `u_forward_ptr(p, it)` | Gradient target for fused imaging / pointer to the full-storage forward field at step it | B (fused) / B, CK |
 | `launch_step_range(state, ctx, xb, xe, view, save_all, u_thist, cpml)` | The whole stencil step over x ∈ [xb, xe) (air-clear prepass included); the skeleton passes the phase strip range | F |
@@ -389,16 +438,17 @@ Types: `Wavefield`, `CPML`, `State`, `BwdWorkspace`, `BsScratch`.
 | `inject_source_fwd(state, ctx, view, p, it, nsrc)` | Source injection; overloaded for `ForwardInput` and `BackwardInput` (the latter for ckpt replay) | F, CK, RC |
 | `record(state, ctx, view, record, p, it, nrec)` | Receiver sampling | F |
 | `rotate_buffers(wf)` | Forward buffer-role rotation (`swap_pml`: u and psi double buffers) | F |
-| `capture_allt(u_allt, wf, it)` | Tensor-copy history capture after the swap (VRZ stores 5 fields; empty for acoustic) | F |
+| `capture_allt(u_allt, wf, it)` | Tensor-copy history capture before the swap (VRZ stores 6 fields: u, the four CPML aux, the second time difference; a no-op for acoustic, which captures in-kernel) | F |
 | `save_last_state(saver, wf)` | After the final segment, store `u_prev/u_now` into `last_two` | F |
 | `adjoint_step(state, ctx, adj_view, cpml, ws, img_fwd, grad_out)` | Fused adjoint stencil; when `img_fwd/grad_out` are non-null it also does the lagged imaging | B, BS, CK, RC |
-| `inject_adjoint_source(state, ctx, adj_view, p, it, nsrc, ws)` | Residual injection (VRZ injects the negated residual) | B, BS, CK, RC |
-| `rotate_adjoint_buffers(wf)` | Adjoint buffer rotation (`swap_aux`, or `swap_pml` for VRZ) | B, BS, CK, RC |
+| `inject_adjoint_source(state, ctx, adj_view, p, it, nsrc, ws)` | Residual injection (VRZ injects the negated residual, `add_source_signed` with sign -1) | B, BS, CK, RC |
+| `rotate_adjoint_buffers(wf)` | Adjoint buffer rotation (`swap_aux`: u + psi + zeta) | B, BS, CK, RC |
 | `accumulate_source_grad(state, ctx, adjoint, p, grads, it, nsrc)` | Sample `grad_wavelet` (empty for VRZ) | B, BS, CK, RC |
 | `image_step(state, ctx, fwd_ptr, adjoint, grads*, rtm_out, ws)` | Standalone imaging plus RTM/illumination; `grads == nullptr` means the imaging is already fused | B, CK, RC |
-| `seed_reconstruction(state, ctx, forward, p)` | First segment: seed the reconstruction fields from `u_last_two` and zero the absorbing rim (except on cut faces) | BS |
+| `seed_reconstruction(state, ctx, forward, p)` | First segment: seed the reconstruction fields from `u_last_two` (acoustic2d also zeroes the absorbing rim, except on cut faces; 3-D zeroes none, VRZ zeroes `u_next` only) | BS |
 | `bs_recon_step(state, ctx, forward, adjoint, rt, bs, w, cpml, p, grads, rtm, ws, scratch, it, bs_it0)` | One reverse reconstruction step (NOPML, restore, imaging, source injection, swap) — the order here is this equation's bit-level order | BS |
-| `bs_rtm_tap(state, ctx, forward, adjoint, illum, compute_illum)` | RTM/illumination/ADCIG sampling after the prefetch | BS |
+| `bs_rtm_tap(state, ctx, forward, adjoint, illum, compute_illum)` | Sampling after the prefetch: 2-D ADCIG on raw pressure (illumination now accumulates inside `bs_recon_step`; empty for 3-D and VRZ) | BS |
+| `bs_illum_tail(state, ctx, adjoint, illum)` | After the `it == 0` adjoint tail: the receiver-illumination term at `it == 0` (only under `compute_illumination`; empty for VRZ) | BS |
 | `replay_step(state, ctx, view, cpml, save_all, u_this)` / `rotate_recon_buffers(wf)` | Whole-domain forward step for ckpt replay / the swap after a replay | CK, RC |
 
 ### Staggered family (`sg_driver.cuh`)
@@ -407,20 +457,23 @@ Constants: `NDIM`, `NAME`, `CKPT_NVAR`, `CKPT_COUNT_MSG`, `CKPT_RECURSIVE_COUNT_
 `BS_NVAR`, `CUT_MASK_BITS`/`CUT_MASK_DESC`, `ADJ_WF_COUNT`, `RECON_WF_COUNT`,
 `RECON_LIST_DESC`, `N_VEL` (number of velocity components), `IMAGING_USES_NEXT_V`
 (whether imaging consumes a v(t+1) carrier; when false, recursive replay breaks
-immediately after the target step and allocates no cross-segment carrier).
+immediately after the target step and takes no cross-segment carrier),
+`CKPT_STATE_COUNT` (tensors in the checkpoint replay-state set, `forward_wavefields`
+set 0), `WS_CARRIERS` (the equation's own `adjoint_workspace` scratch slots; the
+skeleton's velocity carriers, `SgCarrierSlots`, follow them).
 Types: `Wavefield`, `WfView`, `CPML`, `Models`, `State`, `Workspace`, `VelPtrs`,
 `ReconCarriers`.
 
 | Hook | Purpose | Modes |
 |---|---|---|
 | `parse_models(p)` | Bind the models from `p.models` and fill the derived coefficients (lambda/mu and so on) into the propagator's `derived_models` slots through `derived::lame` / `derived::vti_stiffness` / `derived::reciprocal` (`common/derived_models.h`); the struct holds them alive | all |
-| `make_state(p, d, models, launch, src_cfg, rec_cfg)` / `make_workspace(p, vp)` | Parameter pack built outside the loop / adjoint workspace (`init_adjoint_workspace` or internal scratch) | all / B, BS, CK, RC |
+| `make_state(p, d, models, launch, src_cfg, rec_cfg)` / `make_workspace(p, vp)` | Parameter pack built outside the loop / adjoint workspace, bound from the propagator's `adjoint_workspace` (`bind_adjoint_workspace_required`, or the equation's own `pool_required` slots) | all / B, BS, CK, RC |
 | `validate_forward(p)` / `validate_backward(p, "full"\|"bs"\|"ckpt"\|"ckpt_recursive")` | Entry validation, hand-written text preserved per mode, run before the stepped checks | F / B, BS, CK, RC |
 | `setup_ctx` / `init_aux_slabs` / `alloc_cpml` / `allt_shape` | As in the acoustic family (sg's `save_width` is fixed at `M + 1`, so there is no hook) | all |
 | `field_ptr(wf, idx)` / `view(wf)` | Pointer by field index (for the source/receiver loops) / get a `WfView` | all |
-| `bind_or_alloc_forward` / `_adjoint` / `_recon` (returns `ReconCarriers`) / `_recon_ckpt`, `bind_or_alloc_recursive_scratch`, `check_ckpt_aux_layout` | Bind or allocate each wavefield set; recon also carries v(t+1); ckpt validates that the aux layout agrees | F / B,BS,CK,RC / BS / CK,RC / CK,RC / CK |
+| `bind_or_alloc_forward` / `_adjoint` / `_recon` (returns `ReconCarriers`) / `_recon_ckpt`, `bind_or_alloc_recursive_scratch`, `check_ckpt_aux_layout` | Bind each wavefield set the propagator hands over (mandatory; an empty list is refused); recon also carries v(t+1); ckpt validates that the aux layout agrees | F / B,BS,CK,RC / BS / CK,RC / CK,RC / CK |
 | `zero_adjoint_if_first_segment(adjoint, first_segment)` / `zero_adjoint_if_first_segment_bs(...)` | Zero the adjoint state on the first segment (needed by the 3-D members; empty in 2-D) | B / BS |
-| `bind_grads(p, grads)` / `alloc_grads(vp, grads)` | Bind `grads_out` (stepped) or allocate; the element count is the number of models | B, BS, CK / RC |
+| `bind_grads(p, grads)` | Bind `grads_out` (mandatory, accumulated `+=`); the element count is the number of models | B, BS, CK, RC |
 | `adjoint_source_signs(p, receiver_fields)` | The sign each receiver field's residual is injected with (stress receivers -1, velocity +1; EVR all +1): `add_source_signed` flips the sample's sign bit, no negated copy of the residual is built | B, BS, CK, RC |
 | `velocity_substep(state, wf, cpml, solver)` / `stress_substep(state, wf, cpml, solver, u_this)` | The two half-step kernels (also used by ckpt and recursive replay) | F, CK, RC |
 | `inject_source(state, solver, field, source, loc, it, nsrc)` | Single-field source injection (the skeleton loops over `source_field_indices`) | F |
@@ -434,9 +487,9 @@ Types: `Wavefield`, `WfView`, `CPML`, `Models`, `State`, `Workspace`, `VelPtrs`,
 | `full_mode_step(state, solver, adjoint, ws, cpml, vptrs, grads, p, rec_fields, it, nsrc)` | One full-mode step: imaging, receiver-rho and the adjoint step, in the equation's own fused order | B (it>0) |
 | `plain_adjoint_step(state, solver, adjoint, ws, cpml)` | The four-kernel adjoint step with no imaging arguments | CK, RC (it>0) |
 | `seed_recon(forward, p)` | First segment: seed the reconstruction fields from `u_last_two` | BS |
-| `uninject_forward_source(state, solver, for_view, p, src_fields, neg_src, it, nsrc)` | Un-inject the source from the reconstruction fields (-source) | BS |
+| `uninject_forward_source(state, solver, for_view, p, src_fields, it, nsrc)` | Un-inject the source from the reconstruction fields (`add_source_signed`, sign -1; no negated copy) | BS |
 | `bs_stress_half(...)` / `bs_velocity_half(...)` | See the timing map; DD phases 1 and 2 call one each | BS |
-| `seg_buffers(p, vp, max_rows)` / `save_seg_velocities(seg, fwd, slot)` / `export_seg_next_v(prev, seg)` | Per-segment velocity buffers for ckpt: allocate / capture per step / hand v(start+1) to the earlier segment | CK |
+| `seg_buffers(p, vp, max_rows)` / `save_seg_velocities(seg, fwd, slot)` / `export_seg_next_v(prev, seg)` | Per-segment velocity buffers for ckpt: take the `N_VEL` `checkpoint_replay` slots (mandatory) / capture per step / hand v(start+1) to the earlier segment | CK |
 | `inject_forward_sources(state, solver, for_view, p, src_fields, it)` | Forward source injection during replay (`BackwardInput` field names) | CK, RC |
 | `capture_velocities(v, forward)` | Recursive replay captures v(it) at the target step (and v(it+1) when `IMAGING_USES_NEXT_V`) | RC |
 
@@ -449,16 +502,16 @@ each `driver_traits.cuh`.
 
 | Equation | Difference from the reference |
 |---|---|
-| acoustic2d | The acoustic family reference (the baseline itself); its file header spells out what "same as acoustic2d" means term by term — constants, `State`, the behaviour of each hook, and the bs order NOPML → restore → band imaging → injection → swap. |
-| acoustic3d | No `ctx.set_per_edge` (per-edge free surfaces are 2-D only); the fused adjoint carries triple double-buffering of psi and zeta (15 adjoint tensors, `adjoint_extra_nvar=3`); the BS reverse step images **before** the forward source injection (2-D images after injection and the swap), and its NOPML kernel writes a per-step scratch field (`BsScratch.f_this`); ADCIG is offered by `backward_bs` only (the quantity full/ckpt imaging correlates is vp²·Lap(u), not the raw pressure) and there is no seed rim zeroing; the old hand-written `backward_bs` passed nullptr lap/grad coefficient pointers in its `SolverContext` while the skeleton always passes real ones — the bs path never dereferences them, so this is inert to the bit. |
-| acoustic_vrz2d | Models are `[vp, z]` with `inv_z` derived; `TANGENT_PAD=1` (strips sit M inside the pad, offset −M); `ADJ_WF_COUNT=9` (the adjoint rotates through `swap_pml`, with no zeta double buffer); no `grad_wavelet` (`accumulate_source_grad` is an empty hook and `grads_out` slot 0 is unused) and no RTM/illumination/ADCIG (both gates return nullptr, `ADCIG_IN_FULL_MODES=false`); `HAS_FUSED_FULL_IMG=false` (a standalone `CALCULATE_GRAD_VRZ2D_AUTO` per step); `BS_HAS_IT0_ADJOINT_TAIL=false` (the bs floor is it==1); `BwdWorkspace` holds the negated residual, the one-shot `BUILD_VRZ_ADJOINT_COEFFS` C0/Cx/Cz and the split-gradient scratch, and `make_bwd_workspace` zeroes the adjoint state on the way through; adjoint injection uses the **negated** residual; `u_allt` stores 5 fields (u, psix, psiz, zetax, zetaz) written by `capture_allt` as a tensor copy, with the in-kernel `u_this` path off; `save_width` is always M+1; no `setup_ctx` and no aux slabs; the BS order is NOPML → source injection → restore → swap → image on the post-swap `u_now`; the seed additionally zeroes `u_next` and its rim zeroing carries no cut mask; `launch_step_range` refuses a sub-range (no phase split); the chunk and recursive ckpt backwards keep their hand-written linear-segment scan (the recursive entry simply forwards to the chunk one). |
-| elastic2d | The staggered family reference (the baseline itself); its file header likewise spells out what "same as elastic2d" means. The APM entries stay hand-written. |
-| elastic3d | 9 physical fields / 36 wavefield tensors / an 18-tensor adjoint workspace, and three velocity carriers (`N_VEL=3`); DD cuts on x/y only (mask 0x33), which the forward validates; the bound and snapshot lists backfill a missing `m_syzx` memory field (a historical layout quirk); the full backward zeroes the adjoint state on the first segment only (2-D relies on Python-zeroed buffers); reconstruction binding accepts a 12-tensor list (9 fields + 3 carriers) or, leniently, any complete list that carries its own carriers. The APM entries stay hand-written. |
-| das_mu2d | The velocity substep is elastic2d's own kernel, reached through the wavefield's `elastic_view()` adapter; the stress substep is a custom stress+strain kernel (the strain integration happens inside it), so each step's view is a **pair** (the das view and the elastic view). The CPML memory variables stay whole-domain: an identity aux slab **must** be installed before any kernel launch (the aux-slab contention incident). An 8-field BS list (5 elastic + 3 strain; only the 5 elastic ones are restored — strain is recorded only), 18 wavefield tensors, an 8-field `last_two` that also reads the old 5-field format leniently. The full backward has **no** gradient fusion: standalone imaging → receiver-rho correction → then the adjoint step. Checkpointing snapshots the whole-domain state (`allocate`, not `allocate_from_snapshots`) with no aux layout check. No DD cut support (`CUT_MASK_BITS=0`: the borrowed kernels are not cut-aware). New from the skeleton (dormant for the old callers): stepped ranges, Python-bound record/wavefield/gradient buffers, the physical phase split, and loud stepped/phase validation; the old `backward_bs`'s dead `f_this` scratch allocation is gone. |
-| das_mu3d | Structurally the 3-D das_mu2d (family differences above). Its own 3-D differences: 15 physical fields (9 elastic + 6 strain) / 33 wavefield tensors / an 18-tensor adjoint workspace, three velocity carriers (`N_VEL=3`); BS stores all 15 fields but restores only the 9 elastic ones (strain is recorded only and, unlike 2-D, is never seeded from `last_two` — the hand-written seed copies 9 fields); reconstruction wavefield binding and allocation carry **no** CPML memory tensors (`use_pml=false`; 2-D keeps them); the full backward zeroes the adjoint state after binding (2-D relies on Python zeroing), mapped onto the first-segment `zero_adjoint_if_first_segment`; full/ckpt imaging uses the shared `LAUNCH_CALCULATE_GRAD_3DELASTIC_BS` over a pure velocity view (2-D has a dedicated `_NOBS` kernel). |
-| elastic_tti_sg2d | The model set is rho plus 15 stiffness tensors (16 gradients); the kernels take a `StiffnessPointer` rebuilt on demand from `p.models`/grads. Three velocity components on a 2-D grid (TTI couples vy), `N_VEL=3`, and the signed adjoint sources use the 3-D field layout. The adjoint workspace is six plain scratch tensors, taken from `p.adjoint_workspace` when bound (`ElasticTTISG.cuda_layout.backward_workspace_shapes`: 6 per shot in 2-D) and allocated internally otherwise (`eqdrv::pool_or_zeros`). `u_allt` stores all 8 physical fields rather than velocities only. BS reconstruction binds the propagator's 11-grid list (8 physical fields + 3 velocity carriers, `bs_reconstruction_nvar=11`), allocating only when nothing was bound. Per-mode entry validation keeps its hand-written text (`validate_backward`). No recursive checkpointing: the forward refuses it, `backward.cu` does not instantiate the recursive driver, and the recursive-only hooks (`capture_velocities`, `vel_ptrs_from_carriers`, `CKPT_RECURSIVE_COUNT_MSG`) are deliberately absent. No DD cut support and no aux slabs (the CPML memory lives in the equation's own wavefield tensors). |
-| elastic_tti_sg3d | Against its 2-D sibling: the model set is rho plus 21 stiffness tensors (22 gradients) and 12 PML profiles; the wavefields and workspace are the **shared** elastic types (`ElasticWavefieldTensor`, 36 tensors; `ElasticAdjointWorkspaceTensor` via `init_adjoint_workspace`, bound from `p.adjoint_workspace` -- 18 per shot, like elastic3d -- when the propagator declares it) — and unlike elastic3d there is no `m_syzx` backfill; `u_allt` stores the three velocities only (2-D stores all 8 fields); **both** the full and the BS backward zero the adjoint state after binding (`zero_adjoint_if_first_segment` and `zero_adjoint_if_first_segment_bs`; 2-D zeroes in neither); the forward refuses `free_surface` outright (an anisotropic medium refuses the image method); the velocity kernels take only `model.rho` while the stress kernels take the full `StiffnessPointer`. Same as 2-D: reconstruction wavefields are always allocated internally, no recursive checkpointing (the recursive-only hooks are deliberately absent), no DD cut support, no aux slabs. |
-| elastic_vr2d | Six primary models `{vp, vs, Rp_x, Rp_z, Rs_x, Rs_z}`, six gradients, and no rho — so every rho hook (`fix_rho_grad_at_sources`, `fix_rho_grad_at_receivers`) is empty and the imaging has no v(t+1) term (`IMAGING_USES_NEXT_V=false`: recursive replay breaks at the target step and allocates no cross-segment velocity carrier). The wavefields reuse `ElasticWavefieldTensor` (the vx/vz slots hold the momenta px/pz), and the 15-tensor binding, the checkpoint layout and the 5-field BS list all match elastic2d. Every backward mode zeroes the adjoint stress surface rows immediately after residual injection (the adjoint of the forward free-surface BC); that kernel sits at the end of `inject_residuals`. Every mode follows its gradient kernel with a chain-rule kernel (`LAUNCH_EVR_GRAD_CHAIN_APPLY`) — both live in `image_standalone`. The 14-slot adjoint workspace pool is split between the adjoint-step half (slots 0–9, `Workspace`) and the imaging half (slots 10–13 plus a zero-momentum buffer, hung off `State` for `image_standalone`). `backward_bs` never binds Python reconstruction wavefields (it always allocates, with no carriers), and the ckpt/recursive states use a plain full-shape `allocate` rather than a snapshot-driven aux layout. |
+| acoustic2d | The acoustic family reference (the baseline itself); its file header spells out what "same as acoustic2d" means term by term — constants, `State`, the behaviour of each hook, and the bs order NOPML (fused imaging) → restore → strip-source un-injection → band imaging → illumination → injection → swap, with the ADCIG in `bs_rtm_tap` after the prefetch (the header's `bs_rtm_tap` bullet predates the move of illumination into `bs_recon_step`). |
+| acoustic3d | No `ctx.set_per_edge` (per-edge free surfaces are 2-D only); the fused adjoint carries triple double-buffering of psi and zeta (15 adjoint tensors, `adjoint_extra_nvar=3`); `CKPT_STATE_COUNT = 9` (u triple + the 6 CPML aux slabs); the BS reverse step follows the 2-D order (NOPML with fused imaging → restore → strip-source un-injection → band imaging → illumination) but also takes its ADCIG there, before the forward source injection, so its `bs_rtm_tap` is empty; the NOPML kernel's per-step `f_this` store is retired (`BsScratch.f_this` stays undefined); ADCIG is offered by `backward_bs` only (the quantity full/ckpt imaging correlates is vp²·Lap(u), not the raw pressure) and there is no seed rim zeroing; the old hand-written `backward_bs` passed nullptr lap/grad coefficient pointers in its `SolverContext` while the skeleton always passes real ones — the bs path never dereferences them, so this is inert to the bit. |
+| acoustic_vrz2d | Models are `[vp, z]` with `inv_z` derived; `TANGENT_PAD=1` (strips sit M inside the pad, offset −M); `ADJ_WF_COUNT=11` (the exact CPML adjoint writes the new adjoint psi and zeta to separate buffers, rotated with `swap_aux`); no `grad_wavelet` (`accumulate_source_grad` is an empty hook and `grads_out` slot 0 is unused) and no RTM/illumination/ADCIG (both gates return nullptr, `ADCIG_IN_FULL_MODES=false`); `HAS_FUSED_FULL_IMG=false` (a standalone `CALCULATE_GRAD_VRZ2D_AUTO` per step); `BS_HAS_IT0_ADJOINT_TAIL=false` (the bs floor is it==1); `BwdWorkspace` holds the time-invariant C0/Cx/Cz adjoint coefficients (`BUILD_VRZ_ADJOINT_COEFFS`, once) and the split-gradient scratch — seven grids from the Python-bound `adjoint_workspace`, required — and `make_bwd_workspace` zeroes the adjoint state on the way through; adjoint injection uses the **negated** residual (`add_source_signed`, sign -1, no negated copy); `u_allt` stores 6 fields (u, psix, psiz, zetax, zetaz, the second time difference) written by `capture_allt` before the swap, with the in-kernel `u_this` path off; `save_width` is always M+1; no `setup_ctx` and no aux slabs; the BS order is NOPML → source injection → restore → image (`CALCULATE_GRAD_VRZ2D_AUTO` on `u_now` = U_it, before the swap) → swap; the seed additionally zeroes `u_next` and zeroes no boundary band (the offset −M band's pad cells are read by the first reverse step); `launch_step_range` refuses a sub-range (no phase split); the chunk and recursive ckpt backwards keep their hand-written linear-segment scan (the recursive entry simply forwards to the chunk one). |
+| elastic2d | The staggered family reference (the baseline itself); its file header likewise spells out what "same as elastic2d" means. The APM forward entry stays hand-written (there is no compiled APM backward). |
+| elastic3d | 9 physical fields / 36 wavefield tensors (`CKPT_STATE_COUNT = 36`) / an 18-tensor adjoint workspace (`WS_CARRIERS = 18`), and three velocity carriers (`N_VEL=3`); DD cuts on x/y only (mask 0x33), which the forward validates; the bound lists must carry the `m_syzx` memory field (`backfill_syzx` now only checks for it — the propagator always binds all 36 slots); the full backward zeroes the adjoint state on the first segment only (2-D relies on Python-zeroed buffers); reconstruction binding requires the 12-tensor list (9 fields + 3 carriers). The APM forward entry stays hand-written. |
+| das_mu2d | The velocity substep is elastic2d's own kernel, reached through the wavefield's `elastic_view()` adapter; the stress substep is a custom stress+strain kernel (the strain integration happens inside it), so each step's view is a **pair** (the das view and the elastic view). The CPML memory variables stay whole-domain: an identity aux slab **must** be installed before any kernel launch (the aux-slab contention incident). An 8-field BS list (5 elastic + 3 strain; only the 5 elastic ones are restored — strain is recorded only), 18 wavefield tensors, an 8-field `last_two` that also reads the old 5-field format leniently. The bs reconstruction is elastic2d's 7-tensor Python-bound list (5 elastic fields + 2 carriers, mandatory; the strains and the CPML memory are not carried). The full backward has **no** gradient fusion: standalone imaging → receiver-rho correction → then the adjoint step. Checkpointing snapshots the whole-domain state (full grids, not per-axis aux slabs) with no aux layout check; the ckpt/recursive replay state is set 0 of the Python-bound `forward_wavefields` (`CKPT_STATE_COUNT = 18`), the vx/vz histories are the two `checkpoint_replay` slots and the velocity carriers sit behind the 8 struct slots of `adjoint_workspace` (`WS_CARRIERS`). No DD cut support (`CUT_MASK_BITS=0`: the borrowed kernels are not cut-aware). New from the skeleton (dormant for the old callers): stepped ranges, Python-bound record/wavefield/gradient buffers, the physical phase split, and loud stepped/phase validation; the old `backward_bs`'s dead `f_this` scratch allocation is gone. |
+| das_mu3d | Structurally the 3-D das_mu2d (family differences above). Its own 3-D differences: 15 physical fields (9 elastic + 6 strain) / 33 wavefield tensors / an 18-tensor adjoint workspace, three velocity carriers (`N_VEL=3`); BS stores all 15 fields but restores only the 9 elastic ones (strain is recorded only and, unlike 2-D, is never seeded from `last_two` — the hand-written seed copies 9 fields); the bs reconstruction is elastic3d's 12-tensor Python-bound list (9 elastic fields + 3 carriers, mandatory; as in 2-D, the strains and the CPML memory are not carried); the ckpt/recursive replay state is set 0 of the Python-bound `forward_wavefields` (`CKPT_STATE_COUNT = 33`); the full backward zeroes the adjoint state after binding (2-D relies on Python zeroing), mapped onto the first-segment `zero_adjoint_if_first_segment`; full/ckpt imaging uses the shared `LAUNCH_CALCULATE_GRAD_3DELASTIC_BS` over a pure velocity view (2-D has a dedicated `_NOBS` kernel). |
+| elastic_tti_sg2d | The model set is rho plus 15 stiffness tensors (16 gradients); the kernels take a `StiffnessPointer` rebuilt on demand from `p.models`/grads. Three velocity components on a 2-D grid (TTI couples vy), `N_VEL=3`, and the signed adjoint sources use the 3-D field layout. The adjoint workspace is six plain scratch tensors, taken from `p.adjoint_workspace`, which the propagator always binds (`ElasticTTISG.cuda_layout.backward_workspace_shapes`: 6 per shot, plus the skeleton's velocity carriers in ckpt mode and the `FULL_ZERO` grid in full mode). ckpt: the replay state is set 0 of the Python-bound `forward_wavefields` (`CKPT_STATE_COUNT = 20`) and the vx/vy/vz histories are the three `checkpoint_replay` slots. `u_allt` stores all 8 physical fields rather than velocities only. BS reconstruction binds the propagator's 11-grid list (8 physical fields + 3 velocity carriers, `bs_reconstruction_nvar=11`), mandatory. Per-mode entry validation keeps its hand-written text (`validate_backward`). No recursive checkpointing: the forward refuses it, `backward.cu` does not instantiate the recursive driver, and the recursive-only hooks (`capture_velocities`, `vel_ptrs_from_carriers`, `CKPT_RECURSIVE_COUNT_MSG`) are deliberately absent. No DD cut support and no aux slabs (the CPML memory lives in the equation's own wavefield tensors). |
+| elastic_tti_sg3d | Against its 2-D sibling: the model set is rho plus 21 stiffness tensors (22 gradients) and 12 PML profiles; the wavefields and workspace are the **shared** elastic types (`ElasticWavefieldTensor`, 36 tensors; `ElasticAdjointWorkspaceTensor` via `bind_adjoint_workspace_required`, bound from `p.adjoint_workspace` -- 18 per shot, like elastic3d) — and unlike elastic3d there is no `m_syzx` backfill; ckpt: the replay state is set 0 of the Python-bound `forward_wavefields` (`CKPT_STATE_COUNT = 36`); `u_allt` stores the three velocities only (2-D stores all 8 fields); **both** the full and the BS backward zero the adjoint state after binding (`zero_adjoint_if_first_segment` and `zero_adjoint_if_first_segment_bs`; 2-D zeroes in neither); the forward refuses `free_surface` outright (an anisotropic medium refuses the image method); the velocity kernels take only `model.rho` while the stress kernels take the full `StiffnessPointer`. BS reconstruction binds the propagator's 12-tensor list (9 physical fields + 3 carriers, mandatory). Same as 2-D: no recursive checkpointing (the recursive-only hooks are deliberately absent), no DD cut support, no aux slabs. |
+| elastic_vr2d | Six primary models `{vp, vs, Rp_x, Rp_z, Rs_x, Rs_z}`, six gradients, and no rho — so every rho hook (`fix_rho_grad_at_sources`, `fix_rho_grad_at_receivers`) is empty and the imaging has no v(t+1) term (`IMAGING_USES_NEXT_V=false`: recursive replay breaks at the target step and has no cross-segment velocity carrier). The wavefields reuse `ElasticWavefieldTensor` (the vx/vz slots hold the momenta px/pz), and the 15-tensor binding, the checkpoint layout and the 5-field BS list all match elastic2d. Every backward mode zeroes the adjoint stress surface rows immediately after residual injection (the adjoint of the forward free-surface BC); that kernel sits at the end of `inject_residuals`. Every mode follows its gradient kernel with a chain-rule kernel (`LAUNCH_EVR_GRAD_CHAIN_APPLY`) — both live in `image_standalone`. The 14-slot adjoint workspace pool is split between the adjoint-step half (slots 0–9, `Workspace`) and the imaging half (slots 10–13, hung off `State` for `image_standalone`); the imaging's next-momentum pointers are null in every mode, so there is no zero-momentum grid, and only recursive mode appends the `N_VEL` momentum carriers (`WS_CARRIERS`). `backward_bs` binds the 5-tensor Python-bound list `[px, pz, sxx, szz, sxz]` with `use_pml = false` (mandatory; no carriers), and the ckpt/recursive replay states are plain full-shape binds of `forward_wavefields` set 0 (`CKPT_STATE_COUNT = 15`) rather than a snapshot-driven aux layout. |
 
 ## 5. Worked example: the kernel launch sequence of one `backward_bs` reverse step
 
@@ -469,8 +522,8 @@ each `driver_traits.cuh`.
 
 * `inject_step(it)` (DD phase 3)
     1. `add_body_force_rho_grad_correction` — once per source field belonging to vx/vz (stress sources are skipped) [`fix_rho_grad_at_sources`]
-    2. `add_source` (signed residual → adjoint field) — once per receiver field [`inject_residuals`]
-    3. `add_source` (`-forward_source` → reconstruction field) — once per source field [`uninject_forward_source`]
+    2. `add_source_signed` (residual with the field's sign → adjoint field) — once per receiver field [`inject_residuals`]
+    3. `add_source_signed` (forward source, sign -1 → reconstruction field) — once per source field [`uninject_forward_source`]
 * `bs_stress_half` (DD phase 1)
     1. `elastic_stress_kernel_nopml<order>` — reverse stress reconstruction (NOPML)
     2. `boundary_kernel2d` (or `_compact` / `_bf16` / the dequantised int8 variant, depending on the storage dtype) × 3 — restore sxx, szz, sxz (field 2 waits for the chunk first) [`restore_backward_2d_field`]
@@ -496,15 +549,17 @@ segment: `seed_reconstruction` = 2 `copy_` calls + `set_boundary_zeros` × 2):
 4. `accumulate_source_grad_2d` [`accumulate_source_grad`]
 5. `acoustic2nd_nopml<order>` — reverse reconstruction, with the vp gradient imaging fused in (for every cell the restore does not overwrite) [`bs_recon_step`]
 6. `boundary_kernel2d` (or `_compact` / `_bf16` / a dequantising variant) — restore `u_next` [`restore_backward_2d`]
-7. `calculate_grad_utt_band` — imaging for the restore strips only (skipped when `n_strip == 0`)
-8. `add_source` (`forward_source` → `recon.u_next`)
-9. host: `forward.swap()`
-10. host: `prefetch_next_backward_chunk_if_needed`
-11. `accumulate_rtm_image_2d` — only under `compute_illumination` [`bs_rtm_tap`]
-12. `accumulate_adcig_2d` — only when ADCIG was requested
+7. `sub_source_in_restore_strip` — take the forward source back out of a source cell the restore overwrote (the restore wrote the true, source-included w^{it-1})
+8. `calculate_grad_utt_band` — imaging for the restore strips only (skipped when `n_strip == 0`)
+9. `accumulate_illumination_2d` — only under `compute_illumination`, on the three time levels the gradient just used
+10. `add_source` (`forward_source` → `recon.u_next`)
+11. host: `forward.swap()`
+12. host: `prefetch_next_backward_chunk_if_needed`
+13. `accumulate_adcig_2d` — only when ADCIG was requested [`bs_rtm_tap`]
 
 After the loop (`BS_HAS_IT0_ADJOINT_TAIL`, `it_lo == 0` and no tail truncation):
-steps 1–4 run once more at `it = 0`.
+steps 1–4 run once more at `it = 0`, followed under `compute_illumination` by
+`accumulate_illumination_2d` for the receiver term alone [`bs_illum_tail`].
 
 ## 6. Checklist for adding an equation
 
@@ -532,11 +587,13 @@ steps 1–4 run once more at `it = 0`.
    (bump `SWEEP_ENTRY_COUNT`), the matching rows to `ENTRY_NAMES` / `ENTRY_KINDS`
    and the `dispatch()` cases in `cuda/common/capi.cu`; for a stepped equation also
    the two runner-factory `case`s there and its name in
-   `sweep.backend.c.RUNNER_EQUATIONS`. `bindings/module.cpp` mirrors the table for
-   the `SWEEP_JIT_FULL=1` shim only.
+   `sweep.backend.c.RUNNER_EQUATIONS`. `bindings/module.cpp` mirrors the table
+   (`ID_*` constants and `m.def` lines) for the pybind shim only: `SWEEP_JIT_FULL=1`,
+   or a `SWEEP_BUILD_CUDA=1` ahead-of-time build.
 6. **Python**: `C_NAME` and `cuda_layout` (`base_nvar`, `pml_nvar`, `last_two_nvar`,
    `checkpoint_nvar`, `adjoint_extra_nvar`, `boundary_tangent_pad`, `slots`,
-   `grads_out_has_wavelet`, …). Set `stepped=True` once migrated, and
+   `grads_out_has_wavelet`, and `record_shape` / `save_all_shape` — the drivers
+   allocate no output, …). Set `stepped=True` once migrated, and
    `dd_backward_phases=True` once the backward implements numbered phases. Without
    recursive checkpointing set `C_HAS_RECURSIVE_CKPT = False`. For DD, also pick or
    declare a schedule in `parallel/dd_spec.py`.
@@ -569,12 +626,12 @@ log.
 | Tool | Coverage | Usage |
 |---|---|---|
 | `gate/bitgate.py` tier **A** (27 configurations, ~2 min) | acoustic2d/3d, elastic2d/3d, vrz2d, lsrtm2d: eager+c × full/bs_gpu/bs_cpu/bs_gpu_int8/ckpt_chunk/ckpt_recursive × interior/free_surface/free_surface_all4 × canonical/physical grids. Run after every commit. | `gate/run_gate.sh A base_A.pt` |
-| tier **C** (30, ~2 min) | One eager-full and one c-bs_gpu run for every equation in `ALL_SOLVERS` (shallow but complete) | `gate/run_gate.sh C base_C.pt` |
-| tier **B** (~165, ~12 min) | Every equation × 7 c-side memory modes + physical grid + free surface; run when a stage is finished. `gate/noise_floors.json` records the gradient tolerance for the configurations already measured as non-deterministic (DAS, 3-D ckpt, int8); the record and the loss stay strict always. The baseline holds one expected error-text entry (`elastic_tti_sg2d\|c\|ckpt_recursive`). | `gate/run_gate.sh B base_B.pt`; for a subset, `$PY gate/bitgate.py --tier B --only elastic --compare gate/base_B.pt` |
+| tier **C** (36, ~2 min) | One eager-full and one c-bs_gpu run for every equation in `ALL_SOLVERS` (18, shallow but complete) | `gate/run_gate.sh C base_C.pt` |
+| tier **B** (198, ~12 min) | Every equation × 7 c-side memory modes + physical grid + free surface; run when a stage is finished. `gate/noise_floors.json` records the gradient tolerance for the configurations already measured as non-deterministic (DAS, 3-D ckpt, int8); the record and the loss stay strict always. Configurations an equation refuses by construction are recorded as their error text (an error compares equal to an error): recursive checkpointing on elastic_tti_sg2d/sg3d and elastic_tti_2nd2d (`C_HAS_RECURSIVE_CKPT = False`), boundary saving on das3d and visco2d (`supports_boundary_saving_c = False`). | `gate/run_gate.sh B base_B.pt`; for a subset, `$PY gate/bitgate.py --tier B --only elastic --compare gate/base_B.pt` |
 | tier **T** (10) | Topography (hill/stairs, image method and APM); every other tier is flat ground | `gate/run_gate.sh T base_T.pt` |
 | `--verify-reproducible` / `--self-test` / `--measure-noise` | Same code twice, bit for bit; a 1-ULP perturbation must go red; repeated runs measure the floor | `$PY gate/bitgate.py --tier A --verify-reproducible` |
 | `gate/ddgate.py` world=1 | Single-tile `ModelParallel`: capture, lazy adjoint promotion, per-shot geometry rebinding, both families' step loops, buffer-role rotation, the persistent runner path; 12 configurations (Acoustic/3D, AcousticVRZ3D, Elastic/3D × fs, plus two bodyforce cases) | `gate/run_gate.sh dd1 base_dd1.pt` |
-| `gate/ddgate.py` world≥2 | Real tiles, NCCL halo exchange, `cut_face_mask` — the only rung that can catch a wrong send-field list. On ibex: `torchrun --nproc-per-node=2 gate/ddgate.py --ranks 2 …`, with the baseline re-recorded from dev inside the same job | `dd_reverify.sbatch` |
+| `gate/ddgate.py` world≥2 | Real tiles, NCCL halo exchange, `cut_face_mask` — the only rung that can catch a wrong send-field list. Re-record the baseline from dev inside the same job | `torchrun --nproc-per-node=2 gate/ddgate.py --ranks 2 …` |
 | `gate/evr_ab.py` | `ElasticVRR` (elastic_vr2d) is not in the suite, so A/B/C/T can all be green without testing it: 4 backward modes × free surface, comparing the record plus 6 gradients — 56 tensors — bit for bit | `$PY gate/evr_ab.py --out new.pt --compare gate/evr_base.pt` |
 | `gate/check_equations_api.py` | Freezes the public surface of `sweep.equations` (name count, registered equation count, alias identity) | Run when touching `equations/` |
 | pytest | the suite exits 0 (`test_import_does_not_pull_optional_deps` runs in a fresh interpreter). Driver-related: `test_stepped_forward{,_elastic}.py`, `test_stepped_backward{,_elastic}.py`, `test_dd_*two_tile*.py`, `test_dd_tiles_3d.py`, `test_cut_face_mask.py`, `test_slot_table_consistency.py`, `test_dd_supported_equations.py`, `test_boundary_tail_truncation.py`; C-vs-eager gradient consistency lives in `test/solver_gradient_mode_suite.py` | `$PY -m pytest test/` (the default ctypes path, what the wheel ships); a second run under `SWEEP_JIT_FULL=1` covers the pybind shim |

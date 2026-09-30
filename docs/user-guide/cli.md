@@ -1,17 +1,18 @@
 # CLI
 
 SWEEP ships a small command-line interface for inspecting the available
-equations and their compiled-binding status. The CLI is intentionally narrow —
-it answers introspection questions about the installed engine, not full FWI /
-LSRTM task runs.
+equations and their compiled-binding status, plus `sweep datasets` for the
+benchmark velocity models. The CLI is intentionally narrow — it answers
+introspection questions about the installed engine, not full FWI / LSRTM task
+runs.
 
 Implementation: `src/sweep/cli.py`.
 
 ## `sweep list equations`
 
 Lists every equation class exported by `sweep.equations` together with its
-required model parameters, whether compiled CUDA kernels exist for it (`C_NAME`
-declared), and whether the CUDA core can run here right now.
+required model parameters, whether it declares a compiled CUDA binding, and
+whether the CUDA core can run here right now.
 
 ```bash
 sweep list equations
@@ -27,7 +28,7 @@ Available equations:
   Acoustic               ['vp']                                                              yes            yes
   Acoustic1st            ['vp', 'rho']                                                       no             no
   Acoustic3D             ['vp']                                                              yes            yes
-  AcousticCurvilinear    ['vp']                                                              yes            yes
+  AcousticCurvilinear    ['vp']                                                              no             no
   AcousticLSRTM          ['vp', 'mp']                                                        yes            yes
   AcousticLSRTM3D        ['vp', 'mp']                                                        yes            yes
   AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 no             no
@@ -55,7 +56,7 @@ Available equations:
   Elastic                ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic3D              ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticAPM             ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticCurvilinear     ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticCurvilinear     ['vp', 'vs', 'rho']                                                 no             no
   ElasticTTI             ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  no             no
   ElasticTTI2nd          ['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']                      yes            yes
   ElasticTTISG           ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  yes            yes
@@ -76,11 +77,12 @@ The two right-most columns distinguish:
 - **Binding Ready** — whether `impl="c"` can run right now: PyTorch present, a
   CUDA GPU visible, and a CUDA core at hand — the wheel's prebuilt `lib/cu12/`
   or `lib/cu13/` core for your torch's CUDA major, `SWEEP_CORE`, a cached local
-  build, or an `nvcc >= 12.4` that can build one. Nothing is loaded or compiled
-  to answer. A `yes` / `no` mismatch means no core fits this process (no GPU
-  visible, a torch built for a CUDA major with no shipped core, a card older
-  than the shipped archs and PTX):
-  `sweep.backend.torch.binding.diagnostics()["shipped_core"]["reason"]` says why
+  build, or an nvcc of torch's CUDA major that can build one. Nothing is loaded
+  or compiled to answer. A `yes` / `no` mismatch means no GPU is visible, or no
+  core fits this process and none can be built (a torch built for a CUDA major
+  with no shipped core, a card older than the shipped archs and PTX):
+  `sweep.backend.torch.binding.diagnostics()["reason"]` says why, and
+  `["shipped_core"]` which core, if any, fits
   (see [Installation](../getting-started/installation.md)).
 
 ## `sweep show <Equation>`
@@ -164,4 +166,13 @@ print([f.name for f in eq.available_fields(role="source")])
 print(eq.describe_field("h1"))
 print([m.name for m in eq.available_models()])
 print(eq.describe_model("vp"))
+```
+
+## `sweep datasets`
+
+Lists, describes, pre-downloads and locates the benchmark velocity models
+(`list`, `info`, `download`, `where`); see [Datasets · CLI](datasets.md#cli).
+
+```bash
+sweep datasets list
 ```

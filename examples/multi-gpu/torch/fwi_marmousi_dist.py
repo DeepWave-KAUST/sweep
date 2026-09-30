@@ -32,7 +32,7 @@ import tqdm
 
 import configure_marmousi as shared_config
 from sweep.equations import Acoustic
-from sweep.propagator.options import BoundaryOptions, CUDAOptions, EagerOptions, MemoryOptions
+from sweep.propagator.options import BoundarySaving, EagerOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -86,7 +86,7 @@ def build_boundary_options(boundary_cfg):
     if boundary_cfg["storage"] == "cpu":
         kwargs["transfer_interval"] = boundary_cfg["transfer_interval"]
         kwargs["pinned_memory"] = boundary_cfg["pinned_memory"]
-    return BoundaryOptions(**kwargs)
+    return BoundarySaving(**kwargs)
 
 
 def build_solver(shape, dev, cfg):
@@ -123,12 +123,7 @@ def build_solver(shape, dev, cfg):
         **prop_kwargs,
         backend="torch",
         impl="c",
-        cuda_options=CUDAOptions(
-            memory=MemoryOptions(
-                strategy="boundary",
-                boundary=build_boundary_options(cfg["boundary_saving_config"]),
-            ),
-        ),
+        memory=build_boundary_options(cfg["boundary_saving_config"]),
     )
 
 

@@ -33,7 +33,7 @@ from sweep.parallel import MeshTopology, ModelParallel, pad_to_mesh
 topo = MeshTopology(py=1, px=4, shot_groups=1,
                     world_size=world, rank=rank)      # 2-D: py must be 1
 prop = PropTorch(eq, shape=(nz, nx), dh=dh, dt=dt, nt=nt, abcn=abcn,
-                 impl="c", dev=dev, ...)              # the GLOBAL problem spec
+                 impl="c", device=dev, ...)           # the GLOBAL problem spec
 ddp  = ModelParallel(prop, topo)                      # wrap; tiles are automatic
 ```
 
@@ -43,7 +43,7 @@ ddp  = ModelParallel(prop, topo)                      # wrap; tiles are automati
 absorbing boundaries live only on true domain edges), global→tile source
 and receiver remapping, and the per-tile boundary-saving ring. The
 gradient-memory configuration (`storage`, `storage_dtype`,
-`BoundaryOptions.tail_steps`) is inherited from the wrapped prop's memory
+`BoundarySaving.tail_steps`) is inherited from the wrapped prop's memory
 config, so every rank is consistent by construction — see
 [Boundary storage under DD](#boundary-storage-under-dd) for which values the
 DD backward actually accepts.
@@ -125,10 +125,13 @@ has once produced a gradient keeps its adjoint machinery for its lifetime.
 On fp32 gpu-direct boundaries the DD gradient is **bit-identical** to the
 single-domain gradient (`test/test_dd_backward_two_tile*.py`,
 `test/dd_api_check.py`), including with boundary tail truncation
-(`test/test_dd_tail_two_tile.py`). `pad_to_mesh` pads the split axes up to
-the tile multiple; a padded run is a (slightly) different discrete problem
-than an unpadded one, so compare like against like — the example scripts'
-`--check` mode does exactly that.
+(`test/test_dd_tail_two_tile.py`). The exception is `AcousticVRZ3D` at spatial
+order 2 or 4 (the default): its single-GPU backward uses a fused gradient
+kernel that DD cannot use, so the two differ by ~1 ULP per cell unless
+`SWEEP_VRZ_GRAD_SPLIT=1` puts the single-GPU run on the same split kernel.
+`pad_to_mesh` pads the split axes up to the tile multiple; a padded run is a
+(slightly) different discrete problem than an unpadded one, so compare like
+against like — the example scripts' `--check` mode does exactly that.
 
 ## Scope and limits
 
@@ -141,14 +144,21 @@ than an unpadded one, so compare like against like — the example scripts'
   and `ViscoAcoustic`.
 - Cuts: x strips in 2-D (`py=1`); x/y tile grids in 3-D.
 - Free surface: top face only under DD (a cut face can never carry one).
+- Topography: not supported. `ModelParallel` refuses a propagator built with
+  `topography=` (`NotImplementedError`): the tiles carry no surface, and
+  boundary saving gives a wrong gradient under a per-column surface anyway.
+- Gradient memory: boundary saving only. Each tile reconstructs its forward
+  wavefield from saved boundaries, so a wrapped prop built with
+  `memory=Full()` or `memory=Ckpt(...)` is refused at construction.
 - Boundary storage and dtype: see the table below.
-- `BoundaryOptions.tail_steps`: Acoustic 2-D/3-D (see
+- `BoundarySaving.tail_steps`: Acoustic 2-D/3-D (see
   [Propagators](propagators.md#boundary-tail-truncation-boundarysavingtail_steps));
   it composes with cpu staging.
-- Not routed through DD: `rtm()` — use the gradient path (notebook
-  [08](../notebooks/08_rtm_acoustic_marmousi.ipynb) shows how). Encoded
-  supershots (a `(nsrc, nt)` wavelet) *are* supported: each tile keeps the
-  rows of the sources it owns (`test/dd_encoded_check.py`).
+- RTM: take the image through the gradient path (notebook
+  [08](../notebooks/08_rtm_acoustic_marmousi.ipynb) shows how); there is no
+  separate `rtm()` entry. Encoded supershots (a `(nsrc, nt)` wavelet) *are*
+  supported: each tile keeps the rows of the sources it owns
+  (`test/dd_encoded_check.py`).
 - `SWEEP_DD_DISABLE_OVERLAP=1` forces the serial step-then-exchange path —
   the bit-exact reference for the comm/compute-overlap forward and a
   production escape hatch.
@@ -160,7 +170,7 @@ but not every value is wired for the DD backward — which Python drives one
 step per kernel call, unlike the monolithic loop the staged paths were built
 for. What is refused, is refused loudly at the first backward:
 
-| `BoundaryOptions.storage` | Acoustic 2-D / 3-D, VRZ 2-D / 3-D | Elastic 2-D / 3-D, Elastic APM |
+| `BoundarySaving.storage` | Acoustic 2-D / 3-D, VRZ 3-D | Elastic 2-D / 3-D, Elastic APM |
 | --- | --- | --- |
 | `"gpu"` (default, gpu-direct) | yes | yes |
 | `"cpu"` (pinned-host staging) | **yes** | **yes** — it used to raise |
@@ -173,10 +183,11 @@ rest of that family (DAS-mu, elastic TTI SG, elastic VR) is no longer blocked by
 *this* check — but each still has to declare DD admission before any of it is
 reachable under `ModelParallel`.
 
-`storage="cpu"` also needs a **real cut**: a single-tile `ModelParallel`
-(`world_size=1`) refuses it, because that path reaches a reconstruction
-indexing that is not exercised by any multi-tile run. Use gpu-direct there, or
-a plain `PropTorch` backward, which supports cpu and disk staging as usual.
+For the acoustic and VRZ equations, `storage="cpu"` also needs a **real cut**:
+a single-tile `ModelParallel` (`world_size=1`) refuses it, because that path
+reaches a reconstruction indexing that is not exercised by any multi-tile run.
+Use gpu-direct there, or a plain `PropTorch` backward, which supports cpu and
+disk staging as usual.
 
 Every `storage_dtype` works with either storage. On fp32 and bf16 the
 cpu-staged gradient is **bit-identical** to the gpu-direct one; fp16 and int8
@@ -205,7 +216,8 @@ What it costs, measured on 2×V100 with a 3-D elastic tile
 
 So it is still an escape hatch rather than a default — 3.5× less boundary memory
 for 2.68× the backward — but it is a working one, and **the knobs matter more
-than the switch**: the inherited `32`/`4` default is the worst point of the
-space here, not the best. Start at `1`/`1` and raise only if profiling asks.
+than the switch**: `32`/`4` is the worst point measured here, not the best.
+The inherited cpu default (`transfer_interval=64`, `ring_buffers=1`, pinned)
+was not measured. Start at `1`/`1` and raise only if profiling asks.
 
 API details: [sweep.parallel reference](../api/parallel.md).

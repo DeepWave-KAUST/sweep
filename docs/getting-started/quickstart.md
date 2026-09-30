@@ -26,8 +26,8 @@
   </div>
 
   <p>
-    Pick whichever backend you already have. SWEEP supports <em>lazy imports</em> —
-    you don't need both PyTorch and JAX.
+    PyTorch is always installed — it is a required dependency. The
+    <code>[jax]</code> extra adds JAX on top, for the JAX backend.
   </p>
 
   <div class="sweep-qs__pair">
@@ -92,7 +92,7 @@ vp[50:, :] = 2000
 
 ```python title="propagator"
 eq   = Acoustic(spatial_order=8, device="cuda", backend="torch")
-prop = PropTorch(eq, shape=(100, 100), dev="cuda", dh=10., dt=2e-3,
+prop = PropTorch(eq, shape=(100, 100), device="cuda", dh=10., dt=2e-3,
                  source_type=["h1"], receiver_type=["h1"], pml_type="cpmlr")
 
 wave      = ricker(np.arange(0, 1.5, 2e-3) - 0.1, f=8)
@@ -104,7 +104,7 @@ obs = prop.forward(wave, sources, receivers, models=[torch.from_numpy(vp).to("cu
 
 <div class="sweep-qs__figure">
   <img src="../../figures/quickstart/record.png" alt="shot record">
-  <div class="sweep-qs__caption">shot record · 1 src · 1 rec · 750 samples</div>
+  <div class="sweep-qs__caption">shot record · 1 src · 80 rec · 750 samples</div>
 </div>
 
 <section class="sweep-qs__step" id="gradient">
@@ -144,13 +144,12 @@ obs.pow(2).sum().backward()
       <div class="sweep-qs__card-body">
         <div class="sweep-qs__card-tag">NOTEBOOK</div>
         <div class="sweep-qs__card-name">Marmousi FWI</div>
-        <div class="sweep-qs__card-desc">A real benchmark · 30 iters in 6.8 s</div>
+        <div class="sweep-qs__card-desc">A real benchmark · 30 Adam iterations</div>
       </div>
     </a>
 
     <a class="sweep-qs__card" href="../../notebooks/12_multi_gpu/">
-      <img src="../../figures/gallery/12_multi_gpu_ddp.png"
-           onerror="this.src='../../assets/logo/sweep-icon-256.png'" alt="Multi-GPU DDP">
+      <img src="../../assets/logo/sweep-icon-256.png" alt="Multi-GPU DDP">
       <div class="sweep-qs__card-body">
         <div class="sweep-qs__card-tag">NOTEBOOK</div>
         <div class="sweep-qs__card-name">Multi-GPU DDP</div>
