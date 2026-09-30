@@ -90,7 +90,7 @@ done
 # n=57 keeps both split axes even so pad_to_mesh is a no-op: with a pad, the
 # replicate adjoint folds the pad plane back AFTER the cross-shot sum instead of
 # before it, which costs one fp32 ULP on one plane and is not a defect (item 30).
-dd_case 4 "dd_vs_mono_shotgroups" --equation Acoustic3D --n 57 --shot-groups 2 \
+dd_case 4 "dd_vs_mono_shotgroups" --equation Acoustic3D --grid-n 57 --shot-groups 2 \
         --py 1 --px 2
 # One card picks the FUSED VRZ gradient kernel and DD must use the SPLIT one;
 # same kernel, bit-exact. Without this the arm is red for a reason that is not

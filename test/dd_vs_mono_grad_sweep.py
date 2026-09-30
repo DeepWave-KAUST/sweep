@@ -132,7 +132,10 @@ def main() -> None:
     ap.add_argument("--dump", default="", help="save this rank's ref+dd grads to "
                     "PATH.pt; two such runs in two PROCESSES measure the "
                     "run-to-run floor, which same-process repeats cannot")
-    ap.add_argument("--n", type=int, default=0, help="per-axis physical size; 0 = per-ndim default")
+    # --grid-n is the spelling to use under torchrun: its own parser reads a bare
+    # "--n" as an ambiguous prefix of --nnodes / --nproc-per-node and exits 2.
+    ap.add_argument("--grid-n", "--n", type=int, default=0, dest="n",
+                    help="per-axis physical size; 0 = per-ndim default")
     args = ap.parse_args()
 
     dist.init_process_group("nccl")
