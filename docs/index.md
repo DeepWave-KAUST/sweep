@@ -2,7 +2,7 @@
 
 The differentiable, GPU **wave-equation engine** at the core of the sweep
 ecosystem — forward modelling, RTM, and FWI / LSRTM, with equations for
-acoustic, elastic, VTI/TTI, VRZ and spectral-element (SEM) physics, and
+acoustic, visco-acoustic, elastic, VTI/TTI, VRZ and DAS physics, and
 torch / JAX / native-CUDA backends.
 
 Installed with `pip install sweepx` (or `pip install sweep-solver`) → `import sweep`.

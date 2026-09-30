@@ -10,10 +10,13 @@ class PropJax(
     free_surface=False,
     dh=10.0,
     dt=0.002,
-    dev=None,
-    use_ckpt=True,
+    device=None,
+    backend=None,
+    memory=None,
+    use_ckpt=None,
     ckpt_chunks=100,
-    pml_type="spml",
+    pml_type=None,
+    scan_unroll=1,
 )
 ```
 
@@ -21,7 +24,8 @@ Implementation:
 
 - `src/sweep/propagator/jax.py`
 
-JAX propagator built around `jax.lax.scan` and chunk-style rematerialization.
+JAX propagator built around `jax.lax.scan`. The gradient-memory strategy is
+chosen with `memory=`; with none given it is chunk-style rematerialization.
 
 !!! note
 
@@ -34,23 +38,41 @@ JAX propagator built around `jax.lax.scan` and chunk-style rematerialization.
 - `shape` (`tuple[int, ...]`): Physical model shape before absorbing
   boundaries are added. Use `(nz, nx)` in 2D and `(nz, ny, nx)` in 3D.
 - `source_type` (`list[str]`, optional): Wavefield names used for source
-  injection. These names must exist in `equation.wavefields`. `PropJax` does
-  not auto-fill defaults.
+  injection. Defaults to `equation.default_source_fields`; names (or their
+  `FieldSpec` aliases) must be source-capable fields of the equation.
 - `receiver_type` (`list[str]`, optional): Wavefield names sampled at receiver
-  locations. These must also match `equation.wavefields`.
+  locations. Defaults to `equation.default_receiver_fields`; names or aliases
+  must be receiver-capable fields.
 - `abcn` (`int`, optional): Absorbing boundary width.
 - `free_surface` (`bool`, optional): Whether the top boundary is treated as a
   free surface. This affects internal coordinate offsets before source
   injection and receiver sampling.
-- `dh` (`float`, optional): Scalar grid spacing.
+- `dh` (`float` or sequence, optional): Grid spacing: a scalar, or one value
+  per axis, `(dz, dx)` in 2D and `(dz, dy, dx)` in 3D.
 - `dt` (`float`, optional): Time step in seconds.
-- `dev` (device or context, optional): Stored device/context argument. Actual
-  JAX execution placement is still driven by JAX arrays and transforms.
-- `use_ckpt` (`bool`, optional): Enables chunk-based rematerialization in the
-  scanned time loop.
-- `ckpt_chunks` (`int`, optional): Chunk size used when `use_ckpt=True`.
-- `pml_type` (`str`, optional): PML implementation passed into the equation
-  setup.
+- `device` (device or context, optional): Stored device/context argument
+  (`dev=` is a deprecated alias). Actual JAX execution placement is still
+  driven by JAX arrays and transforms.
+- `backend` (`str`, optional): `'jax'` or `None`; accepted for symmetry with
+  `PropTorch`.
+- `memory` (optional): The gradient-memory strategy, one of `Full()`,
+  `BoundarySaving(...)` or `Ckpt(...)` from `sweep.propagator.options`.
+  `Full()` differentiates through the scan tape; `Ckpt(chunks=...)` is chunked
+  `jax.checkpoint` rematerialization (`mode='chunk'` only);
+  `BoundarySaving(...)` reconstructs the forward wavefield in reverse time from
+  saved boundaries, with the ring kept on the device (`storage='gpu'`, no
+  `tail_steps`). `None` (default) means checkpointing.
+- `use_ckpt` (`bool | None`, optional): Legacy switch: `True` requests chunked
+  rematerialization, `False` full storage. `None` (default) leaves the choice
+  to `memory=`, else checkpointing.
+- `ckpt_chunks` (`int`, optional): Chunk size, in time steps, when
+  checkpointing.
+- `pml_type` (`str`, optional): PML formulation. `None` (default) uses
+  `equation.default_pml_type` (e.g. `'cpmlr'` for `Acoustic`, `'cpmls'` for
+  `Elastic`); `'spml'` is supported by `Acoustic1st` only.
+- `scan_unroll` (`int`, optional): `lax.scan` unroll factor for the time loop.
+  Small, launch-bound grids can gain from 2–4 (gradients bit-identical);
+  large, bandwidth-bound grids lose a few percent, so the default is `1`.
 
 ## Forward Parameters
 

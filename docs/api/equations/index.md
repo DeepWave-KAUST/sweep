@@ -144,13 +144,15 @@ through the equation class.
 
     ```python
     class ElasticTTI(
-        spatial_order=4,
+        spatial_order=8,
         device="cpu",
         backend="torch",
+        checkerboard_smoothing=True,
     )
     ```
 
-    First-order TTI elastic equation (non-staggered grid, eager-only).
+    First-order 2-D three-component TTI elastic equation on a rotated
+    staggered grid (RSG); eager-only.
 
     See [ElasticTTI](elastic_tti.md) for parameter meanings.
 
@@ -158,14 +160,14 @@ through the equation class.
 
     ```python
     class ElasticTTISG(
-        spatial_order=4,
+        spatial_order=8,
         device="cpu",
         backend="torch",
     )
     ```
 
-    First-order TTI elastic equation on a rotated staggered grid; supports the
-    CUDA core (`impl='c'`).
+    First-order 2-D three-component TTI elastic equation on an axis-aligned
+    staggered grid; supports the CUDA core (`impl='c'`).
 
     See [ElasticTTISG](elastic_tti_sg.md) for parameter meanings; the 3-D
     variant is [ElasticTTISG3D](elastic_tti_sg3d.md) (axis-aligned SG, 21
@@ -176,18 +178,21 @@ through the equation class.
     ```python
     from sweep.equations import (
         DAS,                            # unified facade (was DASModeler)
-        DASElastic, DASElastic3D,
+        DASElastic, DASElastic3D,       # aliases of DASZhao / DASZhao3D
         DASMu, DASMu3D,
         DASZhao, DASZhao3D,
     )
     ```
 
     Strain-rate / helical-fiber receiver equations for DAS modelling. The
-    six raw equation variants share `['vp', 'vs', 'rho']` and have
-    CUDA-core bindings. `DAS` is the unified facade — pass `method="zhao"`
-    or `method="mu"` to pick a variant.
+    four raw equation classes (`DASZhao` / `DASZhao3D`, `DASMu` / `DASMu3D`)
+    share `['vp', 'vs', 'rho']` and have CUDA-core bindings; `DASElastic` /
+    `DASElastic3D` are aliases of `DASZhao` / `DASZhao3D`. `DAS` is the
+    unified facade — pass `method="zhao"` or `method="mu"` to pick a variant.
 
-    See [DAS family](das.md) for the comparison table.
+    See [DAS family](das.md) for the API and the
+    [DAS table](../../user-guide/equations.md#distributed-acoustic-sensing-das-family)
+    in the user guide for a comparison.
 
 ## Equation Pages
 
@@ -199,14 +204,15 @@ wavefields, and backend / binding behavior:
 - [Acoustic](acoustic.md)
 - [Acoustic3D](acoustic3d.md)
 - [Acoustic1st](acoustic1st.md)
-- [AcousticVRZ](acoustic_vrz.md)
+- [AcousticVRZ / AcousticVRZ3D](acoustic_vrz.md)
 - [AcousticLSRTM](acoustic_lsrtm.md)
 - [AcousticLSRTM3D](acoustic_lsrtm3d.md)
 - [ViscoAcoustic](visco_acoustic.md)
 
 **Elastic family**
 
-- [Elastic](elastic.md)
+- [Elastic](elastic.md) (`ElasticAPM` is an alias of the same class; the APM
+  free surface is chosen with the propagator's `topo_method='apm'`)
 - [Elastic3D](elastic3d.md)
 - [ElasticTTI](elastic_tti.md)
 - [ElasticTTISG](elastic_tti_sg.md)
@@ -216,12 +222,20 @@ wavefields, and backend / binding behavior:
 **DAS family**
 
 - [DAS family overview](das.md) — covers `DAS` (the unified facade, formerly
-  named `DASModeler`), plus the raw equation classes `DASElastic` /
-  `DASElastic3D`, `DASMu` / `DASMu3D`, `DASZhao` / `DASZhao3D`.
+  named `DASModeler`), plus the raw equation classes `DASZhao` /
+  `DASZhao3D` and `DASMu` / `DASMu3D` (`DASElastic` / `DASElastic3D` are
+  aliases of `DASZhao` / `DASZhao3D`).
+
+**Other equations**
+
+- [Other equations](others.md) — curvilinear-grid topography
+  (`AcousticCurvilinear`, `ElasticCurvilinear`; eager-only), vector
+  reflectivity (`AcousticVRR`, `ElasticVRR`), and the anisotropic acoustic
+  classes below with the `AcousticAniso` factory.
 
 **Anisotropic acoustic family**
 
-The raw equation classes are:
+The raw equation classes (API on [Other equations](others.md)) are:
 
 | Class | Symmetry | Dim | Reference |
 | --- | --- | --- | --- |

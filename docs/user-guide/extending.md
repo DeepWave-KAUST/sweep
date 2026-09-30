@@ -65,8 +65,10 @@ Pick the Python-only path when any of the following is true:
 
 - you are prototyping a new physics and want to iterate fast in pure Python
 - you target `backend="jax"` and run through `PropJax`
-- the model sizes you care about fit comfortably in full-wavefield memory,
-  so you do not need boundary saving / disk-backed checkpoint
+- the eager memory modes are enough for your model sizes: `Full()`,
+  `BoundarySaving(storage="gpu" | "cpu")` or `Ckpt(mode="chunk")` (the eager
+  default); boundary saving of a first-order equation needs its
+  `interior_substeps()`
 - you are happy with `torch.compile` (default) for speed and do not need
   hand-tuned CUDA kernels
 
@@ -137,7 +139,8 @@ class MyScalar(SecondOrderEquation):
 This example deliberately ignores the PML coefficient buffer `b` so the time
 step stays one line — the simulation simply has to stop before the wave
 reaches the boundary. For a production-ready PML-coupled version, mirror
-[`Acoustic.step_cpml`](https://github.com/DeepWave-KAUST/sweep/blob/dev/src/sweep/equations/acoustic.py)
+[`sweep.equations.acoustic.step_cpml`](https://github.com/DeepWave-KAUST/sweep/blob/dev/src/sweep/equations/acoustic.py)
+(the module-level function `Acoustic.func` calls)
 and add the `psix / psiz / zetax / zetaz` CPML auxiliary fields to
 `FIELD_SPECS`.
 
@@ -168,11 +171,12 @@ If all four pass, the Python-only equation is shippable.
 
 Add Part 2 on top of Part 1 when any of the following is true:
 
-- you run FWI on production-size models where full-wavefield checkpointing
-  exhausts GPU memory and you need
-  [boundary saving / disk-backed boundary storage](propagators.md#memory-saving-features)
-- you need `CkptOptions(mode="chunk")` or `CkptOptions(mode="recursive")`
-  memory modes (only the C path exposes these)
+- you need disk-backed boundary storage (`BoundarySaving(storage="disk")`) or
+  boundary tail truncation (`BoundarySaving(tail_steps=...)`), which only the
+  C path implements — see
+  [memory-saving features](propagators.md#memory-saving-features)
+- you need recursive checkpointing, `Ckpt(mode="recursive")` (the eager
+  backend checkpoints in chunks only)
 - you want hand-written CUDA kernels for the forward / adjoint inner loop
   instead of relying on `torch.compile`
 
@@ -199,8 +203,10 @@ Three additions on top of Part 1:
    / the `dispatch()` switch of `src/sweep/csrc/cuda/common/capi.cu`, plus one
    `#include` there. The ctypes layer (`sweep.backend.c`) reads that table from
    the loaded core by name, so nothing on the Python side lists your functions.
-   Only if you also work on the `SWEEP_JIT_FULL=1` pybind shim do you add the
-   five `m.def(...)` lines to `src/sweep/csrc/bindings/module.cpp`.
+   Only if you also use the pybind shim — `SWEEP_JIT_FULL=1`, or a
+   `SWEEP_BUILD_CUDA=1` ahead-of-time build — do you add the five
+   `constexpr int ID_my_scalar_*` ids and five `m.def(...)` lines to
+   `src/sweep/csrc/bindings/module.cpp`.
 
 The core build globs `cuda/common/**/*.cu` and `cuda/equations/**/*.cu`
 (`sweep/backend/c/jit.py` `_sources`), so you do **not** edit
@@ -224,7 +230,7 @@ class MyScalar(SecondOrderEquation):
 
     @property
     def cuda_layout(self):
-        from .cuda_layout import CUDALayoutSpec
+        from .cuda_layout import CUDALayoutSpec, history_plain, record_single
         return CUDALayoutSpec(
             base_nvar=2,           # h1, h2
             pml_nvar=4,            # psix, psiz, zetax, zetaz (CPML aux)
@@ -233,6 +239,8 @@ class MyScalar(SecondOrderEquation):
             checkpoint_nvar=6,
             boundary_save_nvar=1,
             backward_workspace_nvar=0,
+            record_shape=record_single(),     # (B, nrec, nt) record, bound as record_out
+            save_all_shape=history_plain(),   # (nt, B, *grid) full-mode history, bound as u_allt_out
         )
 ```
 
@@ -251,6 +259,8 @@ fields are read in `src/sweep/propagator/_c.py`:
 | `base_nvar` | non-PML wavefield tensors per timestep | required |
 | `pml_nvar` | CPML / SPML auxiliary tensors per timestep | required |
 | `last_two_nvar` | size of the rolling "last two snapshots" buffer | required |
+| `record_shape` | `fn(B, nrec, nfield, nt)` → the record the compiled forward writes, in the driver's layout (`record_single()` / `record_multi()`); the propagator allocates it and binds it as `record_out` | `None` — set it: the compiled entries allocate no output |
+| `save_all_shape` | `fn(B, nt, grid)` → the full-mode forward history (`history_plain()` / `history_fields(n)`), bound as `u_allt_out` | `None` — set it for full storage |
 | `last_two_storage_nvar` | tensors actually written into that buffer | `base_nvar` |
 | `checkpoint_nvar` | tensors saved per checkpoint | `base_nvar + pml_nvar` |
 | `boundary_save_nvar` | distinct fields the boundary saver writes per step | `base_nvar` (set to `1` for 2nd-order scalar equations) |
@@ -265,8 +275,8 @@ fields are read in `src/sweep/propagator/_c.py`:
 | `dd_backward_phases` | the compiled backward implements the numbered phases its DD schedule drives (elastic physics split, VRZ coupling exchange) | `False` |
 
 The full field list (`forward_workspace_nvar` / `_shapes`, `derived_model_nvar`,
-`record_shape`, `checkpoint_replay_shapes`, `checkpoint_state_nvar`,
-`save_all_shape`, `bs_reconstruction_nvar`, `supports_boundary_tail_steps`,
+`checkpoint_replay_shapes`, `checkpoint_state_nvar`,
+`bs_reconstruction_nvar`, `supports_boundary_tail_steps`,
 `slots`, ...) is documented on the `CUDALayoutSpec` dataclass in
 `src/sweep/equations/cuda_layout.py`.
 
@@ -276,9 +286,13 @@ bands, and is what `Acoustic`/`Acoustic3D`/`Elastic`/`Elastic3D` do — the
 kernels adapt per bound tensor, so a mis-tagged slot shows up as a wrong
 read, not as a silent full-grid fallback.
 
-If the buffer counts are wrong, the propagator either over-allocates GPU
-memory or reads uninitialised data — there is no second line of defence, so
-double-check these against your CUDA kernels' actual reads/writes.
+The drivers allocate nothing of their own: they check the count and shape of
+every buffer they bind (`pool_required` / `wavefields_required` /
+`bound_required` in `common/cudautils.h`) and refuse a mismatch with a
+`SWEEP_CHECK` naming the `cuda_layout` field — use the same helpers in your
+driver. A count that matches but means something else (a mis-tagged slot)
+still reads the wrong data, so double-check these against your CUDA kernels'
+actual reads/writes.
 
 ### C++ / CUDA side
 
@@ -341,8 +355,9 @@ case 95: *static_cast<BackwardOutputCore*>(out) = my_scalar::backward_core(*stat
 The ctypes layer (`sweep.backend.c`) enumerates the table through
 `sweep_entry_count()` / `sweep_entry_name()` at load, so the Python names need
 no further wiring. `bindings/module.cpp` (the pybind shim) mirrors the same
-table and is only compiled under `SWEEP_JIT_FULL=1`; keep it in step by hand if
-you use that path (the generator that produced it is not in the repository).
+table and is compiled only for that shim — `SWEEP_JIT_FULL=1`, or a
+`SWEEP_BUILD_CUDA=1` ahead-of-time build; keep it in step by hand if you use
+either path (the generator that produced it is not in the repository).
 
 ### Build + load
 
@@ -388,7 +403,7 @@ On top of Part 1's checks:
 
 ## Equation capability flags
 
-`EquationBase` carries a small set of class attributes the propagator reads
+`WaveEquation` (`sweep.equations.base`) carries a small set of class attributes the propagator reads
 to decide what your equation is allowed to do. Override them on your class
 when the corresponding capability is implemented (or, for
 ``supports_free_surface``, when it is *not* valid):
@@ -400,6 +415,10 @@ when the corresponding capability is implemented (or, for
 | `supports_per_edge_free_surface_c` | `False` | Same, for the compiled `impl='c'` CUDA path — set `True` only once the CUDA forward **and** adjoint honour `fs_faces`. |
 | `supports_apm` | `False` | Parameter-modified (APM) irregular topography path — see below. |
 | `supports_batched_models` | `False` | The CUDA kernels accept per-shot batched models `(B, *spatial)` in addition to a single shared model. |
+| `supports_boundary_saving_c` | `True` | Whether the compiled backend can run boundary saving. Set `False` when the step cannot be reverse-reconstructed from boundary strips (`ViscoAcoustic`, `DASZhao3D`): the `impl='c'` default strategy then falls back to `'full'` and an explicit boundary request raises. |
+| `supports_image_topography` / `supports_image_topography_c` | `False` | The eager `func` / the compiled kernels apply the image-method topography staircase; without it, `topography=` with `topo_method='image'` is refused instead of silently modelling a flat surface. |
+| `BOUNDARY_BUFFER_REACH` | `0` | How far, in units of M, the boundary-saving imaging stencil reaches beyond the reverse step; a non-zero value makes the propagator insert a sigma=0 buffer of `REACH*M + 1` cells before the PML (`AcousticVRZ` / `AcousticVRZ3D` declare 1). |
+| `C_HAS_RECURSIVE_CKPT` | `True` | Set `False` when the core ships no `{C_NAME}_backward_recursive_ckpt`; `Ckpt(mode="recursive")` is then refused. |
 | `default_pml_type` | `"cpmlr"` | PML formulation used when the propagator is not given one explicitly. |
 
 ## Out of scope here
@@ -408,9 +427,11 @@ A few features require touching the propagator base or `_c.py` rather than
 just the equation:
 
 - **Irregular free-surface topography (APM / curvilinear).** Set
-  `supports_apm = True` and implement `_C_apm()` returning `(forward,
-  backward, backward_bs)`. See `ElasticAPM` and `ElasticCurvilinear` for
-  references, plus the `topography=` and `free_surface=` plumbing in
+  `supports_apm = True` and implement `_C_apm()` returning `(forward,)`: the
+  compiled APM path is forward-only, and a gradient through it is refused on
+  `impl='c'` (gradients go through `impl='eager'`). See `Elastic` /
+  `Elastic3D` (APM) and `ElasticCurvilinear` (the separate curvilinear path)
+  for references, plus the `topography=` and `free_surface=` plumbing in
   `src/sweep/propagator/base.py`.
 - **RTM imaging.** No equation in the tree implements a `_C_rtm()` hook today;
   the core's C API reserves an `rtm` entry kind for it (`csrc/core/capi.h`,

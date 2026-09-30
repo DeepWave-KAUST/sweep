@@ -105,6 +105,7 @@ nav:
       - CLI: user-guide/cli.md
   - Developer:
       - CUDA driver skeletons: dev/cuda_drivers.md
+      - Release cores: dev/release_cores.md
   - Examples:
       - Overview: examples/index.md
       - Notebooks:
@@ -173,6 +174,7 @@ nav:
           - ElasticTTISG3D: api/equations/elastic_tti_sg3d.md
           - ElasticTTI2nd: api/equations/elastic_tti_2nd.md
           - DAS family: api/equations/das.md
+          - Other equations: api/equations/others.md
       - Operators:
           - api/operators/index.md
       - Propagators:

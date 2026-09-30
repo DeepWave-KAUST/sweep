@@ -33,6 +33,10 @@ without reimplementing the arithmetic.
 
 ::: sweep.parallel.routing.partition_global_coords
 
+::: sweep.parallel.routing.gather_tile_records
+
+::: sweep.parallel.routing.assemble_tile_records
+
 ::: sweep.parallel.pml.build_rank_pml_widths
 
 ::: sweep.parallel.halo.HaloExchange

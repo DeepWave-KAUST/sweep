@@ -26,18 +26,18 @@ is supported for every class.
 | `AcousticLSRTM` | `['vp', 'mp']` | 2D | LSRTM-oriented variant (``mp`` = reflectivity perturbation) | ✅ |
 | `AcousticLSRTM3D` | `['vp', 'mp']` | 3D | 3D counterpart of `AcousticLSRTM` | ✅ |
 | `AcousticVRR` | `['vp', 'rx', 'rz']` | 2D | Variable-density acoustic in vector-reflectivity form (``rx``, ``rz`` first-derivative density parameters) | ❌ |
-| `AcousticCurvilinear` | `['vp']` | 2D | `Acoustic` on a curvilinear grid for irregular topography (`topography=`) | ✅ |
+| `AcousticCurvilinear` | `['vp']` | 2D | `Acoustic` on a curvilinear grid for irregular topography (`topography=`); eager only | ❌ |
 
 ### Anisotropic acoustic family
 
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
 | `AcousticAniso` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks duveneck / liang / alkhalifah; mirrors the `DAS` facade | varies |
-| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | qP acoustic VTI, Liang K. et al. 2022 — alias `AcousticVTILiang` | ❌ |
+| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | qP acoustic VTI, Liang K. et al. 2022 — aliases `AcousticVTILiang` / `AcousticVTIDefault` | ❌ |
 | `AcousticTTI` | `['vp', 'epsilon', 'delta', 'theta']` | 2D | qP acoustic TTI, Liang K. et al. 2022 — alias `AcousticTTILiang` | ❌ |
 | `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | ❌ |
 | `AcousticVTI1st` | `['vp', 'epsilon', 'delta', 'rho']` | 2D | 1st-order velocity-stress, Duveneck et al. 2008 — alias `AcousticVTIDuveneck` | ✅ |
-| `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 3D | 3D counterpart of `AcousticVTI1st` — alias `AcousticVTIDuveneck3D` | ✅ |
+| `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 3D | 3D counterpart of `AcousticVTI1st` — aliases `AcousticVTIDuveneck3D` / `AcousticVTIDefault3D` | ✅ |
 
 ### Elastic family
 
@@ -46,7 +46,7 @@ is supported for every class.
 | `Elastic` | `['vp', 'vs', 'rho']` | 2D | Velocity-stress elastic propagation (Virieux 1986) | ✅ |
 | `Elastic3D` | `['vp', 'vs', 'rho']` | 3D | 3D counterpart of `Elastic` | ✅ |
 | `ElasticAPM` | `['vp', 'vs', 'rho']` | 2D | Alias of `Elastic` (Cao & Chen 2018 APM free surface) | ✅ |
-| `ElasticCurvilinear` | `['vp', 'vs', 'rho']` | 2D | `Elastic` on a curvilinear grid for irregular topography (`topography=`) | ✅ |
+| `ElasticCurvilinear` | `['vp', 'vs', 'rho']` | 2D | `Elastic` on a curvilinear grid for irregular topography (`topography=`); eager only | ❌ |
 | `ElasticVRR` | `['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']` | 2D | Vector-reflectivity elastic (Soares & Sacchi 2025), momentum-stress form, no density model | ✅ |
 | `ElasticTTI` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Rotated-staggered-grid elastic TTI | ❌ |
 | `ElasticTTISG` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Standard-staggered-grid elastic TTI | ✅ |
@@ -63,12 +63,11 @@ the receiver-side discretisation.
 | --- | --- | --- | --- | --- |
 | `DAS` | `['vp', 'vs', 'rho']` | 2D / 3D | **Unified facade** — `method=` picks zhao / mu (formerly `DASModeler`) | ✅ |
 | `DASZhao` / `DASZhao3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Zhao-style DAS formulation | ✅ |
-| `DASMu` / `DASMu3D` | `['vp', 'vs', 'rho']` | 2D / 3D | μ-formulation DAS | ✅ |
+| `DASMu` / `DASMu3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Mu & Hung (2022) velocity-stress formulation with integrated strain | ✅ |
 | `DASElastic` / `DASElastic3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Elastic DAS variant (alias of `DASZhao` / `DASZhao3D`) | ✅ |
 
 For the authoritative list of equations exported by your installation,
-including constructor signatures and compiled-binding availability, use
-the CLI:
+with their models and compiled-binding support, use the CLI:
 
 ```bash
 sweep list equations
@@ -222,7 +221,7 @@ explicit list:
 ```python
 solver = PropTorch(
     Elastic(device=dev),
-    shape=shape, dh=dh, dt=dt, dev=dev,
+    shape=shape, dh=dh, dt=dt, device=dev,
     source_type=["sxx", "szz", "sxz"],     # explicit override
     receiver_type=["vz"],
 )

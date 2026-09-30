@@ -10,8 +10,9 @@ Within the Torch family, `PropTorch` now selects the actual implementation:
 - `impl=None` *(default — equivalent to `impl="auto"`)*: probe
   `sweep.is_torch_binding_available()`; pick `"c"` when PyTorch, a visible CUDA
   GPU and a CUDA core (the wheel's prebuilt one, a cached local build, or an nvcc
-  to build one) are present, otherwise transparently fall back to `"eager"`. A
-  plain `import sweep._C` always succeeds and proves nothing.
+  to build one) are present and the equation has compiled kernels, otherwise
+  transparently fall back to `"eager"`. A plain `import sweep._C` always
+  succeeds and proves nothing.
 - `impl="eager"`: pure-PyTorch implementation (no build step required).
 - `impl="c"`: the compiled CUDA implementation — the prebuilt `libsweep_core.so`
   the wheel ships (`sweep/lib/cu12/` or `cu13/`, picked by your torch's CUDA
@@ -23,10 +24,13 @@ Within the Torch family, `PropTorch` now selects the actual implementation:
 The wheel ships two cores: `cu12` (sm_70–sm_90 SASS + sm_90 PTX) and `cu13`
 (sm_75–sm_120 SASS + sm_120 PTX; no V100, driver >= 580). The loader picks
 `lib/cu<torch CUDA major>/` and checks its `core.json` (ABI 2, CUDA major, archs
-and PTX gated on the driver version). A local nvcc build (`>= 12.4`; `>= 12.8`
-for Blackwell targets; or a CUDA 13 nvcc) happens only when no shipped core fits —
-a torch cu11, a GPU older than sm_70 on cu12 / sm_75 on cu13, an sdist/clone
-install. See [Installation](../getting-started/installation.md).
+and PTX gated on the driver version). A local core build happens only when no
+shipped core fits — a torch of another CUDA major (e.g. cu11), a GPU older than
+sm_70 on cu12, an sdist/clone install — on the first `impl="c"` use, or ahead
+of time with `python -m sweep.build`. It needs an nvcc of torch's CUDA major
+(for CUDA 12: `>= 12.4`, `>= 12.8` for Blackwell targets). A GPU older than
+sm_75 under a cu13 torch is refused rather than built for; use a cu12 torch
+there. See [Installation](../getting-started/installation.md).
 
 ## User-Facing Backend Families
 
@@ -74,7 +78,7 @@ sweep.backend.torch.binding.diagnostics()
 `sweep.backend.torch.binding.is_available()` answers whether `impl="c"` is
 usable here: PyTorch present, a CUDA GPU visible, and a CUDA core at hand (the
 shipped one for your torch's CUDA major, `SWEEP_CORE`, a cached local build, or
-nvcc >= 12.4 to build one). It loads and compiles nothing.
+an nvcc of torch's CUDA major to build one). It loads and compiles nothing.
 
 Example diagnostics output:
 
@@ -130,8 +134,9 @@ Use the `c` implementation inside the Torch family when:
 - you want hand-written CUDA kernels or memory modes such as boundary
   saving, disk-backed boundary storage, or `c` checkpointing
 
-`c` memory modes are equation-specific. Full-wavefield and
-boundary-saving modes are available across the `c`-backed solvers;
+`c` memory modes are equation-specific. Full-wavefield storage is available
+across the `c`-backed solvers, and boundary saving across all of them except
+`ViscoAcoustic` and `DASZhao3D` (their `c` default is full storage);
 checkpoint modes are available where the equation exposes the corresponding
 backward implementation. The user-facing entry point is:
 

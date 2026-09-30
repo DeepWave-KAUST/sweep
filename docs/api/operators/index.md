@@ -18,8 +18,9 @@ You usually do **not** instantiate these directly:
   `self.laplacian_2d(...)`, `self.separable_d2_2d(...)`, `self.gradient(...)`.
 - `StaggeredDerivative` is built by `FirstOrderEquation.__init__` and stored
   on `self.pd`.
-- `RSGDerivative` is constructed explicitly by `ElasticTTI` / `ElasticTTISG`
-  as `self.rsg`.
+- `RSGDerivative` is constructed explicitly by `ElasticTTI` as `self.rsg`
+  (and also bound to `self.pd`); `ElasticTTISG` uses the `StaggeredDerivative`
+  on `self.pd` instead.
 
 ## LaplaceGradientOps
 

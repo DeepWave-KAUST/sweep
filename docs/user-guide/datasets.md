@@ -88,7 +88,7 @@ datasets.load("bp-2004")["dh"]                       # (6.25, 12.5)
 datasets.load("bp-2004", downsample=2)["dh"]         # (12.5, 25.0)   ← ×2 both axes
 datasets.load("bp-2004", downsample=(2, 4))["dh"]    # (12.5, 50.0)   ← dz×2, dx×4
 datasets.load("bp-2004", downsample=(2, 4))["vp"].shape        # (956, 1349)
-datasets.load("seg-eage-salt", downsample=[1, 1, 3])["dh"]     # (20, 20, 60)  depth only
+datasets.load("seg-eage-salt", downsample=[3, 1, 1])["dh"]     # (60.0, 20.0, 20.0)  ← depth only (axes nz, ny, nx)
 ```
 
 ## Cache and dependencies

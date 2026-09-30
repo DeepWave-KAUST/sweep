@@ -64,7 +64,7 @@ vp_true[shape[0] // 2:, :] = 2500.0
 vp_init = np.full(shape, 1500.0, dtype=np.float32)
 
 solver = PropTorch(Acoustic(device=device), shape=shape, dh=dh, dt=dt,
-                   dev=device, pml_type="cpmlr", use_ckpt=False)
+                   device=device, pml_type="cpmlr", use_ckpt=False)
 
 t = np.arange(nt) * dt
 wavelet = ricker(t - 0.14, f=10.0).astype(np.float32)
