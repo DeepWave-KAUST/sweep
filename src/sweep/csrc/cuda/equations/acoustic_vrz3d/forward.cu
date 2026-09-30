@@ -1,35 +1,34 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vrz3d.h"
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
 
 namespace acoustic_vrz3d {
 
-ForwardOutput forward(const ForwardInput& in)
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
-    TORCH_CHECK(p.models.size() == 2, "AcousticVRZ3D CUDA forward expects models [vp, z]");
+    SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D CUDA forward expects models [vp, z]");
 
     auto vp = p.models[0];
     auto z = p.models[1];
-    auto inv_z = torch::reciprocal(z);
+    auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::forward");
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -62,7 +61,7 @@ ForwardOutput forward(const ForwardInput& in)
     // stays absolute, so consecutive segments reproduce one full run.
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
-    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+    SWEEP_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
                 "AcousticVRZ3D stepped forward: require 0 <= it_begin <= it_end "
                 "<= nt, got [", it0, ", ", it1, ") with nt=", p.nt);
     const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
@@ -81,64 +80,74 @@ ForwardOutput forward(const ForwardInput& in)
     const bool cut_x_lo = (p.cut_face_mask & 1) != 0;
     const bool cut_x_hi = (p.cut_face_mask & 2) != 0;
     if (phase != 0) {
-        TORCH_CHECK(phase == 1 || phase == 2,
+        SWEEP_CHECK(phase == 1 || phase == 2,
                     "step_phase must be 0 (legacy), 1 (boundary strips) or 2 (interior)");
-        TORCH_CHECK(it1 == it0 + 1,
+        SWEEP_CHECK(it1 == it0 + 1,
                     "phased forward (step_phase != 0) drives a single step: "
                     "require it_end == it_begin + 1, got [", it0, ", ", it1, ")");
-        TORCH_CHECK(p.cut_face_mask != 0,
+        SWEEP_CHECK(p.cut_face_mask != 0,
                     "phased forward requires cut_face_mask != 0");
-        TORCH_CHECK((p.cut_face_mask & ~0x3) == 0,
+        SWEEP_CHECK((p.cut_face_mask & ~0x3) == 0,
                     "phased forward v1 supports x-face cuts only (bits 0/1), got ",
                     p.cut_face_mask);
-        TORCH_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
+        SWEEP_CHECK(ctx.phys_x1() - ctx.phys_x0() >= 2 * p.M,
                     "tile too narrow for phase-split strips: nx_phys=",
                     ctx.phys_x1() - ctx.phys_x0(), " < 2M=", 2 * p.M);
     }
 
+    // The propagator binds the forward wavefield state on EVERY call -- the
+    // persistent save_all pool or the per-call transient set (_c.py
+    // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
+    // AcousticVRZ3D.cuda_layout base_nvar 3 + pml_nvar 9) -- and the stepped /
+    // DD drivers rebind the same list; a continuation segment (it_begin>0) has
+    // to keep those very tensors, since an internal allocation would zero the
+    // propagation state mid-run.
     AcousticWavefieldTensor wavefield;
-    // A continuation segment (it_begin>0) must keep the same wavefield tensors;
-    // the internal allocate() would zero the propagation state mid-run.
-    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
-                "AcousticVRZ3D stepped continuation (it_begin>0) requires "
-                "Python-bound wavefields");
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, 3, true);
-    else
-        wavefield.allocate(vp, 3, true, /*double_buffer_psi=*/true);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "acoustic_vrz3d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + pml_nvar = 12 tensors)");
+    wavefield.bind(p.wavefields, 3, true);
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 3);
     auto cpml = cpml_tensor.view();
 
-    // Stepped runs accumulate absolute-it writes into a Python-bound record;
-    // a per-call allocation would lose every prior segment.
-    TORCH_CHECK(!stepped || p.record_out.defined(),
-                "AcousticVRZ3D stepped forward requires record_out bound from Python");
-    auto record = p.record_out.defined()
-        ? p.record_out
-        : torch::zeros({N, nrec, p.nt}, vp.options());
-    if (p.record_out.defined())
-        TORCH_CHECK(record.is_contiguous() &&
-                    record.size(-1) == static_cast<long>(p.nt),
-                    "record_out must be contiguous with trailing dim nt");
+    // record_out is bound on every call: AcousticVRZ3D.cuda_layout declares
+    // record_shape, so cp.record_shape is never None and _c.py allocates it.
+    // Stepped runs additionally accumulate absolute-it writes into it, where a
+    // per-call allocation would lose every prior segment.
+    auto record = bound_required(p.record_out, {N, nrec, p.nt},
+                                 "record_out (acoustic_vrz3d/forward, cuda_layout.record_shape)");
+    SWEEP_CHECK(record.is_contiguous() &&
+                record.size(-1) == static_cast<long>(p.nt),
+                "record_out must be contiguous with trailing dim nt");
 
     // save_all_wavefields keeps a fresh per-call buffer; it is a full-run-only
     // debug path (DD uses boundary saving), so forbid it under stepped where
     // segments would clobber each other.
-    TORCH_CHECK(!stepped || !p.save_all_wavefields,
+    SWEEP_CHECK(!stepped || !p.save_all_wavefields,
                 "AcousticVRZ3D stepped forward does not support save_all_wavefields");
-    torch::Tensor u_allt;
+    // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
+    // declares save_all_shape, so cp.u_allt_shape is never None.
+    Buf u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 7, B, nz, ny, nx}, vp.options());
+        // slots 0-6 = u, psix, psiy, psiz, zetax, zetay, zetaz; slot 7 =
+        // U_{it+1} - 2U_it + U_{it-1} (the second time difference the
+        // full-store imaging uses in place of a spatial Laplacian).
+        u_allt = bound_required(p.u_allt_out, {p.nt, 8, B, nz, ny, nx},
+                                "u_allt_out (acoustic_vrz3d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
-        TORCH_CHECK(p.checkpoints.size() == 8, "AcousticVRZ3D checkpointing expects 8 checkpoint tensors");
+        SWEEP_CHECK(p.checkpoints.size() == 8, "AcousticVRZ3D checkpointing expects 8 checkpoint tensors");
     if (p.use_recursive_checkpoint) {
-        TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
-        TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
+        SWEEP_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
+        SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
     }
 
+    // M+1 at offset -M: what the reverse step needs.  The VRZ imaging stencil
+    // (a divergence of a gradient) reaches 2M, one M past the shell; the
+    // Python-side sigma=0 boundary buffer (BOUNDARY_BUFFER_REACH) keeps that
+    // reach inside reconstructed cells, so the shell stays at M+1.
     int save_width = p.M + 1;
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
@@ -147,7 +156,7 @@ ForwardOutput forward(const ForwardInput& in)
     // first would lose everything saved before them, so stepped runs need the
     // Python-bound persistent boundary buffers.
     if (stepped && p.use_boundary_saving)
-        TORCH_CHECK(!p.boundary_gpu.empty(),
+        SWEEP_CHECK(!p.boundary_gpu.empty(),
                     "AcousticVRZ3D stepped forward with boundary saving requires "
                     "Python-bound boundary_gpu");
     // tangent_pad MUST match the Python boundary layout (equations/acoustic_vrz.py
@@ -161,11 +170,11 @@ ForwardOutput forward(const ForwardInput& in)
     if (staged_boundary) {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, false,
                                 p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory,
-                                boundary_tangent_pad);
+                                boundary_tangent_pad, p.boundary_staging);
     } else {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, true,
                                 1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory,
-                                boundary_tangent_pad);
+                                boundary_tangent_pad, p.boundary_staging);
     }
     auto bs = boundary_saver.view();
 
@@ -179,8 +188,13 @@ ForwardOutput forward(const ForwardInput& in)
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
-    BoundaryRuntime boundary_runtime(
+    // Same persistent-session handling as the backward; see there. Without it
+    // the DD forward tears down and rebuilds the copy stream once per time step
+    // and the staged ring can never overlap compute.
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Forward,
         boundary_saver,
         3,
         p.use_boundary_saving,
@@ -189,10 +203,9 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
+        disk_files
     );
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
         8,
@@ -287,17 +300,23 @@ ForwardOutput forward(const ForwardInput& in)
             ctx
         );
 
-        wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
-
+        // snapshot U_it before the rotation (after it, u_now is U_{it+1})
         if (u_allt.defined()) {
-            u_allt.select(0, it).select(0, 0).copy_(wavefield.u_now_t.squeeze(1));
-            u_allt.select(0, it).select(0, 1).copy_(wavefield.psix_t.squeeze(1));
-            u_allt.select(0, it).select(0, 2).copy_(wavefield.psiy_t.squeeze(1));
-            u_allt.select(0, it).select(0, 3).copy_(wavefield.psiz_t.squeeze(1));
-            u_allt.select(0, it).select(0, 4).copy_(wavefield.zetax_t.squeeze(1));
-            u_allt.select(0, it).select(0, 5).copy_(wavefield.zetay_t.squeeze(1));
-            u_allt.select(0, it).select(0, 6).copy_(wavefield.zetaz_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 0), wavefield.u_now_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 1), wavefield.psix_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 2), wavefield.psiy_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 3), wavefield.psiz_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 4), wavefield.zetax_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 5), wavefield.zetay_t.squeeze(1));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 6), wavefield.zetaz_t.squeeze(1));
+            // pre-rotate: u_prev = U_{it-1}, u_now = U_it, u_next = U_{it+1}
+            second_time_difference(u_allt.select(0, it).select(0, 7),
+                                   wavefield.u_next_t.squeeze(1),
+                                   wavefield.u_now_t.squeeze(1),
+                                   wavefield.u_prev_t.squeeze(1));
         }
+
+        wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
 
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), wavefield.checkpoint_tensors());
     }
@@ -307,17 +326,19 @@ ForwardOutput forward(const ForwardInput& in)
     // not swapped yet (u_prev/u_now roles would be wrong) — phase 2 of the same
     // step does this copy.
     if (p.use_boundary_saving && it1 == static_cast<int>(p.nt) && phase != 1) {
-        boundary_saver.last_two_t.select(1, 0).copy_(wavefield.u_prev_t);
-        boundary_saver.last_two_t.select(1, 1).copy_(wavefield.u_now_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(1, 0), wavefield.u_prev_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(1, 1), wavefield.u_now_t);
     }
 
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
 
     return out;
 }
+
+
 
 } // namespace acoustic_vrz3d

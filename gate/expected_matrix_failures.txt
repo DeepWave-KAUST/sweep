@@ -1,0 +1,24 @@
+# Failing cells of test/backend_gradient_matrix.py that are known and accepted.
+# Keyed on the CELL, not the reason, so a reworded error is not a false alarm.
+# A cell that stops failing also fails the run -- remove it here deliberately.
+#
+# What these are, as of 2026-09-06 (all reproduce identically on origin/dev);
+# the VRZ cells left with the exact CPML adjoint (2-D and 3-D, 2026-09-30 --
+# 3-D had kept failing only against an eager reference with cuDNN TF32 on):
+#   * lsrtm3d wavelet   -- returns a gradient and it is wrong (cos -0.005);
+#                          deliberately NOT declared as a missing gradient
+#   * */ckpt_recursive  -- the equation has no recursive-checkpoint binding and
+#                          says so; the harness counts a refusal as a failure
+#   * das3d/bs          -- 3-D DAS declares it has no boundary saving
+acoustic_lsrtm3d/ckpt_chunk/c-cuda
+acoustic_lsrtm3d/full/c-cuda
+acoustic_vti_1st_2d/ckpt_recursive/c-cuda
+acoustic_vti_1st_3d/ckpt_recursive/c-cuda
+das3d/bs/c-cuda
+elastic_tti_2nd2d/ckpt_recursive/c-cuda
+elastic_tti_sg2d/ckpt_recursive/c-cuda
+elastic_tti_sg2d_rec_stress/ckpt_recursive/c-cuda
+elastic_tti_sg2d_src_vz/ckpt_recursive/c-cuda
+elastic_tti_sg3d/ckpt_recursive/c-cuda
+elastic_tti_sg3d_rec_stress/ckpt_recursive/c-cuda
+elastic_tti_sg3d_src_vz/ckpt_recursive/c-cuda

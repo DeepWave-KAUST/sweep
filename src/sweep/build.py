@@ -1,17 +1,242 @@
-"""``python -m sweep.build`` — compile the CUDA backend ahead of time.
+"""``python -m sweep.build`` — make sure the CUDA core exists, ahead of time.
 
-Exists so the build can happen where builds are cheap. Compiling needs nvcc and
-a target architecture, not a card, so this runs on a CPU node or in a CI image
-and leaves a cached ``sweep_C.so`` that the GPU run picks up::
+A no-op with the wheel's prebuilt core.  When no shipped core fits, the core is
+compiled locally, which needs nvcc plus a target architecture -- not a card -- so
+this runs on a CPU node or in a CI image and leaves a cached
+``libsweep_core.so`` that the GPU run picks up without nvcc (a source stamp
+beside it says it is current; nothing torch-specific is compiled by default:
+sweep._C is a ctypes layer)::
 
-    TORCH_CUDA_ARCH_LIST=7.0 TORCH_EXTENSIONS_DIR=/scratch/ext python -m sweep.build
+    TORCH_CUDA_ARCH_LIST=7.0 TORCH_EXTENSIONS_DIR=/scratch/ext python -m sweep.build --no-gpu-required
 
 Without ``--no-gpu-required`` it behaves exactly like ``sweep.precompile()`` and
 insists on a visible device.
+
+``--core`` is the release-side mode: it builds the torch-free core alone as a
+fat binary and drops it where the wheel picks it up (``sweep/lib/<cuN>/``) with
+its ``core.json`` sidecar, so a user's first import compiles nothing.  The tag
+is the nvcc's CUDA major (``_core_tag``): a CUDA 12 nvcc lands in ``lib/cu12/``,
+a CUDA 13 nvcc in ``lib/cu13/``, so the release is one command per toolkit and
+the wheel ships both; the loader picks the tag torch's CUDA major names.
+The release runs it inside the ``pytorch/manylinux2_28-builder`` images through
+``utils/build_cores_manylinux.sh`` (cu12 then cu13, then ``python -m build
+--wheel`` under ``SWEEP_REQUIRE_CORE=cu12,cu13``, which makes setup.py refuse a
+tree missing either core; ``SWEEP_REQUIRE_CORE=1`` asks for at least one), so
+the shipped ``.so`` needs only GLIBC_2.17 / GLIBCXX_3.4.22 and the wheel is
+tagged ``manylinux_2_28``.
+Without ``--archs`` each toolkit gets its recommended list::
+
+    python -m sweep.build --core --cuda-home /usr/local/cuda-12.9   # lib/cu12: 7.0;7.5;8.0;8.6;8.9;9.0+PTX
+    python -m sweep.build --core --cuda-home /usr/local/cuda-13.0   # lib/cu13: 7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX
+
+cu12 covers V100 through H100/H200 as SASS and Blackwell through its sm_90
+PTX.  nvcc 13 dropped offline compilation for compute capability < 7.5, so the
+cu13 list has no sm_70 (no V100) and adds Blackwell (sm_100, sm_120) natively.
 """
+from __future__ import annotations
+
 import argparse
+import hashlib
+import json
 import os
+import re
 import sys
+import tempfile
+from pathlib import Path
+
+# Recommended --archs per core tag, in torch's spelling.  One +PTX entry, the
+# newest arch: each embedded PTX is another copy of every kernel, and a card
+# newer than every SASS entry only ever needs the newest one.
+#   cu12: Volta (V100) through Hopper (H100/H200) as SASS; Blackwell via PTX.
+#   cu13: nvcc 13 dropped offline compilation for compute capability < 7.5, so
+#         Turing (T4/RTX 20) up -- no V100 -- and Blackwell (sm_100, sm_120) as SASS.
+RECOMMENDED_ARCHS = {
+    "cu12": "7.0;7.5;8.0;8.6;8.9;9.0+PTX",
+    "cu13": "7.5;8.0;8.6;8.9;9.0;10.0;12.0+PTX",
+}
+DEFAULT_ARCHS = RECOMMENDED_ARCHS["cu12"]
+
+# Where a pip-installed cuFFT lands relative to sweep/lib/<tag>/: up to
+# site-packages, then into the wheel's lib dir -- nvidia/cufft/lib for the CUDA
+# 12 wheels (nvidia-cufft-cu12), nvidia/cu13/lib for the CUDA 13 ones (the
+# unsuffixed nvidia-cufft 12.x; every CUDA 13 component shares nvidia/cu13/).
+# Every core carries both entries, one -rpath each: the dynamic loader skips a
+# directory that does not exist.  Spelt for ninja ($$ -> $) and single-quoted
+# in _with_release_link_flags so /bin/sh does not expand $ORIGIN into nothing.
+CUFFT_RPATH = ("$$ORIGIN/../../../nvidia/cufft/lib",
+               "$$ORIGIN/../../../nvidia/cu13/lib")
+
+# No -static-libstdc++: a static libstdc++ inside a shared library leaves its
+# locale/iostream globals uninitialised (the core's error text lost every
+# number: "sweep_call: no entry " with the id missing).  The release core links
+# libstdc++ dynamically, so build it in the manylinux_2_28 container
+# (utils/build_cores_manylinux.sh; floors GLIBC_2.17 / GLIBCXX_3.4.22), never on
+# a developer box whose libstdc++ is newer.
+RELEASE_LINK_FLAGS: list = []
+
+
+def _core_tag(cuda_version: str) -> str:
+    from sweep.backend.c import jit
+    tag = getattr(jit, "_core_tag", None)
+    return tag(cuda_version) if tag else "cu" + cuda_version.split(".")[0]
+
+
+def _header_abi_version() -> int:
+    from sweep.backend.c import jit
+    text = (jit._CSRC / "core" / "capi.h").read_text()
+    m = re.search(r"^\s*#define\s+SWEEP_CORE_ABI_VERSION\s+(\d+)", text, re.M)
+    if not m:
+        raise RuntimeError("SWEEP_CORE_ABI_VERSION not found in csrc/core/capi.h")
+    return int(m.group(1))
+
+
+def parse_arch_list(archs: str) -> tuple[list[str], list[str]]:
+    """``"7.0;9.0+PTX"`` -> (["70", "90"], ["90"]): torch's spelling in, the
+    sidecar's out."""
+    sm: list[str] = []
+    ptx: list[str] = []
+    for a in archs.replace(",", ";").split(";"):
+        a = a.strip()
+        if not a:
+            continue
+        has_ptx = a.endswith("+PTX")
+        a = (a[:-4] if has_ptx else a).replace(".", "")
+        if not a.isdigit():
+            raise ValueError(f"bad arch {a!r} in --archs {archs!r}")
+        sm.append(a)
+        if has_ptx:
+            ptx.append(a)
+    if not sm:
+        raise ValueError("--archs names no architecture")
+    return sm, ptx
+
+
+def default_archs(tag: str) -> str:
+    """The recommended ``--archs`` for a core tag (``"cu12"``, ``"cu13"``); a
+    tag with no entry (a future CUDA major) needs an explicit ``--archs``."""
+    try:
+        return RECOMMENDED_ARCHS[tag]
+    except KeyError:
+        raise ValueError(f"no recommended arch list for {tag}; pass --archs "
+                         f"(known: {', '.join(sorted(RECOMMENDED_ARCHS))})") from None
+
+
+def check_archs_for_nvcc(sm: list[str], cuda_major: int) -> None:
+    """nvcc 13 dropped offline compilation for compute capability < 7.5: refuse
+    such an entry here, by name, rather than mid-build with nvcc's own message."""
+    if cuda_major < 13:
+        return
+    low = [a for a in sm if (int(a[:-1]), int(a[-1])) < (7, 5)]
+    if low:
+        raise ValueError(
+            f"nvcc {cuda_major} cannot emit sm_{', sm_'.join(low)}: CUDA 13 dropped "
+            "offline compilation for compute capability < 7.5 (no V100). Drop it "
+            f"from --archs, e.g. {RECOMMENDED_ARCHS['cu13']!r}")
+
+
+def write_core_sidecar(out_dir: Path, archs: list[str], ptx: list[str],
+                       cuda_version: str, flags: list[str]) -> Path:
+    so = Path(out_dir) / "libsweep_core.so"
+    h = hashlib.sha256()
+    with open(so, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    meta = {"abi": _header_abi_version(), "cuda": cuda_version, "archs": list(archs),
+            "ptx": list(ptx), "sha256": h.hexdigest(), "flags": list(flags)}
+    path = Path(out_dir) / "core.json"
+    path.write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n")
+    return path
+
+
+def _with_release_link_flags(text: str) -> str:
+    """``_core_ninja``'s graph with the cuFFT rpaths (one ``-rpath`` per pip
+    layout, see ``CUFFT_RPATH``) and the release link flags on its link rule.
+    Patched on the ninja text rather than through a ``_build_core`` parameter:
+    the release build is the only caller that wants them."""
+    anchor = "  command = $nvcc -shared -o $out $in"
+    if text.count(anchor) != 1:
+        raise RuntimeError("sweep.backend.c.jit._core_ninja link rule changed; update build.py")
+    extra = " ".join([f"-Xlinker '-rpath={p}'" for p in CUFFT_RPATH] + RELEASE_LINK_FLAGS)
+    return text.replace(anchor, f"{anchor} {extra}")
+
+
+def _scratch_dir(tag: str) -> Path:
+    root = os.environ.get("TORCH_EXTENSIONS_DIR")
+    if root:
+        return Path(root) / f"sweep_core_{tag}"
+    try:
+        import getpass
+        who = getpass.getuser()
+    except Exception:
+        who = "sweep"
+    return Path(tempfile.gettempdir()) / f"sweep_core_{tag}_{who}"
+
+
+def build_core(archs: str | None = None, out: Path | None = None,
+               cuda_home: str | None = None, verbose: bool = True) -> Path:
+    """Build the core with the nvcc at ``cuda_home`` and file it under
+    ``lib/<tag>``, the tag being that nvcc's CUDA major.  ``archs=None`` takes
+    the tag's recommended list (``RECOMMENDED_ARCHS``)."""
+    from sweep.backend.c import jit
+
+    if cuda_home is None:
+        cuda_home = jit._find_cuda_home()
+        if cuda_home is None:
+            raise RuntimeError("no suitable nvcc found; pass --cuda-home or set CUDA_HOME")
+    nvcc = os.path.join(cuda_home, "bin", "nvcc")
+    if not os.path.exists(nvcc):
+        raise RuntimeError(f"{nvcc} does not exist")
+    ver = jit._nvcc_version(nvcc)
+    if ver is None:
+        raise RuntimeError(f"cannot read the release of {nvcc}")
+    cuda_version = f"{ver[0]}.{ver[1]}"
+    tag = _core_tag(cuda_version)
+    if archs is None:
+        archs = default_archs(tag)
+    sm, ptx = parse_arch_list(archs)
+    check_archs_for_nvcc(sm, ver[0])
+
+    # _gencode_flags reads the env; set it before anything computes cflags, and
+    # unconditionally so a visible device does not narrow the fat binary.
+    os.environ["TORCH_CUDA_ARCH_LIST"] = archs
+    os.environ["CUDA_HOME"] = cuda_home
+    build_dir = _scratch_dir(tag)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    sources, inc = jit._stage(build_dir)
+    inc = inc + [p for p in (os.path.join(cuda_home, "include"),
+                             os.path.join(cuda_home, "targets", "x86_64-linux", "include"))
+                 if os.path.isdir(p)]
+    flags = jit._CORE_DEFINES + jit._gencode_flags() + jit._CORE_FLAGS
+
+    if verbose:
+        print(f"[sweep] building libsweep_core.so ({tag}, nvcc {cuda_version}) for "
+              f"sm {' '.join(sm)}, ptx {' '.join(ptx) or '-'}, in {build_dir} ...",
+              file=sys.stderr, flush=True)
+    # _build_core looks _core_ninja up on the module, so the link flags ride
+    # in on a temporary wrapper; restored whatever happens.
+    orig = jit._core_ninja
+    jit._core_ninja = lambda *a, **k: _with_release_link_flags(orig(*a, **k))
+    try:
+        so = jit._build_core(build_dir, jit._core_sources(sources), inc, cuda_home, verbose)
+    finally:
+        jit._core_ninja = orig
+
+    out_dir = Path(out) if out is not None else jit._PKG / "lib" / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dst = out_dir / "libsweep_core.so"
+    dst.write_bytes(so.read_bytes())
+    sidecar = write_core_sidecar(out_dir, sm, ptx, cuda_version, flags)
+    print(f"{dst} ({dst.stat().st_size / 2**20:.1f} MB)")
+    print(str(sidecar))
+    return dst
+
+
+def _shipped_core_fits() -> bool:
+    try:
+        from sweep.backend.c import jit
+        return jit._shipped_core()[0] is not None
+    except Exception:
+        return False
 
 
 def main(argv=None) -> int:
@@ -20,9 +245,39 @@ def main(argv=None) -> int:
     ap.add_argument("--no-gpu-required", action="store_true",
                     help="build without a visible device; TORCH_CUDA_ARCH_LIST "
                          "must name the target architecture")
+    ap.add_argument("--core", action="store_true",
+                    help="build only the torch-free core as a fat binary for the "
+                         "wheel (no GPU needed); see --archs/--out/--cuda-home")
+    ap.add_argument("--archs", default=None,
+                    help="--core: TORCH_CUDA_ARCH_LIST spelling; the default is the "
+                         "recommended list for the nvcc's CUDA major -- cu12: "
+                         f"{RECOMMENDED_ARCHS['cu12']!r} (V100 through H100/H200, "
+                         "Blackwell via PTX); cu13: "
+                         f"{RECOMMENDED_ARCHS['cu13']!r} (nvcc 13 cannot emit sm_70, "
+                         "so no V100; Blackwell native). Keep one +PTX entry, the "
+                         "newest arch")
+    ap.add_argument("--out", default=None,
+                    help="--core: output dir (default: inside the installed sweep "
+                         "package, sweep/lib/<tag>; src/sweep/lib/<tag> in a clone). "
+                         "<tag> is the nvcc's CUDA major: a CUDA 12 nvcc lands in "
+                         "lib/cu12/, a CUDA 13 nvcc in lib/cu13/, so one --core run "
+                         "per toolkit ships both")
+    ap.add_argument("--cuda-home", default=None,
+                    help="--core: toolkit with bin/nvcc (default: what sweep would use)")
     a = ap.parse_args(argv)
 
-    if a.no_gpu_required and not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+    if a.core:
+        try:
+            build_core(a.archs, Path(a.out) if a.out else None, a.cuda_home)
+        except Exception as exc:
+            print(f"core build failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    # With a shipped core that fits nothing compiles here (sweep._C is ctypes), so
+    # there is no architecture to name.
+    if (a.no_gpu_required and not os.environ.get("TORCH_CUDA_ARCH_LIST")
+            and not _shipped_core_fits()):
         print("TORCH_CUDA_ARCH_LIST is unset, so there is no architecture to "
               "build for. Set it to your target card, e.g. "
               "TORCH_CUDA_ARCH_LIST=8.9 (Ada) or 7.0 (V100).", file=sys.stderr)
@@ -36,9 +291,13 @@ def main(argv=None) -> int:
         print(f"build failed: {exc}", file=sys.stderr)
         return 1
 
-    from torch.utils import cpp_extension
-    where = cpp_extension._get_build_directory("sweep_C", verbose=False)
-    print(f"sweep._C is built and cached at {where}")
+    from sweep.backend.c import jit
+    if jit.jit_full():
+        from torch.utils import cpp_extension
+        print(f"sweep._C (compiled developer path) is built and cached at "
+              f"{cpp_extension._get_build_directory('sweep_C', verbose=False)}")
+    else:
+        print(f"the CUDA core is at {jit.core_path()}; sweep._C is the ctypes layer, nothing else to build")
     return 0
 
 

@@ -1,7 +1,9 @@
 import os as _os
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
     top_free_surface_derivative,
@@ -18,6 +20,7 @@ from ._topography import (
     enforce_apm_traction_bc_3d,
     zero_at_air,
 )
+from ._registry import register_equation
 
 
 def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
@@ -55,6 +58,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          pml=None,
          free_surface=False,
          topo_rows=None,
+         return_gradients=False,
          ):
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
@@ -190,15 +194,24 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
         else:
             szz = zero_top_row(szz, top_halo, axis=-3)
     
-    return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
-           m_vxx, m_vxy, m_vxz, \
-           m_vyx, m_vyy, m_vyz, \
-           m_vzx, m_vzy, m_vzz, \
-           m_sxxx, m_szzz, \
-           m_sxyx, m_sxyy, \
-           m_sxzx, m_sxzz, \
-           m_syyy, \
-           m_syzy, m_syzz
+    out = (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+           m_vxx, m_vxy, m_vxz,
+           m_vyx, m_vyy, m_vyz,
+           m_vzx, m_vzy, m_vzz,
+           m_sxxx, m_szzz,
+           m_sxyx, m_sxyy,
+           m_sxzx, m_sxzz,
+           m_syyy,
+           m_syzy, m_syzz)
+    if return_gradients:
+        # The CPML-corrected velocity gradients the stress update just consumed.
+        # DASMu3D derives its strain-rate state from exactly these; exporting
+        # them is what lets its step be this step plus six strain lines instead
+        # of a 130-line copy. Nothing is recomputed and nothing reordered, so
+        # the flag cannot perturb the default path.
+        return out + ((dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
+                       dvx_dz, dvz_dx, dvy_dz, dvz_dy),)
+    return out
 
 
 def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
@@ -332,6 +345,7 @@ def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
            m_syzy, m_syzz
 
 
+@register_equation('Elastic3D')
 class Elastic(FirstOrderEquation):
     """First-order 3-D elastic wave equation on a staggered grid (Virieux 1986).
 
@@ -348,6 +362,8 @@ class Elastic(FirstOrderEquation):
 
     
     """
+    C_NAME = "elastic3d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="3D elastic P-wave velocity model.", unit="m/s"),
         ModelSpec("vs", aliases=("s_velocity",), description="3D elastic S-wave velocity model.", unit="m/s"),
@@ -385,6 +401,9 @@ class Elastic(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
     supports_apm = True          # Cao & Chen 2018 3-D APM is implemented
+    supports_image_topography = True   # eager func applies the staircase
+    # supports_image_topography_c stays False: the CUDA kernels never read
+    # the topo rows (topo3d_gradient_mode_suite's docstring says the same).
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         """Build the 3-D elastic equation operator.
@@ -546,38 +565,43 @@ class Elastic(FirstOrderEquation):
             m_syzy, m_syzz,
         )
     
-    def _C(self, ):
-        # CUDA IMPLEMENTATION
-        import torch
-        import sweep._C as _C
-        return (
-            _C.elastic3d_forward,
-            _C.elastic3d_backward,
-            _C.elastic3d_backward_bs,
-            _C.elastic3d_backward_ckpt,
-            _C.elastic3d_backward_recursive_ckpt,
-        )
-
     def _C_apm(self):
-        """APM CUDA bindings (Cao & Chen 2018, 3-D).
-        Forward is fully implemented; backward is a stub pending Phase 3D
-        — the _c.py dispatch handles the fallback to eager autograd for
-        gradient computation."""
+        """APM CUDA binding (Cao & Chen 2018, 3-D): the forward only.  There
+        is no compiled APM backward; ``_c.py``'s ``_guard_apm_backward``
+        sends gradients to eager autograd."""
         import sweep._C as _C
-        return (
-            _C.elastic3d_apm_forward,
-            _C.elastic3d_apm_backward,
-            _C.elastic3d_apm_backward_bs,
-        )
+        return (_C.elastic3d_apm_forward,)
     
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            save_all_shape=history_fields(3),   # vx, vy, vz
             base_nvar=9,
             pml_nvar=27,
             last_two_nvar=1,
             last_two_storage_nvar=9,
+            # The compiled backward's scratch (common/elastic.h
+            # ElasticAdjointWorkspaceTensor), one padded grid per shot each:
+            # [0-17]  = the nine q* then the nine p*, the stress- /
+            #           velocity-adjoint prepare->apply scratch (every mode);
+            # [18-20] = next_segment_v (ckpt) / current_v (recursive): the v(it)
+            #           carriers the imaging reads, vx / vy / vz;
+            # [21-23] = prev_segment_next_v (ckpt) / next_v (recursive): the
+            #           v(it+1) carriers, vx / vy / vz
+            # -- [18-23] in the checkpoint modes only (sg_driver.cuh
+            # SgCarrierSlots after elastic3d WS_CARRIERS = 18); the full mode
+            # keeps one read-only zero grid at [18] instead (v(nt)).
             backward_workspace_nvar=18,
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                24 if mode in ("ckpt", "recursive") else 19 if mode == "full" else 18),
+            # The chunked backward's replayed velocity histories (elastic3d
+            # driver_traits seg_buffers): vx, vy, vz of one chunk, (interval + 1,
+            # B, 1, grid) each -- row 0 = v(start), row k = v(start + k).  The
+            # recursive mode replays per step into the carriers above and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
             # CPML memory variables in C++ bind order: nine (x, y, z) triples
             # (m_vx*, m_vy*, m_vz*, m_sxx*, m_syy*, m_szz*, m_sxy*, m_sxz*,
             # m_syz*); the differencing axis is the name's last letter.  All
@@ -585,4 +609,9 @@ class Elastic(FirstOrderEquation):
             pml_slot_axes=("x", "y", "z") * 9,
             checkpoint_slot_axes=(None,) * 9 + ("x", "y", "z") * 9,
             adjoint_pml_slab=True,
+            slots=slot_table.ELASTIC3D,
+            stepped=True,
+            dd_backward_phases=True,
+            grads_out_has_wavelet=False,
+            illum_nvar=0,
         )

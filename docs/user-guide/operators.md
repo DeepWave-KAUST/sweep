@@ -271,7 +271,7 @@ the base class pick.
 - [Operators API reference](../api/operators/index.md) — full signatures for
   `LaplaceGradientOps`, `StaggeredDerivative`, `RSGDerivative`.
 - [Extending: Adding a New Equation](extending.md) — full lifecycle of a new
-  equation (`FIELD_SPECS`, registration, `_C()` hook, CUDA path).
+  equation (`FIELD_SPECS`, registration, `C_NAME`, CUDA path).
 - [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb)
   — runnable walkthrough of a 2-D scalar equation using
   `self.laplacian_2d` end-to-end.

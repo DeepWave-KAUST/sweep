@@ -28,8 +28,9 @@ cut-aware (zero-coeff PML branch != interior branch bitwise) so the forward
 cut_face_mask is set in 3-D; elastic2d forward does not read it.
 
 Rank 0 also runs the full single-domain model on its own GPU and asserts
-bitwise equality of records and every wavefield slot over each tile's
-physical region (same-model GPUs => IEEE-deterministic kernels => bit
+bitwise equality of records and every physical field (velocity and stress)
+over each tile's physical region -- the CPML memory variables are allocated
+as PML strips, so they have no physical region to compare (same-model GPUs => IEEE-deterministic kernels => bit
 equality is the correct bar).
 """
 
@@ -122,10 +123,8 @@ def capture(prop):
     orig = impl.forward_func
 
     def wrapper(params):
-        out = orig(params)
+        orig(params)
         cap["params"] = params
-        cap["raw_out"] = out
-        return out
 
     impl.forward_func = wrapper
     cap["func"] = orig
@@ -144,7 +143,7 @@ def make_runner(prop, wavelet, sources, receivers, model_arrays, ndim, dev):
     assert len(L) == NWF[ndim]
     for t in L:
         t.zero_()
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
     p.record_out = record
     return SteppedBindingRunner(func, p, L, psi_pairs=(), u_blocks=()), record
 
@@ -334,7 +333,7 @@ def main():
 
     # ---- gather records + final physical tiles on rank 0 ----
     rec_cpu = record.cpu()
-    u_cpu = [runner.L[f][..., lo:hi].cpu() for f in range(NWF[ndim])]
+    u_cpu = [runner.L[f][..., lo:hi].cpu() for f in range(NPHYS[ndim])]
     gathered = [None] * world
     dist.gather_object((own_idx, rec_cpu, u_cpu),
                        gathered if rank == 0 else None, dst=0)
@@ -354,7 +353,7 @@ def main():
         with torch.no_grad():
             runner_full.run_to(nt)
         ref_rec_cpu = record_full.cpu()
-        ref_u = [runner_full.L[f].cpu() for f in range(NWF[ndim])]
+        ref_u = [runner_full.L[f].cpu() for f in range(NPHYS[ndim])]
 
         rec_all = torch.zeros_like(ref_rec_cpu)
         worst = 2  # 2 bit / 1 tol / 0 fail
@@ -363,13 +362,13 @@ def main():
                 rec_all[:, :, gi] = rc[:, :, j]
             tile_bit = True
             tile_mad = 0.0
-            for f in range(NWF[ndim]):
+            for f in range(NPHYS[ndim]):
                 ref_tile = ref_u[f][..., pad + r * nxp: pad + r * nxp + nxp]
                 bit = torch.equal(uc[f], ref_tile)
                 mad = (uc[f] - ref_tile).abs().max().item()
                 tile_bit &= bit
                 tile_mad = max(tile_mad, mad)
-            u_scale = max(ref_u[f].abs().max().item() for f in range(NWF[ndim]))
+            u_scale = max(ref_u[f].abs().max().item() for f in range(NPHYS[ndim]))
             u_scale += 1e-30
             rel = tile_mad / u_scale
             print(f"[rank0] tile {r}: wavefields bitexact={tile_bit} "

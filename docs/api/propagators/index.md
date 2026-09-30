@@ -20,7 +20,7 @@ For most Torch-based workflows, `PropTorch` is now the main user-facing entry
 point. Use:
 
 - `PropTorch(..., backend="torch", impl="eager")` for the pure PyTorch implementation
-- `PropTorch(..., backend="torch", impl="c")` for compiled C++/CUDA extension kernels
+- `PropTorch(..., backend="torch", impl="c")` for the prebuilt CUDA core (`sweep/lib/cu<major>/libsweep_core.so`, driven through the pure-Python ctypes layer `sweep.backend.c`; CUDA GPU required, nothing compiles after `pip install`)
 
 ## Runtime Shape Conventions
 
@@ -96,8 +96,8 @@ loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
         dh=10.0,
         dt=0.002,
         dev=None,
-        backend="torch",
-        impl="eager",
+        backend=None,   # inherits equation.backend
+        impl=None,      # 'auto': 'c' when the CUDA core is usable and the equation has bindings, else 'eager'
         backend_options=None,
         eager_options=None,
         cuda_options=None,
@@ -109,18 +109,21 @@ loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
 
     Torch-family propagator facade. `backend="torch", impl="eager"` uses the
     Python/Torch implementation, while `backend="torch", impl="c"`
-    dispatches to compiled C++/CUDA extension kernels.
+    dispatches to the prebuilt CUDA core through the `sweep.backend.c` ctypes
+    layer (CUDA tensors only).
 
     !!! info "Default memory strategy by impl"
-        - `impl="eager"`, `impl="jax"` → chunked checkpointing
-          (`use_ckpt=True`, `ckpt_chunks=100`).
-        - `impl="c"` → **boundary saving with GPU storage**
-          (`use_ckpt=False`, `boundary_saving_config={'enabled': True,
-          'storage': 'gpu'}`). To opt back into chunked checkpointing
-          on the C backend, pass
-          `cuda_options={"memory": {"strategy": "ckpt"}}`. 2-D RTM
-          silently falls back to full-wavefield mode regardless of the
-          configured strategy.
+        - `impl="eager"` (and `PropJax`) → chunked checkpointing, i.e.
+          `memory=Ckpt(mode="chunk", chunks=100)`.
+        - `impl="c"` → **boundary saving with GPU storage**, i.e.
+          `memory=BoundarySaving(storage="gpu")`. To opt back into chunked
+          checkpointing on the C backend, pass
+          `cuda_options=CUDAOptions(memory=Ckpt())`.
+
+        The three strategies are the types `Full`, `BoundarySaving` and `Ckpt`
+        from `sweep.propagator.options`; the older
+        `MemoryOptions(strategy=...)` and `boundary_saving_config={...}`
+        spellings still work and emit a `DeprecationWarning`.
 
     See [PropTorch](prop_torch.md) for parameter meanings.
 

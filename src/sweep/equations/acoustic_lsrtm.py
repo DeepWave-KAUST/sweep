@@ -1,7 +1,10 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_plain, record_single
+
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
+from ._registry import register_equation
 
 def step(u_now, u_pre, psix, psiz, zetax, zetaz, 
          su_now, su_pre, spsix, spsiz, szetax, szetaz, 
@@ -21,33 +24,26 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
 
     # Background wavefield
     w_sum = 0.
-    # Z direction
-    tmpz = ((1+bz)*lap_uz + dbzdz * dudz) + grad_op(az*psiz, h, -2)
-    w_sum += (1+bz) * tmpz + az * zetaz
+    # ``psiyn`` is the Z memory variable -- historical name, correct slot.
+    contrib_z, psiyn, zetaz = cpml_axis_update(
+        lap_uz, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op)
+    w_sum += contrib_z
 
-    psiyn = bz * dudz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
-
-    # X direction
-    tmpx = ((1+bx)*lap_ux + dbxdx * dudx) + grad_op(ax*psix, h, -1)
-    w_sum += (1+bx) * tmpx + ax * zetax
-    psixn = bx * dudx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_ux, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
 
     # Scatter wavefield
     w_sum_s = 0.
-    # Z direction
-    tmpsz = ((1+bz)*lap_suz + dbzdz * dsudz) + grad_op(az*spsiz, h, -2)
-    w_sum_s += (1+bz) * tmpsz + az * szetaz
-    spsiyn = bz * dsudz + az * spsiz
-    szetaz = bz * tmpsz + az * szetaz   
-    # X direction
-    tmpx_s = ((1+bx)*lap_sux + dbxdx * dsudx) + grad_op(ax*spsix, h, -1)
-    w_sum_s += (1+bx) * tmpx_s + ax * szetax
-    spsixn = bx * dsudx + ax * spsix
-    szetax = bx * tmpx_s + ax * szetax
+    contrib_sz, spsiyn, szetaz = cpml_axis_update(
+        lap_suz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -2, grad_op)
+    w_sum_s += contrib_sz
+
+    contrib_sx, spsixn, szetax = cpml_axis_update(
+        lap_sux, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum_s += contrib_sx
     su_next = 2 * su_now - su_pre + vp**2 * dt**2 * w_sum_s + ref * vp**2 * dt**2 * w_sum
 
     # # background wavefield
@@ -63,6 +59,25 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
     return u_next, u_now, psixn, psiyn, zetax, zetaz, \
             su_next, su_now, spsixn, spsiyn, szetax, szetaz
 
+
+# The checkpoint replay state (u_prev, u_now, u_next, psix, psiz, zetax, zetaz of
+# the background field, AcousticWavefieldTensor bind order): one acoustic state
+# set. The LSRTM forward slot list is two acoustic layouts back to back, so the
+# generic "forward slots minus shadows" rule does not apply and the count is
+# declared explicitly (``checkpoint_state_nvar``); the recursive backward bisects
+# each segment and keeps one scratch set per level (``recursive_state_depth``).
+_CKPT_REPLAY_STATE_NVAR = 7
+
+
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled backward's scratch (acoustic_lsrtm2d/backward.cu WorkspaceSlot),
+    one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
+    plus the replayed step's background u_tt in the recursive-checkpoint mode.
+    """
+    n = 2 if mode == "recursive" else 1
+    return n * [[B, 1, *shape]]
+
+@register_equation()
 class AcousticLSRTM(SecondOrderEquation):
     """Second-order 2-D acoustic Born / LSRTM wave equation.
 
@@ -77,6 +92,8 @@ class AcousticLSRTM(SecondOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic_lsrtm2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Background acoustic velocity model.", unit="m/s"),
@@ -143,26 +160,22 @@ class AcousticLSRTM(SecondOrderEquation):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
 
-    def _C(self):
-        from sweep._C import (
-            acoustic_lsrtm2d_forward,
-            acoustic_lsrtm2d_backward,
-            acoustic_lsrtm2d_backward_bs,
-            acoustic_lsrtm2d_backward_ckpt,
-            acoustic_lsrtm2d_backward_recursive_ckpt,
-        )
-
-        return (
-            acoustic_lsrtm2d_forward,
-            acoustic_lsrtm2d_backward,
-            acoustic_lsrtm2d_backward_bs,
-            acoustic_lsrtm2d_backward_ckpt,
-            acoustic_lsrtm2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
+            # chunk_forward: the replayed chunk's background u_tt
+            # chunk_forward, the replayed chunk's background u_tt: chunk mode only (the
+            # recursive leaf images from its u_this workspace slot)
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)] if mode == "ckpt" else [],
+            backward_workspace_shapes=_adjoint_workspace_shapes,
+            bs_reconstruction_nvar=3,   # u_prev, u_now, u_next of the background field
+            checkpoint_state_nvar=_CKPT_REPLAY_STATE_NVAR,   # one acoustic state set per replay / recursion level
+            recursive_state_depth=True,
+            save_all_shape=history_plain(),   # bg_utt_all
+            # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
+            # propagator sizes grads_out from this.
+            grads_out_has_wavelet=True,
             base_nvar=6,
             # 2 wavefields (bg+sc); each: psix,psiz,zetax,zetaz (4) + psixn,psizn (2)
             # for the race-free forward psi double-buffer -> 2*(4+2)=12.

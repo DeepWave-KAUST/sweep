@@ -1,5 +1,6 @@
 from .base import FirstOrderEquation
 from .fields import FieldSpec, ModelSpec, ensure_field_specs
+from ._registry import register_equation
 
 def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None):
 
@@ -54,6 +55,7 @@ def step_spml(px, pz, vx, vz, vp, rho, dt, h, b, pd, pml=None):
     return px, pz, vx, vz
 
 
+@register_equation()
 class Acoustic1st(FirstOrderEquation):
     """First-order 2-D acoustic wave equation in pressure-velocity form.
 

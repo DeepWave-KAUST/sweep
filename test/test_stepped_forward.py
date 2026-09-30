@@ -40,11 +40,7 @@ DEV = torch.device("cuda")
 NT = 120
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def build(ndim, *, abcn=8, free_surface=False, bs=None, use_ckpt=False,
           ckpt_mode="chunk", ckpt_count=0, requires_grad=False, nt=NT):
@@ -81,7 +77,7 @@ def build(ndim, *, abcn=8, free_surface=False, bs=None, use_ckpt=False,
         B=1,
         use_ckpt=use_ckpt,
         ckpt_mode=ckpt_mode,
-        ckpt_count=ckpt_count,
+        ckpt_num=ckpt_count,
         boundary_saving_config=boundary_saving_config,
     )
 
@@ -107,23 +103,7 @@ def build(ndim, *, abcn=8, free_surface=False, bs=None, use_ckpt=False,
     return prop, wavelet, sources, receivers, models
 
 
-def capture(prop):
-    """Wrap the compiled propagator's forward_func so the populated
-    ForwardInput is kept (PropTorch delegates to ``_backend_impl``)."""
-    cap = {}
-    impl = prop._backend_impl
-    orig = impl.forward_func
-
-    def wrapper(params):
-        out = orig(params)
-        cap["params"] = params
-        cap["raw_out"] = out
-        return out
-
-    impl.forward_func = wrapper
-    cap["func"] = orig
-    return cap
-
+from conftest import capture
 
 def _zero_state(p, L, *, record, u_allt=None, has_bs=False, has_ckpt=False):
     for t in L:
@@ -198,13 +178,13 @@ def run_equivalence(ndim, k, **build_kw):
     has_bs = bool(p.use_boundary_saving)
     has_ckpt = bool(p.use_checkpoint)
 
-    raw_record = cap["raw_out"][2]
+    raw_record = p.record_out          # what the public run wrote (the entry returns nothing)
     record = torch.zeros_like(raw_record)
     p.record_out = record
 
     u_allt = None
     if p.save_all_wavefields:
-        u_allt = torch.zeros_like(cap["raw_out"][0])
+        u_allt = torch.zeros_like(p.u_allt_out)
         p.u_allt_out = u_allt
 
     state_kw = dict(record=record, u_allt=u_allt, has_bs=has_bs, has_ckpt=has_ckpt)
@@ -299,7 +279,7 @@ def test_stepped_guards():
         prop(wavelet, sources, receivers, models=models)
     p, func = cap["params"], cap["func"]
     L = list(p.wavefields)
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
 
     # it range out of bounds
     p.record_out = record
@@ -314,13 +294,17 @@ def test_stepped_guards():
         func(p)
     p.wavefields = L
 
-    # stepped without record_out: needs a params object whose record_out was
-    # never assigned (any tensor set through pybind, even empty, is defined)
+    # stepped without record_out: take a real params object and unbind its
+    # record (see below).
     prop2, wavelet2, sources2, receivers2, models2 = build(2, nt=8)
     cap2 = capture(prop2)
     with torch.no_grad():
         prop2(wavelet2, sources2, receivers2, models=models2)
     p2 = cap2["params"]
     p2.it_begin, p2.it_end = 0, 4
+    # The monolithic forward binds a record of its own now, so "unbound" is
+    # spelled as an empty tensor (a tensor assigned through pybind is always
+    # defined; the guard treats numel() == 0 as not bound).
+    p2.record_out = torch.empty(0, device=p2.record_out.device)
     with pytest.raises(RuntimeError, match="requires record_out"):
         cap2["func"](p2)

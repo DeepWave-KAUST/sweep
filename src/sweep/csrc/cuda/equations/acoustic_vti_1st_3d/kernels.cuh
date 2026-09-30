@@ -6,6 +6,7 @@
 #include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"   // reuses ElasticCPMLPointer (12 vals in 3D)
+#include "../../../core/check.h"
 
 
 namespace acoustic_vti_1st_3d {
@@ -171,9 +172,7 @@ __global__ void velocity_kernel_3d(
     // PML / interior split — outside the PML the half-step coefficients
     // vanish so the memory variables stay at zero.
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
@@ -264,9 +263,7 @@ __global__ void stress_kernel_3d(
     float C13 = c13_b[idx];
 
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iy < solver.abcn + halo) || (iy >= solver.ny - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         float dh = dvx_dx + dvy_dy;       // horizontal divergence
@@ -683,6 +680,17 @@ __global__ void calculate_grad_kernel_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
+    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
+    // gradients on the way back to the model, so everything this kernel writes
+    // in the PML shell is discarded -- read, multiplied and accumulated for
+    // nothing, once per time step.  The bounds come from the context and are
+    // CUT-AWARE: on a DD cut face phys_x0() collapses to the halo, so the
+    // cut-adjacent cells are still imaged.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iy < solver.phys_y0() || iy >= solver.phys_y1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
+        return;
+
     long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
@@ -801,9 +809,9 @@ __global__ void calculate_grad_kernel_3d(
 // Order MUST match AcousticVTI1st3D.FIELD_SPECS:
 //   [vx, vy, vz, sH, sV, m_sHx, m_sHy, m_sVz, m_vxx, m_vyy, m_vzz].
 // ---------------------------------------------------------------------------
-inline VTIWavefieldPointer3D make_wf_pointer_3d(const std::vector<torch::Tensor>& w)
+inline VTIWavefieldPointer3D make_wf_pointer_3d(const std::vector<Buf>& w)
 {
-    TORCH_CHECK(w.size() == 11,
+    SWEEP_CHECK(w.size() == 11,
                 "AcousticVTI1st 3D expects 11 wavefield tensors; got ", w.size());
     VTIWavefieldPointer3D p{};
     p.vx    = w[0].data_ptr<float>();

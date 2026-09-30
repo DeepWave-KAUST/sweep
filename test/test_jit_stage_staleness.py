@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from sweep import _jit
+from sweep.backend.c import jit
 
 
 def _make_csrc(root: Path) -> None:
@@ -33,14 +33,14 @@ def staged(tmp_path, monkeypatch):
     _make_csrc(csrc)
     build = tmp_path / "build"
     build.mkdir()
-    monkeypatch.setattr(_jit, "_CSRC", csrc)
+    monkeypatch.setattr(jit, "_CSRC", csrc)
 
     def _sources():
         return [str(csrc / "cuda/equations/acoustic2d/forward.cu"),
                 str(csrc / "bindings/module.cpp")]
 
-    monkeypatch.setattr(_jit, "_sources", _sources)
-    return csrc, build, lambda: _jit._stage(build)
+    monkeypatch.setattr(jit, "_sources", _sources)
+    return csrc, build, lambda: jit._stage(build)
 
 
 def _stage_dir(build: Path) -> Path:
@@ -140,7 +140,7 @@ def _count_copies(monkeypatch, counter):
 
 def _stage_in_child(csrc, build, sources, barrier, result):
     """Stage from a second process, as torchrun's second rank would."""
-    from sweep import _jit as jit
+    from sweep.backend.c import jit
 
     jit._CSRC = csrc
     jit._sources = lambda: sources
@@ -172,8 +172,8 @@ def test_two_processes_stage_the_tree_once_between_them(tmp_path, monkeypatch):
     _make_csrc(csrc)
     sources = [str(csrc / "cuda/equations/acoustic2d/forward.cu"),
                str(csrc / "bindings/module.cpp")]
-    monkeypatch.setattr(_jit, "_CSRC", csrc)
-    monkeypatch.setattr(_jit, "_sources", lambda: sources)
+    monkeypatch.setattr(jit, "_CSRC", csrc)
+    monkeypatch.setattr(jit, "_sources", lambda: sources)
 
     ctx = mp.get_context("fork")
     counter = ctx.Value("i", 0)
@@ -181,7 +181,7 @@ def test_two_processes_stage_the_tree_once_between_them(tmp_path, monkeypatch):
 
     alone = tmp_path / "build_alone"
     alone.mkdir()
-    _jit._stage(alone)
+    jit._stage(alone)
     expected = counter.value
     assert expected > 0, "the fixture staged nothing, so the count means nothing"
 
@@ -194,7 +194,7 @@ def test_two_processes_stage_the_tree_once_between_them(tmp_path, monkeypatch):
                         args=(csrc, build, sources, barrier, result))
     child.start()
     barrier.wait()
-    staged, _ = _jit._stage(build)       # this process is the other rank
+    staged, _ = jit._stage(build)       # this process is the other rank
     child.join(timeout=60)
 
     assert child.exitcode == 0, "the second rank crashed while staging"

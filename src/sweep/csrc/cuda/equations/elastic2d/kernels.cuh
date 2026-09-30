@@ -351,12 +351,43 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
 
 }
 
+// Compact copy of the physical box's restore strips (width w* per non-cut
+// face) of vx/vz into the boundary-saving carriers: the box cells the NOPML
+// kernel below does not compute.  Launched BEFORE the reverse update.
+static __global__ void elastic_capture_strips_2d(
+    const float* __restrict__ vx, const float* __restrict__ vz,
+    float* __restrict__ fvx, float* __restrict__ fvz,
+    int nx, int nz, int x0, int x1, int z0, int z1,
+    int wxl, int wxh, int wzl, int wzh)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b  = blockIdx.y;
+    const int bw = x1 - x0;
+    const int zi0 = z0 + wzl, zi1 = z1 - wzh;
+    const int bh = zi1 - zi0;
+    const int n_top = wzl * bw, n_bot = wzh * bw;
+    const int n_left = wxl * bh, n_right = wxh * bh;
+    int ix, iz;
+    if (t < n_top) { iz = z0 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_top) < n_bot) { iz = zi1 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_bot) < n_left) { ix = x0 + t % wxl; iz = zi0 + t / wxl; }
+    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t % wxh; iz = zi0 + t / wxh; }
+    else return;
+    const int idx = b * nx * nz + iz * nx + ix;
+    fvx[idx] = vx[idx];
+    fvz[idx] = vz[idx];
+}
+
 template<int Order>
 __global__ void elastic_velocity_kernel_nopml(
     ElasticWavefieldPointer wf,
     const float* __restrict__ rho,
     SGradParam grad_ctx,
-    SolverContext solver
+    SolverContext solver,
+    // Boundary-saving carriers: receive v(it+1) (the value loaded below)
+    // before the in-place reverse update.  nullptr = plain reconstruction.
+    float* __restrict__ fvx_prev = nullptr,
+    float* __restrict__ fvz_prev = nullptr
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -401,6 +432,11 @@ __global__ void elastic_velocity_kernel_nopml(
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
+
+    if (fvx_prev != nullptr) {
+        fvx_prev[b * spatial_size + idx] = f.vx[idx];
+        fvz_prev[b * spatial_size + idx] = f.vz[idx];
+    }
 
     f.vx[idx] -= solver.dt * inv_rho *
         (dsxx_dx + dsxz_dz);
@@ -553,8 +589,8 @@ __global__ void elastic_stress_adjoint_prepare(
     // calculate_grad's a.sxx[idx] / bar_szz / bar_sxz (same FS-row zeroing), and
     // f.vx[idx]/f.vz[idx] are the un-mutated post-source adjoint velocities.
     if (grad_vp_out != nullptr &&
-        ix >= halo && ix < solver.nx - halo &&
-        iz >= halo && iz < solver.nz - halo) {
+        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+        iz >= solver.phys_z0() && iz < solver.phys_z1()) {   // physical box only
         const float* fvx_b      = grad_fvx      + b * spatial_size;
         const float* fvz_b      = grad_fvz      + b * spatial_size;
         const float* fvx_prev_b = grad_fvx_prev + b * spatial_size;
@@ -896,8 +932,11 @@ __global__ void calculate_grad_elastic_bs(
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
     // Even cells strictly above the per-column surface row ("air") can carry
@@ -998,8 +1037,11 @@ __global__ void calculate_grad_elastic_nobs(
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
     // Even cells strictly above the per-column surface row ("air") can carry
@@ -1145,8 +1187,7 @@ __global__ void elastic_velocity_kernel_apm(
     float inv_rho_x = 1.f / rho_x_b[idx];
     float inv_rho_z = 1.f / rho_z_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho_x * (dsxx_dx + dsxz_dz);
@@ -1257,8 +1298,7 @@ __global__ void elastic_stress_kernel_apm(
     float mu_   = mu_b[idx];
     float muxz  = muxz_b[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
@@ -1337,662 +1377,4 @@ __global__ void elastic_stress_kernel_apm(
         else if ((order) == 6) elastic_stress_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
         else if ((order) == 8) elastic_stress_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
         else                   elastic_stress_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
-
-
-// ===========================================================================
-// APM backward kernels
-// ===========================================================================
-// Mirror image-method backward kernels (stress_adjoint_prepare,
-// velocity_adjoint_prepare, calculate_grad_elastic_bs/nobs and the
-// _nopml variants used in bs-mode reverse replay), but consume the APM
-// effective moduli (lam_eff, mu_eff, mu_xz_node, rho_x_eff, rho_z_eff)
-// and chain gradients back to raw (lam, mu, rho) -> (vp, vs, rho) per
-// the 6-category pointwise Jacobian table from
-// ``sweep.equations._topography.precompute_apm_moduli``.
-//
-// The ``_adjoint_apply`` kernels (stress and velocity) don't touch
-// moduli, so they're reused unchanged.
-
-// --- Reverse-time forward replay (used in apm_backward_bs) -----------------
-
-template<int Order>
-__global__ void elastic_velocity_kernel_nopml_apm(
-    ElasticWavefieldPointer wf,
-    const float* __restrict__ rho_x,
-    const float* __restrict__ rho_z,
-    const int*   __restrict__ category,
-    SGradParam grad_ctx,
-    SolverContext solver
-)
-{
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    int M;
-    if constexpr (Order == -1) { M = solver.M; } else { M = Order / 2; }
-    int halo = solver.abcn + M + 1;
-    int top_halo = solver.free_surface ? M : halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
-        return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    if (category[idx] == APM_CATEGORY_AIR) {
-        // air cell wavefield stays zero (forward kernel set it to 0)
-        f.vx[idx] = 0.f;
-        f.vz[idx] = 0.f;
-        return;
-    }
-
-    const float* rho_x_b = rho_x + b * spatial_size;
-    const float* rho_z_b = rho_z + b * spatial_size;
-
-    float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
-
-    float inv_rho_x = 1.f / rho_x_b[idx];
-    float inv_rho_z = 1.f / rho_z_b[idx];
-
-    // Reverse step: subtract instead of add (mirror forward APM with sign flip)
-    f.vx[idx] -= solver.dt * inv_rho_x * (dsxx_dx + dsxz_dz);
-    f.vz[idx] -= solver.dt * inv_rho_z * (dsxz_dx + dszz_dz);
-}
-
-template<int Order>
-__global__ void elastic_stress_kernel_nopml_apm(
-    ElasticWavefieldPointer wf,
-    const float* __restrict__ lam_eff,
-    const float* __restrict__ mu_eff,
-    const float* __restrict__ mu_xz_node,
-    const int*   __restrict__ category,
-    SGradParam grad_ctx,
-    SolverContext solver
-)
-{
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    int M;
-    if constexpr (Order == -1) { M = solver.M; } else { M = Order / 2; }
-    int halo = solver.abcn + M + 1;
-    int top_halo = solver.free_surface ? M : halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
-        return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-    int cat = category[idx];
-
-    if (cat == APM_CATEGORY_AIR) {
-        f.sxx[idx] = 0.f; f.szz[idx] = 0.f; f.sxz[idx] = 0.f;
-        return;
-    }
-
-    const float* lam_b  = lam_eff    + b * spatial_size;
-    const float* mu_b   = mu_eff     + b * spatial_size;
-    const float* muxz_b = mu_xz_node + b * spatial_size;
-
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
-    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
-
-    float lam  = lam_b[idx];
-    float mu_  = mu_b[idx];
-    float muxz = muxz_b[idx];
-
-    // Reverse step: subtract
-    f.sxx[idx] -= solver.dt * ((lam + 2.f * mu_) * dvx_dx + lam * dvz_dz);
-    f.szz[idx] -= solver.dt * ((lam + 2.f * mu_) * dvz_dz + lam * dvx_dx);
-    f.sxz[idx] -= solver.dt * muxz * (dvx_dz + dvz_dx);
-
-    // Re-apply traction BC (forward kernel zeroed these after stress update;
-    // reverse replay must keep the same invariant on the forward state).
-    if (cat == APM_CATEGORY_H) {
-        f.szz[idx] = 0.f;
-    } else if (cat == APM_CATEGORY_VL || cat == APM_CATEGORY_VR) {
-        f.sxx[idx] = 0.f;
-    } else if (cat == APM_CATEGORY_OC) {
-        f.sxx[idx] = 0.f; f.szz[idx] = 0.f; f.sxz[idx] = 0.f;
-    }
-}
-
-#define LAUNCH_ELASTIC_VELOCITY_NOPML_APM(order, grid, block, ...)               \
-    do {                                                                          \
-        if      ((order) == 2) elastic_velocity_kernel_nopml_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_kernel_nopml_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_kernel_nopml_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_kernel_nopml_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_kernel_nopml_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
-
-#define LAUNCH_ELASTIC_STRESS_NOPML_APM(order, grid, block, ...)                 \
-    do {                                                                          \
-        if      ((order) == 2) elastic_stress_kernel_nopml_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_kernel_nopml_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_kernel_nopml_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_kernel_nopml_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_kernel_nopml_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
-
-// --- Adjoint prepare kernels (APM) -----------------------------------------
-
-template<int Order>
-__global__ void elastic_stress_adjoint_prepare_apm(
-    ElasticWavefieldPointer wf,
-    const float* __restrict__ lam_eff,
-    const float* __restrict__ mu_eff,
-    const float* __restrict__ mu_xz_node,
-    const int*   __restrict__ category,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
-    float* __restrict__ qxx,
-    float* __restrict__ qzz,
-    float* __restrict__ qxz,
-    float* __restrict__ qzx
-)
-{
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    float* qxx_b = qxx + b * spatial_size;
-    float* qzz_b = qzz + b * spatial_size;
-    float* qxz_b = qxz + b * spatial_size;
-    float* qzx_b = qzx + b * spatial_size;
-
-    int cat = category[idx];
-
-    float bar_sxx = f.sxx[idx];
-    float bar_szz = f.szz[idx];
-    float bar_sxz = f.sxz[idx];
-
-    // APM traction-BC adjoint: forward sets these to 0 AFTER stress update
-    // for certain categories — so the adjoint of "set to 0" is "zero the
-    // bar_s* contribution" before propagating back into v.
-    if (cat == APM_CATEGORY_H) {
-        bar_szz = 0.f; f.szz[idx] = 0.f;
-    } else if (cat == APM_CATEGORY_VL || cat == APM_CATEGORY_VR) {
-        bar_sxx = 0.f; f.sxx[idx] = 0.f;
-    } else if (cat == APM_CATEGORY_OC || cat == APM_CATEGORY_AIR) {
-        bar_sxx = 0.f; bar_szz = 0.f; bar_sxz = 0.f;
-        f.sxx[idx] = 0.f; f.szz[idx] = 0.f; f.sxz[idx] = 0.f;
-    }
-
-    const float* lam_b  = lam_eff    + b * spatial_size;
-    const float* mu_b   = mu_eff     + b * spatial_size;
-    const float* muxz_b = mu_xz_node + b * spatial_size;
-
-    float lam  = lam_b[idx];
-    float mu_  = mu_b[idx];
-    float muxz = muxz_b[idx];
-
-    float bar_dvx_dx = solver.dt * ((lam + 2.f * mu_) * bar_sxx + lam * bar_szz);
-    float bar_dvz_dz = solver.dt * ((lam + 2.f * mu_) * bar_szz + lam * bar_sxx);
-    float bar_dvx_dz = solver.dt * muxz * bar_sxz;
-    float bar_dvz_dx = solver.dt * muxz * bar_sxz;
-
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
-    if (!in_pml) {
-        qxx_b[idx] = bar_dvx_dx;
-        qzz_b[idx] = bar_dvz_dz;
-        qxz_b[idx] = bar_dvx_dz;
-        qzx_b[idx] = bar_dvz_dx;
-        return;
-    }
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
-
-    // Slab-resident memory variables: see elastic_stress_adjoint_prepare.
-    long xi = solver.aux_rd_x2(iz, ix);
-    long zi = solver.aux_rd_z2(iz, ix);
-
-    float tmp_vxx = f.m_vxx[xi] + bar_dvx_dx;
-    float tmp_vzz = f.m_vzz[zi] + bar_dvz_dz;
-    float tmp_vxz = f.m_vxz[zi] + bar_dvx_dz;
-    float tmp_vzx = f.m_vzx[xi] + bar_dvz_dx;
-
-    qxx_b[idx] = bar_dvx_dx + bx  * tmp_vxx;
-    qzz_b[idx] = bar_dvz_dz + bz  * tmp_vzz;
-    qxz_b[idx] = bar_dvx_dz + bzh * tmp_vxz;
-    qzx_b[idx] = bar_dvz_dx + bxh * tmp_vzx;
-
-    if (solver.aux_x.stored(ix)) {
-        f.m_vxx[xi] = ax  * tmp_vxx;
-        f.m_vzx[xi] = axh * tmp_vzx;
-    }
-    if (solver.aux_z.stored(iz)) {
-        f.m_vzz[zi] = az  * tmp_vzz;
-        f.m_vxz[zi] = azh * tmp_vxz;
-    }
-}
-
-template<int Order>
-__global__ void elastic_velocity_adjoint_prepare_apm(
-    ElasticWavefieldPointer wf,
-    const float* __restrict__ rho_x,
-    const float* __restrict__ rho_z,
-    const int*   __restrict__ category,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
-    float* __restrict__ pxx,
-    float* __restrict__ pzz,
-    float* __restrict__ pxz,
-    float* __restrict__ pzx
-)
-{
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-    int cat = category[idx];
-
-    float bar_vx = f.vx[idx];
-    float bar_vz = f.vz[idx];
-    if (cat == APM_CATEGORY_AIR) {
-        bar_vx = 0.f; bar_vz = 0.f;
-        f.vx[idx] = 0.f; f.vz[idx] = 0.f;
-    }
-
-    const float* rho_x_b = rho_x + b * spatial_size;
-    const float* rho_z_b = rho_z + b * spatial_size;
-    float inv_rho_x = 1.f / rho_x_b[idx];
-    float inv_rho_z = 1.f / rho_z_b[idx];
-
-    float* pxx_b = pxx + b * spatial_size;
-    float* pzz_b = pzz + b * spatial_size;
-    float* pxz_b = pxz + b * spatial_size;
-    float* pzx_b = pzx + b * spatial_size;
-
-    float bar_dsxx_dx = solver.dt * inv_rho_x * bar_vx;
-    float bar_dsxz_dz = solver.dt * inv_rho_x * bar_vx;
-    float bar_dsxz_dx = solver.dt * inv_rho_z * bar_vz;
-    float bar_dszz_dz = solver.dt * inv_rho_z * bar_vz;
-
-    bool in_pml = (ix < solver.padLo(2) + halo) || (ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (iz < solver.padLo(0) + halo) ||
-                  (iz >= solver.nz - solver.padHi(0) - halo);
-    if (!in_pml) {
-        pxx_b[idx] = bar_dsxx_dx;
-        pxz_b[idx] = bar_dsxz_dz;
-        pzx_b[idx] = bar_dsxz_dx;
-        pzz_b[idx] = bar_dszz_dz;
-        return;
-    }
-
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
-
-    // Slab-resident memory variables: see elastic_stress_adjoint_prepare.
-    long xi = solver.aux_rd_x2(iz, ix);
-    long zi = solver.aux_rd_z2(iz, ix);
-
-    float tmp_sxxx = f.m_sxxx[xi] + bar_dsxx_dx;
-    float tmp_sxzz = f.m_sxzz[zi] + bar_dsxz_dz;
-    float tmp_sxzx = f.m_sxzx[xi] + bar_dsxz_dx;
-    float tmp_szzz = f.m_szzz[zi] + bar_dszz_dz;
-
-    pxx_b[idx] = bar_dsxx_dx + bxh * tmp_sxxx;
-    pxz_b[idx] = bar_dsxz_dz + bz  * tmp_sxzz;
-    pzx_b[idx] = bar_dsxz_dx + bx  * tmp_sxzx;
-    pzz_b[idx] = bar_dszz_dz + bzh * tmp_szzz;
-
-    if (solver.aux_x.stored(ix)) {
-        f.m_sxxx[xi] = axh * tmp_sxxx;
-        f.m_sxzx[xi] = ax  * tmp_sxzx;
-    }
-    if (solver.aux_z.stored(iz)) {
-        f.m_sxzz[zi] = az  * tmp_sxzz;
-        f.m_szzz[zi] = azh * tmp_szzz;
-    }
-}
-
-#define LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE_APM(order, grid, block, ...)       \
-    do {                                                                          \
-        if      ((order) == 2) elastic_stress_adjoint_prepare_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_prepare_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_prepare_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_prepare_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_prepare_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
-
-#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE_APM(order, grid, block, ...)     \
-    do {                                                                          \
-        if      ((order) == 2) elastic_velocity_adjoint_prepare_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_prepare_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_prepare_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_prepare_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_prepare_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
-
-// --- Gradient kernels (APM) ------------------------------------------------
-// Chain (grad_lam_eff, grad_mu_eff, grad_mu_xz, grad_rho_x, grad_rho_z) ->
-// (grad_lam, grad_mu, grad_rho) -> (grad_vp, grad_vs, grad_rho) per
-// _topography.precompute_apm_moduli's pointwise category Jacobian.
-//
-// Per-category Jacobians (λ_eff, μ_eff, μ_xz, ρ_x, ρ_z) wrt (λ_raw, μ_raw, ρ):
-//   INTERIOR: (λ, μ, μ, ρ, ρ)         — identity for λ,μ,ρ
-//   IC      : (λ, μ, μ, 0.75ρ, 0.75ρ) — same stiffness; ρ scaled
-//   H       : (0, α/2, μ/2, 0.5ρ, ρ)
-//   VL      : (0, α/2, μ/2, ρ,   0.5ρ)
-//   VR      : (0, α/2, μ/2, 0.5ρ,0.5ρ)
-//   OC      : (0, 0,   0,   0.25ρ, 0.25ρ)
-//   AIR     : (0, 0,   0,   ρ,   ρ)
-//
-//   α = 2μ(λ+μ)/(λ+2μ);  ∂(α/2)/∂λ = μ²/(λ+2μ)²;
-//   ∂(α/2)/∂μ = (λ² + 2λμ + 2μ²)/(λ+2μ)²
-//
-// Then standard (λ, μ, ρ) -> (vp, vs, ρ) chain (λ = ρ(vp²-2vs²), μ = ρvs²).
-
-__device__ __forceinline__ void apm_chain_lammu(
-    int cat, float lam_r, float mu_r,
-    float grad_lam_eff, float grad_mu_eff, float grad_mu_xz,
-    float* grad_lam_out, float* grad_mu_out)
-{
-    if (cat == APM_CATEGORY_INTERIOR || cat == APM_CATEGORY_IC) {
-        *grad_lam_out = grad_lam_eff;
-        *grad_mu_out  = grad_mu_eff + grad_mu_xz;
-    } else if (cat == APM_CATEGORY_H || cat == APM_CATEGORY_VL || cat == APM_CATEGORY_VR) {
-        float denom = lam_r + 2.f * mu_r;
-        float safe = (denom > 0.f) ? denom : 1.f;
-        float inv2 = 1.f / (safe * safe);
-        float dh_dlam = mu_r * mu_r * inv2;
-        float dh_dmu  = (lam_r * lam_r + 2.f * lam_r * mu_r + 2.f * mu_r * mu_r) * inv2;
-        *grad_lam_out = grad_mu_eff * dh_dlam;
-        *grad_mu_out  = grad_mu_eff * dh_dmu + grad_mu_xz * 0.5f;
-    } else {  // OC, AIR
-        *grad_lam_out = 0.f;
-        *grad_mu_out  = 0.f;
-    }
-}
-
-__device__ __forceinline__ void apm_rho_jacobian(int cat, float* drho_x_drho, float* drho_z_drho)
-{
-    switch (cat) {
-        case APM_CATEGORY_INTERIOR:
-        case APM_CATEGORY_AIR:
-            *drho_x_drho = 1.f; *drho_z_drho = 1.f; break;
-        case APM_CATEGORY_H:
-            *drho_x_drho = 0.5f; *drho_z_drho = 1.f; break;
-        case APM_CATEGORY_VL:
-            *drho_x_drho = 1.f;  *drho_z_drho = 0.5f; break;
-        case APM_CATEGORY_VR:
-            *drho_x_drho = 0.5f; *drho_z_drho = 0.5f; break;
-        case APM_CATEGORY_OC:
-            *drho_x_drho = 0.25f; *drho_z_drho = 0.25f; break;
-        case APM_CATEGORY_IC:
-            *drho_x_drho = 0.75f; *drho_z_drho = 0.75f; break;
-        default:
-            *drho_x_drho = 1.f; *drho_z_drho = 1.f; break;
-    }
-}
-
-template<int Order>
-__global__ void calculate_grad_elastic_apm_bs(
-    ElasticWavefieldPointer forward,
-    ElasticWavefieldPointer adjoint,
-    const float* __restrict__ fvx_prev,
-    const float* __restrict__ fvz_prev,
-    const float* __restrict__ vp,
-    const float* __restrict__ vs,
-    const float* __restrict__ rho,
-    const float* __restrict__ lam_raw,
-    const float* __restrict__ mu_raw,
-    const float* __restrict__ rho_x,
-    const float* __restrict__ rho_z,
-    const int*   __restrict__ category,
-    float* __restrict__ grad_vp,
-    float* __restrict__ grad_vs,
-    float* __restrict__ grad_rho,
-    SGradParam grad_ctx,
-    SolverContext solver
-)
-{
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    int cat = category[idx];
-
-    auto f = forward.offset(b, spatial_size);
-    auto a = adjoint.offset(b, spatial_size);
-
-    const float* fvx_prev_b = fvx_prev + b * spatial_size;
-    const float* fvz_prev_b = fvz_prev + b * spatial_size;
-    const float* vp_b   = vp   + b * spatial_size;
-    const float* vs_b   = vs   + b * spatial_size;
-    const float* rho_b  = rho  + b * spatial_size;
-    const float* lam_b  = lam_raw + b * spatial_size;
-    const float* mu_b   = mu_raw  + b * spatial_size;
-    const float* rhox_b = rho_x + b * spatial_size;
-    const float* rhoz_b = rho_z + b * spatial_size;
-
-    float* gvp  = grad_vp  + b * spatial_size;
-    float* gvs  = grad_vs  + b * spatial_size;
-    float* grho = grad_rho + b * spatial_size;
-
-    float fvx_x = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float fvz_z = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
-    float fvx_z = sgradient<2, Order, Z, DIFF_FORWARD> (f.vx, ix, 0, iz, grad_ctx);
-    float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(f.vz, ix, iz, grad_ctx, solver, false);
-
-    // Adjoint stresses with APM traction-BC adjoint applied
-    float bar_sxx = a.sxx[idx];
-    float bar_szz = a.szz[idx];
-    float bar_sxz = a.sxz[idx];
-    if (cat == APM_CATEGORY_H) {
-        bar_szz = 0.f;
-    } else if (cat == APM_CATEGORY_VL || cat == APM_CATEGORY_VR) {
-        bar_sxx = 0.f;
-    } else if (cat == APM_CATEGORY_OC || cat == APM_CATEGORY_AIR) {
-        bar_sxx = 0.f; bar_szz = 0.f; bar_sxz = 0.f;
-    }
-
-    // Gradients w.r.t. effective moduli (no dt — chained later)
-    float grad_lam_eff = (bar_sxx + bar_szz) * (fvx_x + fvz_z);
-    float grad_mu_eff_local = 2.f * (bar_sxx * fvx_x + bar_szz * fvz_z);
-    float grad_mu_xz_local = bar_sxz * (fvx_z + fvz_x);
-
-    float lam_v = lam_b[idx];
-    float mu_v  = mu_b[idx];
-
-    float grad_lam = 0.f, grad_mu = 0.f;
-    apm_chain_lammu(cat, lam_v, mu_v,
-                    grad_lam_eff, grad_mu_eff_local, grad_mu_xz_local,
-                    &grad_lam, &grad_mu);
-
-    // Kinetic ρ term: structure mirrors image but split by rho_x/rho_z.
-    float grad_rho_x_kin = a.vx[idx] * (f.vx[idx] - fvx_prev_b[idx]) / rhox_b[idx];
-    float grad_rho_z_kin = a.vz[idx] * (f.vz[idx] - fvz_prev_b[idx]) / rhoz_b[idx];
-
-    float drho_x_drho, drho_z_drho;
-    apm_rho_jacobian(cat, &drho_x_drho, &drho_z_drho);
-    float grad_rho_kin = grad_rho_x_kin * drho_x_drho + grad_rho_z_kin * drho_z_drho;
-
-    float vp_v = vp_b[idx];
-    float vs_v = vs_b[idx];
-    float rho_v = rho_b[idx];
-
-    gvp[idx]  += -2.f * rho_v * vp_v * grad_lam * solver.dt;
-    gvs[idx]  += -(-4.f * rho_v * vs_v * grad_lam + 2.f * rho_v * vs_v * grad_mu) * solver.dt;
-    grho[idx] += grad_rho_kin
-                 - (grad_lam * (vp_v * vp_v - 2.f * vs_v * vs_v)
-                    + grad_mu * (vs_v * vs_v)) * solver.dt;
-}
-
-template<int Order>
-__global__ void calculate_grad_elastic_apm_nobs(
-    ElasticWavefieldPointer adjoint,
-    const float* __restrict__ fvx,
-    const float* __restrict__ fvz,
-    const float* __restrict__ fvx_prev,
-    const float* __restrict__ fvz_prev,
-    const float* __restrict__ vp,
-    const float* __restrict__ vs,
-    const float* __restrict__ rho,
-    const float* __restrict__ lam_raw,
-    const float* __restrict__ mu_raw,
-    const float* __restrict__ rho_x,
-    const float* __restrict__ rho_z,
-    const int*   __restrict__ category,
-    float* __restrict__ grad_vp,
-    float* __restrict__ grad_vs,
-    float* __restrict__ grad_rho,
-    SGradParam grad_ctx,
-    SolverContext solver
-)
-{
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    int cat = category[idx];
-
-    auto a = adjoint.offset(b, spatial_size);
-    const float* fvx_b = fvx + b * spatial_size;
-    const float* fvz_b = fvz + b * spatial_size;
-    const float* fvx_prev_b = fvx_prev + b * spatial_size;
-    const float* fvz_prev_b = fvz_prev + b * spatial_size;
-    const float* vp_b   = vp   + b * spatial_size;
-    const float* vs_b   = vs   + b * spatial_size;
-    const float* rho_b  = rho  + b * spatial_size;
-    const float* lam_b  = lam_raw + b * spatial_size;
-    const float* mu_b   = mu_raw  + b * spatial_size;
-    const float* rhox_b = rho_x + b * spatial_size;
-    const float* rhoz_b = rho_z + b * spatial_size;
-
-    float* gvp_b  = grad_vp  + b * spatial_size;
-    float* gvs_b  = grad_vs  + b * spatial_size;
-    float* grho_b = grad_rho + b * spatial_size;
-
-    float fvx_x = sgradient<2, Order, X, DIFF_BACKWARD>(fvx_b, ix, 0, iz, grad_ctx);
-    float fvz_z = sgradient<2, Order, Z, DIFF_BACKWARD>(fvz_b, ix, 0, iz, grad_ctx);
-    float fvx_z = sgradient<2, Order, Z, DIFF_FORWARD> (fvx_b, ix, 0, iz, grad_ctx);
-    float fvz_x = sgradient<2, Order, X, DIFF_FORWARD> (fvz_b, ix, 0, iz, grad_ctx);
-
-    float bar_sxx = a.sxx[idx];
-    float bar_szz = a.szz[idx];
-    float bar_sxz = a.sxz[idx];
-    if (cat == APM_CATEGORY_H) {
-        bar_szz = 0.f;
-    } else if (cat == APM_CATEGORY_VL || cat == APM_CATEGORY_VR) {
-        bar_sxx = 0.f;
-    } else if (cat == APM_CATEGORY_OC || cat == APM_CATEGORY_AIR) {
-        bar_sxx = 0.f; bar_szz = 0.f; bar_sxz = 0.f;
-    }
-
-    float grad_lam_eff = (bar_sxx + bar_szz) * (fvx_x + fvz_z);
-    float grad_mu_eff_local = 2.f * (bar_sxx * fvx_x + bar_szz * fvz_z);
-    float grad_mu_xz_local = bar_sxz * (fvx_z + fvz_x);
-
-    float lam_v = lam_b[idx];
-    float mu_v  = mu_b[idx];
-
-    float grad_lam = 0.f, grad_mu = 0.f;
-    apm_chain_lammu(cat, lam_v, mu_v,
-                    grad_lam_eff, grad_mu_eff_local, grad_mu_xz_local,
-                    &grad_lam, &grad_mu);
-
-    float grad_rho_x_kin = a.vx[idx] * (fvx_b[idx] - fvx_prev_b[idx]) / rhox_b[idx];
-    float grad_rho_z_kin = a.vz[idx] * (fvz_b[idx] - fvz_prev_b[idx]) / rhoz_b[idx];
-
-    float drho_x_drho, drho_z_drho;
-    apm_rho_jacobian(cat, &drho_x_drho, &drho_z_drho);
-    float grad_rho_kin = grad_rho_x_kin * drho_x_drho + grad_rho_z_kin * drho_z_drho;
-
-    float vp_v = vp_b[idx];
-    float vs_v = vs_b[idx];
-    float rho_v = rho_b[idx];
-
-    gvp_b[idx]  += -2.f * rho_v * vp_v * grad_lam * solver.dt;
-    gvs_b[idx]  += -(-4.f * rho_v * vs_v * grad_lam + 2.f * rho_v * vs_v * grad_mu) * solver.dt;
-    grho_b[idx] += grad_rho_kin
-                   - (grad_lam * (vp_v * vp_v - 2.f * vs_v * vs_v)
-                      + grad_mu * (vs_v * vs_v)) * solver.dt;
-}
-
-#define LAUNCH_CALCULATE_GRAD_ELASTIC_APM_BS(order, grid, block, ...)            \
-    do {                                                                          \
-        if      ((order) == 2) calculate_grad_elastic_apm_bs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic_apm_bs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic_apm_bs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic_apm_bs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic_apm_bs<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
-
-#define LAUNCH_CALCULATE_GRAD_ELASTIC_APM_NOBS(order, grid, block, ...)          \
-    do {                                                                          \
-        if      ((order) == 2) calculate_grad_elastic_apm_nobs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic_apm_nobs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic_apm_nobs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic_apm_nobs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic_apm_nobs<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)

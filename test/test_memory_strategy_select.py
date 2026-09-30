@@ -177,3 +177,20 @@ def test_eager_strategies():
     assert p_bs2.memory_strategy == "boundary" and p_bs2._backend_impl._eager_bs
     p_off = _mk("eager", use_ckpt=False)
     assert p_off.memory_strategy == "full"
+
+
+def test_legacy_dict_with_knobs_its_storage_ignores_still_reads():
+    """The legacy ``boundary_saving_config`` dict never validated the staging
+    knobs, so a config that set them for every storage (``pinned_memory: True``
+    with ``storage: 'gpu'``, the shape of ``test/dd_session_bench.py``'s gpu
+    baseline) read fine on dev.  The capability check added for the dict route
+    must not turn it into a construction error; the typed API stays strict."""
+    from sweep.propagator.options import BoundarySaving
+    cfg = {"enabled": True, "storage": "gpu", "transfer_interval": 1,
+           "ring_buffers": 1, "pinned_memory": True}
+    for impl in ("eager", "c"):
+        prop = PropTorch(Acoustic(device="cpu"), shape=(20, 24), dh=10.0, dt=1e-3,
+                         dev="cpu", impl=impl, boundary_saving_config=dict(cfg))
+        assert prop.memory_strategy == "boundary"
+    with pytest.raises(ValueError, match="pinned_memory is only valid when storage='cpu'"):
+        BoundarySaving(storage="gpu", pinned_memory=True)

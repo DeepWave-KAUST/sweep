@@ -72,7 +72,7 @@ def reference(family, ndim, shape, so, abcn, fs, nt, dev, models_np, src, rec, w
     impl = prop._backend_impl
     cap = {}
     fo, bo = impl.forward_func, impl.backward_bs_func
-    impl.forward_func = lambda p: (cap.__setitem__("fp", p) or cap.__setitem__("fr", fo(p)) or cap["fr"])
+    impl.forward_func = lambda p: (cap.__setitem__("fp", p) or fo(p))
     impl.backward_bs_func = lambda p: (cap.__setitem__("bp", p) or bo(p))
     models = [torch.tensor(m, device=dev, requires_grad=True) for m in models_np]
     syn = prop(wav, src, rec, models=models)
@@ -82,7 +82,9 @@ def reference(family, ndim, shape, so, abcn, fs, nt, dev, models_np, src, rec, w
     fp, bp = cap["fp"], cap["bp"]
     nwf = len(fp.wavefields) or len(list(bp.adjoint_wavefields))
     Lf = list(fp.wavefields) or [torch.zeros_like(fp.models[0]) for _ in range(nwf)]
-    record = torch.zeros_like(cap["fr"][2]); fp.record_out = record
+    # Entries return nothing (the ctypes layer writes into the tensors the caller
+    # bound); the captured forward already allocated record_out.
+    record = torch.zeros_like(fp.record_out); fp.record_out = record
     for t in Lf:
         t.zero_()
     if family == "acoustic":
@@ -201,7 +203,14 @@ def main():
     if rank == 0:
         ref_rec, ref_g = reference(fam, ndim, shape, so, abcn, fs, nt, dev,
                                    models_np, src, rec, wav)
-        ref_rec = ref_rec.cpu()
+        # ``reference()`` drives the raw C params directly, so its record is in
+        # the raw CUDA layout. ModelParallel (and therefore gather_record) now
+        # returns the single-card layout, which is the whole point of the
+        # change, so the reference is converted rather than the DD side
+        # un-converted -- comparing them in the layout a USER sees is what this
+        # check is for.
+        from sweep.propagator._c import _cuda_record_to_canonical
+        ref_rec = _cuda_record_to_canonical(ref_rec).cpu()
         ztop = M if fs else pad
 
         # grade rel against the GLOBAL reference scale, not the per-tile max:

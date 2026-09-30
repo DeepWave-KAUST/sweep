@@ -1,10 +1,12 @@
 import numpy as np
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_plain, record_single
+
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
 from .utils import to_backend
 from .acoustic import step_cpml
+from ._registry import register_equation
 
 
 def step_visco_cpml(
@@ -66,6 +68,39 @@ def step_visco_cpml(
     return u_next, u_prev, psixn, psizn, zetaxn, zetazn
 
 
+def _zero_outer_halo(u, halo, backend):
+    """Zero the ``halo``-wide band on all four edges of the trailing (z, x)
+    axes.  Dispatch is on the equation's declared ``backend``, not on
+    duck-typing: under ``torch.compile`` Dynamo answers ``hasattr(tensor,
+    "clone")`` with False, which would route the traced step into the numpy
+    branch.  torch: one clone + in-place slice writes (the historical code
+    path, unchanged); jax (array or tracer): functional ``.at[].set`` --
+    in-place under jit; anything else: numpy copy + writes."""
+    if halo <= 0:
+        return u
+    if backend == 'jax':
+        u = u.at[..., :halo, :].set(0)
+        u = u.at[..., -halo:, :].set(0)
+        u = u.at[..., :, :halo].set(0)
+        u = u.at[..., :, -halo:].set(0)
+        return u
+    out = u.clone() if backend == 'torch' else np.array(u, copy=True)
+    out[..., :halo, :] = 0; out[..., -halo:, :] = 0
+    out[..., :, :halo] = 0; out[..., :, -halo:] = 0
+    return out
+
+
+def _fft_work_area_slot(B, grid):
+    """The cuFFT work area of the spectral step's 2-D C2C plan for this batch
+    and grid, as one flat float32 slot: the compiled backend builds the very
+    plan ATen would (same layout, same batch), sets its own work area from the
+    pool and allocates nothing per transform."""
+    from sweep.propagator._c import _get_C
+    nbytes = int(_get_C().visco_acoustic2d_fft_workspace_bytes(int(B), int(grid[0]), int(grid[1])))
+    return [max(1, (nbytes + 3) // 4)]
+
+
+@register_equation()
 class ViscoAcoustic(SecondOrderEquation):
     """Second-order 2-D nearly constant-Q visco-acoustic wave equation.
 
@@ -123,6 +158,10 @@ class ViscoAcoustic(SecondOrderEquation):
         validated against the Kjartansson power law to 0.4% over the band;
         attenuation to 2%).
     """
+    supports_image_topography = True   # eager func applies the staircase
+
+    C_NAME = "visco_acoustic2d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Visco-acoustic wave velocity model.", unit="m/s"),
         ModelSpec("Q", description="Quality factor controlling attenuation."),
@@ -260,21 +299,33 @@ class ViscoAcoustic(SecondOrderEquation):
         if cache is not None and cache[0] is gbar and cache[1].shape == k.shape:
             return cache[2]
         op = self.op
+        # ``k`` is numpy on jax (see init_abc): the mask / k^2 table stay
+        # numpy constants folded into the trace; the fractional powers take
+        # the traced exponent and come out as jnp.
         mask = k > 0
         k_safe = op.where(mask, k, op.ones_like(k))
         zeros = op.zeros_like(k)
         D_k2 = k * k
-        e = gbar.detach() if hasattr(gbar, 'detach') else gbar
+        if hasattr(gbar, 'detach'):
+            e = gbar.detach()
+        elif self.backend == 'jax':
+            import jax
+            e = jax.lax.stop_gradient(gbar)
+        else:
+            e = gbar
         D_frac = op.where(mask, k_safe ** (2.0 * e + 2.0), zeros)
         D_loss = op.where(mask, k_safe ** (2.0 * e + 1.0), zeros)
         grids = (D_k2, D_frac, D_loss)
-        self._D_cache = (gbar, k, grids)
+        if self.backend != 'jax':
+            # On jax these are trace-local (built once per scan-body trace);
+            # caching them on the instance would leak tracers across traces.
+            self._D_cache = (gbar, k, grids)
         return grids
 
     def c_eq_aux(self, prop):
         """ForwardInput.eq_aux for the CUDA kernels: the spectral filter grids
         on the runtime grid.  The composition encodes the active terms (see
-        ``visco_acoustic2d_make_spectral``): ``(D_loss,)`` damping only,
+        ``visco_acoustic2d_spectral_grids``): ``(D_loss,)`` damping only,
         ``(D_k2, D_frac)`` dispersion only, all three for both, ``()`` for
         none.  |k| is raised to the frozen average exponent ``gbar`` from the
         latest :meth:`prepare_models` call (the paper's freezing-unfreezing:
@@ -308,33 +359,67 @@ class ViscoAcoustic(SecondOrderEquation):
             self._c_kmul_cache = (key, tuple(grids))
         return self._c_kmul_cache[1]
 
-    def _C(self):
-        # CUDA IMPLEMENTATION
-        from sweep._C import (
-            visco_acoustic2d_forward,
-            visco_acoustic2d_backward,
-            visco_acoustic2d_backward_bs,
-            visco_acoustic2d_backward_ckpt,
-            visco_acoustic2d_backward_recursive_ckpt,
-        )
-        return (
-            visco_acoustic2d_forward,
-            visco_acoustic2d_backward,
-            visco_acoustic2d_backward_bs,
-            visco_acoustic2d_backward_ckpt,
-            visco_acoustic2d_backward_recursive_ckpt,
-        )
-
-    def _C_rtm(self):
-        from sweep._C import visco_acoustic2d_rtm
-
-        return visco_acoustic2d_rtm
-
     @property
     def cuda_layout(self):
         # Identical to Acoustic: same wavefield state (the damping correction
         # is memoryless in (u_now, u_prev) and runs through ATen).
+        # The spectral terms the constructor switched on decide the scratch:
+        # ``a`` = amplitude damping (D_loss), ``d`` = phase dispersion (D_k2, D_frac).
+        a, d = int(bool(self.amplitude_damping)), int(bool(self.phase_shift))
+        spectral = bool(a or d)
+        complex_slot = lambda B, grid: [B, 1, *grid, 2]      # complex64 grid as float32 pairs
+        grid_slot = lambda B, grid: [B, 1, *grid]
+
+        def forward_workspace_shapes(B, grid):
+            # C0, C1 for the Lop pipeline, C2 keeps the dispersion spectrum alive
+            # across its two products; plus the cuFFT work area.
+            if not spectral:
+                return []
+            return [complex_slot(B, grid)] * (3 if d else 2) + [_fft_work_area_slot(B, grid)]
+
+        def backward_workspace_shapes(B, nt, grid, mode):
+            # [0] the reverse step's vp^2*Lap(u) carrier (every mode), then the
+            # spectral scratch (visco_acoustic2d/kernels.cuh ViscoSlots):
+            # C0, C1 (+ C2 when the checkpoint replay runs the forward's
+            # dispersion pipeline), R1 (dispersion), UPREV (damping, chunk mode:
+            # u_prev of the chunk start), and the cuFFT work area.
+            shapes = [grid_slot(B, grid)]
+            if not spectral:
+                return shapes
+            shapes += [complex_slot(B, grid)] * (2 + (1 if d and mode in ("ckpt", "recursive") else 0))
+            if d:
+                shapes.append(grid_slot(B, grid))
+            if a and mode == "ckpt":
+                shapes.append(grid_slot(B, grid))
+            shapes.append(_fft_work_area_slot(B, grid))
+            return shapes
+
+        def derived_model_nvar(mode):
+            # Gp = A*dt (backward), dt2A = A*dt^2 (forward / replay), Gd1 = B1*dt^2,
+            # Gd2 = B2*dt^2 (dispersion): only the tables the mode reads.
+            if mode == "forward":
+                return a + 2 * d
+            if mode in ("full", "bs"):
+                return a + 2 * d
+            return 2 * a + 2 * d
+
         return CUDALayoutSpec(
+            record_shape=record_single(),
+            # chunk_raw: the replayed chunk's raw pressure (chunk mode; the
+            # recursive leaf replays from its start state)
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)] if mode == "ckpt" else [],
+            # replay state = u_prev, u_now, u_next + the 4 checkpointed CPML aux
+            # (slab-shaped), one set per bisection level in recursive mode
+            checkpoint_state_nvar=7,
+            recursive_state_depth=True,
+            backward_workspace_shapes=backward_workspace_shapes,
+            forward_workspace_shapes=forward_workspace_shapes,
+            derived_model_nvar=derived_model_nvar,
+            illum_nvar=2,
+            save_all_shape=history_plain(),
+            # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
+            # propagator sizes grads_out from this.
+            grads_out_has_wavelet=True,
             base_nvar=3,
             pml_nvar=6,
             adjoint_extra_nvar=2,
@@ -344,7 +429,6 @@ class ViscoAcoustic(SecondOrderEquation):
             pml_slot_axes=("x", "z", "x", "z", "x", "z"),
             checkpoint_slot_axes=(None, None, "x", "z", "x", "z"),
             boundary_save_nvar=1,
-            backward_workspace_nvar=1,
         )
 
     def init_abc(self, type='cpml', **kwargs):
@@ -363,7 +447,10 @@ class ViscoAcoustic(SecondOrderEquation):
         k_np, _, _ = init_wavenumbers(shape, h_scalar)
         # Same rule as the PML profiles above: keep numpy on jax, where this
         # runs inside the user's trace and a jnp array would leak as a tracer.
-        self.k = k_np if self.backend == 'jax' else to_backend(k_np, self.backend, self.device)
+        if self.backend == 'jax':
+            self.k = k_np.astype(np.float32)
+        else:
+            self.k = to_backend(k_np, self.backend, self.device)
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
         u_now = wavefields[0]
@@ -393,10 +480,7 @@ class ViscoAcoustic(SecondOrderEquation):
             # padding the FD taps read, and on free-surface faces this IS the
             # pressure-release condition).
             halo = self.so // 2
-            u = out[0].clone()
-            u[..., :halo, :] = 0; u[..., -halo:, :] = 0
-            u[..., :, :halo] = 0; u[..., :, -halo:] = 0
-            out = (u,) + tuple(out[1:])
+            out = (_zero_outer_halo(out[0], halo, self.backend),) + tuple(out[1:])
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)
             if topo_rows is not None:

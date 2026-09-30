@@ -1,0 +1,128 @@
+"""One object for the compiled call's non-differentiable arguments.
+
+``Wrapper`` is a ``torch.autograd.Function``, and autograd's contract is
+positional: ``backward`` must return exactly one gradient per ``forward`` input,
+in order. That contract had been paid literally -- 51 positional parameters, and
+a hand-maintained wall of 48 ``None``s in ``backward`` that only stays correct if
+every future edit inserts its ``None`` in the matching slot.
+
+Only two of those inputs are differentiable: ``wavelet`` and the trailing
+``*models``. Both STAY positional, because autograd can only see a tensor it
+receives as an input -- a tensor hidden inside this object would silently get no
+gradient. Everything else is configuration, buffers, or bound C functions, all of
+which already returned ``None``; moving them behind one argument changes nothing
+about what autograd computes and collapses the signature to
+``forward(ctx, p, wavelet, *models)`` and the return to
+``(None, wavelet_grad, *model_grads)``.
+
+The object is READ-ONLY to ``forward``. Five parameters are refined inside the
+body (``spacing``, ``dt``, and the three memory-strategy flags, which are turned
+off when no gradient is required); those are bound to locals at the top, so the
+refinement is visible to the reader and never written back to a caller's object.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+
+
+@dataclass
+class CompiledCallParams:
+    """Everything ``Wrapper.forward`` needs that autograd does not differentiate.
+
+    Field order is irrelevant to correctness here -- that is the entire point of
+    the change. Adding one means adding a field, not also counting ``None``s.
+    """
+    forward_func: Any
+    backward_func: Any
+    backward_bs_func: Any
+    backward_ckpt_func: Any
+    backward_recursive_ckpt_func: Any
+    sources_loc: Any   # (B, nsrc, 2)
+    receivers_loc: Any   # (B, nrec, 2)
+    source_field_indices: Any
+    receiver_field_indices: Any
+    coes_list: Any
+    M: int
+    abcn: int
+    spacing: list   # list of floats for grid spacing
+    dt: float
+    pml_vals: list   # list of 6 tensors for PML profiles
+    use_checkpoint: bool = False
+    checkpoint_interval: int = 1
+    use_recursive_checkpoint: bool = False
+    checkpoint_count: int = 0
+    checkpoint_steps: torch.Tensor = None
+    checkpoint_on_cpu: bool = False
+    use_boundary_saving: bool = False
+    use_pinned_memory: bool = False
+    free_surface: bool = False
+    transfer_interval: int = 1
+    boundary_ring_buffers: int = 1
+    boundary_on_cpu: bool = False
+    boundary_on_disk: bool = False
+    boundary_disk_async_read: bool = False
+    boundary_tail_steps: int = 0
+    forward_wavefields: tuple = ()
+    # Shapes of the forward state the backward rebuilds, handed over as
+    # forward_wavefields and allocated zeroed per backward call: the bs
+    # reconstruction grids (cuda_layout.reconstruction_nvar), or the checkpoint
+    # replay state sets (cuda_layout.checkpoint_state_nvar, one set per
+    # recursion level when recursive_state_depth). () in full mode.
+    forward_state_shapes: tuple = ()
+    forward_workspace: tuple = ()
+    # Model-shaped derived-coefficient slots the compiled forward / backward is
+    # handed as ``derived_models`` (cuda_layout.derived_model_nvar, resolved for
+    # this call's mode); allocated per call.
+    derived_model_nvar_forward: int = 0
+    derived_model_nvar_backward: int = 0
+    # Full-mode history shape (cuda_layout.save_all_shape at this batch), or
+    # None when the compiled forward allocates its own.
+    u_allt_shape: tuple = None
+    # Record shape (cuda_layout.record_shape at this batch/receiver count), or
+    # None when the compiled forward allocates its own.
+    record_shape: tuple = None
+    # Whether the equation's BackwardOutput.grads starts with grad_wavelet
+    # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
+    grads_out_has_wavelet: bool = False
+    # (cuda_layout.grads_out_wavelet_written): False when the driver sizes the
+    # slot but never writes it (acoustic_vrz*), so the wavelet gradient stays None.
+    grads_out_wavelet_written: bool = True
+    # How many leading models receive a gradient of their own; the rest (the
+    # derived APM tensors) share one zero placeholder. None = all of them.
+    n_grad_models: int = None
+    # Illumination grids the backward is handed as ``illum_out`` when the
+    # caller asked for illumination (cuda_layout.illum_nvar); 0 = none.
+    illum_nvar: int = 0
+    adjoint_wavefields: tuple = ()
+    adjoint_workspace: tuple = ()
+    checkpoint_buffers: tuple = ()
+    checkpoint_replay: tuple = ()
+    # The replay history a boundary-saving backward that re-runs the forward
+    # needs (cuda_layout.bs_backward_replays_forward), allocated per backward
+    # call; () for every driver that reconstructs from the strips.
+    bs_replay_shapes: tuple = ()
+    last_two: torch.Tensor = None
+    boundary_cpu: tuple = ()
+    boundary_gpu: tuple = ()
+    # FP32 one-timestep bands the scaled (int8/fp16) boundary store quantizes
+    # from and dequantizes into (Layout.staging_shapes). () for fp32/bf16
+    # storage, which never stages.
+    boundary_staging: tuple = ()
+    boundary_disk_files: tuple = ()
+    source_illumination_buffer: torch.Tensor = None
+    receiver_illumination_buffer: torch.Tensor = None
+    illumination_padding: tuple = ()
+    adcig_buffer: torch.Tensor = None   # (nlag, nz, nx[, ny]) model-shaped
+    adcig_max_lag: int = 0
+    topo_rows_param: torch.Tensor = None   # runtime padded surface row per col
+    has_topo_param: bool = False
+    topo_category_param: torch.Tensor = None   # runtime padded APM category int32
+    use_apm_param: bool = False
+    fs_faces: int = -1   # per-edge free-surface bitmask (-1 => legacy z-min)
+    cut_face_mask: int = 0   # DD cut faces (0 => single domain)
+    # Equation-specific aux tensors, opaque to the wrapper (e.g. the
+    # visco-acoustic |k| grid).  Constants -- no grad flows through them.
+    eq_aux: tuple = ()

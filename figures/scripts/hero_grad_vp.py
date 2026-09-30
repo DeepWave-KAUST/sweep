@@ -5,7 +5,7 @@ This is a publication-styled version of the README's "30-line example" — same
 units, balanced colormaps, and a clean three-panel layout. Run with the
 ``ifwitorch`` env active:
 
-    /home/wangs0j/miniconda3/envs/ifwitorch/bin/python figures/scripts/hero_grad_vp.py
+    python figures/scripts/hero_grad_vp.py
 
 Writes ``figures/grad_vp.png``.
 """

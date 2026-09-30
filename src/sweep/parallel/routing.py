@@ -13,7 +13,7 @@ only matches if ``coords[..., 0]`` is x and ``coords[..., -1]`` is z.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -92,3 +92,82 @@ def partition_global_coords(
         mask.unsqueeze(-1), local, torch.zeros_like(local)
     )
     return local, mask
+
+
+def gather_tile_records(
+    tile_record: torch.Tensor,
+    own_rec_idx: Sequence[int],
+    mesh: Any,
+) -> Optional[torch.Tensor]:
+    """Reassemble one shot group's record from its tiles, on the group root.
+
+    The inverse of :func:`partition_global_coords`: that call handed each tile
+    the receiver columns whose global coordinates fall inside it, this one puts
+    those columns back at their global index.
+
+    The gather runs over ``mesh.model_pg`` -- the ``py * px`` ranks that
+    decompose ONE shot -- and NOT over the world. With ``shot_groups > 1``
+    every group propagates a DIFFERENT shot through the SAME tile grid, so two
+    ranks sharing a tile coordinate carry the same global receiver indices
+    holding different shots' traces. A world-wide gather writes both into one
+    array and whichever tile is assembled later silently wins, which is a
+    corrupt record rather than an error.
+
+    Parameters
+    ----------
+    tile_record
+        This rank's record, ``(..., nrec_tile, nt)``.
+    own_rec_idx
+        Global receiver indices of this tile's columns, in tile order.
+    mesh
+        A :class:`sweep.parallel.ModelParallelMesh`.
+
+    Returns
+    -------
+    torch.Tensor or None
+        The assembled record on the shot group's root rank
+        (``topology.tile_rank == 0``, i.e. global rank
+        ``shot_group * py * px``), ``None`` on every other rank.
+    """
+    import torch.distributed as dist
+
+    topo = mesh.topology
+    is_root = topo.tile_rank == 0
+    payload = (list(own_rec_idx), tile_record.detach().cpu())
+    gathered: List[Any] = [None] * topo.tile_world_size
+    # ``dst`` is a GLOBAL rank even when ``group`` restricts the collective
+    # (torch keeps ``group_dst`` for the group-relative spelling, and torch is
+    # unpinned here), so name the group root the long way round.
+    dist.gather_object(
+        payload,
+        gathered if is_root else None,
+        dst=topo.rank_at(topo.shot_group, 0, 0),
+        group=mesh.model_pg,
+    )
+    if not is_root:
+        return None
+    return assemble_tile_records(gathered)
+
+
+def assemble_tile_records(
+    gathered: Sequence[Tuple[Sequence[int], torch.Tensor]],
+) -> Optional[torch.Tensor]:
+    """Place each tile's receiver columns at their global index.
+
+    Pure and collective-free so it can be tested without ``torch.distributed``.
+    Tiles that own no receiver contribute nothing; a global index no tile owns
+    stays zero.
+    """
+    full = None
+    owned = [(idx, rc) for idx, rc in gathered if len(idx)]
+    if not owned:
+        return None
+    nrec_global = max(max(idx) for idx, _ in owned) + 1
+    for idx, rc in owned:
+        if full is None:
+            shape = list(rc.shape)
+            shape[-2] = nrec_global
+            full = torch.zeros(shape, dtype=rc.dtype)
+        for j, gi in enumerate(idx):
+            full[..., gi, :] = rc[..., j, :]
+    return full

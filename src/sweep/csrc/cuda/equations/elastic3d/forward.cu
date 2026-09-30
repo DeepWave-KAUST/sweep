@@ -1,9 +1,5 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
 
 #include "elastic3d.h"
 #include "kernels.cuh"
@@ -15,286 +11,15 @@
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 #include "../../operators/staggered.cuh"
+#include "driver_traits.cuh"
 
 namespace elastic3d {
 
-ForwardOutput forward(const ForwardInput& in)
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    const auto& p = in;
-    ForwardOutput out;
-
-    float dx = p.spacing[0];
-    float dy = p.spacing[1];
-    float dz = p.spacing[2];
-
-    // parse model parameters
-    auto vp = p.models[0];
-    auto vs = p.models[1];
-    auto rho = p.models[2];
-
-    int N  = vp.size(0);
-    int C  = vp.size(1);
-    int nz = vp.size(2);
-    int ny = vp.size(3);
-    int nx = vp.size(4);
-
-    int B = N * C;
-
-    // ---- Stepped forward range [it_begin, it_end) ----
-    const int it0 = p.it_begin;
-    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
-    TORCH_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
-                "stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
-                it0, ", ", it1, ") with nt=", p.nt);
-    const bool stepped = (it0 != 0) || (it1 != static_cast<int>(p.nt));
-    // Physics-split phases (see elastic2d/forward.cu): 1 = velocity only,
-    // 2 = stress + tail; the DD driver exchanges v between phases.
-    TORCH_CHECK(p.step_phase == 0 || p.step_phase == 1 || p.step_phase == 2,
-                "elastic step_phase must be 0, 1 or 2");
-
-    ElasticWavefieldTensor wavefield;
-    // On a continuation call the internal allocate() would silently zero the
-    // propagation state — the caller must keep binding the same tensors.
-    // (Elastic has no buffer-role rotation: every field updates in place, so
-    // the caller binds the SAME 36-tensor list for every segment.)
-    TORCH_CHECK(it0 == 0 || !p.wavefields.empty(),
-                "stepped continuation (it_begin>0) requires Python-bound wavefields");
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, true);
-    else
-        wavefield.allocate(vp, 3);
-    if (!wavefield.m_syzx_t.defined())
-        wavefield.m_syzx_t = torch::zeros_like(vp);
-    auto wf = wavefield.view();
-
-    auto mu  = rho * vs * vs;
-    auto lambda = rho * (vp * vp - 2 * vs * vs);
-
-    ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
-    auto cpml_view = cpml.view();
-
-    int nsrc = p.sources_loc.size(1);
-    int nrec = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    TORCH_CHECK(!stepped || p.record_out.defined(),
-                "stepped forward requires record_out bound from Python");
-    auto record = p.record_out.defined()
-        ? p.record_out
-        : torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
-    if (p.record_out.defined())
-        TORCH_CHECK(record.is_contiguous() &&
-                    record.size(-1) == static_cast<long>(p.nt),
-                    "record_out must be contiguous with trailing dim nt");
-
-    if (p.use_checkpoint) {
-        TORCH_CHECK(p.checkpoints.size() == 36, "Elastic 3D checkpointing expects 36 checkpoint tensors");
-        if (p.use_recursive_checkpoint) {
-            TORCH_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps");
-            TORCH_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
-        } else {
-            TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
-        }
-    }
-
-    torch::Tensor u_allt;
-    if (p.save_all_wavefields) {
-        TORCH_CHECK(!stepped || p.u_allt_out.defined(),
-                    "stepped + save_all_wavefields requires u_allt_out bound from Python");
-        u_allt = p.u_allt_out.defined()
-            ? p.u_allt_out
-            : torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
-    }
-
-    auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
-    auto source_config = fdtd::Geom::make(nsrc, B);
-    auto record_config = fdtd::Geom::make(nrec, B);
-
-    SolverContext solver{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
-    // DD cut faces: kernels switch the cut-side PML/interior band to the
-    // interior branch (per-rank PML widths zero the profile there; the
-    // zero-coefficient PML branch is not bitwise equal to the interior one).
-    TORCH_CHECK((p.cut_face_mask & ~0x33) == 0,
-                "elastic3d forward cut_face_mask supports x/y bits only "
-                "(bit0=x_lo, bit1=x_hi, bit4=y_lo, bit5=y_hi), got ",
-                p.cut_face_mask);
-    solver.set_cut_mask(p.cut_face_mask);
-    elastic_init_aux_slabs(solver, wavefield);
-
-    EffectiveBoundarySaver boundary_saver;
-    int save_width = solver.M + 1;
-    // The internal full-storage fallback ring is per-call; segments after the
-    // first would lose everything saved before them.
-    if (stepped && p.use_boundary_saving)
-        TORCH_CHECK(!p.boundary_gpu.empty(),
-                    "stepped forward with boundary saving requires Python-bound boundary_gpu");
-    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
-    boundary_saver.allocate(
-        p.use_boundary_saving, 3, 9, solver, vp, save_width, 1,
-        true, !staged_boundary, staged_boundary ? p.transfer_interval : 1,
-        staged_boundary ? p.boundary_cpu : std::vector<torch::Tensor>{},
-        p.boundary_gpu,
-        p.last_two, p.use_pinned_memory
-    );
-    auto bs = boundary_saver.view();
-
-    SGradParam grad_ctx{1, nx, nx*ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
-
-    const int order =
-        (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
-
-    float* u_this_t = nullptr;
-
-    // For copying data
-    AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
-    BoundaryRuntime boundary_runtime(
-        boundary_saver,
-        3,
-        p.use_boundary_saving,
-        p.boundary_on_cpu,
-        p.boundary_on_disk,
-        p.boundary_disk_async_read,
-        p.transfer_interval,
-        p.boundary_ring_buffers,
-        p.boundary_disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
-    );
-    CheckpointRuntime checkpoint_runtime(
-        p.checkpoints,
-        36,
-        p.use_checkpoint,
-        p.use_recursive_checkpoint,
-        p.checkpoint_interval,
-        p.checkpoint_steps,
-        p.checkpoint_on_cpu,
-        "forward",
-        "elastic3d",
-        it0
-    );
-
-    const bool do_v = (p.step_phase == 0 || p.step_phase == 1);
-    const bool do_s = (p.step_phase == 0 || p.step_phase == 2);
-    TORCH_CHECK(p.step_phase == 0 || it1 == it0 + 1,
-                "elastic phase-split requires a single step (it_end == it_begin + 1)");
-
-    for (int it = it0; it < it1; ++it) {
-
-        u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
-
-        if (do_v)
-        LAUNCH_3DELASTIC_VELOCITY(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            wf,
-            rho.data_ptr<float>(),
-            grad_ctx,
-            cpml_view,
-            solver
-        ); // t+0.5
-
-        if (!do_s)
-            continue;
-
-        LAUNCH_3DELASTIC_STRESS(
-            order,
-            launch_config.grid,
-            launch_config.block,
-            wf,
-            lambda.data_ptr<float>(),
-            mu.data_ptr<float>(),
-            u_this_t,
-            grad_ctx,
-            cpml_view,
-            solver
-        ); // t+1.0
-
-        for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = elastic_field_ptr(wf, 3, source_fields[isrc].item<int>());
-            if (field == nullptr) continue;
-            add_source_3d<<<source_config.grid, source_config.block>>>(
-                field,
-                p.source.data_ptr<float>(),
-                p.sources_loc.data_ptr<int>(),
-                it,
-                nsrc,
-                solver
-            );
-        }
-
-        checkpoint_runtime.save_forward(static_cast<int>(it), static_cast<int>(p.nt), wavefield.checkpoint_tensors());
-
-        if (p.use_boundary_saving) {
-
-            float* fields[9] = {
-                wf.vx, wf.vy, wf.vz,
-                wf.sxx, wf.syy, wf.szz,
-                wf.sxy, wf.sxz, wf.syz
-            };
-
-            for (int f = 0; f < 9; ++f) {
-                boundary_runtime.save_forward_3d_field(
-                    it,
-                    p.nt,
-                    fields[f],
-                    launch_config.grid,
-                    launch_config.block,
-                    bs,
-                    save_width,
-                    -p.M, // offset
-                    solver,
-                    f,
-                    f == 8
-                );
-            }
-
-        }
-
-        for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = elastic_field_ptr(wf, 3, receiver_fields[irec].item<int>());
-            if (field == nullptr) continue;
-            record_kernel_3d<<<record_config.grid, record_config.block>>>(
-                field,
-                record[irec].data_ptr<float>(),
-                p.receivers_loc.data_ptr<int>(),
-                it,
-                nrec,
-                solver
-            );
-        }
-    
-    }
-
-    // Save the final state for backward (only once the final segment has
-    // run; mid-run segments leave last_two untouched).
-    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
-        boundary_saver.last_two_t.select(0,0).select(0,0).copy_(wavefield.vx_t);
-        boundary_saver.last_two_t.select(0,1).select(0,0).copy_(wavefield.vy_t);
-        boundary_saver.last_two_t.select(0,2).select(0,0).copy_(wavefield.vz_t);
-        boundary_saver.last_two_t.select(0,3).select(0,0).copy_(wavefield.sxx_t);
-        boundary_saver.last_two_t.select(0,4).select(0,0).copy_(wavefield.syy_t);
-        boundary_saver.last_two_t.select(0,5).select(0,0).copy_(wavefield.szz_t);
-        boundary_saver.last_two_t.select(0,6).select(0,0).copy_(wavefield.sxy_t);
-        boundary_saver.last_two_t.select(0,7).select(0,0).copy_(wavefield.sxz_t);
-        boundary_saver.last_two_t.select(0,8).select(0,0).copy_(wavefield.syz_t);
-    }
-
-    boundary_runtime.synchronize();
-
-    out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
-    out.record = record;
-
-    return out;
-
+    return eqdrv::sg_generic_forward_core<Driver>(in);
 }
 
 
@@ -313,23 +38,23 @@ ForwardOutput forward(const ForwardInput& in)
 // kernels here.  ``solver.free_surface=false`` is forced and
 // ``solver.topo_category`` + ``solver.use_apm=true`` are plumbed for
 // the kernel-internal AIR / traction-BC branches.
-ForwardOutput apm_forward(const ForwardInput& in)
+ForwardOutputCore apm_forward_core(const ForwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
-    TORCH_CHECK(p.it_begin == 0 &&
+    SWEEP_CHECK(p.it_begin == 0 &&
                 (p.it_end < 0 || p.it_end == static_cast<int>(p.nt)) &&
                 p.step_phase == 0,
                 "stepped forward not supported for the elastic3d APM path");
-    TORCH_CHECK(p.models.size() >= 21,
+    SWEEP_CHECK(p.models.size() >= 21,
         "elastic3d::apm_forward expects 21-tensor models list "
         "[vp,vs,rho,lam,mu,lam_2mu,alpha_xx,alpha_yy,alpha_zz,"
         "lam_xx_yy,lam_xx_zz,lam_yy_xx,lam_yy_zz,lam_zz_xx,lam_zz_yy,"
         "mu_xy,mu_xz,mu_yz,inv_rho_x,inv_rho_y,inv_rho_z]; got ",
         p.models.size());
-    TORCH_CHECK(p.use_apm && p.topo_category.defined() && p.topo_category.numel() > 0,
+    SWEEP_CHECK(p.use_apm && p.topo_category.defined() && p.topo_category.numel() > 0,
         "apm_forward requires use_apm=true and topo_category tensor");
 
     float dx = p.spacing[0];
@@ -362,29 +87,29 @@ ForwardOutput apm_forward(const ForwardInput& in)
     int B  = N * C;
 
     ElasticWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, true);
-    else
-        wavefield.allocate(vp, 3);
-    if (!wavefield.m_syzx_t.defined())
-        wavefield.m_syzx_t = torch::zeros_like(vp);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "elastic3d/apm_forward requires the propagator-bound wavefields "
+                "(36-slot layout); nothing allocates them here");
+    wavefield.bind(p.wavefields, true);
+    SWEEP_CHECK(wavefield.m_syzx_t.defined(),
+                "elastic3d/apm_forward: the bound wavefield list must carry m_syzx");
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
+    cpml.bind(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
-    torch::Tensor u_allt;
+    Buf u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+        u_allt = bound_required(p.u_allt_out, {p.nt, 3, B, nz, ny, nx}, "u_allt_out");
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -408,9 +133,9 @@ ForwardOutput apm_forward(const ForwardInput& in)
     boundary_saver.allocate(
         p.use_boundary_saving, 3, 9, solver, vp, save_width, 1,
         true, !staged_boundary, staged_boundary ? p.transfer_interval : 1,
-        staged_boundary ? p.boundary_cpu : std::vector<torch::Tensor>{},
+        staged_boundary ? p.boundary_cpu : BufList{},
         p.boundary_gpu,
-        p.last_two, p.use_pinned_memory
+        p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
     );
     auto bs = boundary_saver.view();
 
@@ -419,10 +144,11 @@ ForwardOutput apm_forward(const ForwardInput& in)
     float* u_this_t = nullptr;
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver, 3, p.use_boundary_saving,
         p.boundary_on_cpu, p.boundary_on_disk, p.boundary_disk_async_read,
-        p.transfer_interval, p.boundary_ring_buffers, p.boundary_disk_files,
+        p.transfer_interval, p.boundary_ring_buffers, disk_files,
         async_copy.compute_stream, async_copy.copy_stream
     );
     CheckpointRuntime checkpoint_runtime(
@@ -432,7 +158,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
     );
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        u_this_t = u_allt.defined() ? u_allt[it].data_ptr<float>() : nullptr;
+        u_this_t = u_allt.defined() ? u_allt.select(0, it).data_ptr<float>() : nullptr;
 
         LAUNCH_3DELASTIC_VELOCITY_APM(
             order, launch_config.grid, launch_config.block,
@@ -465,7 +191,7 @@ ForwardOutput apm_forward(const ForwardInput& in)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = elastic_field_ptr(wf, 3, source_fields[isrc].item<int>());
+            float* field = elastic_field_ptr(wf, 3, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source_3d<<<source_config.grid, source_config.block>>>(
                 field, p.source.data_ptr<float>(),
@@ -493,36 +219,41 @@ ForwardOutput apm_forward(const ForwardInput& in)
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = elastic_field_ptr(wf, 3, receiver_fields[irec].item<int>());
+            float* field = elastic_field_ptr(wf, 3, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel_3d<<<record_config.grid, record_config.block>>>(
-                field, record[irec].data_ptr<float>(),
+                field, record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(), it, nrec, solver
             );
         }
     }
 
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(0,0).select(0,0).copy_(wavefield.vx_t);
-        boundary_saver.last_two_t.select(0,1).select(0,0).copy_(wavefield.vy_t);
-        boundary_saver.last_two_t.select(0,2).select(0,0).copy_(wavefield.vz_t);
-        boundary_saver.last_two_t.select(0,3).select(0,0).copy_(wavefield.sxx_t);
-        boundary_saver.last_two_t.select(0,4).select(0,0).copy_(wavefield.syy_t);
-        boundary_saver.last_two_t.select(0,5).select(0,0).copy_(wavefield.szz_t);
-        boundary_saver.last_two_t.select(0,6).select(0,0).copy_(wavefield.sxy_t);
-        boundary_saver.last_two_t.select(0,7).select(0,0).copy_(wavefield.sxz_t);
-        boundary_saver.last_two_t.select(0,8).select(0,0).copy_(wavefield.syz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,0).select(0,0), wavefield.vx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,1).select(0,0), wavefield.vy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,2).select(0,0), wavefield.vz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,3).select(0,0), wavefield.sxx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,4).select(0,0), wavefield.syy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,5).select(0,0), wavefield.szz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,6).select(0,0), wavefield.sxy_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,7).select(0,0), wavefield.sxz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0,8).select(0,0), wavefield.syz_t);
     }
 
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
 
     return out;
 }
 
-// apm_backward / apm_backward_bs are implemented in backward.cu.
+ForwardRunnerCorePtr forward_runner_core(const ForwardInputCore& in)
+{
+    return std::make_shared<eqdrv::SgForwardRunner<Driver>>(in);
+}
+
+
 
 }

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
+from typing import ClassVar
 from typing import Literal
+from typing import Union
 
 
 @dataclass
@@ -57,7 +59,6 @@ class PropagatorDefaults:
     nt: int = ...
     batch_size: int = ...
     allow_growth: bool = ...
-    full_mode: str = ...
 
 
 EAGER_DEFAULTS: EagerDefaults
@@ -107,6 +108,47 @@ class MemoryOptions:
 @dataclass
 class CUDAOptions:
     memory: MemoryOptions | None = ...
+
+
+# The memory-strategy API. These are the names the user guide, the API docs and
+# every current example import; without them a type checker reading this stub
+# rejects ``from sweep.propagator.options import BoundarySaving``.
+
+@dataclass
+class Full:
+    strategy: ClassVar[str]
+
+
+@dataclass
+class BoundarySaving(BoundaryOptions):
+    strategy: ClassVar[str]
+
+
+@dataclass
+class Ckpt(CkptOptions):
+    strategy: ClassVar[str]
+
+
+MemoryStrategy = Union[Full, BoundarySaving, Ckpt]
+
+EAGER_DEFAULTS: EagerDefaults
+BOUNDARY_DEFAULTS: BoundaryDefaults
+CKPT_DEFAULTS: CkptDefaults
+PROP_DEFAULTS: PropagatorDefaults
+EAGER_OPTION_KEYS: frozenset[str]
+CUDA_OPTION_KEYS: frozenset[str]
+
+
+def as_memory_strategy(value: Any) -> MemoryStrategy | None: ...
+
+
+def check_memory_supported(impl: str, strategy: Any) -> None: ...
+
+
+def to_legacy_memory_options(strategy: Any) -> MemoryOptions | None: ...
+
+
+def warn_deprecated_spelling(what: str, instead: str, *, stacklevel: int = ...) -> None: ...
 
 
 def options_to_dict(value: Any) -> Any: ...

@@ -82,6 +82,15 @@ class MeshTopology:
         return self.rank // self.tile_world_size
 
     @property
+    def tile_rank(self) -> int:
+        """This rank's index INSIDE its shot group, i.e. ``yi * px + xi``.
+
+        ``tile_rank == 0`` marks the group's root -- the rank a per-shot-group
+        collective gathers to. Global rank 0 is the root of shot group 0.
+        """
+        return self.rank % self.tile_world_size
+
+    @property
     def yi(self) -> int:
         return (self.rank % self.tile_world_size) // self.px
 
@@ -305,7 +314,7 @@ def balanced_grid(
         # the unpadded one. Measured on acoustic 3-D: ~1.7e-5 relative gradient
         # difference on a small 80x95x95 / 700-step case (localised at the
         # padded faces), but ~1.3e-3 and spread over the WHOLE volume on a
-        # production 109x294x135 / 5258-step encoded run — the perturbation has
+        # production-size, thousands-of-steps encoded run — the perturbation has
         # time to traverse the model. DD itself stays bit-exact either way; this
         # is the pad's own cost. Say so, because the alternative is that it
         # quietly lands in a result someone later compares against history.

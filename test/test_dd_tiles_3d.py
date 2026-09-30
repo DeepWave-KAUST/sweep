@@ -42,11 +42,7 @@ ABCN = 8
 PAD = ABCN + M
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def vp_global():
     vp = 1800.0 + 600.0 * np.linspace(0, 1, NZ, dtype=np.float32)[:, None, None]
@@ -68,21 +64,7 @@ def make_prop(shape, topo=None):
     return PropTorch(equation, **kwargs)
 
 
-def capture(prop):
-    cap = {}
-    impl = prop._backend_impl
-    orig = impl.forward_func
-
-    def wrapper(params):
-        out = orig(params)
-        cap["params"] = params
-        cap["raw_out"] = out
-        return out
-
-    impl.forward_func = wrapper
-    cap["func"] = orig
-    return cap
-
+from conftest import capture
 
 def make_runner(prop, wavelet, sources, receivers, vp_np):
     cap = capture(prop)
@@ -95,7 +77,7 @@ def make_runner(prop, wavelet, sources, receivers, vp_np):
     assert len(L) == 12
     for t in L:
         t.zero_()
-    record = torch.zeros_like(cap["raw_out"][2])
+    record = torch.zeros_like(p.record_out)
     p.record_out = record
     return SteppedBindingRunner(func, p, L, acoustic_psi_pairs(3)), record
 

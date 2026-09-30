@@ -186,9 +186,7 @@ __global__ void das2d_first_derivatives_kernel(
 
     // Interior fast-path: in PML-free region, axh/bxh/azh/bzh vanish, the
     // aux fields stay zero, and tmp_*_b just stores the raw gradient.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         tmp_sxx_x_b[idx] = dsxx_dx;
@@ -272,9 +270,7 @@ __global__ void das2d_update_kernel(
     // Interior fast-path: skip the four aux fields entirely when ax/bx vanish.
     // update_halo widens the bounds further than the standard halo, so we
     // re-key the PML check on the larger halo for safety.
-    bool in_pml = (ix < solver.abcn + update_halo) || (ix >= solver.nx - solver.abcn - update_halo) ||
-                  (iz < (solver.free_surface ? update_halo : solver.abcn + update_halo)) ||
-                  (iz >= solver.nz - solver.abcn - update_halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, update_halo);
 
     if (!in_pml) {
         float shear_xz = dzz_txx + dxx_tzz;

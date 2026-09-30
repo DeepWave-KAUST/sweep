@@ -44,11 +44,11 @@ from __future__ import annotations
 import numpy as np
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
     zero_top_row,
-    top_free_surface_derivative,
     fs_deriv as _fs_deriv,
     get_o2_pd as _get_o2_pd,
     near_surface_o2_count as _near_surface_o2_count,
@@ -73,6 +73,7 @@ from sweep.scalars import fd_coefficients
 # ---------------------------------------------------------------------------
 
 _GRAD_COEF_CACHE: dict[int, np.ndarray] = {}
+from ._registry import register_equation
 
 
 def _grad_coefs(order):
@@ -303,6 +304,7 @@ def elastic_vr_step_core(
     )
 
 
+@register_equation()
 class ElasticVRR(FirstOrderEquation):
     """First-order 2-D elastic vector-reflectivity wave equation.
 
@@ -318,6 +320,12 @@ class ElasticVRR(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "elastic_vr2d"
+
+    # The CUDA forward applies the staircase (elastic_vr2d/forward.cu reads
+    # topo_rows); the eager step does not.
+    supports_image_topography_c = True
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",),
@@ -450,20 +458,10 @@ class ElasticVRR(FirstOrderEquation):
         )
         return out
 
-    def _C(self):
-        """Compiled CUDA entry points (added in Phase 2)."""
-        import sweep._C as _C
-        return (
-            _C.elastic_vr2d_forward,
-            _C.elastic_vr2d_backward,
-            _C.elastic_vr2d_backward_bs,
-            _C.elastic_vr2d_backward_ckpt,
-            _C.elastic_vr2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
-        # EVR backward needs 14 workspace tensors per cell:
+        # EVR backward needs 14 workspace tensors per cell
+        # (elastic_vr2d/driver_traits.cuh WorkspaceSlot):
         #   4 q* (qxx, qzz, qxz, qzx)         stress-adjoint workspace
         #   4 p* (pxx, pzz, pxz, pzx)         momentum-adjoint workspace
         #   2 point_p* (point_px, point_pz)   gamma multiplicative term
@@ -473,10 +471,24 @@ class ElasticVRR(FirstOrderEquation):
         #                                     grad_vp / grad_vs through cached
         #                                     velocity gradients (4th-order
         #                                     central FD, transpose = -A)
+        # The recursive checkpoint mode adds the captured-momentum carriers
+        # behind them (WS_CARRIERS, sg_driver.cuh SgCarrierSlots): p(t) at
+        # slots 14, 15 (px, pz).  The EVR imaging has no velocity(t+1) term,
+        # so there are no p(t+1) carriers, and the chunked ckpt mode -- whose
+        # only carriers would be the cross-chunk p(t+1) -- adds none.
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            save_all_shape=history_fields(2),   # px, pz
             base_nvar=5,
             pml_nvar=10,
             last_two_nvar=1,
             last_two_storage_nvar=5,
-            backward_workspace_nvar=14,
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                14 + (2 if mode == "recursive" else 0)),
+            # ckpt: the per-segment px, pz histories, one row per replayed step
+            # plus the segment start (elastic_vr2d/driver_traits.cuh
+            # seg_buffers); the recursive mode replays per step and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
+            bs_reconstruction_nvar=5,   # px, pz, sxx, szz, sxz
         )

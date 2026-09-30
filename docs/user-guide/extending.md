@@ -1,8 +1,8 @@
 # Extending: Adding a New Equation
 
 SWEEP treats equations as plug-in units: the propagator owns the time loop,
-source/receiver wiring, PML, memory strategies, and (for `impl="c"`) the CUDA
-binding. An equation class only has to describe **what fields it propagates**
+source/receiver wiring, PML, memory strategies, and (for `impl="c"`) the call
+into the CUDA core. An equation class only has to describe **what fields it propagates**
 and **how one time step advances them**.
 
 The guide is in two parts you can read independently:
@@ -19,25 +19,42 @@ For a **runnable walkthrough** that builds a toy `MyScalar` from Part 1 end
 to end, see the
 [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb).
 
-## Discovery is automatic
+## Registration is two lines
 
-Both parts share the same registration mechanism. SWEEP discovers equations
-by reflecting over `sweep.equations`'s namespace — no whitelist, no factory
-dict:
+Both parts share the same registration mechanism: a decorator on the class,
+and an import that makes the decorator run.
+
+```python
+# src/sweep/equations/my_scalar.py
+from ._registry import register_equation
+
+@register_equation()                     # 1. claim the public name
+class MyScalar(SecondOrderEquation):
+    ...
+```
 
 ```python
 # src/sweep/equations/__init__.py
-from .my_scalar import MyScalar    # ← the only line you add
+from . import my_scalar                  # 2. import the module so it executes
 ```
 
-After this single import line, `MyScalar` appears in:
+`@register_equation()` takes the class name by default; pass `name=` to export
+it under a different one, `aliases=(...)` for extra names that resolve to the
+same class, and `method=` to tag a non finite-difference discretization
+(`"sem"`). A name may only be claimed once, so a clash raises at import rather
+than silently shadowing.
+
+After both lines, `MyScalar` appears in:
 
 - `sweep list equations` (CLI)
-- `sweep.equations._equation_classes()` (Python introspection)
-- `sweep.equations.torch_binding_supported_equations()` — only if `_C()` is
-  also defined (Part 2)
+- `sweep.equations.equation_classes()` and `get_equation("MyScalar")`
+- `sweep.equations.torch_binding_supported_equations()` — only if the class
+  declares `C_NAME` (Part 2), which installs the `_C()` hook (`base.py`
+  `__init_subclass__`)
 
-That is the entire registration cost. Everything else below describes what
+Importing the class without the decorator binds a name in the
+`sweep.equations` namespace and registers nothing: `equation_classes()` will
+not list it, `get_equation` raises `KeyError`, and the CLI does not show it. Everything else below describes what
 goes **inside** `my_scalar.py` (Part 1) and the CUDA directory (Part 2).
 
 ## Part 1 — Python-only (eager) equation
@@ -124,8 +141,8 @@ reaches the boundary. For a production-ready PML-coupled version, mirror
 and add the `psix / psiz / zetax / zetaz` CPML auxiliary fields to
 `FIELD_SPECS`.
 
-After your class is in place, add the one import line shown under
-[Discovery is automatic](#discovery-is-automatic). The
+After your class is in place, add the decorator and the module import shown
+under [Registration is two lines](#registration-is-two-lines). The
 [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb)
 runs exactly this class end-to-end against `PropTorch` and plots the
 propagating P-wave ring.
@@ -166,42 +183,44 @@ keeps working as the eager fallback; the C path only adds new hooks.
 
 Three additions on top of Part 1:
 
-1. **Python side** — two hooks on the same class: `_C()` returning the
-   compiled forward + backward functions, and a `cuda_layout` property
-   describing the buffer shapes.
+1. **Python side** — two class attributes: `C_NAME = "my_scalar"` (the
+   entry-name prefix; `base.py` then installs `_C()` returning
+   `my_scalar_forward / _backward / _backward_bs / _backward_ckpt /
+   _backward_recursive_ckpt` from `sweep._C`; set
+   `C_HAS_RECURSIVE_CKPT = False` if you skip the last one) and a
+   `cuda_layout` property describing the buffer shapes.
 2. **C++ / CUDA side** — a new equation directory under
-   `src/sweep/csrc/cuda/equations/<my_scalar>/` with three files
-   (`<my_scalar>.h`, `forward.cu`, `backward.cu`) plus a shared
-   `kernels.cuh`.
-3. **Glue** — five `m.def(...)` lines in `src/sweep/csrc/bindings/module.cpp`
-   and one `#include`.
+   `src/sweep/csrc/cuda/equations/<my_scalar>/` following the existing
+   convention (`<my_scalar>.h`, `driver_traits.cuh`, `kernels.cuh`,
+   `kernels.cu`, `forward.cu`, `backward.cu`).
+3. **Glue** — five entries in the core's C table: add `SWEEP_ENTRY_MY_SCALAR_*`
+   ids to the `SweepEntry` enum in `src/sweep/csrc/core/capi.h` (and bump
+   `SWEEP_ENTRY_COUNT`), and the matching rows in `ENTRY_NAMES` / `ENTRY_KINDS`
+   / the `dispatch()` switch of `src/sweep/csrc/cuda/common/capi.cu`, plus one
+   `#include` there. The ctypes layer (`sweep.backend.c`) reads that table from
+   the loaded core by name, so nothing on the Python side lists your functions.
+   Only if you also work on the `SWEEP_JIT_FULL=1` pybind shim do you add the
+   five `m.def(...)` lines to `src/sweep/csrc/bindings/module.cpp`.
 
-The build system finds new `.cu` files automatically. You do **not** edit
-`setup_cuda.py`, `build_config.py`, or `pyproject.toml`.
+The core build globs `cuda/common/**/*.cu` and `cuda/equations/**/*.cu`
+(`sweep/backend/c/jit.py` `_sources`), so you do **not** edit
+`pyproject.toml`, `build_config.py` or `setup_cuda.py`. If you add a field to
+`ForwardInput` / `BackwardInput` (`shared/wavetypes.h`) you must rerun
+`utils/gen_input_core.py`, which regenerates `core/input_core.h`,
+`cuda/common/adapt_inputs.h`, `cuda/common/layout.cu` and the ctypes mirror
+`sweep/backend/c/abi.py`; the loader's ABI guard refuses a core whose struct
+layout differs from the mirror.
 
 ### Python side (incremental)
 
-Add `_C()` and `cuda_layout` to the same class you wrote in Part 1:
+Add `C_NAME` and `cuda_layout` to the same class you wrote in Part 1:
 
 ```python
 class MyScalar(SecondOrderEquation):
     # ... Part 1 body (MODEL_SPECS / FIELD_SPECS / default_pml_type / func) ...
 
-    def _C(self):
-        from sweep._C import (
-            my_scalar_forward,
-            my_scalar_backward,
-            my_scalar_backward_bs,
-            my_scalar_backward_ckpt,
-            my_scalar_backward_recursive_ckpt,
-        )
-        return (
-            my_scalar_forward,
-            my_scalar_backward,
-            my_scalar_backward_bs,
-            my_scalar_backward_ckpt,
-            my_scalar_backward_recursive_ckpt,
-        )
+    C_NAME = "my_scalar"              # -> sweep._C.my_scalar_forward, _backward, _backward_bs, _backward_ckpt, _backward_recursive_ckpt
+    # C_HAS_RECURSIVE_CKPT = False    # if you do not ship *_backward_recursive_ckpt
 
     @property
     def cuda_layout(self):
@@ -217,10 +236,10 @@ class MyScalar(SecondOrderEquation):
         )
 ```
 
-The last two entries of `_C()` are optional. Return a 3-tuple if you have
-not yet implemented `*_ckpt` / `*_recursive_ckpt`; `PropTorch` will refuse
-those checkpointing modes for your equation but still serve full-wavefield
-and boundary-saving paths.
+Set `C_HAS_RECURSIVE_CKPT = False` to skip the recursive-checkpoint entry
+(`PropTorch` then refuses `Ckpt(mode="recursive")` for your equation); the other
+four entries must exist in the core. A hand-written `_C()` still works if you
+need something unusual (see `acoustic_curvilinear.py`).
 
 #### `cuda_layout` fields
 
@@ -242,8 +261,16 @@ fields are read in `src/sweep/propagator/_c.py`:
 | `pml_slot_axes` | per-slot differencing axis (`'x'`/`'y'`/`'z'`) of the `pml_nvar` **forward** aux slots, in C++ bind order — tagged slots are allocated as per-axis slabs (PML band + stencil reach) instead of full grids | `None` (full grids) |
 | `checkpoint_slot_axes` | the same tagging for the checkpoint snapshot slots; `None` entries stay physical full-grid slots | `None` |
 | `adjoint_pml_slab` | also slab the **adjoint** aux. Only safe when the adjoint touches its memory variables own-cell (elastic); a fused adjoint that stencil-taps psi/zeta must stay full-domain (acoustic) | `False` |
+| `stepped` | the compiled forward / `backward_bs` honour the `it_begin` / `it_end` segment range (the shared template drivers do) — required for domain decomposition | `False` |
+| `dd_backward_phases` | the compiled backward implements the numbered phases its DD schedule drives (elastic physics split, VRZ coupling exchange) | `False` |
 
-The last three are opt-in: leave them unset and your aux buffers are
+The full field list (`forward_workspace_nvar` / `_shapes`, `derived_model_nvar`,
+`record_shape`, `checkpoint_replay_shapes`, `checkpoint_state_nvar`,
+`save_all_shape`, `bs_reconstruction_nvar`, `supports_boundary_tail_steps`,
+`slots`, ...) is documented on the `CUDALayoutSpec` dataclass in
+`src/sweep/equations/cuda_layout.py`.
+
+`pml_slot_axes`, `checkpoint_slot_axes` and `adjoint_pml_slab` are opt-in: leave them unset and your aux buffers are
 full-domain, which always works. Tagging them cuts CPML aux memory to the
 bands, and is what `Acoustic`/`Acoustic3D`/`Elastic`/`Elastic3D` do — the
 kernels adapt per bound tensor, so a mis-tagged slot shows up as a wrong
@@ -255,72 +282,84 @@ double-check these against your CUDA kernels' actual reads/writes.
 
 ### C++ / CUDA side
 
-Create `src/sweep/csrc/cuda/equations/my_scalar/` and add three files. Sizes
-below are typical orders of magnitude; the eight existing equations under
-`src/sweep/csrc/cuda/equations/` are direct references.
+Create `src/sweep/csrc/cuda/equations/my_scalar/` and follow the existing
+convention (`<dir>/<dir>.h` plus `driver_traits.cuh`, `kernels.cuh`,
+`kernels.cu`, `forward.cu`, `backward.cu`). Sizes below are typical orders of
+magnitude; the 19 existing equations under `src/sweep/csrc/cuda/equations/`
+(e.g. `acoustic2d/`) are direct references.
 
 | File | Role | Typical size |
 | --- | --- | --- |
-| `my_scalar.h` | five forward/backward function declarations | ~30 lines |
-| `forward.cu` | forward time loop, initialisation, receiver write-out | 200–300 lines |
-| `kernels.cuh` | per-step CUDA kernels (state update, gradient / imaging) | 300–1200 lines |
-| `backward.cu` | adjoint loop, parameter-gradient accumulation, RTM path | 800–1500 lines |
+| `my_scalar.h` | the `*_core` entry declarations (forward / backward variants, runner factories) | ~30 lines |
+| `driver_traits.cuh` | the equation's traits for the shared template drivers (`common/eq_driver.cuh` / `sg_driver.cuh`) | varies |
+| `kernels.cuh` / `kernels.cu` | per-step CUDA kernels (state update, gradient / imaging) | 300–1200 lines |
+| `forward.cu` | forward entry: initialisation, receiver write-out | 200–300 lines |
+| `backward.cu` | adjoint entries, parameter-gradient accumulation, RTM path | 800–1500 lines |
 
-The build system picks these up via glob:
-
-```python
-# build_config.py
-cuda_sources = (
-    glob.glob("src/sweep/csrc/cuda/common/**/*.cu", recursive=True)
-    + glob.glob("src/sweep/csrc/cuda/equations/**/*.cu", recursive=True)
-)
-```
+The core build (`sweep/backend/c/jit.py` `_sources`) globs
+`cuda/common/**/*.cu` + `cuda/equations/**/*.cu`; the same list feeds
+`python -m sweep.build --core`.
 
 #### Reusable infrastructure
 
-The headers under `src/sweep/csrc/cuda/common/` cover roughly 70–80 % of the
-boilerplate for a new CUDA equation. Reach for these before re-inventing:
+The headers under `src/sweep/csrc/cuda/common/` and `cuda/operators/` cover
+roughly 70–80 % of the boilerplate for a new CUDA equation. Reach for these
+before re-inventing:
 
-- `context.h` — `SolverContext` (grid sizes, dt, PML widths, FD half-stencil)
-- `laplace.cuh`, `gradient.cuh`, `staggered.cuh` — templated FD operators
-- `boundarysaver.cuh` / `.cu` — ring-buffer boundary save / load (GPU / CPU / disk)
-- `checkpoint_runtime.cuh` — checkpoint allocation and replay
-- equation-family CPML / wavefield structs:
-  `cuda/equations/acoustic2d/acoustic.h`,
-  `cuda/equations/elastic2d/elastic.h`
+- `common/context.h` — `SolverContext` (grid sizes, dt, PML widths, FD half-stencil)
+- `operators/laplace.cuh`, `gradient.cuh`, `staggered.cuh` — templated FD operators
+- `common/eq_driver.cuh` / `sg_driver.cuh` — the shared template drivers (second-order / staggered families) that make an equation `stepped`
+- `common/boundarysaver.cuh` / `.cu`, `common/boundary/` — ring-buffer boundary save / load (GPU / CPU / disk) and the session runtime
+- `common/checkpoint_runtime.cuh` — checkpoint allocation and replay
+- equation-family CPML / wavefield structs: `common/acoustic.h`, `common/elastic.h`
 
 What you write per equation is the state-update kernel and the
 parameter-gradient kernel — the rest is reuse.
 
-### Glue: register in `module.cpp`
+### Glue: register in the C API table
 
 ```cpp
-// src/sweep/csrc/bindings/module.cpp
-#include "cuda/equations/my_scalar/my_scalar.h"
+// src/sweep/csrc/core/capi.h  (enum SweepEntry) -- append after the last equation
+SWEEP_ENTRY_MY_SCALAR_FORWARD = 94,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD = 95,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD_BS = 96,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD_CKPT = 97,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD_RECURSIVE_CKPT = 98,
+SWEEP_ENTRY_COUNT = 99
 
-PYBIND11_MODULE(_C, m) {
-    // ... existing equations ...
-
-    m.def("my_scalar_forward",                wrap_forward<my_scalar_forward>);
-    m.def("my_scalar_backward",               wrap_backward<my_scalar_backward>);
-    m.def("my_scalar_backward_bs",            wrap_backward<my_scalar_backward_bs>);
-    m.def("my_scalar_backward_ckpt",          wrap_backward<my_scalar_backward_ckpt>);
-    m.def("my_scalar_backward_recursive_ckpt", wrap_backward<my_scalar_backward_recursive_ckpt>);
-}
+// src/sweep/csrc/cuda/common/capi.cu
+#include "../equations/my_scalar/my_scalar.h"
+// ENTRY_NAMES: "my_scalar_forward", "my_scalar_backward", "my_scalar_backward_bs",
+//              "my_scalar_backward_ckpt", "my_scalar_backward_recursive_ckpt"
+// ENTRY_KINDS: 0, 1, 1, 1, 1
+// dispatch(): one case per entry, e.g.
+case 94: *static_cast<ForwardOutputCore*>(out) = my_scalar::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+case 95: *static_cast<BackwardOutputCore*>(out) = my_scalar::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+// ... _backward_bs, _backward_ckpt, _backward_recursive_ckpt likewise
 ```
 
-The `wrap_forward` / `wrap_backward` templates in
-`src/sweep/csrc/bindings/bindings_utils.h` handle the
-`_C.ForwardInput` / `BackwardInput` structs uniformly. Five lines is the
-entire glue cost.
+The ctypes layer (`sweep.backend.c`) enumerates the table through
+`sweep_entry_count()` / `sweep_entry_name()` at load, so the Python names need
+no further wiring. `bindings/module.cpp` (the pybind shim) mirrors the same
+table and is only compiled under `SWEEP_JIT_FULL=1`; keep it in step by hand if
+you use that path (the generator that produced it is not in the repository).
 
 ### Build + load
 
-Rebuild with the CUDA extension on:
+Rebuild the CUDA core from this tree (incremental; needs an nvcc >= 12.4 of your
+torch's CUDA major; no GPU needed):
 
 ```bash
-SWEEP_BUILD_CUDA=1 pip install -v -e ".[cuda]" --no-build-isolation
+python -m sweep.build --core --cuda-home /usr/local/cuda-12.9   # -> src/sweep/lib/cu12/ (+ core.json)
+# or, with no core under src/sweep/lib/, the first impl='c' call / `python -m sweep.build`
+# builds and caches one under TORCH_EXTENSIONS_DIR
+# or point at a core built elsewhere:
+SWEEP_CORE=/path/to/libsweep_core.so python ...
 ```
+
+A shipped core under `src/sweep/lib/<tag>/` wins over the local build, so after
+editing csrc either rerun `--core` or remove that directory. `SWEEP_JIT_FULL=1`
+is needed only to rebuild the pybind shim.
 
 Then verify the binding is wired up:
 
@@ -335,7 +374,10 @@ On top of Part 1's checks:
 
 1. `sweep list equations` shows your class with **Torch Binding ✓** in the
    table.
-2. `sweep.backend.torch.binding.is_available()` returns `True`.
+2. `sweep.backend.torch.binding.is_available()` returns `True`, and
+   `from sweep._C import my_scalar_forward` succeeds (the first attribute
+   access loads the core and its entry table — a missing entry fails here by
+   name).
 3. `test/solver_gradient_mode_suite.py`-style test compares your eager
    gradient (Part 1) against the compiled full-wavefield, boundary saving,
    and (if implemented) checkpoint modes on the canonical grid
@@ -370,8 +412,9 @@ just the equation:
   backward, backward_bs)`. See `ElasticAPM` and `ElasticCurvilinear` for
   references, plus the `topography=` and `free_surface=` plumbing in
   `src/sweep/propagator/base.py`.
-- **RTM imaging.** Implement `_C_rtm()` returning a single CUDA kernel.
-  `Acoustic._C_rtm` is the smallest reference.
+- **RTM imaging.** No equation in the tree implements a `_C_rtm()` hook today;
+  the core's C API reserves an `rtm` entry kind for it (`csrc/core/capi.h`,
+  kind 2). This is a propagator-level addition.
 - **A new memory mode** (beyond full-wavefield, boundary saving, and the
   two checkpoint modes). This is a propagator-level change, not an
   equation-level one.

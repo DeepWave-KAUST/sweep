@@ -43,8 +43,10 @@ and the envelope decays for as long as float64 can resolve it.
 from __future__ import annotations
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 TTI2ND_STIFFNESS_KEYS = ("C11", "C33", "C13", "C55", "C15", "C35")
 
@@ -202,6 +204,18 @@ def step(
     )
 
 
+
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled backward's scratch (elastic_tti_2nd2d/backward.cu
+    WorkspaceSlot), one padded grid per shot each: the eight-grid adjoint
+    workspace in every mode, plus one read-only zero field in full mode or the
+    three stress workspaces of the replayed step in the boundary-saving and
+    checkpoint modes.
+    """
+    n = 9 if mode == "full" else 11
+    return n * [[B, 1, *shape]]
+
+@register_equation()
 class ElasticTTI2nd(FirstOrderEquation):
     """Displacement-based 2-D elastic TTI wave equation (Oh et al. 2020).
 
@@ -229,6 +243,11 @@ class ElasticTTI2nd(FirstOrderEquation):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"
+
+    C_NAME = "elastic_tti_2nd2d"
+    # No ``elastic_tti_2nd2d_backward_recursive_ckpt`` binding is compiled for this
+    # equation; the 5th slot of the binding tuple stays None.
+    C_HAS_RECURSIVE_CKPT = False
 
     MODEL_SPECS = (
         ModelSpec("vh", description="Horizontal P-wave velocity (VTI frame).", unit="m/s"),
@@ -394,20 +413,13 @@ class ElasticTTI2nd(FirstOrderEquation):
             **kwargs,
         )
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.elastic_tti_2nd2d_forward,
-            _C.elastic_tti_2nd2d_backward,
-            _C.elastic_tti_2nd2d_backward_bs,
-            _C.elastic_tti_2nd2d_backward_ckpt,
-            None,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            # seg_ux, seg_uz: two history levels + one row per replayed step
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg + 2, B, 1, *grid)] * 2,
+            save_all_shape=history_fields(2),   # ux, uz
             # 6 displacement buffers (ux, uz) x (now, pre, next): the CUDA
             # leapfrog rotates a race-free triple buffer, mirroring the
             # acoustic2d second-order layout.
@@ -419,5 +431,9 @@ class ElasticTTI2nd(FirstOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=2,
             boundary_save_nvar=2,
-            backward_workspace_nvar=8,
+            backward_workspace_shapes=_adjoint_workspace_shapes,
+            # The three stress workspaces of the compiled forward's step
+            # (elastic_tti_2nd2d/forward.cu ForwardWorkspaceSlot).
+            forward_workspace_nvar=3,
+            bs_reconstruction_nvar=6,   # ux, uz, ux_pre, uz_pre, ux_nxt, uz_nxt
         )

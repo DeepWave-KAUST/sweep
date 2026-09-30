@@ -51,7 +51,13 @@ def decimate(arr: np.ndarray, factor) -> tuple[np.ndarray, tuple[int, ...]]:
     if all(f == 1 for f in factor):
         return arr, factor
     sl = tuple(slice(None, None, f) for f in factor)
-    return arr[sl], factor
+    # A copy, not the strided view basic slicing gives: the view keeps the
+    # FULL-resolution array alive through its base for as long as the caller
+    # holds the decimated one, so ``load(..., downsample=4)`` handed back a
+    # small model that pinned the large one (a 3-D benchmark: 7.6 MB pinning
+    # 480 MB). It also matches ``read_model``, which already returns
+    # C-contiguous arrays.
+    return np.ascontiguousarray(arr[sl]), factor
 
 
 # --------------------------------------------------------------- decompress
@@ -155,6 +161,15 @@ _SEGY_TRACE_HEADER = 240
 _SEGY_BYTES_PER_SAMPLE = {1: 4, 2: 4, 3: 2, 5: 4, 6: 8, 8: 1}
 
 
+# Traces per block for the SEG-Y read.  The decode below holds five temporaries
+# the size of whatever it is given -- sign, exponent, mantissa, the ldexp result
+# and the negation -- so handing it the whole file made the read peak at several
+# times its payload.  16 MiB of samples per block caps the temporaries at ~80 MiB
+# whatever the file size, and is large enough that the per-block overhead is
+# nothing next to the decode itself.
+_SEGY_BLOCK_SAMPLES = 4 << 20
+
+
 def _ibm_to_ieee(u32: np.ndarray) -> np.ndarray:
     """Decode IBM 32-bit floats (uint32 bit-pattern) to IEEE float32."""
     u32 = np.ascontiguousarray(u32, dtype=np.uint32)
@@ -163,6 +178,22 @@ def _ibm_to_ieee(u32: np.ndarray) -> np.ndarray:
     mant = (u32 & 0x00FFFFFF).astype(np.float32)
     out = np.ldexp(mant, (expo - 64) * 4 - 24).astype(np.float32)
     return np.where(sign != 0, -out, out)
+
+
+def _segy_decode(block: np.ndarray, fmt: int, n_samples: int) -> np.ndarray:
+    """One block of raw trace bytes -> float32 ``(n_traces_in_block, n_samples)``."""
+    n = block.shape[0]
+    if fmt == 1:                                     # IBM float32
+        return _ibm_to_ieee(block.view(">u4").reshape(n, n_samples))
+    if fmt == 5:                                     # IEEE float32
+        return block.view(">f4").reshape(n, n_samples).astype(np.float32, copy=False)
+    if fmt == 6:                                     # IEEE float64
+        return block.view(">f8").reshape(n, n_samples).astype(np.float32)
+    if fmt == 2:                                     # int32
+        return block.view(">i4").reshape(n, n_samples).astype(np.float32)
+    if fmt == 3:                                     # int16
+        return block.view(">i2").reshape(n, n_samples).astype(np.float32)
+    return block.view("i1").reshape(n, n_samples).astype(np.float32)   # int8
 
 
 def segy_to_array(path: Path) -> np.ndarray:
@@ -194,19 +225,22 @@ def segy_to_array(path: Path) -> np.ndarray:
         offset=_SEGY_TEXT_HEADER + _SEGY_BIN_HEADER,
         shape=(n_traces, trace_bytes),
     )
-    data = np.ascontiguousarray(raw[:, _SEGY_TRACE_HEADER:])  # drop per-trace headers
+    if fmt not in _SEGY_BYTES_PER_SAMPLE:
+        raise NotImplementedError(f"{path.name}: SEG-Y sample format {fmt} not supported")
+    # Block-wise: dropping the per-trace headers needs a contiguous copy (the
+    # memmap rows are strided), and the decode allocates several temporaries the
+    # size of what it is given.  Doing the whole file at once made both scale
+    # with the file rather than with a bound, so a large SEG-Y peaked at several
+    # times its payload before returning a single-payload array.
+    out = np.empty((n_traces, n_samples), dtype=np.float32)
+    step = max(1, _SEGY_BLOCK_SAMPLES // max(1, n_samples))
+    for a in range(0, n_traces, step):
+        b = min(a + step, n_traces)
+        block = np.ascontiguousarray(raw[a:b, _SEGY_TRACE_HEADER:])
+        out[a:b] = _segy_decode(block, fmt, n_samples)
+        del block
     del raw
-    if fmt == 1:                                     # IBM float32
-        return _ibm_to_ieee(data.view(">u4").reshape(n_traces, n_samples))
-    if fmt == 5:                                     # IEEE float32
-        return data.view(">f4").reshape(n_traces, n_samples).astype(np.float32, copy=False)
-    if fmt == 6:                                     # IEEE float64
-        return data.view(">f8").reshape(n_traces, n_samples).astype(np.float32)
-    if fmt == 2:                                     # int32
-        return data.view(">i4").reshape(n_traces, n_samples).astype(np.float32)
-    if fmt == 3:                                     # int16
-        return data.view(">i2").reshape(n_traces, n_samples).astype(np.float32)
-    return data.view("i1").reshape(n_traces, n_samples).astype(np.float32)  # int8
+    return out
 
 
 # --------------------------------------------------------------- dispatch

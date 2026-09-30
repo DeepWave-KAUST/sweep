@@ -1,5 +1,6 @@
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 
 def step_cpml(
@@ -40,7 +41,14 @@ def step_cpml(
     # 10.1190/geo2022-0292.1 EQ(19) from 10.1190/geo2014-0242.1
     numerator = -2 * (epsilon - delta) * dpdx**2 * dpdz**2
     denominator = (1 + 2 * epsilon) * dpdx**4 + dpdz**4 + 2 * (1 + delta) * dpdx**2 * dpdz**2
-    sk = numerator * ((denominator + 1e-26) ** -1)
+    # NOT ``numerator * ((denominator + 1e-26) ** -1)``. That form is finite in
+    # the forward, but autograd's pow backward evaluates ``x ** -2``, and in
+    # fp32 ``(1e-26) ** -2`` overflows to +inf. Wherever the numerator is also
+    # zero -- the whole grid at t=0, the quiet region ahead of the wavefront,
+    # the PML corners -- the chain rule computes ``0 * inf = NaN``, and a single
+    # NaN poisons the entire model gradient. Division's backward is
+    # ``-grad * result / denominator`` and never forms ``den ** -2``.
+    sk = numerator / (denominator + 1e-26)
 
     vp2dt2 = vp**2 * dt**2
     u_next = 2 * u_now - u_pre + vp2dt2 * (((1 + 2 * epsilon) + sk) * lap_x_pml + (1 + sk) * lap_z_pml)
@@ -53,6 +61,7 @@ def step_cpml(
     return u_next, u_now, psixn, psizn, zetaxn, zetazn
 
 
+@register_equation(aliases=('AcousticVTIDefault', 'AcousticVTILiang'))
 class AcousticVTI(SecondOrderEquation):
     """Second-order 2-D pseudo-acoustic VTI wave equation (Liang 2022).
 

@@ -103,6 +103,8 @@ nav:
       - Datasets: user-guide/datasets.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
+  - Developer:
+      - CUDA driver skeletons: dev/cuda_drivers.md
   - Examples:
       - Overview: examples/index.md
       - Notebooks:

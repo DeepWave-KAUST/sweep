@@ -206,9 +206,7 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     // adjoint prepare: ax/az/bx/bz vanish outside the PML band, m_v* aux
     // fields stay 0, so the four q* outputs collapse to bar_dv*_d* and
     // the four m_v* writes become 0 -> 0.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < (solver.free_surface ? halo : solver.abcn + halo)) ||
-                  (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;

@@ -5,20 +5,14 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from ._free_surface import (
-    top_free_surface_derivative,
-    top_free_surface_cell_derivative,
-    zero_top_row,
-    overwrite_top_row,
-    blend_top_n,
-    get_o2_pd as _get_o2_pd,
-    fs_deriv as _fs_deriv,
-    near_surface_o2_count as _near_surface_o2_count,
-)
-import os as _os
+from ._free_surface import zero_top_row
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
+from .elastic3d import step as _elastic3d_step
+from ._elastic_step_core import elastic_stress_substep, elastic_velocity_substep
 
 
 def _is_torch_tensor(value):
@@ -385,11 +379,13 @@ class DAS(torch.nn.Module):
         sources,
         receivers,
         models=None,
-        source_encoding=False,
         adj=False,
         return_wavefield=False,
         **kwargs,
     ):
+        # (no source_encoding parameter: the solver derives the encoding mode
+        # from the wavelet/sources shapes; the old parameter was forwarded to a
+        # forward() that never read it.)
         if return_wavefield:
             raise NotImplementedError("DAS facade returns records only. Use PropTorch directly for wavefields.")
 
@@ -398,7 +394,6 @@ class DAS(torch.nn.Module):
             sources=sources,
             receivers=receivers,
             models=models,
-            source_encoding=source_encoding,
             adj=adj,
             return_wavefield=False,
             **kwargs,
@@ -518,82 +513,52 @@ def step_das_mu_2d(
 ):
     """One Mu velocity-stress-strain DAS step in 2D.
 
-    The velocity and stress update follows the standard first-order elastic
-    staggered-grid equation. The strain fields integrate the velocity
-    derivatives from the same step:
-    ``exx_t = vx_x``, ``ezz_t = vz_z``, and
-    ``exz_t = 0.5 * (vx_z + vz_x)``.
+    This IS the shared elastic pair (:func:`elastic_velocity_substep` +
+    :func:`elastic_stress_substep`) plus three strain integrations
+    (``exx_t = vx_x``, ``ezz_t = vz_z``, ``exz_t = 0.5 (vx_z + vz_x)``) -- the
+    bodies were maintained as literal copies apart from variable names and the
+    staggered-parameter generality (DASMu uses the plain ``rho`` and
+    ``lame_mu`` where elastic passes staggered averages, so those are forwarded
+    as-is and the arithmetic is unchanged). The post-step ``szz`` zeroing is the
+    caller's job by the sub-step contract, and happens here as before.
     """
-
-    az, bz, azh, bzh, ax, bx, axh, bxh = pml
-    top_halo = pd.coes.shape[0]
-
-    sxx_x = pd.x_forward(sxx)
-    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1"))
-    _pd2 = _get_o2_pd(pd) if _n_o2 else None
-    if free_surface:
-        # sxz sits at z=+h/2 -> half-cell mirror (about halo-1/2); szz is on the
-        # surface plane -> integer-grid mirror.  See ``_free_surface.fs_deriv``.
-        sxz_z = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2, half=True)
-        szz_z = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
-    else:
-        sxz_z = pd.z_backward(sxz)
-        szz_z = pd.z_forward(szz)
-    sxz_x = pd.x_backward(sxz)
-
-    m_tzzz = azh * m_tzzz + bzh * szz_z
-    szz_z = szz_z + m_tzzz
-    m_txzx = ax * m_txzx + bx * sxz_x
-    sxz_x = sxz_x + m_txzx
-    vz = vz + dt / rho * (szz_z + sxz_x)
-
-    m_txzz = az * m_txzz + bz * sxz_z
-    sxz_z = sxz_z + m_txzz
-    m_txxx = axh * m_txxx + bxh * sxx_x
-    sxx_x = sxx_x + m_txxx
-    vx = vx + dt / rho * (sxx_x + sxz_z)
-
-    vx_x = pd.x_backward(vx)
-    if free_surface:
-        # vz sits at z=+h/2 -> half-cell mirror; vx is on the surface plane.
-        vz_z = _fs_deriv(vz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2, half=True)
-        vx_z = _fs_deriv(vx, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
-    else:
-        vz_z = pd.z_backward(vz)
-        vx_z = pd.z_forward(vx)
-    vz_x = pd.x_forward(vz)
-
-    m_vzz = az * m_vzz + bz * vz_z
-    vz_z = vz_z + m_vzz
-    m_vxx = ax * m_vxx + bx * vx_x
-    vx_x = vx_x + m_vxx
-
-    sxx_pre = sxx
-    szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
-    sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
-    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
-        # Robertsson free-surface fix: at the surface row sigma_zz=0 implies
-        # d vz/dz = -lam/(lam+2mu) d vx/dx, so sigma_xx there reduces to the
-        # modified coefficient  4 mu (lam+mu)/(lam+2mu) * d vx/dx  (no vz-in-air).
-        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
-        sxx_surf = sxx_pre + dt * _coef * vx_x
-        sxx = overwrite_top_row(sxx, sxx_surf, top_halo, axis=-2)
-
-    m_vxz = azh * m_vxz + bzh * vx_z
-    vx_z = vx_z + m_vxz
-    m_vzx = axh * m_vzx + bxh * vz_x
-    vz_x = vz_x + m_vzx
-    sxz = sxz + dt * lame_mu * (vx_z + vz_x)
+    (vx, vz, sxx, szz, sxz,
+     m_vxx, m_vxz, m_vzx, m_vzz,
+     m_txxx, m_txxz, m_tzzx, m_tzzz,
+     m_txzx, m_txzz) = elastic_velocity_substep(
+        vx, vz, sxx, szz, sxz,
+        m_vxx, m_vxz, m_vzx, m_vzz,
+        m_txxx, m_txxz, m_tzzx, m_tzzz,
+        m_txzx, m_txzz,
+        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
+        rho_x=rho, rho_z=rho,
+        dt=dt, h=h, b=b, pd=pd, pml=pml,
+        free_surface=free_surface,
+        lame_lambda_2mu=lame_lambda_2mu,
+    )
+    *state, (vx_x, vz_z, vx_z, vz_x) = elastic_stress_substep(
+        vx, vz, sxx, szz, sxz,
+        m_vxx, m_vxz, m_vzx, m_vzz,
+        m_txxx, m_txxz, m_tzzx, m_tzzz,
+        m_txzx, m_txzz,
+        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
+        rho_x=rho, rho_z=rho,
+        dt=dt, h=h, b=b, pd=pd, pml=pml,
+        free_surface=free_surface,
+        lame_lambda_2mu=lame_lambda_2mu,
+        return_gradients=True,
+    )
+    (vx, vz, sxx, szz, sxz,
+     m_vxx, m_vxz, m_vzx, m_vzz,
+     m_txxx, m_txxz, m_tzzx, m_tzzz,
+     m_txzx, m_txzz) = state
 
     exx = exx + dt * vx_x
     ezz = ezz + dt * vz_z
     exz = exz + 0.5 * dt * (vx_z + vz_x)
 
     if free_surface:
-        # z-low FS: zero only szz (normal stress, on-surface node); sxz is a
-        # +h/2 medium value -- zeroing it adds ~6% Rayleigh dispersion (cf. the
-        # elastic sxz free-surface fix, Kristek 2002 Table 1).
-        szz = zero_top_row(szz, top_halo, axis=-2)
+        szz = zero_top_row(szz, pd.coes.shape[0], axis=-2)
 
     return (
         vx,
@@ -663,123 +628,43 @@ def step_das_mu_3d(
     pml=None,
     free_surface=False,
 ):
-    """One Mu velocity-stress-strain DAS step in 3D."""
+    """One Mu velocity-stress-strain DAS step in 3D.
 
-    az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
-    top_halo = pd.coes.shape[0]
-
-    dsxx_dx = pd.x_forward(sxx)
-    dsxy_dy = pd.y_backward(sxy)
-    if free_surface:
-        dsxz_dz = top_free_surface_cell_derivative(sxz, pd.z_backward, top_halo, odd=True, axis=-3)
-    else:
-        dsxz_dz = pd.z_backward(sxz)
-
-    dsxy_dx = pd.x_backward(sxy)
-    dsyy_dy = pd.y_forward(syy)
-    if free_surface:
-        dsyz_dz = top_free_surface_cell_derivative(syz, pd.z_backward, top_halo, odd=True, axis=-3)
-    else:
-        dsyz_dz = pd.z_backward(syz)
-
-    dsxz_dx = pd.x_backward(sxz)
-    dsyz_dy = pd.y_backward(syz)
-    if free_surface:
-        dszz_dz = top_free_surface_derivative(szz, pd.z_forward, top_halo, odd=True, axis=-3)
-    else:
-        dszz_dz = pd.z_forward(szz)
-
-    m_szzz = azh * m_szzz + bzh * dszz_dz
-    dszz_dz = dszz_dz + m_szzz
-    m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    dsxz_dx = dsxz_dx + m_sxzx
-
-    m_sxzz = az * m_sxzz + bz * dsxz_dz
-    dsxz_dz = dsxz_dz + m_sxzz
-    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    dsxx_dx = dsxx_dx + m_sxxx
-
-    m_sxyy = ay * m_sxyy + by * dsxy_dy
-    dsxy_dy = dsxy_dy + m_sxyy
-
-    m_sxyx = ax * m_sxyx + bx * dsxy_dx
-    dsxy_dx = dsxy_dx + m_sxyx
-
-    m_syyy = ayh * m_syyy + byh * dsyy_dy
-    dsyy_dy = dsyy_dy + m_syyy
-    m_syzz = az * m_syzz + bz * dsyz_dz
-    dsyz_dz = dsyz_dz + m_syzz
-
-    m_syzy = ay * m_syzy + by * dsyz_dy
-    dsyz_dy = dsyz_dy + m_syzy
-
-    vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
-    vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
-    vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
-
-    dvx_dx = pd.x_backward(vx)
-    dvx_dy = pd.y_forward(vx)
-    if free_surface:
-        dvx_dz = top_free_surface_derivative(vx, pd.z_forward, top_halo, odd=False, axis=-3)
-    else:
-        dvx_dz = pd.z_forward(vx)
-
-    dvy_dx = pd.x_forward(vy)
-    dvy_dy = pd.y_backward(vy)
-    if free_surface:
-        dvy_dz = top_free_surface_derivative(vy, pd.z_forward, top_halo, odd=False, axis=-3)
-    else:
-        dvy_dz = pd.z_forward(vy)
-
-    dvz_dx = pd.x_forward(vz)
-    dvz_dy = pd.y_forward(vz)
-    if free_surface:
-        dvz_dz = top_free_surface_cell_derivative(vz, pd.z_backward, top_halo, odd=True, axis=-3)
-    else:
-        dvz_dz = pd.z_backward(vz)
-
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
-    m_vyy = ay * m_vyy + by * dvy_dy
-    dvy_dy = dvy_dy + m_vyy
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
-    m_vxz = azh * m_vxz + bzh * dvx_dz
-    dvx_dz = dvx_dz + m_vxz
-    m_vzx = axh * m_vzx + bxh * dvz_dx
-    dvz_dx = dvz_dx + m_vzx
-
-    m_vxy = ayh * m_vxy + byh * dvx_dy
-    dvx_dy = dvx_dy + m_vxy
-    m_vyx = axh * m_vyx + bxh * dvy_dx
-    dvy_dx = dvy_dx + m_vyx
-    m_vyz = azh * m_vyz + bzh * dvy_dz
-    dvy_dz = dvy_dz + m_vyz
-    m_vzy = ayh * m_vzy + byh * dvz_dy
-    dvz_dy = dvz_dy + m_vzy
-
-    div_v = dvx_dx + dvy_dy + dvz_dz
-
-    sxx_pre_fs = sxx
-    syy_pre_fs = syy
-    sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx)
-    syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy)
-    szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz)
-    sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx)
-    sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx)
-    syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
-    if free_surface and _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
-        # Robertsson tangential FS correction (3-D): at a z-low free surface
-        # sigma_zz=0 => surface-row sigma_xx = coef*dvx_dx + coef2*dvy_dy
-        # (x<->y for sigma_yy); coef = 4 mu (lam+mu)/(lam+2mu),
-        # coef2 = 2 lam mu/(lam+2mu).  Same fix as DASMu-2D above.
-        _l2m = lame_lambda + 2.0 * lame_mu
-        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / _l2m
-        _coef2 = 2.0 * lame_lambda * lame_mu / _l2m
-        _sxx_surf = sxx_pre_fs + dt * (_coef * dvx_dx + _coef2 * dvy_dy)
-        _syy_surf = syy_pre_fs + dt * (_coef2 * dvx_dx + _coef * dvy_dy)
-        sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
-        syy = overwrite_top_row(syy, _syy_surf, top_halo, axis=-3)
+    This IS :func:`elastic3d.step` plus six strain integrations -- the two
+    bodies were maintained as ~130-line literal copies, verified statement-for-
+    statement identical before being merged (with ``topo_rows=None`` the
+    elastic free-surface helper reduces by construction to the very functions
+    this copy called). ``return_gradients=True`` hands back the CPML-corrected
+    velocity gradients the stress update consumed, which are exactly what the
+    strain-rate state integrates.
+    """
+    *state, (dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
+             dvx_dz, dvz_dx, dvy_dz, dvz_dy) = _elastic3d_step(
+        vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+        m_vxx, m_vxy, m_vxz,
+        m_vyx, m_vyy, m_vyz,
+        m_vzx, m_vzy, m_vzz,
+        m_sxxx, m_szzz,
+        m_sxyx, m_sxyy,
+        m_sxzx, m_sxzz,
+        m_syyy,
+        m_syzy, m_syzz,
+        vp, vs, rho,
+        lame_lambda, lame_mu,
+        dt, h, b, pd,
+        pml=pml,
+        free_surface=free_surface,
+        return_gradients=True,
+    )
+    (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+     m_vxx, m_vxy, m_vxz,
+     m_vyx, m_vyy, m_vyz,
+     m_vzx, m_vzy, m_vzz,
+     m_sxxx, m_szzz,
+     m_sxyx, m_sxyy,
+     m_sxzx, m_sxzz,
+     m_syyy,
+     m_syzy, m_syzz) = state
 
     exx = exx + dt * dvx_dx
     eyy = eyy + dt * dvy_dy
@@ -787,12 +672,6 @@ def step_das_mu_3d(
     exy = exy + 0.5 * dt * (dvx_dy + dvy_dx)
     exz = exz + 0.5 * dt * (dvx_dz + dvz_dx)
     eyz = eyz + 0.5 * dt * (dvy_dz + dvz_dy)
-
-    if free_surface:
-        # z-low FS: zero only szz (normal stress, on-surface node); sxz/syz are
-        # +h/2 medium values -- zeroing them adds ~6% Rayleigh dispersion (cf.
-        # the elastic sxz free-surface fix, Kristek 2002 Table 1).
-        szz = zero_top_row(szz, top_halo, axis=-3)
 
     return (
         vx,
@@ -1017,6 +896,26 @@ def step_das_zhao_3d(
     )
 
 
+def _das_derived_model_nvar(mode):
+    """mu and lambda (common/derived_models.h LameSlot) wherever the DAS drivers
+    step the elastic forward: the forward itself, the boundary-saving backward's
+    reconstruction and the checkpoint replays. The full-mode backward reads the
+    stored strain history and derives nothing, so it gets no slots."""
+    return 0 if mode == "full" else 2
+
+
+def _das2d_adjoint_workspace(B, nt, shape, mode):
+    """The compiled 2-D DAS backward's scratch (das2d/backward.cu WorkspaceSlot),
+    one padded grid per shot each: a read-only zero strain and eight adjoint
+    derivative grids in every mode; boundary saving also keeps the two current
+    strains and four derivative temporaries alive through its adjoint loop, so
+    that mode -- and only that mode -- gets six more.
+    """
+    n = 15 if mode == "bs" else 9
+    return n * [[B, 1, *shape]]
+
+
+@register_equation(aliases=('DASElastic',))
 class DASZhao(FirstOrderEquation):
     """First-order 2-D stress / normal-strain-rate DAS equation (Zhao 2022).
 
@@ -1033,6 +932,8 @@ class DASZhao(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
@@ -1112,28 +1013,28 @@ class DASZhao(FirstOrderEquation):
             raise ValueError(f"DASZhao.func expected 3 or 5 models, got {len(models)}")
         return step_das_zhao_2d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das2d_forward,
-            _C.das2d_backward,
-            _C.das2d_backward_bs,
-            _C.das2d_backward_ckpt,
-            _C.das2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            # The checkpoint modes recompute the whole strain history (nt steps);
+            # the buffer is the same shape as the full-mode u_allt.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(nt, 2, B, *grid)],
+            save_all_shape=history_fields(2),
             base_nvar=9,
             pml_nvar=8,
             last_two_nvar=1,
             last_two_storage_nvar=9,
-            backward_workspace_nvar=0,
+            backward_workspace_shapes=_das2d_adjoint_workspace,
+            # The four per-step derivative scratch grids the compiled forward
+            # used to allocate itself (das2d/forward.cu ForwardWorkspaceSlot).
+            forward_workspace_nvar=4,
+            bs_reconstruction_nvar=9,   # exx, ezz, sxx, szz, txx, tzz + das35, das54x, das54z
+            derived_model_nvar=_das_derived_model_nvar,
         )
 
 
+@register_equation(aliases=('DASElastic3D',))
 class DASZhao3D(FirstOrderEquation):
     """First-order 3-D stress / normal-strain-rate DAS equation (Zhao 2022).
 
@@ -1149,6 +1050,23 @@ class DASZhao3D(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das3d"
+
+    # The compiled 3-D backward has NO boundary-saving path.  The forward never
+    # writes boundary strips (it returns an empty ``last_two``), and
+    # ``backward_bs`` -- like ``backward_ckpt`` and
+    # ``backward_recursive_ckpt`` -- is three lines that re-run the whole
+    # forward and allocate the complete ``{nt, 3, B, nz, ny, nx}`` strain
+    # history, which is exactly what full storage holds.  Meanwhile the Python
+    # side still allocated a 13-field boundary ring and a 13-grid ``last_two``
+    # that nothing writes and nothing reads.  Asking for boundary saving here
+    # therefore cost strictly MORE memory than 'full', and it was the implicit
+    # impl='c' default, so every plain 3-D DAS gradient paid it.  Declaring the
+    # capability makes that default resolve to 'full' and an explicit request
+    # raise.  This is "not implemented", not "impossible": das2d writes real
+    # strips and DASMu / DASMu3D get them from the shared staggered skeleton.
+    supports_boundary_saving_c = False
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1238,28 +1156,36 @@ class DASZhao3D(FirstOrderEquation):
             raise ValueError(f"DASZhao3D.func expected 3 or 5 models, got {len(models)}")
         return step_das_zhao_3d(*wavefields, vp, vs, rho, lame_lambda, lame_mu, dt, h, b, pd=self.pd, pml=self.b, **kwargs)
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das3d_forward,
-            _C.das3d_backward,
-            _C.das3d_backward_bs,
-            _C.das3d_backward_ckpt,
-            _C.das3d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            # The whole strain history, recomputed in one pass: this driver's
+            # boundary-saving backward is the checkpoint recompute (das3d/backward.cu
+            # backward_bs calls recompute_strain_history), so the buffer is needed
+            # in the bs mode as well as the checkpoint modes.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(nt, 3, B, *grid)],
+            bs_backward_replays_forward=True,
+            # ... and so is the replay state it steps: base + pml, the same list the
+            # checkpoint modes bind (there is no reverse reconstruction to size here).
+            bs_reconstruction_nvar=31,
+            save_all_shape=history_fields(3),
             base_nvar=13,
             pml_nvar=18,
             last_two_nvar=1,
             last_two_storage_nvar=13,
-            backward_workspace_nvar=0,
+            # One read-only zero strain, nine adjoint derivative grids and nine
+            # gradient-projection grids of the compiled backward (das3d/backward.cu
+            # WorkspaceSlot); the checkpoint replay aliases the derivative grids.
+            backward_workspace_nvar=19,
+            # The nine per-step derivative scratch grids the compiled forward
+            # used to allocate itself (das3d/forward.cu ForwardWorkspaceSlot).
+            forward_workspace_nvar=9,
+            derived_model_nvar=_das_derived_model_nvar,
         )
 
 
+@register_equation()
 class DASMu(FirstOrderEquation):
     """First-order 2-D velocity-stress-strain DAS equation (Mu).
 
@@ -1278,6 +1204,8 @@ class DASMu(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das_mu2d"
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1370,28 +1298,34 @@ class DASMu(FirstOrderEquation):
             **kwargs,
         )
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das_mu2d_forward,
-            _C.das_mu2d_backward,
-            _C.das_mu2d_backward_bs,
-            _C.das_mu2d_backward_ckpt,
-            _C.das_mu2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            save_all_shape=history_fields(2),   # vx, vz
             base_nvar=8,
             pml_nvar=10,
             last_two_nvar=1,
             last_two_storage_nvar=8,
-            backward_workspace_nvar=8,
+            # The compiled backward's scratch (das_mu2d/driver_traits.cuh
+            # WS_CARRIERS), one padded grid per shot each: the 8 elastic
+            # adjoint grids [qxx, qzz, qxz, qzx, pxx, pzz, pxz, pzx] in every
+            # mode; the checkpoint modes add the velocity carriers -- v(t) at
+            # slots 8, 9 (vx, vz) and v(t+1) at 10, 11; the full mode keeps one
+            # read-only zero grid at [8] (v(nt)).
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                8 + (4 if mode in ("ckpt", "recursive") else 1 if mode == "full" else 0)),
+            # ckpt: the per-segment vx, vz histories, one row per replayed step
+            # plus the segment start (das_mu2d/driver_traits.cuh seg_buffers);
+            # the recursive mode replays per step and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
+            bs_reconstruction_nvar=7,   # vx, vz, sxx, szz, sxz + fvx_prev, fvz_prev (the DAS strains are dead in the bs reverse loop)
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
 
 
+@register_equation()
 class DASMu3D(FirstOrderEquation):
     """First-order 3-D velocity-stress-strain DAS equation (Mu).
 
@@ -1407,6 +1341,8 @@ class DASMu3D(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "das_mu3d"
 
     MODEL_SPECS = DASZhao.MODEL_SPECS
     FIELD_SPECS = (
@@ -1512,25 +1448,30 @@ class DASMu3D(FirstOrderEquation):
             **kwargs,
         )
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.das_mu3d_forward,
-            _C.das_mu3d_backward,
-            _C.das_mu3d_backward_bs,
-            _C.das_mu3d_backward_ckpt,
-            _C.das_mu3d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            save_all_shape=history_fields(3),   # vx, vy, vz
             base_nvar=15,
             pml_nvar=18,
             last_two_nvar=1,
             last_two_storage_nvar=15,
-            backward_workspace_nvar=18,
+            # The compiled backward's scratch (das_mu3d/driver_traits.cuh
+            # WS_CARRIERS), one padded grid per shot each: the 18 elastic
+            # adjoint grids (9 q** + 9 p**) in every mode; the checkpoint
+            # modes add the velocity carriers -- v(t) at slots 18, 19, 20
+            # (vx, vy, vz) and v(t+1) at 21, 22, 23; the full mode keeps one
+            # read-only zero grid at [18] (v(nt)).
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                18 + (6 if mode in ("ckpt", "recursive") else 1 if mode == "full" else 0)),
+            # ckpt: the per-segment vx, vy, vz histories, one row per replayed
+            # step plus the segment start (das_mu3d/driver_traits.cuh
+            # seg_buffers); the recursive mode replays per step and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
+            bs_reconstruction_nvar=12,  # 9 elastic fields + fvx/fvy/fvz_prev (the DAS strains are dead in the bs reverse loop)
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
         )
 
 

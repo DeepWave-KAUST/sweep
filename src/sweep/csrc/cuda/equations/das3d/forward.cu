@@ -1,32 +1,41 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 
 #include "das3d.h"
 #include "kernels.cuh"
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
+#include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/das.h"
 #include "../../common/elastic.h"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
 namespace das3d {
 
-ForwardOutput forward(const ForwardInput& in)
+// Layout of p.forward_workspace, declared on the Python side as
+// DASZhao3D.cuda_layout.forward_workspace_nvar: the per-step derivative scratch
+// (one padded grid per shot each). The step loop zeroes every slot before it
+// is written, so nothing here relies on the pool's contents at entry.
+enum ForwardWorkspaceSlot : int {
+    TMP_SXX_X = 0, TMP_SYY_Y, TMP_SZZ_Z,
+    TMP_TXX_Y, TMP_TXX_Z, TMP_TYY_X, TMP_TYY_Z, TMP_TZZ_X, TMP_TZZ_Y,
+    N_FORWARD_SLOTS
+};
+
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     auto vp = p.models[0];
     auto vs = p.models[1];
     auto rho = p.models[2];
-    auto mu = rho * vs * vs;
-    auto lambda = rho * (vp * vp - 2 * vs * vs);
-    c10::cuda::CUDAGuard device_guard(vp.device());
+    const auto lame = derived::lame(p, vp, vs, rho, "das3d::forward");
+    auto mu = lame.mu;
+    auto lambda = lame.lambda;
+    sweep::DeviceGuard device_guard(device_index_of(vp));
 
     float dx = p.spacing[0];
     float dy = p.spacing[1];
@@ -39,37 +48,51 @@ ForwardOutput forward(const ForwardInput& in)
     int nx = vp.size(4);
     int B = N * C;
 
+    // Mandatory: the propagator binds every forward state slot
+    // (cuda_layout.base_nvar + pml_nvar = 31, propagator/_c.py Wrapper.forward
+    // `params.wavefields = cp.forward_wavefields`), in every mode.
     DasWavefieldTensor3D wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields);
-    else
-        wavefield.allocate(vp);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "das3d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields);
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 3);
+    cpml.bind(p.pml_vals, 3);
     auto cpml_view = cpml.view();
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out.
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
-    auto tmp_sxx_x = torch::zeros_like(vp);
-    auto tmp_syy_y = torch::zeros_like(vp);
-    auto tmp_szz_z = torch::zeros_like(vp);
-    auto tmp_txx_y = torch::zeros_like(vp);
-    auto tmp_txx_z = torch::zeros_like(vp);
-    auto tmp_tyy_x = torch::zeros_like(vp);
-    auto tmp_tyy_z = torch::zeros_like(vp);
-    auto tmp_tzz_x = torch::zeros_like(vp);
-    auto tmp_tzz_y = torch::zeros_like(vp);
-    torch::Tensor u_allt;
+    // Mandatory: cuda_layout.forward_workspace_nvar = 9, so
+    // _transient_forward_workspace always hands over nine grids.
+    SWEEP_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+                "das3d/forward requires the propagator-bound forward_workspace "
+                "(cuda_layout.forward_workspace_nvar = ",
+                static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());
+    const auto& ws = p.forward_workspace;
+    auto tmp_sxx_x = pool_required(ws, TMP_SXX_X, vp, "forward_workspace");
+    auto tmp_syy_y = pool_required(ws, TMP_SYY_Y, vp, "forward_workspace");
+    auto tmp_szz_z = pool_required(ws, TMP_SZZ_Z, vp, "forward_workspace");
+    auto tmp_txx_y = pool_required(ws, TMP_TXX_Y, vp, "forward_workspace");
+    auto tmp_txx_z = pool_required(ws, TMP_TXX_Z, vp, "forward_workspace");
+    auto tmp_tyy_x = pool_required(ws, TMP_TYY_X, vp, "forward_workspace");
+    auto tmp_tyy_z = pool_required(ws, TMP_TYY_Z, vp, "forward_workspace");
+    auto tmp_tzz_x = pool_required(ws, TMP_TZZ_X, vp, "forward_workspace");
+    auto tmp_tzz_y = pool_required(ws, TMP_TZZ_Y, vp, "forward_workspace");
+    Buf u_allt;
     if (p.save_all_wavefields) {
-        u_allt = torch::zeros({p.nt, 3, B, nz, ny, nx}, vp.options());
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(3), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 3, B, nz, ny, nx}, "u_allt_out");
     }
 
     SolverContext solver{
@@ -85,15 +108,15 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        tmp_sxx_x.zero_();
-        tmp_syy_y.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_y.zero_();
-        tmp_txx_z.zero_();
-        tmp_tyy_x.zero_();
-        tmp_tyy_z.zero_();
-        tmp_tzz_x.zero_();
-        tmp_tzz_y.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_syy_y);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_y);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tyy_x);
+        zero_tensor_device_async(tmp_tyy_z);
+        zero_tensor_device_async(tmp_tzz_x);
+        zero_tensor_device_async(tmp_tzz_y);
 
         LAUNCH_DAS3D_FIRST(
             order,
@@ -137,7 +160,7 @@ ForwardOutput forward(const ForwardInput& in)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = das3d_field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = das3d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source_3d<<<source_config.grid, source_config.block>>>(
                 field,
@@ -151,17 +174,17 @@ ForwardOutput forward(const ForwardInput& in)
 
         if (u_allt.defined()) {
             auto history_t = u_allt.select(0, it);
-            history_t.select(0, 0).copy_(wavefield.exx_t.view({B, nz, ny, nx}));
-            history_t.select(0, 1).copy_(wavefield.eyy_t.view({B, nz, ny, nx}));
-            history_t.select(0, 2).copy_(wavefield.ezz_t.view({B, nz, ny, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 0), wavefield.exx_t.view({B, nz, ny, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 1), wavefield.eyy_t.view({B, nz, ny, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 2), wavefield.ezz_t.view({B, nz, ny, nx}));
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = das3d_field_ptr(wf, receiver_fields[irec].item<int>());
+            float* field = das3d_field_ptr(wf, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel_3d<<<record_config.grid, record_config.block>>>(
                 field,
-                record[irec].data_ptr<float>(),
+                record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(),
                 it,
                 nrec,
@@ -171,9 +194,11 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     out.wavefield = u_allt;
-    out.last_two = torch::empty({0}, vp.options());
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
 }
+
+
 
 }

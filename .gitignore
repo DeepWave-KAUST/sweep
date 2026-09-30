@@ -8,6 +8,8 @@ dist
 /build/
 /build.*
 src/sweep/*.so
+# Prebuilt CUDA core staged by `python -m sweep.build --core` for the wheel.
+src/sweep/lib/
 tests
 *.egg-info
 *.csv

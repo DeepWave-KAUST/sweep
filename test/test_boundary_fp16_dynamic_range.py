@@ -70,11 +70,7 @@ def test_quantize_fp16_roundtrip_survives_subnormal_range():
 # on every storage path.  Unit-amplitude stress source = the failing regime.
 # ---------------------------------------------------------------------------
 
-def _ricker(nt, dt, freq=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    x = np.pi * freq * t
-    return (1.0 - 2.0 * x * x) * np.exp(-(x * x))
-
+from conftest import ricker
 
 def _ramp(shape, top, bottom):
     nz = shape[0]
@@ -116,7 +112,7 @@ def _elastic_grads(ndim, storage, dtype, tmp_path):
                      backend="torch", impl="c", cuda_options=opts,
                      shape=shape, abcn=ABCN, dh=DH, dt=DT,
                      source_type=st, receiver_type=rt)
-    wav = torch.tensor(_ricker(NT, DT), device=dev)   # unit amplitude
+    wav = torch.tensor(ricker(NT, DT), device=dev)   # unit amplitude
     m = [torch.tensor(vp, device=dev, requires_grad=True),
          torch.tensor(vs, device=dev, requires_grad=True),
          torch.tensor(rho, device=dev)]
@@ -158,7 +154,7 @@ def test_eager_fp16_ring_survives_tiny_amplitudes():
     src = np.array([[nx // 2, nz // 4]], np.int64)
     rx = np.arange(2, nx - 2, 6, dtype=np.int64)
     rec = np.stack([rx, np.full(rx.size, 2, np.int64)], -1)[None]
-    wav = torch.tensor(_ricker(NT, DT) * 1e-6, device=dev)   # everything < 2^-24
+    wav = torch.tensor(ricker(NT, DT) * 1e-6, device=dev)   # everything < 2^-24
 
     def grad(mem):
         eq = Acoustic(spatial_order=SO, device=dev, backend="torch")

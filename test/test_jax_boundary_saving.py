@@ -39,11 +39,7 @@ DT, DH, NT, SO, ABCN = 0.0015, 10.0, 64, 4, 20
 BOUNDARY = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage="gpu"))
 
 
-def _ricker(nt, dt, freq=10.0, delay=0.06, amp=1.0):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    x = np.pi * freq * t
-    return (amp * (1.0 - 2.0 * x * x) * np.exp(-(x * x))).astype(np.float32)
-
+from conftest import ricker
 
 def _ramp(shape, top, bot):
     nz = shape[0]
@@ -120,7 +116,7 @@ def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT):
         abcn=ABCN, pml_type=eq.default_pml_type, nt=nt, B=1,
     )
     if mode is not None:
-        prop.use_ckpt = False
+        prop.memory_strategy = "boundary"
         prop.enable_boundary_saving(True, mode=mode)
     return prop
 
@@ -128,7 +124,7 @@ def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT):
 def _setup(cfg, nt=NT):
     shape = _shape(cfg["ndim"])
     true_m, init_m = _models(cfg["kind"], shape)
-    wavelet = _ricker(nt, DT, amp=cfg["amp"])[None, :]
+    wavelet = ricker(nt, DT, scale=cfg["amp"])[None, :]
     src, rec = _geometry(cfg["ndim"])
     full = _build(cfg, nt=nt)
     obs = full(wavelet, src, rec, models=[jnp.asarray(a) for a in true_m])
@@ -199,7 +195,7 @@ def test_multi_shot_batch():
     cfg = CASES["acoustic2d"]
     nz, nx = _shape(2)
     true_m, init_m = _models("acoustic", (nz, nx))
-    wavelet = np.repeat(_ricker(NT, DT)[None, :], 2, axis=0)
+    wavelet = np.repeat(ricker(NT, DT)[None, :], 2, axis=0)
     src = np.array([[nx // 3, nz // 4], [2 * nx // 3, nz // 4]], dtype=np.int32)
     rx = np.arange(2, nx - 2, 6, dtype=np.int32)
     r1 = np.stack([rx, np.full(rx.size, SO // 2, np.int32)], -1)
@@ -243,7 +239,7 @@ def test_source_encoding_mode():
     true_m, init_m = _models("acoustic", (nz, nx))
     nsrc = 3
     scales = np.array([1.0, -0.7, 0.45], np.float32)
-    wavelet = scales[:, None] * _ricker(NT, DT)[None, :]
+    wavelet = scales[:, None] * ricker(NT, DT)[None, :]
     src = np.array([[[nx // 4, 3], [nx // 2, 3], [3 * nx // 4, 3]]], dtype=np.int32)
     rx = np.arange(2, nx - 2, 6, dtype=np.int32)
     rec = np.stack([rx, np.full(rx.size, SO // 2, np.int32)], -1)[None]
@@ -299,7 +295,7 @@ def test_memory_analysis_shows_reduction():
     prop_kw = dict(dh=DH, dt=DT, source_type=["h1"], receiver_type=["h1"],
                    abcn=ABCN, nt=nt, B=1)
     vp = _ramp((nz, nx), 1800.0, 2400.0)
-    wavelet = _ricker(nt, DT)[None, :]
+    wavelet = ricker(nt, DT)[None, :]
     src = np.array([[[nx // 2, nz // 4]]], dtype=np.int32)
     rx = np.arange(2, nx - 2, 6, dtype=np.int32)
     rec = np.stack([rx, np.full(rx.size, SO // 2, np.int32)], -1)[None]
@@ -348,11 +344,14 @@ def test_cpu_ring_storage_rejected():
 
 
 def test_mutually_exclusive_with_ckpt():
-    prop = _build(CASES["acoustic2d"], memory=BOUNDARY)
-    prop.use_ckpt = True
-    init_m, wavelet, src, rec, _ = _setup(CASES["acoustic2d"])
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        prop(wavelet, src, rec, models=[jnp.asarray(init_m[0])])
+    """The conflict is rejected where it is stated, not carried to call time.
+
+    This used to build with boundary saving and then flip ``use_ckpt`` on, so
+    the propagator held two answers to one question until the forward noticed.
+    The strategy is now a single value, so the contradiction can only be
+    written at construction -- and that is where it is refused."""
+    with pytest.raises(ValueError, match="Conflicting gradient-memory"):
+        _build(CASES["acoustic2d"], memory=BOUNDARY, use_ckpt=True)
 
 
 def test_return_wavefield_rejected():

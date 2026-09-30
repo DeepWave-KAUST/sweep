@@ -183,18 +183,13 @@ def test_elastic_tti_short_forward_and_gradient_are_finite(equation_cls, free_su
 # Body-force source: rho gradient (CUDA) must match the eager reference
 # ---------------------------------------------------------------------------
 
-def _cuda_tti_binding_ready():
-    if not torch.cuda.is_available():
-        return False
-    try:
-        import sweep._C as _C
-        return hasattr(_C, "elastic_tti_sg2d_backward")
-    except Exception:
-        return False
+# Not `try: import sweep._C; hasattr(...) except Exception` -- that spelling
+# turns a COMPILE FAILURE into a skip, because sweep._C is a lazy shim whose
+# attribute access triggers the JIT.
+from conftest import requires_binding
 
 
-@pytest.mark.skipif(not _cuda_tti_binding_ready(),
-                    reason="CUDA + compiled sweep._C required")
+@requires_binding("elastic_tti_sg2d_backward")
 @pytest.mark.parametrize("source_type,tag", [(["vz"], "body force"),
                                              (["sxx", "szz"], "explosion")])
 def test_tti_sg_rho_gradient_matches_eager_for_body_force(source_type, tag):

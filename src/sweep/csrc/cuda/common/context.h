@@ -139,7 +139,8 @@ struct SolverContext {
     // ``pad_lo``/``pad_hi`` vectors (in C axis order [z,(y,)x]).  Empty vectors
     // leave the -1 sentinels => legacy layout.  Call right after the positional
     // brace-init of a SolverContext at every driver.
-    inline void set_per_edge(int fs, const std::vector<int>& plo, const std::vector<int>& phi) {
+    template <class Ints>   // std::vector<int> (the torch input) or IntSpan (the core twin)
+    inline void set_per_edge(int fs, const Ints& plo, const Ints& phi) {
         fs_faces_ = fs;
         for (int a = 0; a < 3; ++a) {
             pad_lo_[a] = (a < (int)plo.size()) ? plo[a] : -1;
@@ -222,6 +223,74 @@ struct SolverContext {
         g.nx = nx; g.ny = ny; g.nz = nz; g.B = B; g.M = M; g.x_end = x_end();
         for (int a = 0; a < 3; ++a) { g.phys_lo[a] = phys_lo_[a]; g.phys_hi[a] = phys_hi_[a]; }
         return g;
+    }
+
+    // ---- halo-parameterised bounds -------------------------------------
+    // The no-arg accessors above stay exactly as dev wrote them: bare cache
+    // loads, no comparison, so the launch-invariant fast path they were added
+    // for is untouched.
+    //
+    // These overloads exist because kernels use several band widths for the
+    // same bound: ``M`` for the stencil reach, ``M + 1`` where a saved boundary
+    // strip is excluded too, per-kernel locals elsewhere. They are COMPUTED,
+    // not cached -- refresh() only ever caches the ``M`` case -- and they short
+    // out to the cache when the width IS ``M``, which is a compile-time
+    // constant at nearly every call site.
+    //
+    // This also sidesteps the header's own warning about adding members that
+    // phys_*() depends on: nothing new is cached, so nothing new has to be kept
+    // in sync by refresh(). refresh() computes ``cl ? M : padLo(a) + M``, which
+    // is this expression at ``halo == M``.
+    __host__ __device__
+    inline int phys_x0(int halo) const { return halo == M ? phys_lo_[2] : (cut_x_lo() ? halo : padLo(2) + halo); }
+
+    __host__ __device__
+    inline int phys_x1(int halo) const { return halo == M ? phys_hi_[2] : nx - (cut_x_hi() ? halo : padHi(2) + halo); }
+
+    __host__ __device__
+    inline int phys_y0(int halo) const { return halo == M ? phys_lo_[1] : (cut_y_lo() ? halo : padLo(1) + halo); }
+
+    __host__ __device__
+    inline int phys_y1(int halo) const { return halo == M ? phys_hi_[1] : ny - (cut_y_hi() ? halo : padHi(1) + halo); }
+
+    __host__ __device__
+    inline int phys_z0(int halo) const { return halo == M ? phys_lo_[0] : (cut_z_lo() ? halo : padLo(0) + halo); }
+
+    __host__ __device__
+    inline int phys_z1(int halo) const { return halo == M ? phys_hi_[0] : nz - (cut_z_hi() ? halo : padHi(0) + halo); }
+
+    // ---- Shared "is this cell inside the absorbing band?" predicate -------
+    // Every CPML kernel needs it, and until this existed each one open-coded
+    // the same comparison against ``abcn + halo``.  Two consequences: the
+    // copies drift, and -- the expensive one -- a copy not written in terms of
+    // ``phys_*`` is NOT cut-aware, so an equation becomes usable under domain
+    // decomposition only after every one of its kernels is hand-edited.
+    // Routed through here, a new equation is cut-aware for free.
+    //
+    // Per-axis, because the separable CPML update needs each axis's answer on
+    // its own (acoustic2d/3d), not only their disjunction.
+    __host__ __device__
+    inline bool in_pml_x(int ix, int halo) const {
+        return ix < phys_x0(halo) || ix >= phys_x1(halo);
+    }
+    __host__ __device__
+    inline bool in_pml_y(int iy, int halo) const {
+        return iy < phys_y0(halo) || iy >= phys_y1(halo);
+    }
+    __host__ __device__
+    inline bool in_pml_z(int iz, int halo) const {
+        return iz < phys_z0(halo) || iz >= phys_z1(halo);
+    }
+    // Named per dimension rather than overloaded: ``in_pml(ix, iz, halo)`` and
+    // ``in_pml(ix, iy, iz)`` are both three ints, and the compiler would pick
+    // one of them in silence.
+    __host__ __device__
+    inline bool in_pml_2d(int ix, int iz, int halo) const {
+        return in_pml_x(ix, halo) || in_pml_z(iz, halo);
+    }
+    __host__ __device__
+    inline bool in_pml_3d(int ix, int iy, int iz, int halo) const {
+        return in_pml_x(ix, halo) || in_pml_y(iy, halo) || in_pml_z(iz, halo);
     }
 
     __host__ __device__ inline int nx_phys() const { return phys_hi_[2] - phys_lo_[2]; }

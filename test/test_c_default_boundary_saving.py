@@ -11,7 +11,6 @@ verify that:
 2. Explicitly opting in to checkpointing via ``cuda_options`` still
    works (the default is opt-out).
 3. 2-D RTM does not raise even when the default would have boundary
-   saving on (the rtm path silently forces full-wavefield mode).
 """
 
 import numpy as np
@@ -69,40 +68,17 @@ def test_c_explicit_ckpt_opt_in():
 
 
 @cuda_only
-def test_c_rtm_2d_no_longer_raises():
-    """RTM 2-D used to require explicit ``use_ckpt=False``; now it just runs."""
+def test_c_rtm_entry_is_removed():
+    """solver.rtm() is gone entirely -- no method, no tombstone.
 
-    solver = _build_solver()  # default → boundary saving on
-    if solver._backend_impl.rtm_func is None:
-        pytest.skip("Acoustic RTM not available in this binding.")
+    The entry was full-wavefield-only in 2-D, had no bit-exact gate, its last
+    real caller (sweep-tasks RTM) migrated to the forward+backward recipe
+    (inner-product loss + compute_illumination, see notebook 08), and the docs
+    described a notebook as using it when the notebook deliberately did not.
+    Pinned so it cannot quietly return without a design discussion.
+    """
+    solver = _build_solver()
+    assert not hasattr(solver, "rtm")
+    assert not hasattr(solver._backend_impl, "rtm")
 
-    nz, nx = _SHAPE
-    nt = _NT
-    t = np.arange(nt, dtype=np.float32) * _DT - 0.05
-    x = np.pi * 10.0 * t
-    wavelet = ((1.0 - 2.0 * x * x) * np.exp(-(x * x))).astype(np.float32)
 
-    sources = np.array([[nx // 2, 4]], dtype=np.int64)
-    rx = np.arange(8, nx - 8, 2, dtype=np.int64)
-    receivers = np.stack(
-        [rx, np.full(len(rx), 6, dtype=np.int64)],
-        axis=-1,
-    )[None, ...]
-    adjoint_source = np.zeros(
-        (1, nt, receivers.shape[1], 1), dtype=np.float32
-    )
-
-    dev = torch.device("cuda")
-    vp = torch.full((nz, nx), 1800.0, dtype=torch.float32, device=dev)
-
-    # Should not raise — the 2-D RTM path silently forces full mode.
-    syn, image, src_illum, _ = solver.rtm(
-        wavelet, sources, receivers, adjoint_source=adjoint_source, models=[vp]
-    )
-    assert syn.shape[0] == 1
-    # Image is returned in the full padded layout (B, 1, nz_full, nx_full).
-    assert image.ndim == 4
-    assert image.shape[0] == 1
-    # Solver did NOT mutate its persistent flag — boundary saving stays on.
-    assert solver._backend_impl.use_ckpt is False
-    assert solver._backend_impl.boundary_saving_config["enabled"] is True

@@ -1,24 +1,25 @@
 #pragma once
-#include <torch/extension.h>
-#include "../../common/wavetypes.h"
+#include "../../../core/input_core.h"
+#include "../../../core/outputs.h"
+#include "../../../core/runner.h"
 
 namespace elastic3d {
 
-ForwardOutput forward(const ForwardInput& in);
+ForwardOutputCore forward_core(const ForwardInputCore& in);
 
-BackwardOutput backward_bs(const BackwardInput& in);
+ForwardRunnerCorePtr forward_runner_core(const ForwardInputCore& in);
+BackwardRunnerCorePtr backward_bs_runner_core(const BackwardInputCore& in);
 
-BackwardOutput backward_ckpt(const BackwardInput& in);
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
 
-BackwardOutput backward(const BackwardInput& in);
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
+
+BackwardOutputCore backward_core(const BackwardInputCore& in);
 
 // APM (Cao & Chen 2018, 3-D) — irregular topography with
-// parameter-modified moduli.  Forward only in this commit;
-// apm_backward / apm_backward_bs are stubs until Phase 3D.
-ForwardOutput  apm_forward(const ForwardInput& in);
-BackwardOutput apm_backward(const BackwardInput& in);
-BackwardOutput apm_backward_bs(const BackwardInput& in);
+// parameter-modified moduli.  Forward only: no compiled APM backward.
+ForwardOutputCore apm_forward_core(const ForwardInputCore& in);
 
 }

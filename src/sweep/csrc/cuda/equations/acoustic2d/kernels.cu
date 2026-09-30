@@ -5,7 +5,8 @@ __global__ void calculate_grad(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz, float dt
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -13,6 +14,11 @@ __global__ void calculate_grad(
     int b  = blockIdx.z;
 
     if (ix >= nx || iz >= nz)
+        return;
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < x0 || ix >= x1 || iz < z0 || iz >= z1)
         return;
 
     long long spatial_size = (long long)nx * nz;
@@ -37,7 +43,8 @@ __global__ void calculate_grad_utt(
     const float* __restrict__ u_backward, // (nt, B, nz, nx)
     const float* __restrict__ vp,        // (B, nz, nx)
     float* __restrict__ grad,             // (B, nz, nx)
-    int nx, int nz, float dt
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -45,6 +52,11 @@ __global__ void calculate_grad_utt(
     int b  = blockIdx.z;
 
     if (ix >= nx || iz >= nz)
+        return;
+    // Physical box only: the model gradient outside [padLo+M, N-padHi-M)
+    // per axis is cropped by EdgePadding.backward (never observable), so
+    // imaging those cells is pure memory traffic.
+    if (ix < x0 || ix >= x1 || iz < z0 || iz >= z1)
         return;
 
     long long spatial_size = (long long)nx * nz;
@@ -68,13 +80,64 @@ __global__ void calculate_grad_utt(
 
 }
 
-__global__ void accumulate_rtm_image_2d(
-    const float* __restrict__ u_forward,
+__global__ void calculate_grad_utt_band(
+    const float* __restrict__ u_forward_next,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward_now,  // (nt, B, nz, nx)
+    const float* __restrict__ u_forward_prev,  // (nt, B, nz, nx)
+    const float* __restrict__ u_backward, // (nt, B, nz, nx)
+    const float* __restrict__ vp,        // (B, nz, nx)
+    float* __restrict__ grad,             // (B, nz, nx)
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1,
+    int wxl, int wxh, int wzl, int wzh
+) {
+    // Strip cell enumeration: top rows, bottom rows (full box width), then
+    // left / right columns over the inner z range (corners counted once).
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b  = blockIdx.y;
+    const int bw = x1 - x0;
+    const int zi0 = z0 + wzl, zi1 = z1 - wzh;
+    const int bh = zi1 - zi0;
+    const int n_top = wzl * bw, n_bot = wzh * bw;
+    const int n_left = wxl * bh, n_right = wxh * bh;
+    int ix, iz;
+    if (t < n_top) { iz = z0 + t / bw; ix = x0 + t % bw; }
+    else if ((t -= n_top) < n_bot) { iz = zi1 + t / bw; ix = x0 + t % bw; }
+    // Side strips: x offset innermost so a warp's threads share memory sectors.
+    else if ((t -= n_bot) < n_left) { ix = x0 + t % wxl; iz = zi0 + t / wxl; }
+    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t % wxh; iz = zi0 + t / wxh; }
+    else return;
+
+    long long spatial_size = (long long)nx * nz;
+    int idx = iz * nx + ix;
+
+    const float* u_next_b  = u_forward_next  + b * spatial_size;
+    const float* u_now_b = u_forward_now + b * spatial_size;
+    const float* u_prev_b = u_forward_prev + b * spatial_size;
+    const float* u_backward_b = u_backward + b * spatial_size;
+    float*       grad_b       = grad       + b * spatial_size;
+    const float* vp_b         = vp         + b * spatial_size;
+
+    // After the forward.swap() in backward_bs the buffer roles are rotated so
+    // that this expression evaluates to the centered second time derivative
+    // (u(t-1) - 2 u(t) + u(t+1)) / dt^2 at the physical middle time.
+    float u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
+
+    // u_tt = vp^2 * Lap(u) in the interior, same form as calculate_grad:
+    //   dL/dvp += (2 dt^2 / vp) * u_tt * u_adj
+    grad_b[idx] += 2.f * dt * dt * u_tt * u_backward_b[idx] / vp_b[idx];
+
+}
+
+__global__ void accumulate_illumination_2d(
+    const float* __restrict__ u_forward_next,
+    const float* __restrict__ u_forward_now,     // null => u_forward_next IS u_tt
+    const float* __restrict__ u_forward_prev,
     const float* __restrict__ u_backward,
-    float* __restrict__ image,
     float* __restrict__ source_illumination,
     float* __restrict__ receiver_illumination,
-    int nx, int nz
+    int nx, int nz, float dt,
+    int x0, int x1, int z0, int z1
 ) {
 
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -83,22 +146,39 @@ __global__ void accumulate_rtm_image_2d(
 
     if (ix >= nx || iz >= nz)
         return;
+    // The same physical box the gradient kernels image: EdgePadding.backward
+    // crops the rest, and both paths must cover the same cells or the two
+    // illuminations would still not be comparable.
+    if (ix < x0 || ix >= x1 || iz < z0 || iz >= z1)
+        return;
 
     long long spatial_size = (long long)nx * nz;
     int idx = iz * nx + ix;
 
-    const float* u_forward_b = u_forward + b * spatial_size;
-    const float* u_backward_b = u_backward + b * spatial_size;
-    float* image_b = image + b * spatial_size;
     float* src_b = source_illumination + b * spatial_size;
-    float* rec_b = receiver_illumination + b * spatial_size;
 
-    float uf = u_forward_b[idx];
-    float ub = u_backward_b[idx];
+    // Same expression and operand order as calculate_grad_utt_band.
+    if (receiver_illumination != nullptr) {
+        const float* u_backward_b2 = u_backward + b * spatial_size;
+        float ub2 = u_backward_b2[idx];
+        (receiver_illumination + b * spatial_size)[idx] += ub2 * ub2;
+    }
+    // Receiver-only is a real call: the it == 0 tail of the boundary-saving
+    // reverse loop has the adjoint field but no reconstructed forward, and the
+    // store-based paths DO accumulate lambda(0)^2 there.
+    if (source_illumination == nullptr)
+        return;
 
-    image_b[idx] += uf * ub;
-    src_b[idx] += uf * uf;
-    rec_b[idx] += ub * ub;
+    const float* u_next_b = u_forward_next + b * spatial_size;
+    float u_tt;
+    if (u_forward_now == nullptr) {
+        u_tt = u_next_b[idx];                    // the store already holds u_tt
+    } else {
+        const float* u_now_b  = u_forward_now  + b * spatial_size;
+        const float* u_prev_b = u_forward_prev + b * spatial_size;
+        u_tt = (u_now_b[idx] - 2*u_prev_b[idx] + u_next_b[idx]) / (dt*dt);
+    }
+    src_b[idx] += u_tt * u_tt;
 }
 
 // Space-lag (horizontal subsurface-offset) extended imaging condition, per step:

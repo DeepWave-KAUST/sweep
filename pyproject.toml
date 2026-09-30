@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sweep-solver"
-version = "0.2.0"
+version = "0.3.0"
 description = "Seismic Wave Equation Exploration Platform — equations, propagators, operators."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,12 +26,22 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# JIT distribution: one py3-none wheel ships the C++/CUDA *sources* and compiles
-# sweep._C against the user's OWN torch on first use (see sweep/_jit.py), so a
-# single wheel works with any torch version + any Python 3. torch is unpinned.
-# The first-use compile needs nvcc from a CUDA toolkit (system / `module load
-# cuda` / `conda install -c nvidia cuda-nvcc`) — the pip `nvidia-cuda-nvcc-cu12`
-# wheel ships only ptxas, not the nvcc frontend, so it can't be relied on.
+# ONE wheel ships the C++/CUDA *sources* plus two prebuilt, torch-free CUDA
+# cores, one per CUDA major (sweep/lib/cu12/ and sweep/lib/cu13/, each a
+# libsweep_core.so + core.json); the loader picks the one torch's CUDA major
+# names. cu12: V100 through H100/H200 as SASS, Blackwell via PTX. cu13: T4/RTX 20
+# and newer with Blackwell native (nvcc 13 cannot emit sm_70, so no V100); it
+# needs driver >= 580, exactly what torch cu130 needs.
+# sweep._C is a pure-Python ctypes layer over that core's C API (sweep/backend/c/):
+# nothing compiles after pip install -- no nvcc, no C++ compiler, no CUDA
+# headers -- and no torch C++ ABI is involved, so the wheel works with any torch
+# version + any Python >= 3.9. torch is unpinned.
+# nvcc of torch's CUDA major (system / `module load cuda` / `conda install -c
+# nvidia cuda-toolkit`; >= 12.4 for CUDA 12, >= 12.8 for Blackwell targets) is
+# needed only when no shipped core fits (a torch built for a CUDA major with no
+# core, a card outside the shipped archs and older than the shipped PTX, sdist/clone
+# install): then the core is built locally. The pip `nvidia-cuda-nvcc-cu12`
+# wheel ships only ptxas, not the nvcc frontend.
 dependencies = [
     "numpy>=1.20",
     "scipy>=1.7",
@@ -41,6 +51,14 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda  = ["torch"]
+# The shipped cores link cuFFT dynamically; torch's pip CUDA builds pull the
+# matching wheel in. These extras are for a torch that did not (conda torch, a
+# CPU wheel plus a system driver), one per core. cuFFT for CUDA 12 is the
+# "-cu12"-suffixed wheel (11.x, nvidia/cufft/lib); cuFFT for CUDA 13 is the
+# UNSUFFIXED "nvidia-cufft" 12.x (soname libcufft.so.12), which lands in
+# nvidia/cu13/lib -- the core's rpath reaches both.
+cuda12 = ["nvidia-cufft-cu12"]
+cuda13 = ["nvidia-cufft>=12,<13"]
 torch = ["torch"]
 jax   = ["jax", "jaxlib"]
 all   = ["torch", "jax", "jaxlib"]
@@ -63,12 +81,20 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["sweep*", "geophyai*"]
-exclude = ["sweep.csrc*"]
+exclude = ["sweep.csrc*", "sweep.lib*"]
 
-# Ship the C++/CUDA sources inside the wheel — sweep._C is JIT-compiled from them
-# on first use (csrc is data, not an importable package, hence excluded above).
+# Ship the C++/CUDA sources inside the wheel: sweep._C is a ctypes shim over the
+# prebuilt core below, so nothing compiles; csrc is for the local core build when
+# no shipped core fits, and the SWEEP_JIT_FULL=1 developer path (csrc is data,
+# not an importable package, hence excluded above).
 [tool.setuptools.package-data]
 sweep = [
     "csrc/**/*.cu", "csrc/**/*.cuh", "csrc/**/*.cpp",
     "csrc/**/*.h", "csrc/**/*.hpp", "csrc/**/CMakeLists.txt",
+    # Prebuilt core (python -m sweep.build --core) + its core.json sidecar.
+    # Wheel-only: MANIFEST.in prunes it from the sdist and git ignores it.
+    "lib/**/*.so", "lib/**/*.json",
+    # PEP 561: without py.typed a checker ignores the package entirely, so the
+    # .pyi files shipped nothing and were never consulted by anyone.
+    "py.typed", "**/*.pyi",
 ]

@@ -15,20 +15,21 @@ are:
   (`"torch"` for PyTorch eager / `torch.compile`; `"jax"` for JAX on
   `PropJax`).
 - `impl` — the **implementation path** under that framework (`"eager"` =
-  pure-Python operators with PyTorch autograd; `"c"` = compiled C++ / CUDA
-  kernels through the `sweep._C` extension).
+  pure-Python operators with PyTorch autograd; `"c"` = the prebuilt CUDA core
+  (`libsweep_core.so`) driven through the pure-Python `sweep._C` ctypes layer).
 
 The two axes are orthogonal:
 
 | Backend | Impl | Device | What runs |
 | --- | --- | --- | --- |
 | `torch` | `eager` | CPU or CUDA | Pure-Python operators + PyTorch autograd |
-| `torch` | `c` | CPU or CUDA | Compiled C++ / CUDA kernels via `sweep._C` |
+| `torch` | `c` | CUDA | Prebuilt CUDA core via the `sweep._C` ctypes layer |
 | `jax` | — | CPU or CUDA | JAX implementation via `PropJax` |
 
 `"cuda"` is **not** a backend or `impl` value — it is a device choice driven by
-the tensors you pass in. The compiled extension runs C++ CPU kernels on CPU
-tensors and CUDA kernels on CUDA tensors.
+the tensors you pass in. The compiled path runs on CUDA tensors only; a host
+model tensor is refused with a clear error, and a CPU propagator resolves to
+`impl="eager"`.
 
 A minimal invocation for each path:
 
@@ -89,6 +90,19 @@ Each free face replaces its PML pad with the image-method boundary
 condition; the remaining faces stay absorbing. ``abcn`` accepts the same
 per-edge forms (a scalar, or a canonical tuple of per-face PML widths).
 
+``boundary_buffer=`` (default ``None``) puts that many sigma=0 cells between
+the physical box and the PML ramp on every absorbing face.  Boundary saving
+stores a shell ``M + 1`` cells wide, which is all the reverse time step needs;
+an equation whose gradient stencil reaches further -- ``AcousticVRZ`` and
+``AcousticVRZ3D`` take a divergence of a gradient, reach ``2M`` -- would image
+cells the shell never restored.  Such an equation declares
+``BOUNDARY_BUFFER_REACH`` and ``None`` gives it ``REACH * M + 1`` buffer cells
+under every memory strategy and backend, so full, checkpointing and boundary
+saving solve the same grid; the buffer is cropped with the pad, so shapes and
+coordinates do not change.  Equations with pointwise imaging get no buffer.
+An explicit value is honoured, but boundary saving refuses one below the
+equation's need.
+
 Support matrix:
 
 - **2-D ``Acoustic`` / ``Elastic``** — full per-edge support on the eager
@@ -120,10 +134,15 @@ quick reference:
 | Option block | Used with | Configures |
 | --- | --- | --- |
 | `EagerOptions` | `impl="eager"` | `torch.compile` flags, debug knobs |
-| `CUDAOptions` | `impl="c"` | Container for `MemoryOptions` |
-| `MemoryOptions` | inside `CUDAOptions.memory` | Picks **one** C memory-saving strategy |
-| `BoundaryOptions` | inside `MemoryOptions.boundary` | Boundary saving with GPU / CPU / disk storage |
-| `CkptOptions` | inside `MemoryOptions.ckpt` | Chunk- or recursive-mode checkpointing |
+| `CUDAOptions` | `impl="c"` | Container; its `memory=` takes one strategy |
+| `Full` | as `memory=` | Keep the whole forward wavefield. No parameters |
+| `BoundarySaving` | as `memory=` | Boundary saving with GPU / CPU / disk storage |
+| `Ckpt` | as `memory=` | Chunk- or recursive-mode checkpointing |
+
+`MemoryOptions(strategy=..., boundary=..., ckpt=...)` is the older way to say
+the same three things and is deprecated; `BoundarySaving` and `Ckpt` subclass
+the `BoundaryOptions` / `CkptOptions` it wrapped, so every field, default and
+validation rule is the one you already knew.
 
 Pass each block through the matching kwarg:
 
@@ -143,7 +162,7 @@ import torch
 from sweep.equations import Acoustic
 from sweep.propagator.torch import PropTorch
 from sweep.propagator.options import (
-    CUDAOptions, MemoryOptions, BoundaryOptions,
+    CUDAOptions, Full, BoundarySaving, Ckpt,
 )
 
 dev = torch.device("cuda")
@@ -155,17 +174,14 @@ solver = PropTorch(
     shape=shape, dh=dh, dt=dt, dev=dev,
     impl="c",
     cuda_options=CUDAOptions(
-        memory=MemoryOptions(
-            strategy="boundary",
-            boundary=BoundaryOptions(storage="cpu", pinned_memory=True),
-        )
+        memory=BoundarySaving(storage="cpu", pinned_memory=True),
     ),
 )
 ```
 
-Replace the `BoundaryOptions(...)` block with `CkptOptions(mode="chunk",
-chunks=100)` (wrapped in `MemoryOptions(strategy="ckpt", ckpt=...)`) to use
-chunk-mode checkpointing instead.
+Swap in `Ckpt(mode="chunk", chunks=100)` for chunk-mode checkpointing, or
+`Full()` to keep the whole forward wavefield. The strategy IS the object, so
+there is no separate `strategy=` string to keep in step with it.
 
 The validation rules are enforced in the dataclass `__post_init__` methods, so
 incompatible combinations (e.g. `disk_async_read=True` with `storage="cpu"`)
@@ -173,15 +189,24 @@ fail loudly at construction time rather than during a long FWI run.
 
 ## Memory-saving features
 
-The gradient-memory mode is a **three-way choice — `'full'`, `'boundary'`, or
-`'ckpt'` — identical for the eager and CUDA backends**, selected once via
-`memory=MemoryOptions(strategy=...)`.  Left unset, `impl="c"` defaults to
-`'boundary'` (GPU ring, fp32) and the eager backend to `'ckpt'`.  The modes
-are mutually exclusive: conflicting requests (e.g. the legacy `use_ckpt=True`
-together with an enabled `boundary_saving_config`) raise a `ValueError`
-instead of one path silently winning.  The legacy `use_ckpt` /
-`boundary_saving_config` knobs remain accepted and resolve into the same
-three-way choice.
+The gradient-memory mode is a **three-way choice, identical for the eager and
+CUDA backends**, and the choice is a type:
+
+```python
+memory=Full()                                     # keep the forward wavefield
+memory=BoundarySaving(storage="gpu")              # reconstruct from the boundary
+memory=Ckpt(mode="chunk", chunks=100)             # rematerialise from checkpoints
+```
+
+Left unset, `impl="c"` defaults to `BoundarySaving(storage="gpu")` (fp32 ring)
+and the eager backend to `Ckpt()`.  The modes are mutually exclusive, and
+conflicting requests raise a `ValueError` instead of one path silently winning.
+
+!!! warning "The older spellings still work, and now warn"
+    `memory=MemoryOptions(strategy=..., boundary=..., ckpt=...)` and the flat
+    `boundary_saving_config={...}` dict are read exactly as before and emit a
+    `DeprecationWarning`; the removal criterion is written next to the shim.
+    `use_ckpt=` is **not** deprecated — it stays a plain supported keyword.
 
 Three rules make that resolution predictable:
 
@@ -199,18 +224,18 @@ Three rules make that resolution predictable:
   intent twice and is accepted; `..., use_ckpt=True` contradicts it and
   raises.  Where both carry detail, `memory=` wins.
 
-Tail truncation has a dict spelling too — `boundary_saving_config={'enabled':
-True, 'tail_steps': K}` is equivalent to
-`BoundaryOptions(tail_steps=K)`.
+Tail truncation has a legacy dict spelling too — `boundary_saving_config=
+{'enabled': True, 'tail_steps': K}` is equivalent to
+`BoundarySaving(tail_steps=K)`.
 
 | Feature | Path | Configured by |
 | --- | --- | --- |
-| Full storage (no reconstruction) | both | `MemoryOptions(strategy="full")` |
-| Boundary saving (GPU ring; + pinned CPU / disk on `impl="c"`) | both | `MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage=..., storage_dtype=..., ...))` |
-| Asynchronous disk prefetch | `impl="c"` | `BoundaryOptions(storage="disk", disk_async_read=True, ...)` |
-| Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundaryOptions(tail_steps=...)` |
-| Chunked checkpointing | both | `MemoryOptions(strategy="ckpt", ckpt=CkptOptions(mode="chunk", chunks=...))` |
-| Recursive (fixed-budget) checkpointing | `impl="c"` | `CkptOptions(mode="recursive", count=...)` |
+| Full storage (no reconstruction) | both | `Full()` |
+| Boundary saving (GPU ring; + pinned CPU / disk on `impl="c"`) | both | `BoundarySaving(storage=..., storage_dtype=..., ...)` |
+| Asynchronous disk prefetch | `impl="c"` | `BoundarySaving(storage="disk", disk_async_read=True, ...)` |
+| Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundarySaving(tail_steps=...)` |
+| Chunked checkpointing | both | `Ckpt(mode="chunk", chunks=...)` |
+| Recursive (fixed-budget) checkpointing | `impl="c"` | `Ckpt(mode="recursive", count=...)` |
 | `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
 
 A runnable comparison of these options lives in the
@@ -218,7 +243,7 @@ A runnable comparison of these options lives in the
 exercises full-wavefield, boundary saving, and checkpointing on the same
 Marmousi shot and prints the per-mode peak GPU / host memory.
 
-### Boundary tail truncation (`BoundaryOptions.tail_steps`)
+### Boundary tail truncation (`BoundarySaving.tail_steps`)
 
 For **steady-state objectives** — frequency-selection / DFT-comb FWI, where the
 loss reads only the **last** `n_probe` samples of the record and the adjoint
@@ -227,10 +252,7 @@ to walk the whole record.  `tail_steps=K` makes the forward save only the last
 `K` steps' boundary strips and stops the backward after them:
 
 ```python
-memory=MemoryOptions(
-    strategy="boundary",
-    boundary=BoundaryOptions(storage="gpu", tail_steps=n_probe + margin),
-)
+memory=BoundarySaving(storage="gpu", tail_steps=n_probe + margin)
 ```
 
 - **The forward physics is unchanged** — the wavefield still runs the full
@@ -274,8 +296,14 @@ machine, not on the problem. All are read once per run; none changes results.
 | --- | --- |
 | `SWEEP_VRZ_GRAD_SPLIT=1` | `AcousticVRZ3D` backward: force the O(M) split gradient (materialise `c_d`/`e_d`, then one divergence) instead of the fused nested-stencil kernel that `order<=4` picks by default. The crossover is GPU-dependent — fused wins on RTX 6000 Ada, split is ~12 s/iter faster on V100 at production scale. |
 | `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
-| `SWEEP_BOUNDARY_DTYPE` | Default `storage_dtype` for the boundary ring; an explicit `BoundaryOptions(storage_dtype=...)` wins. |
+| `SWEEP_BOUNDARY_DTYPE` | Default `storage_dtype` for the boundary ring; an explicit `BoundarySaving(storage_dtype=...)` wins. |
 | `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
+| `SWEEP_JIT_FULL=1` | Developer path: compile the pybind shim against your torch instead of using the ctypes layer over the prebuilt core. |
+| `SWEEP_CORE=<path>/libsweep_core.so` | Use a custom CUDA core; its `core.json` sidecar gets the same fit check as the shipped one. |
+| `SWEEP_JIT_ALLOW_OLD_CUDA=1` | Try an nvcc 12.0–12.3 for a local core build. |
+| `TORCH_CUDA_ARCH_LIST` | Target arch(s) for a local core build with no visible device. |
+| `TORCH_EXTENSIONS_DIR` | Where a locally built core is cached. |
+| `CUDA_HOME` / `CUDA_PATH` | Toolkit for a local core build, version-checked against torch's CUDA major. |
 
 ## Consistency testing
 

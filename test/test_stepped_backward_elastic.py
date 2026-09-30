@@ -69,11 +69,7 @@ N_ADJ = {2: 15, 3: 36}
 N_RECON = {2: 7, 3: 12}
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return (scale * (1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def build(ndim, *, free_surface, bs=None, nt=NT2D):
     shape = (48, 56) if ndim == 2 else (24, 20, 24)
@@ -141,27 +137,7 @@ def build(ndim, *, free_surface, bs=None, nt=NT2D):
     return prop, wavelet, sources, receivers, models
 
 
-def capture_backward(prop):
-    cap = {}
-    impl = prop._backend_impl
-    for name in ("backward_func", "backward_bs_func", "backward_ckpt_func"):
-        orig = getattr(impl, name, None)
-        if orig is None:
-            continue
-
-        def make(orig, name):
-            def wrapper(params):
-                out = orig(params)
-                cap["params"] = params
-                cap["raw_out"] = out
-                cap["func"] = orig
-                cap["mode"] = name
-                return out
-            return wrapper
-
-        setattr(impl, name, make(orig, name))
-    return cap
-
+from conftest import capture_backward
 
 def run_public_once(prop, wavelet, sources, receivers, models):
     syn = prop(wavelet, sources, receivers, models=models)
@@ -194,10 +170,19 @@ class Harness:
             f"expected the full elastic adjoint layout ({N_ADJ[ndim]}), "
             f"got {len(self.L_adj)}"
         )
-        self.recon = (
-            [torch.zeros_like(self.p.models[0]) for _ in range(N_RECON[ndim])]
-            if mode == "bs" else None
-        )
+        # The captured params' own reconstruction list -- what
+        # _c.Wrapper.backward bound as forward_wavefields for the bs backward
+        # -- not a hand-built one: the replay then runs through the very grids
+        # the monolithic backward used, and a drift between the slot table's
+        # recon count and the driver's 7/12-tensor expectation surfaces here
+        # instead of hiding behind a literal that happened to match.  The
+        # full-storage backward binds none (it reads u_forward).
+        self.recon = list(self.p.forward_wavefields) if mode == "bs" else None
+        if self.recon is not None:
+            assert len(self.recon) == N_RECON[ndim], (
+                f"expected the {N_RECON[ndim]}-tensor reconstruction list the "
+                f"bs backward binds, got {len(self.recon)}"
+            )
         self.gbufs = [torch.zeros_like(m) for m in self.p.models]
         self.p.grads_out = self.gbufs
         self.p.illum_out = []
@@ -321,7 +306,9 @@ def test_stepped_backward_elastic_guards():
     run_public_once(prop, wavelet, sources, receivers, models)
     p, func = cap["params"], cap["func"]
     nt = int(p.nt)
-    recon = [torch.zeros_like(p.models[0]) for _ in range(7)]
+    recon = list(p.forward_wavefields)   # the bs backward's own 7-tensor list
+    assert len(recon) == N_RECON[2], (
+        f"expected {N_RECON[2]} reconstruction grids, got {len(recon)}")
     gbufs = [torch.zeros_like(m) for m in p.models]
 
     # segment range out of order / out of bounds
@@ -359,13 +346,22 @@ def test_stepped_backward_elastic_guards():
         func(p)
     p.step_phase = 0
 
-    # stepped + staged (cpu/disk) boundary storage is v1-unsupported
+    # Staged boundary storage: cpu is supported (the staggered skeleton takes
+    # the Python-owned BoundarySession, so the copy stream and its ring events
+    # outlive the per-step call); disk still is not.  This guard used to refuse
+    # both -- if it starts refusing cpu again, that capability has regressed.
+    # (This bare input binds no boundary buffers, so the call is refused
+    # further in, by the saver's mandatory-binding check; only the GUARD's
+    # own wording is the regression signal here.)
     p.boundary_on_cpu = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    try:
         func(p)
+    except RuntimeError as exc:
+        assert "gpu-direct or cpu boundary storage only" not in str(exc), (
+            f"cpu boundary staging is refused again: {exc}")
     p.boundary_on_cpu = False
     p.boundary_on_disk = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    with pytest.raises(RuntimeError, match="boundary_on_disk unsupported"):
         func(p)
     p.boundary_on_disk = False
 

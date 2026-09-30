@@ -7,7 +7,15 @@
 //   - Adjoint PML memory variables are NOT tracked → interior gradients are
 //     correct; gradients inside the PML band are approximate.  This matches
 //     standard FWI/RTM usage where the PML region is masked off.
-//   - backward_bs / backward_ckpt / backward_recursive_ckpt remain stubs.
+//   - backward_bs reconstructs the forward state from u_last_two with the
+//     NOPML kernels; its 4-tensor reconstruction list [vx, vz, sH, sV]
+//     (cuda_layout.bs_reconstruction_nvar) is bound from
+//     BackwardInputCore.forward_wavefields, or allocated here when unbound.
+//   - backward_ckpt is chunked replay: its CKPT_STATE_COUNT-slot replay
+//     state (the forward slot list: 4 physical + 4 CPML memory) is bound
+//     from BackwardInputCore.forward_wavefields set 0 (cuda_layout
+//     checkpoint_state_nvar), or allocated here when unbound.
+//     backward_recursive_ckpt is a stub.
 //
 // Gradient ordering follows AcousticVTI1st.MODEL_SPECS: [vp, ε, δ, ρ].
 //
@@ -15,37 +23,89 @@
 // `adjoint_step_kernel` and `calculate_grad_kernel`.
 // ---------------------------------------------------------------------------
 
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vti_1st_2d.h"
 #include "kernels.cuh"
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../launch/config.h"
-#include "../../common/wavetypes.h"
 
 namespace acoustic_vti_1st_2d {
 
 namespace {
 
+enum GradSlot : int { GRAD_VP = 0, GRAD_EPS, GRAD_DELTA, GRAD_RHO, N_GRADS };
+
+// p.grads_out as the propagator binds it: {grad_vp, grad_eps, grad_delta, grad_rho}, in
+// BackwardOutputCore.grads order, zeroed per backward on the Python side and
+// accumulated here.  Mandatory: propagator/_c.py Wrapper.backward always sets
+// `params.grads_out = _gradient_buffers(...)`, one slot per model
+// (cuda_layout.grads_out_has_wavelet is False here, so no wavelet slot).
+static BufList grad_slots(const BackwardInputCore& p)
+{
+    SWEEP_CHECK(static_cast<int>(p.grads_out.size()) == N_GRADS,
+                "acoustic_vti_1st_2d/backward requires the propagator-bound grads_out (",
+                static_cast<int>(N_GRADS), " tensors {grad_vp, grad_eps, grad_delta, grad_rho}), got ",
+                p.grads_out.size());
+    return p.grads_out;
+}
+
+// Layout of p.adjoint_workspace, declared on the Python side as
+// AcousticVTI1st.cuda_layout.backward_workspace_nvar (one padded grid per shot
+// each). ZERO_PREV is read only: it stands in for the "previous stress" at the
+// first reverse step and relies on the propagator zeroing the pool before every
+// gradient-bearing forward.
+enum WorkspaceSlot : int { SCRATCH_X = 0, SCRATCH_Z, ZERO_PREV, SEED_SH, SEED_SV, N_SLOTS };
+
+// Exactly N_SLOTS: a pool of any other size means the Python declaration
+// drifted.  Mandatory: AcousticVTI1st.cuda_layout.backward_workspace_nvar = 5
+// in every mode, and propagator/_c.py Wrapper.backward always sets
+// `params.adjoint_workspace = list(cp.adjoint_workspace)`.
+BufList workspace_slots(const BackwardInputCore& p)
+{
+    SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == N_SLOTS,
+                "acoustic_vti_1st_2d/backward requires the propagator-bound adjoint_workspace (",
+                static_cast<int>(N_SLOTS), " tensors, cuda_layout.backward_workspace_nvar), got ",
+                p.adjoint_workspace.size());
+    return p.adjoint_workspace;
+}
+
 // Same wavefield-tensor helper as forward.cu, lives in an anonymous namespace
 // so the linker sees it once per TU only.
+//
+// Two bindings: bind() takes the full 8-slot list (4 physical + 4 CPML
+// memory, AcousticVTI1st.FIELD_SPECS order -- the adjoint state, and the
+// CKPT_STATE_COUNT-slot checkpoint replay state); bind_physical() takes
+// the RECON_WF_COUNT-slot boundary-saving reconstruction list
+// (cuda_layout.bs_reconstruction_nvar) and leaves the m_* members undefined
+// -- the bs reverse loop steps the reconstruction with the NOPML kernels
+// only, which never read or write CPML memory, so view() hands those slots
+// out as nullptr (ptr_or_null).
 struct AdjWavefieldTensor {
-    torch::Tensor vx_t, vz_t, sH_t, sV_t;
-    torch::Tensor m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
+    static constexpr int RECON_WF_COUNT = 4;
+    static constexpr const char* RECON_LIST_DESC = "[vx, vz, sH, sV]";
+    // The checkpoint replay state the propagator binds: one full bind() list
+    // (cuda_layout checkpoint_state_nvar = base_nvar + pml_nvar).
+    static constexpr int CKPT_STATE_COUNT = 8;
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    Buf vx_t, vz_t, sH_t, sV_t;
+    Buf m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
+
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+
+    void bind(const std::vector<Buf>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 8,
+        SWEEP_CHECK(tensors.size() == 8,
                     "AcousticVTI1st2D backward: expects 8 adjoint wavefield tensors, got ",
                     tensors.size());
         vx_t    = tensors[0];
@@ -58,19 +118,26 @@ struct AdjWavefieldTensor {
         m_vzz_t = tensors[7];
     }
 
-    void allocate(const torch::Tensor& ref)
+    // Boundary-saving reconstruction: the physical prefix only, in
+    // RECON_LIST_DESC order; m_sHx_t / m_sVz_t / m_vxx_t / m_vzz_t stay
+    // undefined.
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+
+    void bind_physical(const std::vector<Buf>& tensors)
     {
-        auto opts  = ref.options();
-        auto shape = ref.sizes();
-        vx_t    = torch::zeros(shape, opts);
-        vz_t    = torch::zeros(shape, opts);
-        sH_t    = torch::zeros(shape, opts);
-        sV_t    = torch::zeros(shape, opts);
-        m_sHx_t = torch::zeros(shape, opts);
-        m_sVz_t = torch::zeros(shape, opts);
-        m_vxx_t = torch::zeros(shape, opts);
-        m_vzz_t = torch::zeros(shape, opts);
+        SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_WF_COUNT,
+                    "AcousticVTI1st2D backward_bs: reconstruction list must hold ",
+                    RECON_WF_COUNT, " tensors ", RECON_LIST_DESC, ", got ",
+                    tensors.size());
+        vx_t = tensors[0];
+        vz_t = tensors[1];
+        sH_t = tensors[2];
+        sV_t = tensors[3];
     }
+
+    // No allocate(): every state this struct carries -- the adjoint, the bs
+    // reconstruction and the checkpoint replay -- is bound by the propagator.
 
     VTIWavefieldPointer view() const
     {
@@ -79,15 +146,17 @@ struct AdjWavefieldTensor {
         p.vz    = vz_t.data_ptr<float>();
         p.sH    = sH_t.data_ptr<float>();
         p.sV    = sV_t.data_ptr<float>();
-        p.m_sHx = m_sHx_t.data_ptr<float>();
-        p.m_sVz = m_sVz_t.data_ptr<float>();
-        p.m_vxx = m_vxx_t.data_ptr<float>();
-        p.m_vzz = m_vzz_t.data_ptr<float>();
+        // nullptr after bind_physical(): only the NOPML kernels see such a
+        // view and they never touch CPML memory.
+        p.m_sHx = ptr_or_null(m_sHx_t);
+        p.m_sVz = ptr_or_null(m_sVz_t);
+        p.m_vxx = ptr_or_null(m_vxx_t);
+        p.m_vzz = ptr_or_null(m_vzz_t);
         return p;
     }
 
     // For CheckpointRuntime save/load: the 8 tensors saved as one "state".
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {vx_t, vz_t, sH_t, sV_t,
                 m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t};
@@ -95,10 +164,10 @@ struct AdjWavefieldTensor {
 
     void zero_state() const
     {
-        vx_t.zero_();   vz_t.zero_();
-        sH_t.zero_();   sV_t.zero_();
-        m_sHx_t.zero_(); m_sVz_t.zero_();
-        m_vxx_t.zero_(); m_vzz_t.zero_();
+        zero_tensor_device_async(vx_t);   zero_tensor_device_async(vz_t);
+        zero_tensor_device_async(sH_t);   zero_tensor_device_async(sV_t);
+        zero_tensor_device_async(m_sHx_t); zero_tensor_device_async(m_sVz_t);
+        zero_tensor_device_async(m_vxx_t); zero_tensor_device_async(m_vzz_t);
     }
 };
 
@@ -109,8 +178,8 @@ void vti_adjoint_A_2d(
     int order,
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer adj_view,
-    const torch::Tensor& c11, const torch::Tensor& c33, const torch::Tensor& c13,
-    torch::Tensor& sx, torch::Tensor& sz,
+    const Buf& c11, const Buf& c33, const Buf& c13,
+    Buf& sx, Buf& sz,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_stress_kernel<0><<<lc.grid, lc.block>>>(
@@ -127,8 +196,8 @@ void vti_adjoint_B_2d(
     int order,
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer adj_view,
-    const torch::Tensor& inv_rho,
-    torch::Tensor& sx, torch::Tensor& sz,
+    const Buf& inv_rho,
+    Buf& sx, Buf& sz,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_vel_kernel<0><<<lc.grid, lc.block>>>(
@@ -142,22 +211,28 @@ void vti_adjoint_B_2d(
 }  // anonymous namespace
 
 
-BackwardOutput backward(const BackwardInput& in)
+BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st2D CUDA backward: free_surface=True not supported "
                 "(Robertsson 1996 / Mittet 2002 anisotropic FS — follow-up).");
 
-    TORCH_CHECK(p.spacing.size() >= 2,
+    SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D backward: spacing must have length >= 2");
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    // Cartesian order, as every other driver and _c.py::_cuda_spacing() have it:
+    // PropBase stores (dz, dx) in model-axis order and _cuda_spacing() already
+    // REVERSED it, so p.spacing arrives as [dx, dz].  Reading it as (dz, dx)
+    // here swapped the two axes, which is invisible on the isotropic dh every
+    // test uses and wrong the moment they differ (measured: record cosine
+    // -0.259 against eager at dz=10, dx=25; the 3-D twin was always correct).
+    float dx = p.spacing[0];
+    float dz = p.spacing[1];
 
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st2D backward expects 4 model tensors "
                 "[vp, epsilon, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -172,36 +247,39 @@ BackwardOutput backward(const BackwardInput& in)
     int B  = N * C;
 
     // Cached stiffness (matches forward.cu)
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11_t   = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33_t   = rho_vp2;
-    auto c13_t   = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho_t = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::backward");
+    auto c11_t   = stiff.c11;
+    auto c33_t   = stiff.c33;
+    auto c13_t   = stiff.c13;
+    auto inv_rho_t = stiff.inv_rho;
 
-    TORCH_CHECK(p.u_forward.defined(),
+    SWEEP_CHECK(p.u_forward.defined(),
                 "AcousticVTI1st2D backward (full mode) requires the forward to "
                 "be run with save_all_wavefields=True so u_forward is populated.");
-    TORCH_CHECK(p.u_forward.dim() == 5,
+    SWEEP_CHECK(p.u_forward.dim() == 5,
                 "u_forward must be (nt, n_comp, B, nz, nx); got dim ",
                 p.u_forward.dim());
-    TORCH_CHECK(p.u_forward.size(1) == 4,
+    SWEEP_CHECK(p.u_forward.size(1) == 4,
                 "u_forward second dim must be 4 (vx, vz, sH, sV); got ",
                 p.u_forward.size(1));
 
-    // Allocate / bind adjoint wavefield (zero-initialised)
+    // Bind the adjoint wavefield (zero-initialised on the Python side).
+    // Mandatory: propagator/_c.py Wrapper.backward always binds
+    // `params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]`.
     AdjWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp_t);
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vti_1st_2d/full requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     auto adj_view = adjoint.view();
 
     // Output gradient tensors (one per model)
-    auto grad_vp    = torch::zeros_like(vp_t);
-    auto grad_eps   = torch::zeros_like(epsilon_t);
-    auto grad_delta = torch::zeros_like(delta_t);
-    auto grad_rho   = torch::zeros_like(rho_t);
+    const auto& gs  = grad_slots(p);
+    auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_required(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -216,17 +294,20 @@ BackwardOutput backward(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
-    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
-    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+    const auto& ws = workspace_slots(p);
+    auto scratch_x = pool_required(ws, SCRATCH_X, vp_t, "adjoint_workspace");
+    auto scratch_z = pool_required(ws, SCRATCH_Z, vp_t, "adjoint_workspace");
 
     // Zero buffer the size of one wavefield component, used as the "previous"
     // stress at iter `it = 0` (no prior step exists; initial state is zero).
-    auto zero_state = torch::zeros({B, nz, nx}, vp_t.options());
+    // ZERO_PREV is never written, and the pool is zeroed before every
+    // gradient-bearing forward, so it is still zero here.
+    auto zero_state = pool_required(ws, ZERO_PREV, vp_t, "adjoint_workspace");
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan receiver_fields = p.receiver_field_indices;
     auto adjoint_src_config = (adjoint_nsrc > 0)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
 
@@ -236,12 +317,12 @@ BackwardOutput backward(const BackwardInput& in)
     for (int it = static_cast<int>(p.nt) - 1; it >= 0; --it) {
         // 1. Inject adjoint source at receivers (residual back-projected)
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            int field_index = receiver_fields[irec].item<int>();
+            int field_index = receiver_fields[irec];
             float* field = vti_field_ptr(adj_view, field_index);
             if (field == nullptr) continue;
             add_source<<<adjoint_src_config.grid, adjoint_src_config.block>>>(
                 field,
-                p.adjoint_source[irec].data_ptr<float>(),
+                p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it,
                 adjoint_nsrc,
@@ -250,11 +331,11 @@ BackwardOutput backward(const BackwardInput& in)
         }
 
         // 2. Accumulate gradients using forward state at the right times:
-        //    - vx_now, vz_now from u_forward[it] for the stiffness gradients
-        //      (vx_new in step it's stress sub-step == u_forward[it].vx)
-        //    - sH_prev, sV_prev from u_forward[it-1] for the inv_rho gradient
-        //      (sH_old in step it's velocity sub-step == u_forward[it-1].sH)
-        //    For it == 0, u_forward[-1] is "the initial state" = zeros.
+        //    - vx_now, vz_now from u_forward.select(0, it) for the stiffness gradients
+        //      (vx_new in step it's stress sub-step == u_forward.select(0, it).vx)
+        //    - sH_prev, sV_prev from u_forward.select(0, it-1) for the inv_rho gradient
+        //      (sH_old in step it's velocity sub-step == u_forward.select(0, it-1).sH)
+        //    For it == 0, u_forward.select(0, -1) is "the initial state" = zeros.
         const float* fvx_now = p.u_forward.select(0, it).select(0, 0).data_ptr<float>();
         const float* fvz_now = p.u_forward.select(0, it).select(0, 1).data_ptr<float>();
         const float* fsH_prev;
@@ -327,25 +408,26 @@ BackwardOutput backward(const BackwardInput& in)
 //      e. Propagate the adjoint state one step back in time (same as Phase 1).
 //      f. Time-reverse the forward VELOCITY step.
 //      g. Restore velocity boundary cells.
-// The wavelet source is also subtracted (negative sign) on the forward side
-// so that the source-injection contribution is removed when stepping back.
+// The wavelet source is also subtracted (add_source_signed, sign -1) on the
+// forward side so that the source-injection contribution is removed when
+// stepping back; no negated copy of the source is built.
 // ---------------------------------------------------------------------------
-BackwardOutput backward_bs(const BackwardInput& in)
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st2D backward_bs: free_surface=True not supported "
                 "(Robertsson 1996 / Mittet 2002 anisotropic FS — follow-up).");
 
-    TORCH_CHECK(p.spacing.size() >= 2,
+    SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D backward_bs: spacing length >= 2 required.");
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    float dx = p.spacing[0];   // Cartesian order; see forward.cu
+    float dz = p.spacing[1];
 
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st2D backward_bs expects 4 models "
                 "[vp, eps, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -359,12 +441,12 @@ BackwardOutput backward_bs(const BackwardInput& in)
     int nx = vp_t.size(3);
     int B  = N * C;
 
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11_t   = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33_t   = rho_vp2;
-    auto c13_t   = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho_t = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::backward_bs");
+    auto c11_t   = stiff.c11;
+    auto c33_t   = stiff.c33;
+    auto c13_t   = stiff.c13;
+    auto inv_rho_t = stiff.inv_rho;
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -378,48 +460,55 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     // Adjoint wavefield (Phase 1-style: 4 physical + 4 CPML memory).
     AdjWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp_t);
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vti_1st_2d/bs requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     auto adj_view = adjoint.view();
 
-    // Reconstructed forward state.  Bind from p.forward_wavefields if the
-    // propagator pre-allocated a workspace; otherwise allocate fresh.
+    // Reconstructed forward state: the RECON_WF_COUNT physical fields the
+    // propagator hands over as p.forward_wavefields (zeroed, model-shaped).
+    // Only the NOPML kernels step this state, so it carries no CPML memory.
+    // Mandatory: cuda_layout.bs_reconstruction_nvar = 4, and
+    // propagator/_c.py Wrapper.backward binds
+    // `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+    // on the boundary-saving path.
     AdjWavefieldTensor forward;
-    if (!p.forward_wavefields.empty())
-        forward.bind(p.forward_wavefields);
-    else
-        forward.allocate(vp_t);
+    wavefields_required(p.forward_wavefields, AdjWavefieldTensor::RECON_WF_COUNT, vp_t,
+                        "acoustic_vti_1st_2d/bs reconstruction "
+                        "(cuda_layout.bs_reconstruction_nvar)");
+    forward.bind_physical(p.forward_wavefields);
     auto for_view = forward.view();
 
     // Initialise forward state from u_last_two (final state at t=nt-1, the
     // post-step / post-source-inject snapshot of step nt-1).
-    TORCH_CHECK(p.u_last_two.defined(),
+    SWEEP_CHECK(p.u_last_two.defined(),
                 "AcousticVTI1st2D backward_bs requires p.u_last_two from the "
                 "boundary-saving forward.");
-    forward.vx_t.copy_(p.u_last_two.select(0, 0).select(0, 0));
-    forward.vz_t.copy_(p.u_last_two.select(0, 1).select(0, 0));
-    forward.sH_t.copy_(p.u_last_two.select(0, 2).select(0, 0));
-    forward.sV_t.copy_(p.u_last_two.select(0, 3).select(0, 0));
-
-    // Negated forward source: time-reversal subtracts it during reconstruction.
-    auto neg_forward_source = -p.forward_source;
+    copy_tensor_cuda_async(forward.vx_t, p.u_last_two.select(0, 0).select(0, 0));
+    copy_tensor_cuda_async(forward.vz_t, p.u_last_two.select(0, 1).select(0, 0));
+    copy_tensor_cuda_async(forward.sH_t, p.u_last_two.select(0, 2).select(0, 0));
+    copy_tensor_cuda_async(forward.sV_t, p.u_last_two.select(0, 3).select(0, 0));
 
     // Gradient outputs.
-    auto grad_vp    = torch::zeros_like(vp_t);
-    auto grad_eps   = torch::zeros_like(epsilon_t);
-    auto grad_delta = torch::zeros_like(delta_t);
-    auto grad_rho   = torch::zeros_like(rho_t);
+    const auto& gs  = grad_slots(p);
+    auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_required(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     // CPML coefficients (cpmls 8-tuple) for the adjoint propagation step.
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     // Boundary saver / runtime — mirror forward.cu's allocation but in
     // backward mode (data flows from saver → forward state, not the other
     // way around).
+    // last_two is bound but never read here: this backward seeds its
+    // reconstruction from p.u_last_two directly, and an unbound saver would
+    // allocate an nvar-wavefield copy on every call (in host memory on the
+    // staged path).
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
@@ -428,15 +517,15 @@ BackwardOutput backward_bs(const BackwardInput& in)
             /*use_bs=*/true, /*dim=*/2, /*nvar=*/4, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/false, p.transfer_interval,
-            p.boundary_cpu, p.boundary_gpu, /*last_two=*/{},
-            p.use_pinned_memory);
+            p.boundary_cpu, p.boundary_gpu, /*last_two=*/p.u_last_two,
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     } else {
         boundary_saver.allocate(
             /*use_bs=*/true, /*dim=*/2, /*nvar=*/4, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/true, /*transfer_interval=*/1,
-            /*boundary_cpu=*/{}, p.boundary_gpu, /*last_two=*/{},
-            p.use_pinned_memory);
+            /*boundary_cpu=*/{}, p.boundary_gpu, /*last_two=*/p.u_last_two,
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
         // If the propagator handed us an in-memory boundary tensor list
         // (legacy path), load it now.
         if (p.boundary_gpu.empty() && !p.u_boundary.empty())
@@ -448,22 +537,27 @@ BackwardOutput backward_bs(const BackwardInput& in)
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
-    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
-    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+    const auto& ws = workspace_slots(p);
+    auto scratch_x = pool_required(ws, SCRATCH_X, vp_t, "adjoint_workspace");
+    auto scratch_z = pool_required(ws, SCRATCH_Z, vp_t, "adjoint_workspace");
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
                        ? p.forward_sources_loc.size(1) : 0;
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields   = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
     auto adj_src_config = (adjoint_nsrc > 0)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
         ? fdtd::Geom::make(forward_nsrc, B) : fdtd::Geom::make(1, B);
+    SWEEP_CHECK(nsrc_fields == 0 || p.forward_source.defined(),
+                "AcousticVTI1st2D backward_bs: forward_source must be defined "
+                "when source fields are un-injected.");
 
     AsyncCopyContext async_copy(staged_boundary);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         /*dim=*/2,
@@ -473,38 +567,36 @@ BackwardOutput backward_bs(const BackwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
     boundary_runtime.prefetch_initial_backward_chunk(p.nt);
 
-    auto zero_prev_sH = torch::zeros_like(vp_t);
-    auto zero_prev_sV = torch::zeros_like(vp_t);
-
     for (int it = static_cast<int>(p.nt) - 1; it >= 1; --it) {
         // (a) adjoint source injection (receiver-side residual)
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            int field_index = receiver_fields[irec].item<int>();
+            int field_index = receiver_fields[irec];
             float* field = vti_field_ptr(adj_view, field_index);
             if (field == nullptr) continue;
             add_source<<<adj_src_config.grid, adj_src_config.block>>>(
-                field, p.adjoint_source[irec].data_ptr<float>(),
+                field, p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it, adjoint_nsrc, solver);
         }
 
-        // (b-i) forward source subtraction (neg_forward_source) — removes
-        //       the source contribution that was added during the forward
-        //       step we are about to time-reverse.
+        // (b-i) forward source subtraction (add_source_signed, sign -1) —
+        //       removes the source contribution that was added during the
+        //       forward step we are about to time-reverse. The in-kernel
+        //       sign flip is exact; no negated copy of the source is built.
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            int field_index = source_fields[isrc].item<int>();
+            int field_index = source_fields[isrc];
             float* field = vti_field_ptr(for_view, field_index);
             if (field == nullptr) continue;
-            add_source<<<fwd_src_config.grid, fwd_src_config.block>>>(
-                field, neg_forward_source.data_ptr<float>(),
+            add_source_signed<<<fwd_src_config.grid, fwd_src_config.block>>>(
+                field, p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
-                it, forward_nsrc, solver);
+                it, forward_nsrc, -1.0f, solver);
         }
 
         // (b-ii) time-reverse the STRESS update (uses NEW velocity which
@@ -532,7 +624,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         //     fsH_prev / fsV_prev are now obtained from THIS iter's
         //     reconstructed forward state (which represents state_{it-1}
         //     after the time-reverse stress step) plus the velocity that
-        //     hasn't been reversed yet (= u_forward[it].vx for the
+        //     hasn't been reversed yet (= u_forward.select(0, it).vx for the
         //     stiffness path).
         //
         //     Concretely:
@@ -540,7 +632,7 @@ BackwardOutput backward_bs(const BackwardInput& in)
         //         END of step it, before we time-reverse the velocity step)
         //       - fsH_prev / fsV_prev : approximated as for_view.sH / sV
         //         AFTER stress reverse but BEFORE velocity reverse.  This
-        //         matches u_forward[it-1].sH used in the full-mode kernel.
+        //         matches u_forward.select(0, it-1).sH used in the full-mode kernel.
         // (e) half-step A first: the inv_rho gradient needs the COMPLETE
         //     lambda_v(it), which only exists once this step's ds/dv coupling
         //     has been applied.  A writes lambda_v and only reads lambda_s, so
@@ -606,24 +698,24 @@ BackwardOutput backward_bs(const BackwardInput& in)
 // Memory cost: O(num_chunks) checkpoints + O(chunk_size) inner replay buffer
 // — significantly smaller than save_all_wavefields when nt is large.
 // ---------------------------------------------------------------------------
-BackwardOutput backward_ckpt(const BackwardInput& in)
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    BackwardOutput out;
+    BackwardOutputCore out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st2D backward_ckpt: free_surface=True not supported.");
-    TORCH_CHECK(p.checkpoint_interval >= 1,
+    SWEEP_CHECK(p.checkpoint_interval >= 1,
                 "checkpoint_interval must be >= 1");
-    TORCH_CHECK(p.checkpoints.size() == 8,
+    SWEEP_CHECK(p.checkpoints.size() == 8,
                 "AcousticVTI1st2D backward_ckpt expects 8 checkpoint tensors "
                 "(4 physical + 4 PML memory); got ", p.checkpoints.size());
-    TORCH_CHECK(p.spacing.size() >= 2,
+    SWEEP_CHECK(p.spacing.size() >= 2,
                 "spacing length >= 2 required.");
 
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    float dx = p.spacing[0];   // Cartesian order; see forward.cu
+    float dz = p.spacing[1];
 
     auto vp_t      = p.models[0];
     auto epsilon_t = p.models[1];
@@ -636,12 +728,12 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     int nx = vp_t.size(3);
     int B  = N * C;
 
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11_t   = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33_t   = rho_vp2;
-    auto c13_t   = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho_t = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::backward_ckpt");
+    auto c11_t   = stiff.c11;
+    auto c33_t   = stiff.c33;
+    auto c13_t   = stiff.c13;
+    auto inv_rho_t = stiff.inv_rho;
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -655,16 +747,33 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     // Adjoint wavefield (carried across chunks; cleared once at the start).
     AdjWavefieldTensor adjoint;
-    if (!p.adjoint_wavefields.empty())
-        adjoint.bind(p.adjoint_wavefields);
-    else
-        adjoint.allocate(vp_t);
+    SWEEP_CHECK(!p.adjoint_wavefields.empty(),
+                "acoustic_vti_1st_2d/ckpt requires the propagator-bound adjoint_wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    adjoint.bind(p.adjoint_wavefields);
     auto adj_view = adjoint.view();
     adjoint.zero_state();
 
-    // Forward-state buffer used during each chunk's replay.
+    // Forward-state buffer used during each chunk's replay: the
+    // CKPT_STATE_COUNT model-shaped slots the propagator hands over as
+    // p.forward_wavefields (set 0 of the replay state, zeroed per backward
+    // call).  Every chunk re-seeds all of it (zero_state / checkpoint load)
+    // before stepping, so nothing depends on the initial zeros.  Mandatory:
+    // propagator/_c.py Wrapper.backward binds
+    // `params.forward_wavefields = _forward_state_buffers(cp.forward_state_shapes, ...)`
+    // on the checkpoint path, and _forward_state_shapes("ckpt") is the forward
+    // slot list (base_nvar + pml_nvar = CKPT_STATE_COUNT).
     AdjWavefieldTensor fwd_state;
-    fwd_state.allocate(vp_t);
+    {
+        const char* what = "acoustic_vti_1st_2d ckpt replay state";
+        SWEEP_CHECK(!p.forward_wavefields.empty(),
+                    "acoustic_vti_1st_2d/ckpt requires the propagator-bound "
+                    "forward_wavefields replay state (cuda_layout base_nvar + pml_nvar slots)");
+        auto state = wavefield_set(p.forward_wavefields, 0, AdjWavefieldTensor::CKPT_STATE_COUNT, what);
+        for (int i = 0; i < AdjWavefieldTensor::CKPT_STATE_COUNT; ++i)
+            pool_slot_checked(state, i, vp_t, what);   // every slot is model-shaped
+        fwd_state.bind(state);
+    }
     auto fwd_view = fwd_state.view();
 
     // CheckpointRuntime — load checkpoints saved by the forward.
@@ -681,29 +790,31 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     );
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
-    auto grad_vp    = torch::zeros_like(vp_t);
-    auto grad_eps   = torch::zeros_like(epsilon_t);
-    auto grad_delta = torch::zeros_like(delta_t);
-    auto grad_rho   = torch::zeros_like(rho_t);
+    const auto& gs  = grad_slots(p);
+    auto grad_vp    = pool_required(gs, GRAD_VP, vp_t, "grads_out");
+    auto grad_eps   = pool_required(gs, GRAD_EPS, epsilon_t, "grads_out");
+    auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
+    auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
 
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
-    auto scratch_x = torch::zeros({B, nz, nx}, vp_t.options());
-    auto scratch_z = torch::zeros({B, nz, nx}, vp_t.options());
+    const auto& ws = workspace_slots(p);
+    auto scratch_x = pool_required(ws, SCRATCH_X, vp_t, "adjoint_workspace");
+    auto scratch_z = pool_required(ws, SCRATCH_Z, vp_t, "adjoint_workspace");
 
     int adjoint_nsrc = p.adjoint_sources_loc.defined()
                        ? p.adjoint_sources_loc.size(1) : 0;
     int forward_nsrc = p.forward_sources_loc.defined()
                        ? p.forward_sources_loc.size(1) : 0;
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields   = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
     auto adj_src_config = (adjoint_nsrc > 0)
         ? fdtd::Geom::make(adjoint_nsrc, B) : fdtd::Geom::make(1, B);
     auto fwd_src_config = (forward_nsrc > 0)
@@ -714,11 +825,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
     // Per-chunk replay buffer: shape (chunk_size, 4, B, nz, nx) — only the
     // 4 physical fields are needed for the gradient kernel.
-    auto u_chunk = torch::zeros({chunk_size, 4, B, nz, nx}, vp_t.options());
+    // Python-allocated with the checkpoint snapshots (cuda_layout.checkpoint_replay_shapes
+    // is declared, so _ensure_checkpoint_buffers always fills self.checkpoint_replay);
+    // every row is written by the replay before the reverse pass reads it.
+    auto u_chunk = pool_required(p.checkpoint_replay, 0, {chunk_size, 4, B, nz, nx}, "checkpoint_replay");
 
-    auto zero_prev = torch::zeros({B, nz, nx}, vp_t.options());
-    auto seed_sH   = torch::zeros({B, nz, nx}, vp_t.options());
-    auto seed_sV   = torch::zeros({B, nz, nx}, vp_t.options());
+    // zero_prev is read-only (ZERO_PREV stays zero, see backward()); the two seed
+    // buffers are overwritten at every chunk boundary before they are read.
+    auto zero_prev = pool_required(ws, ZERO_PREV, vp_t, "adjoint_workspace");
+    auto seed_sH   = pool_required(ws, SEED_SH, vp_t, "adjoint_workspace");
+    auto seed_sV   = pool_required(ws, SEED_SV, vp_t, "adjoint_workspace");
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;
@@ -765,7 +881,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
                 grad_ctx, cpml_view, solver);
 
             for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-                int field_index = source_fields[isrc].item<int>();
+                int field_index = source_fields[isrc];
                 float* field = vti_field_ptr(fwd_view, field_index);
                 if (field == nullptr) continue;
                 add_source<<<fwd_src_config.grid, fwd_src_config.block>>>(
@@ -776,7 +892,7 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
 
             // Snapshot to chunk buffer (vx, vz, sH, sV).
             int spatial_size = solver.nx * solver.nz;
-            float* slot = u_chunk[local_i].data_ptr<float>();
+            float* slot = u_chunk.select(0, local_i).data_ptr<float>();
             const int comp_stride = B * spatial_size;
             cudaMemcpyAsync(slot + 0 * comp_stride, fwd_view.vx,
                             B * spatial_size * sizeof(float),
@@ -798,30 +914,30 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
         for (int local_i = local_len - 1; local_i >= 0; --local_i) {
             int it = start + local_i;
 
-            // adjoint source from record[it]
+            // adjoint source from record.select(0, it)
             for (int irec = 0; irec < nrec_fields; ++irec) {
-                int field_index = receiver_fields[irec].item<int>();
+                int field_index = receiver_fields[irec];
                 float* field = vti_field_ptr(adj_view, field_index);
                 if (field == nullptr) continue;
                 add_source<<<adj_src_config.grid, adj_src_config.block>>>(
-                    field, p.adjoint_source[irec].data_ptr<float>(),
+                    field, p.adjoint_source.select(0, irec).data_ptr<float>(),
                     p.adjoint_sources_loc.data_ptr<int>(),
                     it, adjoint_nsrc, solver);
             }
 
             // gradient computation — fvx_now / fvz_now / fsH / fsV come from
-            // u_chunk[local_i]; fsH_prev / fsV_prev come from u_chunk[local_i-1]
+            // u_chunk.select(0, local_i); fsH_prev / fsV_prev come from u_chunk.select(0, local_i-1)
             // (or zero when local_i == 0 AND chunk_id == 0).
-            const float* fvx_now = u_chunk[local_i].select(0, 0).data_ptr<float>();
-            const float* fvz_now = u_chunk[local_i].select(0, 1).data_ptr<float>();
+            const float* fvx_now = u_chunk.select(0, local_i).select(0, 0).data_ptr<float>();
+            const float* fvz_now = u_chunk.select(0, local_i).select(0, 1).data_ptr<float>();
             const float* fsH_prev;
             const float* fsV_prev;
             if (it > 0) {
                 if (local_i > 0) {
-                    fsH_prev = u_chunk[local_i - 1].select(0, 2).data_ptr<float>();
-                    fsV_prev = u_chunk[local_i - 1].select(0, 3).data_ptr<float>();
+                    fsH_prev = u_chunk.select(0, local_i - 1).select(0, 2).data_ptr<float>();
+                    fsV_prev = u_chunk.select(0, local_i - 1).select(0, 3).data_ptr<float>();
                 } else {
-                    // Crossing a chunk boundary: u_chunk[-1] does not exist,
+                    // Crossing a chunk boundary: u_chunk.select(0, -1) does not exist,
                     // but the state at step start-1 is exactly the checkpoint
                     // this chunk was replayed from, snapshotted above.
                     fsH_prev = seed_sH.data_ptr<float>();
@@ -862,11 +978,16 @@ BackwardOutput backward_ckpt(const BackwardInput& in)
     out.grads = {grad_vp, grad_eps, grad_delta, grad_rho};
     return out;
 }
-BackwardOutput backward_recursive_ckpt(const BackwardInput& /*in*/)
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& /*in*/)
 {
-    TORCH_CHECK(false,
+    SWEEP_CHECK(false,
         "AcousticVTI1st2D CUDA backward_recursive_ckpt is not yet implemented.");
     return {};
 }
+
+
+
+
+
 
 }  // namespace acoustic_vti_1st_2d

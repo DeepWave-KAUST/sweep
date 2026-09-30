@@ -12,6 +12,7 @@
 #include <string>
 
 #include "saver.cuh"
+#include "../../../core/check.h"
 
 // Bind one staged boundary face to the typed pointer matching the staging
 // tensor's dtype (fp32/fp16/bf16) at element offset OFF.  Mirrors view()'s
@@ -22,12 +23,12 @@
 // restrict qualifier).
 #define BIND_STAGED_FACE(STG, OFF, PF, PH, PBF)                                \
     do {                                                                       \
-        const torch::Tensor& _stg = (STG);                                     \
+        const Buf& _stg = (STG);                                               \
         const int64_t _off = (OFF);                                            \
         const auto _st = _stg.scalar_type();                                   \
-        if (_st == torch::kHalf)                                               \
+        if (_st == BoundaryDtype::FP16)                                        \
             (PH) = reinterpret_cast<__half*>(_stg.data_ptr()) + _off;          \
-        else if (_st == torch::kBFloat16)                                      \
+        else if (_st == BoundaryDtype::BF16)                                   \
             (PBF) = reinterpret_cast<__nv_bfloat16*>(_stg.data_ptr()) + _off;  \
         else                                                                   \
             (PF) = reinterpret_cast<float*>(_stg.data_ptr()) + _off;           \
@@ -107,7 +108,7 @@ public:
         if (!enabled_ || !staged_)
             return;
 
-        TORCH_CHECK(
+        SWEEP_CHECK(
             !boundary_disk_async_read_ || ring_buffers_ >= 2,
             "boundary_disk_async_read requires boundary_ring_buffers >= 2."
         );
@@ -134,6 +135,11 @@ public:
 
         if (boundary_disk_async_read_)
             disk_reader_thread_ = std::thread(&BoundaryRuntime::disk_reader_loop, this);
+
+        // Start from a clean write-error slot. On the per-call path this
+        // runtime is a BoundaryScope local rebuilt every call, so this bounds a
+        // recorded-but-never-reported failure to the run that caused it.
+        reset_boundary_disk_write_error();
     }
 
     ~BoundaryRuntime()
@@ -201,14 +207,15 @@ public:
     // because the boundary kernels gate it on ctx.cut_* (nothing is ever
     // written there — its halo is reconstructed in the DD backward).  The test
     // MUST be on numel, not on ``cells``: PyTorch clamps a 0-size dim's stride
-    // to a nonzero value, so the stride-derived ``cells`` would still drive a
+    // to a nonzero value -- and Buf copies that stride verbatim rather than
+    // deriving it -- so the stride-derived ``cells`` would still drive a
     // launch that writes into the empty buffer.  Guarding here covers the FP16
     // and INT8 payloads in one place.
-    inline bool face_is_cut(const torch::Tensor& face_t) const
+    inline bool face_is_cut(const Buf& face_t) const
     {
         return face_t.numel() == 0;
     }
-    inline void quantize_face(const torch::Tensor& face_t,
+    inline void quantize_face(const Buf& face_t,
                               float* stage, uint8_t* q, __half* h, float* scale,
                               BoundaryDtype dt, int64_t step_idx,
                               int64_t cells, int64_t blocks)
@@ -219,7 +226,7 @@ public:
         else
             launch_quantize_int8(stage, q + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
     }
-    inline void dequantize_face(const torch::Tensor& face_t,
+    inline void dequantize_face(const Buf& face_t,
                                 float* stage, uint8_t* q, __half* h, float* scale,
                                 BoundaryDtype dt, int64_t step_idx,
                                 int64_t cells, int64_t blocks)
@@ -365,7 +372,7 @@ public:
         int field_idx
     )
     {
-        TORCH_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
+        SWEEP_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
 
         if (dim_ == 2) {
             GeneralBoundaryPointer ptr{};
@@ -908,7 +915,7 @@ public:
         int field_idx
     )
     {
-        TORCH_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
+        SWEEP_CHECK(field_idx >= 0 && field_idx < saver_->nvar, "Invalid boundary field index.");
 
         if (dim_ == 2) {
             GeneralBoundaryPointer ptr{};

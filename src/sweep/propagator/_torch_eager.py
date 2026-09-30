@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 
@@ -9,6 +11,41 @@ from sweep.sources.torch import SourceTorch
 from sweep.utils.torch import EdgePadding
 from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
 from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
+
+
+_DYNAMO_LIMIT_WARNED = False
+
+
+def _raise_dynamo_recompile_limit(target=32):
+    """Raise Dynamo's recompile cap, whatever the installed torch calls it.
+
+    The knob was renamed: ``cache_size_limit`` up to torch 2.5,
+    ``recompile_limit`` from 2.6. torch is unpinned here, so keying on the new
+    name alone made the bump a silent no-op for every user on an older torch --
+    and the cap it was there to lift is exactly what makes Dynamo give up and
+    fall back to eager on the many-wavefield equations. ``accumulated_``
+    is the secondary cap on the old spelling and has to move with it.
+    """
+    global _DYNAMO_LIMIT_WARNED
+    cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
+    if cfg is None:
+        return
+    names = [n for n in ("recompile_limit", "cache_size_limit",
+                         "accumulated_recompile_limit", "accumulated_cache_size_limit")
+             if hasattr(cfg, n)]
+    primary = [n for n in names if not n.startswith("accumulated_")]
+    if not primary:
+        if not _DYNAMO_LIMIT_WARNED:
+            _DYNAMO_LIMIT_WARNED = True
+            warnings.warn(
+                f"torch {torch.__version__}'s Dynamo exposes neither "
+                "recompile_limit nor cache_size_limit, so the recompile cap "
+                "was left alone; torch.compile may fall back to eager on the "
+                "many-wavefield equations.", RuntimeWarning, stacklevel=3)
+        return
+    for name in names:
+        if getattr(cfg, name) < target:
+            setattr(cfg, name, target)
 
 
 class _PropTorchEager(
@@ -75,11 +112,7 @@ class _PropTorchEager(
         off.  Shared by the full-tape step and the eager boundary-saving step."""
         if not self.use_compile or not hasattr(torch, "compile"):
             return fn
-        dynamo_config = getattr(torch, "_dynamo", None)
-        if dynamo_config is not None:
-            cfg = getattr(dynamo_config, "config", None)
-            if cfg is not None and hasattr(cfg, "recompile_limit") and cfg.recompile_limit < 32:
-                cfg.recompile_limit = 32
+        _raise_dynamo_recompile_limit()
         compile_kwargs = {
             "mode": self.compile_mode,
             "dynamic": self.compile_dynamic,
@@ -282,15 +315,16 @@ class _PropTorchEager(
             record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
         return wavefield
 
-    def _rollout_full(self, wavefield, runtime_models, wavelet, src, rec, record,
+    def _rollout_full(self, wavefield, runtime_models, wavelet, src, rec,
                       receivers, nt, adj, return_wavefield, snapshots, snapshot_lookup):
         """Plain time loop recording the full autograd tape (the default path):
         PyTorch retains every step's activations and backward differentiates the
         whole graph.  This is the only path that supports ``return_wavefield``
-        (wavefield snapshots).  Writes the record (and snapshots, if requested) in
-        place and returns the final wavefield list.
+        (wavefield snapshots).  Returns ``(wavefield, record)``; the snapshots,
+        which are detached host copies, are still written in place.
         """
         multi_receiver = len(self.receiver_indices) > 1
+        columns = []
         for i in range(nt):
             wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None))
             time = i if not adj else nt - i - 1
@@ -302,11 +336,19 @@ class _PropTorchEager(
                     0,
                 )
             if multi_receiver:
-                record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+                columns.append(rec.sample_fields(
+                    [wavefield[idx] for idx in self.receiver_indices]))
             else:
                 receiver_idx = self.receiver_indices[0]
-                record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
-        return wavefield
+                columns.append(rec(wavefield[receiver_idx])
+                               .view(*receivers.shape[:-1]).unsqueeze(-1))
+        # One stack instead of nt in-place slice writes. Writing into a live
+        # autograd tensor builds a chain of nt CopySlices nodes, and EACH of
+        # them allocates a full-record buffer and copies the incoming gradient
+        # through it, so the record alone cost O(nt^2) backward traffic:
+        # 2*nt*|record|, which is 64 GB per shot at nt=4000 with 500 receivers.
+        # Stacking makes it 2*|record|.
+        return wavefield, torch.stack(columns, dim=1)
 
     def forward(
         self,
@@ -364,21 +406,29 @@ class _PropTorchEager(
         if return_wavefield:
             has_aux = True
             snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
-            snapshots = self._get_cached_tensor(
-                "snapshots",
-                snapshot_shape,
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-            )
+            # NOT through _get_cached_tensor: that cache has no eviction policy,
+            # so the snapshot buffer -- whose size grows linearly in the number
+            # of snapshot steps, and which defaults to EVERY step -- would be
+            # pinned to this propagator for its whole lifetime, long after the
+            # caller stopped holding the snapshots. It is also the one workspace
+            # that is handed to the caller, so a fresh allocation is what lets
+            # it be returned without the defensive clone below, halving the host
+            # memory this path costs.
+            snapshots = torch.zeros(snapshot_shape, device=torch.device("cpu"),
+                                    dtype=torch.float32)
         else:
             snapshots = None
 
-        record = self._get_cached_tensor(
-            "record",
-            (batch_size, nt, receivers.shape[1], len(self.receiver_type)),
-            device=self.dev,
-            dtype=torch.float32,
-        )
+        # Only the paths that still fill a record in place need one allocated
+        # up front; _rollout_full stacks its own (see there).
+        record = None
+        if self.use_ckpt or getattr(self, "_eager_bs", False):
+            record = self._get_cached_tensor(
+                "record",
+                (batch_size, nt, receivers.shape[1], len(self.receiver_type)),
+                device=self.dev,
+                dtype=torch.float32,
+            )
 
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
@@ -409,8 +459,8 @@ class _PropTorchEager(
                 wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj
             )
         else:
-            wavefield = self._rollout_full(
-                wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj,
+            wavefield, record = self._rollout_full(
+                wavefield, runtime_models, wavelet, src, rec, receivers, nt, adj,
                 return_wavefield, snapshots, snapshot_lookup,
             )
 
@@ -418,10 +468,13 @@ class _PropTorchEager(
         # The eager backend reuses internal workspace buffers across calls.
         # Return clones so previous outputs do not alias buffers that a later
         # forward pass will overwrite.
-        record_out = record.clone()
+        # A stacked record is already a fresh tensor; only the in-place paths
+        # hand back workspace that a later forward would overwrite.
+        record_out = record.clone() if (self.use_ckpt or getattr(self, "_eager_bs", False)) else record
         if not has_aux:
             return record_out
-        snapshots_out = snapshots.clone()
-        return record_out, snapshots_out
+        # ``snapshots`` is allocated per call above, so it aliases no workspace
+        # and needs no defensive copy.
+        return record_out, snapshots
 
     forward_base = forward

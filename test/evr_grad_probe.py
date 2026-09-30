@@ -62,8 +62,13 @@ def cos(a, b):
 def grads(impl, w, s, r, target):
     ms = models(True)
     syn = prop(impl)(w, s, r, models=ms)
-    (syn - target).pow(2).sum().backward()
-    return {n: m.grad.detach().clone() for n, m in zip(NAMES, ms)}
+    loss = (syn - target).pow(2).sum()
+    if loss.requires_grad:
+        loss.backward()
+    # nt=1 records only the initial zero state, which no model reaches: eager
+    # builds no graph there, and the gradient is identically zero.
+    return {n: (m.grad if m.grad is not None else torch.zeros_like(m)).detach().clone()
+            for n, m in zip(NAMES, ms)}
 
 
 def main():

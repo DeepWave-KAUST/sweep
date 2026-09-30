@@ -13,7 +13,7 @@ Writes to ``docs/assets/cards/{backends,equations,gpu,research}.png``,
 all sized 1280x640.
 
 Run:
-    /home/wangs0j/miniconda3/envs/ifwitorch/bin/python figures/scripts/index_cards.py
+    python figures/scripts/index_cards.py
 """
 
 from pathlib import Path

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from .base import FirstOrderEquation
 from .fields import FieldSpec, ModelSpec
-from ._free_surface import top_free_surface_cell_derivative, top_free_surface_derivative
 from .utils import to_backend
 from sweep.operators.rsg import RSGDerivative
 
@@ -26,6 +25,7 @@ STIFFNESS_KEYS = (
     "C56",
     "C66",
 )
+from ._registry import register_equation
 
 
 def step(
@@ -70,7 +70,7 @@ def step(
     b,
     rsg,
     pml=None,
-    free_surface=False,
+    free_surface=False,   # accepted for signature parity; refused below
 ):
     """One RSG elastic-TTI step.
 
@@ -86,25 +86,21 @@ def step(
     if pml is None or len(pml) != 6:
         raise ValueError("ElasticTTI requires pml_type='cpmlr', which provides six CPML profiles.")
     az, bz, _dbzdz, ax, bx, _dbxdx = pml
-    top_halo = rsg.L
-
     if free_surface:
-        # RSG Lx/Lz are diagonal 2D stencils, so both derivatives touch top
-        # ghost cells. Stresses are cell-centered: the free surface lies
-        # between the first interior stress row and its ghost image.
-        dsxx_dx = top_free_surface_cell_derivative(sxx, rsg.lx_bwd, top_halo, odd=False, axis=-2)
-        dsxz_dz = top_free_surface_cell_derivative(sxz, rsg.lz_bwd, top_halo, odd=True, axis=-2)
-        dsxy_dx = top_free_surface_cell_derivative(sxy, rsg.lx_bwd, top_halo, odd=False, axis=-2)
-        dsyz_dz = top_free_surface_cell_derivative(syz, rsg.lz_bwd, top_halo, odd=True, axis=-2)
-        dsxz_dx = top_free_surface_cell_derivative(sxz, rsg.lx_bwd, top_halo, odd=True, axis=-2)
-        dszz_dz = top_free_surface_cell_derivative(szz, rsg.lz_bwd, top_halo, odd=True, axis=-2)
-    else:
-        dsxx_dx = rsg.lx_bwd(sxx)
-        dsxz_dz = rsg.lz_bwd(sxz)
-        dsxy_dx = rsg.lx_bwd(sxy)
-        dsyz_dz = rsg.lz_bwd(syz)
-        dsxz_dx = rsg.lx_bwd(sxz)
-        dszz_dz = rsg.lz_bwd(szz)
+        # The class refuses a free surface at construction (supports_free_surface
+        # = False -- the anisotropic stress-free condition is not the isotropic
+        # mirror this would apply). A True here can only mean the propagator was
+        # bypassed; fail loud rather than run physics nothing has ever tested.
+        raise NotImplementedError(
+            "ElasticTTI.step has no free-surface implementation; construct via "
+            "PropTorch, which refuses free_surface=True for this equation.")
+
+    dsxx_dx = rsg.lx_bwd(sxx)
+    dsxz_dz = rsg.lz_bwd(sxz)
+    dsxy_dx = rsg.lx_bwd(sxy)
+    dsyz_dz = rsg.lz_bwd(syz)
+    dsxz_dx = rsg.lx_bwd(sxz)
+    dszz_dz = rsg.lz_bwd(szz)
 
     m_txxx = ax * m_txxx + bx * dsxx_dx
     m_txzz = az * m_txzz + bz * dsxz_dz
@@ -124,22 +120,12 @@ def step(
     vy = vy + (dt / rho) * (dsxy_dx + dsyz_dz)
     vz = vz + (dt / rho) * (dsxz_dx + dszz_dz)
 
-    if free_surface:
-        # Velocities are sampled on the surface node: tangential components
-        # mirror evenly, and the normal component mirrors oddly.
-        dvx_dx = top_free_surface_derivative(vx, rsg.lx_fwd, top_halo, odd=False, axis=-2)
-        dvy_dx = top_free_surface_derivative(vy, rsg.lx_fwd, top_halo, odd=False, axis=-2)
-        dvz_dx = top_free_surface_derivative(vz, rsg.lx_fwd, top_halo, odd=True, axis=-2)
-        dvz_dz = top_free_surface_derivative(vz, rsg.lz_fwd, top_halo, odd=True, axis=-2)
-        dvx_dz = top_free_surface_derivative(vx, rsg.lz_fwd, top_halo, odd=False, axis=-2)
-        dvy_dz = top_free_surface_derivative(vy, rsg.lz_fwd, top_halo, odd=False, axis=-2)
-    else:
-        dvx_dx = rsg.lx_fwd(vx)
-        dvy_dx = rsg.lx_fwd(vy)
-        dvz_dx = rsg.lx_fwd(vz)
-        dvz_dz = rsg.lz_fwd(vz)
-        dvx_dz = rsg.lz_fwd(vx)
-        dvy_dz = rsg.lz_fwd(vy)
+    dvx_dx = rsg.lx_fwd(vx)
+    dvy_dx = rsg.lx_fwd(vy)
+    dvz_dx = rsg.lx_fwd(vz)
+    dvz_dz = rsg.lz_fwd(vz)
+    dvx_dz = rsg.lz_fwd(vx)
+    dvy_dz = rsg.lz_fwd(vy)
 
     m_vxx = ax * m_vxx + bx * dvx_dx
     m_vxz = az * m_vxz + bz * dvx_dz
@@ -186,6 +172,7 @@ def step(
     )
 
 
+@register_equation()
 class ElasticTTI(FirstOrderEquation):
     """First-order 2-D three-component elastic TTI wave equation (RSG).
 

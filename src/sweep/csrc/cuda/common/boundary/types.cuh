@@ -1,30 +1,11 @@
 #pragma once
 
+#include "../../../core/dtype.h"   // BoundaryMode, BoundaryDtype, BOUNDARY_INT8_BLOCK
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cstdint>
 #include <cstdlib>
 
-enum BoundaryMode {
-    BOUNDARY_SAVE = 0,
-    BOUNDARY_RESTORE = 1
-};
-
-// Boundary-buffer storage dtype.  Compute always stays FP32; this only
-// changes the per-cell storage of the saved boundary strip.
-enum class BoundaryDtype : int {
-    FP32 = 0,
-    FP16 = 1,
-    BF16 = 2,
-    INT8 = 3,
-};
-
-// Per-block size for INT8 symmetric quantization.  Each block stores
-// one FP32 max_abs scale and BOUNDARY_INT8_BLOCK uint8 quantized cells.
-// Compression ratio = 4·B / (B + 4) where B = BOUNDARY_INT8_BLOCK.
-// B=256 → ratio = 1024/260 ≈ 3.94×.  Smaller B improves local dynamic-
-// range adaptation at the cost of higher metadata overhead.
-constexpr int BOUNDARY_INT8_BLOCK = 256;
 
 // Storage pointers passed into boundary save/load kernels.  Three
 // parallel pointer sets — FP32 / FP16 / BF16 — are populated depending
@@ -95,28 +76,3 @@ struct GeneralBoundaryPointer {
     bool use_fp16 = false;   // == (dtype == FP16), kept for back-compat
 };
 
-// Legacy env-var gate (FP16 only).  Prefer the per-PropTorch option
-// passed through BoundaryOptions.storage_dtype.
-static inline bool sweep_use_fp16_boundary() {
-    static bool flag = []() {
-        const char* env = std::getenv("SWEEP_FP16_BOUNDARY");
-        return env != nullptr && std::atoi(env) != 0;
-    }();
-    return flag;
-}
-
-// New unified dtype gate, driven by env var SWEEP_BOUNDARY_DTYPE in
-// {fp32, fp16, bf16, int8}.  The Python wrapper sets this per-call
-// before invoking the forward kernel.  Returning FP32 when unset
-// preserves the legacy default.
-static inline BoundaryDtype sweep_boundary_dtype_env() {
-    const char* env = std::getenv("SWEEP_BOUNDARY_DTYPE");
-    if (env == nullptr) {
-        // Fall back to legacy FP16 gate so old test paths still work.
-        return sweep_use_fp16_boundary() ? BoundaryDtype::FP16 : BoundaryDtype::FP32;
-    }
-    if (env[0] == 'f' && env[1] == 'p' && env[2] == '1' && env[3] == '6') return BoundaryDtype::FP16;
-    if (env[0] == 'b' && env[1] == 'f' && env[2] == '1' && env[3] == '6') return BoundaryDtype::BF16;
-    if (env[0] == 'i' && env[1] == 'n' && env[2] == 't' && env[3] == '8') return BoundaryDtype::INT8;
-    return BoundaryDtype::FP32;
-}

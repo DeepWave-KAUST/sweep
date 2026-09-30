@@ -1,112 +1,111 @@
+"""Wave equations.
+
+Every equation module decorates its class with ``@register_equation`` (see
+``_registry.py``); importing the modules below runs those decorators, and the
+whole public name set -- canonical names, author-named aliases, and the
+per-symmetry ``*Default*`` routing -- is bound at module scope straight from the
+registry. Adding an equation is "write the module, decorate the class"; there is
+nothing to edit here and no ``globals()`` scan to keep honest.
+
+Alias sets live next to their classes, so the citation-to-class mapping is
+visible where the physics is:
+
+* ``AcousticVTILiang`` / ``AcousticTTILiang`` -- Liang K. et al. (2022),
+  2nd-order pseudo-acoustic, 10.1190/geo2022-0292.1
+* ``AcousticVTIAlkhalifah`` / ``AcousticTTIAlkhalifah`` -- Tariq Alkhalifah
+  (2000), qP eta-formulation, 10.1190/1.1444815 (one class covers VTI and TTI)
+* ``AcousticVTIDuveneck``/``3D`` -- Duveneck et al. (2008), 1st-order
+  velocity-stress, 10.1190/1.3059320
+* ``DASElastic``/``3D`` -- alias of ``DASZhao``/``3D``
+* ``ElasticAPM`` -- alias of ``Elastic`` (Cao & Chen 2018 APM free surface;
+  the same class, dispatched by the propagator's ``topo_method='apm'``)
+
+The ``*Default*`` names point at the class a user gets when they just want "the
+standard" solver for that symmetry: 2-D VTI routes to Liang's 2nd-order scalar
+(memory-light, the original SWEEP entry), 3-D VTI to Duveneck's first-order
+because it is the only one with a 3-D class.
+"""
+from ._registry import (
+    equation_classes,
+    equation_method,
+    get_equation,
+    list_equations,
+    register_equation,
+)
 from .base import WaveEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
-from .acoustic_lsrtm import AcousticLSRTM
-from .acoustic_lsrtm3d import AcousticLSRTM3D
-from .acoustic1st import Acoustic1st
-# from .elasticz import ElasticZ
-from .acoustic_vrz import AcousticVRZ, AcousticVRZ3D
-# from .aec_lsrtm import AECLSRTM
-# from .elastic_lsrtm import ElasticLSRTM
-from .elastic import Elastic
-from .elastic_tti import ElasticTTI
-from .elastic_tti_sg import ElasticTTISG
-from .elastic_tti_sg3d import ElasticTTISG3D
-from .elastic_tti_2nd import ElasticTTI2nd
-from .elastic3d import Elastic as Elastic3D
-# DAS family lives in `das.py` which imports torch at module top. Guard the
-# import so jax-only environments (no torch installed) can still
-# ``import sweep.equations`` and use jax-only equations / propagators.
-# Mirrors the ``qP_tti`` pattern below.
+
+# Importing each module is what runs its @register_equation decorator.
+from . import (
+    acoustic,
+    acoustic1st,
+    acoustic3d,
+    acoustic_curvilinear,
+    acoustic_lsrtm,
+    acoustic_lsrtm3d,
+    acoustic_vrr,
+    acoustic_vrz,
+    acoustic_vti_1st,
+    elastic,
+    elastic3d,
+    elastic_apm,
+    elastic_curvilinear,
+    elastic_tti,
+    elastic_tti_2nd,
+    elastic_tti_sg,
+    elastic_tti_sg3d,
+    elastic_vrr,
+    qP_tariq,
+    qP_vti,
+    visco_acoustic,
+)
+
+# Public exports that are NOT WaveEquation subclasses, so they are not in the
+# registry: a ``__new__`` dispatch facade and a helper function.
+from .acoustic_aniso import AcousticAniso
+from .elastic_vrr import compute_vector_reflectivity
+
+# ``das`` imports torch at module top; guard it so a jax-only environment can
+# still ``import sweep.equations`` and use the jax-only equations. The four DAS
+# equation classes self-register; only the nn.Module facade and the DSP helpers
+# are bound explicitly.
 try:
-    from .das import (
-        DAS,
-        DASElastic,
-        DASElastic3D,
-        DASModeler,    # back-compat alias of `DAS`
-        DASMu,
-        DASMu3D,
-        DASZhao,
-        DASZhao3D,
-        gauge_average,
-        helical_das_response,
-    )
+    from . import das  # noqa: F401  (registers DASZhao/3D, DASMu/3D + DASElastic aliases)
+    from .das import DAS, DASModeler, gauge_average, helical_das_response
 except ModuleNotFoundError as _das_import_err:
     if _das_import_err.name != "torch":
         raise
-    DAS = DASElastic = DASElastic3D = DASModeler = None
-    DASMu = DASMu3D = DASZhao = DASZhao3D = None
-    gauge_average = helical_das_response = None
+    DAS = DASModeler = gauge_average = helical_das_response = None
+    DASZhao = DASZhao3D = DASMu = DASMu3D = None
+    DASElastic = DASElastic3D = None
 
-from .acoustic_vrr import AcousticVRR
+# qP_tti (eta-acoustic TTI) is optional for the same reason.
 try:
-    from .qP_tti import AcousticTTI
+    from . import qP_tti  # noqa: F401  (registers AcousticTTI + AcousticTTILiang)
 except ModuleNotFoundError:
-    AcousticTTI = None
-# from .aec import AEC
-from .visco_acoustic import ViscoAcoustic
-from .qP_vti import AcousticVTI
-# from .elasticP import ElasticP
-from .acoustic import Acoustic
-from .qP_tariq import AcousticTariq
-from .acoustic3d import Acoustic3D
-# TODO: re-run any codegen script if one exists for this module.
-from .acoustic_vti_1st import AcousticVTI1st, AcousticVTI1st3D
-from .acoustic_aniso import AcousticAniso
-from .acoustic_curvilinear import AcousticCurvilinear
-from .elastic_curvilinear import ElasticCurvilinear
-from .elastic_apm import ElasticAPM
-from .elastic_vrr import (
-    ElasticVRR,
-    compute_vector_reflectivity,
-)
+    AcousticTTI = AcousticTTILiang = None
 
-
-# ---------------------------------------------------------------------------
-# Anisotropic entry points — author-named aliases (mirror the DAS pattern
-# in `das.py`, where the canonical user-facing name aliases to the author's
-# class: `DAS = DASZhao`, `DASElastic = DASZhao`, etc.).
-#
-# Originals stay exported above for back-compat.  Prefer the author-named
-# alias in new code; it makes the citation-to-class mapping obvious.
-# ---------------------------------------------------------------------------
-
-#   Liang K. et al. (2022) — 2nd-order pseudo-acoustic, 10.1190/geo2022-0292.1
-AcousticVTILiang        = AcousticVTI
-AcousticTTILiang        = AcousticTTI
-
-#   Tariq Alkhalifah (2000) — qP η-formulation, 10.1190/1.1444815
-AcousticVTIAlkhalifah   = AcousticTariq
-AcousticTTIAlkhalifah   = AcousticTariq   # same class; eta-acoustic covers VTI & TTI
-
-#   Duveneck et al. (2008) — 1st-order velocity-stress acoustic VTI,
-#                            10.1190/1.3059320
-AcousticVTIDuveneck     = AcousticVTI1st
-AcousticVTIDuveneck3D   = AcousticVTI1st3D
-
-
-# Per-symmetry default entry: when the user just wants "the standard" VTI
-# acoustic propagator without thinking about authors.  Matches the DAS
-# convention `DAS = DASZhao` (sensible default points at the most-used
-# class).  Today we route 2-D VTI to Liang's 2nd-order scalar (memory-
-# light, the original SWEEP entry); 3-D VTI routes to Duveneck's
-# first-order because that's the only one with a 3-D class.
-AcousticVTIDefault     = AcousticVTI            # 2-D, 2nd-order
-AcousticVTIDefault3D   = AcousticVTI1st3D       # 3-D, 1st-order
+# Bind every registered public name at module scope, so
+# ``from sweep.equations import Acoustic`` / ``AcousticVTILiang`` / ``Elastic3D``
+# all keep working.
+globals().update(equation_classes())
 
 
 def _equation_classes():
-    return {
-        name: obj
-        for name, obj in globals().items()
-        if isinstance(obj, type) and issubclass(obj, WaveEquation) and obj is not WaveEquation
-    }
+    """Deprecated alias of :func:`equation_classes`.
+
+    Kept only for companion repos (sweep-tasks, sweep-agent) that still import
+    it. Nothing inside sweep uses it -- ``test_equation_registry_public_api``
+    keeps it that way -- so this can go once those repos are updated.
+    """
+    return equation_classes()
 
 
 def supports_torch_binding(equation):
     """Check whether an equation class or exported equation name supports ``sweep._C``."""
     if isinstance(equation, str):
-        equation_cls = _equation_classes().get(equation)
+        equation_cls = equation_classes().get(equation)
         if equation_cls is None:
             raise KeyError(f"Unknown equation '{equation}'")
         return equation_cls.supports_torch_binding()
@@ -123,25 +122,6 @@ def supports_torch_binding(equation):
 def torch_binding_supported_equations():
     """Return the exported equation names that support the compiled PyTorch binding."""
     return sorted(
-        name for name, equation_cls in _equation_classes().items()
+        name for name, equation_cls in equation_classes().items()
         if equation_cls.supports_torch_binding()
     )
-
-# __all__ = [
-#     'AcousticLSRTM',
-#     'Acoustic1st',
-#     'ElasticZ',
-#     'AcousticVRZ',
-#     'AECLSRTM',
-#     'ElasticLSRTM',
-#     'Elastic',
-#     'AcousticVRR',
-#     'AcousticTTI',
-#     'AEC',
-#     'ViscoAcoustic',
-#     'AcousticVTI',
-#     'ElasticP',
-#     'Acoustic',
-#     'AcousticTariq',
-#     'Acoustic3D',
-# ]

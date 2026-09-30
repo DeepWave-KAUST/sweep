@@ -1,8 +1,12 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_plain, record_single
+
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
 from ._free_surface import zero_above_topo
+from ._registry import register_equation
 
 
 def step_cpml(
@@ -21,29 +25,25 @@ def step_cpml(
     dudy = grad_op(u_now, h, -2)
     dudx = grad_op(u_now, h, -1)
 
-    # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dudz) + grad_op(az*psiz, h, -3)
-    w_sum += (1+bz) * tmpz + az * zetaz
+    # Axes are accumulated z, y, x -- the order is preserved because
+    # floating-point addition is not associative.
+    contrib_z, psizn, zetaz = cpml_axis_update(
+        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op)
+    w_sum += contrib_z
 
-    psizn = bz * dudz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
+    contrib_y, psiyn, zetay = cpml_axis_update(
+        lap_y, dudy, psiy, zetay, ay, by, dbydy, h, -2, grad_op)
+    w_sum += contrib_y
 
-    # Y direction
-    tmpy = ((1+by)*lap_y + dbydy * dudy) + grad_op(ay*psiy, h, -2)
-    w_sum += (1+by) * tmpy + ay * zetay
-    psiyn = by * dudy + ay * psiy
-    zetay = by * tmpy + ay * zetay
-
-    # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dudx) + grad_op(ax*psix, h, -1)
-    w_sum += (1+bx) * tmpx + ax * zetax
-    psixn = bx * dudx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op)
+    w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
 
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
+@register_equation()
 class Acoustic3D(SecondOrderEquation):
     """Second-order 3-D acoustic wave equation with CPML auxiliary fields.
 
@@ -54,6 +54,10 @@ class Acoustic3D(SecondOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic3d"
+    supports_image_topography = True
+    supports_image_topography_c = True
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic P-wave velocity model.", unit="m/s"),
@@ -127,32 +131,24 @@ class Acoustic3D(SecondOrderEquation):
                 out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out
 
-    def _C(self, ):
-        import torch
-        from sweep._C import (
-            acoustic3d_forward,
-            acoustic3d_backward,
-            acoustic3d_backward_bs,
-            acoustic3d_backward_ckpt,
-            acoustic3d_backward_recursive_ckpt,
-        )
-        return (
-            acoustic3d_forward,
-            acoustic3d_backward,
-            acoustic3d_backward_bs,
-            acoustic3d_backward_ckpt,
-            acoustic3d_backward_recursive_ckpt,
-        )
-
-    def _C_rtm(self):
-        import torch
-        from sweep._C import acoustic3d_rtm
-
-        return acoustic3d_rtm
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
+            save_all_shape=history_plain(),
+            # Checkpoint backward (csrc/cuda/common/eq_driver.cuh
+            # generic_backward_ckpt / _recursive_ckpt).  Its replay state is
+            # the forward slot list without the psi shadows (9, derived); the
+            # recursive bisection keeps one scratch state set per level on
+            # top of set 0.
+            recursive_state_depth=True,
+            # ckpt mode: the recomputed chunk, allt_shape rows
+            # (chunk, B, nz, ny, nx) (ACOUSTIC_CKPT_CHUNK_FORWARD); recursive mode
+            # images from the leaf's scratch instead and keeps no history.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)] if mode == "ckpt" else [],
+            # recursive mode: the leaf's model-shaped u_this scratch
+            # (ACOUSTIC_RECURSIVE_U_THIS); the other modes take no workspace.
+            backward_workspace_shapes=lambda B, nt, grid, mode: [[B, 1, *grid]] if mode == "recursive" else [],
             base_nvar=3,
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3) for the
             # race-free forward psi double-buffer (read psi, write psi*n, swap_pml).
@@ -169,5 +165,9 @@ class Acoustic3D(SecondOrderEquation):
             pml_slot_axes=("x", "z", "x", "z", "y", "y", "x", "z", "y"),
             checkpoint_slot_axes=(None, None, "x", "y", "z", "x", "y", "z"),
             boundary_save_nvar=1,
-            backward_workspace_nvar=1,
+            slots=slot_table.ACOUSTIC3D,
+            grads_out_has_wavelet=True,
+            supports_boundary_tail_steps=True,
+            stepped=True,
+            illum_nvar=2,
         )

@@ -1,6 +1,10 @@
+from __future__ import annotations
 from dataclasses import asdict, dataclass, fields, is_dataclass
+from sweep.core.arguments import warn_deprecated_spelling
 from typing import Any
+from typing import ClassVar
 from typing import Literal
+from typing import Union
 
 
 @dataclass(frozen=True)
@@ -60,7 +64,6 @@ class PropagatorDefaults:
     nt: int = -1
     batch_size: int = 1
     allow_growth: bool = True
-    full_mode: str = "full"
 
 
 EAGER_DEFAULTS = EagerDefaults()
@@ -159,6 +162,28 @@ class BoundaryOptions:
             raise ValueError(
                 "BoundaryOptions.disk_async_read is only valid when storage='disk'."
             )
+
+
+# The staging knobs only some storages accept; BoundaryOptions.__post_init__
+# refuses them anywhere else.  The legacy boundary_saving_config dict route
+# never validated them, so a config that set them once for every storage
+# (``pinned_memory: True`` with ``storage: 'gpu'``) was read, the knob simply
+# ignored.  Validating such a dict must keep reading it.
+_STORAGE_ONLY_KNOBS = {
+    "transfer_interval": ("cpu", "disk"),
+    "ring_buffers": ("cpu", "disk"),
+    "pinned_memory": ("cpu",),
+    "disk_async_read": ("disk",),
+}
+
+
+def _applicable_boundary_knobs(knobs: dict) -> dict:
+    """``knobs`` without the staging knobs its storage ignores (the legacy dict
+    semantics).  The typed ``BoundarySaving(...)`` stays strict; this is for
+    reading a legacy dict only."""
+    storage = knobs.get("storage", BOUNDARY_DEFAULTS.storage)
+    return {k: v for k, v in knobs.items()
+            if storage in _STORAGE_ONLY_KNOBS.get(k, (storage,))}
 
 
 @dataclass
@@ -323,3 +348,202 @@ def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_co
         if strategy not in exclude:
             return strategy
     return "full"
+
+
+# ---------------------------------------------------------------------------
+# The gradient-memory strategy as a type, not a tag plus optional bags
+# ---------------------------------------------------------------------------
+# ``MemoryOptions(strategy=..., boundary=..., ckpt=...)`` can express states that
+# are not valid -- a strategy with the wrong bag filled, or a bag with no
+# strategy -- so it carries six runtime checks whose only job is to reject them.
+# When the TYPE carries the strategy, every one of those states becomes
+# unrepresentable and the errors move to the call site with the right argument
+# names: ``Ckpt(transfer_interval=4)`` is a TypeError from Python itself.
+#
+# The names follow the vocabulary already in the codebase rather than taste:
+# ``Ckpt`` because everything here says ckpt (``use_ckpt``, ``ckpt_chunks``),
+# ``Full`` because the strategy string is 'full'. ``BoundarySaving`` is the one
+# spelled out: bare ``Boundary`` would be badly ambiguous in a solver where
+# "boundary" means the absorbing/PML boundary in ~685 places against ~299 for
+# boundary saving.
+#
+# They subclass the existing option dataclasses, so every field, default and
+# validation rule is inherited rather than copied, and ``isinstance(x,
+# BoundaryOptions)`` keeps working for code that predates this.
+
+@dataclass
+class Full:
+    """Keep everything the backward needs in memory. No parameters, by nature."""
+    strategy: ClassVar[str] = "full"
+
+
+@dataclass
+class BoundarySaving(BoundaryOptions):
+    """Reconstruct the forward wavefield from saved boundary values."""
+    strategy: ClassVar[str] = "boundary"
+
+
+@dataclass
+class Ckpt(CkptOptions):
+    """Rematerialise the forward wavefield from checkpoints."""
+    strategy: ClassVar[str] = "ckpt"
+
+
+MemoryStrategy = Union[Full, BoundarySaving, Ckpt]
+
+_STRATEGY_TYPES = {"full": Full, "boundary": BoundarySaving, "ckpt": Ckpt}
+
+
+def as_memory_strategy(value):
+    """Normalise anything that can name a memory strategy into one of the types.
+
+    Accepts, in order of preference:
+
+    * ``Full`` / ``BoundarySaving`` / ``Ckpt`` -- returned unchanged;
+    * a legacy ``MemoryOptions(strategy=..., boundary=..., ckpt=...)``;
+    * a dict, either the new flat shape ``{'kind': 'boundary', 'storage': ...}``
+      or the legacy nested one ``{'strategy': 'boundary', 'boundary': {...}}``.
+      Both are accepted on the way IN because the nested shape is already
+      written into stored experiment YAML -- rewriting those files would edit
+      the record of what was actually run;
+    * ``None`` -- returned as ``None``, meaning "no request", which is distinct
+      from ``Full()``.
+    """
+    if value is None or isinstance(value, (Full, BoundarySaving, Ckpt)):
+        return value
+
+    if isinstance(value, MemoryOptions):
+        warn_deprecated_spelling(
+            "MemoryOptions(strategy=..., boundary=..., ckpt=...)",
+            "Full() / BoundarySaving(...) / Ckpt(...)")
+        if value.strategy is None:
+            return None
+        if value.strategy == "full":
+            return Full()
+        sub = value.boundary if value.strategy == "boundary" else value.ckpt
+        cls = _STRATEGY_TYPES[value.strategy]
+        return cls(**{f.name: getattr(sub, f.name) for f in fields(sub)})
+
+    if isinstance(value, dict):
+        data = dict(value)
+        kind = data.pop("kind", None) or data.pop("strategy", None)
+        if kind is None:
+            raise ValueError(
+                "a memory-strategy dict needs 'kind' (or the legacy 'strategy'); "
+                f"got keys {sorted(value)}")
+        if kind not in _STRATEGY_TYPES:
+            raise ValueError(
+                f"memory strategy must be 'full', 'boundary' or 'ckpt', got {kind!r}")
+        # Legacy nested shape: the parameters sit under a key named after the
+        # strategy, and the same word therefore appears twice.
+        nested = data.pop(kind, None)
+        if nested is not None:
+            warn_deprecated_spelling(
+                f"the nested {{'strategy': {kind!r}, {kind!r}: {{...}}}} dict",
+                f"a flat {{'kind': {kind!r}, ...}} dict")
+            data = dict(nested)
+        data.pop("boundary", None)
+        data.pop("ckpt", None)
+        return _STRATEGY_TYPES[kind](**data)
+
+    raise TypeError(
+        f"cannot read a memory strategy from {type(value).__name__}; pass "
+        "Full(), BoundarySaving(...), Ckpt(...) or a dict with 'kind'.")
+
+
+def to_legacy_memory_options(strategy):
+    """Inverse of :func:`as_memory_strategy`, for the internal plumbing.
+
+    The impl='c' path translates ``cuda_options.memory`` into init kwargs
+    through code that reads the tagged shape (``{'strategy': ..., 'boundary':
+    {...}}``). Rather than teach every one of those layers the new types, the
+    public entry point converts once, here, on the way in. The new types are the
+    API; the tagged form remains the wire format until the layers below are
+    migrated in their own right.
+    """
+    if strategy is None or isinstance(strategy, MemoryOptions):
+        return strategy
+    if isinstance(strategy, Full):
+        return MemoryOptions(strategy="full")
+    if isinstance(strategy, BoundarySaving):
+        return MemoryOptions(
+            strategy="boundary",
+            boundary=BoundaryOptions(**{f.name: getattr(strategy, f.name)
+                                        for f in fields(BoundaryOptions)}))
+    if isinstance(strategy, Ckpt):
+        return MemoryOptions(
+            strategy="ckpt",
+            ckpt=CkptOptions(**{f.name: getattr(strategy, f.name)
+                                for f in fields(CkptOptions)}))
+    raise TypeError(f"not a memory strategy: {type(strategy).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# What each backend can actually do
+# ---------------------------------------------------------------------------
+# Declared per backend rather than discovered by hitting a scattered ValueError
+# somewhere down the call stack, so that the answer to "can eager do this?" is
+# one table instead of a search. Every entry below was MEASURED, not read off a
+# docstring.
+#
+# The entry that matters most is ``tail_steps`` on eager. It was being ACCEPTED
+# and then dropped: ``_apply_eager_memory`` forwards only storage and
+# storage_dtype, and the eager backend has no implementation of truncation at
+# all. So ``BoundarySaving(tail_steps=20)`` on eager silently produced a
+# full-length gradient. Refusing an unsupported option is a nuisance; accepting
+# it and ignoring it is a wrong answer that looks right.
+_MEMORY_CAPABILITIES = {
+    "c": {
+        "strategies": ("full", "boundary", "ckpt"),
+        "boundary_storage": ("gpu", "cpu", "disk"),
+        "boundary_tail_steps": True,
+        "ckpt_mode": ("chunk", "recursive"),
+    },
+    "eager": {
+        "strategies": ("full", "boundary", "ckpt"),
+        "boundary_storage": ("gpu", "cpu"),   # the ring stays on device or in host RAM
+        "boundary_tail_steps": False,         # no truncated backward in the eager driver
+        "ckpt_mode": ("chunk",),              # no recursive/binomial schedule
+    },
+}
+
+
+def check_memory_supported(impl, strategy):
+    """Refuse a memory request the backend cannot honour, before it is built.
+
+    Raises :class:`NotImplementedError` naming the impl, the option and what it
+    does support. An unsupported request must never be quietly downgraded: the
+    run would report one strategy and compute another.
+    """
+    caps = _MEMORY_CAPABILITIES.get(impl)
+    if caps is None or strategy is None:
+        return
+    name = getattr(strategy, "strategy", None)
+    if name is None:
+        return
+    if name not in caps["strategies"]:
+        raise NotImplementedError(
+            f"impl={impl!r} does not implement the {name!r} gradient-memory "
+            f"strategy; it supports {', '.join(caps['strategies'])}.")
+
+    if name == "boundary":
+        storage = getattr(strategy, "storage", "gpu")
+        if storage not in caps["boundary_storage"]:
+            raise NotImplementedError(
+                f"impl={impl!r} boundary saving does not implement "
+                f"storage={storage!r}; it supports "
+                f"{', '.join(caps['boundary_storage'])}.")
+        tail = getattr(strategy, "tail_steps", None)
+        if tail and not caps["boundary_tail_steps"]:
+            raise NotImplementedError(
+                f"impl={impl!r} boundary saving does not implement tail_steps "
+                f"(truncated backward); it would be accepted and ignored, "
+                f"returning a full-length gradient. Use impl='c' for "
+                f"tail_steps={tail!r}.")
+
+    elif name == "ckpt":
+        mode = getattr(strategy, "mode", "chunk")
+        if mode not in caps["ckpt_mode"]:
+            raise NotImplementedError(
+                f"impl={impl!r} checkpointing does not implement "
+                f"mode={mode!r}; it supports {', '.join(caps['ckpt_mode'])}.")

@@ -49,11 +49,7 @@ REC_Y, REC_Z = NY // 2, 2
 X_LO_BIT, X_HI_BIT = 1, 2
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def vp_global():
     vp = 1800.0 + 600.0 * np.linspace(0, 1, NZ, dtype=np.float32)[:, None, None]
@@ -83,17 +79,15 @@ def capture_both(prop):
     fwd_orig = impl.forward_func
 
     def fwd_wrapper(params):
-        out = fwd_orig(params)
-        cap["fp"], cap["fwd_raw_out"], cap["fwd_func"] = params, out, fwd_orig
-        return out
+        fwd_orig(params)
+        cap["fp"], cap["fwd_func"] = params, fwd_orig
 
     impl.forward_func = fwd_wrapper
     bwd_orig = impl.backward_bs_func
 
     def bwd_wrapper(params):
-        out = bwd_orig(params)
+        bwd_orig(params)
         cap["bp"], cap["bwd_func"] = params, bwd_orig
-        return out
 
     impl.backward_bs_func = bwd_wrapper
     return cap
@@ -112,7 +106,7 @@ class TileState3D:
         self.fwd_func = cap["fwd_func"]
         self.bp = cap["bp"]
         self.bwd_func = cap["bwd_func"]
-        self.fwd_record_raw = cap["fwd_raw_out"][2]
+        self.fwd_record_raw = self.fp.record_out      # what the public run wrote
 
         L = list(self.fp.wavefields)
         if not L:

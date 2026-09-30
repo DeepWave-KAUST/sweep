@@ -1,14 +1,15 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "kernels.cuh"
+#include "../../../core/check.h"
 
 namespace elastic_tti_sg3d {
 
-inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
+inline StiffnessPointer stiffness_view(const std::vector<Buf>& models)
 {
-    TORCH_CHECK(models.size() == 22, "ElasticTTISG3D CUDA expects prepared models: rho plus 21 stiffness tensors");
+    SWEEP_CHECK(models.size() == 22, "ElasticTTISG3D CUDA expects prepared models: rho plus 21 stiffness tensors");
     StiffnessPointer out{};
     int i = 0;
     out.rho = models[i++].data_ptr<float>();
@@ -36,19 +37,9 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     return out;
 }
 
-inline std::vector<torch::Tensor> zero_model_grads(const std::vector<torch::Tensor>& models)
+inline StiffnessGradPointer stiffness_grad_view(std::vector<Buf>& grads)
 {
-    TORCH_CHECK(models.size() == 22, "ElasticTTISG3D CUDA backward expects 22 prepared models");
-    std::vector<torch::Tensor> grads;
-    grads.reserve(models.size());
-    for (const auto& model : models)
-        grads.push_back(torch::zeros_like(model));
-    return grads;
-}
-
-inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
-{
-    TORCH_CHECK(grads.size() == 22, "ElasticTTISG3D CUDA backward expects 22 prepared model gradients");
+    SWEEP_CHECK(grads.size() == 22, "ElasticTTISG3D CUDA backward expects 22 prepared model gradients");
     StiffnessGradPointer out{};
     int i = 0;
     out.rho = grads[i++].data_ptr<float>();

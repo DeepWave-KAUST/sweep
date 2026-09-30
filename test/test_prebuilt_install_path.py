@@ -114,10 +114,12 @@ def test_precompile_is_a_noop_on_a_prebuilt_extension(monkeypatch):
 
 
 def test_precompile_still_compiles_when_the_jit_shim_is_in_place(monkeypatch):
-    """The other half: with the JIT shim, precompile must actually call it --
-    otherwise this fix would turn the documented warm-up into a no-op."""
+    """The developer path (SWEEP_JIT_FULL=1) keeps the compiled pybind shim,
+    and there precompile must actually call its loader -- otherwise the
+    documented warm-up would be a no-op on exactly the path that compiles."""
     import sweep
 
+    monkeypatch.setenv("SWEEP_JIT_FULL", "1")
     called = []
     mod = types.ModuleType("sweep._C")
     mod._load = lambda **kw: called.append(kw)
@@ -132,3 +134,45 @@ def test_precompile_still_compiles_when_the_jit_shim_is_in_place(monkeypatch):
     called.clear()
     assert sweep.precompile(require_gpu=False) is True
     assert called == [{"compile_only": True}], called
+
+
+def test_precompile_loads_the_core_and_never_the_shim_by_default(monkeypatch):
+    """The default path is the ctypes shim: precompile resolves the core
+    (core_path) and loads it (core_lib) so is_compiled() is True afterwards,
+    and never calls the pybind loader -- nothing compiles."""
+    import sweep
+    from sweep.backend.c import jit, loader
+
+    monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
+    loads, cores, libs, gates = [], [], [], []
+    mod = types.ModuleType("sweep._C")
+    mod._load = lambda **kw: loads.append(kw)
+    monkeypatch.setitem(sys.modules, "sweep._C", mod)
+    monkeypatch.setattr(sweep, "_C", mod, raising=False)
+    monkeypatch.setattr(jit, "can_build", lambda: (gates.append("build"), (True, ""))[1])
+    monkeypatch.setattr(jit, "can_compile", lambda: (gates.append("compile"), (True, ""))[1])
+    monkeypatch.setattr(jit, "core_path", lambda: cores.append(1) or Path("/fake/libsweep_core.so"))
+    monkeypatch.setattr(loader, "core_lib", lambda: libs.append(1) or object())
+
+    assert sweep.precompile() is True
+    assert loads == [] and cores == [1] and libs == [1] and gates == ["build"]
+
+    # require_gpu=False relaxes only the device check: the toolkit-or-core
+    # gate is can_compile, the loader still never runs.
+    assert sweep.precompile(require_gpu=False) is True
+    assert loads == [] and cores == [1, 1] and libs == [1, 1] and gates == ["build", "compile"]
+
+
+def test_precompile_refuses_with_the_gate_reason_by_default(monkeypatch):
+    import sweep
+    from sweep.backend.c import jit
+
+    monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
+    mod = types.ModuleType("sweep._C")
+    mod._load = lambda **kw: (_ for _ in ()).throw(AssertionError("loader must not run"))
+    monkeypatch.setitem(sys.modules, "sweep._C", mod)
+    monkeypatch.setattr(sweep, "_C", mod, raising=False)
+    monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc and no shipped core fits"))
+    with pytest.raises(RuntimeError, match="no nvcc and no shipped core fits"):
+        sweep.precompile()
+

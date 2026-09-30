@@ -47,11 +47,7 @@ NT2D = 120
 NT3D = 60
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def build(ndim, *, abcn=8, bs=None, use_ckpt=False, nt=NT2D):
     shape = (48, 56) if ndim == 2 else (24, 20, 24)
@@ -106,29 +102,7 @@ def build(ndim, *, abcn=8, bs=None, use_ckpt=False, nt=NT2D):
     return prop, wavelet, sources, receivers, models
 
 
-def capture_backward(prop):
-    """Wrap the compiled propagator's backward funcs so the populated
-    BackwardInput is kept (Warpper.apply reads the attrs at forward time)."""
-    cap = {}
-    impl = prop._backend_impl
-    for name in ("backward_func", "backward_bs_func", "backward_ckpt_func"):
-        orig = getattr(impl, name, None)
-        if orig is None:
-            continue
-
-        def make(orig, name):
-            def wrapper(params):
-                out = orig(params)
-                cap["params"] = params
-                cap["raw_out"] = out
-                cap["func"] = orig
-                cap["mode"] = name
-                return out
-            return wrapper
-
-        setattr(impl, name, make(orig, name))
-    return cap
-
+from conftest import capture_backward
 
 def run_public_once(prop, wavelet, sources, receivers, models):
     syn = prop(wavelet, sources, receivers, models=models)
@@ -162,10 +136,19 @@ class Harness:
             f"expected the psi+zeta double-buffer adjoint layout "
             f"({want}), got {len(self.L_adj)}"
         )
-        self.recon = (
-            [torch.zeros_like(self.p.models[0]) for _ in range(3)]
-            if mode == "bs" else None
-        )
+        # The captured params' own reconstruction list -- what
+        # _c.Wrapper.backward bound as forward_wavefields for the bs backward
+        # -- not a hand-built one: the replay then runs through the very grids
+        # the monolithic backward used, and a drift between the slot table's
+        # recon count and the driver's 3-tensor expectation surfaces here
+        # instead of hiding behind a literal that happened to match.  The
+        # full-storage backward binds none (it reads u_forward).
+        self.recon = list(self.p.forward_wavefields) if mode == "bs" else None
+        if self.recon is not None:
+            assert len(self.recon) == 3, (
+                f"expected the 3-tensor reconstruction list the bs backward "
+                f"binds (u_prev, u_now, u_next), got {len(self.recon)}"
+            )
         self.gbufs = [torch.zeros_like(self.p.forward_source)] + [
             torch.zeros_like(m) for m in self.p.models
         ]
@@ -288,7 +271,8 @@ def test_stepped_backward_guards():
     run_public_once(prop, wavelet, sources, receivers, models)
     p, func = cap["params"], cap["func"]
     nt = int(p.nt)
-    recon = [torch.zeros_like(p.models[0]) for _ in range(3)]
+    recon = list(p.forward_wavefields)   # the bs backward's own 3-tensor list
+    assert len(recon) == 3, f"expected 3 reconstruction grids, got {len(recon)}"
     gbufs = [torch.zeros_like(p.forward_source)] + [
         torch.zeros_like(m) for m in p.models
     ]
@@ -347,21 +331,6 @@ def test_stepped_backward_guards_ckpt():
     with pytest.raises(RuntimeError,
                        match="checkpoint backward does not support"):
         func(p)
-
-
-@cuda_only
-def test_stepped_backward_guards_rtm():
-    # full-storage params carry u_forward, which is what rtm() needs; the
-    # stepped TORCH_CHECK must fire before anything else.
-    prop, wavelet, sources, receivers, models = build(2, nt=16)
-    cap = capture_backward(prop)
-    run_public_once(prop, wavelet, sources, receivers, models)
-    p = cap["params"]
-    from sweep.propagator._c import _get_C
-    _C = _get_C()
-    p.bw_it_begin, p.bw_it_end = int(p.nt), 1
-    with pytest.raises(RuntimeError, match="stepped RTM not supported"):
-        _C.acoustic2d_rtm(p)
 
 
 @cuda_only

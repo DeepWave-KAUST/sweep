@@ -6,6 +6,7 @@
 #include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/elastic.h"   // reuses ElasticCPMLPointer (8 vals in 2D)
+#include "../../../core/check.h"
 
 
 namespace acoustic_vti_1st_2d {
@@ -126,8 +127,7 @@ __global__ void velocity_kernel(
     // PML / interior split — outside the PML the half-step coefficients
     // axh/bxh/azh/bzh vanish so the memory variables remain zero.
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
@@ -205,8 +205,7 @@ __global__ void stress_kernel(
     float C13 = c13_b[idx];
 
     bool in_pml =
-        (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-        (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+        solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.sH[idx] += solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
@@ -592,6 +591,14 @@ __global__ void calculate_grad_kernel(
     int b  = blockIdx.z;
 
     if (ix >= solver.nx || iz >= solver.nz) return;
+    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
+    // gradients on the way back to the model, so everything this kernel writes
+    // in the PML shell and the stencil halo is discarded -- it was read,
+    // multiplied and accumulated for nothing, once per time step.  The bounds
+    // come from the context and are CUT-AWARE: on a DD cut face phys_x0()
+    // collapses to the halo, so the cut-adjacent columns are still imaged.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
@@ -716,9 +723,9 @@ __global__ void calculate_grad_kernel(
 // Order MUST match AcousticVTI1st.FIELD_SPECS:
 //   [vx, vz, sH, sV, m_sHx, m_sVz, m_vxx, m_vzz].
 // ---------------------------------------------------------------------------
-inline VTIWavefieldPointer make_wf_pointer(const std::vector<torch::Tensor>& w)
+inline VTIWavefieldPointer make_wf_pointer(const std::vector<Buf>& w)
 {
-    TORCH_CHECK(w.size() == 8,
+    SWEEP_CHECK(w.size() == 8,
                 "AcousticVTI1st 2D expects 8 wavefield tensors; got ", w.size());
     VTIWavefieldPointer p{};
     p.vx    = w[0].data_ptr<float>();

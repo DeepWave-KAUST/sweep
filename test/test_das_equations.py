@@ -40,7 +40,7 @@ def test_helical_response_weights_and_gauge_average():
 def test_das_equations_are_exported_with_cuda_binding():
     import sweep.equations as eq
 
-    classes = eq._equation_classes()
+    classes = eq.equation_classes()
     assert classes["DASElastic"] is DASElastic
     assert classes["DASElastic3D"] is DASElastic3D
     assert classes["DASMu"] is DASMu
@@ -451,7 +451,9 @@ def test_das_elastic_2d_cuda_backward_matches_eager_with_random_adjoint(name, bo
             sources=sources,
             receivers=receivers,
             models=[vp, vs, rho],
-            boundary_saving_config={"enabled": False} if backend == "eager" else boundary_saving_config,
+            # only the c forward takes a call-time boundary config; the eager
+            # forward rejects unknown call kwargs
+            **({} if backend == "eager" else {"boundary_saving_config": boundary_saving_config}),
         )
         # Both backends return the canonical (B, nt, nrec, nfield) record;
         # the legacy `permute(1, 3, 2, 0)` here was a remnant from when the
@@ -548,7 +550,9 @@ def test_das_elastic_3d_cuda_backward_matches_eager_with_encoded_wavelet(name, b
             sources=sources,
             receivers=receivers,
             models=[vp, vs, rho],
-            boundary_saving_config={"enabled": False} if backend == "eager" else boundary_saving_config,
+            # only the c forward takes a call-time boundary config; the eager
+            # forward rejects unknown call kwargs
+            **({} if backend == "eager" else {"boundary_saving_config": boundary_saving_config}),
         )
         # See note on the 2-D variant: CUDA record is already canonical.
         if adjoint_weight is None:

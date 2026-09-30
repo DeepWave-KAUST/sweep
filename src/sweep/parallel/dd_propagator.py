@@ -46,81 +46,66 @@ shrink the boundary ring for finer grids; defaults to gpu/fp32.
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Sequence
+import warnings
+from typing import List
 
 import numpy as np
 import torch
 
+from sweep.equations.slot_table import slot_table_of
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, VRZ_DD
+from sweep.propagator._c import (_canonical_to_cuda_record,
+                                 _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
-from sweep.parallel.routing import partition_global_coords
+from sweep.parallel.routing import (
+    gather_tile_records,
+    partition_global_coords,
+)
+from sweep.propagator.options import BoundarySaving
+from sweep.parallel.pml import dd_cut_face_mask
 from sweep.propagator.torch import PropTorch
 from sweep.propagator._stepped import (
     SteppedBackwardRunner,
     SteppedBindingRunner,
-    acoustic_adj_pairs,
-    acoustic_psi_pairs,
 )
 
-X_LO_BIT, X_HI_BIT = 1, 2
-Y_LO_BIT, Y_HI_BIT = 16, 32
 
-# Per-family wavefield-list geometry (see acoustic.h / elastic.h ::bind and
-# sweep/propagator/_stepped.py).  ``nv``/``nphys``/``nrecon`` are 2-D, 3-D.
-_FAMILIES = {
-    "acoustic": dict(nwf=(9, 12), nphys=None, nv=None, nrecon=(3, 3),
-                     half_step=False),
-    "elastic": dict(nwf=(15, 36), nphys=(5, 9), nv=(2, 3), nrecon=(7, 12),
-                    half_step=True),
-}
+def check_dd_admission(equation, layout, spec):
+    """Refuse equations whose DECLARED capabilities cannot run ``spec``.
 
+    Replaces the retired ``_DD_EQUATIONS`` class-name whitelist.  Two
+    capabilities gate admission, both declared on ``cuda_layout``:
 
-# Which equations ModelParallel can actually run, and their wavefield family.
-#
-# The criterion is NOT the class name. DD advances the solver one step at a
-# time and exchanges halos between steps, so the equation's CUDA forward AND
-# backward have to honour the stepped range (``p.it_begin`` / ``p.it_end``).
-# Only these do -- see csrc/cuda/equations/{acoustic2d, acoustic3d,
-# acoustic_vrz3d, elastic2d, elastic3d}/{forward,backward}.cu.
-#
-# This used to be a substring match on the class name, which accepted every
-# ``Acoustic*`` / ``Elastic*`` variant in the library. The ones without a
-# stepped forward do not fail on the way in: their time loop is a plain
-# ``for (it = 0; it < p.nt; ++it)``, so a "run one step" call runs the WHOLE
-# record and DD then exchanges halos of a wavefield that already reached nt.
-# Silently wrong, which is worse than unsupported. ``AcousticVRZ`` (2-D) is
-# the clearest case -- its 3-D sibling IS stepped, so the name gives no hint.
-#
-# Adding an equation here means all three of: its forward.cu and backward.cu
-# implement the stepped range; its wavefield list matches the family geometry
-# in ``_FAMILIES``; and a DD-vs-single parity test covers it (test/dd_corner_*).
-_DD_EQUATIONS = {
-    "Acoustic": "acoustic",             # csrc/cuda/equations/acoustic2d
-    "Acoustic3D": "acoustic",           # csrc/cuda/equations/acoustic3d
-    "AcousticVRZ3D": "acoustic",        # csrc/cuda/equations/acoustic_vrz3d
-    "Elastic": "elastic",               # elastic2d and elastic3d -- the 3-D
-                                        # class is also named ``Elastic``,
-                                        # exported as ``Elastic3D``
-}
-
-
-def _family_of(equation) -> str:
-    # Walk the MRO so a subclass of a supported equation still works. Every
-    # equation in the library derives straight from First/SecondOrderEquation,
-    # never from a sibling, so this cannot smuggle in an unsupported one.
-    for klass in type(equation).__mro__:
-        family = _DD_EQUATIONS.get(klass.__name__)
-        if family is not None:
-            return family
-    raise NotImplementedError(
-        f"domain decomposition does not support {type(equation).__name__}. It "
-        f"needs an equation whose CUDA forward and backward implement the "
-        f"stepped range (it_begin/it_end): "
-        f"{', '.join(sorted(_DD_EQUATIONS))} -- Elastic covers 2-D and 3-D, "
-        f"and note AcousticVRZ3D is stepped while the 2-D AcousticVRZ is not. "
-        f"An equation without it would not raise, it would run the full record "
-        f"on every stepped call."
-    )
+    * ``stepped`` -- the compiled forward/backward_bs honour it_begin/it_end.
+      An equation without it would not raise; it would run the full record on
+      every stepped call and return zeros.  Silently wrong beats unsupported,
+      so this must be loud.
+    * ``dd_backward_phases`` -- required only when ``spec`` drives numbered
+      backward phases (the elastic physics split, the VRZ coupling exchange).
+      An unphased compiled backward ignores ``step_phase`` -- again silent.
+    """
+    name = type(equation).__name__
+    if not getattr(layout, "stepped", False):
+        raise NotImplementedError(
+            f"domain decomposition does not support {name}: its compiled "
+            f"drivers do not declare the stepped it_begin/it_end range "
+            f"(cuda_layout.stepped). Equations opt in by declaring "
+            f"stepped=True once their forward and backward_bs honour "
+            f"stepped segments -- joining the shared template drivers in "
+            f"csrc/cuda/common provides exactly that.")
+    bwd = spec.backward
+    needs_phases = any(
+        ph.step_phase is not None
+        for ph in tuple(getattr(bwd, "prologue", ()) or ()) + tuple(bwd.phases))
+    if needs_phases and not getattr(layout, "dd_backward_phases", False):
+        raise NotImplementedError(
+            f"domain decomposition does not support {name} yet: its schedule "
+            f"({spec.name}) drives numbered backward phases which the "
+            f"compiled backward does not declare "
+            f"(cuda_layout.dd_backward_phases). For the 2-D AcousticVRZ this "
+            f"is the coupling-exchange backward that only the 3-D sibling "
+            f"implements.")
 
 
 class _DDForward(torch.autograd.Function):
@@ -154,11 +139,20 @@ class _DDForward(torch.autograd.Function):
         with torch.enable_grad():
             rec = ddp.forward(wavelet, sources, receivers,
                               models=[m.detach() for m in models])
+        # The cotangent arrives in the canonical layout `rec` is in; backward has
+        # to put it back into the raw one _run_adjoint documents. Which inverse
+        # that is depends on the RAW ndim (3 = single-channel, 4 = multi-field),
+        # read off the live buffer here rather than in backward because
+        # _set_geometry may reallocate it in between.
+        ctx.cuda_record_ndim = ddp.record.ndim
         return rec.detach().clone()
 
     @staticmethod
     def backward(ctx, grad_record):
         ddp = ctx.ddp
+        # _run_adjoint's contract is the raw CUDA layout and stays that way; the
+        # conversion belongs at this boundary, mirroring _c.Wrapper.backward.
+        grad_record = _canonical_to_cuda_record(grad_record, ctx.cuda_record_ndim)
         tile_grads = ddp._run_adjoint(grad_record.contiguous())
         out = []
         for shp, g in zip(ctx.shapes, tile_grads):
@@ -201,7 +195,6 @@ class ModelParallel:
         # Read the global-problem spec off the single-domain propagator.
         # dh/dt are stored as buffer tensors (dh per-axis); recover plain Python
         # for the per-tile prop (scalar dh when the spacing is uniform).
-        self._global_prop = prop
         equation = prop.equation
         global_shape = prop._shape_phys
         if torch.is_tensor(prop.dh):
@@ -241,6 +234,28 @@ class ModelParallel:
         # compressing (fp16/bf16/int8) or offloading the DD boundary ring to fit
         # finer grids is a first-class API choice. Defaults (gpu/fp32) reproduce
         # the original v1 behaviour.
+        # DD reconstructs the forward wavefield from saved boundaries; there is
+        # no decomposed full-storage or checkpoint backward, and
+        # eq_driver.cuh's "domain-decomposed backward (cut_face_mask) is
+        # boundary-saving only" says so from the other side. Until now the
+        # request was SILENTLY REPLACED: nothing below reads 'enabled' or
+        # 'use_ckpt', and _tile_memory_strategy returns BoundarySaving
+        # unconditionally, so a caller who asked for Full() got reconstruction
+        # and a gradient 1.6e-07 away from the one they thought they were
+        # computing -- and the C-side check never fired, because Python had
+        # already swapped the strategy out from under it. Refuse the same way
+        # check_dd_admission refuses an equation: silently wrong is worse than
+        # unsupported.
+        _strategy = getattr(prop, "memory_strategy", "boundary")
+        if _strategy != "boundary":
+            raise NotImplementedError(
+                f"domain decomposition needs boundary saving, but the wrapped "
+                f"propagator's gradient-memory strategy is {_strategy!r}. DD "
+                f"reconstructs each tile's forward wavefield from saved "
+                f"boundaries; it has no full-storage or checkpoint backward. "
+                f"Build the propagator with "
+                f"memory=BoundarySaving(...) (storage='gpu' is the default, "
+                f"'cpu' stages the ring to the host) and wrap that.")
         _bcfg = getattr(prop, "boundary_saving_config", None) or {}
         self._bstorage = _bcfg.get("storage", "gpu")
         self._bdtype = _bcfg.get("storage_dtype", "fp32")
@@ -266,14 +281,21 @@ class ModelParallel:
         if self.ndim not in (2, 3):
             raise ValueError("global_shape must be 2-D or 3-D")
         self.equation = equation
-        self.family = _family_of(equation)
-        # VRZ is an "acoustic"-family variant (variable density).  Its CUDA
-        # forward kernels now implement the phased (comm/compute overlap) path
-        # (acoustic_vrz3d/forward.cu), so VRZ is eligible for the same forward
-        # overlap as acoustic3d.  The BACKWARD stays serial for the whole
-        # acoustic family (only elastic has a phased backward), so VRZ's
-        # backward still uses the step-then-exchange loop.
-        self._is_vrz = "vrz" in type(equation).__name__.lower()
+        # Whether this equation's backward needs the coupling-field exchange
+        # (a gradient that is a spatial DIVERGENCE rather than a pointwise
+        # product; variable-density VRZ is the case in the tree). Read off the
+        # equation's declaration -- it used to be `"vrz" in class name`, which
+        # a subclass named anything else would have slipped straight past.
+        _layout = getattr(equation, "cuda_layout", None)
+        # grads_out layout and illumination are output-binding facts about the
+        # compiled backward, declared by the equation rather than inferred from
+        # its family: grads_out is models+1 with slot 0 = grad_wavelet for the
+        # acoustic family, models for elastic (see the TORCH_CHECKs cited on
+        # CUDALayoutSpec).
+        self._ngrad_prefix = 1 if getattr(_layout, "grads_out_has_wavelet", False) else 0
+        self._illum_nvar = int(getattr(_layout, "illum_nvar", 0) or 0)
+        self._dd_coupling_nvar = int(getattr(_layout, "dd_coupling_nvar", 0) or 0)
+        self._dd_coeff_nvar = int(getattr(_layout, "dd_adjoint_coeff_nvar", 0) or 0)
         self.dev = dev
         self.nt = int(nt)
         self.abcn = int(abcn)
@@ -283,7 +305,6 @@ class ModelParallel:
         self.free_surface = bool(free_surface)
         self.world = self.topo.world_size
         self.rank = self.topo.rank
-        self._st = dict(_FAMILIES[self.family])
 
         self.local_shape, self.offsets = self.topo.local_extent(self.global_shape)
         self.x0 = self.offsets[-1]                       # global x-origin of tile
@@ -297,22 +318,14 @@ class ModelParallel:
 
         # cut-face mask + active halo axes: a cut exists wherever a neighbour is
         # present.  x-cut (px>1) and, for 3-D, y-cut (py>1) -> 2x2 when both.
-        self.cut_mask = 0
-        axes = []
-        if self.topo.neighbour_rank("x", -1) is not None:
-            self.cut_mask |= X_LO_BIT
-        if self.topo.neighbour_rank("x", +1) is not None:
-            self.cut_mask |= X_HI_BIT
-        if self.topo.px > 1:
-            axes.append("x")
-        if self.ndim == 3:
-            if self.topo.neighbour_rank("y", -1) is not None:
-                self.cut_mask |= Y_LO_BIT
-            if self.topo.neighbour_rank("y", +1) is not None:
-                self.cut_mask |= Y_HI_BIT
-            if self.topo.py > 1:
-                axes.append("y")
-        self.axes = tuple(axes)
+        # Same function PropBase uses for its own cut mask, so the two cannot
+        # drift; equivalence with the old inline neighbour_rank spelling was
+        # checked exhaustively over py<=3 x px<=4 x every rank x both ndims.
+        self.cut_mask = dd_cut_face_mask(self.topo, self.ndim)
+        self.axes = tuple(
+            ax for ax, n in (("x", self.topo.px),
+                             ("y", self.topo.py if self.ndim == 3 else 1))
+            if n > 1)
 
         # Inherit the wrapped prop's formulation verbatim. There is deliberately
         # no fallback: PropBase.__init__ already resolved a None pml_type to
@@ -320,7 +333,7 @@ class ModelParallel:
         # is always a concrete string. The old ``or ("cpmls" if elastic else
         # "cpmlr")`` was therefore unreachable, and the rule it encoded was
         # wrong anyway — it guessed the formulation from a substring of the
-        # class name (``_family_of``), which puts AcousticVTI1st in the
+        # class name (the retired family guess), which puts AcousticVTI1st in the
         # "acoustic" family and would have handed it 'cpmlr' when its staggered
         # step unpacks the 8 profiles of 'cpmls'. The equation's own
         # ``default_pml_type`` is the only thing that knows.
@@ -330,22 +343,7 @@ class ModelParallel:
             dh=dh, dt=dt, source_type=list(source_type),
             receiver_type=list(receiver_type), abcn=abcn,
             free_surface=self.free_surface, pml_type=pml, nt=nt, B=B,
-            use_ckpt=False,
-            boundary_saving_config={
-                "enabled": True,
-                # inherited from the wrapped prop (PropTorch memory= API);
-                # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
-                "storage": self._bstorage,
-                "storage_dtype": self._bdtype,
-                # tail truncation shrinks each tile's boundary ring to the
-                # last tail_steps steps (None = full length); the C++ side
-                # indexes it in shifted saved-step coordinates either way.
-                "tail_steps": self._btail or None,
-                # batching + ring depth decide whether the staged copies can
-                # overlap compute at all; 1/1 serialises them per step.
-                "transfer_interval": self._bti,
-                "ring_buffers": self._bring,
-                "pinned_memory": self._bpinned},
+            memory=self._tile_memory_strategy(),
             model_parallel=self.topo,
         )
 
@@ -357,6 +355,9 @@ class ModelParallel:
         ppad = self.prop.padding
         self.lo = ppad[0] + self.M
         self.hi = self.lo + self.nxp
+        # z likewise: the tile's own top pad (0 under a free surface, else the
+        # PML ramp plus any sigma=0 boundary buffer) plus the stencil halo.
+        self.ztop = ppad[-2] + self.M
         if self.ndim == 3:
             self.lo_y = ppad[2] + self.M
             self.hi_y = self.lo_y + self.nyp
@@ -367,7 +368,8 @@ class ModelParallel:
         self._fwd_halo = None
         self._bwd_halo = None
         self._model_halo = None
-        self._halo_sl_cache = {}     # (field.ndim, axis) -> crop slice tuple
+        self._halo_sl_cache = {}         # (field.ndim, axis) -> crop slice tuple
+        self._multi_group_cache = {}     # field data_ptrs -> cross-axis batched group
 
         # comm/compute overlap (acoustic + VRZ forward): a dedicated comm stream
         # runs step's halo exchange while step's interior computes. Eligible
@@ -394,11 +396,40 @@ class ModelParallel:
         self._need_adjoint = False
         self._model_dtype = None  # pinned by the first capture; see _capture
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
-        self._nwf = self._st["nwf"][0 if self.ndim == 2 else 1]
-        self._nrecon = self._st["nrecon"][0 if self.ndim == 2 else 1]
-        if self.family == "elastic":
-            self._nv = self._st["nv"][0 if self.ndim == 2 else 1]
-            self._nphys = self._st["nphys"][0 if self.ndim == 2 else 1]
+        # Wavefield-list geometry, derived from the equation's declared slot
+        # table. Every DD-capable equation has one; a missing table is a
+        # configuration error rather than something to paper over, because the
+        # fallback would have to guess counts that are load-bearing.
+        table = slot_table_of(equation)
+        if table is None:
+            raise NotImplementedError(
+                f"{type(equation).__name__} is accepted for domain "
+                f"decomposition but declares no cuda_layout.slots table, so "
+                f"its wavefield geometry cannot be derived.")
+        self._table = table
+        self._role_idx = {}
+        # Declarative time-loop schedule -- the only thing that decides how
+        # this equation's DD loops run. Selected from what the equation
+        # DECLARES: a fixed-slot layout (no rotating time-level block) is the
+        # staggered first-order protocol; a divergence-form gradient needs the
+        # coupling exchange; otherwise it is the plain second-order schedule.
+        self._spec = (ELASTIC_DD if not table.u_blocks
+                      else VRZ_DD if self._dd_coupling_nvar else ACOUSTIC_DD)
+        # Admission is DECLARED, not name-listed (see check_dd_admission).
+        check_dd_admission(equation, _layout, self._spec)
+        self._nwf = table.n_forward
+        # FORWARD and ADJOINT list lengths are different quantities for the
+        # acoustic family (9/12 vs 11/15: the fused adjoint double-buffers zeta
+        # as well as psi). The old hand table only ever knew one number, so the
+        # adjoint fallback in _bind_adjoint_buffers sized itself with the
+        # forward count -- latent only because bp.adjoint_wavefields is never
+        # actually empty. Two quantities, two names.
+        self._nadj = table.n_adjoint
+        self._nrecon = table.nrecon
+        # Explicit index tuples rather than two counts plus the unstated
+        # assumption that velocity slots are a contiguous prefix -- true for
+        # elastic, false for DAS-Zhao, whose physical block is split around the
+        # PML block.
 
     # ------------------------------------------------------------------ utils
     def _halo(self, attr):
@@ -453,14 +484,33 @@ class ModelParallel:
                 hs.exchange(self._halo_view(tensor, ax))
 
     def _exchange_group(self, halo, tensors):
-        """Halo-exchange a group of fields in ONE batched P2P per cut axis
-        (elastic velocity / stress groups). Collapses ``len(tensors)`` separate
-        NCCL rounds into one isend/irecv+wait per axis — the per-step latency
-        win for the multi-field elastic protocol (acoustic exchanges a single
-        field, so it uses :meth:`_exchange`/the overlap path instead)."""
-        if halo is not None:
+        """Halo-exchange a group of fields in ONE batched P2P for the WHOLE
+        shipment — every field, every cut axis.
+
+        Collapsing the fields of one axis into one isend/irecv+wait was the
+        original win (the multi-field elastic protocol). On a multi-axis mesh
+        one round per axis remained, and these strips are latency-bound: on a
+        production-size 3-D grid a six-field shipment is 3.3 MiB and took 486 us,
+        6.5 GiB/s on an NVLink that does 300+. So the axes are concatenated too,
+        via :class:`FastHaloMultiGroup` — same buffers, same pack/unpack order,
+        same peers, one wait. Single-axis meshes keep the previous path exactly.
+        """
+        if halo is None:
+            return
+        if len(halo) == 1:
             for ax, hs in halo.items():
                 hs.exchange_group([self._halo_view(t, ax) for t in tensors])
+            return
+        key = tuple(t.data_ptr() for t in tensors)
+        grp = self._multi_group_cache.get(key)
+        if grp is None:
+            from sweep.parallel.fast_halo import FastHaloMultiGroup
+            ex = []
+            for ax, hs in halo.items():
+                ex.extend(hs.group_exchangers([self._halo_view(t, ax) for t in tensors]))
+            grp = FastHaloMultiGroup(ex)
+            self._multi_group_cache[key] = grp
+        grp()
 
     def _src_away_from_cuts(self, sg) -> bool:
         """True when no source sits within M of an x-cut line (k*nxp). The
@@ -496,7 +546,7 @@ class ModelParallel:
         for the model-halo exchange to overwrite.  Matches the propagator's
         edge padding (np.pad(edge), proven bitwise for the NCCL checks)."""
         lo_x, hi_x = self.lo, self.hi
-        ztop = self.M if self.free_surface else self.pad
+        ztop = self.ztop
         t = torch.as_tensor(tile, device=rt.device, dtype=rt.dtype)
         nz = tile.shape[0]
         if self.ndim == 2:
@@ -587,11 +637,11 @@ class ModelParallel:
         # such case; x stays safe only because its per-tile interior is wider.
         def fwrap(p):
             p.cut_face_mask = self.cut_mask
-            out = f_orig(p); cap["fp"] = p; cap["fraw"] = out; return out
+            f_orig(p); cap["fp"] = p
 
         def bwrap(p):
             p.cut_face_mask = self.cut_mask
-            out = b_orig(p); cap["bp"] = p; return out
+            b_orig(p); cap["bp"] = p
 
         # Allocate the probe's models BEFORE the try: this is the one full-tile
         # allocation in _capture, i.e. where a real run OOMs, and nothing is
@@ -664,12 +714,23 @@ class ModelParallel:
             if _p is not None and self._bsession is not None:
                 _p.boundary_session = self._bsession
         self.f_func, self.b_func = f_orig, b_orig
-        self._cuda_ndim = cap["fraw"][2].ndim
 
         L = list(self.fp.wavefields)
         if not L:
             L = [torch.zeros_like(self.fp.models[0]) for _ in range(self._nwf)]
         self.L_fwd = L
+        # The compiled forward's per-call scratch (cuda_layout
+        # .forward_workspace_nvar grids) rides on the captured fp and is bound
+        # again on every stepped call, so the zeroed-at-entry contract the
+        # monolithic path gets from a fresh torch.zeros per call has to be
+        # re-established by _prepare_call.  Shape-declared scratch
+        # (forward_workspace_shapes) is torch.empty on the monolithic path
+        # too -- the driver writes every cell before it reads -- so it is not
+        # re-zeroed here either.  Empty for every stepped equation today; what
+        # is kept is the contract.
+        _layout = getattr(self.equation, "cuda_layout", None)
+        self.fwd_ws = ([] if getattr(_layout, "forward_workspace_shapes", None)
+                       is not None else list(self.fp.forward_workspace))
         if self.bp is not None:
             self._bind_adjoint_buffers()
         else:
@@ -680,8 +741,20 @@ class ModelParallel:
             self.L_adj, self.recon = [], []
             self.coupling, self.adj_coeffs = [], []
             self.gbufs, self.illum = [], []
-        self.record = torch.zeros_like(cap["fraw"][2])
-        self.fp.record_out = self.record
+            self.adj_ws = []
+        # The record is the buffer _c.py bound as fp.record_out and the probe
+        # forward wrote into: the drivers allocate nothing, so the record IS
+        # record_out (the entry returns nothing; the caller reads the tensor
+        # it bound).  Keep that one instead of a second zeros_like -- every
+        # stepped call already writes there, and _set_geometry re-allocates it
+        # only on an nrec change.  A probe that bound no record is loud here,
+        # where a stepped forward would otherwise have nowhere to write.
+        self.record = self.fp.record_out
+        if self.record is None:
+            raise RuntimeError(
+                "ModelParallel: the probe forward bound no "
+                "ForwardInput.record_out; the stepped forward writes its "
+                "record there, so this capture cannot be driven.")
         # Cache the canonical wavelet shape + the per-tile source/receiver counts
         # so per-shot _set_geometry can validate and reshape. Read it off
         # ``fp.source``, which a forward-only capture also has: the binding is
@@ -720,8 +793,34 @@ class ModelParallel:
         suppresses, that is the whole memory win of the lazy split."""
         self.L_adj = list(self.bp.adjoint_wavefields)
         if not self.L_adj:
-            self.L_adj = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nwf)]
-        self.recon = [torch.zeros_like(self.bp.models[0]) for _ in range(self._nrecon)]
+            self.L_adj = [torch.zeros_like(self.bp.models[0])
+                          for _ in range(self._nadj)]
+        # The reconstruction list is the one _c.Wrapper.backward bound as
+        # bp.forward_wavefields (_forward_state_buffers, reconstruction_nvar
+        # grids) and the probe backward stepped through; the stepped backward
+        # binds exactly that list per segment, so reuse it instead of holding a
+        # second full-grid set for the instance's lifetime.  _run_adjoint
+        # re-zeroes it per call -- the one-call lifetime the monolithic path
+        # gets from allocating afresh.
+        recon = list(self.bp.forward_wavefields)
+        if recon:
+            if len(recon) != self._nrecon:
+                raise RuntimeError(
+                    f"captured BackwardInput.forward_wavefields holds "
+                    f"{len(recon)} reconstruction grids but the slot table of "
+                    f"{type(self.equation).__name__} lists {self._nrecon}; the "
+                    f"two bind orders drifted apart.")
+            self.recon = recon
+        else:
+            # Nothing was bound (a backward_bs that did not come through
+            # _c.Wrapper.backward's bs branch).  Allocating is the only way to
+            # keep going and a second full-grid set is what it costs -- say so.
+            warnings.warn(
+                "ModelParallel: the captured backward bound no reconstruction "
+                f"list; allocating {self._nrecon} grids of its own.",
+                RuntimeWarning, stacklevel=2)
+            self.recon = [torch.zeros_like(self.bp.models[0])
+                          for _ in range(self._nrecon)]
         # VRZ variable-density gradient is a spatial divergence of the coupling
         # field c/e = lambda*vp*grad(p), so under DD the divergence at a cut seam
         # needs the neighbour's c/e.  Materialise the six coupling buffers and bind
@@ -729,33 +828,37 @@ class ModelParallel:
         # there) so _run_adjoint can halo-exchange them between the build and
         # divergence sub-steps.  Plain acoustic's pointwise u_tt*lambda gradient
         # needs no such exchange, so it keeps self.coupling empty.
-        if self._is_vrz:
-            self.coupling = [torch.zeros_like(self.bp.models[0]) for _ in range(6)]
+        if self._dd_coupling_nvar:
+            self.coupling = [torch.zeros_like(self.bp.models[0])
+                             for _ in range(self._dd_coupling_nvar)]
             # C0/Cx/Cy/Cz: the fused adjoint's transpose fast-path reads these coeffs
             # over [ix-M,ix+M] -> into the cut halo.  They are model-only (constant
             # within a backward), so build once + halo-exchange once (before the reverse
             # loop) rather than per step.  Without their exchanged halo, cut-adjacent
             # physical cells (now on the cut-aware fast-path) read a 0 coeff halo -> the
             # adjoint (hence gradient) drifts at the source.
-            self.adj_coeffs = [torch.zeros_like(self.bp.models[0]) for _ in range(4)]
+            self.adj_coeffs = [torch.zeros_like(self.bp.models[0])
+                               for _ in range(self._dd_coeff_nvar)]
             self.bp.adjoint_workspace = self.coupling + self.adj_coeffs  # [0-5]=c/e, [6-9]=C0,Cx,Cy,Cz
+            # VRZ's workspace IS the two lists above; they are zeroed by name.
+            self.adj_ws = []
         else:
             self.coupling = []
             self.adj_coeffs = []
-        # acoustic grads_out = [grad_wavelet, *model_grads] (size = models + 1);
-        # elastic has no wavelet grad (size = models).
-        if self.family == "acoustic":
-            self.gbufs = ([torch.zeros_like(self.bp.forward_source)]
-                          + [torch.zeros_like(m) for m in self.bp.models])
-        else:
-            self.gbufs = [torch.zeros_like(m) for m in self.bp.models]
+            # The captured adjoint scratch (cuda_layout.backward_workspace_nvar
+            # grids of the propagator's workspace pool -- elastic's q*/p*
+            # prepare->apply scratch; empty for the acoustic family).  The
+            # monolithic path zeroes that pool on every call; the DD path
+            # binds it again on every backward, so _run_adjoint re-zeroes it.
+            self.adj_ws = list(self.bp.adjoint_workspace)
+        # grads_out = [grad_wavelet?, *model_grads]; the prefix is declared.
+        self.gbufs = (
+            [torch.zeros_like(self.bp.forward_source)] * self._ngrad_prefix
+            + [torch.zeros_like(m) for m in self.bp.models])
         self.bp.grads_out = self.gbufs
-        # acoustic backward produces source/receiver illumination; elastic none
-        if self.family == "acoustic":
-            self.illum = [torch.zeros_like(self.bp.models[0]),
-                          torch.zeros_like(self.bp.models[0])]
-        else:
-            self.illum = []
+        # source/receiver illumination, where the compiled backward writes it
+        self.illum = [torch.zeros_like(self.bp.models[0])
+                      for _ in range(self._illum_nvar)]
         self.bp.illum_out = self.illum
 
     def __call__(self, *args, **kwargs):
@@ -821,7 +924,7 @@ class ModelParallel:
                 # gbufs only exists once the adjoint has been captured; a
                 # forward-only instance still needs the _fs_shape update above
                 # (it reshapes this shot's wavelet into fp.source).
-                if self.family == "acoustic" and self.bp is not None:
+                if self._ngrad_prefix and self.bp is not None:
                     self.gbufs[0] = torch.zeros(
                         self._fs_shape, dtype=self.gbufs[0].dtype,
                         device=self.gbufs[0].device)
@@ -849,7 +952,11 @@ class ModelParallel:
 
     # --------------------------------------------------------------- forward
     def forward(self, wavelet, sources_global, receivers_global, models):
-        """Run the DD forward; return this rank's tile record (raw CUDA layout).
+        """Run the DD forward; return this rank's tile record.
+
+        The record is in the SAME layout a single-domain ``PropTorch`` returns,
+        ``(B, nt, nrec, nfield)`` -- only this rank's receivers
+        (:attr:`own_receiver_indices`).
 
         ``models`` is a list of global or already-tiled physical arrays, OR
         ``None`` to REUSE the model already edge-padded and halo-exchanged by a
@@ -906,10 +1013,7 @@ class ModelParallel:
         sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
         fhalo = self._halo("_fwd_halo")
         with torch.no_grad():
-            if self.family == "acoustic":
-                self._forward_loop_acoustic(fhalo, sg)
-            else:
-                self._forward_loop_elastic(fhalo)
+            self._forward_loop(fhalo, sg)
 
         # A tile owning no real receivers carries only a dummy receiver; its
         # record is meaningless.  Zero it so a residual/adjoint derived from it
@@ -926,13 +1030,26 @@ class ModelParallel:
         if self.bp is not None:
             self.bp.boundary_gpu = list(self.fp.boundary_gpu)
             self.bp.u_last_two = self.fp.last_two
-        # Clone: ``self.record`` is a live buffer that the NEXT call zeroes in
-        # _prepare_call, so handing it out aliases every shot of an observed-data
-        # loop to one tensor that goes to zero on the following iteration. Until
-        # now the autograd path masked this for grad-carrying models (it returns
-        # a detached clone), but no_grad calls are routed here on purpose, so the
-        # buffer must not escape. The record is small next to a wavefield.
-        return self.record.clone()
+        # Return the SINGLE-CARD layout, (B, nt, nrec, nfield). The raw buffer
+        # stays raw -- eq_driver.cuh TORCH_CHECKs record_out contiguous with
+        # trailing dim nt -- so the permute happens here, at the Python boundary,
+        # with the very helpers the single-card path uses (_c.Wrapper). Before
+        # this, DD handed back (B, nrec, nt) / (nfield, B, nrec, nt) while
+        # PropTorch returned (B, nt, nrec, nfield), so observed data from
+        # anywhere other than the same ModelParallel -- a single-card modelling
+        # run, a SEG-Y file -- did not line up, and the "two marked lines"
+        # drop-in in docs/user-guide/parallel.md was not true.
+        rec = _cuda_record_to_canonical(self.record)
+        # .contiguous() inside that helper is a NO-OP when the permuted view is
+        # already contiguous -- nrec == 1, i.e. a tile owning one real receiver,
+        # or only the dummy partition_global_coords inserts -- and then ``rec``
+        # is a VIEW of the live buffer that _prepare_call zeroes on the next
+        # shot. That is exactly the aliasing the clone below has always been
+        # here to prevent; it is now paid only when the permute did not already
+        # pay it.
+        if rec.data_ptr() == self.record.data_ptr():
+            rec = rec.clone()
+        return rec
 
     def _prepare_call(self, wavelet, sources_global, receivers_global, models):
         """Per-call forward setup shared by every step loop: slice the model (or
@@ -952,6 +1069,25 @@ class ModelParallel:
             tiles = [self._slice_tile(m) for m in models]
         sg = torch.as_tensor(np.asarray(sources_global), dtype=torch.int64)
         rg = torch.as_tensor(np.asarray(receivers_global), dtype=torch.int64)
+        # A 3-D coords array means source encoding, whose leading axis is 1.
+        # Anything longer is what a caller writes when they mean "several
+        # shots", and the single-domain propagator refuses it -- but the
+        # partitioning below unions the owned sources of EVERY leading entry
+        # into one array (``loc_s[mask_s]``, a boolean index that flattens) and
+        # reads receivers and their ownership from index 0 alone.  So DD used to
+        # accept the geometry and answer it as one fused supershot recorded at
+        # the first entry's receivers, with no error and a plausible-looking
+        # record.
+        for name, arr in (("sources_global", sg), ("receivers_global", rg)):
+            if arr.dim() == 3 and arr.shape[0] != 1:
+                raise NotImplementedError(
+                    f"{name} has {arr.shape[0]} leading entries; domain "
+                    "decomposition solves ONE shot (or one encoded supershot) "
+                    "per call, so it cannot answer this. Run the shots as "
+                    "separate calls, put them on separate shot groups with "
+                    "MeshTopology(shot_groups=...), or encode them into a "
+                    "single supershot (leading axis 1)."
+                )
         loc_s, mask_s = partition_global_coords(sg, self.topo, self.global_shape)
         loc_r, mask_r = partition_global_coords(rg, self.topo, self.global_shape)
         self._owns_src = bool(mask_s.any())
@@ -1018,7 +1154,7 @@ class ModelParallel:
             # allocates its own, so promotion never holds two full forward sets
             # at once. _captured goes False first so an OOM here leaves a clean
             # "capture again next call" state rather than a half-built one.
-            self.fp, self.L_fwd, self.record = None, [], None
+            self.fp, self.L_fwd, self.fwd_ws, self.record = None, [], [], None
             self._captured = False
             self._capture(wav, ls, lr, tiles, True)
             self._geom_key = geom_key
@@ -1036,55 +1172,187 @@ class ModelParallel:
         # cells fall into the zero-coeff PML branch and drift in the last ulp
         # against the single-domain reference (the asymmetric-pad invariant).
         self.fp.cut_face_mask = self.cut_mask
+        # Zeroed per forward like the monolithic path's per-call buffers
+        # (_c.py: transient forward wavefields, forward workspace and record
+        # are fresh zeros on every call); here the captured bindings persist,
+        # so the zeroing is explicit.  In place: the forward runner built by
+        # _forward_loop copies fp by value at construction, so the tensors
+        # bound at capture must stay the ones bound.
         for t in self.L_fwd:
+            t.zero_()
+        for t in self.fwd_ws:
             t.zero_()
         self.record.zero_()
         return sg
 
-    def _forward_loop_acoustic(self, fhalo, sg):
-        """Acoustic forward time loop. Uses true comm/compute overlap (phase-1
-        cut strips exchanged async on a comm stream while phase-2 interior
-        computes, then compute waits for comm) when eligible — x-face cuts only
-        and no source in a cut strip — else a serial step-then-exchange loop.
-        Both are bit-identical (the overlap is a pure reordering)."""
-        runner = SteppedBindingRunner(
-            self.f_func, self.fp, self.L_fwd, acoustic_psi_pairs(self.ndim))
-        if self._overlap_ok and self._src_away_from_cuts(sg):
-            if self._comm_stream is None:
-                self._comm_stream = torch.cuda.Stream()
-                self._comm_evt = torch.cuda.Event()
-            comm, evt = self._comm_stream, self._comm_evt
-            compute = torch.cuda.current_stream()
-            fx = fhalo["x"]                # _overlap_ok => axes == ("x",)
-            for it in range(self.nt):
-                runner.run_phase(it + 1, 1)
-                evt.record()
-                un = self._halo_view(runner.u_next, "x")
-                with torch.cuda.stream(comm):
-                    comm.wait_event(evt)
-                    fx.exchange_start(un)           # copy-send + P2P (no wait)
-                runner.run_phase(it + 1, 2)         # interior, overlaps P2P
-                with torch.cuda.stream(comm):
-                    fx.exchange_finish(un)          # wait P2P + copy-recv
-                compute.wait_stream(comm)
-        else:
-            for it in range(self.nt):
-                runner.run_to(it + 1)
-                self._exchange(fhalo, runner.u_now)
+    # ------------------------------------------------- DDSpec interpreter
+    _BUFS = {"fwd": "L_fwd", "adj": "L_adj", "recon": "recon",
+             "coupling": "coupling", "coeffs": "adj_coeffs"}
 
-    def _forward_loop_elastic(self, fhalo):
-        """Elastic forward time loop: phase-1 velocity update + batched velocity-
-        halo exchange, phase-2 stress update + batched stress-halo exchange.
-        Elastic slots don't rotate, so the field lists are fixed across steps."""
-        runner = SteppedBindingRunner(
-            self.f_func, self.fp, self.L_fwd, psi_pairs=(), u_blocks=())
-        vel = [self.L_fwd[f] for f in range(self._nv)]
-        stress = [self.L_fwd[f] for f in range(self._nv, self._nphys)]
+    def _role_index(self, buf, roles):
+        """Slot indices of ``buf`` whose slot-table role is in ``roles``.
+
+        For ``recon`` the lookup is by NAME against the table's reconstruction
+        tuple, so the trailing ``fv*_prev`` carries fall out of every group on
+        their own: they are not bind slots, so they have no role to match.
+        """
+        t = self._table
+        if buf == "recon":
+            role_of = {sl.name: sl.role for sl in t.slots}
+            return tuple(i for i, n in enumerate(t.recon)
+                         if role_of.get(n) in roles)
+        pool = t.slots if buf == "adj" else t._fwd()
+        return tuple(i for i, sl in enumerate(pool) if sl.role in roles)
+
+    def _tensors(self, ref, runner):
+        if ref.at is not None:
+            return (runner.at(ref.buf, ref.at),)
+        L = getattr(self, self._BUFS[ref.buf])
+        if ref.roles is None:
+            return tuple(L)
+        key = (ref.buf, ref.roles)
+        idx = self._role_idx.get(key)
+        if idx is None:
+            idx = self._role_idx[key] = self._role_index(*key)
+        return tuple(L[i] for i in idx)
+
+    def _ship(self, halo, runner, grp):
+        ts = [t for ref in grp.refs for t in self._tensors(ref, runner)]
+        if not ts:
+            return                       # a workspace this equation does not have
+        if grp.batched:
+            self._exchange_group(halo, ts)
+        else:
+            for t in ts:
+                self._exchange(halo, t)
+
+    def _loop_floor(self, L):
+        """Lowest ``it`` the reverse loop executes.
+
+        Boundary-tail truncation raises it: with ``tail_steps = K`` the strips
+        cover forward steps ``[nt-K, nt)`` and the restore at reverse step
+        ``it`` consumes the strip of step ``it - 1``, so the loop stops at
+        ``bs_it0 + 1``. Derived from ``nt`` and the captured tail, both of which
+        are identical on every rank -- which is what keeps the ranks' lockstep
+        exchanges from leaving one of them waiting.
+        """
+        if not L.tail_truncatable:
+            return L.floor
+        tail = int(getattr(self.bp, "boundary_tail_steps", 0) or 0)
+        bs_it0 = max(0, self.nt - tail) if tail > 0 else 0
+        return max(L.floor, bs_it0 + 1 if bs_it0 > 0 else 0)
+
+    def _run_dd_loop(self, L, runner, halo, preds=None):
+        """Interpret one :class:`DDLoop` -- the generic DD time loop."""
+        preds = preds or {}
+        fwd = L.direction == "fwd"
+        seg = (lambda it: (it + 1,)) if fwd else (lambda it: (it + 1, it))
+
+        # Env-gated phase profiler.  A schedule with more than one phase per step
+        # re-enters the compiled binding once PER PHASE, and a schedule the C
+        # runner rejects (VRZ's coupling exchange) re-marshals the whole params
+        # object every time -- 3 x nt full pybind entries.  This says how much of
+        # the loop is that, versus the shipments, versus the kernels.
+        import os as _os
+        _prof = _os.environ.get("SWEEP_DD_PHASE_PROF") == "1"
+        if _prof:
+            import time as _t
+            import torch as _torch
+            _acc = {}
+
+            def _tick(key, t0):
+                _torch.cuda.synchronize()
+                _acc[key] = _acc.get(key, [0.0, 0])
+                _acc[key][0] += _t.perf_counter() - t0
+                _acc[key][1] += 1
+
+        for ph in L.prologue:
+            runner.run(*seg(self.nt - 1), phase=ph.step_phase, advance=ph.advances)
+            for grp in ph.after:
+                self._ship(halo, runner, grp)
+
+        floor = self._loop_floor(L)
+        its = range(self.nt) if fwd else range(self.nt - 1, floor - 1, -1)
+        last = L.phases[-1]
+        for it in its:
+            on_floor = (not fwd) and it == floor
+            for ph in L.phases:
+                if _prof:
+                    import time as _t
+                    _t0 = _t.perf_counter()
+                runner.run(*seg(it), phase=ph.step_phase, advance=ph.advances)
+                if _prof:
+                    _tick(f"phase{ph.step_phase}", _t0)
+                if on_floor and ph is last and L.drop_trailing_exchange_on_floor:
+                    continue
+                for grp in ph.after:
+                    if grp.when is not None and not preds.get(grp.when, True):
+                        continue
+                    if _prof:
+                        import time as _t
+                        _t0 = _t.perf_counter()
+                    self._ship(halo, runner, grp)
+                    if _prof:
+                        _tick(f"ship@{ph.step_phase}", _t0)
+        if _prof and self.rank == 0:
+            tot = sum(v[0] for v in _acc.values())
+            print(f"[ddprof] {L.direction} loop, {len(its)} steps, total {tot:.1f}s", flush=True)
+            for k in sorted(_acc):
+                v = _acc[k]
+                print(f"[ddprof]   {k:12s} {v[0]:8.1f}s  {100*v[0]/max(tot,1e-9):5.1f}%  "
+                      f"{v[1]:7d} calls  {v[0]/max(v[1],1)*1e3:7.3f} ms/call", flush=True)
+
+    def _run_dd_loop_overlapped(self, L, runner, halo):
+        """Interpret a two-phase forward with the exchange on a comm stream.
+
+        The only place in this file that knows about CUDA streams. Phase 1
+        computes just the cut strips, the shipment starts on the comm stream,
+        phase 2 computes the strict complement over it, and the join happens
+        before the next step's phase 1. Bit-identical to the serial loop -- the
+        strips carry the same values either way -- so ``SWEEP_DD_DISABLE_OVERLAP``
+        selecting the serial variant is a usable reference, not a fallback.
+        """
+        p1, p2 = L.phases
+        grp = p1.after[0]
+        if self._comm_stream is None:
+            self._comm_stream = torch.cuda.Stream()
+            self._comm_evt = torch.cuda.Event()
+        comm, evt = self._comm_stream, self._comm_evt
+        compute = torch.cuda.current_stream()
+        hs = halo["x"]          # eligibility implies x-only cuts, so one axis
         for it in range(self.nt):
-            runner.run_phase(it + 1, 1)
-            self._exchange_group(fhalo, vel)
-            runner.run_phase(it + 1, 2)
-            self._exchange_group(fhalo, stress)
+            runner.run(it + 1, phase=p1.step_phase, advance=p1.advances)
+            evt.record()
+            (t,) = self._tensors(grp.refs[0], runner)
+            view = self._halo_view(t, "x")
+            with torch.cuda.stream(comm):
+                comm.wait_event(evt)
+                hs.exchange_start(view)         # copy-send + P2P, no wait
+            runner.run(it + 1, phase=p2.step_phase, advance=p2.advances)
+            with torch.cuda.stream(comm):
+                hs.exchange_finish(view)        # wait P2P + copy-recv
+            compute.wait_stream(comm)
+
+    def _forward_loop(self, fhalo, sg):
+        """Run the equation's declared forward schedule.
+
+        One loop for every family. Where a spec offers an overlapped variant,
+        the driver takes it only if it can discharge that variant's proof
+        obligation -- for acoustic, that no source sits within M of a cut line,
+        because the source injection atomically adds into the very buffer the
+        comm stream would be packing. Both variants are bit-identical.
+        """
+        ffac, _ = self.prop.equation._compiled_runner_factories()
+        runner = SteppedBindingRunner(
+            self.f_func, self.fp, self.L_fwd,
+            psi_pairs=self._table.pairs(adjoint=False),
+            u_blocks=self._table.u_blocks,
+            c_factory=ffac)
+        ov = self._spec.forward_overlapped
+        if ov is not None and self._overlap_ok and self._src_away_from_cuts(sg):
+            self._run_dd_loop_overlapped(ov, runner, fhalo)
+        else:
+            self._run_dd_loop(self._spec.forward, runner, fhalo)
 
     # -------------------------------------------------------------- gradient
     def _run_adjoint(self, adjoint_source_tile):
@@ -1105,115 +1373,67 @@ class ModelParallel:
                 "before asking for the adjoint.")
         self.bp.adjoint_source = torch.as_tensor(
             adjoint_source_tile, device=self.dev, dtype=torch.float32)
-        for t in self.L_adj + self.recon + self.gbufs + self.illum + self.coupling + self.adj_coeffs:
+        # Zeroed per backward like the monolithic path (_c.Wrapper.backward:
+        # adjoint wavefields zero_()'d, grads_out / illum_out /
+        # forward_wavefields fresh zeros, the workspace pool zeroed per call).
+        # Every one of these stays the tensor bound on bp at capture -- the
+        # persistent runner built below copies bp by value at construction,
+        # so they are zeroed in place, never rebound.
+        for t in (self.L_adj + self.recon + self.gbufs + self.illum
+                  + self.coupling + self.adj_coeffs + self.adj_ws):
             t.zero_()
         self.bp.cut_face_mask = self.cut_mask
         bhalo = self._halo("_bwd_halo")
-        nv = self._nv if self.family == "elastic" else None
 
         with torch.no_grad():
-            if self._is_vrz:
-                # VRZ phased backward (Fix A): advance+recon -> exchange lambda,p
-                # -> build coupling c/e from the POST-exchange lambda,p -> exchange
-                # c/e -> divergence/accumulate.  The c/e exchange gives the gradient
-                # divergence the neighbour's coupling values at the cut seam
-                # (acoustic's pointwise gradient needs no such exchange).  VRZ
-                # rotates the psi pairs only (swap_pml), like the forward recon.
-                br = SteppedBackwardRunner(
-                    self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=acoustic_psi_pairs(self.ndim))
-                # Pre-loop: build the adjoint coeffs C0/Cx/Cy/Cz once (model-only,
-                # constant within a backward) and halo-exchange them once, so the fused
-                # adjoint's transpose fast-path reads valid coeffs in the cut halo at
-                # every reverse step (phase 1).  step_phase 4 = coeff build only.
-                br.run_vrz_phase(self.nt, self.nt - 1, 4)
-                self._exchange_group(bhalo, self.adj_coeffs)
-                for it in range(self.nt - 1, 0, -1):    # step 0 contributes no grad
-                    br.run_vrz_phase(it + 1, it, 1)     # advance adjoint + recon
-                    self._exchange(bhalo, br.lambda_now)
-                    self._exchange(bhalo, br.recon_u_now)
-                    br.run_vrz_phase(it + 1, it, 2)     # build c/e (POST-exchange lambda,p)
-                    self._exchange_group(bhalo, self.coupling)
-                    br.run_vrz_phase(it + 1, it, 3)     # divergence -> grad += (once)
-            elif self.family == "acoustic":
-                # Plain acoustic doubles psi AND zeta in the fused adjoint
-                # (swap_aux), needing the wider adj-pairs over a 15-field list.
-                # VRZ (variable density) doubles only psi in the adjoint
-                # (swap_pml), so its 12-field adjoint rotates just the psi pairs
-                # -- exactly like the forward recon.  adjoint_extra_nvar (the
-                # zeta double-buffer) is the discriminator: acoustic sets it to
-                # 3, VRZ leaves it 0.  Using adj_pairs for VRZ indexes past the
-                # 12-field list -> IndexError in rotate_wavefield_roles.
-                _adj_extra = getattr(getattr(self.equation, "cuda_layout", None),
-                                     "adjoint_extra_nvar", 0)
-                _adj_pairs = (acoustic_adj_pairs(self.ndim) if _adj_extra
-                              else acoustic_psi_pairs(self.ndim))
-                br = SteppedBackwardRunner(
-                    self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=_adj_pairs)
-                # Boundary tail truncation: with tail_steps = K the strips
-                # cover forward steps [nt-K, nt-1] and the restore at reverse
-                # step ``it`` consumes the strip of step ``it - 1``, so the
-                # reverse loop stops at bs_it0 + 1 (same bound as the C++
-                # monolithic driver).  ``stop`` is derived from nt and the
-                # captured tail — both identical on every rank — so all tiles
-                # cease their lockstep halo exchanges at the same step; no
-                # rank can be left waiting.  stop == 0 (tail off or >= nt)
-                # reproduces the historical loop verbatim.
-                _tail = int(getattr(self.bp, "boundary_tail_steps", 0) or 0)
-                _bs_it0 = max(0, self.nt - _tail) if _tail > 0 else 0
-                stop = _bs_it0 + 1 if _bs_it0 > 0 else 0
-                for it in range(self.nt - 1, stop - 1, -1):
-                    br.run_segment(it + 1, it)
-                    if it == stop:
-                        break
-                    self._exchange(bhalo, br.lambda_now)
-                    self._exchange(bhalo, br.recon_u_now)
-            else:
-                br = SteppedBackwardRunner(
-                    self.b_func, self.bp, self.L_adj, self.recon,
-                    adj_pairs=(), adj_u_blocks=(), recon_u_blocks=())
-                # fixed elastic slots -> precompute each phase's exchange group
-                # (adjoint + recon fields) and batch into one P2P per phase
-                ph1 = ([self.L_adj[f] for f in range(nv)]
-                       + [self.recon[f] for f in range(nv, self._nphys)])
-                ph2 = ([self.L_adj[f] for f in range(nv, self._nphys)]
-                       + [self.recon[f] for f in range(nv)])
-                # The injections run as their own sub-phase (step_phase 3),
-                # at the same op position monolithic runs them; the split
-                # exists purely so an exchange can sit between the injections
-                # and the phase-1 kernels. A body-force source writes recon
-                # VELOCITY and a stress receiver writes adjoint STRESS -- both
-                # are ph2 fields, which phase 1 READS across the cut, so
-                # without that exchange the neighbour's halo is one injection
-                # stale at every reverse step. When neither is in play the
-                # strips are untouched since the previous ph2 exchange and
-                # the ship is skipped: the default combination (stress
-                # source, velocity receivers) keeps the two-exchange step.
-                _vel = ("vx", "vy", "vz")
-                inj_cross = (any(t in _vel for t in self.prop.source_type)
-                             or any(t not in _vel for t in self.prop.receiver_type))
-                for it in range(self.nt - 1, 0, -1):     # elastic BS floor it==1
-                    br.run_phase(it + 1, it, 3)          # injections(it)
-                    if inj_cross:
-                        self._exchange_group(bhalo, ph2)
-                    br.run_phase(it + 1, it, 1)
-                    self._exchange_group(bhalo, ph1)
-                    br.run_phase(it + 1, it, 2)
-                    self._exchange_group(bhalo, ph2)
+            # One loop for every family. The schedule says which phases run,
+            # what each ships, and which phase advances the buffer-role
+            # counters -- so what used to be three hand-written loops behind a
+            # vrz / acoustic / elastic branch is one interpreter reading three
+            # declarations.
+            #
+            # The runner arguments unify too: adj_u_blocks and recon_u_blocks
+            # are both the table's u_blocks, which is (0,) for the rotating
+            # acoustic/VRZ lists and () for elastic's fixed slots -- exactly
+            # what the three branches passed by hand.
+            # The VRZ coupling schedule drives three phases per step.  The
+            # SHARED template runner rejects step_phase != 0, so VRZ used to be
+            # forced onto the per-call path -- and that path re-entered the
+            # compiled binding 3 x nt times per iteration, rebuilding the whole
+            # setup (negated adjoint source, 1/z, the CPML upload, the boundary
+            # saver and its copy stream) on every entry: measured 1.26 ms of
+            # setup against 0.11 ms of reverse step, 179 s of a 205 s backward
+            # on a production-size 3-D grid.  acoustic_vrz3d now ships its own
+            # phase-aware persistent runner, so take whatever factory the
+            # equation exposes; an equation without one still gets None here and
+            # falls back to the per-call path unchanged.
+            _, bfac = self.prop.equation._compiled_runner_factories()
+            br = SteppedBackwardRunner(
+                self.b_func, self.bp, self.L_adj, self.recon,
+                adj_pairs=self._table.pairs(adjoint=True),
+                adj_u_blocks=self._table.u_blocks,
+                recon_u_blocks=self._table.u_blocks,
+                c_factory=bfac)
+            # Runtime predicates a schedule may gate a shipment on. Only the
+            # elastic backward declares one; an unused key costs nothing.
+            _vel = ("vx", "vy", "vz")
+            preds = {"inj_cross": (
+                any(t in _vel for t in self.prop.source_type)
+                or any(t not in _vel for t in self.prop.receiver_type))}
+            self._run_dd_loop(self._spec.backward, br, bhalo, preds)
 
         # crop the runtime model grad to the physical tile interior (z is
         # FS-aware: top pad = M under free surface; cut-side x-pad grad belongs
         # to the neighbour and is dropped — proven in test_dd_*_backward).
-        ztop = self.M if self.free_surface else self.pad
+        ztop = self.ztop
         nz = self.global_shape[0]
         if self.ndim == 2:
             interior = (..., slice(ztop, ztop + nz), slice(self.lo, self.hi))
         else:
             interior = (..., slice(ztop, ztop + nz),
                         slice(self.lo_y, self.hi_y), slice(self.lo, self.hi))
-        # grads_out slot 0 is grad_wavelet for acoustic; model grads are the rest
-        model_grads = self.gbufs[1:] if self.family == "acoustic" else self.gbufs
+        # model grads follow the declared grad_wavelet prefix
+        model_grads = self.gbufs[self._ngrad_prefix:]
         out = [g[interior].clone() for g in model_grads]
         # Shot-parallel: with shot_groups>1 each group ran a DIFFERENT shot on
         # the SAME tile, so the FWI gradient (a sum over shots) needs the per-
@@ -1228,6 +1448,35 @@ class ModelParallel:
                 dist.all_reduce(g, op=dist.ReduceOp.SUM, group=self.mesh.shot_pg)
         return out
 
+    def _tile_memory_strategy(self):
+        """The wrapped propagator's boundary strategy, re-stated for one tile.
+
+        Only the knobs that apply to the chosen storage are passed on.  The
+        staging trio (transfer_interval / ring_buffers / pinned_memory) is
+        meaningless for ``storage='gpu'`` and ``BoundaryOptions.__post_init__``
+        rejects it there, so re-emitting whatever was inherited turned a config
+        the legacy dict route accepted into a construction error -- including
+        the gpu baseline of ``test/dd_session_bench.py`` at its own default.
+        """
+        kwargs = dict(
+            # inherited from the wrapped prop (PropTorch memory= API);
+            # gpu/fp32 by default, or fp16/bf16/int8 / cpu for finer grids.
+            storage=self._bstorage,
+            storage_dtype=self._bdtype,
+            # tail truncation shrinks each tile's boundary ring to the last
+            # tail_steps steps (None = full length); the C++ side indexes it in
+            # shifted saved-step coordinates either way.
+            tail_steps=self._btail or None,
+        )
+        if self._bstorage != "gpu":
+            # batching + ring depth decide whether the staged copies can
+            # overlap compute at all; 1/1 serialises them per step.
+            kwargs["transfer_interval"] = self._bti
+            kwargs["ring_buffers"] = self._bring
+        if self._bstorage == "cpu":
+            kwargs["pinned_memory"] = self._bpinned
+        return BoundarySaving(**kwargs)
+
     @property
     def own_receiver_indices(self):
         """Global receiver indices (caller's receiver order) whose traces this
@@ -1239,26 +1488,19 @@ class ModelParallel:
 
     # ---------------------------------------------------------------- gather
     def gather_record(self, tile_record):
-        """Assemble the global record on rank 0 (returns None on other ranks)."""
+        """Assemble this shot group's record on the group root (None elsewhere).
+
+        The gather is per shot group, not world-wide: with ``shot_groups > 1``
+        every group runs a DIFFERENT shot through the same tile grid, so ranks
+        sharing a tile coordinate carry the same global receiver indices with
+        different shots' traces.  The root is global rank
+        ``shot_group * py * px``, which is rank 0 for the single-group case the
+        guides describe.  See :func:`sweep.parallel.gather_tile_records`.
+
+        Layout-agnostic on purpose: nrec is axis -2 both in the raw CUDA record
+        and in the canonical ``(B, nt, nrec, nfield)`` one, so this needs no
+        change when :meth:`forward` hands back the latter.
+        """
         if self.world == 1:
             return tile_record
-        import torch.distributed as dist
-        payload = (self._own_rec_idx, tile_record.detach().cpu())
-        gathered = [None] * self.world
-        dist.gather_object(payload, gathered if self.rank == 0 else None, dst=0)
-        if self.rank != 0:
-            return None
-        # place each tile's receiver columns at their global index
-        ncomp_axis = tile_record.ndim
-        full = None
-        nrec_global = max(max(idx) for idx, _ in gathered if idx) + 1
-        for idx, rc in gathered:
-            if not idx:
-                continue
-            if full is None:
-                shape = list(rc.shape)
-                shape[-2] = nrec_global
-                full = torch.zeros(shape, dtype=rc.dtype)
-            for j, gi in enumerate(idx):
-                full[..., gi, :] = rc[..., j, :]
-        return full
+        return gather_tile_records(tile_record, self._own_rec_idx, self.mesh)

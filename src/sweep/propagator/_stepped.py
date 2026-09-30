@@ -57,26 +57,32 @@ from typing import List, Sequence, Tuple
 
 import torch
 
-ACOUSTIC2D_PSI_PAIRS: Tuple[Tuple[int, int], ...] = ((3, 7), (4, 8))
-ACOUSTIC3D_PSI_PAIRS: Tuple[Tuple[int, int], ...] = ((3, 9), (4, 10), (7, 11))
+def _acoustic_table(ndim: int):
+    """The declared bind order for the acoustic family, 2-D or 3-D.
 
-# Adjoint (fused backward) wavefield pair sets: psi AND zeta double-buffers
-# are both swapped by ``swap_aux()``; rotating only the psi pairs (forward
-# habit) leaves the zeta roles flipped after odd-length segments.
-ACOUSTIC2D_ADJ_PAIRS: Tuple[Tuple[int, int], ...] = (
-    (3, 7), (4, 8), (5, 9), (6, 10),
-)
-ACOUSTIC3D_ADJ_PAIRS: Tuple[Tuple[int, int], ...] = (
-    (3, 9), (4, 10), (7, 11), (5, 12), (6, 13), (8, 14),
-)
+    Imported lazily: ``sweep.equations`` registers every equation class on
+    import, and ``_stepped`` sits on the propagator's import path.
+    """
+    from sweep.equations.slot_table import ACOUSTIC2D, ACOUSTIC3D
+
+    return ACOUSTIC2D if ndim == 2 else ACOUSTIC3D
 
 
 def acoustic_psi_pairs(ndim: int) -> Tuple[Tuple[int, int], ...]:
-    return ACOUSTIC2D_PSI_PAIRS if ndim == 2 else ACOUSTIC3D_PSI_PAIRS
+    """Forward ``(slot, shadow)`` pairs that ``swap_aux()`` exchanges."""
+    return _acoustic_table(ndim).pairs(adjoint=False)
 
 
 def acoustic_adj_pairs(ndim: int) -> Tuple[Tuple[int, int], ...]:
-    return ACOUSTIC2D_ADJ_PAIRS if ndim == 2 else ACOUSTIC3D_ADJ_PAIRS
+    """Adjoint pairs: psi AND zeta shadows.
+
+    The fused backward swaps both; rotating only the psi pairs (the forward
+    habit) leaves the zeta roles flipped after an odd-length segment. The 3-D
+    tuple is not sorted by its first component -- the bind order inserts the y
+    slots mid-list -- and deriving it by shadow index reproduces that for free
+    where a hand-written list had to remember it.
+    """
+    return _acoustic_table(ndim).pairs(adjoint=True)
 
 
 def rotate_wavefield_roles(
@@ -130,7 +136,7 @@ def rotate_adjoint_roles(
     """Adjoint wavefield list to bind for a backward continuation after
     ``k_adj`` completed adjoint steps (``swap_aux()`` calls, it==0 tail
     included).  ``pairs`` is the full psi+zeta pair set
-    (:data:`ACOUSTIC2D_ADJ_PAIRS` / :data:`ACOUSTIC3D_ADJ_PAIRS`)."""
+    (:func:`acoustic_adj_pairs`)."""
     return rotate_wavefield_roles(wavefields, k_adj, psi_pairs=pairs)
 
 
@@ -158,13 +164,31 @@ class SteppedBindingRunner:
     SAME wavefield list is then bound for every segment.
     """
 
-    def __init__(self, func, params, wavefields, psi_pairs=(), u_blocks=(0,)):
+    def __init__(self, func, params, wavefields, psi_pairs=(), u_blocks=(0,),
+                 c_factory=None):
         self.func = func
         self.p = params
         self.L = list(wavefields)
         self.psi_pairs = tuple(psi_pairs)
         self.u_blocks = tuple(u_blocks)
         self.k = 0
+        # Persistent C++ runner (prologue once, ~us per step instead of ~ms):
+        # constructed at k == 0 with the ORIGINAL list order; the buffer-role
+        # rotation then lives in the C++ wavefield object, so the per-call
+        # re-binding below is skipped entirely (self.k keeps counting for the
+        # u_now/u_next role resolution the DD driver reads).  Checkpoint-free
+        # runs with gpu-direct or host-staged boundaries qualify; the core's
+        # runner carries the staging session like the per-call path does
+        # (measured bit-identical), and the per-call path cost two host syncs
+        # per step.  Disk staging keeps the per-call path.  A None factory
+        # keeps it too.
+        self._cr = None
+        if (c_factory is not None
+                and not params.use_checkpoint
+                and not params.boundary_on_disk):
+            params.it_begin, params.it_end, params.step_phase = 0, -1, 0
+            params.wavefields = list(self.L)
+            self._cr = c_factory(params)
         # The bound order depends only on (k % 3, k % 2) — the u-triple phase
         # and the psi-pair swap parity — so there are at most 6 distinct lists.
         # Cache them (keyed on that pair) instead of re-allocating a fresh
@@ -183,6 +207,10 @@ class SteppedBindingRunner:
         return out
 
     def run_to(self, it_end: int) -> None:
+        if self._cr is not None:
+            self._cr.run(self.k, int(it_end), 0)
+            self.k = int(it_end)
+            return
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
         p.wavefields = self._bound_wavefields()
@@ -207,6 +235,11 @@ class SteppedBindingRunner:
                 f"run_phase drives exactly one step: it_end={it_end} but "
                 f"k={self.k}"
             )
+        if self._cr is not None:
+            self._cr.run(self.k, int(it_end), int(phase))
+            if phase == 2:
+                self.k = int(it_end)
+            return
         p = self.p
         p.it_begin, p.it_end = self.k, int(it_end)
         p.step_phase = int(phase)
@@ -217,6 +250,51 @@ class SteppedBindingRunner:
             p.step_phase = 0
         if phase == 2:
             self.k = int(it_end)
+
+    def run(self, it_end: int, phase: int | None = None,
+            advance: bool = True) -> None:
+        """Unified entry: ``phase=None`` is the legacy unphased segment.
+
+        ``run_to`` / ``run_phase`` differ only in the phase value and in which
+        phase advances the buffer-role counter -- facts a schedule states as
+        data. Keeping them as arguments is what lets one interpreter drive every
+        equation's loop instead of one hand-written loop per family.
+        """
+        if phase is None:
+            self.run_to(it_end)
+            return
+        if int(it_end) != self.k + 1:
+            raise ValueError(
+                f"phased forward drives exactly one step: it_end={it_end} "
+                f"but k={self.k}")
+        if self._cr is not None:
+            self._cr.run(self.k, int(it_end), int(phase))
+            if advance:
+                self.k = int(it_end)
+            return
+        p = self.p
+        p.it_begin, p.it_end = self.k, int(it_end)
+        p.step_phase = int(phase)
+        p.wavefields = self._bound_wavefields()
+        try:
+            self.func(p)
+        finally:
+            p.step_phase = 0
+        if advance:
+            self.k = int(it_end)
+
+    def at(self, buf: str, role: str) -> torch.Tensor:
+        """The tensor currently holding ``role`` in the forward list."""
+        assert buf == "fwd", f"forward runner cannot resolve {buf!r}"
+        assert self.u_blocks, "time-role resolution requires a rotating u block"
+        b = self.u_blocks[0]
+        if role == "u_now":
+            return self.L[u_now_slot(self.k, b)]
+        if role == "u_next":
+            return self.L[u_next_slot(self.k, b)]
+        if role == "u_prev":
+            return self.L[b + self.k % 3]
+        raise ValueError(f"unknown time role {role!r}")
 
     @property
     def u_next(self) -> torch.Tensor:
@@ -273,7 +351,8 @@ class SteppedBackwardRunner:
 
     def __init__(self, func, params, adjoint_wavefields,
                  recon_wavefields=None, adj_pairs=(),
-                 adj_u_blocks=(0,), recon_u_blocks=(0,)):
+                 adj_u_blocks=(0,), recon_u_blocks=(0,),
+                 c_factory=None):
         self.func = func
         self.p = params
         self.L_adj = list(adjoint_wavefields)
@@ -283,6 +362,20 @@ class SteppedBackwardRunner:
         self.recon_u_blocks = tuple(recon_u_blocks)
         self.k_adj = 0
         self.k_f = 0
+        # Persistent C++ runner -- same contract as the forward one: original
+        # list order at construction, rotation state lives in C++; gpu-direct
+        # or host-staged boundaries (disk keeps the per-call path).  An
+        # equation without a runner (the caller passes c_factory=None) keeps
+        # the per-call path; acoustic_vrz3d's runner also drives the vrz
+        # coupling phases (run_vrz_phase).
+        self._cr = None
+        if (c_factory is not None
+                and not params.boundary_on_disk):
+            params.bw_it_begin, params.bw_it_end, params.step_phase = -1, 0, 0
+            params.adjoint_wavefields = list(self.L_adj)
+            if self.L_recon is not None:
+                params.forward_wavefields = list(self.L_recon)
+            self._cr = c_factory(params)
         # Both rotations depend only on (k % 3, k % 2) -> <=6 distinct lists
         # each; cache instead of re-allocating per segment (see the forward
         # runner's _rot_cache note).
@@ -310,19 +403,25 @@ class SteppedBackwardRunner:
                 self._recon_cache[rk] = rec
             p.forward_wavefields = rec
 
-    def run_segment(self, bw_it_begin: int, bw_it_end: int):
+    def run_segment(self, bw_it_begin: int, bw_it_end: int) -> None:
         """Run the segment [bw_it_end, bw_it_begin); segments must be issued
-        in descending order and partition [0, nt) exactly."""
+        in descending order and partition [0, nt) exactly.  Returns nothing:
+        the gradients accumulate into the bound ``grads_out`` (and
+        ``illum_out``), which the caller owns."""
         b, e = int(bw_it_begin), int(bw_it_end)
+        if self._cr is not None:
+            self._cr.run(b, e, 0)
+            self.k_adj += b - e
+            self.k_f += b - max(e, 1)
+            return
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         self._bind_lists()
-        out = self.func(p)
+        self.func(p)
         self.k_adj += b - e
         self.k_f += b - max(e, 1)
-        return out
 
-    def run_phase(self, bw_it_begin: int, bw_it_end: int, phase: int):
+    def run_phase(self, bw_it_begin: int, bw_it_end: int, phase: int) -> None:
         """Phase-split single backward step (elastic backward_bs only).
 
         ``phase == 1`` runs the adjoint-source injection, the stress
@@ -347,20 +446,25 @@ class SteppedBackwardRunner:
             raise ValueError(
                 f"run_phase drives exactly one step: got segment [{e}, {b})"
             )
+        if self._cr is not None:
+            self._cr.run(b, e, int(phase))
+            if phase == 2:
+                self.k_adj += 1
+                self.k_f += 1 if e >= 1 else 0
+            return
         p = self.p
         p.bw_it_begin, p.bw_it_end = b, e
         p.step_phase = int(phase)
         self._bind_lists()
         try:
-            out = self.func(p)
+            self.func(p)
         finally:
             p.step_phase = 0
         if phase == 2:
             self.k_adj += 1
             self.k_f += 1 if e >= 1 else 0
-        return out
 
-    def run_vrz_phase(self, bw_it_begin: int, bw_it_end: int, phase: int):
+    def run_vrz_phase(self, bw_it_begin: int, bw_it_end: int, phase: int) -> None:
         """Phase-split single VRZ backward_bs step (domain-decomposition only).
 
         The variable-density gradient is a spatial divergence of the coupling
@@ -384,6 +488,15 @@ class SteppedBackwardRunner:
         if phase not in (1, 2, 3, 4):
             raise ValueError(f"phase must be 1, 2, 3 or 4, got {phase}")
         b, e = int(bw_it_begin), int(bw_it_end)
+        if self._cr is not None:
+            if b != e + 1:
+                raise ValueError(
+                    f"run_vrz_phase drives exactly one step: got segment [{e}, {b})")
+            out = self._cr.run(b, e, int(phase))
+            if phase == 1:
+                self.k_adj += 1
+                self.k_f += 1 if e >= 1 else 0
+            return out
         if b != e + 1:
             raise ValueError(
                 f"run_vrz_phase drives exactly one step: got segment [{e}, {b})")
@@ -392,13 +505,64 @@ class SteppedBackwardRunner:
         p.step_phase = int(phase)
         self._bind_lists()
         try:
-            out = self.func(p)
+            self.func(p)
         finally:
             p.step_phase = 0
         if phase == 1:
             self.k_adj += 1
             self.k_f += 1 if e >= 1 else 0
-        return out
+
+    def run(self, bw_it_begin: int, bw_it_end: int, phase: int | None = None,
+            advance: bool = True) -> None:
+        """Unified entry; ``phase=None`` is the legacy unphased segment.
+
+        The advance arithmetic is the SAME rule in every variant: over a
+        single-step segment ``b == e + 1``, ``k_adj += b - e`` gives +1 and
+        ``k_f += b - max(e, 1)`` gives +1 unless the ``it == 0`` tail (which
+        runs no reconstruction step). ``run_phase`` and ``run_vrz_phase``
+        differed only in WHICH phase advanced -- now an argument.
+        """
+        b, e = int(bw_it_begin), int(bw_it_end)
+        if phase is None:
+            self.run_segment(b, e)
+            return
+        if b != e + 1:
+            raise ValueError(
+                f"phased backward drives exactly one step: got segment [{e}, {b})")
+        if self._cr is not None:
+            self._cr.run(b, e, int(phase))
+            if advance:
+                self.k_adj += b - e
+                self.k_f += b - max(e, 1)
+            return
+        p = self.p
+        p.bw_it_begin, p.bw_it_end = b, e
+        p.step_phase = int(phase)
+        self._bind_lists()
+        try:
+            self.func(p)
+        finally:
+            p.step_phase = 0
+        if advance:
+            self.k_adj += b - e
+            self.k_f += b - max(e, 1)
+
+    def at(self, buf: str, role: str) -> torch.Tensor:
+        """The tensor currently holding ``role`` in the adjoint / recon list."""
+        if buf == "adj":
+            L, k = self.L_adj, self.k_adj
+        elif buf == "recon":
+            assert self.L_recon is not None, "no reconstruction list bound"
+            L, k = self.L_recon, self.k_f
+        else:
+            raise ValueError(f"backward runner cannot resolve {buf!r}")
+        if role == "u_now":
+            return L[u_now_slot(k)]
+        if role == "u_next":
+            return L[u_next_slot(k)]
+        if role == "u_prev":
+            return L[k % 3]
+        raise ValueError(f"unknown time role {role!r}")
 
     @property
     def lambda_now(self) -> torch.Tensor:

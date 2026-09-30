@@ -1,6 +1,8 @@
 import glob
 import inspect
 import os
+import platform
+import re
 import sys
 from distutils import log
 
@@ -22,14 +24,6 @@ PACKAGE_VERSION = "0.1.0"
 def env_flag_enabled(name):
     value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def openmp_flags():
-    if sys.platform == "win32":
-        return ["/openmp"]
-    if sys.platform == "darwin":
-        return []
-    return ["-fopenmp"]
 
 
 # Carries +PTX on purpose: a binary built for one architecture and nothing else
@@ -95,40 +89,15 @@ def patch_packaging_compat():
 
 
 def get_sources():
-    """Collect C++/CUDA sources for the ``sweep._C`` extension.
-
-    Honours the ``SWEEP_SKIP_CPU`` environment variable: when set to a
-    truthy value (1, true, yes, on), the heavy ``cpu/equations/*`` tree
-    (~19k lines, often the build-time bottleneck) is *excluded* and a tiny
-    stub is linked in its place.  The stub keeps `bindings/module.cpp`
-    linking and routes every call to the CUDA path; attempting to use a
-    CPU tensor raises a clear TORCH_CHECK message.
-
-    This is intended for users who only ever run on CUDA — typically HPC
-    deployments where the CPU C++ path would be dead weight.
-    """
+    """Collect C++/CUDA sources for the ``sweep._C`` extension: the CUDA core's
+    .cu files plus the pybind shim.  The extension serves CUDA tensors only; a
+    host tensor is refused with a clear message (``bindings/module.cpp``)."""
     cuda_sources = (
         glob.glob("src/sweep/csrc/cuda/common/**/*.cu", recursive=True)
         + glob.glob("src/sweep/csrc/cuda/equations/**/*.cu", recursive=True)
     )
     binding_sources = ["src/sweep/csrc/bindings/module.cpp"]
-
-    if env_flag_enabled("SWEEP_SKIP_CPU"):
-        log.warn(
-            "SWEEP_SKIP_CPU=1: skipping cpu/equations/* (~19k LoC); linking "
-            "cpu_binding_stub.cpp instead. CPU tensors will raise a clear "
-            "error at call time."
-        )
-        cpu_sources = ["src/sweep/csrc/cpu/cpu_binding_stub.cpp"]
-    else:
-        cpu_sources = glob.glob("src/sweep/csrc/cpu/**/*.cpp", recursive=True)
-        # Defensive: don't accidentally include the stub if it's globbed
-        cpu_sources = [
-            s for s in cpu_sources
-            if not s.endswith("cpu_binding_stub.cpp")
-        ]
-
-    return cpu_sources + cuda_sources + binding_sources
+    return cuda_sources + binding_sources
 
 
 def _check_ninja_on_path():
@@ -203,15 +172,113 @@ def make_build_extension(BuildExtension):
     return SweepBuildExtension
 
 
+def shipped_core_paths(root_dir=ROOT_DIR):
+    """Every prebuilt core under src/sweep/lib/<tag>/, one per CUDA major the
+    wheel ships (cu12, cu13), sorted by tag."""
+    return sorted(glob.glob(os.path.join(root_dir, "src", "sweep", "lib", "*", "libsweep_core.so")))
+
+
+def shipped_core_tags(root_dir=ROOT_DIR):
+    """The <tag> of each core ``shipped_core_paths`` finds: ``["cu12", "cu13"]``."""
+    return [os.path.basename(os.path.dirname(p)) for p in shipped_core_paths(root_dir)]
+
+
+_CORE_TAG_RE = re.compile(r"^cu\d+$")
+
+
+def required_core_tags(value):
+    """Parse SWEEP_REQUIRE_CORE.  Unset / 0 / false: ``None`` (no requirement).
+    1 / true / yes / on: ``[]`` (at least one core, any tag).  A comma list such
+    as ``cu12,cu13``: those tags, which must ALL be present."""
+    value = (value or "").strip()
+    if value.lower() in {"", "0", "false", "no", "off"}:
+        return None
+    if value.lower() in {"1", "true", "yes", "on"}:
+        return []
+    tags = [t.strip() for t in value.split(",") if t.strip()]
+    bad = [t for t in tags if not _CORE_TAG_RE.match(t)]
+    if bad or not tags:
+        raise SystemExit(
+            f"SWEEP_REQUIRE_CORE={value!r} is neither 1 (any core) nor a comma list "
+            "of core tags such as cu12,cu13"
+        )
+    return tags
+
+
+def require_shipped_core(root_dir=ROOT_DIR):
+    """SWEEP_REQUIRE_CORE (the release script sets it): refuse to package a
+    wheel without the prebuilt core(s).  ``1`` means at least one core under
+    src/sweep/lib/<tag>/; ``cu12,cu13`` names the tags that must ALL be there,
+    so a release meant to carry both cannot quietly ship one, and the error
+    names the missing tag.  MANIFEST.in prunes src/sweep/lib from the sdist, so
+    a bare ``python -m build`` packs the wheel from that sdist and silently
+    ships no core; the release path is ``python -m sweep.build --core`` once
+    per nvcc (CUDA 12 and CUDA 13) then ``python -m build --wheel`` from the
+    same tree."""
+    wanted = required_core_tags(os.environ.get("SWEEP_REQUIRE_CORE", ""))
+    if wanted is None:
+        return
+    have = shipped_core_tags(root_dir)
+    if wanted:
+        missing = [t for t in wanted if t not in have]
+        if not missing:
+            return
+        raise SystemExit(
+            f"SWEEP_REQUIRE_CORE={','.join(wanted)} but src/sweep/lib/<tag>/libsweep_core.so "
+            f"is missing for: {', '.join(missing)} (present: {', '.join(have) or 'none'}). "
+            f"Build each with the matching nvcc first (`python -m sweep.build --core "
+            f"--cuda-home <CUDA {missing[0][2:]} toolkit>`; the tag follows the nvcc's "
+            "CUDA major), then run `python -m build --wheel` from the same tree."
+        )
+    if have:
+        return
+    raise SystemExit(
+        "SWEEP_REQUIRE_CORE=1 but no src/sweep/lib/*/libsweep_core.so is present. "
+        "A bare `python -m build` packs the wheel from the sdist, which prunes "
+        "src/sweep/lib, so the wheel would ship no core. Build the core first "
+        "(`python -m sweep.build --core`, once per nvcc), then run "
+        "`python -m build --wheel` from the same tree."
+    )
+
+
+def host_wheel_platform():
+    """manylinux tag of the build host, or plain linux when glibc is unknown."""
+    machine = platform.machine() or "x86_64"
+    if not sys.platform.startswith("linux"):
+        return f"{sys.platform}_{machine}"
+    libc, version = platform.libc_ver()
+    parts = version.split(".") if libc == "glibc" else []
+    if len(parts) >= 2 and all(p.isdigit() for p in parts[:2]):
+        return f"manylinux_{parts[0]}_{parts[1]}_{machine}"
+    return f"linux_{machine}"
+
+
+def wheel_platform_kwargs(root_dir=ROOT_DIR):
+    """``options`` for setup(): pin the wheel to the build host's platform only
+    when a prebuilt core sits under src/sweep/lib -- the core is a native .so,
+    but the shim over it is pure Python (ctypes), so no CPython ABI is involved:
+    the wheel stays py3-none and only its platform tag changes (manylinux_2_28
+    from the release container). Without a core the wheel is ...-any."""
+    cores = shipped_core_paths(root_dir)
+    if not cores:
+        return {}
+    plat = host_wheel_platform()
+    log.info("shipped core(s) %s -> platform wheel %s", ", ".join(cores), plat)
+    return {"options": {"bdist_wheel": {"plat_name": plat}}}
+
+
 def build_ext_kwargs(build_cuda=None):
     """Return setup() kwargs for the optional AOT C++/CUDA extension.
 
-    The default distribution is **JIT** (see ``sweep/_jit.py``): one ``py3-none``
-    wheel ships the C++/CUDA sources and compiles ``sweep._C`` against the user's
-    own torch on first use — so this returns NO ``ext_modules`` and every dep
-    comes from ``pyproject.toml``. The ``SWEEP_BUILD_CUDA=1`` path is kept only
-    for building optional pre-compiled fast-path wheels (e.g. a GitHub release),
-    never for the PyPI wheel.
+    The default distribution compiles NOTHING at install or first use: the wheel
+    ships the C++/CUDA sources plus prebuilt torch-free cores (src/sweep/lib/cu12,
+    cu13) and ``sweep._C`` is a pure-Python ctypes layer over them
+    (``sweep/backend/c/``); a local core build (``python -m sweep.build``, nvcc
+    only) happens only when no shipped core fits. So this returns NO
+    ``ext_modules`` and every dep comes from ``pyproject.toml``. The
+    ``SWEEP_BUILD_CUDA=1`` path is kept only for an ahead-of-time ``sweep._C``
+    extension (the pybind shim, bound to one torch) -- the
+    developer/GitHub-release variant, never the PyPI wheel.
     """
     if build_cuda is None:
         build_cuda = env_flag_enabled("SWEEP_BUILD_CUDA")
@@ -242,7 +309,6 @@ def build_ext_kwargs(build_cuda=None):
         ) from exc
 
     SweepBuildExtension = make_build_extension(BuildExtension)
-    omp_flags = openmp_flags()
     configure_cuda_arch_list()
 
     # Optional extra nvcc flags (e.g. -DELASTIC3D_LB_MINBLOCKS=6 to retune a
@@ -262,7 +328,7 @@ def build_ext_kwargs(build_cuda=None):
                 os.path.join(ROOT_DIR, "src/sweep/csrc/cuda/equations"),
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-Wno-attributes", *omp_flags],
+                "cxx": ["-O3", "-Wno-attributes"],
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
@@ -274,7 +340,11 @@ def build_ext_kwargs(build_cuda=None):
             # RPATH so the shipped wheel resolves libtorch/libc10 against the
             # USER's torch (auditwheel --exclude keeps those libs external).
             # Belt-and-suspenders: sweep always imports torch before sweep._C.
-            extra_link_args=[*omp_flags, "-Wl,-rpath,$ORIGIN/../torch/lib"],
+            # -lcufft: the visco-acoustic spectral step runs its own cuFFT plan
+            # (csrc/cuda/equations/visco_acoustic2d/fft.cu); torch links cuFFT
+            # itself (libcufft.so.<major> is loaded before sweep._C) but does
+            # not re-export it.
+            extra_link_args=["-lcufft", "-Wl,-rpath,$ORIGIN/../torch/lib"],
         )
     ]
     kwargs["cmdclass"] = {

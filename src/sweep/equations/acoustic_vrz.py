@@ -1,9 +1,13 @@
+from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_single
+
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from .utils import to_backend, zero_top_halo_fields
 from sweep.scalars import fd_coefficients
 import numpy as np
+from ._registry import register_equation
 
 
 def _gradient_kernel3d(spatial_order, axis, sign=-1):
@@ -51,19 +55,14 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
     dbdx = dvpdx * inv_z + vp * dinvzdx
     dbdz = dvpdz * inv_z + vp * dinvzdz
 
-    # Z direction
-    tmpz = ((1+bz)*lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-2, kernels=grad_kernels)
-    w_sum += (1+bz) * tmpz + az * zetaz
+    # ``psiyn`` is the Z memory variable -- historical name, correct slot.
+    contrib_z, psiyn, zetaz = cpml_axis_update(
+        lap_z, dpdz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels)
+    w_sum += contrib_z
 
-    psiyn = bz * dpdz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
-
-    # X direction
-    tmpx = ((1+bx)*lap_x + dbxdx * dpdx) + grad_op(ax * psix, h, axis=-1, kernels=grad_kernels)
-    w_sum += (1+bx) * tmpx + ax * zetax
-
-    psixn = bx * dpdx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dpdx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels)
+    w_sum += contrib_x
 
     dpdx_cpml = dpdx + psixn
     dpdz_cpml = dpdz + psiyn
@@ -104,26 +103,17 @@ def step_cpml_3d(
     dbdy = dvpdy * inv_z + vp * dinvzdy
     dbdz = dvpdz * inv_z + vp * dinvzdz
 
-    # Z direction
-    tmpz = ((1 + bz) * lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-3, kernels=grad_kernels)
-    w_sum += (1 + bz) * tmpz + az * zetaz
+    contrib_z, psizn, zetaz = cpml_axis_update(
+        lap_z, dpdz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op, grad_kernels)
+    w_sum += contrib_z
 
-    psizn = bz * dpdz + az * psiz
-    zetaz = bz * tmpz + az * zetaz
+    contrib_y, psiyn, zetay = cpml_axis_update(
+        lap_y, dpdy, psiy, zetay, ay, by, dbydy, h, -2, grad_op, grad_kernels)
+    w_sum += contrib_y
 
-    # Y direction
-    tmpy = ((1 + by) * lap_y + dbydy * dpdy) + grad_op(ay * psiy, h, axis=-2, kernels=grad_kernels)
-    w_sum += (1 + by) * tmpy + ay * zetay
-
-    psiyn = by * dpdy + ay * psiy
-    zetay = by * tmpy + ay * zetay
-
-    # X direction
-    tmpx = ((1 + bx) * lap_x + dbxdx * dpdx) + grad_op(ax * psix, h, axis=-1, kernels=grad_kernels)
-    w_sum += (1 + bx) * tmpx + ax * zetax
-
-    psixn = bx * dpdx + ax * psix
-    zetax = bx * tmpx + ax * zetax
+    contrib_x, psixn, zetax = cpml_axis_update(
+        lap_x, dpdx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels)
+    w_sum += contrib_x
 
     dpdx_cpml = dpdx + psixn
     dpdy_cpml = dpdy + psiyn
@@ -136,6 +126,22 @@ def step_cpml_3d(
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
 
+def _adjoint_workspace_shapes(B, nt, shape, mode):
+    """The compiled 2-D backward's scratch (acoustic_vrz2d/driver_traits.cuh
+    WorkspaceSlot), one padded grid per shot each, in the order the DD runner
+    binds the family (coupling grids first, adjoint coefficients last):
+    [0-3] = c_x, c_z, e_x, e_z, the split-gradient coupling scratch
+            (lambda*vp*grad p and lambda*vp^2*z*grad p; order >= 6 only),
+    [4-6] = C0, Cx, Cz, the time-invariant adjoint coefficients
+            (vp^2, dx b*kappa, dz b*kappa), built once per backward.
+    Every memory mode takes the same seven: full and boundary-saving through
+    the template driver, the checkpoint modes through the hand-written
+    backward_ckpt (acoustic_vrz2d/backward.cu), which binds the same slots.
+    """
+    return 7 * [[B, 1, *shape]]
+
+
+@register_equation()
 class AcousticVRZ(SecondOrderEquation):
     """Second-order 2-D acoustic wave equation in variable-density VRZ form.
 
@@ -150,6 +156,10 @@ class AcousticVRZ(SecondOrderEquation):
 
     
     """
+    C_NAME = "acoustic_vrz2d"
+    # div(lambda*vp*grad p) in the gradient: reach 2M, one M beyond the shell.
+    BOUNDARY_BUFFER_REACH = 1
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic velocity model.", unit="m/s"),
         ModelSpec("z", description="Auxiliary parameter used by the VRZ formulation."),
@@ -213,39 +223,49 @@ class AcousticVRZ(SecondOrderEquation):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
 
-    def _C(self):
-        import torch
-        from sweep._C import (
-            acoustic_vrz2d_forward,
-            acoustic_vrz2d_backward,
-            acoustic_vrz2d_backward_bs,
-            acoustic_vrz2d_backward_ckpt,
-            acoustic_vrz2d_backward_recursive_ckpt,
-        )
-
-        return (
-            acoustic_vrz2d_forward,
-            acoustic_vrz2d_backward,
-            acoustic_vrz2d_backward_bs,
-            acoustic_vrz2d_backward_ckpt,
-            acoustic_vrz2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
+            # chunk_forward, (steps + 2, B, 1, grid): U_{start-1}, the replayed
+            # segment's pressure, U_end -- the p_tt imaging reads neighbours.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg + 2, B, 1, *grid)],
+            # u, psix, psiz, zetax, zetaz, U_{it+1}-2U_it+U_{it-1} (the p_tt
+            # imaging); the singleton channel axis is the driver's own layout
+            # (acoustic_vrz2d allt_shape).
+            save_all_shape=lambda B, nt, grid: (nt, 6, B, 1, *grid),
+            # The compiled backward's scratch (acoustic_vrz2d/driver_traits.cuh
+            # WorkspaceSlot): four c/e coupling grids of the split gradient and
+            # the three adjoint coefficients C0/Cx/Cz -- the same 7 in every
+            # memory mode (see _adjoint_workspace_shapes).
+            backward_workspace_shapes=_adjoint_workspace_shapes,
+            derived_model_nvar=1,   # 1/z (common/derived_models.h VrzSlot)
             base_nvar=3,
             # psix,psiz,zetax,zetaz (4) + psixn,psizn (2): race-free forward psi
             # double-buffer (read psi, write psi*n, swap_pml).
             pml_nvar=6,
+            # exact CPML adjoint: zeta double-buffer on the adjoint only
+            adjoint_extra_nvar=2,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
+            slots=slot_table.ACOUSTIC_VRZ2D,
+            stepped=True,
+            grads_out_has_wavelet=True,
+            grads_out_wavelet_written=False,
+            illum_nvar=2,
+            # Same divergence-form gradient as the 3-D sibling.  DD still
+            # refuses this class -- no longer for want of stepped kernels
+            # (the template driver made it stepped), but because its backward
+            # lacks the coupling-exchange phases (dd_backward_phases).
+            dd_coupling_nvar=6,
+            dd_adjoint_coeff_nvar=4,
         )
 
 
+@register_equation()
 class AcousticVRZ3D(SecondOrderEquation):
     """Second-order 3-D acoustic wave equation in variable-density VRZ form.
 
@@ -260,6 +280,9 @@ class AcousticVRZ3D(SecondOrderEquation):
 
     
     """
+    C_NAME = "acoustic_vrz3d"
+    BOUNDARY_BUFFER_REACH = 1
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic velocity model.", unit="m/s"),
         ModelSpec("z", description="Auxiliary parameter used by the 3D VRZ formulation."),
@@ -332,34 +355,40 @@ class AcousticVRZ3D(SecondOrderEquation):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out
 
-    def _C(self):
-        import torch
-        from sweep._C import (
-            acoustic_vrz3d_forward,
-            acoustic_vrz3d_backward,
-            acoustic_vrz3d_backward_bs,
-            acoustic_vrz3d_backward_ckpt,
-            acoustic_vrz3d_backward_recursive_ckpt,
-        )
-
-        return (
-            acoustic_vrz3d_forward,
-            acoustic_vrz3d_backward,
-            acoustic_vrz3d_backward_bs,
-            acoustic_vrz3d_backward_ckpt,
-            acoustic_vrz3d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_single(),
+            # chunk_forward, (steps + 2, B, 1, grid): U_{start-1}, the replayed
+            # segment's pressure, U_end -- the p_tt imaging reads neighbours.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg + 2, B, 1, *grid)],
+            # u + 3 psi + 3 zeta + U_{it+1}-2U_it+U_{it-1} (the p_tt imaging)
+            save_all_shape=history_fields(8),
+            # The compiled backward's scratch (acoustic_vrz3d/backward.cu WorkspaceSlot):
+            # six c/e coupling grids of the split gradient and the four adjoint
+            # coefficients C0/Cx/Cy/Cz -- the same ten the DD runner binds.
+            backward_workspace_nvar=10,
+            derived_model_nvar=1,   # 1/z (common/derived_models.h VrzSlot)
             base_nvar=3,
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3): race-free
             # forward psi double-buffer (read psi, write psi*n, swap_pml).
             pml_nvar=9,
+            # exact CPML adjoint: zeta double-buffer on the adjoint only
+            adjoint_extra_nvar=3,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
+            slots=slot_table.ACOUSTIC_VRZ3D,
+            stepped=True,
+            dd_backward_phases=True,
+            grads_out_has_wavelet=True,
+            grads_out_wavelet_written=False,
+            illum_nvar=2,
+            # DD: the variable-density gradient is div(c/e) with
+            # c/e = lambda*vp*grad(p), so a cut seam needs the
+            # neighbour's coupling field before the divergence.
+            dd_coupling_nvar=6,
+            dd_adjoint_coeff_nvar=4,
         )

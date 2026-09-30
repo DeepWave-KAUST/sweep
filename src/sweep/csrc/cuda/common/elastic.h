@@ -1,8 +1,9 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "context.h"
+#include "cudautils.h"   // zero_tensor_device_async
 
 struct ElasticCPMLPointer {
     const float* __restrict__ ax;
@@ -22,14 +23,14 @@ struct ElasticCPMLPointer {
 };
 
 struct ElasticCPMLTensor {
-    torch::Tensor ax_t, bx_t, axh_t, bxh_t;
-    torch::Tensor az_t, bz_t, azh_t, bzh_t;
-    torch::Tensor ay_t, by_t, ayh_t, byh_t;  // 3D only
+    Buf ax_t, bx_t, axh_t, bxh_t;
+    Buf az_t, bz_t, azh_t, bzh_t;
+    Buf ay_t, by_t, ayh_t, byh_t;  // 3D only
 
     int dim = 3;
     bool allocated = false;
 
-    void allocate(const std::vector<torch::Tensor>& pml_vals, int dim_)
+    void bind(const std::vector<Buf>& pml_vals, int dim_)
     {
         dim = dim_;
 
@@ -45,10 +46,10 @@ struct ElasticCPMLTensor {
             ayh_t = pml_vals[idx++];
             byh_t = pml_vals[idx++];
         } else {
-            ay_t = torch::Tensor();
-            by_t = torch::Tensor();
-            ayh_t = torch::Tensor();
-            byh_t = torch::Tensor();
+            ay_t = Buf{};
+            by_t = Buf{};
+            ayh_t = Buf{};
+            byh_t = Buf{};
         }
 
         ax_t = pml_vals[idx++];
@@ -98,7 +99,7 @@ inline void elastic_init_aux_slabs(SolverContext& ctx, const WF& wf) {
         if (wf.dim == 3 && wf.m_vyy_t.defined() && wf.m_vyy_t.numel() > 0)
             ly = wf.m_vyy_t.size(3);
     }
-    TORCH_CHECK(ctx.init_aux_slabs(lz, ly, lx),
+    SWEEP_CHECK(ctx.init_aux_slabs(lz, ly, lx),
                 "elastic memory-variable tensor axis lengths match neither the "
                 "full grid nor the strip layout: z=", lz, " y=", ly, " x=", lx,
                 " grid (", ctx.nz, ",", ctx.ny, ",", ctx.nx, ") M=", ctx.M);
@@ -218,81 +219,25 @@ struct ElasticWavefieldPointer {
 };
 
 struct ElasticWavefieldTensor {
-    torch::Tensor vx_t, vy_t, vz_t;
-    torch::Tensor sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t;
+    Buf vx_t, vy_t, vz_t;
+    Buf sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t;
 
-    torch::Tensor m_vxx_t, m_vxy_t, m_vxz_t;
-    torch::Tensor m_vyx_t, m_vyy_t, m_vyz_t;
-    torch::Tensor m_vzx_t, m_vzy_t, m_vzz_t;
+    Buf m_vxx_t, m_vxy_t, m_vxz_t;
+    Buf m_vyx_t, m_vyy_t, m_vyz_t;
+    Buf m_vzx_t, m_vzy_t, m_vzz_t;
 
-    torch::Tensor m_sxxx_t, m_sxxy_t, m_sxxz_t;
-    torch::Tensor m_syyx_t, m_syyy_t, m_syyz_t;
-    torch::Tensor m_szzx_t, m_szzy_t, m_szzz_t;
-    torch::Tensor m_sxyx_t, m_sxyy_t, m_sxyz_t;
-    torch::Tensor m_sxzx_t, m_sxzy_t, m_sxzz_t;
-    torch::Tensor m_syzx_t, m_syzy_t, m_syzz_t;
+    Buf m_sxxx_t, m_sxxy_t, m_sxxz_t;
+    Buf m_syyx_t, m_syyy_t, m_syyz_t;
+    Buf m_szzx_t, m_szzy_t, m_szzz_t;
+    Buf m_sxyx_t, m_sxyy_t, m_sxyz_t;
+    Buf m_sxzx_t, m_sxzy_t, m_sxzz_t;
+    Buf m_syzx_t, m_syzy_t, m_syzz_t;
 
     int dim = 2;
     bool use_pml = true;
     bool allocated = false;
 
-    void allocate(const torch::Tensor& vp, int dim_, bool use_pml_ = true)
-    {
-        if (allocated) return;
-
-        dim = dim_;
-        use_pml = use_pml_;
-
-        vx_t = torch::zeros_like(vp);
-        vz_t = torch::zeros_like(vp);
-        sxx_t = torch::zeros_like(vp);
-        szz_t = torch::zeros_like(vp);
-        sxz_t = torch::zeros_like(vp);
-
-        reset_optional_3d();
-        reset_optional_pml();
-
-        if (dim == 3) {
-            vy_t = torch::zeros_like(vp);
-            syy_t = torch::zeros_like(vp);
-            sxy_t = torch::zeros_like(vp);
-            syz_t = torch::zeros_like(vp);
-        }
-
-        if (use_pml) {
-            allocate_common_pml(vp);
-
-            if (dim == 3) {
-                allocate_3d_only_pml(vp);
-            }
-        }
-
-        allocated = true;
-    }
-
-    // Allocate state whose slot shapes follow the Python-allocated checkpoint
-    // snapshots (bind order, each [n_ckpt, B, 1, ...]); memory variables may
-    // be per-axis slabs there.  Used by the checkpoint drivers, which have no
-    // bound forward wavefield to copy the layout from.
-    void allocate_from_snapshots(const torch::Tensor& vp,
-                                 const std::vector<torch::Tensor>& snaps,
-                                 int dim_)
-    {
-        if (allocated) return;
-        TORCH_CHECK((int)snaps.size() == (dim_ == 2 ? 15 : 36),
-                    "elastic checkpoint set expects 15 (2D) / 36 (3D) tensors, got ",
-                    snaps.size());
-        std::vector<torch::Tensor> ts;
-        ts.reserve(snaps.size());
-        for (const auto& t : snaps) {
-            auto sizes = t.sizes().vec();
-            sizes.erase(sizes.begin());          // drop the n_ckpt axis
-            ts.push_back(torch::zeros(sizes, vp.options()));
-        }
-        bind(ts, true);
-    }
-
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml_ = true)
+    void bind(const std::vector<Buf>& tensors, bool use_pml_ = true)
     {
         int i = 0;
         use_pml = use_pml_;
@@ -304,7 +249,7 @@ struct ElasticWavefieldTensor {
         // fields only: 5 (2D) / 9 (3D).  The 9-tensor no-pml case falls
         // through to the 3D branch (which reads exactly 9 when use_pml
         // is false).
-        TORCH_CHECK(
+        SWEEP_CHECK(
             use_pml_ ? (tensors.size() == 15 || tensors.size() == 36)
                      : (tensors.size() == 5 || tensors.size() == 9),
             "ElasticWavefieldTensor::bind: expected ",
@@ -420,7 +365,7 @@ struct ElasticWavefieldTensor {
         }
 
         if (use_pml) {
-            auto bn = [](const torch::Tensor& t) -> long {
+            auto bn = [](const Buf& t) -> long {
                 return t.defined() && t.numel() > 0 ? t.numel() / t.size(0) : -1;
             };
             v.aux_bn_x = bn(m_vxx_t);
@@ -431,7 +376,7 @@ struct ElasticWavefieldTensor {
         return v;
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         if (dim == 3) {
             return {
@@ -450,7 +395,7 @@ struct ElasticWavefieldTensor {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return checkpoint_tensors();
     }
@@ -458,83 +403,42 @@ struct ElasticWavefieldTensor {
 private:
     void reset_optional_3d()
     {
-        vy_t = torch::Tensor();
-        syy_t = torch::Tensor();
-        sxy_t = torch::Tensor();
-        syz_t = torch::Tensor();
+        vy_t = Buf{};
+        syy_t = Buf{};
+        sxy_t = Buf{};
+        syz_t = Buf{};
     }
 
     void reset_optional_pml()
     {
-        m_vxx_t = torch::Tensor();
-        m_vxy_t = torch::Tensor();
-        m_vxz_t = torch::Tensor();
-        m_vyx_t = torch::Tensor();
-        m_vyy_t = torch::Tensor();
-        m_vyz_t = torch::Tensor();
-        m_vzx_t = torch::Tensor();
-        m_vzy_t = torch::Tensor();
-        m_vzz_t = torch::Tensor();
+        m_vxx_t = Buf{};
+        m_vxy_t = Buf{};
+        m_vxz_t = Buf{};
+        m_vyx_t = Buf{};
+        m_vyy_t = Buf{};
+        m_vyz_t = Buf{};
+        m_vzx_t = Buf{};
+        m_vzy_t = Buf{};
+        m_vzz_t = Buf{};
 
-        m_sxxx_t = torch::Tensor();
-        m_sxxy_t = torch::Tensor();
-        m_sxxz_t = torch::Tensor();
-        m_syyx_t = torch::Tensor();
-        m_syyy_t = torch::Tensor();
-        m_syyz_t = torch::Tensor();
-        m_szzx_t = torch::Tensor();
-        m_szzy_t = torch::Tensor();
-        m_szzz_t = torch::Tensor();
-        m_sxyx_t = torch::Tensor();
-        m_sxyy_t = torch::Tensor();
-        m_sxyz_t = torch::Tensor();
-        m_sxzx_t = torch::Tensor();
-        m_sxzy_t = torch::Tensor();
-        m_sxzz_t = torch::Tensor();
-        m_syzx_t = torch::Tensor();
-        m_syzy_t = torch::Tensor();
-        m_syzz_t = torch::Tensor();
-    }
-
-    void allocate_common_pml(const torch::Tensor& like)
-    {
-        m_vxx_t = torch::zeros_like(like);
-        m_vxz_t = torch::zeros_like(like);
-        m_vzx_t = torch::zeros_like(like);
-        m_vzz_t = torch::zeros_like(like);
-
-        m_sxxx_t = torch::zeros_like(like);
-        m_sxxz_t = torch::zeros_like(like);
-        m_szzx_t = torch::zeros_like(like);
-        m_szzz_t = torch::zeros_like(like);
-        m_sxzx_t = torch::zeros_like(like);
-        m_sxzz_t = torch::zeros_like(like);
-    }
-
-    void allocate_3d_only_pml(const torch::Tensor& like)
-    {
-        m_vxy_t = torch::zeros_like(like);
-        m_vzy_t = torch::zeros_like(like);
-
-        m_vyx_t = torch::zeros_like(like);
-        m_vyy_t = torch::zeros_like(like);
-        m_vyz_t = torch::zeros_like(like);
-
-        m_sxyx_t = torch::zeros_like(like);
-        m_sxyy_t = torch::zeros_like(like);
-        m_sxyz_t = torch::zeros_like(like);
-
-        m_syyx_t = torch::zeros_like(like);
-        m_syyy_t = torch::zeros_like(like);
-        m_syyz_t = torch::zeros_like(like);
-
-        m_sxzy_t = torch::zeros_like(like);
-        m_syzx_t = torch::zeros_like(like);
-        m_syzy_t = torch::zeros_like(like);
-        m_syzz_t = torch::zeros_like(like);
-
-        m_sxxy_t = torch::zeros_like(like);
-        m_szzy_t = torch::zeros_like(like);
+        m_sxxx_t = Buf{};
+        m_sxxy_t = Buf{};
+        m_sxxz_t = Buf{};
+        m_syyx_t = Buf{};
+        m_syyy_t = Buf{};
+        m_syyz_t = Buf{};
+        m_szzx_t = Buf{};
+        m_szzy_t = Buf{};
+        m_szzz_t = Buf{};
+        m_sxyx_t = Buf{};
+        m_sxyy_t = Buf{};
+        m_sxyz_t = Buf{};
+        m_sxzx_t = Buf{};
+        m_sxzy_t = Buf{};
+        m_sxzz_t = Buf{};
+        m_syzx_t = Buf{};
+        m_syzy_t = Buf{};
+        m_syzz_t = Buf{};
     }
 
     void bind_common_pml_view(ElasticWavefieldPointer& v)
@@ -634,55 +538,30 @@ private:
 };
 
 struct ElasticAdjointWorkspaceTensor {
-    torch::Tensor qxx_t, qxy_t, qxz_t, qyx_t, qyy_t, qyz_t, qzx_t, qzy_t, qzz_t;
-    torch::Tensor pxx_t, pxy_t, pxz_t, pyx_t, pyy_t, pyz_t, pzx_t, pzy_t, pzz_t;
+    Buf qxx_t, qxy_t, qxz_t, qyx_t, qyy_t, qyz_t, qzx_t, qzy_t, qzz_t;
+    Buf pxx_t, pxy_t, pxz_t, pyx_t, pyy_t, pyz_t, pzx_t, pzy_t, pzz_t;
 
     int dim = 2;
     bool allocated = false;
 
-    void allocate(const torch::Tensor& like, int dim_ = 2)
-    {
-        if (allocated) return;
+    // Slots this struct binds per dimension: 2-D qxx, qzz, qxz, qzx, pxx, pzz,
+    // pxz, pzx (8); 3-D the nine q* then the nine p* (18).  They are the HEAD
+    // of the adjoint_workspace pool (cuda_layout.backward_workspace_shapes);
+    // in the checkpoint modes the staggered skeleton's velocity carriers
+    // follow them (sg_driver.cuh SgCarrierSlots, from Eq::WS_CARRIERS on), so
+    // bind() accepts a longer list and takes only its head.
+    static constexpr int nslots(int dim_) { return dim_ == 2 ? 8 : 18; }
 
-        dim = dim_;
-        qxx_t = torch::zeros_like(like);
-        pxx_t = torch::zeros_like(like);
-
-        if (dim == 2) {
-            qzz_t = torch::zeros_like(like);
-            qxz_t = torch::zeros_like(like);
-            qzx_t = torch::zeros_like(like);
-            pzz_t = torch::zeros_like(like);
-            pxz_t = torch::zeros_like(like);
-            pzx_t = torch::zeros_like(like);
-        } else {
-            qxy_t = torch::zeros_like(like);
-            qxz_t = torch::zeros_like(like);
-            qyx_t = torch::zeros_like(like);
-            qyy_t = torch::zeros_like(like);
-            qyz_t = torch::zeros_like(like);
-            qzx_t = torch::zeros_like(like);
-            qzy_t = torch::zeros_like(like);
-            qzz_t = torch::zeros_like(like);
-
-            pxy_t = torch::zeros_like(like);
-            pxz_t = torch::zeros_like(like);
-            pyx_t = torch::zeros_like(like);
-            pyy_t = torch::zeros_like(like);
-            pyz_t = torch::zeros_like(like);
-            pzx_t = torch::zeros_like(like);
-            pzy_t = torch::zeros_like(like);
-            pzz_t = torch::zeros_like(like);
-        }
-        allocated = true;
-    }
-
-    void bind(const std::vector<torch::Tensor>& tensors)
+    void bind(const std::vector<Buf>& tensors, int dim_)
     {
         int i = 0;
+        dim = dim_;
+        SWEEP_CHECK(static_cast<int>(tensors.size()) >= nslots(dim),
+                    "Elastic adjoint workspace expects at least ", nslots(dim),
+                    " tensors (", dim, "D q*/p* scratch; any further slots are the "
+                    "checkpoint modes' velocity carriers), got ", tensors.size());
 
-        if (tensors.size() == 8) {
-            dim = 2;
+        if (dim == 2) {
             qxx_t = tensors[i++];
             qzz_t = tensors[i++];
             qxz_t = tensors[i++];
@@ -691,8 +570,7 @@ struct ElasticAdjointWorkspaceTensor {
             pzz_t = tensors[i++];
             pxz_t = tensors[i++];
             pzx_t = tensors[i++];
-        } else if (tensors.size() == 18) {
-            dim = 3;
+        } else {
             qxx_t = tensors[i++];
             qxy_t = tensors[i++];
             qxz_t = tensors[i++];
@@ -711,77 +589,84 @@ struct ElasticAdjointWorkspaceTensor {
             pzx_t = tensors[i++];
             pzy_t = tensors[i++];
             pzz_t = tensors[i++];
-        } else {
-            TORCH_CHECK(false, "Elastic adjoint workspace expects 8 tensors (2D) or 18 tensors (3D)");
         }
 
         allocated = true;
     }
 };
 
-inline void init_adjoint_workspace(
+// The adjoint workspace, which the propagator ALWAYS binds: every staggered-family equation declares
+// cuda_layout.backward_workspace_shapes as a callable, so _c.py's
+// _ensure_adjoint_workspace_buffers sizes the pool for the backward's memory
+// mode and Wrapper.backward hands it over as BackwardInput.adjoint_workspace
+// on every gradient-bearing call.  There is therefore no supported path on
+// which the driver has to allocate its own q*/p* scratch -- an empty pool is
+// a Python/driver contract break, not a mode.  ``who`` names the driver and
+// mode for the message.
+inline void bind_adjoint_workspace_required(
     ElasticAdjointWorkspaceTensor& workspace,
-    const std::vector<torch::Tensor>& tensors,
-    const torch::Tensor& like,
-    int dim
+    const BufList& tensors,
+    int dim,
+    const char* who
 )
 {
-    if (!tensors.empty())
-        workspace.bind(tensors);
-    else
-        workspace.allocate(like, dim);
+    SWEEP_CHECK(!tensors.empty(),
+                who, " requires the propagator-bound adjoint_workspace "
+                "(cuda_layout.backward_workspace_shapes); got an empty pool");
+    workspace.bind(tensors, dim);
 }
 
 inline void zero_wavefield_state(ElasticWavefieldTensor& wf)
 {
-    if (wf.dim == 3 && !wf.m_syzx_t.defined())
-        wf.m_syzx_t = torch::zeros_like(wf.vx_t);
+    SWEEP_CHECK(wf.dim != 3 || wf.m_syzx_t.defined(),
+                "zero_wavefield_state: a 3-D elastic wavefield must carry m_syzx "
+                "(the propagator binds all 36 slots; nothing allocates it here)");
 
-    wf.vx_t.zero_();
-    wf.vz_t.zero_();
-    wf.sxx_t.zero_();
-    wf.szz_t.zero_();
-    wf.sxz_t.zero_();
+    zero_tensor_device_async(wf.vx_t);
+    zero_tensor_device_async(wf.vz_t);
+    zero_tensor_device_async(wf.sxx_t);
+    zero_tensor_device_async(wf.szz_t);
+    zero_tensor_device_async(wf.sxz_t);
 
     if (wf.dim == 3) {
-        wf.vy_t.zero_();
-        wf.syy_t.zero_();
-        wf.sxy_t.zero_();
-        wf.syz_t.zero_();
+        zero_tensor_device_async(wf.vy_t);
+        zero_tensor_device_async(wf.syy_t);
+        zero_tensor_device_async(wf.sxy_t);
+        zero_tensor_device_async(wf.syz_t);
     }
 
     if (!wf.use_pml)
         return;
 
-    wf.m_vxx_t.zero_();
-    wf.m_vxz_t.zero_();
-    wf.m_vzx_t.zero_();
-    wf.m_vzz_t.zero_();
-    wf.m_sxxx_t.zero_();
-    wf.m_sxxz_t.zero_();
-    wf.m_szzx_t.zero_();
-    wf.m_szzz_t.zero_();
-    wf.m_sxzx_t.zero_();
-    wf.m_sxzz_t.zero_();
+    zero_tensor_device_async(wf.m_vxx_t);
+    zero_tensor_device_async(wf.m_vxz_t);
+    zero_tensor_device_async(wf.m_vzx_t);
+    zero_tensor_device_async(wf.m_vzz_t);
+    zero_tensor_device_async(wf.m_sxxx_t);
+    zero_tensor_device_async(wf.m_sxxz_t);
+    zero_tensor_device_async(wf.m_szzx_t);
+    zero_tensor_device_async(wf.m_szzz_t);
+    zero_tensor_device_async(wf.m_sxzx_t);
+    zero_tensor_device_async(wf.m_sxzz_t);
 
     if (wf.dim == 3) {
-        wf.m_vxy_t.zero_();
-        wf.m_vyx_t.zero_();
-        wf.m_vyy_t.zero_();
-        wf.m_vyz_t.zero_();
-        wf.m_vzy_t.zero_();
-        wf.m_sxxy_t.zero_();
-        wf.m_syyx_t.zero_();
-        wf.m_syyy_t.zero_();
-        wf.m_syyz_t.zero_();
-        wf.m_szzy_t.zero_();
-        wf.m_sxyx_t.zero_();
-        wf.m_sxyy_t.zero_();
-        wf.m_sxyz_t.zero_();
-        wf.m_sxzy_t.zero_();
-        if (wf.m_syzx_t.defined()) wf.m_syzx_t.zero_();
-        wf.m_syzy_t.zero_();
-        wf.m_syzz_t.zero_();
+        zero_tensor_device_async(wf.m_vxy_t);
+        zero_tensor_device_async(wf.m_vyx_t);
+        zero_tensor_device_async(wf.m_vyy_t);
+        zero_tensor_device_async(wf.m_vyz_t);
+        zero_tensor_device_async(wf.m_vzy_t);
+        zero_tensor_device_async(wf.m_sxxy_t);
+        zero_tensor_device_async(wf.m_syyx_t);
+        zero_tensor_device_async(wf.m_syyy_t);
+        zero_tensor_device_async(wf.m_syyz_t);
+        zero_tensor_device_async(wf.m_szzy_t);
+        zero_tensor_device_async(wf.m_sxyx_t);
+        zero_tensor_device_async(wf.m_sxyy_t);
+        zero_tensor_device_async(wf.m_sxyz_t);
+        zero_tensor_device_async(wf.m_sxzy_t);
+        if (wf.m_syzx_t.defined()) zero_tensor_device_async(wf.m_syzx_t);
+        zero_tensor_device_async(wf.m_syzy_t);
+        zero_tensor_device_async(wf.m_syzz_t);
     }
 }
 
@@ -801,24 +686,30 @@ inline bool elastic_field_is_stress(int dim, int idx)
 // component; injecting it raw (as for a velocity receiver) negates every model
 // gradient.
 //
-// Returns the per-receiver-field adjoint sources with that sign applied, built
-// once per backward call so the reverse loop stays allocation-free.
-inline std::vector<torch::Tensor> elastic_signed_adjoint_sources(
-    const torch::Tensor& adjoint_source,     // (nfield, B, nrec, nt)
-    const torch::Tensor& receiver_fields,    // (nfield,) wavefield indices, CPU
+// Returns the per-receiver-field injection sign (+1 velocity, -1 stress)
+// that add_source_signed / add_source_3d_signed (common.cuh) apply to the
+// sample at the injection -- bit-identical to the negated per-field copy this
+// used to build, without the copy.  Built once per backward call.  The signed
+// kernels read ``adjoint_source[i]`` in place, so the list must be contiguous:
+// the copy that used to make a stress field's slice contiguous is gone (a
+// velocity field's slice was always read in place).
+inline std::vector<float> elastic_adjoint_source_signs(
+    const Buf& adjoint_source,     // (nfield, B, nrec, nt)
+    IntSpan receiver_fields,       // (nfield,) wavefield indices, host
     int dim
 )
 {
-    const int64_t nfield = receiver_fields.numel();
-    std::vector<torch::Tensor> out;
-    out.reserve(static_cast<size_t>(nfield));
+    SWEEP_CHECK(adjoint_source.is_contiguous(),
+                "elastic adjoint_source must be contiguous (nfield, B, nrec, nt); "
+                "the residual injection reads it in place");
+    const int64_t nfield = receiver_fields.size();
+    std::vector<float> signs;
+    signs.reserve(static_cast<size_t>(nfield));
     for (int64_t i = 0; i < nfield; ++i) {
-        const int field = receiver_fields[i].item<int>();
-        out.push_back(elastic_field_is_stress(dim, field)
-                          ? (-adjoint_source[i]).contiguous()
-                          : adjoint_source[i]);
+        const int field = receiver_fields[i];
+        signs.push_back(elastic_field_is_stress(dim, field) ? -1.0f : 1.0f);
     }
-    return out;
+    return signs;
 }
 
 inline float* elastic_field_ptr(ElasticWavefieldPointer& wf, int dim, int idx)

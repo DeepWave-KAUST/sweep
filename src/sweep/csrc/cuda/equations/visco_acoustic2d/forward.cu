@@ -1,7 +1,5 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <c10/cuda/CUDAGuard.h>
 #include "visco_acoustic2d.h"
 #include "kernels.cuh"
 #include "../acoustic2d/kernels.cuh"   // reused CPML stencil (ODR-safe: same header)
@@ -10,7 +8,7 @@
 #include "../../common/acoustic.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/cudautils.h"
-#include "../../common/wavetypes.h"
+#include "../../common/derived_models.h"
 #include "../../launch/config.h"
 #include "../../operators/laplace.cuh"
 #include "../../operators/gradient.cuh"
@@ -19,36 +17,46 @@ namespace visco_acoustic2d {
 
 // Nearly constant-Q visco-acoustic forward (Zhu & Harris 2014, decoupled):
 // the CPML acoustic step run with the dispersion-folded ``vp_step``
-// (models[0]) plus a per-step spectral amplitude-damping correction
-// (models[1] = A = tt*vp/2; active iff eq_aux = {|k| grid} is present).
+// (models[0]) plus the per-step spectral corrections (dispersion remainder
+// from B1/B2 = models[1..2], amplitude damping from A = models[3]), each
+// active iff its eq_aux filter grid is present.
 //
 // v1 scope (all guarded, never silent): no DD / stepped segments, no
 // topography / APM, no boundary saving (the dissipative term breaks the
 // reverse-time reconstruction; use ckpt / full).  Per-edge free surface is
 // inherited from the acoustic2d region logic + the post-damping halo zeroing.
-ForwardOutput forward(const ForwardInput& in) {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+//
+// Allocation contract: the propagator's pools (wavefields, record_out,
+// u_allt_out, derived_models, forward_workspace) are REQUIRED, and with them
+// this forward allocates NOTHING on the device -- the spectral terms run on
+// forward_workspace slots through the cached cuFFT plan (kernels.cuh
+// ViscoScratch / ViscoFFT) and the tables come from derived_models.  The only
+// remaining per-call host objects are tensor views and the wrapped CPU scalars
+// of the in-place Scalar ops (div_(dt), the ifft normalisation), exactly as the
+// ATen expressions had.
+ForwardOutputCore forward_core(const ForwardInputCore& in) {
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
 
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "visco_acoustic2d expects the prepared models "
                 "(vp_step, B1, B2, A); got ", p.models.size());
-    TORCH_CHECK(p.models[0].is_cuda(),
+    SWEEP_CHECK(p.models[0].is_cuda(),
                 "visco_acoustic2d impl='c' is CUDA-only; use impl='eager' on CPU");
-    TORCH_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
+    SWEEP_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
                 "visco_acoustic2d does not support domain decomposition (the "
                 "amplitude damping is a global FFT)");
-    TORCH_CHECK(p.it_begin == 0 && (p.it_end < 0 || p.it_end == (int)p.nt),
+    SWEEP_CHECK(p.it_begin == 0 && (p.it_end < 0 || p.it_end == (int)p.nt),
                 "visco_acoustic2d does not support stepped forward segments");
-    TORCH_CHECK(!p.has_topo && !p.use_apm,
+    SWEEP_CHECK(!p.has_topo && !p.use_apm,
                 "visco_acoustic2d does not support topography on impl='c' yet; "
                 "use impl='eager'");
-    TORCH_CHECK(!p.use_boundary_saving,
+    SWEEP_CHECK(!p.use_boundary_saving,
                 "visco_acoustic2d does not support boundary saving (dissipative "
                 "step is not reverse-time reconstructible); use "
-                "memory=MemoryOptions(strategy='ckpt') or 'full'");
+                "memory=Ckpt() or memory=Full()");
 
     auto vp = p.models[0];
 
@@ -77,28 +85,36 @@ ForwardOutput forward(const ForwardInput& in) {
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     ctx.set_cut_mask(0);
 
+    // The propagator binds the forward wavefield state on EVERY call -- the
+    // persistent save_all pool or the per-call transient set (_c.py
+    // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
+    // ViscoAcoustic.cuda_layout base_nvar 3 + pml_nvar 6, the CPML aux as
+    // per-axis slabs via pml_slot_axes).
     AcousticWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, 2, true);
-    else
-        wavefield.allocate(vp, 2, true, /*double_buffer_psi=*/true);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "visco_acoustic2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + pml_nvar = 9 tensors)");
+    wavefield.bind(p.wavefields, 2, true);
     acoustic_init_aux_slabs(ctx, wavefield);
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.allocate(p.pml_vals, 2);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    auto record = torch::zeros(
-        {N, p.receivers_loc.size(1), p.nt},
-        vp.options()
-    );
+    // record_out is bound on every call: ViscoAcoustic.cuda_layout declares
+    // record_shape, so cp.record_shape is never None and _c.py allocates it.
+    auto record = bound_required(p.record_out, {N, p.receivers_loc.size(1), p.nt},
+                                 "record_out (visco_acoustic2d/forward, cuda_layout.record_shape)");
 
     // Full-mode store: RAW pressure u(t) (NOT the acoustic vp^2*Lap(u)
     // carrier) — the attenuation adjoint needs du/dt and its |k| filter; the
     // vp_step-gradient carrier is recomputed in backward (kernels.cuh).
-    torch::Tensor u_allt;
+    // Bound whenever save_all_wavefields is on: cuda_layout declares
+    // save_all_shape, so cp.u_allt_shape is never None.
+    Buf u_allt;
     if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, B, nz, nx}, vp.options());
+        u_allt = bound_required(p.u_allt_out, {p.nt, B, nz, nx},
+                                "u_allt_out (visco_acoustic2d/forward, cuda_layout.save_all_shape)");
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -114,9 +130,17 @@ ForwardOutput forward(const ForwardInput& in) {
     );
 
     // Spectral terms (damping / NCQ dispersion): selected by the eq_aux
-    // composition, see visco_acoustic2d_make_spectral (kernels.cuh).
-    ViscoSpectral spectral =
-        visco_acoustic2d_make_spectral(p.eq_aux, p.models, p.dt, nz, nx);
+    // composition (kernels.cuh).  Tables from p.derived_models in the forward
+    // slot order [dt2A if damping, Gd1, Gd2 if dispersion]
+    // (derived::visco_tables); per-step scratch from p.forward_workspace in
+    // the order [C0, C1, (C2 if dispersion), FFT_WS] (visco_slots) -- both
+    // count-checked against the flags at entry.
+    ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
+        p.eq_aux, p.models, p.derived_models, derived::ViscoMode::Forward, p.dt, nz, nx,
+        "visco_acoustic2d::forward");
+    ViscoScratch scratch = visco_acoustic2d_bind_scratch(
+        p.forward_workspace, wavefield.u_now_t, spectral.active, spectral.disp,
+        derived::ViscoMode::Forward, "visco_acoustic2d::forward forward_workspace");
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
@@ -133,7 +157,7 @@ ForwardOutput forward(const ForwardInput& in) {
 
         // Raw store BEFORE the step: u_now == u(t=it).
         if (u_allt.defined())
-            u_allt[it].copy_(wavefield.u_now_t.view({B, nz, nx}));
+            copy_tensor_device_to_device_async(u_allt.select(0, it), wavefield.u_now_t);
 
         ACOUSTIC2D(
             order,
@@ -151,10 +175,10 @@ ForwardOutput forward(const ForwardInput& in) {
             ctx
         );
 
-        // Dispersion + damping corrections; the FFTs write into the halo
-        // bands, so the helper restores the stencil-kernel invariant
-        // (halo == 0 == the free-surface image condition) afterwards.
-        visco_acoustic2d_apply_spectral(wavefield, spectral, p.dt, p.M);
+        // Dispersion + damping corrections on the bound slots; the FFTs write
+        // into the halo bands, so the helper restores the stencil-kernel
+        // invariant (halo == 0 == the free-surface image condition) afterwards.
+        visco_acoustic2d_apply_spectral_into(wavefield, spectral, scratch, p.dt, p.M);
 
         add_source<<<source_config.grid, source_config.block>>>(
             view.u_next,
@@ -181,10 +205,12 @@ ForwardOutput forward(const ForwardInput& in) {
     }
 
     out.wavefield = u_allt;
-    out.last_two = torch::Tensor();
+    out.last_two = Buf{};
     out.record = record;
 
     return out;
 }
+
+
 
 } // namespace visco_acoustic2d

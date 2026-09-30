@@ -25,7 +25,8 @@ Thomsen, L. (1986), "Weak elastic anisotropy", Geophysics 51, 1954–1966.
 import warnings
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
 from .fields import FieldSpec, ModelSpec
 # Free-surface helpers from `_free_surface` are intentionally NOT imported:
 # the VTI free-surface BC requires a Mittet/Robertsson-style anisotropic
@@ -36,6 +37,7 @@ from .fields import FieldSpec, ModelSpec
 # ---------------------------------------------------------------------------
 # 2-D step function
 # ---------------------------------------------------------------------------
+from ._registry import register_equation
 
 def step_vti_2d(
     vx, vz, sH, sV,
@@ -209,6 +211,7 @@ def _build_stiffness(vp, epsilon, delta, rho):
 # 2-D equation class
 # ---------------------------------------------------------------------------
 
+@register_equation(aliases=('AcousticVTIDuveneck',))
 class AcousticVTI1st(FirstOrderEquation):
     """First-order 2-D acoustic VTI wave equation on a standard staggered grid.
 
@@ -240,6 +243,8 @@ class AcousticVTI1st(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic_vti_1st_2d"
 
     # The isotropic image-method free surface is WRONG for an anisotropic
     # medium (see EquationBase.supports_free_surface); fail loud instead.
@@ -407,28 +412,6 @@ class AcousticVTI1st(FirstOrderEquation):
         """
         return cfl * h / (vp_max * (1.0 + 2.0 * epsilon_max) ** 0.5)
 
-    def _C(self):
-        """Expose the compiled CUDA forward + Phase-1 backward bindings.
-
-        * forward          — full CUDA forward (verified against eager,
-                             ~62× speedup on 401×401).
-        * backward         — Phase 1 (full mode): uses saved forward
-                             wavefield; interior gradients correct, PML-band
-                             gradients approximate.  Mask the PML in your
-                             gradient if it matters.
-        * backward_bs / _ckpt / _recursive_ckpt — Phase 2+, currently raise
-                             TORCH_CHECK.  Use ``use_ckpt=False`` and
-                             ``save_all_wavefields=True`` for full mode.
-        """
-        import sweep._C as _C
-        return (
-            _C.acoustic_vti_1st_2d_forward,
-            _C.acoustic_vti_1st_2d_backward,
-            _C.acoustic_vti_1st_2d_backward_bs,
-            _C.acoustic_vti_1st_2d_backward_ckpt,
-            _C.acoustic_vti_1st_2d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         """CUDA buffer layout.
@@ -436,17 +419,26 @@ class AcousticVTI1st(FirstOrderEquation):
         base_nvar = 4   (vx, vz, sH, sV)
         pml_nvar  = 4   (m_sHx, m_sVz, m_vxx, m_vzz)
         last_two_storage_nvar = 4  (snapshot of vx, vz, sH, sV)
-        backward_workspace_nvar = 0  (Phase 1 backward doesn't need extra
-                                       adjoint scratch — the 8 standard
-                                       adjoint-wavefield tensors are passed
-                                       via ``adjoint_wavefields``).
+        backward_workspace_nvar = 5  (the compiled backward's scratch: two
+                                       pre-multiplication buffers, one
+                                       read-only zero "previous stress", and
+                                       the two chunk-boundary seeds of the
+                                       checkpoint mode; the 8 adjoint
+                                       wavefields are passed separately via
+                                       ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            # u_chunk: the replayed chunk's vx, vz, sH, sV (acoustic_vti_1st_2d/backward.cu)
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, 4, B, *grid)],
+            save_all_shape=history_fields(4),   # vx, vz, sH, sV
             base_nvar=4,
             pml_nvar=4,
             last_two_nvar=1,
             last_two_storage_nvar=4,
-            backward_workspace_nvar=0,
+            backward_workspace_nvar=5,
+            bs_reconstruction_nvar=4,   # vx, vz, sH, sV (no CPML memory in the reconstruction)
+            derived_model_nvar=4,   # c11, c13, c33, 1/rho (common/derived_models.h VtiSlot)
         )
 
 
@@ -454,6 +446,7 @@ class AcousticVTI1st(FirstOrderEquation):
 # 3-D equation class
 # ---------------------------------------------------------------------------
 
+@register_equation(aliases=('AcousticVTIDefault3D', 'AcousticVTIDuveneck3D'))
 class AcousticVTI1st3D(FirstOrderEquation):
     """First-order 3-D acoustic VTI wave equation on a standard staggered grid.
 
@@ -470,6 +463,8 @@ class AcousticVTI1st3D(FirstOrderEquation):
 
     
     """
+
+    C_NAME = "acoustic_vti_1st_3d"
 
     # The isotropic image-method free surface is WRONG for an anisotropic
     # medium (see EquationBase.supports_free_surface); fail loud instead.
@@ -593,28 +588,6 @@ class AcousticVTI1st3D(FirstOrderEquation):
         """
         return cfl * h / (vp_max * (1.0 + 2.0 * epsilon_max) ** 0.5)
 
-    def _C(self):
-        """Expose the compiled CUDA 3-D bindings.
-
-        Same memory-mode coverage as the 2-D entry point:
-
-        * forward          — CUDA forward with optional save_all_wavefields /
-                             boundary saving / chunk checkpointing.
-        * backward         — full mode (consumes ``u_forward`` from the
-                             ``save_all_wavefields=True`` forward).
-        * backward_bs      — boundary-saving + last_two reconstruction.
-        * backward_ckpt    — chunk replay from saved checkpoints.
-        * backward_recursive_ckpt — TORCH_CHECK stub (not implemented).
-        """
-        import sweep._C as _C
-        return (
-            _C.acoustic_vti_1st_3d_forward,
-            _C.acoustic_vti_1st_3d_backward,
-            _C.acoustic_vti_1st_3d_backward_bs,
-            _C.acoustic_vti_1st_3d_backward_ckpt,
-            _C.acoustic_vti_1st_3d_backward_recursive_ckpt,
-        )
-
     @property
     def cuda_layout(self):
         """CUDA buffer layout.
@@ -622,13 +595,24 @@ class AcousticVTI1st3D(FirstOrderEquation):
         base_nvar = 5   (vx, vy, vz, sH, sV)
         pml_nvar  = 6   (m_sHx, m_sHy, m_sVz, m_vxx, m_vyy, m_vzz)
         last_two_storage_nvar = 5  (snapshot of vx, vy, vz, sH, sV)
-        backward_workspace_nvar = 0 (the 11 standard adjoint-wavefield tensors
-                                     are passed via ``adjoint_wavefields``).
+        backward_workspace_nvar = 6 (the compiled backward's scratch: three
+                                     pre-multiplication buffers, one read-only
+                                     zero "previous stress", and the two
+                                     chunk-boundary seeds of the checkpoint
+                                     mode; the 11 adjoint wavefields are
+                                     passed separately via
+                                     ``adjoint_wavefields``).
         """
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            # u_chunk: the replayed chunk's vx, vy, vz, sH, sV
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, 5, B, *grid)],
+            save_all_shape=history_fields(5),   # vx, vy, vz, sH, sV
             base_nvar=5,
             pml_nvar=6,
             last_two_nvar=1,
             last_two_storage_nvar=5,
-            backward_workspace_nvar=0,
+            backward_workspace_nvar=6,
+            bs_reconstruction_nvar=5,   # vx, vy, vz, sH, sV
+            derived_model_nvar=4,   # c11, c13, c33, 1/rho (common/derived_models.h VtiSlot)
         )

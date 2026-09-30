@@ -129,3 +129,18 @@ def test_guards():
     # (three-way selector); the ckpt path can never silently swallow tail_steps.
     with pytest.raises(ValueError, match="Conflicting"):
         mk(Acoustic, boundary_saving_config=cfg, use_ckpt=True)
+
+
+def test_tail_support_is_declared_not_name_matched():
+    """Eligibility is read off ``cuda_layout.supports_boundary_tail_steps``:
+    subclasses inherit it, and a new equation opts in with one declaration
+    instead of editing a class-name set inside the shared driver."""
+    dev = "cpu"
+    assert Acoustic(device=dev, backend="torch").cuda_layout.supports_boundary_tail_steps
+    assert Acoustic3D(device=dev, backend="torch").cuda_layout.supports_boundary_tail_steps
+    assert not Elastic(device=dev, backend="torch").cuda_layout.supports_boundary_tail_steps
+
+    class MyAcoustic(Acoustic):
+        pass
+
+    assert MyAcoustic(device=dev, backend="torch").cuda_layout.supports_boundary_tail_steps

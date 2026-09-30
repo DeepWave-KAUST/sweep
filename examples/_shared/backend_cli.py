@@ -10,7 +10,7 @@ LEGACY_BACKEND_ALIASES = {
     "eager": ("torch", "eager", None),
     "c": ("torch", "c", None),
     "cuda": ("torch", "c", "cuda"),
-    "cpu": ("torch", "c", "cpu"),
+    "cpu": ("torch", "eager", "cpu"),   # the compiled backend is CUDA-only
 }
 
 IMPL_ALIASES = {}
@@ -58,6 +58,8 @@ def resolve_backend_impl_device(backend="torch", impl=None, device="auto", *, al
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but torch.cuda.is_available() is False.")
+    if backend == "torch" and impl == "c" and device != "cuda":
+        raise ValueError("--impl c runs on CUDA only; use --impl eager for --device cpu.")
 
     return backend, impl, device
 
@@ -77,7 +79,7 @@ def add_backend_impl_device_args(parser, *, default_backend="torch", default_imp
         metavar="{eager,c}",
         default=default_impl,
         help=(
-            "Torch implementation: 'eager' uses PyTorch ops, 'c' uses compiled C++/CUDA kernels. "
+            "Torch implementation: 'eager' uses PyTorch ops, 'c' uses the compiled CUDA kernels (CUDA only). "
             "Defaults to 'eager' for --backend torch."
         ),
     )

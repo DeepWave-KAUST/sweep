@@ -129,9 +129,10 @@ linked at the bottom of this page.
     ---
 
     Reverse-time migration on full 12.5 m Marmousi with a 15 Hz Ricker —
-    background subtraction, near-offset mask, illumination compensation,
-    and `solver.rtm()`. Produces a clean reflectivity image in <3 s on
-    30 shots.
+    the RTM image as the gradient of an inner-product loss through the
+    boundary-saving backward, with background subtraction, near-offset
+    mask and illumination compensation. A clean reflectivity image in
+    <3 s on 30 shots.
 
     [:material-notebook-outline: Open notebook](../notebooks/08_rtm_acoustic_marmousi.ipynb)
 

@@ -61,11 +61,7 @@ pytestmark = pytest.mark.skipif(not _binding_ready(),
                                 reason="CUDA + compiled sweep._C required")
 
 
-def _ricker(nt, dt, fm, delay):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    a = np.pi * fm * t
-    return ((1.0 - 2.0 * a ** 2) * np.exp(-a ** 2)).astype(np.float32)
-
+from conftest import ricker
 
 def _models(shape):
     """Heterogeneous on purpose: a homogeneous model hides defect 1 entirely."""
@@ -135,7 +131,7 @@ def _solver(shape, abcn, mode, source_type, receiver_type):
 def _grads(shape, abcn, mode, source_type, receiver_type):
     dev = torch.device("cuda")
     solver = _solver(shape, abcn, mode, source_type, receiver_type)
-    wavelet = torch.tensor(_ricker(NT, DT, FREQ, DELAY), device=dev)
+    wavelet = torch.tensor(ricker(NT, DT, FREQ, DELAY), device=dev)
     src, rec = _geometry(shape, abcn)
     models = [torch.tensor(a, device=dev, requires_grad=True) for a in _models(shape)]
     solver(wavelet, src.copy(), rec.copy(), models=models).pow(2).mean().backward()

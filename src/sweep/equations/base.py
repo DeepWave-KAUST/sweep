@@ -14,7 +14,6 @@ from .fields import (
     format_field_specs,
     format_model_specs,
 )
-from .cuda_layout import CUDALayoutSpec
 
 
 class hybridmethod:
@@ -42,6 +41,25 @@ class WaveEquation:
     # Default PML formulation when the propagator is not given one explicitly.
     # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.
     default_pml_type = "cpmlr"
+
+    # Symbol prefix of this equation's compiled bindings in ``sweep._C``:
+    # ``{C_NAME}_forward`` plus the four backward variants.  Declaring it is
+    # what gives the class a ``_C()`` -- ``__init_subclass__`` installs
+    # :meth:`_compiled_funcs` under that name -- so it is also what
+    # ``supports_torch_binding()`` keys off.  ``None`` = eager only.
+    C_NAME = None
+
+    # A couple of kernels ship no ``{C_NAME}_backward_recursive_ckpt``
+    # (ElasticTTISG); their 5th binding slot is ``None``.
+    C_HAS_RECURSIVE_CKPT = True
+
+    # Boundary saving: how far, in units of M, the IMAGING stencil reaches
+    # beyond the M cells the reverse step needs.  0 = pointwise imaging
+    # (acoustic); 1 = a divergence of a gradient (VRZ).  The propagator turns
+    # it into a sigma=0 buffer of REACH*M+1 cells between the physical box and
+    # the PML, so the boundary shell -- and the storage noise it carries -- is
+    # never read by the gradient of a physical cell.
+    BOUNDARY_BUFFER_REACH = 0
 
     # Whether this equation has a parameter-modified (APM, Cao & Chen 2018)
     # path for irregular free-surface topography.  When True, the propagator's
@@ -91,6 +109,19 @@ class WaveEquation:
     # separately from the eager path.  Defaults to False; set True by an equation
     # only once its CUDA forward + adjoint honour ``fs_faces`` per edge.
     supports_per_edge_free_surface_c = False
+
+    # Whether the eager ``func`` applies the image-method topography staircase
+    # (it reads ``_topo_rows_runtime``).  Without this flag, ``topography=``
+    # with ``topo_method='image'`` on an equation whose step ignores the rows
+    # would silently model a FLAT surface -- the propagator refuses instead.
+    # A flat free surface (no ``topography=``) never consults this flag.
+    supports_image_topography = False
+
+    # Same, for the compiled ``impl='c'`` kernels (they read the rows through
+    # ``SolverContext``).  Declared separately because support differs by impl:
+    # 3-D Elastic honours topography on eager but its CUDA kernels do not, and
+    # ElasticVRR is the reverse.
+    supports_image_topography_c = False
 
     # Class-level spec tables. Subclasses that declare these tables drive
     # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``
@@ -154,6 +185,15 @@ class WaveEquation:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        # Declaring ``C_NAME`` is what gives a class its compiled bindings.
+        # Install ``_C`` for exactly those classes and no others: the propagator
+        # asks ``supports_torch_binding()``, which is ``callable(cls._C)``, so
+        # putting ``_C`` on the base unconditionally would silently promote
+        # every eager-only equation into the compiled set. A class that writes
+        # its own ``_C`` keeps it (the curvilinear pair, whose ``_C`` raises a
+        # "use impl='eager'" NotImplementedError but still counts as declared).
+        if cls.__dict__.get("C_NAME") and "_C" not in cls.__dict__:
+            cls._C = WaveEquation._compiled_funcs
         # Skip facades / placeholders that declare neither table — they have
         # no specs to render, and instantiating them (e.g. AcousticAniso's
         # __new__ dispatch) would cause surprises.
@@ -192,6 +232,56 @@ class WaveEquation:
         )
         if section:
             cls.__doc__ = existing_doc.rstrip() + "\n\n" + section
+
+    def _compiled_funcs(self):
+        """This equation's compiled binding 5-tuple, resolved from :attr:`C_NAME`.
+
+        Every CUDA equation exposes the same ``sweep._C`` symbol set --
+        ``{C_NAME}_forward`` plus ``_backward`` / ``_backward_bs`` /
+        ``_backward_ckpt`` / ``_backward_recursive_ckpt`` -- so the naming
+        convention lives here once instead of as a hand-copied import block per
+        equation.  Attribute access on ``sweep._C`` is what loads the backend on
+        first use (the ctypes layer over the prebuilt CUDA core; a local nvcc
+        core build only when no shipped core fits, the pybind compile only under
+        ``SWEEP_JIT_FULL=1``), exactly as those blocks did.
+
+        Installed as ``_C`` on every subclass that declares ``C_NAME``; see
+        :meth:`__init_subclass__`.
+        """
+        import sweep._C as _C
+
+        name = self.C_NAME
+        if not name:
+            raise NotImplementedError(
+                f"{type(self).__name__} declares no C_NAME, so it has no "
+                f"compiled CUDA bindings; use impl='eager'."
+            )
+        return (
+            getattr(_C, f"{name}_forward"),
+            getattr(_C, f"{name}_backward"),
+            getattr(_C, f"{name}_backward_bs"),
+            getattr(_C, f"{name}_backward_ckpt"),
+            getattr(_C, f"{name}_backward_recursive_ckpt")
+            if self.C_HAS_RECURSIVE_CKPT
+            else None,
+        )
+
+    def _compiled_runner_factories(self):
+        """(forward_runner, backward_bs_runner) persistent-runner factories.
+
+        Same ``C_NAME`` convention as :meth:`_compiled_funcs`; returns
+        ``(None, None)`` when the equation has no compiled bindings or the core
+        has no persistent runner for this equation (see
+        ``sweep.backend.c.RUNNER_EQUATIONS``), so callers can fall back to the
+        per-call stepped path.
+        """
+        import sweep._C as _C
+
+        name = self.C_NAME
+        if not name:
+            return (None, None)
+        return (getattr(_C, f"{name}_forward_runner", None),
+                getattr(_C, f"{name}_backward_bs_runner", None))
 
     @classmethod
     def supports_torch_binding(cls):
@@ -261,6 +351,13 @@ class WaveEquation:
         self.use_habc = False
         self.device = device
         self.pml_type = kwargs.get('pml_type', 'cpmls')
+
+    # Freshness key for ``self.b``, written by ``PropBase.init_abc``. It lives
+    # here, with the value it describes: an equation may be shared by several
+    # propagators (ModelParallel does exactly that), and a key held per
+    # propagator cannot tell whether the profiles currently on the equation are
+    # the ones THIS propagator's padded shape needs.
+    _abc_cache_key = None
 
     def init_abc(self, type='cpml', **kwargs):
         pml_func = {'cpmls': set_cpml_profiles_s, 'cpmlr': set_cpml_profiles_r,'spml': set_spml_profiles}[type]

@@ -136,11 +136,7 @@ NV = {2: 2, 3: 3}                          # velocity slots 0..NV-1
 NRECON = {2: 7, 3: 12}                     # phys + fv*_prev carries
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return (scale * (1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def global_models(ndim):
     if ndim == 2:
@@ -205,32 +201,7 @@ def make_prop(ndim, shape, free_surface, topo=None):
     return PropTorch(equation, **kwargs)
 
 
-def capture_both(prop):
-    cap = {}
-    impl = prop._backend_impl
-
-    fwd_orig = impl.forward_func
-
-    def fwd_wrapper(params):
-        out = fwd_orig(params)
-        cap["fp"] = params
-        cap["fwd_raw_out"] = out
-        cap["fwd_func"] = fwd_orig
-        return out
-
-    impl.forward_func = fwd_wrapper
-
-    bwd_orig = impl.backward_bs_func
-
-    def bwd_wrapper(params):
-        out = bwd_orig(params)
-        cap["bp"] = params
-        cap["bwd_func"] = bwd_orig
-        return out
-
-    impl.backward_bs_func = bwd_wrapper
-    return cap
-
+from conftest import capture_both
 
 def run_public_once(prop, wavelet, sources, receivers, model_arrays):
     models = [
@@ -250,7 +221,7 @@ class TileState:
         self.fwd_func = cap["fwd_func"]
         self.bp = cap["bp"]
         self.bwd_func = cap["bwd_func"]
-        self.fwd_record_raw = cap["fwd_raw_out"][2]
+        self.fwd_record_raw = self.fp.record_out      # what the public run wrote
 
         L = list(self.fp.wavefields)
         if not L:
@@ -666,14 +637,19 @@ def test_dd_elastic_backward_guards():
     with pytest.raises(RuntimeError, match="bits 0..3"):
         func(bp)
 
-    # cut_face_mask requires gpu-direct boundary storage (v1)
+    # Under a cut, cpu staging is supported and disk is not.  Both used to be
+    # refused; the cpu arm is what a 2xV100 run measures at 0.29 GB of boundary
+    # memory against gpu-direct's 1.03, bit-exact.
     bp.cut_face_mask = X_HI_BIT
     bp.boundary_on_cpu = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    try:
         func(bp)
+    except RuntimeError as exc:
+        assert "boundary storage" not in str(exc), (
+            f"cpu boundary staging is refused again under a cut: {exc}")
     bp.boundary_on_cpu = False
     bp.boundary_on_disk = True
-    with pytest.raises(RuntimeError, match="gpu-direct boundary storage only"):
+    with pytest.raises(RuntimeError, match="boundary_on_disk unsupported"):
         func(bp)
     bp.boundary_on_disk = False
     bp.cut_face_mask = 0

@@ -1,43 +1,20 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "kernels.cuh"
+#include "../../common/cudautils.h"   // ptr_or_null
 
 namespace elastic_tti_sg2d {
 
 struct WavefieldTensor {
-    torch::Tensor vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t;
-    torch::Tensor m_vxx_t, m_vxz_t, m_vyx_t, m_vyz_t, m_vzx_t, m_vzz_t;
-    torch::Tensor m_txxx_t, m_txzz_t, m_txyx_t, m_tyzz_t, m_txzx_t, m_tzzz_t;
+    Buf vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t;
+    Buf m_vxx_t, m_vxz_t, m_vyx_t, m_vyz_t, m_vzx_t, m_vzz_t;
+    Buf m_txxx_t, m_txzz_t, m_txyx_t, m_tyzz_t, m_txzx_t, m_tzzz_t;
 
-    void allocate(const torch::Tensor& like)
+    void bind(const std::vector<Buf>& tensors)
     {
-        vx_t = torch::zeros_like(like);
-        vy_t = torch::zeros_like(like);
-        vz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        syz_t = torch::zeros_like(like);
-        sxz_t = torch::zeros_like(like);
-        sxy_t = torch::zeros_like(like);
-        m_vxx_t = torch::zeros_like(like);
-        m_vxz_t = torch::zeros_like(like);
-        m_vyx_t = torch::zeros_like(like);
-        m_vyz_t = torch::zeros_like(like);
-        m_vzx_t = torch::zeros_like(like);
-        m_vzz_t = torch::zeros_like(like);
-        m_txxx_t = torch::zeros_like(like);
-        m_txzz_t = torch::zeros_like(like);
-        m_txyx_t = torch::zeros_like(like);
-        m_tyzz_t = torch::zeros_like(like);
-        m_txzx_t = torch::zeros_like(like);
-        m_tzzz_t = torch::zeros_like(like);
-    }
-
-    void bind(const std::vector<torch::Tensor>& tensors)
-    {
-        TORCH_CHECK(tensors.size() == 20, "ElasticTTISG 2D expects 20 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 20, "ElasticTTISG 2D expects 20 wavefield tensors");
         int i = 0;
         vx_t = tensors[i++];
         vy_t = tensors[i++];
@@ -61,6 +38,24 @@ struct WavefieldTensor {
         m_tzzz_t = tensors[i++];
     }
 
+    void bind_physical(const std::vector<Buf>& tensors)
+    {
+        SWEEP_CHECK(tensors.size() == 8,
+                    "ElasticTTISG 2D expects 8 physical wavefield tensors "
+                    "[vx, vy, vz, sxx, szz, syz, sxz, sxy]; got ", tensors.size());
+        int i = 0;
+        vx_t = tensors[i++];
+        vy_t = tensors[i++];
+        vz_t = tensors[i++];
+        sxx_t = tensors[i++];
+        szz_t = tensors[i++];
+        syz_t = tensors[i++];
+        sxz_t = tensors[i++];
+        sxy_t = tensors[i++];
+        m_vxx_t = m_vxz_t = m_vyx_t = m_vyz_t = m_vzx_t = m_vzz_t = Buf{};
+        m_txxx_t = m_txzz_t = m_txyx_t = m_tyzz_t = m_txzx_t = m_tzzz_t = Buf{};
+    }
+
     WavefieldPointer view() const
     {
         WavefieldPointer out{};
@@ -72,22 +67,23 @@ struct WavefieldTensor {
         out.syz = syz_t.data_ptr<float>();
         out.sxz = sxz_t.data_ptr<float>();
         out.sxy = sxy_t.data_ptr<float>();
-        out.m_vxx = m_vxx_t.data_ptr<float>();
-        out.m_vxz = m_vxz_t.data_ptr<float>();
-        out.m_vyx = m_vyx_t.data_ptr<float>();
-        out.m_vyz = m_vyz_t.data_ptr<float>();
-        out.m_vzx = m_vzx_t.data_ptr<float>();
-        out.m_vzz = m_vzz_t.data_ptr<float>();
-        out.m_txxx = m_txxx_t.data_ptr<float>();
-        out.m_txzz = m_txzz_t.data_ptr<float>();
-        out.m_txyx = m_txyx_t.data_ptr<float>();
-        out.m_tyzz = m_tyzz_t.data_ptr<float>();
-        out.m_txzx = m_txzx_t.data_ptr<float>();
-        out.m_tzzz = m_tzzz_t.data_ptr<float>();
+        // CPML memory: nullptr after bind_physical (bs reconstruction).
+        out.m_vxx = ptr_or_null(m_vxx_t);
+        out.m_vxz = ptr_or_null(m_vxz_t);
+        out.m_vyx = ptr_or_null(m_vyx_t);
+        out.m_vyz = ptr_or_null(m_vyz_t);
+        out.m_vzx = ptr_or_null(m_vzx_t);
+        out.m_vzz = ptr_or_null(m_vzz_t);
+        out.m_txxx = ptr_or_null(m_txxx_t);
+        out.m_txzz = ptr_or_null(m_txzz_t);
+        out.m_txyx = ptr_or_null(m_txyx_t);
+        out.m_tyzz = ptr_or_null(m_tyzz_t);
+        out.m_txzx = ptr_or_null(m_txzx_t);
+        out.m_tzzz = ptr_or_null(m_tzzz_t);
         return out;
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             vx_t, vy_t, vz_t, sxx_t, szz_t, syz_t, sxz_t, sxy_t,
@@ -96,15 +92,15 @@ struct WavefieldTensor {
         };
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return state_tensors();
     }
 };
 
-inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
+inline StiffnessPointer stiffness_view(const std::vector<Buf>& models)
 {
-    TORCH_CHECK(models.size() == 16, "ElasticTTISG CUDA expects prepared models: rho plus 15 stiffness tensors");
+    SWEEP_CHECK(models.size() == 16, "ElasticTTISG CUDA expects prepared models: rho plus 15 stiffness tensors");
     StiffnessPointer out{};
     int i = 0;
     out.rho = models[i++].data_ptr<float>();
@@ -126,19 +122,9 @@ inline StiffnessPointer stiffness_view(const std::vector<torch::Tensor>& models)
     return out;
 }
 
-inline std::vector<torch::Tensor> zero_model_grads(const std::vector<torch::Tensor>& models)
+inline StiffnessGradPointer stiffness_grad_view(std::vector<Buf>& grads)
 {
-    TORCH_CHECK(models.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared models");
-    std::vector<torch::Tensor> grads;
-    grads.reserve(models.size());
-    for (const auto& model : models)
-        grads.push_back(torch::zeros_like(model));
-    return grads;
-}
-
-inline StiffnessGradPointer stiffness_grad_view(std::vector<torch::Tensor>& grads)
-{
-    TORCH_CHECK(grads.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared model gradients");
+    SWEEP_CHECK(grads.size() == 16, "ElasticTTISG CUDA backward expects 16 prepared model gradients");
     StiffnessGradPointer out{};
     int i = 0;
     out.rho = grads[i++].data_ptr<float>();

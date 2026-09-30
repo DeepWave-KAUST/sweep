@@ -1,9 +1,10 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <memory>
 #include <string>
 #include <vector>
-#include "boundary_session.h"
+#include "session_handle.h"
 
 
 struct ForwardInput {
@@ -24,10 +25,13 @@ struct ForwardInput {
 
     std::vector<torch::Tensor> pml_vals;  // Bind from python
     std::vector<torch::Tensor> wavefields; // Bind from python
+    std::vector<torch::Tensor> forward_workspace; // Bind from python: per-call scratch, cuda_layout.forward_workspace_nvar
+    std::vector<torch::Tensor> derived_models; // Bind from python: cuda_layout.derived_model_nvar model-shaped slots the driver fills (common/derived_models.h)
     torch::Tensor last_two; // Bind from python
 
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
+    std::vector<torch::Tensor> boundary_staging; // Bind from python: FP32 one-timestep bands the scaled (int8/fp16) store quantizes from, Layout.staging_shapes
     std::vector<std::string> boundary_disk_files; // Bind from python
     std::vector<torch::Tensor> checkpoints; // Bind from python
     torch::Tensor checkpoint_steps;
@@ -92,7 +96,7 @@ struct ForwardInput {
     // per-call copy stream + BoundaryRuntime, i.e. exactly the old
     // behaviour.  DD sets it so a transfer can stay in flight across the
     // per-step calls.
-    std::shared_ptr<BoundarySession> boundary_session;
+    std::shared_ptr<BoundarySessionHandle> boundary_session;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
@@ -151,9 +155,48 @@ struct BackwardOutput {
     torch::Tensor adcig;
 };
 
+// ---------------------------------------------------------------------------
+// Persistent stepped runners.
+//
+// A stepped/DD driver calls the compiled entry once per time step, and each
+// call re-pays the whole prologue (validation, model parsing, wavefield/CPML
+// binding, boundary/checkpoint runtime construction, launch configs) -- about
+// 1-2 ms/step against a 10-30 us launch floor.  A runner performs that
+// prologue ONCE at construction and exposes only the time loop:
+//
+//     run(it_begin, it_end, step_phase)          (forward)
+//     run(bw_it_begin, bw_it_end, step_phase)    (backward_bs)
+//
+// The monolithic entries are thin wrappers (construct + one run), so the
+// runner path is the SAME code the bit gates exercise, not a second copy.
+// Reuse contract: a second run() on one runner requires gpu-direct boundary
+// storage and no checkpointing (the only combinations whose cross-call state
+// lives entirely in Python-bound buffers).
+// ---------------------------------------------------------------------------
+struct IForwardRunner {
+    virtual ~IForwardRunner() = default;
+    virtual ForwardOutput run(int it_begin, int it_end, int step_phase) = 0;
+    // The CUDA device the bound inputs live on: the binding sets the core's
+    // current stream for it around every run() (bindings_utils.h).
+    virtual int device_index() const = 0;
+};
+
+struct IBackwardRunner {
+    virtual ~IBackwardRunner() = default;
+    virtual BackwardOutput run(int bw_it_begin, int bw_it_end, int step_phase) = 0;
+    virtual int device_index() const = 0;
+};
+
+using ForwardRunnerPtr = std::shared_ptr<IForwardRunner>;
+using BackwardRunnerPtr = std::shared_ptr<IBackwardRunner>;
+
 struct RTMOutput {
 
-    torch::Tensor image;
+    // No ``image``: the zero-lag RTM image used to be accumulated here, but the
+    // only thing that ever returned it was the ``rtm()`` entry point, removed in
+    // 295858c along with ``wrap_rtm``.  ``pack_outputs`` hands Python the
+    // illuminations and the ADCIG cube; an image field would be written once per
+    // time step and read by nobody.
 
     torch::Tensor source_illumination;
 
@@ -172,16 +215,19 @@ struct BackwardInput {
     std::vector<torch::Tensor> u_boundary;
     torch::Tensor u_last_two;
     std::vector<torch::Tensor> checkpoints;
+    std::vector<torch::Tensor> checkpoint_replay; // Bind from python: cuda_layout.checkpoint_replay_shapes
     torch::Tensor checkpoint_steps;
 
     // Wavefields
     std::vector<torch::Tensor> adjoint_wavefields; // Bind from python
     std::vector<torch::Tensor> forward_wavefields; // Bind from python
     std::vector<torch::Tensor> adjoint_workspace; // Bind from python
+    std::vector<torch::Tensor> derived_models; // Bind from python: cuda_layout.derived_model_nvar (see ForwardInput)
 
     // Wavefields
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
+    std::vector<torch::Tensor> boundary_staging; // Bind from python: see ForwardInput::boundary_staging
     std::vector<std::string> boundary_disk_files; // Bind from python
 
     // models
@@ -240,7 +286,7 @@ struct BackwardInput {
     // per-call copy stream + BoundaryRuntime, i.e. exactly the old
     // behaviour.  DD sets it so a transfer can stay in flight across the
     // per-step calls.
-    std::shared_ptr<BoundarySession> boundary_session;
+    std::shared_ptr<BoundarySessionHandle> boundary_session;
     int checkpoint_interval = 1;
     int checkpoint_count = 0;
 
@@ -285,9 +331,16 @@ struct BackwardInput {
     // (zeros_like(forward_source), raw CUDA layout (B,nsrc,nt)), slots
     // 1..N = model grads (zeros_like(models[i])).
     std::vector<torch::Tensor> grads_out;
-    // illum_out = {source_illumination, receiver_illumination}, shapes
-    // identical to what init_rtm_output_{2d,3d} allocates.
+    // illum_out = {source_illumination, receiver_illumination}, model-shaped
+    // (N, C, nz, nx[, ny]), zeroed per backward call; bound whenever the
+    // caller asked for illumination.
     std::vector<torch::Tensor> illum_out;
+    // adcig_out: the space-lag ADCIG cube the backward accumulates into when
+    // compute_adcig is set, (nlag = 2*adcig_max_lag+1, N, C, nz, nx[, ny])
+    // over the padded model, zeroed per backward call.  Bound by _c.py
+    // Wrapper.backward exactly when compute_adcig; returned as
+    // BackwardOutput.adcig.
+    torch::Tensor adcig_out;
 
     // ---- DD cut faces ----
     // Bitmask of tile faces that are interior cuts (a neighbour tile

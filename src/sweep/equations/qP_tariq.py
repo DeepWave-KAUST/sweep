@@ -1,5 +1,6 @@
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 
 def step_cpml(
@@ -53,6 +54,7 @@ def step_cpml(
     return u_next, u_now, f_next, f_now, psixn, psizn, zetaxn, zetazn
 
 
+@register_equation(aliases=('AcousticTTIAlkhalifah', 'AcousticVTIAlkhalifah'))
 class AcousticTariq(SecondOrderEquation):
     """Second-order 2-D pseudo-acoustic VTI/TTI wave equation (Alkhalifah eta).
 

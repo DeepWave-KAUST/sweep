@@ -104,11 +104,7 @@ REC_GZ = 2
 X_LO_BIT, X_HI_BIT = 1, 2
 
 
-def ricker(nt, dt, fm=10.0, delay=0.06):
-    t = np.arange(nt, dtype=np.float32) * dt - delay
-    arg = np.pi * fm * t
-    return ((1.0 - 2.0 * arg**2) * np.exp(-(arg**2))).astype(np.float32)
-
+from conftest import ricker
 
 def vp_global():
     vp = 1800.0 + 600.0 * np.linspace(0, 1, NZ, dtype=np.float32)[:, None]
@@ -145,34 +141,7 @@ def make_prop(shape, topo=None, storage="gpu", ti=1, ring=1):
     return PropTorch(equation, **kwargs)
 
 
-def capture_both(prop):
-    """Wrap forward_func + backward_bs_func so the populated raw inputs
-    survive the public forward+backward run."""
-    cap = {}
-    impl = prop._backend_impl
-
-    fwd_orig = impl.forward_func
-
-    def fwd_wrapper(params):
-        out = fwd_orig(params)
-        cap["fp"] = params
-        cap["fwd_raw_out"] = out
-        cap["fwd_func"] = fwd_orig
-        return out
-
-    impl.forward_func = fwd_wrapper
-
-    bwd_orig = impl.backward_bs_func
-
-    def bwd_wrapper(params):
-        out = bwd_orig(params)
-        cap["bp"] = params
-        cap["bwd_func"] = bwd_orig
-        return out
-
-    impl.backward_bs_func = bwd_wrapper
-    return cap
-
+from conftest import capture_both
 
 def run_public_once(prop, wavelet, sources, receivers, vp_np):
     models = [torch.tensor(vp_np, device=DEV, requires_grad=True)]
@@ -189,7 +158,7 @@ class TileState:
         self.fwd_func = cap["fwd_func"]
         self.bp = cap["bp"]
         self.bwd_func = cap["bwd_func"]
-        self.fwd_record_raw = cap["fwd_raw_out"][2]
+        self.fwd_record_raw = self.fp.record_out      # what the public run wrote
 
         # forward wavefield list (9 slots) for the stepped forward replay
         L = list(self.fp.wavefields)

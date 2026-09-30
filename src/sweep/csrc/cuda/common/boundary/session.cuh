@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdio>
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -41,7 +43,20 @@ public:
     BoundarySessionImpl(const BoundarySessionImpl&) = delete;
     BoundarySessionImpl& operator=(const BoundarySessionImpl&) = delete;
 
-    ~BoundarySessionImpl() { finish(); }
+    // finish() reaches BoundaryRuntime::synchronize(), which now RETHROWS a
+    // failed boundary-disk write instead of leaving the backward to read zeros.
+    // An exception escaping a destructor is std::terminate, so the destructor
+    // reports and swallows while an explicit finish() still raises -- same
+    // split as stop_disk_reader_no_throw() next to the throwing reader path.
+    ~BoundarySessionImpl()
+    {
+        try {
+            finish();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                         "Boundary session teardown failed: %s\n", e.what());
+        }
+    }
 
     // Bind the per-call objects and return the persistent runtime.  The first
     // call builds the stream + events; later calls only re-point the runtime at
@@ -70,7 +85,7 @@ public:
         } else {
             Cfg want{dim, use_boundary_saving, boundary_on_cpu, boundary_on_disk,
                      boundary_disk_async_read, transfer_interval, ring_buffers};
-            TORCH_CHECK(
+            SWEEP_CHECK(
                 want == cfg_,
                 "BoundarySession reused with a different staging configuration "
                 "(dim/use_bs/cpu/disk/async_read/transfer_interval/ring_buffers). "
@@ -103,7 +118,7 @@ public:
     // first bind() built it.
     AsyncCopyContext& async_ctx()
     {
-        TORCH_CHECK(async_.has_value(),
+        SWEEP_CHECK(async_.has_value(),
                     "BoundarySession::async_ctx() before the first bind()");
         return *async_;
     }

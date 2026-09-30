@@ -10,7 +10,7 @@ The goal is to make it easy to answer three practical questions:
 ## Summary Table
 
 Equations are grouped by physics family. The `impl="c"` column reflects whether
-the compiled C++ / CUDA binding is available; the eager path (`impl="eager"`)
+compiled CUDA kernels exist in the shipped core; the eager path (`impl="eager"`)
 is supported for every class.
 
 ### Acoustic family
@@ -25,6 +25,8 @@ is supported for every class.
 | `AcousticVRZ3D` | `['vp', 'z']` | 3D | 3D counterpart of `AcousticVRZ` | ✅ |
 | `AcousticLSRTM` | `['vp', 'mp']` | 2D | LSRTM-oriented variant (``mp`` = reflectivity perturbation) | ✅ |
 | `AcousticLSRTM3D` | `['vp', 'mp']` | 3D | 3D counterpart of `AcousticLSRTM` | ✅ |
+| `AcousticVRR` | `['vp', 'rx', 'rz']` | 2D | Variable-density acoustic in vector-reflectivity form (``rx``, ``rz`` first-derivative density parameters) | ❌ |
+| `AcousticCurvilinear` | `['vp']` | 2D | `Acoustic` on a curvilinear grid for irregular topography (`topography=`) | ✅ |
 
 ### Anisotropic acoustic family
 
@@ -43,6 +45,9 @@ is supported for every class.
 | --- | --- | --- | --- | --- |
 | `Elastic` | `['vp', 'vs', 'rho']` | 2D | Velocity-stress elastic propagation (Virieux 1986) | ✅ |
 | `Elastic3D` | `['vp', 'vs', 'rho']` | 3D | 3D counterpart of `Elastic` | ✅ |
+| `ElasticAPM` | `['vp', 'vs', 'rho']` | 2D | Alias of `Elastic` (Cao & Chen 2018 APM free surface) | ✅ |
+| `ElasticCurvilinear` | `['vp', 'vs', 'rho']` | 2D | `Elastic` on a curvilinear grid for irregular topography (`topography=`) | ✅ |
+| `ElasticVRR` | `['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']` | 2D | Vector-reflectivity elastic (Soares & Sacchi 2025), momentum-stress form, no density model | ✅ |
 | `ElasticTTI` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Rotated-staggered-grid elastic TTI | ❌ |
 | `ElasticTTISG` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Standard-staggered-grid elastic TTI | ✅ |
 | `ElasticTTISG3D` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 3D | Standard-staggered-grid elastic TTI | ✅ |
@@ -72,9 +77,9 @@ sweep list equations
 Or from Python:
 
 ```python
-from sweep.equations import _equation_classes, torch_binding_supported_equations
+from sweep.equations import equation_classes, torch_binding_supported_equations
 
-print(sorted(_equation_classes().keys()))
+print(sorted(equation_classes().keys()))
 print(torch_binding_supported_equations())
 ```
 
@@ -151,12 +156,14 @@ Roughly:
 
 ### Torch Binding Support
 
-`Acoustic` supports the compiled PyTorch extension binding through `sweep._C`.
+`Acoustic` ships compiled CUDA kernels in the core (`C_NAME = "acoustic2d"`).
 
 That means:
 
 - equation-level torch binding support: yes
-- runtime availability still depends on whether your environment can import `sweep._C`
+- runtime availability depends on a visible CUDA GPU and a fitting core
+  (`sweep.backend.torch.binding.is_available()`), not on importing `sweep._C`,
+  which always succeeds
 
 You can inspect this from the CLI:
 
@@ -225,10 +232,11 @@ solver = PropTorch(
 
 The equation classes above are plug-in units. The propagator owns the time
 loop and PML wiring, so a new equation is one Python file (eager) plus an
-optional CUDA equation directory and a five-line entry in `module.cpp`
-(`impl="c"`). The discovery is reflective: importing the class in
-`src/sweep/equations/__init__.py` makes it appear in `sweep list equations`
-and in `_equation_classes()`.
+optional CUDA equation directory and five entries in the core's C API table
+(`csrc/core/capi.h`, `csrc/cuda/common/capi.cu`) (`impl="c"`). Registration is a decorator plus an import: `@register_equation()` on the
+class claims its public name, and importing the module in
+`src/sweep/equations/__init__.py` is what makes the decorator run. Both are
+needed before it appears in `sweep list equations` or `equation_classes()`.
 
 Two entry points:
 

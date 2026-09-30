@@ -1,6 +1,8 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
+
+#include "cudautils.h"
 
 struct DasWavefieldPointer2D {
     float* __restrict__ exx;
@@ -47,38 +49,18 @@ struct DasWavefieldPointer2D {
 };
 
 struct DasWavefieldTensor2D {
-    torch::Tensor exx_t, ezz_t, sxx_t, szz_t, txx_t, tzz_t;
-    torch::Tensor m_sxx_xf_t, m_sxx_xb_t, m_szz_zf_t, m_szz_zb_t;
-    torch::Tensor m_txx_zf_t, m_txx_zb_t, m_tzz_xf_t, m_tzz_xb_t;
-    torch::Tensor das35_t, das54x_t, das54z_t;
-    bool allocated = false;
+    Buf exx_t, ezz_t, sxx_t, szz_t, txx_t, tzz_t;
+    Buf m_sxx_xf_t, m_sxx_xb_t, m_szz_zf_t, m_szz_zb_t;
+    Buf m_txx_zf_t, m_txx_zb_t, m_tzz_xf_t, m_tzz_xb_t;
+    Buf das35_t, das54x_t, das54z_t;
 
-    void allocate(const torch::Tensor& like)
-    {
-        if (allocated) return;
-        exx_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        txx_t = torch::zeros_like(like);
-        tzz_t = torch::zeros_like(like);
-        m_sxx_xf_t = torch::zeros_like(like);
-        m_sxx_xb_t = torch::zeros_like(like);
-        m_szz_zf_t = torch::zeros_like(like);
-        m_szz_zb_t = torch::zeros_like(like);
-        m_txx_zf_t = torch::zeros_like(like);
-        m_txx_zb_t = torch::zeros_like(like);
-        m_tzz_xf_t = torch::zeros_like(like);
-        m_tzz_xb_t = torch::zeros_like(like);
-        das35_t = torch::zeros_like(like);
-        das54x_t = torch::zeros_like(like);
-        das54z_t = torch::zeros_like(like);
-        allocated = true;
-    }
+    // No allocate(): every DAS 2-D caller is handed its state by the
+    // propagator (ForwardInput.wavefields, BackwardInput.adjoint_wavefields /
+    // forward_wavefields), so the driver owns no wavefield storage.
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    void bind(const std::vector<Buf>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 17, "DAS 2D expects 17 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 17, "DAS 2D expects 17 wavefield tensors");
         int i = 0;
         exx_t = tensors[i++];
         ezz_t = tensors[i++];
@@ -97,11 +79,39 @@ struct DasWavefieldTensor2D {
         das35_t = tensors[i++];
         das54x_t = tensors[i++];
         das54z_t = tensors[i++];
-        allocated = true;
+    }
+
+    // Boundary-saving reconstruction state (das2d backward_bs): the propagator
+    // binds cuda_layout.bs_reconstruction_nvar = RECON_NVAR zeroed grids in
+    // RECON_LIST_DESC order -- bind() order with the 8 CPML memory members
+    // (m_sxx_xf .. m_tzz_xb) skipped, because the NOPML reverse kernels never
+    // touch them. Those 8 stay undefined after bind_recon(); view() hands them
+    // out as nullptr.
+    static constexpr int RECON_NVAR = 9;
+    static constexpr const char* RECON_LIST_DESC =
+        "[exx, ezz, sxx, szz, txx, tzz, das35, das54x, das54z]";
+
+    void bind_recon(const std::vector<Buf>& tensors)
+    {
+        SWEEP_CHECK(static_cast<int>(tensors.size()) == RECON_NVAR,
+                    "DAS 2D reconstruction expects ", RECON_NVAR,
+                    " wavefield tensors ", RECON_LIST_DESC, ", got ", tensors.size());
+        int i = 0;
+        exx_t = tensors[i++];
+        ezz_t = tensors[i++];
+        sxx_t = tensors[i++];
+        szz_t = tensors[i++];
+        txx_t = tensors[i++];
+        tzz_t = tensors[i++];
+        das35_t = tensors[i++];
+        das54x_t = tensors[i++];
+        das54z_t = tensors[i++];
     }
 
     DasWavefieldPointer2D view()
     {
+        // The 8 CPML memory members are undefined after bind_recon() (a
+        // no-PML reconstruction): ptr_or_null keeps view() usable there.
         return {
             exx_t.data_ptr<float>(),
             ezz_t.data_ptr<float>(),
@@ -109,21 +119,21 @@ struct DasWavefieldTensor2D {
             szz_t.data_ptr<float>(),
             txx_t.data_ptr<float>(),
             tzz_t.data_ptr<float>(),
-            m_sxx_xf_t.data_ptr<float>(),
-            m_sxx_xb_t.data_ptr<float>(),
-            m_szz_zf_t.data_ptr<float>(),
-            m_szz_zb_t.data_ptr<float>(),
-            m_txx_zf_t.data_ptr<float>(),
-            m_txx_zb_t.data_ptr<float>(),
-            m_tzz_xf_t.data_ptr<float>(),
-            m_tzz_xb_t.data_ptr<float>(),
+            ptr_or_null(m_sxx_xf_t),
+            ptr_or_null(m_sxx_xb_t),
+            ptr_or_null(m_szz_zf_t),
+            ptr_or_null(m_szz_zb_t),
+            ptr_or_null(m_txx_zf_t),
+            ptr_or_null(m_txx_zb_t),
+            ptr_or_null(m_tzz_xf_t),
+            ptr_or_null(m_tzz_xb_t),
             das35_t.data_ptr<float>(),
             das54x_t.data_ptr<float>(),
             das54z_t.data_ptr<float>(),
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             exx_t, ezz_t, sxx_t, szz_t, txx_t, tzz_t,
@@ -231,54 +241,19 @@ struct DasWavefieldPointer3D {
 };
 
 struct DasWavefieldTensor3D {
-    torch::Tensor exx_t, eyy_t, ezz_t, sxx_t, syy_t, szz_t, txx_t, tyy_t, tzz_t;
-    torch::Tensor m_sxx_xf_t, m_sxx_xb_t, m_syy_yf_t, m_syy_yb_t, m_szz_zf_t, m_szz_zb_t;
-    torch::Tensor m_txx_yf_t, m_txx_yb_t, m_txx_zf_t, m_txx_zb_t;
-    torch::Tensor m_tyy_xf_t, m_tyy_xb_t, m_tyy_zf_t, m_tyy_zb_t;
-    torch::Tensor m_tzz_xf_t, m_tzz_xb_t, m_tzz_yf_t, m_tzz_yb_t;
-    torch::Tensor das35_t, das54x_t, das54y_t, das54z_t;
-    bool allocated = false;
+    Buf exx_t, eyy_t, ezz_t, sxx_t, syy_t, szz_t, txx_t, tyy_t, tzz_t;
+    Buf m_sxx_xf_t, m_sxx_xb_t, m_syy_yf_t, m_syy_yb_t, m_szz_zf_t, m_szz_zb_t;
+    Buf m_txx_yf_t, m_txx_yb_t, m_txx_zf_t, m_txx_zb_t;
+    Buf m_tyy_xf_t, m_tyy_xb_t, m_tyy_zf_t, m_tyy_zb_t;
+    Buf m_tzz_xf_t, m_tzz_xb_t, m_tzz_yf_t, m_tzz_yb_t;
+    Buf das35_t, das54x_t, das54y_t, das54z_t;
 
-    void allocate(const torch::Tensor& like)
-    {
-        if (allocated) return;
-        exx_t = torch::zeros_like(like);
-        eyy_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        syy_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        txx_t = torch::zeros_like(like);
-        tyy_t = torch::zeros_like(like);
-        tzz_t = torch::zeros_like(like);
-        m_sxx_xf_t = torch::zeros_like(like);
-        m_sxx_xb_t = torch::zeros_like(like);
-        m_syy_yf_t = torch::zeros_like(like);
-        m_syy_yb_t = torch::zeros_like(like);
-        m_szz_zf_t = torch::zeros_like(like);
-        m_szz_zb_t = torch::zeros_like(like);
-        m_txx_yf_t = torch::zeros_like(like);
-        m_txx_yb_t = torch::zeros_like(like);
-        m_txx_zf_t = torch::zeros_like(like);
-        m_txx_zb_t = torch::zeros_like(like);
-        m_tyy_xf_t = torch::zeros_like(like);
-        m_tyy_xb_t = torch::zeros_like(like);
-        m_tyy_zf_t = torch::zeros_like(like);
-        m_tyy_zb_t = torch::zeros_like(like);
-        m_tzz_xf_t = torch::zeros_like(like);
-        m_tzz_xb_t = torch::zeros_like(like);
-        m_tzz_yf_t = torch::zeros_like(like);
-        m_tzz_yb_t = torch::zeros_like(like);
-        das35_t = torch::zeros_like(like);
-        das54x_t = torch::zeros_like(like);
-        das54y_t = torch::zeros_like(like);
-        das54z_t = torch::zeros_like(like);
-        allocated = true;
-    }
+    // No allocate(): see DasWavefieldTensor2D -- the propagator binds every
+    // DAS 3-D state list.
 
-    void bind(const std::vector<torch::Tensor>& tensors)
+    void bind(const std::vector<Buf>& tensors)
     {
-        TORCH_CHECK(tensors.size() == 31, "DAS 3D expects 31 wavefield tensors");
+        SWEEP_CHECK(tensors.size() == 31, "DAS 3D expects 31 wavefield tensors");
         int i = 0;
         exx_t = tensors[i++];
         eyy_t = tensors[i++];
@@ -311,7 +286,6 @@ struct DasWavefieldTensor3D {
         das54x_t = tensors[i++];
         das54y_t = tensors[i++];
         das54z_t = tensors[i++];
-        allocated = true;
     }
 
     DasWavefieldPointer3D view()
@@ -351,7 +325,7 @@ struct DasWavefieldTensor3D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {
             exx_t, eyy_t, ezz_t, sxx_t, syy_t, szz_t, txx_t, tyy_t, tzz_t,

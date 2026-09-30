@@ -1,6 +1,9 @@
 
 #include "common.cuh"
 #include "context.h"
+#include "boundary/strip.cuh"
+#include "../../core/check.h"
+#include "../../core/device.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
 
@@ -175,6 +178,149 @@ __global__ void add_source_3d(
     atomicAdd(&u[u_idx], source[src_idx]);
 }
 
+__global__ void add_source_signed(
+    float* __restrict__ u,          // (B, nz, nx)
+    const float* __restrict__ source, // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,  // (B, nsrc, 2)
+    int it,
+    int nsrc,
+    float sign,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 2;
+    int ix = sources_loc[base + 0];
+    int iz = sources_loc[base + 1];
+
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
+        return;
+
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    const float v = source[src_idx];
+    atomicAdd(&u[u_idx], sign < 0.0f ? -v : v);   // exact sign flip, see common.cuh
+
+}
+
+__global__ void add_source_3d_signed(
+    float* __restrict__ u,                 // (B, nz, ny, nx)
+    const float* __restrict__ source,      // (B, nsrc, nt)
+    const int* __restrict__ sources_loc,   // (B, nsrc, 3)
+    int it,
+    int nsrc,
+    float sign,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 3;
+
+    int ix = sources_loc[base + 0];
+    int iy = sources_loc[base + 1];
+    int iz = sources_loc[base + 2];
+
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz)
+        return;
+
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
+
+    long long u_idx = (long long)b * spatial_size
+              + (long long)iz * solver.ny * solver.nx
+              + iy * solver.nx
+              + ix;
+
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    const float v = source[src_idx];
+    atomicAdd(&u[u_idx], sign < 0.0f ? -v : v);   // exact sign flip, see common.cuh
+}
+
+// See common.cuh.  Thread/source/sample indexing is add_source's, line for
+// line; the only additions are the strip test and the sign.
+__global__ void sub_source_in_restore_strip(
+    float* __restrict__ u,
+    const float* __restrict__ source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    int width,
+    int offset,
+    int tangent_pad,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (b >= solver.B || s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 2;
+    int ix = sources_loc[base + 0];
+    int iz = sources_loc[base + 1];
+
+    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz)
+        return;
+    if (!bs_in_restore_strip_2d(solver, width, offset, tangent_pad, ix, iz))
+        return;   // not overwritten by the restore: u already lacks s^it here
+
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    long long u_idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    atomicAdd(&u[u_idx], -source[src_idx]);   // exact sign flip
+}
+
+__global__ void sub_source_in_restore_strip_3d(
+    float* __restrict__ u,
+    const float* __restrict__ source,
+    const int* __restrict__ sources_loc,
+    int it,
+    int nsrc,
+    int width,
+    int offset,
+    int tangent_pad,
+    const SolverContext solver
+) {
+    int b = blockIdx.x;
+    int s = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (s >= nsrc) return;
+
+    int base = (b * nsrc + s) * 3;
+
+    int ix = sources_loc[base + 0];
+    int iy = sources_loc[base + 1];
+    int iz = sources_loc[base + 2];
+
+    if (ix < 0 || ix >= solver.nx ||
+        iy < 0 || iy >= solver.ny ||
+        iz < 0 || iz >= solver.nz)
+        return;
+    if (!bs_in_restore_strip_3d(solver, width, offset, tangent_pad, ix, iy, iz))
+        return;   // not overwritten by the restore: u already lacks s^it here
+
+    long long spatial_size = (long long)solver.nx * solver.ny * solver.nz;
+
+    long long u_idx = (long long)b * spatial_size
+              + (long long)iz * solver.ny * solver.nx
+              + iy * solver.nx
+              + ix;
+
+    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
+
+    atomicAdd(&u[u_idx], -source[src_idx]);   // exact sign flip
+}
+
 __global__ void record_kernel_3d(
     const float* __restrict__ u,           // (B, nz, ny, nx)
     float* __restrict__ record,            // (B, nrec, nt)
@@ -252,34 +398,29 @@ __global__ void set_boundary_zeros(
     }
 }
 
-__global__ void set_boundary_zeros_3d(
-    float* __restrict__ u,   // (B, nz, ny, nx)
-    int width,
-    int nx,
-    int ny,
-    int nz
-)
+__global__ void second_time_difference_kernel(
+    float* __restrict__ out, const float* __restrict__ next,
+    const float* __restrict__ now, const float* __restrict__ prev, int64_t n)
 {
-
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    int b  = iz_global / nz;
-    int iz = iz_global % nz;
-
-    if (ix >= nx || iy >= ny || iz >= nz) return;
-
-    int spatial = nx * ny * nz;
-    float* u_b = u + b * spatial;
-
-    int halo = width;
-
-    if (ix < halo || ix >= nx - halo ||
-        iy < halo || iy >= ny - halo ||
-        iz < halo || iz >= nz - halo)
-    {
-        int idx = iz * ny * nx + iy * nx + ix;
-        u_b[idx] = 0.f;
-    }
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (next[i] - 2.0f * now[i]) + prev[i];
 }
+
+void second_time_difference(const Buf& out, const Buf& next, const Buf& now, const Buf& prev)
+{
+    SWEEP_CHECK(out.defined() && next.defined() && now.defined() && prev.defined(),
+                "second_time_difference expects defined buffers");
+    const int64_t n = out.numel();
+    SWEEP_CHECK(next.numel() == n && now.numel() == n && prev.numel() == n,
+                "second_time_difference expects matching numel (", n, ", ", next.numel(), ", ",
+                now.numel(), ", ", prev.numel(), ")");
+    SWEEP_CHECK(out.is_contiguous() && next.is_contiguous() && now.is_contiguous() && prev.is_contiguous(),
+                "second_time_difference expects contiguous buffers");
+    if (n == 0) return;
+    constexpr int kThreads = 256;
+    const unsigned blocks = static_cast<unsigned>((n + kThreads - 1) / kThreads);
+    second_time_difference_kernel<<<blocks, kThreads>>>(
+        out.data_ptr<float>(), next.data_ptr<float>(), now.data_ptr<float>(), prev.data_ptr<float>(), n);
+    SWEEP_CUDA_CHECK(cudaGetLastError());
+}
+

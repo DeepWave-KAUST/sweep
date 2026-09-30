@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
 from .elastic_tti import ElasticTTI
 from .fields import FieldSpec, ModelSpec
+from ._registry import register_equation
 
 
 # Full 21-component Voigt upper triangle produced by the 3-D Bond rotation.
@@ -163,6 +165,7 @@ def step(
     )
 
 
+@register_equation()
 class ElasticTTISG3D(FirstOrderEquation):
     """First-order 3-D three-component elastic TTI wave equation (axis-aligned SG).
 
@@ -190,6 +193,11 @@ class ElasticTTISG3D(FirstOrderEquation):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"
+
+    C_NAME = "elastic_tti_sg3d"
+    # No ``elastic_tti_sg3d_backward_recursive_ckpt`` binding is compiled for this
+    # equation; the 5th slot of the binding tuple stays None.
+    C_HAS_RECURSIVE_CKPT = False
 
     MODEL_SPECS = (
         ModelSpec("vp0", description="VTI-frame vertical P velocity.", unit="m/s"),
@@ -420,23 +428,27 @@ class ElasticTTISG3D(FirstOrderEquation):
             **kwargs,
         )
 
-    def _C(self):
-        import sweep._C as _C
-
-        return (
-            _C.elastic_tti_sg3d_forward,
-            _C.elastic_tti_sg3d_backward,
-            _C.elastic_tti_sg3d_backward_bs,
-            _C.elastic_tti_sg3d_backward_ckpt,
-            None,
-        )
-
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            save_all_shape=history_fields(3),   # velocities only
             base_nvar=9,
             pml_nvar=27,
             last_two_nvar=1,
             last_two_storage_nvar=9,
-            backward_workspace_nvar=18,
+            # The compiled backward's scratch (elastic_tti_sg3d/driver_traits.cuh
+            # WS_CARRIERS), one padded grid per shot each: the 18 elastic
+            # adjoint grids (9 q** + 9 p**) in every mode; ckpt (the only
+            # checkpoint mode this equation runs) adds the velocity carriers --
+            # v(t) at slots 18, 19, 20 (vx, vy, vz) and v(t+1) at 21, 22, 23;
+            # the full mode keeps one read-only zero grid at [18] (v(nt)).
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                18 + (6 if mode == "ckpt" else 1 if mode == "full" else 0)),
+            # ckpt: the per-segment vx, vy, vz histories, one row per replayed
+            # step plus the segment start (elastic_tti_sg3d/driver_traits.cuh
+            # seg_buffers).
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
+            bs_reconstruction_nvar=12,  # 9 physical fields + fvx/fvy/fvz_next carriers
         )

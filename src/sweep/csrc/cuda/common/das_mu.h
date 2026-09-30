@@ -1,8 +1,9 @@
 #pragma once
+#include <cuda_runtime.h>
 
-#include <torch/extension.h>
 
 #include "elastic.h"
+#include "cudautils.h"
 
 struct DasMuWavefieldPointer2D {
     float* __restrict__ vx;
@@ -53,58 +54,34 @@ struct DasMuWavefieldPointer2D {
 };
 
 struct DasMuWavefieldTensor2D {
-    torch::Tensor vx_t;
-    torch::Tensor vz_t;
-    torch::Tensor sxx_t;
-    torch::Tensor szz_t;
-    torch::Tensor sxz_t;
-    torch::Tensor exx_t;
-    torch::Tensor ezz_t;
-    torch::Tensor exz_t;
-    torch::Tensor m_vxx_t;
-    torch::Tensor m_vxz_t;
-    torch::Tensor m_vzx_t;
-    torch::Tensor m_vzz_t;
-    torch::Tensor m_sxxx_t;
-    torch::Tensor m_sxxz_t;
-    torch::Tensor m_szzx_t;
-    torch::Tensor m_szzz_t;
-    torch::Tensor m_sxzx_t;
-    torch::Tensor m_sxzz_t;
+    Buf vx_t;
+    Buf vz_t;
+    Buf sxx_t;
+    Buf szz_t;
+    Buf sxz_t;
+    Buf exx_t;
+    Buf ezz_t;
+    Buf exz_t;
+    Buf m_vxx_t;
+    Buf m_vxz_t;
+    Buf m_vzx_t;
+    Buf m_vzz_t;
+    Buf m_sxxx_t;
+    Buf m_sxxz_t;
+    Buf m_szzx_t;
+    Buf m_szzz_t;
+    Buf m_sxzx_t;
+    Buf m_sxzz_t;
 
     bool allocated = false;
 
-    void allocate(const torch::Tensor& like, bool use_pml = true)
-    {
-        if (allocated) return;
-        vx_t = torch::zeros_like(like);
-        vz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        sxz_t = torch::zeros_like(like);
-        exx_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        exz_t = torch::zeros_like(like);
-
-        if (use_pml) {
-            m_vxx_t = torch::zeros_like(like);
-            m_vxz_t = torch::zeros_like(like);
-            m_vzx_t = torch::zeros_like(like);
-            m_vzz_t = torch::zeros_like(like);
-            m_sxxx_t = torch::zeros_like(like);
-            m_sxxz_t = torch::zeros_like(like);
-            m_szzx_t = torch::zeros_like(like);
-            m_szzz_t = torch::zeros_like(like);
-            m_sxzx_t = torch::zeros_like(like);
-            m_sxzz_t = torch::zeros_like(like);
-        }
-        allocated = true;
-    }
-
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
+    void bind(const std::vector<Buf>& tensors, bool use_pml = true)
     {
         int i = 0;
-        TORCH_CHECK(tensors.size() == (use_pml ? 18 : 8), "DAS Mu 2D wavefield expects 8 base tensors plus 10 CPML tensors");
+        SWEEP_CHECK(tensors.size() == (use_pml ? 18 : 8),
+                    "DAS Mu 2D wavefield expects ", (use_pml ? 18 : 8), " tensors (8 base fields",
+                    (use_pml ? " plus 10 CPML memory tensors)" : ", no CPML memory)"),
+                    ", got ", tensors.size());
         vx_t = tensors[i++];
         vz_t = tensors[i++];
         sxx_t = tensors[i++];
@@ -128,6 +105,33 @@ struct DasMuWavefieldTensor2D {
         allocated = true;
     }
 
+    void bind_elastic(const std::vector<Buf>& tensors)
+    {
+        SWEEP_CHECK(tensors.size() == 5,
+                    "DAS Mu 2D elastic-only wavefield bind expects 5 tensors "
+                    "[vx, vz, sxx, szz, sxz], got ", tensors.size());
+        int i = 0;
+        vx_t = tensors[i++];
+        vz_t = tensors[i++];
+        sxx_t = tensors[i++];
+        szz_t = tensors[i++];
+        sxz_t = tensors[i++];
+        exx_t = Buf{};
+        ezz_t = Buf{};
+        exz_t = Buf{};
+        m_vxx_t = Buf{};
+        m_vxz_t = Buf{};
+        m_vzx_t = Buf{};
+        m_vzz_t = Buf{};
+        m_sxxx_t = Buf{};
+        m_sxxz_t = Buf{};
+        m_szzx_t = Buf{};
+        m_szzz_t = Buf{};
+        m_sxzx_t = Buf{};
+        m_sxzz_t = Buf{};
+        allocated = true;
+    }
+
     DasMuWavefieldPointer2D view()
     {
         DasMuWavefieldPointer2D v{};
@@ -136,19 +140,23 @@ struct DasMuWavefieldTensor2D {
         v.sxx = sxx_t.data_ptr<float>();
         v.szz = szz_t.data_ptr<float>();
         v.sxz = sxz_t.data_ptr<float>();
-        v.exx = exx_t.data_ptr<float>();
-        v.ezz = ezz_t.data_ptr<float>();
-        v.exz = exz_t.data_ptr<float>();
-        v.m_vxx = m_vxx_t.data_ptr<float>();
-        v.m_vxz = m_vxz_t.data_ptr<float>();
-        v.m_vzx = m_vzx_t.data_ptr<float>();
-        v.m_vzz = m_vzz_t.data_ptr<float>();
-        v.m_sxxx = m_sxxx_t.data_ptr<float>();
-        v.m_sxxz = m_sxxz_t.data_ptr<float>();
-        v.m_szzx = m_szzx_t.data_ptr<float>();
-        v.m_szzz = m_szzz_t.data_ptr<float>();
-        v.m_sxzx = m_sxzx_t.data_ptr<float>();
-        v.m_sxzz = m_sxzz_t.data_ptr<float>();
+        // DAS strains: nullptr after bind_elastic() (the backward_bs
+        // reconstruction), whose reverse loop never touches them.
+        v.exx = ptr_or_null(exx_t);
+        v.ezz = ptr_or_null(ezz_t);
+        v.exz = ptr_or_null(exz_t);
+        // CPML memory: nullptr after bind_elastic() or a use_pml=false bind
+        // (the backward_bs reconstruction), which only the NOPML kernels step.
+        v.m_vxx = ptr_or_null(m_vxx_t);
+        v.m_vxz = ptr_or_null(m_vxz_t);
+        v.m_vzx = ptr_or_null(m_vzx_t);
+        v.m_vzz = ptr_or_null(m_vzz_t);
+        v.m_sxxx = ptr_or_null(m_sxxx_t);
+        v.m_sxxz = ptr_or_null(m_sxxz_t);
+        v.m_szzx = ptr_or_null(m_szzx_t);
+        v.m_szzz = ptr_or_null(m_szzz_t);
+        v.m_sxzx = ptr_or_null(m_sxzx_t);
+        v.m_sxzz = ptr_or_null(m_sxzz_t);
         return v;
     }
 
@@ -164,37 +172,39 @@ struct DasMuWavefieldTensor2D {
         v.sxy = nullptr;
         v.sxz = sxz_t.data_ptr<float>();
         v.syz = nullptr;
-        v.m_vxx = m_vxx_t.data_ptr<float>();
+        // CPML memory: nullptr after bind_elastic() or a use_pml=false bind
+        // (the backward_bs reconstruction), which only the NOPML kernels step.
+        v.m_vxx = ptr_or_null(m_vxx_t);
         v.m_vxy = nullptr;
-        v.m_vxz = m_vxz_t.data_ptr<float>();
+        v.m_vxz = ptr_or_null(m_vxz_t);
         v.m_vyx = nullptr;
         v.m_vyy = nullptr;
         v.m_vyz = nullptr;
-        v.m_vzx = m_vzx_t.data_ptr<float>();
+        v.m_vzx = ptr_or_null(m_vzx_t);
         v.m_vzy = nullptr;
-        v.m_vzz = m_vzz_t.data_ptr<float>();
-        v.m_sxxx = m_sxxx_t.data_ptr<float>();
+        v.m_vzz = ptr_or_null(m_vzz_t);
+        v.m_sxxx = ptr_or_null(m_sxxx_t);
         v.m_sxxy = nullptr;
-        v.m_sxxz = m_sxxz_t.data_ptr<float>();
+        v.m_sxxz = ptr_or_null(m_sxxz_t);
         v.m_syyx = nullptr;
         v.m_syyy = nullptr;
         v.m_syyz = nullptr;
-        v.m_szzx = m_szzx_t.data_ptr<float>();
+        v.m_szzx = ptr_or_null(m_szzx_t);
         v.m_szzy = nullptr;
-        v.m_szzz = m_szzz_t.data_ptr<float>();
+        v.m_szzz = ptr_or_null(m_szzz_t);
         v.m_sxyx = nullptr;
         v.m_sxyy = nullptr;
         v.m_sxyz = nullptr;
-        v.m_sxzx = m_sxzx_t.data_ptr<float>();
+        v.m_sxzx = ptr_or_null(m_sxzx_t);
         v.m_sxzy = nullptr;
-        v.m_sxzz = m_sxzz_t.data_ptr<float>();
+        v.m_sxzz = ptr_or_null(m_sxzz_t);
         v.m_syzx = nullptr;
         v.m_syzy = nullptr;
         v.m_syzz = nullptr;
         return v;
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return {
             vx_t, vz_t, sxx_t, szz_t, sxz_t, exx_t, ezz_t, exz_t,
@@ -203,12 +213,15 @@ struct DasMuWavefieldTensor2D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return checkpoint_tensors();
     }
 };
 
+// Field pointer by BS index.  The strain slots (5..7) come straight from the
+// view, so on a bind_elastic() reconstruction (backward_bs) they are nullptr;
+// every caller skips a nullptr field.
 inline float* das_mu2d_field_ptr(DasMuWavefieldPointer2D& wf, int idx)
 {
     switch (idx) {
@@ -303,88 +316,49 @@ struct DasMuWavefieldPointer3D {
 };
 
 struct DasMuWavefieldTensor3D {
-    torch::Tensor vx_t;
-    torch::Tensor vy_t;
-    torch::Tensor vz_t;
-    torch::Tensor sxx_t;
-    torch::Tensor syy_t;
-    torch::Tensor szz_t;
-    torch::Tensor sxy_t;
-    torch::Tensor sxz_t;
-    torch::Tensor syz_t;
-    torch::Tensor exx_t;
-    torch::Tensor eyy_t;
-    torch::Tensor ezz_t;
-    torch::Tensor exy_t;
-    torch::Tensor exz_t;
-    torch::Tensor eyz_t;
-    torch::Tensor m_vxx_t;
-    torch::Tensor m_vxy_t;
-    torch::Tensor m_vxz_t;
-    torch::Tensor m_vyx_t;
-    torch::Tensor m_vyy_t;
-    torch::Tensor m_vyz_t;
-    torch::Tensor m_vzx_t;
-    torch::Tensor m_vzy_t;
-    torch::Tensor m_vzz_t;
-    torch::Tensor m_sxxx_t;
-    torch::Tensor m_szzz_t;
-    torch::Tensor m_sxyx_t;
-    torch::Tensor m_sxyy_t;
-    torch::Tensor m_sxzx_t;
-    torch::Tensor m_sxzz_t;
-    torch::Tensor m_syyy_t;
-    torch::Tensor m_syzy_t;
-    torch::Tensor m_syzz_t;
+    Buf vx_t;
+    Buf vy_t;
+    Buf vz_t;
+    Buf sxx_t;
+    Buf syy_t;
+    Buf szz_t;
+    Buf sxy_t;
+    Buf sxz_t;
+    Buf syz_t;
+    Buf exx_t;
+    Buf eyy_t;
+    Buf ezz_t;
+    Buf exy_t;
+    Buf exz_t;
+    Buf eyz_t;
+    Buf m_vxx_t;
+    Buf m_vxy_t;
+    Buf m_vxz_t;
+    Buf m_vyx_t;
+    Buf m_vyy_t;
+    Buf m_vyz_t;
+    Buf m_vzx_t;
+    Buf m_vzy_t;
+    Buf m_vzz_t;
+    Buf m_sxxx_t;
+    Buf m_szzz_t;
+    Buf m_sxyx_t;
+    Buf m_sxyy_t;
+    Buf m_sxzx_t;
+    Buf m_sxzz_t;
+    Buf m_syyy_t;
+    Buf m_syzy_t;
+    Buf m_syzz_t;
 
     bool allocated = false;
 
-    void allocate(const torch::Tensor& like, bool use_pml = true)
-    {
-        if (allocated) return;
-        vx_t = torch::zeros_like(like);
-        vy_t = torch::zeros_like(like);
-        vz_t = torch::zeros_like(like);
-        sxx_t = torch::zeros_like(like);
-        syy_t = torch::zeros_like(like);
-        szz_t = torch::zeros_like(like);
-        sxy_t = torch::zeros_like(like);
-        sxz_t = torch::zeros_like(like);
-        syz_t = torch::zeros_like(like);
-        exx_t = torch::zeros_like(like);
-        eyy_t = torch::zeros_like(like);
-        ezz_t = torch::zeros_like(like);
-        exy_t = torch::zeros_like(like);
-        exz_t = torch::zeros_like(like);
-        eyz_t = torch::zeros_like(like);
-
-        if (use_pml) {
-            m_vxx_t = torch::zeros_like(like);
-            m_vxy_t = torch::zeros_like(like);
-            m_vxz_t = torch::zeros_like(like);
-            m_vyx_t = torch::zeros_like(like);
-            m_vyy_t = torch::zeros_like(like);
-            m_vyz_t = torch::zeros_like(like);
-            m_vzx_t = torch::zeros_like(like);
-            m_vzy_t = torch::zeros_like(like);
-            m_vzz_t = torch::zeros_like(like);
-            m_sxxx_t = torch::zeros_like(like);
-            m_szzz_t = torch::zeros_like(like);
-            m_sxyx_t = torch::zeros_like(like);
-            m_sxyy_t = torch::zeros_like(like);
-            m_sxzx_t = torch::zeros_like(like);
-            m_sxzz_t = torch::zeros_like(like);
-            m_syyy_t = torch::zeros_like(like);
-            m_syzy_t = torch::zeros_like(like);
-            m_syzz_t = torch::zeros_like(like);
-        }
-        allocated = true;
-    }
-
-    void bind(const std::vector<torch::Tensor>& tensors, bool use_pml = true)
+    void bind(const std::vector<Buf>& tensors, bool use_pml = true)
     {
         int i = 0;
-        TORCH_CHECK(tensors.size() == (use_pml ? 33 : 15), "DAS Mu 3D wavefield expects 15 base tensors plus 18 CPML tensors");
+        SWEEP_CHECK(tensors.size() == (use_pml ? 33 : 15),
+                    "DAS Mu 3D wavefield expects ", (use_pml ? 33 : 15), " tensors (15 base fields",
+                    (use_pml ? " plus 18 CPML memory tensors)" : ", no CPML memory)"),
+                    ", got ", tensors.size());
         vx_t = tensors[i++];
         vy_t = tensors[i++];
         vz_t = tensors[i++];
@@ -423,6 +397,49 @@ struct DasMuWavefieldTensor3D {
         allocated = true;
     }
 
+    void bind_elastic(const std::vector<Buf>& tensors)
+    {
+        SWEEP_CHECK(tensors.size() == 9,
+                    "DAS Mu 3D elastic-only wavefield bind expects 9 tensors "
+                    "[vx, vy, vz, sxx, syy, szz, sxy, sxz, syz], got ",
+                    tensors.size());
+        int i = 0;
+        vx_t = tensors[i++];
+        vy_t = tensors[i++];
+        vz_t = tensors[i++];
+        sxx_t = tensors[i++];
+        syy_t = tensors[i++];
+        szz_t = tensors[i++];
+        sxy_t = tensors[i++];
+        sxz_t = tensors[i++];
+        syz_t = tensors[i++];
+        exx_t = Buf{};
+        eyy_t = Buf{};
+        ezz_t = Buf{};
+        exy_t = Buf{};
+        exz_t = Buf{};
+        eyz_t = Buf{};
+        m_vxx_t = Buf{};
+        m_vxy_t = Buf{};
+        m_vxz_t = Buf{};
+        m_vyx_t = Buf{};
+        m_vyy_t = Buf{};
+        m_vyz_t = Buf{};
+        m_vzx_t = Buf{};
+        m_vzy_t = Buf{};
+        m_vzz_t = Buf{};
+        m_sxxx_t = Buf{};
+        m_szzz_t = Buf{};
+        m_sxyx_t = Buf{};
+        m_sxyy_t = Buf{};
+        m_sxzx_t = Buf{};
+        m_sxzz_t = Buf{};
+        m_syyy_t = Buf{};
+        m_syzy_t = Buf{};
+        m_syzz_t = Buf{};
+        allocated = true;
+    }
+
     DasMuWavefieldPointer3D view()
     {
         DasMuWavefieldPointer3D v{};
@@ -435,12 +452,16 @@ struct DasMuWavefieldTensor3D {
         v.sxy = sxy_t.data_ptr<float>();
         v.sxz = sxz_t.data_ptr<float>();
         v.syz = syz_t.data_ptr<float>();
-        v.exx = exx_t.data_ptr<float>();
-        v.eyy = eyy_t.data_ptr<float>();
-        v.ezz = ezz_t.data_ptr<float>();
-        v.exy = exy_t.data_ptr<float>();
-        v.exz = exz_t.data_ptr<float>();
-        v.eyz = eyz_t.data_ptr<float>();
+        // DAS strains: nullptr after bind_elastic() (the backward_bs
+        // reconstruction), whose reverse loop never touches them.  The CPML
+        // memory below is guarded the same way (undefined after
+        // bind_elastic() or a use_pml=false bind).
+        v.exx = ptr_or_null(exx_t);
+        v.eyy = ptr_or_null(eyy_t);
+        v.ezz = ptr_or_null(ezz_t);
+        v.exy = ptr_or_null(exy_t);
+        v.exz = ptr_or_null(exz_t);
+        v.eyz = ptr_or_null(eyz_t);
         v.m_vxx = m_vxx_t.defined() ? m_vxx_t.data_ptr<float>() : nullptr;
         v.m_vxy = m_vxy_t.defined() ? m_vxy_t.data_ptr<float>() : nullptr;
         v.m_vxz = m_vxz_t.defined() ? m_vxz_t.data_ptr<float>() : nullptr;
@@ -504,7 +525,7 @@ struct DasMuWavefieldTensor3D {
         return v;
     }
 
-    std::vector<torch::Tensor> checkpoint_tensors() const
+    std::vector<Buf> checkpoint_tensors() const
     {
         return {
             vx_t, vy_t, vz_t, sxx_t, syy_t, szz_t, sxy_t, sxz_t, syz_t,
@@ -514,12 +535,15 @@ struct DasMuWavefieldTensor3D {
         };
     }
 
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return checkpoint_tensors();
     }
 };
 
+// Field pointer by BS index.  The strain slots (9..14) come straight from the
+// view, so on a bind_elastic() reconstruction (backward_bs) they are nullptr;
+// every caller skips a nullptr field.
 inline float* das_mu3d_field_ptr(DasMuWavefieldPointer3D& wf, int idx)
 {
     switch (idx) {

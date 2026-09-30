@@ -1,13 +1,15 @@
 #pragma once
-#include <torch/extension.h>
-#include "../../common/wavetypes.h"
+#include "../../../core/input_core.h"
+#include "../../../core/outputs.h"
+#include "../../../core/runner.h"
 
 namespace acoustic_vrz3d {
 
-ForwardOutput forward(const ForwardInput& in);
-BackwardOutput backward(const BackwardInput& in);
-BackwardOutput backward_bs(const BackwardInput& in);
-BackwardOutput backward_ckpt(const BackwardInput& in);
-BackwardOutput backward_recursive_ckpt(const BackwardInput& in);
+ForwardOutputCore forward_core(const ForwardInputCore& in);
+BackwardOutputCore backward_core(const BackwardInputCore& in);
+BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
+BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
+BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
+BackwardRunnerCorePtr backward_bs_runner_core(const BackwardInputCore& in);
 
 } // namespace acoustic_vrz3d

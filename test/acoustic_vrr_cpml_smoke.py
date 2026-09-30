@@ -1,7 +1,7 @@
 """Smoke + correctness check for the CPML-ified AcousticVRR (Python/eager path).
 
 Run with the *edited* checkout on PYTHONPATH, e.g.:
-    PYTHONPATH=/ibex/user/wangs0j/sweep-stack/sweep/src \
+    PYTHONPATH=src \
         python test/acoustic_vrr_cpml_smoke.py
 """
 import numpy as np

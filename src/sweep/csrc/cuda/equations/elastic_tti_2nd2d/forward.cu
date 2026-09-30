@@ -1,5 +1,3 @@
-#include <torch/extension.h>
-#include <c10/cuda/CUDAGuard.h>
 
 #include "elastic_tti_2nd2d.h"
 #include "kernels.cuh"
@@ -12,24 +10,29 @@
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
 namespace elastic_tti_2nd2d {
 
-ForwardOutput forward(const ForwardInput& in)
-{
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
-    const auto& p = in;
-    ForwardOutput out;
+// Layout of p.forward_workspace, declared on the Python side as
+// ElasticTTI2nd.cuda_layout.forward_workspace_nvar: the three stress
+// workspaces the stress kernel writes and the update kernel reads within one
+// step (one padded grid per shot each).
+enum ForwardWorkspaceSlot : int { SXX_WS = 0, SZZ_WS, SXZ_WS, N_FORWARD_SLOTS };
 
-    TORCH_CHECK(p.models.size() == 7, "ElasticTTI2nd forward expects prepared models: rho plus 6 stiffness tensors");
-    TORCH_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd forward expects cpmls PML profiles");
-    TORCH_CHECK(!p.free_surface, "ElasticTTI2nd has no free-surface support (anisotropic media reject the image method)");
+ForwardOutputCore forward_core(const ForwardInputCore& in)
+{
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    const auto& p = in;
+    ForwardOutputCore out;
+
+    SWEEP_CHECK(p.models.size() == 7, "ElasticTTI2nd forward expects prepared models: rho plus 6 stiffness tensors");
+    SWEEP_CHECK(p.pml_vals.size() == 8, "ElasticTTI2nd forward expects cpmls PML profiles");
+    SWEEP_CHECK(!p.free_surface, "ElasticTTI2nd has no free-surface support (anisotropic media reject the image method)");
     if (p.use_checkpoint) {
-        TORCH_CHECK(!p.use_recursive_checkpoint, "ElasticTTI2nd recursive checkpointing is not implemented yet");
-        TORCH_CHECK(p.checkpoints.size() == 14, "ElasticTTI2nd checkpointing expects 14 checkpoint tensors");
-        TORCH_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
+        SWEEP_CHECK(!p.use_recursive_checkpoint, "ElasticTTI2nd recursive checkpointing is not implemented yet");
+        SWEEP_CHECK(p.checkpoints.size() == 14, "ElasticTTI2nd checkpointing expects 14 checkpoint tensors");
+        SWEEP_CHECK(p.checkpoint_interval >= 1, "checkpoint_interval must be >= 1");
     }
 
     const auto& rho = p.models[0];
@@ -42,28 +45,37 @@ ForwardOutput forward(const ForwardInput& in)
     const float dx = p.spacing[0];
     const float dz = p.spacing[1];
 
+    // Mandatory: the propagator binds every forward state slot
+    // (cuda_layout.base_nvar + pml_nvar = 14, propagator/_c.py Wrapper.forward
+    // `params.wavefields = cp.forward_wavefields`), in every mode -- the
+    // persistent save_all pool or the per-call transient one.
     WavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields);
-    else
-        wavefield.allocate(rho);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "elastic_tti_2nd2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields);
     auto model = stiffness_view(p.models);
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     const int nsrc = p.sources_loc.size(1);
     const int nrec = p.receivers_loc.size(1);
-    const int nsrc_fields = p.source_field_indices.numel();
-    const int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, rho.options());
+    const int nsrc_fields = p.source_field_indices.size();
+    const int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out.
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
-    torch::Tensor u_allt;
-    if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 2, B, nz, nx}, rho.options());
+    Buf u_allt;
+    if (p.save_all_wavefields) {
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(2), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, "u_allt_out");
+    }
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -77,9 +89,16 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
     SGradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
 
-    auto sxx_ws = torch::zeros_like(rho);
-    auto szz_ws = torch::zeros_like(rho);
-    auto sxz_ws = torch::zeros_like(rho);
+    // Mandatory: cuda_layout.forward_workspace_nvar = 3, so
+    // _transient_forward_workspace always hands over three grids.
+    SWEEP_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+                "elastic_tti_2nd2d/forward requires the propagator-bound forward_workspace "
+                "(cuda_layout.forward_workspace_nvar = ",
+                static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());
+    const auto& ws = p.forward_workspace;
+    auto sxx_ws = pool_required(ws, SXX_WS, rho, "forward_workspace");
+    auto szz_ws = pool_required(ws, SZZ_WS, rho, "forward_workspace");
+    auto sxz_ws = pool_required(ws, SXZ_WS, rho, "forward_workspace");
 
     EffectiveBoundarySaver boundary_saver;
     const int save_width = solver.M + 1;
@@ -89,18 +108,19 @@ ForwardOutput forward(const ForwardInput& in)
             p.use_boundary_saving, 2, 2, solver, rho, save_width, 2,
             true, false, p.transfer_interval,
             p.boundary_cpu, p.boundary_gpu,
-            p.last_two, p.use_pinned_memory
+            p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
             p.use_boundary_saving, 2, 2, solver, rho, save_width, 2,
             true, true, 1,
             {}, p.boundary_gpu,
-            p.last_two, p.use_pinned_memory
+            p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     }
     auto bs = boundary_saver.view();
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -110,7 +130,7 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -154,7 +174,7 @@ ForwardOutput forward(const ForwardInput& in)
         }
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
@@ -167,11 +187,11 @@ ForwardOutput forward(const ForwardInput& in)
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = field_ptr(wf, receiver_fields[irec].item<int>());
+            float* field = field_ptr(wf, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel<<<record_config.grid, record_config.block>>>(
                 field,
-                record[irec].data_ptr<float>(),
+                record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(),
                 it,
                 nrec,
@@ -180,8 +200,8 @@ ForwardOutput forward(const ForwardInput& in)
         }
 
         if (u_allt.defined()) {
-            u_allt[it].select(0, 0).copy_(wavefield.ux_nxt_t.view({B, nz, nx}));
-            u_allt[it].select(0, 1).copy_(wavefield.uz_nxt_t.view({B, nz, nx}));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 0), wavefield.ux_nxt_t.view({B, nz, nx}));
+            copy_tensor_cuda_async(u_allt.select(0, it).select(0, 1), wavefield.uz_nxt_t.view({B, nz, nx}));
         }
 
         wavefield.swap_u();
@@ -192,17 +212,19 @@ ForwardOutput forward(const ForwardInput& in)
     if (p.use_boundary_saving) {
         // (storage, level): level 0 = W_{nt-1} (u_pre after final swap),
         // level 1 = W_nt (u_now after final swap).
-        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(wavefield.ux_pre_t);
-        boundary_saver.last_two_t.select(0, 0).select(0, 1).copy_(wavefield.ux_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(wavefield.uz_pre_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 1).copy_(wavefield.uz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), wavefield.ux_pre_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 1), wavefield.ux_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 0), wavefield.uz_pre_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 1), wavefield.uz_t);
     }
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
 }
+
+
 
 }

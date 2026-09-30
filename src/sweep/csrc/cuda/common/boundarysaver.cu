@@ -1,5 +1,6 @@
 #include "context.h"
 #include "boundary/kernels.cuh"
+#include "boundary/strip.cuh"
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -51,57 +52,22 @@ __global__ void boundary_kernel2d(
     int spatial = ctx.nx * ctx.nz;
     float* u_b = u + b * spatial;
 
-    int x0 = ctx.phys_x0();
-    int x1 = ctx.phys_x1();
-
-    int z0 = ctx.phys_z0();
-    int z1 = ctx.phys_z1();
-
-    int nx_phys = ctx.nx_phys();
-    int nz_phys = ctx.nz_phys();
-    int nx_boundary = nx_phys + 2 * tangent_pad;
-    int nz_boundary = nz_phys + 2 * tangent_pad;
-
-    int x_t0 = x0 - tangent_pad;
-    int x_t1 = x1 + tangent_pad;
-    int z_t0 = z0 - tangent_pad;
-    int z_t1 = z1 + tangent_pad;
-
-    // ---------- symmetric boundary bands ----------
-
-    int top_start = z0 + offset;
-    int top_end   = top_start + width;
-
-    int bot_end   = z1 - offset;
-    int bot_start = bot_end - width;
-
-    int left_start = x0 + offset;
-    int left_end   = left_start + width;
-
-    int right_end   = x1 - offset;
-    int right_start = right_end - width;
-
-    // DD cut faces (ctx.cut_mask(): bit0=x_lo/left, bit1=x_hi/right,
-    // bit2=z_lo/top, bit3=z_hi/bottom) are skipped: the strip there is
+    // Band geometry and per-face membership come from boundary/strip.cuh, the
+    // one definition shared with the strip-source un-injection
+    // (sub_source_in_restore_strip), which must agree with this restore about
+    // every cell.  DD cut faces (ctx.cut_mask(): bit0=x_lo/left, bit1=x_hi/right,
+    // bit2=z_lo/top, bit3=z_hi/bottom) carry no band: the strip there is
     // reverse-leapfrog-computed + halo-exchanged instead of restored.
-    bool is_top =
-        (iz >= top_start && iz < top_end) &&
-        (ix >= x_t0 && ix < x_t1) && !ctx.cut_z_lo();
-
-    bool is_bottom =
-        (iz >= bot_start && iz < bot_end) &&
-        (ix >= x_t0 && ix < x_t1) && !ctx.cut_z_hi();
-
-    bool is_left =
-        (ix >= left_start && ix < left_end) &&
-        (iz >= z_t0 && iz < z_t1) && !ctx.cut_x_lo();
-
-    bool is_right =
-        (ix >= right_start && ix < right_end) &&
-        (iz >= z_t0 && iz < z_t1) && !ctx.cut_x_hi();
-
-    if (!(is_top || is_bottom || is_left || is_right))
+    const BsStripBands2D g = bs_strip_bands_2d(ctx, width, offset, tangent_pad);
+    const BsStripFaces2D f = bs_strip_faces_2d(ctx, g, ix, iz);
+    if (!f.any())
         return;
+
+    const bool is_top = f.top, is_bottom = f.bottom, is_left = f.left, is_right = f.right;
+    const int nx_boundary = g.nx_boundary, nz_boundary = g.nz_boundary;
+    const int x_t0 = g.x_t0, z_t0 = g.z_t0;
+    const int top_start = g.top_start, bot_start = g.bot_start;
+    const int left_start = g.left_start, right_start = g.right_start;
 
     float val = u_b[iz * ctx.nx + ix];
 
@@ -176,26 +142,15 @@ __device__ __forceinline__ void boundary_kernel2d_body(
     int spatial = ctx.nx * ctx.nz;
     float* u_b = u + b * spatial;
 
-    int x0 = ctx.phys_x0(), x1 = ctx.phys_x1();
-    int z0 = ctx.phys_z0(), z1 = ctx.phys_z1();
-    int nx_phys = ctx.nx_phys();
-    int nz_phys = ctx.nz_phys();
-    int nx_boundary = nx_phys + 2 * tangent_pad;
-    int nz_boundary = nz_phys + 2 * tangent_pad;
-    int x_t0 = x0 - tangent_pad, x_t1 = x1 + tangent_pad;
-    int z_t0 = z0 - tangent_pad, z_t1 = z1 + tangent_pad;
-
-    int top_start = z0 + offset, top_end = top_start + width;
-    int bot_end   = z1 - offset, bot_start = bot_end - width;
-    int left_start = x0 + offset, left_end = left_start + width;
-    int right_end  = x1 - offset, right_start = right_end - width;
-
-    bool is_top    = iz >= top_start && iz < top_end  && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_lo();
-    bool is_bottom = iz >= bot_start && iz < bot_end  && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_hi();
-    bool is_left   = ix >= left_start && ix < left_end && iz >= z_t0 && iz < z_t1 && !ctx.cut_x_lo();
-    bool is_right  = ix >= right_start && ix < right_end && iz >= z_t0 && iz < z_t1 && !ctx.cut_x_hi();
-
-    if (!(is_top || is_bottom || is_left || is_right)) return;
+    // Geometry: boundary/strip.cuh (see boundary_kernel2d).
+    const BsStripBands2D g = bs_strip_bands_2d(ctx, width, offset, tangent_pad);
+    const BsStripFaces2D f = bs_strip_faces_2d(ctx, g, ix, iz);
+    if (!f.any()) return;
+    const bool is_top = f.top, is_bottom = f.bottom, is_left = f.left, is_right = f.right;
+    const int nx_boundary = g.nx_boundary, nz_boundary = g.nz_boundary;
+    const int x_t0 = g.x_t0, z_t0 = g.z_t0;
+    const int top_start = g.top_start, bot_start = g.bot_start;
+    const int left_start = g.left_start, right_start = g.right_start;
     int idx3 = iz * ctx.nx + ix;
 
     if (is_top) {
@@ -283,88 +238,21 @@ __global__ void boundary_kernel3d(
     float* u_b = u + b * spatial;
     int idx3 = iz * stride_z + iy * stride_y + ix;
 
-    // --------------------------------------------------
-    // physical domain
-    // --------------------------------------------------
-
-    int x0 = ctx.phys_x0();
-    int x1 = ctx.phys_x1();
-
-    int y0 = ctx.phys_y0();
-    int y1 = ctx.phys_y1();
-
-    int z0 = ctx.phys_z0();
-    int z1 = ctx.phys_z1();
-
-    int nx_phys = ctx.nx_phys();
-    int ny_phys = ctx.ny_phys();
-    int nz_phys = ctx.nz_phys();
-    int nx_boundary = nx_phys + 2 * tangent_pad;
-    int ny_boundary = ny_phys + 2 * tangent_pad;
-    int nz_boundary = nz_phys + 2 * tangent_pad;
-
-    int x_t0 = x0 - tangent_pad;
-    int x_t1 = x1 + tangent_pad;
-    int y_t0 = y0 - tangent_pad;
-    int y_t1 = y1 + tangent_pad;
-    int z_t0 = z0 - tangent_pad;
-    int z_t1 = z1 + tangent_pad;
-
-    // --------------------------------------------------
-    // boundary ranges
-    // --------------------------------------------------
-
-    int top_start = z0 + offset;
-    int top_end   = top_start + width;
-
-    int bot_end   = z1 - offset;
-    int bot_start = bot_end - width;
-
-    int front_start = y0 + offset;
-    int front_end   = front_start + width;
-
-    int back_end   = y1 - offset;
-    int back_start = back_end - width;
-
-    int left_start = x0 + offset;
-    int left_end   = left_start + width;
-
-    int right_end   = x1 - offset;
-    int right_start = right_end - width;
-
-    // DD cut faces (ctx.cut_mask()) are skipped — see boundary_kernel2d.
-    bool is_top =
-        iz >= top_start && iz < top_end &&
-        iy >= y_t0 && iy < y_t1 &&
-        ix >= x_t0 && ix < x_t1 && !ctx.cut_z_lo();
-
-    bool is_bottom =
-        iz >= bot_start && iz < bot_end &&
-        iy >= y_t0 && iy < y_t1 &&
-        ix >= x_t0 && ix < x_t1 && !ctx.cut_z_hi();
-
-    bool is_front =
-        iy >= front_start && iy < front_end &&
-        iz >= z_t0 && iz < z_t1 &&
-        ix >= x_t0 && ix < x_t1 && !ctx.cut_y_lo();
-
-    bool is_back =
-        iy >= back_start && iy < back_end &&
-        iz >= z_t0 && iz < z_t1 &&
-        ix >= x_t0 && ix < x_t1 && !ctx.cut_y_hi();
-
-    bool is_left =
-        ix >= left_start && ix < left_end &&
-        iz >= z_t0 && iz < z_t1 &&
-        iy >= y_t0 && iy < y_t1 && !ctx.cut_x_lo();
-
-    bool is_right =
-        ix >= right_start && ix < right_end &&
-        iz >= z_t0 && iz < z_t1 &&
-        iy >= y_t0 && iy < y_t1 && !ctx.cut_x_hi();
-
-    if (!(is_top || is_bottom || is_front || is_back || is_left || is_right))
+    // Band geometry and per-face membership: boundary/strip.cuh, shared with
+    // the strip-source un-injection (see boundary_kernel2d).  DD cut faces
+    // (ctx.cut_mask()) carry no band.
+    const BsStripBands3D g = bs_strip_bands_3d(ctx, width, offset, tangent_pad);
+    const BsStripFaces3D f = bs_strip_faces_3d(ctx, g, ix, iy, iz);
+    if (!f.any())
         return;
+
+    const bool is_top = f.top, is_bottom = f.bottom, is_front = f.front;
+    const bool is_back = f.back, is_left = f.left, is_right = f.right;
+    const int nx_boundary = g.nx_boundary, ny_boundary = g.ny_boundary, nz_boundary = g.nz_boundary;
+    const int x_t0 = g.x_t0, y_t0 = g.y_t0, z_t0 = g.z_t0;
+    const int top_start = g.top_start, bot_start = g.bot_start;
+    const int front_start = g.front_start, back_start = g.back_start;
+    const int left_start = g.left_start, right_start = g.right_start;
 
     float val = u_b[idx3];
 
@@ -522,34 +410,17 @@ __device__ __forceinline__ void boundary_kernel3d_body(
     float* u_b = u + b * spatial;
     int idx3 = iz * stride_z + iy * stride_y + ix;
 
-    int x0 = ctx.phys_x0(), x1 = ctx.phys_x1();
-    int y0 = ctx.phys_y0(), y1 = ctx.phys_y1();
-    int z0 = ctx.phys_z0(), z1 = ctx.phys_z1();
-    int nx_phys = ctx.nx_phys();
-    int ny_phys = ctx.ny_phys();
-    int nz_phys = ctx.nz_phys();
-    int nx_boundary = nx_phys + 2 * tangent_pad;
-    int ny_boundary = ny_phys + 2 * tangent_pad;
-    int nz_boundary = nz_phys + 2 * tangent_pad;
-    int x_t0 = x0 - tangent_pad, x_t1 = x1 + tangent_pad;
-    int y_t0 = y0 - tangent_pad, y_t1 = y1 + tangent_pad;
-    int z_t0 = z0 - tangent_pad, z_t1 = z1 + tangent_pad;
-
-    int top_start = z0 + offset, top_end = top_start + width;
-    int bot_end   = z1 - offset, bot_start = bot_end - width;
-    int front_start = y0 + offset, front_end = front_start + width;
-    int back_end  = y1 - offset, back_start = back_end - width;
-    int left_start = x0 + offset, left_end = left_start + width;
-    int right_end = x1 - offset, right_start = right_end - width;
-
-    bool is_top    = iz >= top_start  && iz < top_end  && iy >= y_t0 && iy < y_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_lo();
-    bool is_bottom = iz >= bot_start  && iz < bot_end  && iy >= y_t0 && iy < y_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_z_hi();
-    bool is_front  = iy >= front_start && iy < front_end && iz >= z_t0 && iz < z_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_y_lo();
-    bool is_back   = iy >= back_start  && iy < back_end  && iz >= z_t0 && iz < z_t1 && ix >= x_t0 && ix < x_t1 && !ctx.cut_y_hi();
-    bool is_left   = ix >= left_start  && ix < left_end  && iz >= z_t0 && iz < z_t1 && iy >= y_t0 && iy < y_t1 && !ctx.cut_x_lo();
-    bool is_right  = ix >= right_start && ix < right_end && iz >= z_t0 && iz < z_t1 && iy >= y_t0 && iy < y_t1 && !ctx.cut_x_hi();
-
-    if (!(is_top || is_bottom || is_front || is_back || is_left || is_right)) return;
+    // Geometry: boundary/strip.cuh (see boundary_kernel3d).
+    const BsStripBands3D g = bs_strip_bands_3d(ctx, width, offset, tangent_pad);
+    const BsStripFaces3D f = bs_strip_faces_3d(ctx, g, ix, iy, iz);
+    if (!f.any()) return;
+    const bool is_top = f.top, is_bottom = f.bottom, is_front = f.front;
+    const bool is_back = f.back, is_left = f.left, is_right = f.right;
+    const int nx_boundary = g.nx_boundary, ny_boundary = g.ny_boundary, nz_boundary = g.nz_boundary;
+    const int x_t0 = g.x_t0, y_t0 = g.y_t0, z_t0 = g.z_t0;
+    const int top_start = g.top_start, bot_start = g.bot_start;
+    const int front_start = g.front_start, back_start = g.back_start;
+    const int left_start = g.left_start, right_start = g.right_start;
 
     if (is_top) {
         int zloc = iz - top_start, yloc = iy - y_t0, xloc = ix - x_t0;
@@ -633,11 +504,6 @@ __global__ void boundary_kernel2d_compact(
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int x0 = ctx.phys_x0();
-    int x1 = ctx.phys_x1();
-    int z0 = ctx.phys_z0();
-    int z1 = ctx.phys_z1();
-
     int nx_boundary = ctx.nx_phys() + 2 * tangent_pad;
     int nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
 
@@ -651,14 +517,15 @@ __global__ void boundary_kernel2d_compact(
     int b = tid / per_batch;
     int local = tid - b * per_batch;
 
-    int x_t0 = x0 - tangent_pad;
-    int z_t0 = z0 - tangent_pad;
-    int top_start = z0 + offset;
-    int bot_end = z1 - offset;
-    int bot_start = bot_end - width;
-    int left_start = x0 + offset;
-    int right_end = x1 - offset;
-    int right_start = right_end - width;
+    // Band bounds: boundary/strip.cuh.  Enumerating the in-grid cells of the
+    // non-cut bands visits exactly the cells bs_in_restore_strip_2d accepts.
+    const BsStripBands2D g = bs_strip_bands_2d(ctx, width, offset, tangent_pad);
+    int x_t0 = g.x_t0;
+    int z_t0 = g.z_t0;
+    int top_start = g.top_start;
+    int bot_start = g.bot_start;
+    int left_start = g.left_start;
+    int right_start = g.right_start;
 
     int ix = 0;
     int iz = 0;
@@ -742,19 +609,9 @@ __global__ void boundary_kernel3d_compact(
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int x0 = ctx.phys_x0();
-    int x1 = ctx.phys_x1();
-    int y0 = ctx.phys_y0();
-    int y1 = ctx.phys_y1();
-    int z0 = ctx.phys_z0();
-    int z1 = ctx.phys_z1();
-
-    int nx_phys = ctx.nx_phys();
-    int ny_phys = ctx.ny_phys();
-    int nz_phys = ctx.nz_phys();
-    int nx_boundary = nx_phys + 2 * tangent_pad;
-    int ny_boundary = ny_phys + 2 * tangent_pad;
-    int nz_boundary = nz_phys + 2 * tangent_pad;
+    int nx_boundary = ctx.nx_phys() + 2 * tangent_pad;
+    int ny_boundary = ctx.ny_phys() + 2 * tangent_pad;
+    int nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
 
     int top_count = width * ny_boundary * nx_boundary;
     int front_count = nz_boundary * width * nx_boundary;
@@ -767,18 +624,18 @@ __global__ void boundary_kernel3d_compact(
     int b = tid / per_batch;
     int local = tid - b * per_batch;
 
-    int x_t0 = x0 - tangent_pad;
-    int y_t0 = y0 - tangent_pad;
-    int z_t0 = z0 - tangent_pad;
-    int top_start = z0 + offset;
-    int bot_end = z1 - offset;
-    int bot_start = bot_end - width;
-    int front_start = y0 + offset;
-    int back_end = y1 - offset;
-    int back_start = back_end - width;
-    int left_start = x0 + offset;
-    int right_end = x1 - offset;
-    int right_start = right_end - width;
+    // Band bounds: boundary/strip.cuh.  Enumerating the in-grid cells of the
+    // non-cut bands visits exactly the cells bs_in_restore_strip_3d accepts.
+    const BsStripBands3D g = bs_strip_bands_3d(ctx, width, offset, tangent_pad);
+    int x_t0 = g.x_t0;
+    int y_t0 = g.y_t0;
+    int z_t0 = g.z_t0;
+    int top_start = g.top_start;
+    int bot_start = g.bot_start;
+    int front_start = g.front_start;
+    int back_start = g.back_start;
+    int left_start = g.left_start;
+    int right_start = g.right_start;
 
     int ix = 0;
     int iy = 0;
@@ -889,13 +746,9 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int x0 = ctx.phys_x0(), x1 = ctx.phys_x1();
-    int y0 = ctx.phys_y0(), y1 = ctx.phys_y1();
-    int z0 = ctx.phys_z0(), z1 = ctx.phys_z1();
-    int nx_phys = ctx.nx_phys(), ny_phys = ctx.ny_phys(), nz_phys = ctx.nz_phys();
-    int nx_boundary = nx_phys + 2 * tangent_pad;
-    int ny_boundary = ny_phys + 2 * tangent_pad;
-    int nz_boundary = nz_phys + 2 * tangent_pad;
+    int nx_boundary = ctx.nx_phys() + 2 * tangent_pad;
+    int ny_boundary = ctx.ny_phys() + 2 * tangent_pad;
+    int nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
     int top_count = width * ny_boundary * nx_boundary;
     int front_count = nz_boundary * width * nx_boundary;
     int left_count = nz_boundary * ny_boundary * width;
@@ -904,13 +757,15 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
     if (tid >= total) return;
     int b = tid / per_batch;
     int local = tid - b * per_batch;
-    int x_t0 = x0 - tangent_pad, y_t0 = y0 - tangent_pad, z_t0 = z0 - tangent_pad;
-    int top_start = z0 + offset;
-    int bot_end = z1 - offset, bot_start = bot_end - width;
-    int front_start = y0 + offset;
-    int back_end = y1 - offset, back_start = back_end - width;
-    int left_start = x0 + offset;
-    int right_end = x1 - offset, right_start = right_end - width;
+    // Band bounds: boundary/strip.cuh (see boundary_kernel3d_compact).
+    const BsStripBands3D g = bs_strip_bands_3d(ctx, width, offset, tangent_pad);
+    int x_t0 = g.x_t0, y_t0 = g.y_t0, z_t0 = g.z_t0;
+    int top_start = g.top_start;
+    int bot_start = g.bot_start;
+    int front_start = g.front_start;
+    int back_start = g.back_start;
+    int left_start = g.left_start;
+    int right_start = g.right_start;
 
     int ix = 0, iy = 0, iz = 0;
     int64_t idx = 0;

@@ -1,4 +1,4 @@
-"""Gradient consistency matrix for eager/cpu, eager/gpu, C/cpu, and C/cuda.
+"""Gradient consistency matrix for eager/cpu, eager/gpu and C/cuda.
 
 Run from the repository root after installing the compiled extension:
 
@@ -7,9 +7,7 @@ Run from the repository root after installing the compiled extension:
 
 The eager leg is the point of this file: it is the only backend that does not
 share code with the compiled backward, so it is the only reference that can see
-a defect present in both C paths.  ``--backends`` exists because the c-cpu
-column needs ``SWEEP_JIT_FULL=1`` (the default JIT build ships a CPU stub); drop
-it to run the eager-vs-CUDA comparison on a stock build.
+a defect in it.  ``--backends`` picks the columns.
 
 The eager backend supports full mode and PyTorch chunk checkpointing. Boundary
 saving and recursive checkpointing are compiled-backend modes, so those eager
@@ -34,6 +32,9 @@ import sys
 import traceback
 
 import torch
+# The eager side is the reference: FP32, never cuDNN TF32 (Ampere+ default).
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +45,7 @@ for path in (SRC_ROOT, TEST_ROOT):
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from cpu_binding_gradient_consistency import (  # noqa: E402
+from gradient_cases import (  # noqa: E402
     CASES,
     MODES,
     CUDA_MODE_REFERENCE_ONLY,
@@ -71,7 +72,6 @@ class BackendSpec:
 BACKENDS = (
     BackendSpec("eager/cpu", "eager", "cpu"),
     BackendSpec("eager/gpu", "eager", "cuda"),
-    BackendSpec("c-cpu", "c", "cpu"),
     BackendSpec("c-cuda", "c", "cuda"),
 )
 
@@ -123,18 +123,17 @@ def reference_label_for_mode(mode: str, cuda_available: bool,
     """Pick the truth leg for this mode out of the selected backends.
 
     Eager first, always: it is the only leg that does not share code with the
-    compiled backward, so it is the only one that can see a defect present in
-    both C paths.  Falling back to a C reference makes the row a C-vs-C check —
-    still useful for mode consistency, useless for backend correctness.
+    compiled backward, so it is the only one that can see a defect in it.
+    Falling back to the C reference makes the row a C-vs-C check — still
+    useful for mode consistency, useless for backend correctness.
     """
     labels = {b.label for b in backends}
     order = ["eager/cpu", "eager/gpu"] if mode in EAGER_MODES else []
     order += ["c-cuda"] if cuda_available else []
-    order += ["c-cpu"]
     for label in order:
         if label in labels:
             return label
-    return next(iter(labels)) if labels else "c-cpu"
+    return next(iter(labels)) if labels else "c-cuda"
 
 
 def one_line_error(exc: BaseException) -> str:
@@ -164,13 +163,7 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=[b.label for b in BACKENDS],
         choices=[b.label for b in BACKENDS],
-        help=(
-            "Which backends to run. The c-cpu column needs the compiled CPU "
-            "tree, which the default JIT build does not include — without "
-            "SWEEP_JIT_FULL=1 it raises 'CUDAGuardImpl initialized with "
-            "non-CUDA DeviceType: cpu'. Pass --backends eager/gpu c-cuda to "
-            "run the eager-vs-CUDA comparison on a stock build."
-        ),
+        help="Which backends to run.",
     )
     parser.add_argument(
         "--scale",
@@ -211,6 +204,16 @@ def parse_args() -> argparse.Namespace:
             "and VRZ families; 1e-3 clears all of them with ~2.5x margin and "
             "still catches a percent-level forward difference."
         ),
+    )
+    parser.add_argument(
+        "--expect", metavar="FILE",
+        help=(
+            "Compare the failing cells against a recorded set and EXIT NON-ZERO "
+            "if they differ. Without it this script always exits 0 -- it printed "
+            "'Failures:' and returned success, so nothing that ran it in a "
+            "pipeline could tell. A cell that stops failing is also a mismatch: "
+            "the file has to be updated deliberately, the same rule "
+            "KNOWN_MISSING_GRADIENTS already follows for declared gaps."),
     )
     parser.add_argument(
         "--reference-scope",
@@ -279,10 +282,7 @@ def run_cross_matrix(args: argparse.Namespace, selected_cases: list[Case], cuda_
                     row[backend.label] = "PASS*" if missing else "PASS"
                     continue
                 row[backend.label] = "FAIL"
-                suffix = ""
-                if (case.name, mode) in CUDA_MODE_REFERENCE_ONLY and {backend.label, reference_label} == {"c-cpu", "c-cuda"}:
-                    suffix = " (mode follows c-cuda rather than c-cpu full)"
-                failures.append(f"{case.name}/{mode}/{backend.label}: {errors[0] if errors else 'mismatch'}{suffix}")
+                failures.append(f"{case.name}/{mode}/{backend.label}: {errors[0] if errors else 'mismatch'}")
 
             rows.append(row)
 
@@ -346,11 +346,11 @@ def run_within_matrix(args: argparse.Namespace, selected_cases: list[Case], cuda
                 if ok:
                     row[backend.label] = "PASS*" if missing else "PASS"
                 elif (case.name, mode) in CUDA_MODE_REFERENCE_ONLY and backend.family == "c":
-                    # Declared: this mode is aligned to the matching mode on
-                    # the other device, not to full. Grade it GAP so the
-                    # within matrix separates documented deviations from
-                    # regressions -- it stays visible in the known-gaps list
-                    # and a case NOT on the list still fails loudly.
+                    # Declared: this mode deviates from full at the source /
+                    # receiver cells (see CUDA_MODE_REFERENCE_ONLY). Grade it
+                    # GAP so the within matrix separates documented deviations
+                    # from regressions -- it stays visible in the known-gaps
+                    # list and a case NOT on the list still fails loudly.
                     row[backend.label] = "GAP"
                     known_gaps.append(
                         f"{case.name}/{mode}/{backend.label}: "
@@ -407,6 +407,32 @@ def main() -> None:
         print("Failures:")
         for failure in failures:
             print(f"- {failure}")
+
+    if not args.expect:
+        return
+    path = Path(args.expect)
+    # A failure line is "<case>/<mode>/<backend>: <reason>"; key on the cell,
+    # not the reason, so a reworded error message is not a false alarm while a
+    # newly failing cell still is.
+    seen = {line.split(":", 1)[0].strip() for line in failures}
+    if not path.exists():
+        path.write_text("\n".join(sorted(seen)) + "\n")
+        print(f"\nwrote {len(seen)} expected failures to {path}")
+        return
+    want = {l.strip() for l in path.read_text().splitlines()
+            if l.strip() and not l.startswith("#")}
+    new_fail, gone = sorted(seen - want), sorted(want - seen)
+    if new_fail:
+        print("\nNEW failing cells (not in %s):" % path)
+        for c in new_fail:
+            print(f"  + {c}")
+    if gone:
+        print("\nCells that no longer fail -- update %s deliberately:" % path)
+        for c in gone:
+            print(f"  - {c}")
+    if new_fail or gone:
+        raise SystemExit(1)
+    print(f"\nfailing cells match {path} ({len(seen)} of them)")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,16 @@
-from collections.abc import Sequence
 import inspect
 
 import numpy as np
+from sweep.parallel.pml import dd_cut_face_mask, dd_cut_pad
+from sweep.core.arguments import (
+    merge_legacy_boundary_kwargs,
+    refuse_free_surface_if_anisotropic,
+    resolve_boundary_spec,
+    normalise_spacing,
+    resolve_device,
+)
+from sweep.core import geometry, validation
+from sweep.core import topography as topography_
 from sweep.equations.fields import build_field_index, format_field_specs
 from sweep.equations._edges import (
     normalize_free_surface,
@@ -13,6 +22,10 @@ from sweep.equations._edges import (
 from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFAULTS
 
 class PropBase:
+
+    # Which equation flag gates an image-method topography staircase on this
+    # impl; the compiled backend overrides it with the _c spelling.
+    _IMAGE_TOPO_FLAG = "supports_image_topography"
 
     def __init__(self,
                  equation,
@@ -37,8 +50,8 @@ class PropBase:
                  nt=PROP_DEFAULTS.nt,
                  B=PROP_DEFAULTS.batch_size,
                  allow_growth=PROP_DEFAULTS.allow_growth,
-                 full_mode=PROP_DEFAULTS.full_mode,
                  boundary_saving_config=None,
+                 boundary_buffer=None,
                  **kwargs):
         """Base class for the Propagator
 
@@ -88,7 +101,8 @@ class PropBase:
                 the checkpointing mode.  The gradient-memory mode is a
                 three-way choice (full / boundary / ckpt) resolved by
                 ``options.resolve_memory_strategy``; prefer
-                ``memory=MemoryOptions(strategy=...)``.  None (default) picks
+                ``memory=Full()`` / ``BoundarySaving(...)`` / ``Ckpt(...)``.
+                None (default) picks
                 the backend default: 'boundary' for impl='c', 'ckpt' for
                 eager/jax.
             ckpt_chunks (int, optional): The number of time steps to chunk for checkpointing. Defaults to 100.
@@ -138,73 +152,19 @@ class PropBase:
         # sweep.parallel.ModelParallel) that reads a built propagator's
         # global-problem spec. (dh/dt are already registered as buffers later.)
         self._shape_phys = tuple(int(s) for s in shape)
-        if device is not None and dev is not None and device != dev:
-            import warnings
-            warnings.warn(
-                "Both 'device' and 'dev' were passed to the propagator; using 'device'. "
-                "'dev' is deprecated and will be removed in a future release.",
-                DeprecationWarning, stacklevel=2,
-            )
-        resolved_device = device if device is not None else dev
-        if resolved_device is None:
-            # Inherit from the equation, which is the source of truth: its
-            # operators (laplace kernels etc.) were already built on this device.
-            resolved_device = getattr(equation, 'device', None)
-        self.dev = resolved_device
+        self.dev = resolve_device(device, dev, equation)
         # ---- Per-edge boundary spec (free surface + PML thickness) ----------
         # ``free_surface`` and ``abcn`` accept the historical scalar/bool forms
         # as well as per-edge specs; both normalise to canonical axis-major
         # tuples ``(z_lo, z_hi, [y_lo, y_hi,] x_lo, x_hi)``.  ``free_surface=True``
         # with a scalar ``abcn`` reproduces the old top-only layout bit-for-bit.
-        self.fs_faces = normalize_free_surface(free_surface, self.ndim)
-        # Anisotropic equations have no correct free-surface implementation:
-        # the anisotropic stress-free condition is NOT the isotropic image
-        # condition these solvers implement.  Fail loud on ANY free-surface
-        # request rather than silently produce wrong surface physics.  Checked
-        # twice: here for the explicit request (bool / per-edge list), and again
-        # after ``_resolve_topo_method`` -- ``topography=`` implies a free
-        # surface, and that is only known once the method has been resolved.
-        def _refuse_free_surface_if_anisotropic(requested, how):
-            if not requested or getattr(equation, "supports_free_surface", True):
-                return
-            raise NotImplementedError(
-                f"{type(equation).__name__} does not support a free surface "
-                f"({how}): the anisotropic stress-free boundary condition "
-                "couples through the stiffness tensor and is not the isotropic "
-                "image method this solver implements. Use free_surface=False "
-                "(absorbing top) or an isotropic equation."
-            )
-
-        _refuse_free_surface_if_anisotropic(any(self.fs_faces), "free_surface=")
         self._abcn_arg = abcn
-        self.pad = normalize_pad(abcn, self.fs_faces, self.ndim)
-        # ``self.abcn`` stays a representative uniform PML width for the legacy
-        # readers (topography / curvilinear) that assume one — those paths are
-        # guarded to the top-only configuration just below.
-        self.abcn = abcn if isinstance(abcn, int) and not isinstance(abcn, bool) else max(self.pad + (0,))
-        # Per-edge free surface (anything other than top-only or none), and
-        # per-edge PML thickness, are a staged feature: only equations that opt
-        # in (``supports_per_edge_free_surface``) handle them, 2-D only, and not
-        # with topography.  Fail loud rather than silently degrade to top-only.
-        _extended_boundary = (not is_top_only_or_none(self.fs_faces)) or not isinstance(abcn, int)
-        if _extended_boundary:
-            if self.ndim != 2:
-                raise NotImplementedError(
-                    "per-edge free surface / per-edge PML thickness is currently "
-                    f"2-D only; got a {self.ndim}-D propagator (free_surface="
-                    f"{free_surface!r}, abcn={abcn!r})."
-                )
-            if not getattr(equation, "supports_per_edge_free_surface", False):
-                raise NotImplementedError(
-                    f"{type(equation).__name__} does not support a per-edge free "
-                    "surface or per-edge PML thickness yet (only top-only "
-                    "free_surface=True/False with a scalar abcn). Supported: "
-                    "Acoustic, Elastic (2-D)."
-                )
-            if topography is not None:
-                raise NotImplementedError(
-                    "per-edge free surface cannot be combined with topography= yet."
-                )
+        self.fs_faces, self.pad, self.abcn = resolve_boundary_spec(
+            free_surface, abcn, self.ndim, equation, topography,
+            normalize_free_surface=normalize_free_surface,
+            normalize_pad=normalize_pad,
+            is_top_only_or_none=is_top_only_or_none,
+        )
         # Resolve topo_method + free_surface BEFORE PML padding is
         # computed.  Two separate flags come out:
         #   ``self.free_surface``           — physical: model has a free
@@ -227,7 +187,20 @@ class PropBase:
         )
         # ``topography=`` implies a free surface even with free_surface=False --
         # image method or APM alike, both of them isotropic constructions.
-        _refuse_free_surface_if_anisotropic(self.free_surface, "implied by topography=")
+        refuse_free_surface_if_anisotropic(
+            equation, self.free_surface, "implied by topography=")
+        # A topography STAIRCASE (not a flat free surface) needs the equation
+        # to actually apply ``_topo_rows_runtime`` / the kernel-side rows;
+        # accepting it otherwise silently models a flat surface.  The flag name
+        # is per-impl (``_IMAGE_TOPO_FLAG``): e.g. 3-D Elastic honours the
+        # rows on eager but not in its CUDA kernels.
+        if topography is not None and self._topo_method == 'image' \
+                and not getattr(equation, self._IMAGE_TOPO_FLAG, False):
+            raise NotImplementedError(
+                f"topography= with the image method is not implemented by "
+                f"{type(equation).__name__} on this impl "
+                f"({self._IMAGE_TOPO_FLAG} is False)."
+            )
         # ``_resolve_topo_method`` can turn the TOP free surface on implicitly
         # (topography= implies an image-method free surface even with
         # free_surface=False).  Fold that back into the canonical fs_faces/pad so
@@ -240,27 +213,14 @@ class PropBase:
         if topography is not None and self._image_method_active and not self.fs_faces[0]:
             self.fs_faces = (True,) + tuple(self.fs_faces[1:])
             self.pad = normalize_pad(self._abcn_arg, self.fs_faces, self.ndim)
-        if np.isscalar(dh):
-            self._dh = float(dh)
-            self._grid_spacing = tuple([self._dh] * self.ndim)
-        else:
-            if not isinstance(dh, Sequence) or isinstance(dh, (str, bytes)):
-                raise TypeError(
-                    "dh must be a float or a sequence ordered like shape "
-                    "(2D: (dz, dx), 3D: (dz, dy, dx))."
-                )
-            if len(dh) != self.ndim:
-                raise ValueError(
-                    f"dh must have length {self.ndim} to match shape {shape}, "
-                    f"got {len(dh)}."
-                )
-            self._grid_spacing = tuple(float(v) for v in dh)
-            self._dh = float(self._grid_spacing[-1])
+        self._dh, self._grid_spacing = normalise_spacing(dh, self.ndim, shape)
         self._dt = float(dt)
         # None = unspecified; the torch entry points always pass a resolved
         # bool (see options.resolve_memory_strategy).  Direct PropBase / JAX
-        # construction keeps the historical checkpointing default.
-        self.use_ckpt = True if use_ckpt is None else bool(use_ckpt)
+        # construction keeps the historical checkpointing default.  Held raw
+        # here because the strategy needs the boundary config too, which is not
+        # built yet -- it is derived once, below.
+        _ckpt_requested = True if use_ckpt is None else bool(use_ckpt)
         self.ckpt_chunks = ckpt_chunks
         self.ckpt_mode = ckpt_mode
         self.ckpt_num = ckpt_num
@@ -273,31 +233,36 @@ class PropBase:
         self.nt = nt
         self.B = B
         self.allow_growth = allow_growth
-        self.full_mode = full_mode
-        legacy_boundary_config = {}
-        if "transfer_interval" in kwargs:
-            legacy_boundary_config["transfer_interval"] = kwargs.pop("transfer_interval")
-        if "boundary_on_cpu" in kwargs:
-            legacy_boundary_config["storage"] = "cpu" if kwargs.pop("boundary_on_cpu") else "gpu"
-        if "use_pinned_memory" in kwargs:
-            legacy_boundary_config["pinned_memory"] = kwargs.pop("use_pinned_memory")
-        if "boundary_disk_async_read" in kwargs:
-            legacy_boundary_config["disk_async_read"] = kwargs.pop("boundary_disk_async_read")
-        if boundary_saving_config is None:
-            boundary_saving_config = legacy_boundary_config or None
-        else:
-            boundary_saving_config = {**legacy_boundary_config, **boundary_saving_config}
+        # NOT warned here: by this point ``boundary_saving_config`` is the
+        # INTERNAL wire format -- PropTorch translates memory=BoundarySaving()
+        # into exactly this dict, so warning here would warn about the new API.
+        # The warning belongs at the entry point the caller crosses.
+        boundary_saving_config = merge_legacy_boundary_kwargs(
+            kwargs, boundary_saving_config)
 
         self.boundary_saving_config = self._normalize_boundary_saving_config(boundary_saving_config)
+        # ONE piece of state for the gradient-memory mode. ``use_ckpt`` used to
+        # be an independent flag that happened to agree with the boundary
+        # config; the two could drift, and a drift is silent -- the run measures
+        # one strategy and reports the other.
+        self._memory_strategy = (
+            "ckpt" if _ckpt_requested
+            else ("boundary" if self.boundary_saving_config.get("enabled") else "full"))
         self.transfer_interval = self.boundary_saving_config["transfer_interval"]
         self.boundary_on_cpu = (self.boundary_saving_config["storage"] == "cpu")
         self.use_pinned_memory = self.boundary_saving_config["pinned_memory"]
-        self._abc_cache_key = None
 
         # Optional sweep.parallel.ModelParallelMesh; when set, init_abc routes
         # through rank-local PML widths and source/receiver / model tile work
         # is performed in subclasses. None = single-rank behaviour (unchanged).
         self.model_parallel = kwargs.pop('model_parallel', None)
+        if kwargs:
+            # Every named option and every legacy spelling has been consumed by
+            # now, so anything left is a typo -- swallowing it silently turns
+            # e.g. free_surfce=True into a flat-surface run that looks fine.
+            raise TypeError(
+                f"{type(self).__name__} got unexpected keyword arguments: "
+                f"{sorted(kwargs)}")
 
         # Keep the equation object aware of geometry-dependent boundary
         # behavior.  ``equation.free_surface`` is the image-method-layout
@@ -336,23 +301,20 @@ class PropBase:
         # thin if EITHER the per-edge layout says so (free surface, or an
         # explicitly thinner pad) or the mesh says it is cut.  Without a mesh
         # ``self.pad`` is left exactly as ``normalize_pad`` produced it.
-        if self.model_parallel is not None:
-            from sweep.parallel.pml import build_rank_pml_widths
-            # image_method_active=False ON PURPOSE.  That flag makes the helper
-            # zero the z_lo entry, and its contract ("the top face is a free
-            # surface") only held on the DD branch, where _image_method_active
-            # was exactly that.  Under dev's per-edge feature
-            # ``_resolve_topo_method`` returns image=True for ANY free-surface
-            # face, so passing it here would delete the top PML whenever e.g.
-            # only the LEFT face is free -- a face that is neither a free
-            # surface nor ever cut (``_dd_cut_mask`` only sets x/y bits).
-            # ``normalize_pad`` has already zeroed every genuine free-surface
-            # face in ``self.pad``, so this call must contribute cut faces and
-            # nothing else.
-            _cut_pad = build_rank_pml_widths(
-                self.model_parallel, abcn=self.abcn, ndim=self.ndim,
-                image_method_active=False)
-            self.pad = tuple(min(p, c) for p, c in zip(self.pad, _cut_pad))
+        self.pad = dd_cut_pad(self.model_parallel, self.pad, self.abcn, self.ndim)
+
+        # ---- sigma=0 buffer between the physical box and the PML ------------
+        # ``self.pml_pad`` is the damping-ramp width per face (what the CPML
+        # profiles, the boundary Layout and the C side see); ``self.pad`` is
+        # the tensor pad = ramp + buffer, and drives the runtime shape, the
+        # coordinate shift and the gradient crop.  The buffer cells are plain
+        # interior cells whose gradient is cropped away, so a boundary-saving
+        # shell placed at THEIR outer edge is never read by the gradient of a
+        # physical cell: the storage-noise rim lands in the buffer.  Faces
+        # without a ramp (free surface, DD cut) get no buffer.
+        self.pml_pad = tuple(self.pad)
+        self.boundary_buffer = self._resolve_boundary_buffer(boundary_buffer, topography)
+        self.pad = tuple(p + self.boundary_buffer if p > 0 else 0 for p in self.pml_pad)
 
         self.padding_z = (self.pad[0], self.pad[1])
         self.padding = torch_pad_order(self.pad, self.ndim)
@@ -366,18 +328,7 @@ class PropBase:
         # DD cut-face bitmask (x_lo=1, x_hi=2, y_lo=16, y_hi=32; z is never
         # split in v1). Passed to the boundary Layout so its phys_* bounds
         # match this (possibly asymmetric) pad. 0 = single domain.
-        self._dd_cut_mask = 0
-        mp = self.model_parallel
-        if mp is not None:
-            if not mp.is_edge("x", "low"):
-                self._dd_cut_mask |= 1
-            if not mp.is_edge("x", "high"):
-                self._dd_cut_mask |= 2
-            if self.ndim == 3:
-                if not mp.is_edge("y", "low"):
-                    self._dd_cut_mask |= 16
-                if not mp.is_edge("y", "high"):
-                    self._dd_cut_mask |= 32
+        self._dd_cut_mask = dd_cut_face_mask(self.model_parallel, self.ndim)
 
         # Topography is processed AFTER self.shape is PML-padded so the
         # runtime-coord conversion can compute the final padded surface row.
@@ -413,61 +364,16 @@ class PropBase:
                                     z-derivative mirror?  Only true when
                                     ``method == 'image'``.
         """
-        valid_methods = {'auto', 'image', 'apm'}
-        if topo_method not in valid_methods:
-            raise ValueError(
-                f"topo_method must be one of {sorted(valid_methods)}; "
-                f"got {topo_method!r}"
-            )
-
-        has_topo = topography is not None
-        supports_apm = bool(getattr(self.equation, 'supports_apm', False))
-
-        # Curvilinear equations have their own topo path (boundary-fitted
-        # grid via metric tensors); ``topo_method`` doesn't apply.  Honour
-        # the user's ``free_surface`` flag verbatim and skip method
-        # resolution.
-        is_curvilinear = bool(getattr(self.equation, 'is_curvilinear', False))
-        if is_curvilinear:
-            fs = bool(free_surface) or has_topo
-            return None, fs, fs
-
-        # ---- No topography ----
-        if not has_topo:
-            if free_surface:
-                # Flat free surface — only image method supports this
-                # configuration.  APM is meaningless without per-cell
-                # categories from a topo mask.
-                if topo_method == 'apm':
-                    raise ValueError(
-                        "topo_method='apm' requires a topography= mask; "
-                        "for a flat free surface use topo_method='image' "
-                        "(or omit it)."
-                    )
-                return 'image', True, True
-            # No free surface at all.
-            return None, False, False
-
-        # ---- Topography given: free surface is implicit ----
-        # If the user also passed free_surface=False, we still turn it on
-        # (topo implies FS); if they passed True, that matches.  No
-        # warning needed — the new semantics make the combination
-        # unambiguous.
-        if topo_method == 'auto':
-            method = 'apm' if supports_apm else 'image'
-        elif topo_method == 'apm':
-            if not supports_apm:
-                raise ValueError(
-                    f"topo_method='apm' requires equation.supports_apm=True; "
-                    f"{type(self.equation).__name__} only supports the image "
-                    f"method (use topo_method='image' or omit topo_method)."
-                )
-            method = 'apm'
-        else:  # 'image'
-            method = 'image'
-
-        image_method_active = (method == 'image')
-        return method, True, image_method_active
+        return topography_.resolve_topo_method(
+            topography=topography, topo_method=topo_method,
+            free_surface=free_surface,
+            supports_apm=bool(getattr(self.equation, 'supports_apm', False)),
+            # is_curvilinear is an INSTANCE attribute with no class-level
+            # default (unlike supports_apm), so the getattr default is what
+            # every non-curvilinear equation relies on.
+            is_curvilinear=bool(getattr(self.equation, 'is_curvilinear', False)),
+            equation_name=type(self.equation).__name__,
+        )
 
     def _process_topography(self, topography):
         """Validate and store irregular free-surface topography.
@@ -567,192 +473,43 @@ class PropBase:
             )
 
     def _canonicalise_topography(self, topo_input, *phys_extent):
-        """Validate the per-column surface row array and derive the matching
-        air mask.
-
-        Shapes (dispatched on ``len(phys_extent)``):
-
-        * 2-D propagator (``phys_extent = (nz_phys, nx_phys)``):
-          ``topo_input`` must be 1-D ``(nx_phys,)``.  Returns
-          ``(topo_row_phys, air_mask_phys)`` with shapes
-          ``(nx_phys,)`` and ``(nz_phys, nx_phys)``.
-
-        * 3-D propagator (``phys_extent = (nz_phys, ny_phys, nx_phys)``):
-          ``topo_input`` must be 2-D ``(ny_phys, nx_phys)``.  Returns
-          ``(topo_row_phys, air_mask_phys)`` with shapes
-          ``(ny_phys, nx_phys)`` and ``(nz_phys, ny_phys, nx_phys)``.
-
-        ``topo_row_phys`` is ``int64``; ``air_mask_phys`` is ``float32``
-        (1.0 above the surface, 0.0 at and below).
-        """
-        import torch
-
-        if len(phys_extent) == 2:
-            nz_phys, nx_phys = phys_extent
-            if topo_input.ndim != 1:
-                raise ValueError(
-                    f"2-D topography must be 1-D ``(nx_phys,)`` (surface row "
-                    f"index per physical column); got shape "
-                    f"{tuple(topo_input.shape)}.  Non-single-valued geometries "
-                    f"(overhangs, caves) are not supported by the standard "
-                    f"staircase path."
-                )
-            if topo_input.shape[0] != nx_phys:
-                raise ValueError(
-                    f"topography length {topo_input.shape[0]} != physical nx "
-                    f"({nx_phys})"
-                )
-            topo_row_phys = topo_input.to(torch.long)
-            if (topo_row_phys < 0).any() or (topo_row_phys >= nz_phys).any():
-                raise ValueError(
-                    f"topography values must satisfy 0 <= row < {nz_phys}; "
-                    f"got range [{int(topo_row_phys.min())}, "
-                    f"{int(topo_row_phys.max())}]"
-                )
-            iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1)
-            air_mask_phys = (iz < topo_row_phys.view(1, -1)).to(torch.float32)
-            return topo_row_phys, air_mask_phys
-
-        # 3-D branch.
-        nz_phys, ny_phys, nx_phys = phys_extent
-        if topo_input.ndim != 2:
-            raise ValueError(
-                f"3-D topography must be 2-D ``(ny_phys, nx_phys)`` (surface "
-                f"row index per (iy, ix) physical column); got shape "
-                f"{tuple(topo_input.shape)}.  Overhangs / caves are not "
-                f"supported."
-            )
-        if tuple(topo_input.shape) != (ny_phys, nx_phys):
-            raise ValueError(
-                f"3-D topography shape {tuple(topo_input.shape)} != "
-                f"(ny_phys, nx_phys) = ({ny_phys}, {nx_phys})"
-            )
-        topo_row_phys = topo_input.to(torch.long)
-        if (topo_row_phys < 0).any() or (topo_row_phys >= nz_phys).any():
-            raise ValueError(
-                f"topography values must satisfy 0 <= row < {nz_phys}; "
-                f"got range [{int(topo_row_phys.min())}, "
-                f"{int(topo_row_phys.max())}]"
-            )
-        iz = torch.arange(nz_phys, device=topo_row_phys.device).view(-1, 1, 1)
-        air_mask_phys = (iz < topo_row_phys.view(1, ny_phys, nx_phys)).to(
-            torch.float32
-        )
-        return topo_row_phys, air_mask_phys
+        return topography_.canonicalise_topography(topo_input, *phys_extent)
 
     def _populate_image_method_topography(self, topo_row_phys):
-        """Set ``self._topo_rows_runtime`` for the image-method /
-        vacuum-staircase path.  Translates physical row indices to
-        runtime-grid coordinates and replicate-pads the horizontal
-        axes (x for 2-D; y and x for 3-D) through PML + stencil halo so
-        the surface stays continuous through the absorbing boundary.
+        """Set the runtime surface rows for the image-method / vacuum path.
 
-        Result shapes:
-          2-D : 1-D ``(nx_phys + 2*(abcn+halo),)`` ``int32``.
-          3-D : 2-D ``(ny_phys + 2*(abcn+halo), nx_phys + 2*(abcn+halo))``
-                ``int32``.
+        The build is in :func:`sweep.core.topography.build_image_method_topo_rows`;
+        the four assignments stay here because they are this propagator taking
+        ownership of the equation's runtime binding -- see that module's note on
+        the mutation boundary.
         """
-        import torch
-        import torch.nn.functional as F
-
-        halo = self.equation.so // 2
-        # Runtime z layout (free_surface=True):
-        #   [0, halo)              top stencil halo (image)
-        #   [halo, halo + nz_phys) physical interior
-        #   [halo + nz_phys, ...)  bottom PML + bottom halo
-        topo_z = topo_row_phys + halo
-        pad_each = self.abcn + halo
-
-        # int32, not int64: ``_c.py`` reads ``data_ptr<int>()`` and a dtype
-        # cast there would create a temporary whose GPU memory is reused
-        # before the async CUDA kernels finish reading it.
-        if topo_row_phys.ndim == 1:
-            # 2-D propagator: 1-D row per ix.
-            topo_runtime = F.pad(
-                topo_z.to(torch.float32).view(1, 1, -1),
-                (pad_each, pad_each),
-                mode="replicate",
-            ).view(-1).to(torch.int32)
-        else:
-            # 3-D propagator: 2-D row per (iy, ix).  Pad x then y via a
-            # single F.pad call (right, left, top, bottom).
-            topo_runtime = F.pad(
-                topo_z.to(torch.float32).view(1, 1, *topo_z.shape),
-                (pad_each, pad_each, pad_each, pad_each),
-                mode="replicate",
-            ).squeeze(0).squeeze(0).to(torch.int32)
-
-        device = getattr(self.equation, "device", None) or self.dev
-        if device is not None:
-            try:
-                topo_runtime = topo_runtime.to(device=device)
-            except (RuntimeError, TypeError):
-                pass
-
-        # Defensive: ensure CPU→GPU copy is complete before any forward
-        # kernel reads ``topo_rows[..., ix]``.  Without this we've seen ~30%
-        # non-determinism in CUDA forward results.
-        if topo_runtime.device.type == "cuda":
-            torch.cuda.synchronize(topo_runtime.device)
-
+        topo_runtime = topography_.build_image_method_topo_rows(
+            topo_row_phys,
+            abcn=self.abcn,
+            halo=self.equation.so // 2,
+            # truthiness `or`, not `is not None` -- preserved verbatim
+            device=getattr(self.equation, "device", None) or self.dev,
+        )
         self.topography = topo_row_phys
         self._topo_rows_runtime = topo_runtime
         self.equation.topography = topo_row_phys
         self.equation._topo_rows_runtime = topo_runtime
 
     def _populate_apm_topography(self, air_mask_phys):
-        """Set ``self.equation._apm_air_mask_runtime`` for the APM path.
+        """Set the APM air mask on the equation.
 
-        Replicate-pads the air mask through PML + stencil halo so the
-        surface stays continuous through the absorbing boundary.
-
-        Shapes:
-
-        * 2-D propagator: ``air_mask_phys`` is ``(nz_phys, nx_phys)``;
-          output is ``(nz_phys + 2*pad, nx_phys + 2*pad)``.
-        * 3-D propagator: ``air_mask_phys`` is
-          ``(nz_phys, ny_phys, nx_phys)``; output is
-          ``(nz_phys + 2*pad, ny_phys + 2*pad, nx_phys + 2*pad)``,
-          replicate-padded on all 6 sides.
+        The build is in :func:`sweep.core.topography.build_apm_air_mask`; the
+        three assignments stay here. Note ``self.topography`` keeps the
+        PHYSICAL mask while the equation gets the padded one, and that the
+        physical mask lives on the INPUT's device -- CPU for a numpy
+        topography, even on a CUDA run.
         """
-        import torch
-        import torch.nn.functional as F
-
-        halo = self.equation.so // 2
-        pad_each = self.abcn + halo
-
-        if air_mask_phys.ndim == 2:
-            nz_phys, nx_phys = air_mask_phys.shape
-            air_mask_padded = F.pad(
-                air_mask_phys.view(1, 1, nz_phys, nx_phys),
-                (pad_each, pad_each, pad_each, pad_each),
-                mode="replicate",
-            ).view(nz_phys + 2 * pad_each, nx_phys + 2 * pad_each)
-        elif air_mask_phys.ndim == 3:
-            nz_phys, ny_phys, nx_phys = air_mask_phys.shape
-            # F.pad on (N=1, C=1, D, H, W) accepts a 6-tuple
-            # (W_left, W_right, H_left, H_right, D_left, D_right).
-            air_mask_padded = F.pad(
-                air_mask_phys.view(1, 1, nz_phys, ny_phys, nx_phys),
-                (pad_each, pad_each, pad_each, pad_each, pad_each, pad_each),
-                mode="replicate",
-            ).view(
-                nz_phys + 2 * pad_each,
-                ny_phys + 2 * pad_each,
-                nx_phys + 2 * pad_each,
-            )
-        else:
-            raise ValueError(
-                f"air_mask_phys must be 2-D or 3-D, got ndim={air_mask_phys.ndim}"
-            )
-
-        device = getattr(self.equation, "device", None) or self.dev
-        if device is not None:
-            try:
-                air_mask_padded = air_mask_padded.to(device=device)
-            except (RuntimeError, TypeError):
-                pass
-
+        air_mask_padded = topography_.build_apm_air_mask(
+            air_mask_phys,
+            abcn=self.abcn,
+            halo=self.equation.so // 2,
+            device=getattr(self.equation, "device", None) or self.dev,
+        )
         self.topography = air_mask_phys
         self.equation.topography = air_mask_phys
         self.equation._apm_air_mask_runtime = air_mask_padded
@@ -846,6 +603,62 @@ class PropBase:
             output.append(spec.name)
         return output
 
+    @property
+    def use_ckpt(self):
+        """Whether the gradient-memory strategy is checkpointing.
+
+        Read-only on purpose. It was a writable flag, and six places flipped it
+        after construction while the boundary config stayed as it was, so the
+        object could hold two answers to one question. Change the strategy with
+        :attr:`memory_strategy`, which says which one it is becoming.
+        """
+        return self._memory_strategy == "ckpt"
+
+    @use_ckpt.setter
+    def use_ckpt(self, value):
+        # Python's own message for a getter-only property ("property has no
+        # setter") does not say what to write instead, and this one is reached
+        # from code that predates the read-only change.
+        raise AttributeError(
+            "use_ckpt is read-only: it reports the gradient-memory strategy "
+            "rather than setting it. Write `memory_strategy = "
+            f"{'ckpt' if value else 'full'!r}` (or 'boundary') instead, which "
+            "moves the boundary configuration with it."
+        )
+
+    @property
+    def memory_strategy(self):
+        """'full' | 'boundary' | 'ckpt' -- the single source for the mode."""
+        return self._memory_strategy
+
+    @memory_strategy.setter
+    def memory_strategy(self, value):
+        self._set_memory_strategy(value)
+
+    def _set_memory_strategy(self, strategy, *, reason=None):
+        """Move to another gradient-memory strategy, deliberately.
+
+        ``reason`` is for the caller's benefit at the call site, not stored: it
+        makes ``_set_memory_strategy('boundary', reason='APM has no ckpt
+        backward')`` read as what it is, where ``use_ckpt = False`` left the
+        reader to work out what it fell back TO.
+        """
+        if strategy not in ("full", "boundary", "ckpt"):
+            raise ValueError(
+                f"memory strategy must be 'full', 'boundary' or 'ckpt', got {strategy!r}")
+        self._memory_strategy = strategy
+
+    def _disable_ckpt(self, reason):
+        """Drop out of checkpointing, keeping boundary saving if it is enabled.
+
+        ``use_ckpt = False`` did not say where it landed. It landed here.
+        """
+        if self._memory_strategy != "ckpt":
+            return
+        self._set_memory_strategy(
+            "boundary" if self.boundary_saving_config.get("enabled") else "full",
+            reason=reason)
+
     def _set_call_signature(self):
         forward = getattr(type(self), "forward", None)
         if forward is None:
@@ -859,105 +672,13 @@ class PropBase:
             signature = signature.replace(parameters=parameters[1:])
         self.__signature__ = signature
 
+    # Shape validation lives in sweep.core.validation as a pure function of the
+    # three shapes; this stays as the binding that supplies self.ndim.
     def _shape_tuple(self, value):
-        shape = getattr(value, "shape", None)
-        if shape is None:
-            shape = np.shape(value)
-        return tuple(int(dim) for dim in shape)
+        return validation.shape_tuple(value)
 
     def _normalize_io(self, wavelet, sources, receivers):
-        """Validate user-facing shapes for ``wavelet`` / ``sources`` / ``receivers``.
-
-        The propagator accepts three input modes:
-
-        - **A1**: ``wavelet=(nt,)``, ``sources=(nshots, ndim)``,
-          ``receivers=(nshots, nrec, ndim)`` — naive multi-shot, shared wavelet.
-        - **A2**: ``wavelet=(nshots, nt)``, ``sources=(nshots, ndim)``,
-          ``receivers=(nshots, nrec, ndim)`` — naive multi-shot, per-shot wavelet.
-        - **B**:  ``wavelet=(nt,)`` or ``(nsrc, nt)``,
-          ``sources=(1, nsrc, ndim)``, ``receivers=(1, nrec, ndim)`` —
-          source encoding (single super-shot, ``nsrc`` superposed point sources).
-
-        ``receivers`` must always be 3-D; shared receiver arrays should be
-        pre-broadcast/repeated to ``(B, nrec, ndim)`` by the user.
-
-        Returns
-        -------
-        mode : {'A1', 'A2', 'B'}
-        batch_size : int
-            Internal batch dim (``nshots`` for A, ``1`` for B).
-        nsrc_per_shot : int
-            Number of point sources per shot (``1`` for A, ``nsrc`` for B).
-        is_encoded : bool
-            ``True`` iff ``mode == 'B'``.
-        """
-        ws = self._shape_tuple(wavelet)
-        ss = self._shape_tuple(sources)
-        rs = self._shape_tuple(receivers)
-        ndim = self.ndim
-
-        if len(rs) != 3 or rs[-1] != ndim:
-            raise ValueError(
-                f"receivers must have shape (B, nrec, {ndim}); got {rs}. "
-                "Pre-broadcast/repeat per-shot if you previously passed a "
-                "shared (nrec, dim) array."
-            )
-        nrec = rs[1]
-
-        if len(ss) == 2:
-            if ss[-1] != ndim:
-                raise ValueError(
-                    f"sources must have shape (nshots, {ndim}); got {ss}."
-                )
-            nshots = ss[0]
-            if rs[0] != nshots:
-                raise ValueError(
-                    f"receivers batch ({rs[0]}) must match sources nshots "
-                    f"({nshots}) in naive multi-shot mode."
-                )
-            if len(ws) == 1:
-                return 'A1', nshots, 1, nrec, False
-            if len(ws) == 2:
-                if ws[0] != nshots:
-                    raise ValueError(
-                        f"wavelet must have shape (nshots={nshots}, nt); got {ws}."
-                    )
-                return 'A2', nshots, 1, nrec, False
-            raise ValueError(
-                "wavelet must have shape (nt,) [shared] or (nshots, nt) "
-                f"[per-shot] in naive multi-shot mode; got {ws}."
-            )
-
-        if len(ss) == 3:
-            if ss[0] != 1 or ss[-1] != ndim:
-                raise ValueError(
-                    "sources in source-encoding mode must have shape "
-                    f"(1, nsrc, {ndim}); got {ss}."
-                )
-            nsrc = ss[1]
-            if rs[0] != 1:
-                raise ValueError(
-                    "receivers batch must be 1 in source-encoding mode; "
-                    f"got {rs[0]}."
-                )
-            if len(ws) == 1:
-                return 'B', 1, nsrc, nrec, True
-            if len(ws) == 2:
-                if ws[0] != nsrc:
-                    raise ValueError(
-                        f"wavelet must have shape (nt,) or (nsrc={nsrc}, nt) "
-                        f"in source-encoding mode; got {ws}."
-                    )
-                return 'B', 1, nsrc, nrec, True
-            raise ValueError(
-                "wavelet must have shape (nt,) or (nsrc, nt) in "
-                f"source-encoding mode; got {ws}."
-            )
-
-        raise ValueError(
-            f"sources must have shape (nshots, {ndim}) [naive multi-shot] "
-            f"or (1, nsrc, {ndim}) [source encoding]; got {ss}."
-        )
+        return validation.normalize_io(wavelet, sources, receivers, self.ndim)
 
     def _normalize_boundary_saving_config(self, config):
         default = {
@@ -1054,7 +775,52 @@ class PropBase:
             config["enabled"] = bool(use_boundary_saving)
         return config
 
+    _INIT_ABC_KEYS = frozenset({"fd_pad", "shape", "max_vel", "pml_freq"})
+
+    def _resolve_boundary_buffer(self, requested, topography):
+        """Cells of sigma=0 buffer on every PML face; see ``BOUNDARY_BUFFER_REACH``.
+
+        ``None`` = the equation's need (REACH*M+1, 0 for a pointwise-imaging
+        equation), applied under EVERY gradient-memory strategy and impl so that
+        full, checkpoint and boundary-saving runs -- and eager vs compiled --
+        solve the same discretised problem (the buffer moves the PML outward,
+        which shifts the gradient by ~1e-2 relative on a small grid; only
+        boundary saving needs the buffer, but a mode-dependent grid would make
+        the modes disagree).  An explicit value is honoured, but a
+        boundary-saving run below the equation's need is refused: the
+        alternative is a shell narrower than the imaging stencil, i.e. the
+        outermost physical cells imaging cells that were never restored.
+        """
+        M = self.equation.so // 2
+        reach = int(getattr(self.equation, "BOUNDARY_BUFFER_REACH", 0) or 0)
+        needed = reach * M + 1 if reach > 0 else 0
+        if requested is None:
+            k = needed
+        else:
+            if isinstance(requested, bool) or int(requested) != requested or int(requested) < 0:
+                raise ValueError(f"boundary_buffer must be a non-negative int, got {requested!r}")
+            k = int(requested)
+        if k > 0 and topography is not None:
+            raise NotImplementedError(
+                "boundary_buffer (sigma=0 buffer for boundary saving) is not "
+                "supported together with topography= yet.")
+        if self._memory_strategy == "boundary" and k < needed:
+            raise ValueError(
+                f"{type(self.equation).__name__} boundary saving needs a buffer of at "
+                f"least {needed} cells (its imaging stencil reaches {reach}M beyond the "
+                f"boundary shell); got boundary_buffer={k}. Leave boundary_buffer=None "
+                "for the default, or use memory=Full()/Ckpt().")
+        return k
+
     def init_abc(self, **kwargs):
+        # forward()'s residual kwargs land here on both impls, so this is the
+        # one place a call-time typo (pml_freqs=...) can be caught instead of
+        # silently keeping the default.
+        unknown = set(kwargs) - self._INIT_ABC_KEYS
+        if unknown:
+            raise TypeError(
+                f"forward() got unexpected keyword arguments: {sorted(unknown)}; "
+                f"recognised extras are {sorted(self._INIT_ABC_KEYS)}")
         _padding = [self.equation.so // 2, self.equation.so // 2] * self.ndim
         fd_pad = tuple(kwargs.get('fd_pad', _padding))
         shape = tuple(kwargs.get('shape', self.shape))
@@ -1074,7 +840,7 @@ class PropBase:
 
         abc_key = (
             self.pml_type,
-            tuple(self.pad),  # per-edge PML widths, axis-major (FS/cut faces = 0)
+            tuple(self.pml_pad),  # per-edge damping-ramp widths, axis-major (FS/cut faces = 0)
             self.equation.so,
             fd_pad,
             self._dt,
@@ -1085,7 +851,18 @@ class PropBase:
             rank_coord,
         )
 
-        if abc_key != self._abc_cache_key:
+        # The cached profiles live on the EQUATION (``equation.b``), so the
+        # freshness key has to live there too.  Keeping the key on the
+        # propagator made the pair incoherent: two propagators over one
+        # equation each start with their own ``None`` key, both build, and
+        # whichever ran last owns ``equation.b`` -- while the other's key still
+        # matches, so its rebuild is skipped and it hands the kernel profiles
+        # built for a DIFFERENT padded shape, with no length check on the way
+        # in.  Sharing an equation is a supported pattern (ModelParallel builds
+        # a second propagator over the wrapped one's equation), and a free
+        # surface changes the pad, so this fires in ordinary use: notebook 02
+        # builds ``solver``, then ``solver_fs``, then runs ``solver`` again.
+        if abc_key != getattr(self.equation, "_abc_cache_key", None):
             self.equation.init_abc(
                     type=self.pml_type,
                     pml_width=list(abc_key[1]),
@@ -1098,11 +875,8 @@ class PropBase:
                     pml_freq=kwargs.get('pml_freq', 25.0),
                     shape=shape
             )
-            self._abc_cache_key = abc_key
+            self.equation._abc_cache_key = abc_key
         
-        if getattr(self.equation, 'need_init', False):
-            self.equation.init(self.shape, self.dev, self._dh)
-
     def crop(self, data):
         """Crop the data to the original shape
 
@@ -1115,12 +889,7 @@ class PropBase:
         # Remove each face's PML pad, recovering the physical model.  Free-surface
         # faces have pad 0 (their halo is handled elsewhere), so nothing is cropped
         # there — reproducing the old image ``data[..., 0:-abcn, abcn:-abcn]``.
-        slices = [Ellipsis]
-        for ax in range(self.ndim):
-            lo = self.pad[2*ax]
-            hi = self.pad[2*ax + 1]
-            slices.append(slice(lo, -hi if hi > 0 else None))
-        return data[tuple(slices)]
+        return geometry.crop_to_physical(data, self.pad, self.ndim)
 
     def get_parameters(self, key):
         assert key in self.model_names, f'Key must be in {self.model_names}, got {key}'
@@ -1129,45 +898,30 @@ class PropBase:
     def parameters(self, ):
         return [getattr(self, name) for name in self.model_names]
 
+    # Grid geometry lives in sweep.core.geometry as plain functions of the
+    # numbers; these stay as the thin bindings that supply them from self.
     def _runtime_fd_halo(self):
-        return self.equation.so // 2
+        return geometry.fd_halo(self.equation.so)
 
     def _runtime_shape(self):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return self.shape
-        return tuple(s + 2 * halo for s in self.shape)
+        return geometry.runtime_shape(self.shape, self._runtime_fd_halo())
 
     def _runtime_padding(self):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return self.padding
-        return tuple(p + halo for p in self.padding)
+        return geometry.runtime_padding(self.padding, self._runtime_fd_halo())
 
     def _runtime_fd_pad(self):
-        halo = self._runtime_fd_halo()
-        return [halo, halo] * self.ndim
+        return geometry.runtime_fd_pad(self._runtime_fd_halo(), self.ndim)
 
     def _runtime_coord_offset(self):
-        halo = self._runtime_fd_halo()
-        # Physical origin -> padded-grid origin: each axis' LOW-side pad plus the
-        # stencil halo, in torch/reverse-axis order (last entry is z) to match
-        # ``self.padding``.  Free-surface low faces have pad 0, so e.g. a top FS
-        # gives z-offset ``halo`` — reproducing the old image-method rule.
-        return tuple(self.pad[2*ax] + halo for ax in reversed(range(self.ndim)))
+        return geometry.runtime_coord_offset(
+            self.pad, self._runtime_fd_halo(), self.ndim)
 
     def _runtime_crop_slices(self):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return (slice(None),) * self.ndim
-        return tuple(slice(halo, -halo) for _ in range(self.ndim))
+        return geometry.runtime_crop_slices(self._runtime_fd_halo(), self.ndim)
 
     def _crop_runtime_halo(self, data):
-        halo = self._runtime_fd_halo()
-        if halo <= 0:
-            return data
-        return data[(...,) + self._runtime_crop_slices()]
+        return geometry.crop_runtime_halo(
+            data, self._runtime_fd_halo(), self.ndim)
 
     def _spatial_pad_pairs(self, flat_padding):
-        pairs = [(flat_padding[2 * i], flat_padding[2 * i + 1]) for i in range(len(flat_padding) // 2)]
-        return tuple(reversed(pairs))
+        return geometry.spatial_pad_pairs(flat_padding)

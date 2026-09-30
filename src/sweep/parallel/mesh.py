@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
+import torch
 import torch.distributed as dist
 
 from sweep.parallel._topology import MeshTopology
@@ -85,10 +86,11 @@ class ModelParallelMesh:
     def _build_subgroups(self) -> None:
         topo = self.topology
         tile = topo.tile_world_size
+        timeout = self._default_pg_timeout()
 
         for sg in range(topo.shot_groups):
             ranks = list(range(sg * tile, (sg + 1) * tile))
-            pg = dist.new_group(ranks=ranks)
+            pg = dist.new_group(ranks=ranks, timeout=timeout)
             if sg == topo.shot_group:
                 self._model_pg = pg
 
@@ -98,9 +100,32 @@ class ModelParallelMesh:
                     sg * tile + yi * topo.px + xi
                     for sg in range(topo.shot_groups)
                 ]
-                pg = dist.new_group(ranks=ranks)
+                pg = dist.new_group(ranks=ranks, timeout=timeout)
                 if yi == topo.yi and xi == topo.xi:
                     self._shot_pg = pg
+
+    @staticmethod
+    def _default_pg_timeout():
+        """The watchdog timeout the DEFAULT process group was built with.
+
+        ``new_group`` does NOT inherit it: an omitted ``timeout`` falls back to
+        torch's own per-backend default (10 minutes for NCCL), whatever the
+        caller passed to ``init_process_group``.  Every collective this mesh
+        drives runs on a sub-group, so the caller's timeout was silently not in
+        force, and a run whose per-stage setup takes longer than ten minutes on
+        one rank dies with ``Watchdog caught collective operation timeout ...
+        Timeout(ms)=600000`` while the other ranks sit in the matching
+        collective (a multi-band VRZ cascade on field data, 2026-09-08, entering
+        the finest stage).  Read it back off the default group so the two agree by
+        construction; ``None`` means "torch's default", i.e. today's behaviour.
+        """
+        try:
+            pg = dist.distributed_c10d._get_default_group()
+            dev = (torch.device("cuda", torch.cuda.current_device())
+                   if torch.cuda.is_available() else torch.device("cpu"))
+            return pg._get_backend(dev).options._timeout
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Public accessors

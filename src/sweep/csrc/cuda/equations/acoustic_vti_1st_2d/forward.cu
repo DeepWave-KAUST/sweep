@@ -5,7 +5,7 @@
 // Boundary saving, checkpointing, and CPU fallback are deliberately NOT
 // implemented in this first cut — the goal is to land a working forward kernel
 // that matches the Python step function bit-for-bit on the interior.  When
-// gradients are needed, the backward.cu stubs raise TORCH_CHECK so the absent
+// gradients are needed, the backward.cu stubs raise SWEEP_CHECK so the absent
 // adjoint surfaces immediately.
 //
 // References:
@@ -14,36 +14,37 @@
 //   Annual Meeting, pp. 2186–2190.  DOI: 10.1190/1.3059320.
 // ---------------------------------------------------------------------------
 
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include "acoustic_vti_1st_2d.h"
 #include "kernels.cuh"
 
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/elastic.h"     // ElasticCPMLTensor (re-used)
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../launch/config.h"
-#include "../../common/wavetypes.h"
 
 namespace acoustic_vti_1st_2d {
 
-// Internal wavefield-tensor helper.  Allocates 8 float tensors shaped
-// (B=N*C, 1, nz, nx) if the caller did not supply pre-allocated ones.
+// Internal wavefield-tensor helper.  Binds the 8 float tensors shaped
+// (B=N*C, 1, nz, nx) the propagator hands over; it never allocates -- the
+// forward state is always bound (cuda_layout.base_nvar + pml_nvar = 8).
 struct VTIWavefieldTensor {
-    torch::Tensor vx_t, vz_t, sH_t, sV_t;
-    torch::Tensor m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
-    bool allocated = false;
+    Buf vx_t, vz_t, sH_t, sV_t;
+    Buf m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t;
 
-    void bind(const std::vector<torch::Tensor>& tensors, bool /*use_pml*/)
+    // torch spelling: the drivers still hand over the input struct's tensor
+    // lists; the descriptors are what the struct keeps.
+
+    void bind(const std::vector<Buf>& tensors, bool /*use_pml*/)
     {
-        TORCH_CHECK(tensors.size() == 8,
+        SWEEP_CHECK(tensors.size() == 8,
                     "AcousticVTI1st2D expects 8 wavefield tensors, got ",
                     tensors.size());
         vx_t    = tensors[0];
@@ -54,22 +55,6 @@ struct VTIWavefieldTensor {
         m_sVz_t = tensors[5];
         m_vxx_t = tensors[6];
         m_vzz_t = tensors[7];
-        allocated = true;
-    }
-
-    void allocate(const torch::Tensor& ref, int /*dim*/)
-    {
-        auto opts = ref.options();
-        auto shape = ref.sizes();   // (N, C, nz, nx)
-        vx_t    = torch::zeros(shape, opts);
-        vz_t    = torch::zeros(shape, opts);
-        sH_t    = torch::zeros(shape, opts);
-        sV_t    = torch::zeros(shape, opts);
-        m_sHx_t = torch::zeros(shape, opts);
-        m_sVz_t = torch::zeros(shape, opts);
-        m_vxx_t = torch::zeros(shape, opts);
-        m_vzz_t = torch::zeros(shape, opts);
-        allocated = true;
     }
 
     VTIWavefieldPointer view() const
@@ -87,7 +72,7 @@ struct VTIWavefieldTensor {
     }
 
     // 8 tensors saved as one checkpoint "state".
-    std::vector<torch::Tensor> state_tensors() const
+    std::vector<Buf> state_tensors() const
     {
         return {vx_t, vz_t, sH_t, sV_t,
                 m_sHx_t, m_sVz_t, m_vxx_t, m_vzz_t};
@@ -95,13 +80,13 @@ struct VTIWavefieldTensor {
 };
 
 
-ForwardOutput forward(const ForwardInput& in)
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
-    c10::cuda::CUDAGuard device_guard(in.models[0].device());
+    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
-    TORCH_CHECK(!p.free_surface,
+    SWEEP_CHECK(!p.free_surface,
                 "AcousticVTI1st2D CUDA forward: free_surface=True is not yet "
                 "implemented (Robertsson 1996 / Mittet 2002 anisotropic FS — "
                 "follow-up).");
@@ -109,14 +94,20 @@ ForwardOutput forward(const ForwardInput& in)
     // Checkpointing supported (Phase 2): forward saves state at intervals;
     // backward_ckpt replays each chunk and runs adjoint over it.
 
-    // Parse spacing (Python sends in axis-0..n-1 order: [dz, dx] in 2D).
-    TORCH_CHECK(p.spacing.size() >= 2,
+    // Parse spacing (Cartesian order from _c.py::_cuda_spacing(): [dx, dz] in 2D).
+    SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D: spacing must have length >= 2");
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    // Cartesian order, as every other driver and _c.py::_cuda_spacing() have it:
+    // PropBase stores (dz, dx) in model-axis order and _cuda_spacing() already
+    // REVERSED it, so p.spacing arrives as [dx, dz].  Reading it as (dz, dx)
+    // here swapped the two axes, which is invisible on the isotropic dh every
+    // test uses and wrong the moment they differ (measured: record cosine
+    // -0.259 against eager at dz=10, dx=25; the 3-D twin was always correct).
+    float dx = p.spacing[0];
+    float dz = p.spacing[1];
 
     // Models (vp, epsilon, delta, rho) in this canonical order.
-    TORCH_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st2D expects exactly 4 model tensors "
                 "[vp, epsilon, delta, rho]; got ", p.models.size());
     auto vp_t      = p.models[0];
@@ -130,40 +121,49 @@ ForwardOutput forward(const ForwardInput& in)
     int nx = vp_t.size(3);
     int B  = N * C;
 
-    // Cached stiffness tensors (same formulas as Python prepare_models):
+    // Stiffness tensors (same formulas as Python prepare_models), filled into
+    // the propagator's derived_models slots by one kernel (common/derived_models.h):
     //   c11 = ρ V_P² (1+2ε), c33 = ρ V_P², c13 = ρ V_P² √(1+2δ).
-    auto vp_sq   = vp_t * vp_t;
-    auto rho_vp2 = rho_t * vp_sq;
-    auto c11     = rho_vp2 * (1.0f + 2.0f * epsilon_t);
-    auto c33     = rho_vp2;
-    auto c13     = rho_vp2 * torch::sqrt(1.0f + 2.0f * delta_t);
-    auto inv_rho = 1.0f / rho_t;
+    const auto stiff = derived::vti_stiffness(p, vp_t, epsilon_t, delta_t, rho_t,
+                                              "acoustic_vti_1st_2d::forward");
+    auto c11     = stiff.c11;
+    auto c33     = stiff.c33;
+    auto c13     = stiff.c13;
+    auto inv_rho = stiff.inv_rho;
 
-    // Wavefield allocation
+    // Wavefield binding.  Mandatory: the propagator binds every forward state
+    // slot (cuda_layout.base_nvar + pml_nvar = 8, propagator/_c.py
+    // Wrapper.forward `params.wavefields = cp.forward_wavefields`), in every
+    // mode -- the persistent save_all pool or the per-call transient one.
     VTIWavefieldTensor wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields, true);
-    else
-        wavefield.allocate(vp_t, 2);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "acoustic_vti_1st_2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields, true);
     auto wf = wavefield.view();
 
     // CPML (cpmls, 8 vals in 2D — same struct elastic uses)
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     int nsrc        = p.sources_loc.size(1);
     int nrec        = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields   = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
 
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp_t.options());
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out.
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
-    torch::Tensor u_allt;
-    if (p.save_all_wavefields)
-        u_allt = torch::zeros({p.nt, 4, B, nz, nx}, vp_t.options());  // vx,vz,sH,sV
+    Buf u_allt;
+    if (p.save_all_wavefields) {
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(4), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 4, B, nz, nx}, "u_allt_out");  // vx,vz,sH,sV
+    }
 
     SolverContext solver{
         2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
@@ -182,14 +182,14 @@ ForwardOutput forward(const ForwardInput& in)
             p.use_boundary_saving, /*dim=*/2, /*nvar=*/4, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/false, p.transfer_interval,
-            p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory);
+            p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     } else {
         boundary_saver.allocate(
             p.use_boundary_saving, /*dim=*/2, /*nvar=*/4, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/true, /*transfer_interval=*/1,
             /*boundary_cpu=*/{}, p.boundary_gpu, p.last_two,
-            p.use_pinned_memory);
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
     }
     auto bs = boundary_saver.view();
 
@@ -203,6 +203,7 @@ ForwardOutput forward(const ForwardInput& in)
                         dx, 0.f, dz};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         /*dim=*/2,
@@ -212,7 +213,7 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
@@ -260,7 +261,7 @@ ForwardOutput forward(const ForwardInput& in)
         // ----- source injection (additive on stress/velocity per the
         //       caller-supplied source_field_indices) -----
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = vti_field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = vti_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<src_config.grid, src_config.block>>>(
                 field,
@@ -291,7 +292,7 @@ ForwardOutput forward(const ForwardInput& in)
 
         // ----- snapshot AFTER source injection -----
         //   The eager Python propagator pattern is:
-        //       wf = step(wf); wf[src] += source; record[it] = wf[rec]
+        //       wf = step(wf); wf[src] += source; record.select(0, it) = wf[rec]
         //   so the saved state that step `it+1` will read on its NEXT
         //   iteration corresponds to wf AFTER source inject.  For the
         //   gradient chain rule, the inv_rho contribution at step `it+1`
@@ -301,7 +302,7 @@ ForwardOutput forward(const ForwardInput& in)
         //   unaffected by this choice.
         if (u_allt.defined()) {
             int spatial_size = solver.nx * solver.nz;
-            float* u_this_t = u_allt[it].data_ptr<float>();
+            float* u_this_t = u_allt.select(0, it).data_ptr<float>();
             const int comp_stride = B * spatial_size;
             cudaMemcpyAsync(u_this_t + 0 * comp_stride, wf.vx,
                             B * spatial_size * sizeof(float),
@@ -319,11 +320,11 @@ ForwardOutput forward(const ForwardInput& in)
 
         // ----- receiver recording -----
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = vti_field_ptr(wf, receiver_fields[irec].item<int>());
+            float* field = vti_field_ptr(wf, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel<<<rec_config.grid, rec_config.block>>>(
                 field,
-                record[irec].data_ptr<float>(),
+                record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(),
                 it,
                 nrec,
@@ -334,20 +335,22 @@ ForwardOutput forward(const ForwardInput& in)
 
     // ----- save final state for backward_bs (last_two) -----
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(wavefield.vx_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(wavefield.vz_t);
-        boundary_saver.last_two_t.select(0, 2).select(0, 0).copy_(wavefield.sH_t);
-        boundary_saver.last_two_t.select(0, 3).select(0, 0).copy_(wavefield.sV_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), wavefield.vx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 0), wavefield.vz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 2).select(0, 0), wavefield.sH_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 3).select(0, 0), wavefield.sV_t);
     }
 
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two  = boundary_saver.last_two_t;
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record    = record;
     return out;
 }
 
 // Backward implementations now live in backward.cu.
+
+
 
 }  // namespace acoustic_vti_1st_2d

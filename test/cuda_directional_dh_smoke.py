@@ -381,8 +381,11 @@ def run_acoustic_physical_consistency(dev):
     check_tensor("coarse acoustic obs", coarse_obs)
     check_tensor("fine acoustic obs", fine_obs)
 
-    coarse_np = coarse_obs.detach().cpu().numpy()
-    fine_np = fine_obs.detach().cpu().numpy()
+    # Records are (B, nt, nrec, C); the plots and the per-trace correlation
+    # below index (shot, receiver, time).
+    assert coarse_obs.shape[-1] == 1 and fine_obs.shape[-1] == 1, (coarse_obs.shape, fine_obs.shape)
+    coarse_np = coarse_obs.detach().cpu().numpy()[..., 0].transpose(0, 2, 1)
+    fine_np = fine_obs.detach().cpu().numpy()[..., 0].transpose(0, 2, 1)
     figure_path = save_record_comparison("acoustic_physical_consistency", coarse_np, fine_np)
     normalized_figure_path = save_normalized_record_comparison(
         "acoustic_physical_consistency",

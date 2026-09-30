@@ -10,14 +10,14 @@ Implementation: `src/sweep/cli.py`.
 ## `sweep list equations`
 
 Lists every equation class exported by `sweep.equations` together with its
-required model parameters, whether the compiled PyTorch extension is supported,
-and whether that extension is actually loadable in the current environment.
+required model parameters, whether compiled CUDA kernels exist for it (`C_NAME`
+declared), and whether the CUDA core can run here right now.
 
 ```bash
 sweep list equations
 ```
 
-Example output on a machine with the compiled `sweep._C` extension installed:
+Example output on a machine with a CUDA GPU where the shipped core fits:
 
 ```text
 Available equations:
@@ -27,12 +27,14 @@ Available equations:
   Acoustic               ['vp']                                                              yes            yes
   Acoustic1st            ['vp', 'rho']                                                       no             no
   Acoustic3D             ['vp']                                                              yes            yes
+  AcousticCurvilinear    ['vp']                                                              yes            yes
   AcousticLSRTM          ['vp', 'mp']                                                        yes            yes
   AcousticLSRTM3D        ['vp', 'mp']                                                        yes            yes
   AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 no             no
   AcousticTTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
   AcousticTTILiang       ['vp', 'epsilon', 'delta', 'theta']                                 no             no
   AcousticTariq          ['vv', 'v', 'eta']                                                  no             no
+  AcousticVRR            ['vp', 'rx', 'rz']                                                  no             no
   AcousticVRZ            ['vp', 'z']                                                         yes            yes
   AcousticVRZ3D          ['vp', 'z']                                                         yes            yes
   AcousticVTI            ['vp', 'epsilon', 'delta']                                          no             no
@@ -52,8 +54,14 @@ Available equations:
   DASZhao3D              ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic                ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic3D              ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticAPM             ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticCurvilinear     ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticTTI             ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  no             no
+  ElasticTTI2nd          ['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']                      yes            yes
   ElasticTTISG           ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  yes            yes
+  ElasticTTISG3D         ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  yes            yes
+  ElasticVRR             ['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']                        yes            yes
+  ViscoAcoustic          ['vp', 'Q', 'omega']                                                yes            yes
 ```
 
 The unified facades `DAS` (formerly `DASModeler`) and `AcousticAniso` are
@@ -65,10 +73,15 @@ The two right-most columns distinguish:
 
 - **Torch Binding** — whether the equation's source code declares compiled-extension
   support (`supports_torch_binding()` returns `True`).
-- **Binding Ready** — whether the compiled binding can actually be loaded right
-  now (PyTorch present, CUDA visible, `sweep._C` importable). A `yes` /
-  `no` mismatch usually means you have not built the CUDA extra (see
-  [Installation](../getting-started/installation.md)).
+- **Binding Ready** — whether `impl="c"` can run right now: PyTorch present, a
+  CUDA GPU visible, and a CUDA core at hand — the wheel's prebuilt `lib/cu12/`
+  or `lib/cu13/` core for your torch's CUDA major, `SWEEP_CORE`, a cached local
+  build, or an `nvcc >= 12.4` that can build one. Nothing is loaded or compiled
+  to answer. A `yes` / `no` mismatch means no core fits this process (no GPU
+  visible, a torch built for a CUDA major with no shipped core, a card older
+  than the shipped archs and PTX):
+  `sweep.backend.torch.binding.diagnostics()["shipped_core"]["reason"]` says why
+  (see [Installation](../getting-started/installation.md)).
 
 ## `sweep show <Equation>`
 
@@ -99,6 +112,30 @@ sweep show ElasticTTISG
   Torch binding available: yes
 ```
 
+### Unknown names, and the exit code
+
+`show` resolves the name through the **equation registry**, not the
+`sweep.equations` namespace, so only real equations answer. An unknown name
+exits **1** and offers the closest registered spellings:
+
+```bash
+sweep show Acoustic3d ; echo "exit=$?"
+```
+
+```text
+No such wave equation: Acoustic3d
+  Did you mean: Acoustic3D, Acoustic, AcousticVRZ3D?
+  `sweep list equations` names all 38 registered equations.
+exit=1
+```
+
+`DAS` and `AcousticAniso` are facades: they pick a raw equation class from
+their constructor arguments, so they have no wavefields of their own. `show`
+says so, and also exits 1 -- there is nothing to introspect.
+
+A successful `show` exits 0, so `sweep show <Eq> >/dev/null` is a usable
+"is this equation available here" probe in a script.
+
 The `Wavefields` list is the **full** internal state — it includes CPML memory
 variables and other auxiliary fields. The user-facing source / receiver field
 choices are a subset; use the equation's `available_fields(role="source")` or
@@ -111,13 +148,13 @@ The CLI is a thin wrapper around the introspection helpers in
 
 ```python
 from sweep.equations import (
-    _equation_classes,
+    equation_classes,
     supports_torch_binding,
     torch_binding_supported_equations,
     Acoustic,
 )
 
-print(sorted(_equation_classes().keys()))
+print(sorted(equation_classes().keys()))
 print(torch_binding_supported_equations())
 print(supports_torch_binding("ElasticTTISG"))      # True
 

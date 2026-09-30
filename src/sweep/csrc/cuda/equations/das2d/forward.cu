@@ -1,8 +1,5 @@
-#include <torch/extension.h>
 #include <cuda_runtime.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 
 #include "das2d.h"
 #include "kernels.cuh"
@@ -10,26 +7,33 @@
 #include "../../common/common.cuh"
 #include "../../common/context.h"
 #include "../../common/cudautils.h"
+#include "../../common/derived_models.h"
 #include "../../common/das.h"
 #include "../../common/elastic.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
-#include "../../common/wavetypes.h"
 #include "../../launch/config.h"
 
 namespace das2d {
 
-ForwardOutput forward(const ForwardInput& in)
+// Layout of p.forward_workspace, declared on the Python side as
+// DASZhao.cuda_layout.forward_workspace_nvar: the per-step derivative scratch
+// (one padded grid per shot each). The step loop zeroes every slot before it
+// is written, so nothing here relies on the pool's contents at entry.
+enum ForwardWorkspaceSlot : int { TMP_SXX_X = 0, TMP_SZZ_Z, TMP_TXX_Z, TMP_TZZ_X, N_FORWARD_SLOTS };
+
+ForwardOutputCore forward_core(const ForwardInputCore& in)
 {
     const auto& p = in;
-    ForwardOutput out;
+    ForwardOutputCore out;
 
     auto vp = p.models[0];
     auto vs = p.models[1];
     auto rho = p.models[2];
-    auto mu = rho * vs * vs;
-    auto lambda = rho * (vp * vp - 2 * vs * vs);
-    c10::cuda::CUDAGuard device_guard(vp.device());
+    const auto lame = derived::lame(p, vp, vs, rho, "das2d::forward");
+    auto mu = lame.mu;
+    auto lambda = lame.lambda;
+    sweep::DeviceGuard device_guard(device_index_of(vp));
 
     float dx = p.spacing[0];
     float dz = p.spacing[1];
@@ -40,32 +44,48 @@ ForwardOutput forward(const ForwardInput& in)
     int nx = vp.size(3);
     int B = N * C;
 
+    // Mandatory: the propagator binds every forward state slot
+    // (cuda_layout.base_nvar + pml_nvar = 17, propagator/_c.py Wrapper.forward
+    // `params.wavefields = cp.forward_wavefields`), in every mode -- the
+    // persistent save_all pool or the per-call transient one.
     DasWavefieldTensor2D wavefield;
-    if (!p.wavefields.empty())
-        wavefield.bind(p.wavefields);
-    else
-        wavefield.allocate(vp);
+    SWEEP_CHECK(!p.wavefields.empty(),
+                "das2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + cuda_layout.pml_nvar)");
+    wavefield.bind(p.wavefields);
     auto wf = wavefield.view();
 
     ElasticCPMLTensor cpml;
-    cpml.allocate(p.pml_vals, 2);
+    cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
-    int nsrc_fields = p.source_field_indices.numel();
-    int nrec_fields = p.receiver_field_indices.numel();
-    auto source_fields = p.source_field_indices.to(torch::kCPU);
-    auto receiver_fields = p.receiver_field_indices.to(torch::kCPU);
-    auto record = torch::zeros({nrec_fields, B, nrec, p.nt}, vp.options());
+    int nsrc_fields = p.source_field_indices.size();
+    int nrec_fields = p.receiver_field_indices.size();
+    const IntSpan source_fields = p.source_field_indices;
+    const IntSpan receiver_fields = p.receiver_field_indices;
+    // Mandatory: cuda_layout.record_shape is record_multi(), so the propagator
+    // always allocates and binds record_out (propagator/_c.py Wrapper.forward,
+    // `params.record_out = _record_buffer(cp.record_shape, ...)`).
+    auto record = bound_required(p.record_out, {nrec_fields, B, nrec, p.nt}, "record_out");
 
-    auto tmp_sxx_x = torch::zeros_like(vp);
-    auto tmp_szz_z = torch::zeros_like(vp);
-    auto tmp_txx_z = torch::zeros_like(vp);
-    auto tmp_tzz_x = torch::zeros_like(vp);
-    torch::Tensor u_allt;
+    // Mandatory: cuda_layout.forward_workspace_nvar = 4, so
+    // _transient_forward_workspace always hands over four grids.
+    SWEEP_CHECK(static_cast<int>(p.forward_workspace.size()) == N_FORWARD_SLOTS,
+                "das2d/forward requires the propagator-bound forward_workspace "
+                "(cuda_layout.forward_workspace_nvar = ",
+                static_cast<int>(N_FORWARD_SLOTS), "), got ", p.forward_workspace.size());
+    const auto& ws = p.forward_workspace;
+    auto tmp_sxx_x = pool_required(ws, TMP_SXX_X, vp, "forward_workspace");
+    auto tmp_szz_z = pool_required(ws, TMP_SZZ_Z, vp, "forward_workspace");
+    auto tmp_txx_z = pool_required(ws, TMP_TXX_Z, vp, "forward_workspace");
+    auto tmp_tzz_x = pool_required(ws, TMP_TZZ_X, vp, "forward_workspace");
+    Buf u_allt;
     if (p.save_all_wavefields) {
-        u_allt = torch::zeros({p.nt, 2, B, nz, nx}, vp.options());
+        // Mandatory in this branch: cuda_layout.save_all_shape is
+        // history_fields(2), so a save_all forward always binds u_allt_out.
+        u_allt = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx}, "u_allt_out");
     }
 
     SolverContext solver{
@@ -93,7 +113,7 @@ ForwardOutput forward(const ForwardInput& in)
             p.boundary_cpu,
             p.boundary_gpu,
             p.last_two,
-            p.use_pinned_memory
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
@@ -110,7 +130,7 @@ ForwardOutput forward(const ForwardInput& in)
             {},
             p.boundary_gpu,
             p.last_two,
-            p.use_pinned_memory
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     }
     auto bs = boundary_saver.view();
@@ -121,6 +141,7 @@ ForwardOutput forward(const ForwardInput& in)
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
+    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
         2,
@@ -130,16 +151,16 @@ ForwardOutput forward(const ForwardInput& in)
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        p.boundary_disk_files,
+        disk_files,
         async_copy.compute_stream,
         async_copy.copy_stream
     );
 
     for (unsigned int it = 0; it < p.nt; ++it) {
-        tmp_sxx_x.zero_();
-        tmp_szz_z.zero_();
-        tmp_txx_z.zero_();
-        tmp_tzz_x.zero_();
+        zero_tensor_device_async(tmp_sxx_x);
+        zero_tensor_device_async(tmp_szz_z);
+        zero_tensor_device_async(tmp_txx_z);
+        zero_tensor_device_async(tmp_tzz_x);
 
         LAUNCH_DAS2D_FIRST(
             order,
@@ -173,7 +194,7 @@ ForwardOutput forward(const ForwardInput& in)
         );
 
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
-            float* field = das2d_field_ptr(wf, source_fields[isrc].item<int>());
+            float* field = das2d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
             add_source<<<source_config.grid, source_config.block>>>(
                 field,
@@ -214,16 +235,16 @@ ForwardOutput forward(const ForwardInput& in)
 
         if (u_allt.defined()) {
             auto history_t = u_allt.select(0, it);
-            history_t.select(0, 0).copy_(wavefield.exx_t.view({B, nz, nx}));
-            history_t.select(0, 1).copy_(wavefield.ezz_t.view({B, nz, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 0), wavefield.exx_t.view({B, nz, nx}));
+            copy_tensor_cuda_async(history_t.select(0, 1), wavefield.ezz_t.view({B, nz, nx}));
         }
 
         for (int irec = 0; irec < nrec_fields; ++irec) {
-            float* field = das2d_field_ptr(wf, receiver_fields[irec].item<int>());
+            float* field = das2d_field_ptr(wf, receiver_fields[irec]);
             if (field == nullptr) continue;
             record_kernel<<<record_config.grid, record_config.block>>>(
                 field,
-                record[irec].data_ptr<float>(),
+                record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(),
                 it,
                 nrec,
@@ -233,23 +254,25 @@ ForwardOutput forward(const ForwardInput& in)
     }
 
     if (p.use_boundary_saving) {
-        boundary_saver.last_two_t.select(0, 0).select(0, 0).copy_(wavefield.exx_t);
-        boundary_saver.last_two_t.select(0, 1).select(0, 0).copy_(wavefield.ezz_t);
-        boundary_saver.last_two_t.select(0, 2).select(0, 0).copy_(wavefield.sxx_t);
-        boundary_saver.last_two_t.select(0, 3).select(0, 0).copy_(wavefield.szz_t);
-        boundary_saver.last_two_t.select(0, 4).select(0, 0).copy_(wavefield.txx_t);
-        boundary_saver.last_two_t.select(0, 5).select(0, 0).copy_(wavefield.tzz_t);
-        boundary_saver.last_two_t.select(0, 6).select(0, 0).copy_(wavefield.das35_t);
-        boundary_saver.last_two_t.select(0, 7).select(0, 0).copy_(wavefield.das54x_t);
-        boundary_saver.last_two_t.select(0, 8).select(0, 0).copy_(wavefield.das54z_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), wavefield.exx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 0), wavefield.ezz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 2).select(0, 0), wavefield.sxx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 3).select(0, 0), wavefield.szz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 4).select(0, 0), wavefield.txx_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 5).select(0, 0), wavefield.tzz_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 6).select(0, 0), wavefield.das35_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 7).select(0, 0), wavefield.das54x_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 8).select(0, 0), wavefield.das54z_t);
     }
 
     boundary_runtime.synchronize();
 
     out.wavefield = u_allt;
-    out.last_two = boundary_saver.last_two_t;
+    out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
 }
+
+
 
 }

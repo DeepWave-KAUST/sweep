@@ -22,6 +22,11 @@ from typing import Iterable
 
 import numpy as np
 import torch
+# The eager reference runs conv3d BACKWARD in TF32 on Ampere/Hopper unless this is
+# off (forward picks a full-precision algorithm, so records do not warn): the 3-D
+# c-vs-eager rel was 0.10-0.26 with it on, 1e-3 with it off (2026-09-10).
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
 
 
 def find_repo_root() -> Path:
@@ -45,6 +50,7 @@ from sweep.equations import (  # noqa: E402
     Acoustic3D,
     AcousticLSRTM,
     AcousticLSRTM3D,
+    ViscoAcoustic,
     AcousticVRZ,
     AcousticVRZ3D,
     AcousticVTI1st,
@@ -98,6 +104,8 @@ SOLVERS = {
     "vrz3d": SolverSpec("vrz3d", AcousticVRZ3D, 3, ("vp", "z"), ("h1",), ("h1",), "cpmlr"),
     "lsrtm2d": SolverSpec("lsrtm2d", AcousticLSRTM, 2, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
     "lsrtm3d": SolverSpec("lsrtm3d", AcousticLSRTM3D, 3, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
+    # Visco-acoustic (Zhu & Harris NCQ): vp + Q + omega, acoustic pressure I/O.
+    "visco2d": SolverSpec("visco2d", ViscoAcoustic, 2, ("vp", "Q", "omega"), ("h1",), ("h1",), "cpmlr"),
     "das2d": SolverSpec(
         "das2d",
         DASZhao,
@@ -139,22 +147,14 @@ SOLVERS = {
         ("exx_t", "eyy_t", "ezz_t", "das35_t", "das54x_t", "das54y_t", "das54z_t"),
         "cpmls",
         elastic=True,
+        # No bs_* modes: das3d has no compiled boundary-saving path. Its
+        # forward writes no strips and backward_bs re-runs the forward and
+        # allocates the whole strain history, so the 14 bs_* entries that used
+        # to be listed here all exercised the SAME code as "full" -- and passed,
+        # because the gradient was right and nothing asserted on memory.
+        # DASZhao3D.supports_boundary_saving_c is False, so they now raise.
         supported_modes=(
             "full",
-            "bs_gpu",
-            "bs_gpu_fp16",
-            "bs_gpu_bf16",
-            "bs_gpu_int8",
-            "bs_cpu",
-            "bs_cpu_pinned",
-            "bs_cpu_fp16",
-            "bs_cpu_bf16",
-            "bs_cpu_int8",
-            "bs_disk",
-            "bs_disk_async",
-            "bs_disk_fp16",
-            "bs_disk_bf16",
-            "bs_disk_int8",
             "ckpt_chunk",
             "ckpt_chunk_cpu",
             "ckpt_recursive",
@@ -379,6 +379,7 @@ def require_cuda_bindings(solver_keys: list[str]):
         "vrz3d": "acoustic_vrz3d",
         "lsrtm2d": "acoustic_lsrtm2d",
         "lsrtm3d": "acoustic_lsrtm3d",
+        "visco2d": "visco_acoustic2d",
         "das2d": "das2d",
         "das3d": "das3d",
         "das_mu2d": "das_mu2d",
@@ -464,9 +465,21 @@ def make_models(spec: SolverSpec, shape: tuple[int, ...]):
     vp_true = add_box(vp_init, 180.0)
 
     if spec.lsrtm:
-        mp_init = np.zeros(shape, dtype=np.float32)
-        mp_true = add_box(mp_init, 0.08)
+        # A non-zero initial reflectivity, so the Born FORWARD is exercised: with
+        # mp_init = 0 the record is identically zero and a record comparison can
+        # never see a change in the forward (the gates ran that way until 2026-09).
+        # The true model keeps a stronger box, so the residual stays non-zero.
+        mp_init = add_box(np.zeros(shape, dtype=np.float32), 0.04)
+        mp_true = add_box(np.zeros(shape, dtype=np.float32), 0.08)
         return [vp_init, mp_true], [vp_init, mp_init], [False, True]
+
+    # ViscoAcoustic (NCQ): vp + Q + omega. Q gets its own contrast so its adjoint
+    # is exercised; omega is the constant reference frequency (no gradient).
+    if spec.model_names == ("vp", "Q", "omega"):
+        q_init = np.full(shape, 60.0, dtype=np.float32)
+        q_true = add_box(q_init, -20.0)
+        omega = np.full(shape, 2.0 * np.pi * 10.0, dtype=np.float32)
+        return [vp_true, q_true, omega], [vp_init, q_init, omega], [True, True, False]
 
     # ElasticTTISG: 8 anisotropic parameters. We perturb only vp0 to keep the
     # adjoint gradient comparison focused on a single elastic-like contrast;

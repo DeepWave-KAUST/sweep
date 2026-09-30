@@ -6,7 +6,7 @@ revealing the model's internal structure. No axes, no colorbar.
 
 Run inside the ``ifwitorch`` env:
 
-    /home/wangs0j/miniconda3/envs/ifwitorch/bin/python figures/scripts/overthrust_3d_render.py
+    python figures/scripts/overthrust_3d_render.py
 """
 
 from __future__ import annotations

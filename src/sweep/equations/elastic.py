@@ -1,5 +1,7 @@
 from .base import FirstOrderEquation
-from .cuda_layout import CUDALayoutSpec
+from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
+
+from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._elastic_step_core import (
     elastic_step_core,
@@ -18,8 +20,10 @@ from ._topography import (
     precompute_apm_moduli,
     zero_at_air,
 )
+from ._registry import register_equation
 
 
+@register_equation(aliases=('ElasticAPM',))
 class Elastic(FirstOrderEquation):
     """First-order 2-D elastic wave equation on a staggered grid (Virieux 1986).
 
@@ -36,6 +40,8 @@ class Elastic(FirstOrderEquation):
 
     
     """
+    C_NAME = "elastic2d"
+
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",), description="Elastic P-wave velocity model.", unit="m/s"),
         ModelSpec("vs", aliases=("s_velocity",), description="Elastic S-wave velocity model.", unit="m/s"),
@@ -81,6 +87,8 @@ class Elastic(FirstOrderEquation):
     # directly by ``impl='c'``: shot ``b`` propagates in its own (vp,vs,rho)[b]
     # and each parameter's gradient is kept per-shot. Same for the eager path.
     supports_batched_models = True
+    supports_image_topography = True
+    supports_image_topography_c = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic equation operator.
@@ -330,37 +338,44 @@ class Elastic(FirstOrderEquation):
             m_txzx, m_txzz,
         )
     
-    def _C(self, ):
-        # CUDA IMPLEMENTATION
-        import torch
-        import sweep._C as _C
-        return (
-            _C.elastic2d_forward,
-            _C.elastic2d_backward,
-            _C.elastic2d_backward_bs,
-            _C.elastic2d_backward_ckpt,
-            _C.elastic2d_backward_recursive_ckpt,
-        )
-
     def _C_apm(self):
-        """CUDA APM (Cao & Chen 2018) entry points.  Forward is fully
-        implemented; backward is a stub — gradients should be computed
-        via the eager autograd path (see :func:`_func_apm`)."""
+        """CUDA APM (Cao & Chen 2018) entry point: the forward only.  There is
+        no compiled APM backward; gradients go through eager autograd (see
+        :func:`_func_apm` and ``_c.py``'s ``_guard_apm_backward``)."""
         import sweep._C as _C
-        return (
-            _C.elastic2d_apm_forward,
-            _C.elastic2d_apm_backward,
-            _C.elastic2d_apm_backward_bs,
-        )
+        return (_C.elastic2d_apm_forward,)
 
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            record_shape=record_multi(),
+            save_all_shape=history_fields(2),   # vx, vz
             base_nvar=5,
             pml_nvar=10,
             last_two_nvar=1,
             last_two_storage_nvar=5,
+            # The compiled backward's scratch (common/elastic.h
+            # ElasticAdjointWorkspaceTensor), one padded grid per shot each:
+            # [0-7]   = qxx, qzz, qxz, qzx, pxx, pzz, pxz, pzx, the stress- /
+            #           velocity-adjoint prepare->apply scratch (every mode);
+            # [8-9]   = next_segment_v (ckpt) / current_v (recursive): the v(it)
+            #           carriers the imaging reads, vx / vz;
+            # [10-11] = prev_segment_next_v (ckpt) / next_v (recursive): the
+            #           v(it+1) carriers, vx / vz
+            # -- [8-11] in the checkpoint modes only (sg_driver.cuh
+            # SgCarrierSlots after elastic2d WS_CARRIERS = 8); the full mode
+            # keeps one read-only zero grid at [8] instead (v(nt) for the last
+            # reverse step's imaging).
             backward_workspace_nvar=8,
+            backward_workspace_shapes=lambda B, nt, shape, mode: [[B, 1, *shape]] * (
+                12 if mode in ("ckpt", "recursive") else 9 if mode == "full" else 8),
+            # The chunked backward's replayed velocity histories (elastic2d
+            # driver_traits seg_buffers): vx, vz of one chunk, (interval + 1, B, 1,
+            # grid) each -- row 0 = v(start), row k = v(start + k).  The recursive
+            # mode replays per step into the carriers above and keeps none.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
+            derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)
             # CPML memory variables (C++ bind order m_vxx,m_vxz,m_vzx,m_vzz,
             # m_sxxx,m_sxxz,m_szzx,m_szzz,m_sxzx,m_sxzz) live in per-axis
             # slabs; the differencing axis is the name's last letter.  All
@@ -369,4 +384,9 @@ class Elastic(FirstOrderEquation):
             checkpoint_slot_axes=(None,) * 5
                 + ("x", "z", "x", "z", "x", "z", "x", "z", "x", "z"),
             adjoint_pml_slab=True,
+            slots=slot_table.ELASTIC2D,
+            stepped=True,
+            dd_backward_phases=True,
+            grads_out_has_wavelet=False,
+            illum_nvar=0,
         )

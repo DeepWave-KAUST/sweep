@@ -10,7 +10,7 @@ An equation defines:
 - the wavefields carried during propagation
 - the user-facing source and receiver field choices
 - the numerical update rule used by the propagator
-- whether a compiled PyTorch extension binding exists
+- whether it has CUDA-core bindings (`impl='c'`: `C_NAME` declared, `supports_torch_binding()` True)
 
 ## Shared Equation Interface
 
@@ -65,12 +65,12 @@ Field and model metadata are not just documentation.
   If an equation lists `["vp", "vs", "rho"]`, then the runtime model list must
   follow the same order.
 
-For equations that support the compiled extension backend, runtime buffer metadata is
+For equations with CUDA-core bindings, runtime buffer metadata is
 now grouped under:
 
 - `cuda_layout`
 
-This replaces the older pattern of scattering extension-specific scalar properties
+This replaces the older pattern of scattering core-specific scalar properties
 through the equation class.
 
 !!! note
@@ -165,7 +165,7 @@ through the equation class.
     ```
 
     First-order TTI elastic equation on a rotated staggered grid; supports the
-    compiled C++ / CUDA binding.
+    CUDA core (`impl='c'`).
 
     See [ElasticTTISG](elastic_tti_sg.md) for parameter meanings; the 3-D
     variant is [ElasticTTISG3D](elastic_tti_sg3d.md) (axis-aligned SG, 21
@@ -183,8 +183,8 @@ through the equation class.
     ```
 
     Strain-rate / helical-fiber receiver equations for DAS modelling. The
-    six raw equation variants share `['vp', 'vs', 'rho']` and ship the
-    compiled binding. `DAS` is the unified facade — pass `method="zhao"`
+    six raw equation variants share `['vp', 'vs', 'rho']` and have
+    CUDA-core bindings. `DAS` is the unified facade — pass `method="zhao"`
     or `method="mu"` to pick a variant.
 
     See [DAS family](das.md) for the comparison table.
