@@ -38,9 +38,9 @@ What it does internally (x-cut decomposition, v1):
 v1 scope: x-cut (``py == 1``), acoustic2d/3d + elastic2d/3d, fixed acquisition
 geometry per instance (capture once; later ``forward`` calls rebind models +
 wavelet).  Free surface supported.  Boundary-saving storage/dtype are inherited
-from the wrapped prop's memory config (``PropTorch(memory=MemoryOptions(
-boundary=BoundaryOptions(storage=..., storage_dtype=...)))``) — e.g. int8 to
-shrink the boundary ring for finer grids; defaults to gpu/fp32.
+from the wrapped prop's memory config (``PropTorch(memory=BoundarySaving(
+storage=..., storage_dtype=...))``) — e.g. int8 to shrink the boundary ring for
+finer grids; defaults to gpu/fp32.
 """
 
 from __future__ import annotations
@@ -230,7 +230,7 @@ class ModelParallel:
         model_parallel = mesh
         # Boundary-saving storage/dtype are inherited from the wrapped prop's
         # memory config (set the normal way via
-        # ``PropTorch(memory=MemoryOptions(boundary=BoundaryOptions(...)))``), so
+        # ``PropTorch(memory=BoundarySaving(...))``), so
         # compressing (fp16/bf16/int8) or offloading the DD boundary ring to fit
         # finer grids is a first-class API choice. Defaults (gpu/fp32) reproduce
         # the original v1 behaviour.

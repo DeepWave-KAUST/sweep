@@ -30,9 +30,11 @@ def step_visco_cpml(
     independently: both off reduces to :func:`~sweep.equations.acoustic.step_cpml`,
     both on gives the full visco-acoustic update.  Both material inputs are the
     PREPARED forms from :meth:`ViscoAcoustic.prepare_models` (shared with the
-    CUDA backend): ``vp_step`` has the dispersion (phase-shift) term folded in
-    as an effective velocity, so it rides through the CPML machinery unchanged;
-    ``A = tt * vp / 2`` is the amplitude-damping coefficient.
+    CUDA backend): ``vp_step = vp*cos(pi*gamma/2)`` is the paper's velocity and
+    rides through the CPML step unchanged; the dispersion remainder ``B1`` /
+    ``B2`` is applied spectrally after that step, upgrading its FD Laplacian to
+    the fractional one, and ``A = c^2 * tau_hat`` is the amplitude-damping
+    coefficient.
 
     ``k`` is the FFT wavenumber grid and must match ``u_now``'s trailing shape
     (PML pad plus stencil halo); ``op`` supplies the backend FFT namespace.

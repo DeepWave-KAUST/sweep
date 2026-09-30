@@ -186,7 +186,7 @@ def resolve_boundary_spec(free_surface, abcn, ndim, equation, topography,
                 f"{type(equation).__name__} does not support a per-edge free "
                 "surface or per-edge PML thickness yet (only top-only "
                 "free_surface=True/False with a scalar abcn). Supported: "
-                "Acoustic, Elastic (2-D)."
+                "Acoustic, Elastic, ViscoAcoustic (2-D)."
             )
         if topography is not None:
             raise NotImplementedError(
