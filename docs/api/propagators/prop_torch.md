@@ -1,17 +1,20 @@
 # PropTorch
 
 The PyTorch propagator wrapper that drives any `WaveEquation` from
-`sweep.equations` through a time loop. Accepts an array of keyword arguments
-inherited from the base class — those are the ones the user mostly tunes.
+`sweep.equations` through a time loop. It builds a backend (the eager or the
+compiled `impl='c'` propagator, both `PropBase` subclasses) and forwards the
+shared keyword arguments to it — those are the ones the user mostly tunes.
 
 ::: sweep.propagator.torch.PropTorch
 
-## Base class (full keyword reference)
+## Shared keywords (`PropBase`)
 
-`PropTorch` forwards every shared keyword argument to `PropBase`. The complete
-list of solver knobs (`shape`, `dh`, `dt`, `abcn`, `pml_type`, `free_surface`,
-`use_ckpt`, checkpointing options, boundary-saving options, …) is documented
-on the base class.
+`PropTorch` is not itself a `PropBase` subclass: it forwards every shared
+keyword argument (`shape`, `dh`, `dt`, `abcn`, `pml_type`, `free_surface`,
+`use_ckpt`, checkpointing options, …) to a `PropBase`-derived backend, whose
+constructor is documented below. `memory=`, `impl=`, `backend=` and the
+`backend_options=` / `eager_options=` / `cuda_options=` blocks are
+`PropTorch`'s own (see above).
 
 ::: sweep.propagator.base.PropBase
     options:

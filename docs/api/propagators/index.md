@@ -71,10 +71,10 @@ the **canonical** shape
 (B, nt, nrec, nfield)
 ```
 
-where `nfield` is the number of recorded components for the equation
-(e.g. `1` for acoustic pressure, `2` for elastic vx/vz, `5` for the Zhao
-DAS receivers). This matches the layout expected by `sweep_loss` so the
-output of a solver can be fed straight into a misfit:
+where `nfield = len(receiver_type)`, one per recorded field (with the default
+receivers: `1` for acoustic pressure `h1`, `2` for elastic `vx`/`vz`, `2` for
+the Zhao DAS strain rates `exx_t`/`ezz_t`). This matches the layout expected
+by `sweep_loss` so the output of a solver can be fed straight into a misfit:
 
 ```python
 syn = solver(wavelet, sources, receivers, models=models)
@@ -95,15 +95,17 @@ loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
         free_surface=False,
         dh=10.0,
         dt=0.002,
-        dev=None,
+        device=None,    # None: the equation's device (dev= is a deprecated alias)
         backend=None,   # inherits equation.backend
-        impl=None,      # 'auto': 'c' when the CUDA core is usable and the equation has bindings, else 'eager'
+        impl=None,      # 'auto': 'c' when the CUDA core is usable, the equation has
+                        # bindings and the device is CUDA, else 'eager'
         backend_options=None,
         eager_options=None,
         cuda_options=None,
-        use_ckpt=True,
+        memory=None,    # Full() / BoundarySaving(...) / Ckpt(...); None: impl default
+        use_ckpt=None,  # legacy knob; None: impl default (see below)
         ckpt_chunks=100,
-        pml_type="spml",
+        pml_type=None,  # None: equation.default_pml_type ('cpmlr' / 'cpmls')
     )
     ```
 
@@ -117,8 +119,11 @@ loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
           `memory=Ckpt(mode="chunk", chunks=100)`.
         - `impl="c"` → **boundary saving with GPU storage**, i.e.
           `memory=BoundarySaving(storage="gpu")`. To opt back into chunked
-          checkpointing on the C backend, pass
-          `cuda_options=CUDAOptions(memory=Ckpt())`.
+          checkpointing on the C backend, pass `memory=Ckpt()` to `PropTorch`
+          (or `memory=Full()` for full wavefield storage).
+        - Exception: `ViscoAcoustic` and `DASZhao3D` do not support boundary
+          saving on `impl="c"`; they default to `Full()` there, and an explicit
+          `BoundarySaving` raises `NotImplementedError`.
 
         The three strategies are the types `Full`, `BoundarySaving` and `Ckpt`
         from `sweep.propagator.options`; the older
@@ -139,14 +144,20 @@ loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
         free_surface=False,
         dh=10.0,
         dt=0.002,
-        dev=None,
-        use_ckpt=True,
+        device=None,
+        backend=None,   # 'jax' or None
+        memory=None,    # Full() / BoundarySaving(...) / Ckpt(...); None: checkpointing
+        use_ckpt=None,  # legacy knob; None: checkpointing
         ckpt_chunks=100,
-        pml_type="spml",
+        pml_type=None,  # None: equation.default_pml_type
+        scan_unroll=1,
     )
     ```
 
-    JAX propagator based on `jax.lax.scan` with chunk-style rematerialization.
+    JAX propagator based on `jax.lax.scan`. The gradient-memory strategy is
+    `memory=Full()`, `BoundarySaving(...)` (on-device ring only) or
+    `Ckpt(...)` (chunk mode); with none given it is chunk-style
+    rematerialization.
 
     See [PropJax](prop_jax.md) for parameter meanings.
 
