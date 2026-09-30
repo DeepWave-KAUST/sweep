@@ -28,6 +28,12 @@ Three things pinned here, all found on field-data int8 gradients:
    M+1 at offset -M and sits out of the imaging reach.  The rim is gone
    (outermost line ~0.3-0.8x the interior) and the boundary memory is back
    to the M+1 level.  Pinned by the bookkeeping tests at the end.
+5. Reconstruction seed (2-D).  The bs seed zeroed [0, phys0) of the two last
+   states the way acoustic2d does, but VRZ's band sits at offset -M: its pad
+   cells were wiped before the first reverse step read them.  bs vs full rel
+   3.5e-4 to 1.1e-3 while the wavefield still reached the pad at the last step
+   (this nt), ~3e-6 once it had left.  Fixed: seed as is, as the 3-D runner
+   always did.  Guarded by REL_TOL_MODES below.
 """
 import numpy as np
 import pytest
@@ -38,10 +44,12 @@ from conftest import ricker as _ricker  # the shared test wavelet (bit-identical
 
 SO = 4
 DH, DT = 10.0, 1.5e-3
-# Measured on the fixed tree (order 4, the grids below): bs-full rel 3.5e-4 (2-D)
-# / 9e-8 (3-D), edge ratio 0.4-0.9; c-vs-eager 8e-4.  Pre-fix: offset bug rel
-# 0.12; M+1 shell rel 9.7e-3 and edge ratio 109 (2-D) / 1.2e5 (3-D).
-REL_TOL_MODES = 5e-3     # bs / ckpt vs full (fp32)
+# Measured on the fixed tree (order 4, the grids below): bs-full rel 2.3e-7 (2-D)
+# / 9e-8 (3-D), edge ratio 0.2-0.3; c-vs-eager 1.4e-4.  Pre-fix: offset bug rel
+# 0.12; M+1 shell rel 9.7e-3 and edge ratio 109 (2-D) / 1.2e5 (3-D); zeroing
+# seed 4.3e-4 (2-D).  nt=200 keeps the wavefield in the pad at the last step,
+# which is what exposes a wrong seed.
+REL_TOL_MODES = 1e-5     # bs / ckpt vs full (fp32)
 EDGE_RATIO_TOL = 5.0     # outermost line of (bs - full) / interior
 REL_TOL_EAGER = 1e-3     # c full vs eager (fused CPML form), 2-D interior; measured 1.4e-4
 # int8 rim (bs int8 - full), outermost line / interior.  With the sigma=0
@@ -149,7 +157,7 @@ def test_vrz_bs_and_ckpt_match_full_including_the_rim(ndim):
         ratio = _edge_ratio(gb - gf)
         print(f"{ndim}D {name}: bs-full rel {rel_bs:.3e}  ckpt-full rel {rel_ck:.3e}  bs-full edge/interior {ratio:.2f}")
         assert rel_ck < REL_TOL_MODES, f"{ndim}D {name}: ckpt vs full rel {rel_ck:.3e} (imaging time offset?)"
-        assert rel_bs < REL_TOL_MODES, f"{ndim}D {name}: bs vs full rel {rel_bs:.3e} (imaging time offset?)"
+        assert rel_bs < REL_TOL_MODES, f"{ndim}D {name}: bs vs full rel {rel_bs:.3e} (imaging time offset, or a reconstruction seed that is not the last state?)"
         assert ratio < EDGE_RATIO_TOL, f"{ndim}D {name}: bs-full outermost line is {ratio:.1f}x the interior (shell narrower than the imaging reach?)"
 
 

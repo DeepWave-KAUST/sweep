@@ -373,7 +373,7 @@ and this project adheres to
   deferred history capture ran after the buffer rotation, so full and
   checkpointing imaged ``U_{it+1}`` while boundary saving imaged ``U_{it-1}``
   (boundary saving vs full rel 0.12); every mode now images ``U_it``
-  (4e-4).  Only VRZ used that hook.
+  (4e-4, the rest of which was the 2-D seed below).  Only VRZ used that hook.
 - **VRZ boundary saving imaged unrestored cells.**  Its gradient reaches ``2M``,
   one ``M`` past the ``M + 1`` shell, so the outermost physical cells read what
   the reverse step left there (up to 9x the largest full-storage gradient on a
@@ -381,6 +381,13 @@ and this project adheres to
   sigma=0 ``boundary_buffer`` moves the shell out of the stencil's reach
   instead of widening it (peak memory 69.4 -> 54.7 GB against a ``2M + 1``
   shell on a 3-D field-data single shot).
+- **2-D VRZ boundary saving started its reverse pass from a damaged state.**
+  The reconstruction seed zeroed the pad ring of the two last wavefields, as
+  ``Acoustic`` does (harmless there), but the VRZ restore band starts ``M``
+  cells inside the pad and the first reverse step reads those cells before any
+  restore.  Boundary saving vs full was 3.5e-4 to 2.6e-3 whenever the wavefield
+  still reached the pad at the last step; it is now 2e-7 to 3e-6, the level of
+  the 3-D runner, which never zeroed.
 - **The compiled VRZ adjoint was an approximation in the PML band** (it applied
   the forward CPML operator to the adjoint field).  It is now the exact
   discrete transpose, 2-D and 3-D: compiled vs eager 1.7e-7 (2-D) and 8e-7

@@ -21,8 +21,8 @@
 //   * u_forward_ptr = the u slice u_forward.select(0, it)[0];
 //   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (add_source_signed, sign -1, straight from p.adjoint_source -- no negated copy is built);
 //   * image_step = CALCULATE_GRAD_VRZ2D_AUTO (two gradients, split scratch from the workspace; returns early without grads), no RTM kernel;
-//   * seed_reconstruction also zeroes u_next, and its set_boundary_zeros calls do not pass the cut_mask;
-//   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on u_prev after the swap (= U_it) (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
+//   * seed_reconstruction also zeroes u_next and, unlike acoustic2d, zeroes no boundary band (the offset -M band's pad cells are read by the first reverse step);
+//   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> CALCULATE_GRAD_VRZ2D_AUTO on u_now before the swap (= U_it, p_tt from u_prev/u_now/u_next) -> forward.swap() (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
 //   * no ckpt/recursive hooks (section [5] is empty): backward.cu keeps the hand-written chunk/recursive checkpoint backward.
 //
 // What the skeleton ADDS for this equation (dormant on legacy calls, all
@@ -466,7 +466,7 @@ struct Driver {
 
     // _c.py binds cp.adjoint_wavefields on every backward
     // (_ensure_wavefield_buffers allocates them whenever the forward required a
-    // gradient: base_nvar 3 + pml_nvar 6 + adjoint_extra_nvar 0 = 9 slots), and
+    // gradient: base_nvar 3 + pml_nvar 6 + adjoint_extra_nvar 2 = 11 slots), and
     // the stepped / DD drivers rebind the same list.
     static void bind_or_alloc_adjoint(Wavefield& wf, const BackwardInputCore& p,
                                       const Buf& /*vp*/)
@@ -616,30 +616,31 @@ struct Driver {
         wf.bind(p.forward_wavefields, 2, false);
     }
 
-    // Seed from last_two, zero u_next, and zero the boundary/PML band so stale
-    // PML values carried in u_last_two don't leak inward during reverse
-    // propagation (see the hand-written driver's accuracy note).
-    static void seed_reconstruction(const State& s, const SolverContext& ctx,
+    // Seed from last_two as it is (u_prev = U_nt, u_now = U_{nt-1}) and zero
+    // u_next.  No boundary zeroing: the restore band sits at offset -M, so its
+    // outer M cells are pad cells, and the first reverse step reads them from
+    // u_now before any restore has run.  Zeroing [0, phys0) there (what the
+    // acoustic2d seed does, harmless for its offset-0 band) wiped exactly those
+    // cells: bs vs full rel 3.5e-4 to 2.6e-3 whenever the wavefield still
+    // reached the pad at the last step, ~3e-6 once it had left.  Nothing reads
+    // past the band -- the NOPML step updates [phys0 + 1, phys1 - 1) only and
+    // the physical cells' imaging reach stays inside it (BOUNDARY_BUFFER_REACH)
+    // -- so the untouched pad values beyond it are never used.  The 3-D
+    // sibling (Vrz3dBackwardBsRunner) never zeroed.
+    static void seed_reconstruction(const State&, const SolverContext&,
                                     Wavefield& forward, const BackwardInputCore& p)
     {
         copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(1, 1).squeeze(0));
         copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(1, 0).squeeze(0));
         zero_tensor_device_async(forward.u_next_t);
-        auto for_init = forward.view();
-        set_boundary_zeros<<<s.launch_config.grid, s.launch_config.block>>>(
-            for_init.u_prev, ctx.abcn + ctx.M, s.nx, s.nz,
-            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
-        set_boundary_zeros<<<s.launch_config.grid, s.launch_config.block>>>(
-            for_init.u_now, ctx.abcn + ctx.M, s.nx, s.nz,
-            ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
     }
 
     static BsScratch make_bs_scratch(const BackwardInputCore&, const Buf&)
     { return {}; }
 
     // VRZ bs reverse order: NOPML step, forward-source injection, strip
-    // restore, swap, THEN the gradient on the post-swap u_now (both operands
-    // co-resident at time it).
+    // restore, the gradient at it (U_{it+1}, U_it, U_{it-1} co-resident),
+    // THEN the swap.
     // No illumination on this equation (rtm_out_bs returns nullptr), and its bs
     // loop has no it == 0 tail either -- present so the skeleton can call it.
     static void bs_illum_tail(const State&, const SolverContext&,
