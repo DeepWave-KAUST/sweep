@@ -9,53 +9,9 @@ and this project adheres to
 
 ## [Unreleased]
 
-### Added
-- **``boundary_buffer=`` on every propagator**: sigma=0 cells between the
-  physical box and the PML ramp.  ``None`` (the default) gives an equation that
-  declares ``BOUNDARY_BUFFER_REACH`` its need, ``REACH * M + 1`` cells, under
-  every memory strategy and backend; only ``AcousticVRZ`` / ``AcousticVRZ3D``
-  declare one.  The buffer is cropped with the pad, so shapes and coordinates
-  do not change; boundary saving refuses an explicit value below the need.
-- **A persistent backward runner for ``AcousticVRZ3D``**
-  (``acoustic_vrz3d_backward_bs_runner``), phase-aware, so the domain-decomposed
-  backward no longer re-enters the per-call binding three times per step and
-  rebuilds its whole setup each time: on a production-size 3-D grid (2x2 DD,
-  4xH100) an iteration went from 240 s to 95.7 s, gradients and records
-  bit-identical.  It owns its boundary saver, so it also serves host-staged
-  boundaries.
-- **`impl='c'` talks to the prebuilt core through a pure-Python `ctypes`
-  layer; after `pip install` nothing compiles.**  `sweep.backend.c` fills the
-  core's C structs from each tensor's `data_ptr()`, shape, strides and dtype
-  and calls into `libsweep_core.so` directly, so the default path no longer
-  builds a torch shim at all: no nvcc, no C++ compiler, no CUDA headers, no
-  ninja run (the `ninja` dependency serves a local core build only), and no
-  torch C++ ABI in the loop -- the same wheel works with any
-  torch version by construction.  `nvcc` is needed only when no shipped core
-  fits (a torch built for another CUDA major, a GPU outside the shipped archs
-  and older than the shipped PTX) or for an sdist/clone install, and then only
-  the CUDA core is compiled (`python -m sweep.build`, or the first `impl='c'`
-  use).  That local build needs nvcc >= 12.4 (12.0-12.3 ship a broken
-  `<cuda/std>` bf16 header; `SWEEP_JIT_ALLOW_OLD_CUDA=1` tries anyway), >= 12.8
-  when the target list reaches Blackwell (sm_100 / sm_120), or a CUDA 13 nvcc,
-  and is refused up front with the toolkit and the version named otherwise.  A
-  local core built once is reused by later runs without nvcc, on the
-  strength of a source stamp (`sources.sha256`: the csrc tree plus the nvcc
-  flags) written beside it.  `sweep.precompile()` now just makes sure a core
-  exists and loads it: a no-op with a shipped core, the local core build
-  otherwise.  The compiled pybind shim survives as the
-  developer path behind `SWEEP_JIT_FULL=1` (needs torch's C++ headers, the CUDA
-  runtime headers -- torch's pip CUDA wheels bring them -- and a C++ compiler;
-  nvcc only when no shipped core fits).  A core that fits a GPU only
-  through its PTX is refused when the driver's CUDA release is older than the
-  toolkit that emitted it (the driver could not JIT it), with the versions in
-  the reason.
-  `sweep.backend.torch.binding.diagnostics()` gains a `shim` key, `"ctypes"`
-  or `"pybind"`.
-  A core sitting under `sweep/lib/<cuN>/` is loaded as it is: in a clone that
-  holds one (after `utils/build_cores_manylinux.sh`), edits under `csrc/` do not
-  reach `impl='c'` until that core is rebuilt or removed (`SWEEP_CORE`,
-  `diagnostics()['shipped_core']` show which core is in use).
+## [0.3.0] - 2026-09-30
 
+### Added
 - **The wheel ships a prebuilt CUDA core; first use of `impl='c'` no longer
   needs nvcc.**  The CUDA kernels are built once, ahead of the wheel, as a
   torch-free `libsweep_core.so` (every `.cu`, nvcc) behind a plain C
@@ -104,7 +60,6 @@ and this project adheres to
   script sets `cu12,cu13`) makes `setup.py` refuse such a tree instead of quietly
   producing a core-less wheel: `1` asks for at least one core, a comma list names
   the tags that must all be present.
-
 - **A second prebuilt core, for CUDA 13 (`sweep/lib/cu13/`).**  The wheel
   ships cu12 and cu13 side by side and the loader picks the tag torch's CUDA
   major names, so a torch cu130 install compiles nothing either.  Per core:
@@ -125,6 +80,53 @@ and this project adheres to
   accepts a comma list of tags (`cu12,cu13`) that must all be present, naming
   the missing one, next to `1` for "at least one".  The cu13 core is a second
   `.so` (155 MiB against cu12's 127 MiB); the wheel with both is about 76 MiB.
+- **`impl='c'` talks to the prebuilt core through a pure-Python `ctypes`
+  layer; after `pip install` nothing compiles.**  `sweep.backend.c` fills the
+  core's C structs from each tensor's `data_ptr()`, shape, strides and dtype
+  and calls into `libsweep_core.so` directly, so the default path no longer
+  builds a torch shim at all: no nvcc, no C++ compiler, no CUDA headers, no
+  ninja run (the `ninja` dependency serves a local core build only), and no
+  torch C++ ABI in the loop -- the same wheel works with any
+  torch version by construction.  `nvcc` is needed only when no shipped core
+  fits (a torch built for another CUDA major, a GPU outside the shipped archs
+  and older than the shipped PTX) or for an sdist/clone install, and then only
+  the CUDA core is compiled (`python -m sweep.build`, or the first `impl='c'`
+  use).  That local build needs nvcc >= 12.4 (12.0-12.3 ship a broken
+  `<cuda/std>` bf16 header; `SWEEP_JIT_ALLOW_OLD_CUDA=1` tries anyway), >= 12.8
+  when the target list reaches Blackwell (sm_100 / sm_120), or a CUDA 13 nvcc,
+  and is refused up front with the toolkit and the version named otherwise.  A
+  local core built once is reused by later runs without nvcc, on the
+  strength of a source stamp (`sources.sha256`: the csrc tree plus the nvcc
+  flags) written beside it.  `sweep.precompile()` now just makes sure a core
+  exists and loads it: a no-op with a shipped core, the local core build
+  otherwise.  The compiled pybind shim survives as the
+  developer path behind `SWEEP_JIT_FULL=1` (needs torch's C++ headers, the CUDA
+  runtime headers -- torch's pip CUDA wheels bring them -- and a C++ compiler;
+  nvcc only when no shipped core fits).  A core that fits a GPU only
+  through its PTX is refused when the driver's CUDA release is older than the
+  toolkit that emitted it (the driver could not JIT it), with the versions in
+  the reason.
+  `sweep.backend.torch.binding.diagnostics()` gains a `shim` key, `"ctypes"`
+  or `"pybind"`.
+  A core sitting under `sweep/lib/<cuN>/` is loaded as it is: in a clone that
+  holds one (after `utils/build_cores_manylinux.sh`), edits under `csrc/` do not
+  reach `impl='c'` until that core is rebuilt or removed (`SWEEP_CORE`,
+  `diagnostics()['shipped_core']` show which core is in use).
+
+- **``boundary_buffer=`` on every propagator**: sigma=0 cells between the
+  physical box and the PML ramp.  ``None`` (the default) gives an equation that
+  declares ``BOUNDARY_BUFFER_REACH`` its need, ``REACH * M + 1`` cells, under
+  every memory strategy and backend; only ``AcousticVRZ`` / ``AcousticVRZ3D``
+  declare one.  The buffer is cropped with the pad, so shapes and coordinates
+  do not change; boundary saving refuses an explicit value below the need.
+
+- **A persistent backward runner for ``AcousticVRZ3D``**
+  (``acoustic_vrz3d_backward_bs_runner``), phase-aware, so the domain-decomposed
+  backward no longer re-enters the per-call binding three times per step and
+  rebuilds its whole setup each time: on a production-size 3-D grid (2x2 DD,
+  4xH100) an iteration went from 240 s to 95.7 s, gradients and records
+  bit-identical.  It owns its boundary saver, so it also serves host-staged
+  boundaries.
 
 - **A CPU-only test job** (`.github/workflows/tests-cpu.yml`).  Nothing in this
   repository ran the tests before, and nothing could: `pytest test/` was unable
@@ -778,5 +780,6 @@ see the
 [GitHub commit history](https://github.com/DeepWave-KAUST/sweep/commits/dev)
 for changes prior to this entry.
 
-[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.2.0...dev
+[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.0...dev
+[0.3.0]: https://github.com/DeepWave-KAUST/sweep/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/DeepWave-KAUST/sweep/compare/v0.1.0...v0.2.0
