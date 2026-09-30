@@ -49,10 +49,13 @@ def _compiled_binding_available():
 
 
 def _equation_supports_c(equation):
-    """True when the equation exposes the compiled-kernel hook ``_C()``."""
+    """True when the equation has compiled kernels: a ``C_NAME`` and the
+    ``_C()`` hook it installs. A hand-written ``_C`` that only refuses
+    impl='c' (the curvilinear pair) does not count, so 'auto' runs those
+    eager and an explicit 'c' falls back with the usual warning."""
     if equation is None:
         return True
-    return callable(getattr(equation, "_C", None))
+    return callable(getattr(equation, "_C", None)) and bool(getattr(equation, "C_NAME", None))
 
 
 def _device_type(device):
