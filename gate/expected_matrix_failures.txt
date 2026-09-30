@@ -13,8 +13,6 @@
 #   * das3d/bs          -- 3-D DAS declares it has no boundary saving
 acoustic_lsrtm3d/ckpt_chunk/c-cuda
 acoustic_lsrtm3d/full/c-cuda
-acoustic_vrz2d/ckpt_chunk/c-cuda
-acoustic_vrz2d/full/c-cuda
 acoustic_vrz3d/ckpt_chunk/c-cuda
 acoustic_vrz3d/full/c-cuda
 acoustic_vti_1st_2d/ckpt_recursive/c-cuda
