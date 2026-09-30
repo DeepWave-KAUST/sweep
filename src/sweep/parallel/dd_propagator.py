@@ -226,6 +226,20 @@ class ModelParallel:
                     "(or none) can be decomposed -- any other face would have to "
                     "be reconciled against the tile cut faces."
                 )
+        # ``topography=`` is not part of the tile spec below, so a model with a
+        # surface used to be decomposed as a flat-top problem, silently.
+        # Carrying it across would not help: DD's only gradient path is
+        # boundary saving, and boundary saving under a per-column surface gives
+        # a wrong gradient -- the single-card path refuses that pair at run time
+        # (_guard_boundary_saving_topography), but tiles built without a surface
+        # never reach that guard.
+        if getattr(prop, "topography", None) is not None:
+            raise NotImplementedError(
+                "domain decomposition does not support topography=: the tiles "
+                "would be built with a flat top, and boundary saving (DD's only "
+                "gradient path) gives a wrong gradient under a per-column "
+                "surface. Run the model on one card with memory=Full() or "
+                "memory=Ckpt(...) instead.")
         dev = prop.dev
         model_parallel = mesh
         # Boundary-saving storage/dtype are inherited from the wrapped prop's
