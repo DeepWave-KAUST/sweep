@@ -13,6 +13,41 @@ from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
 from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
 
+_DYNAMO_LIMIT_WARNED = False
+
+
+def _raise_dynamo_recompile_limit(target=32):
+    """Raise Dynamo's recompile cap, whatever the installed torch calls it.
+
+    The knob was renamed: ``cache_size_limit`` up to torch 2.5,
+    ``recompile_limit`` from 2.6. torch is unpinned here, so keying on the new
+    name alone made the bump a silent no-op for every user on an older torch --
+    and the cap it was there to lift is exactly what makes Dynamo give up and
+    fall back to eager on the many-wavefield equations. ``accumulated_``
+    is the secondary cap on the old spelling and has to move with it.
+    """
+    global _DYNAMO_LIMIT_WARNED
+    cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
+    if cfg is None:
+        return
+    names = [n for n in ("recompile_limit", "cache_size_limit",
+                         "accumulated_recompile_limit", "accumulated_cache_size_limit")
+             if hasattr(cfg, n)]
+    primary = [n for n in names if not n.startswith("accumulated_")]
+    if not primary:
+        if not _DYNAMO_LIMIT_WARNED:
+            _DYNAMO_LIMIT_WARNED = True
+            warnings.warn(
+                f"torch {torch.__version__}'s Dynamo exposes neither "
+                "recompile_limit nor cache_size_limit, so the recompile cap "
+                "was left alone; torch.compile may fall back to eager on the "
+                "many-wavefield equations.", RuntimeWarning, stacklevel=3)
+        return
+    for name in names:
+        if getattr(cfg, name) < target:
+            setattr(cfg, name, target)
+
+
 class _PropTorchEager(
     PropBase, torch.nn.Module, _CustomGradientMixin, _EagerBoundarySavingMixin
 ):
@@ -64,41 +99,6 @@ class _PropTorchEager(
             return equation_step(wavefields, models, dt, h, b)
 
         return self._maybe_compile(step_func)
-
-_DYNAMO_LIMIT_WARNED = False
-
-
-def _raise_dynamo_recompile_limit(target=32):
-    """Raise Dynamo's recompile cap, whatever the installed torch calls it.
-
-    The knob was renamed: ``cache_size_limit`` up to torch 2.5,
-    ``recompile_limit`` from 2.6. torch is unpinned here, so keying on the new
-    name alone made the bump a silent no-op for every user on an older torch --
-    and the cap it was there to lift is exactly what makes Dynamo give up and
-    fall back to eager on the many-wavefield equations. ``accumulated_``
-    is the secondary cap on the old spelling and has to move with it.
-    """
-    global _DYNAMO_LIMIT_WARNED
-    cfg = getattr(getattr(torch, "_dynamo", None), "config", None)
-    if cfg is None:
-        return
-    names = [n for n in ("recompile_limit", "cache_size_limit",
-                         "accumulated_recompile_limit", "accumulated_cache_size_limit")
-             if hasattr(cfg, n)]
-    primary = [n for n in names if not n.startswith("accumulated_")]
-    if not primary:
-        if not _DYNAMO_LIMIT_WARNED:
-            _DYNAMO_LIMIT_WARNED = True
-            warnings.warn(
-                f"torch {torch.__version__}'s Dynamo exposes neither "
-                "recompile_limit nor cache_size_limit, so the recompile cap "
-                "was left alone; torch.compile may fall back to eager on the "
-                "many-wavefield equations.", RuntimeWarning, stacklevel=3)
-        return
-    for name in names:
-        if getattr(cfg, name) < target:
-            setattr(cfg, name, target)
-
 
     def _maybe_compile(self, fn):
         """``torch.compile`` *fn* with the propagator's compile settings, after
