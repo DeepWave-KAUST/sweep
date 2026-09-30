@@ -9,6 +9,11 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+- `sweep.backend.torch.binding.diagnostics()["shim"]` read `"ctypes"` on a
+  `SWEEP_BUILD_CUDA=1` install, whose compiled `sweep._C` is the pybind shim;
+  it now reads `"pybind"` there, as under `SWEEP_JIT_FULL=1`.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added

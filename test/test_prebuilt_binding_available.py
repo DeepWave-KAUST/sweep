@@ -155,6 +155,22 @@ class TestBindingDiagnostics:
         assert d["prebuilt"] is False
         assert d["reason"] == "no nvcc"
 
+    def test_shim_names_the_compiled_extension(self, monkeypatch):
+        """A ``SWEEP_BUILD_CUDA=1`` install's ``sweep._C`` IS the pybind shim --
+        it shadows the ctypes layer -- so ``shim`` must say so. It used to read
+        "ctypes" there, because only ``SWEEP_JIT_FULL`` was consulted."""
+        from sweep.backend.c import jit
+        from sweep.backend.torch import binding
+
+        monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
+        monkeypatch.setattr(jit, "can_build", lambda: (False, "no nvcc"))
+        monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: True)
+        assert binding.diagnostics()["shim"] == "pybind"
+        monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
+        assert binding.diagnostics()["shim"] == "ctypes"
+        monkeypatch.setenv("SWEEP_JIT_FULL", "1")
+        assert binding.diagnostics()["shim"] == "pybind"
+
     SHIPPED_CORE_KEYS = {"path", "reason", "tag", "available"}
 
     def test_shipped_core_lists_the_cores_the_install_carries(self, monkeypatch):

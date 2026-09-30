@@ -82,7 +82,7 @@ Example diagnostics output:
 {
     "usable": True,
     "reason": "ok",
-    "shim": "ctypes",            # "pybind" under SWEEP_JIT_FULL=1
+    "shim": "ctypes",            # "pybind" under SWEEP_JIT_FULL=1 or with a prebuilt extension
     "cuda_home": "/usr/local/cuda-12.9",   # None is fine: a shipped core needs no nvcc
     "already_compiled": False,   # True once the core is loaded (sweep.precompile())
     "prebuilt": False,           # a SWEEP_BUILD_CUDA=1 ahead-of-time extension on disk
