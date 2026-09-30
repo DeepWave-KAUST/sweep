@@ -36,19 +36,19 @@
         <span class="sweep-qs__pill-name">PyTorch backend</span>
         <span class="sweep-qs__pill-tag">recommended</span>
       </div>
-      <code>$ pip install "sweep[torch] @ git+https://github.com/DeepWave-KAUST/sweep.git"</code>
+      <code>$ pip install sweepx</code>
     </div>
     <div class="sweep-qs__pill">
       <div class="sweep-qs__pill-hd">
         <span class="sweep-qs__pill-name">JAX backend</span>
       </div>
-      <code>$ pip install "sweep[jax] @ git+https://github.com/DeepWave-KAUST/sweep.git"</code>
+      <code>$ pip install "sweep-solver[jax]"</code>
     </div>
   </div>
 
   <div class="sweep-qs__hint">
-    <strong>tip</strong> &nbsp; Not on PyPI yet — install straight from GitHub. For the compiled CUDA backend (<code>impl="c"</code>) or a dev clone, see
-    <a href="../installation/">Install from source</a>.
+    <strong>tip</strong> &nbsp; The wheel ships a prebuilt CUDA core, so the compiled backend (<code>impl="c"</code>) works right after install — nothing compiles. For a dev clone, see
+    <a href="../installation/">Installation</a>.
   </div>
 </section>
 

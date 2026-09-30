@@ -1,14 +1,13 @@
 """The ahead-of-time install path, which nothing else exercises.
 
-`SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation` is what
-README.md and docs/getting-started/installation.md tell people to run from
-source, and it produces an artifact no test had ever looked at:
+`SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation` is the
+ahead-of-time developer install in docs/getting-started/installation.md, and it
+produces an artifact no test had ever looked at:
 
   * the arch list it targets -- a fixed default silently overrode torch's own
     detection, so the build on a non-Volta machine carried sm_70 code only;
-  * what `sweep.precompile()` does afterwards -- the command the same documents
-    publish -- when `sweep._C` is that compiled extension rather than the JIT
-    shim.
+  * what `sweep.precompile()` does afterwards when `sweep._C` is that
+    compiled extension rather than the ctypes layer.
 
 Both are checked here without compiling anything.
 """

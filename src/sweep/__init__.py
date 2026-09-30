@@ -176,8 +176,8 @@ def precompile(require_gpu: bool = True) -> bool:
         # A prebuilt extension shadows _C.py: the import machinery tries the
         # .so suffixes before .py, so `sweep._C` IS the compiled module and
         # importing it has already loaded it. It has no _load to call, and
-        # calling one would be an AttributeError on exactly the install the
-        # README tells people to do (SWEEP_BUILD_CUDA=1 pip install).
+        # calling one would be an AttributeError on exactly that install
+        # (SWEEP_BUILD_CUDA=1 pip install, the documented developer path).
         return True
     from sweep.backend.c import jit
     if jit.jit_full():
