@@ -2,11 +2,11 @@
 
 ## From PyPI (recommended)
 
-One wheel, any PyTorch version, Python >= 3.9:
+One wheel, any PyTorch version, Python >= 3.10 (`pip install sweep-solver`, the solver
+without the `sweep-agent` companion, also runs on 3.9):
 
 ```bash
 pip install sweepx
-python -c "import sweep; sweep.precompile()"   # optional: make sure a CUDA core is in place and load it (compiles nothing with the shipped one)
 ```
 
 The wheel carries a **prebuilt CUDA core** per CUDA major — `sweep/lib/cu12/` and
@@ -78,33 +78,27 @@ git clone https://github.com/DeepWave-KAUST/sweep
 cd sweep
 ```
 
-## Install by Backend and Binding
+## Install by Backend
 
-=== "PyTorch + Extension Binding"
+=== "PyTorch"
 
-    Use this from a clone to build the **ahead-of-time** `sweep._C` extension: the
-    compiled pybind shim, compiled against **your** torch (the
-    same CUDA kernels the PyPI wheel ships as a prebuilt core, plus the torch-bound
-    C++). It is tied to the torch it was built against. If you only want to avoid
-    the first-use core build, `pip install .` then `python -m sweep.build` (nvcc
-    only, no torch headers) is the lighter path -- see "Building where there is no
-    GPU" below. (A prebuilt `_C` extension takes precedence over the ctypes layer
-    automatically.)
-
-    1. Install a compatible PyTorch + CUDA environment first.
-    2. Make sure an nvcc of your torch's CUDA major (`>= 12.4` for CUDA 12, `>= 12.8`
-       for Blackwell targets; any CUDA 13 nvcc), a C++ compiler and your NVIDIA
-       driver are available for builds.
-    3. Build and install SWEEP with the CUDA extra:
+    1. Install a working PyTorch environment first.
+    2. Install SWEEP from the repository root:
 
     ```bash
-    SWEEP_BUILD_CUDA=1 pip install -v .[cuda] --no-build-isolation
+    pip install .
+    python -m sweep.build   # optional: build the CUDA core now, not on the first impl='c' call
     ```
 
     Notes:
 
-    - This build produces the compiled extension module `sweep._C`.
-    - After installation, `PropTorch` auto-detects the binding by default:
+    - A clone carries no prebuilt core, so the CUDA core is compiled once, locally
+      for your card, with an nvcc of your torch's CUDA major (2–5 min, at
+      `python -m sweep.build` or on the first `impl='c'` call), and cached; later
+      runs reuse it without nvcc. Only the core is compiled: no torch headers, no
+      C++ compiler. On a node without a GPU, see "Building where there is no GPU"
+      below.
+    - `PropTorch` picks the backend automatically:
 
     ```python
     from sweep.propagator.torch import PropTorch
@@ -114,29 +108,12 @@ cd sweep
     solver = PropTorch(..., impl="eager")  # force pure-PyTorch
     ```
 
-    - The compiled binding covers every equation the CUDA core exposes: acoustic /
+    - The compiled backend covers every equation the CUDA core exposes: acoustic /
       acoustic_lsrtm / acoustic_vrz / acoustic_vti_1st (2D and 3D), das / das_mu
       (2D and 3D), elastic (2D and 3D), elastic_tti_sg (2D and 3D),
       elastic_tti_2nd2d, elastic_vr2d, visco_acoustic2d.
-
-=== "PyTorch"
-
-    Use this path when your environment is PyTorch-first, but you only need
-    the eager Torch backend and do not want to build the compiled binding.
-
-    1. Install a working PyTorch environment first.
-    2. Install SWEEP from the repository root:
-
-    ```bash
-    pip install .
-    ```
-
-    Notes:
-
-    - This path gives you the Torch-family Python interface, including
-      `PropTorch(..., backend="torch", impl="eager")`.
-    - You can still use checkpointing and `torch.compile` through
-      `EagerOptions`.
+    - The eager backend (`impl="eager"`) needs no core; checkpointing and
+      `torch.compile` go through `EagerOptions`.
 
 === "JAX"
 
@@ -156,23 +133,36 @@ cd sweep
       to use the JAX path.
     - This path gives you the Python package interface and `PropJax`.
 
-### Developer path: the compiled shim (`SWEEP_JIT_FULL=1`)
+### Developer paths: the compiled pybind shim
 
 `impl='c'` normally reaches the core through the pure-Python `ctypes` layer and
-compiles nothing. `SWEEP_JIT_FULL=1` switches to the developer path instead: the
-old pybind torch shim (`module.cpp`, compiled against **your** torch through
-`torch.utils.cpp_extension`), built by the JIT
-loader on first use and cached under `TORCH_EXTENSIONS_DIR`. That path needs
-torch's C++ headers, a C++ compiler and the CUDA runtime headers (torch's pip
-`nvidia-cuda-runtime[-cu12]` + `nvidia-cuda-nvcc[-cu12]` wheels, or a toolkit's
-include dir); `nvcc` only when no shipped core fits and the core itself must be
-built. The result is tied to the torch it was built against. Use it to work on the binding, or to
-A/B the two shims; `sweep.backend.torch.binding.diagnostics()["shim"]` says which
-one is loaded (`"ctypes"` or `"pybind"`).
+compiles nothing. Two developer switches load the old pybind torch shim
+(`module.cpp`, compiled against **your** torch through `torch.utils.cpp_extension`)
+instead: same kernels, same results, but tied to the torch it was built against.
+Use them to work on the binding or to A/B the two shims.
+
+**`SWEEP_JIT_FULL=1`** builds the shim with the JIT loader on first use and caches
+it under `TORCH_EXTENSIONS_DIR`. It needs torch's C++ headers, a C++ compiler and
+the CUDA runtime headers (torch's pip `nvidia-cuda-runtime[-cu12]` +
+`nvidia-cuda-nvcc[-cu12]` wheels, or a toolkit's include dir); `nvcc` only when no
+shipped core fits and the core itself must be built.
+`sweep.backend.torch.binding.diagnostics()["shim"]` then reads `"pybind"`.
+
+**Ahead of time**, from a clone, the whole CUDA tree plus the shim compile into a
+`sweep._C` extension at install (nvcc, a C++ compiler and torch's headers; set
+`TORCH_CUDA_ARCH_LIST` to your card to keep the build short, and have `ninja` on
+`PATH`, or torch falls back to a serial build):
+
+```bash
+SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation
+```
+
+The installed extension takes precedence over the ctypes layer;
+`diagnostics()["prebuilt"]` is `True` for it.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+ for `sweepx` (3.9+ for `sweep-solver` alone)
 - A working [PyTorch](https://pytorch.org/get-started/locally/) or
   [JAX](https://docs.jax.dev/en/latest/installation.html) environment depending
   on your backend
@@ -315,8 +305,7 @@ Three rules for a core that is going to PyPI:
 
 - Lazy imports mean you do not need to install both JAX and PyTorch unless you
   plan to use both.
-- From a clone, `python -m sweep.build` builds the CUDA core ahead of time; the
-  `PyTorch + Extension Binding` path builds the torch-bound developer extension
-  instead. From the PyPI wheel the base install already has the core.
+- From a clone, `python -m sweep.build` builds the CUDA core ahead of time; from
+  the PyPI wheel the base install already has the core.
 - CUDA source files are needed for source builds, but not for normal runtime
   imports after installation.
