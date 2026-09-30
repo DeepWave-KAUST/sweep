@@ -9,10 +9,37 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- `Full`, `BoundarySaving` and `Ckpt` are exported from `sweep.propagator`
+  (only the deprecated `MemoryOptions` family was).
+
 ### Fixed
 - `sweep.backend.torch.binding.diagnostics()["shim"]` read `"ctypes"` on a
   `SWEEP_BUILD_CUDA=1` install, whose compiled `sweep._C` is the pybind shim;
   it now reads `"pybind"` there, as under `SWEEP_JIT_FULL=1`.
+- A typed strategy inside `cuda_options=CUDAOptions(memory=...)` did not reach
+  the `impl='c'` backend: `Ckpt()` and `Full()` raised a "conflicting
+  gradient-memory mode" `ValueError` at construction, and
+  `BoundarySaving(storage='cpu', pinned_memory=True)` silently built the
+  default GPU ring.  It is now read exactly like `memory=`.
+- `AcousticCurvilinear` / `ElasticCurvilinear` counted as compiled bindings
+  because their `_C()` stub (which only refuses `impl='c'`) was callable, so
+  `impl=None` on a CUDA device picked `'c'` and raised `NotImplementedError`.
+  A binding now needs a `C_NAME`: both report no binding (the CLI prints
+  `no`), `'auto'` runs them eager, and an explicit `impl='c'` falls back with
+  a `UserWarning` like any eager-only equation.
+- `ModelParallel` decomposed a propagator built with `topography=` as a
+  flat-top problem, silently (the tiles never carried the surface, and
+  boundary saving under a surface is wrong anyway).  It now refuses it with
+  `NotImplementedError`.
+
+### Documentation
+- README and the installation page are shorter; the release-core build rules
+  moved to *Developer › Release cores*.
+- The API reference, user guide, examples and notebooks were audited against
+  the 0.3.0 code: wrong signatures and defaults, removed or renamed APIs,
+  deprecated spellings shown as current, and stale JIT-era install claims
+  were fixed.
 
 ## [0.3.0] - 2026-09-30
 
