@@ -543,6 +543,18 @@ and this project adheres to
   builds `solver`, then `solver_fs`, then runs `solver` again, so it hits this.
   The key now lives on the equation next to the value it describes.
 
+- **`AcousticVTI1st` on `impl='c'` read the grid spacing with the axes
+  swapped.** `PropBase` stores spacing in model-axis order `(dz, dx)` and
+  `_cuda_spacing()` reverses it, so `p.spacing` reaches the kernels as
+  `[dx, dz]` -- as every other driver reads it, including this equation's own
+  3-D twin. `acoustic_vti_1st_2d` read it as `(dz, dx)` in all four entry
+  points, which is identical whenever `dx == dz` and wrong the moment they
+  differ: at `dh=(dz=10, dx=20)` the compiled record's cosine against eager was
+  **-0.62** (and **0.10** at `(20, 10)`), with the model gradients scattered.
+  With `dh=10` it was 1.000000, which is why nothing caught it -- the gate, the
+  gradient matrix and every test pass a scalar `dh`, though `normalise_spacing`
+  has always accepted a per-axis sequence. Isotropic results are unchanged (the
+  two values are equal, so the swap is a no-op there).
 - **Disk-staged boundary saving reconstructed a wrong gradient.**  Since the
   persistent staging session / non-blocking copy stream (PR #81), every
   `storage='disk'` gradient was wrong: max|disk-gpu|/scale 0.2-0.5 for acoustic

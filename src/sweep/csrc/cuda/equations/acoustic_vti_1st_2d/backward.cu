@@ -223,8 +223,14 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
 
     SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D backward: spacing must have length >= 2");
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    // Cartesian order, as every other driver and _c.py::_cuda_spacing() have it:
+    // PropBase stores (dz, dx) in model-axis order and _cuda_spacing() already
+    // REVERSED it, so p.spacing arrives as [dx, dz].  Reading it as (dz, dx)
+    // here swapped the two axes, which is invisible on the isotropic dh every
+    // test uses and wrong the moment they differ (measured: record cosine
+    // -0.259 against eager at dz=10, dx=25; the 3-D twin was always correct).
+    float dx = p.spacing[0];
+    float dz = p.spacing[1];
 
     SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st2D backward expects 4 model tensors "
@@ -418,8 +424,8 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 
     SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D backward_bs: spacing length >= 2 required.");
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    float dx = p.spacing[0];   // Cartesian order; see forward.cu
+    float dz = p.spacing[1];
 
     SWEEP_CHECK(p.models.size() == 4,
                 "AcousticVTI1st2D backward_bs expects 4 models "
@@ -708,8 +714,8 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
     SWEEP_CHECK(p.spacing.size() >= 2,
                 "spacing length >= 2 required.");
 
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    float dx = p.spacing[0];   // Cartesian order; see forward.cu
+    float dz = p.spacing[1];
 
     auto vp_t      = p.models[0];
     auto epsilon_t = p.models[1];

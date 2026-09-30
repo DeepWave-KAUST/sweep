@@ -94,11 +94,17 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
     // Checkpointing supported (Phase 2): forward saves state at intervals;
     // backward_ckpt replays each chunk and runs adjoint over it.
 
-    // Parse spacing (Python sends in axis-0..n-1 order: [dz, dx] in 2D).
+    // Parse spacing (Cartesian order from _c.py::_cuda_spacing(): [dx, dz] in 2D).
     SWEEP_CHECK(p.spacing.size() >= 2,
                 "AcousticVTI1st2D: spacing must have length >= 2");
-    float dz = p.spacing[0];
-    float dx = p.spacing[1];
+    // Cartesian order, as every other driver and _c.py::_cuda_spacing() have it:
+    // PropBase stores (dz, dx) in model-axis order and _cuda_spacing() already
+    // REVERSED it, so p.spacing arrives as [dx, dz].  Reading it as (dz, dx)
+    // here swapped the two axes, which is invisible on the isotropic dh every
+    // test uses and wrong the moment they differ (measured: record cosine
+    // -0.259 against eager at dz=10, dx=25; the 3-D twin was always correct).
+    float dx = p.spacing[0];
+    float dz = p.spacing[1];
 
     // Models (vp, epsilon, delta, rho) in this canonical order.
     SWEEP_CHECK(p.models.size() == 4,
