@@ -73,7 +73,8 @@ def diagnostics() -> dict:
 
     ``shim`` names which ``sweep._C`` this process gets: ``"ctypes"`` (the
     default -- ``sweep.backend.c`` over the prebuilt core, nothing compiles) or
-    ``"pybind"`` (``SWEEP_JIT_FULL=1``, the compiled developer path).
+    ``"pybind"`` (the compiled developer shim: ``SWEEP_JIT_FULL=1``, or an
+    ahead-of-time extension, which shadows the ctypes layer).
     ``prebuilt`` and ``shipped_core`` explain the otherwise confusing pairs:
     with an ahead-of-time extension, or with the wheel's prebuilt CUDA core
     fitting this torch and GPU, the backend is usable even though ``cuda_home``
@@ -88,6 +89,8 @@ def diagnostics() -> dict:
         from sweep import _prebuilt_binding_present
         from sweep.backend.c import jit
         prebuilt = _prebuilt_binding_present()
+        if prebuilt:
+            shim = "pybind"   # a compiled sweep._C is the pybind shim, whatever SWEEP_JIT_FULL says
         can_jit, reason = jit.can_build()
         return {
             "usable": prebuilt or can_jit,   # can impl='c' be used at all?
