@@ -1,8 +1,14 @@
-from .options import BoundaryOptions, CkptOptions, CUDAOptions, EagerOptions, MemoryOptions
+from .options import (
+    BoundaryOptions, BoundarySaving, Ckpt, CkptOptions, CUDAOptions, EagerOptions, Full,
+    MemoryOptions,
+)
 
 __all__ = [
     "EagerOptions",
     "CUDAOptions",
+    "Full",
+    "BoundarySaving",
+    "Ckpt",
     "MemoryOptions",
     "BoundaryOptions",
     "CkptOptions",

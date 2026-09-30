@@ -434,8 +434,7 @@ class Wrapper(torch.autograd.Function):
                 "compute_adcig=True currently requires boundary-saving mode. The "
                 "full/checkpoint forward stores vp^2*Lap(u) for the vp gradient, "
                 "not the raw pressure the space-lag ADCIG imaging condition needs. "
-                "Enable boundary saving via boundary_saving_config={'enabled': True} "
-                "or memory=BoundarySaving()."
+                "Enable boundary saving with memory=BoundarySaving()."
             )
         # The cube the driver accumulates into, Python-owned like the
         # illumination pair: (nlag, N, C, nz, nx[, ny]) over the padded model,

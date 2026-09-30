@@ -126,12 +126,25 @@ class PropBase:
             nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
             B (int, optional): The batch size for the simulation. Defaults to 1.
             allow_growth (bool, optional): Whether to allow GPU memory growth. Defaults to True.
-            boundary_saving_config (dict, optional): Configuration for boundary saving. Defaults to None, which means boundary saving is disabled. If provided, it should be a dictionary with the following keys:
-                - enabled (bool): Whether to enable boundary saving. If True, the boundary wavefields will be saved and transferred to CPU for checkpointing. Defaults to False.
-                - storage (str): Where to store the boundary wavefields. Options are 'gpu' and 'cpu'. If 'gpu', the boundary wavefields will be stored in GPU memory. If 'cpu', the boundary wavefields will be transferred to CPU memory. Defaults to 'gpu'.
-                - transfer_interval (int): The interval (in time steps) at which to transfer the boundary wavefields to CPU memory if storage is 'cpu'. For example, if transfer_interval is 10, then every 10 time steps the boundary wavefields will be transferred to CPU memory. Defaults to 1.
-                - pinned_memory (bool): Whether to use pinned memory for the boundary wavefields when storage is 'cpu'. Using pinned memory can speed up the transfer between GPU and CPU. Defaults to False.
-                - disk_async_read (bool): Whether to read disk boundary chunks asynchronously during backward when storage is 'disk'. Defaults to False.
+            boundary_saving_config (dict, optional): Legacy dict spelling of
+                ``memory=BoundarySaving(...)``, which is what to pass to
+                ``PropTorch`` (it warns on this dict). The keys mirror the
+                ``BoundarySaving`` fields -- ``enabled``, ``storage`` ('gpu',
+                'cpu' or 'disk'), ``transfer_interval``, ``pinned_memory``,
+                ``ring_buffers``, ``disk_dir``, ``disk_async_read``,
+                ``storage_dtype``, ``tail_steps`` -- with the same per-storage
+                defaults (storage='cpu': transfer_interval=64,
+                pinned_memory=True). Defaults to None: the backend's default
+                strategy, which on impl='c' is boundary saving with a GPU ring
+                (full storage for equations without compiled boundary saving).
+            boundary_buffer (int, optional): Number of sigma=0 cells between the
+                physical box and the PML ramp on every absorbing face. None
+                (default) gives the equation the buffer its boundary-saving
+                reconstruction needs (none for pointwise imaging), under every
+                memory strategy, so all of them solve the same grid. An explicit
+                value is honoured, but boundary saving refuses one below the
+                need, and a non-zero buffer cannot be combined with
+                ``topography=`` yet.
         """
         
         self.equation = equation
