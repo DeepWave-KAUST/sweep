@@ -34,6 +34,7 @@
 #include "../equations/elastic_tti_sg3d/elastic_tti_sg3d.h"
 #include "../equations/elastic_vr2d/elastic_vr2d.h"
 #include "../equations/visco_acoustic2d/visco_acoustic2d.h"
+#include "../equations/visco_elastic2d/visco_elastic2d.h"
 
 namespace {
 
@@ -131,9 +132,14 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "visco_acoustic2d_backward",
     "visco_acoustic2d_backward_bs",
     "visco_acoustic2d_backward_ckpt",
-    "visco_acoustic2d_backward_recursive_ckpt"
+    "visco_acoustic2d_backward_recursive_ckpt",
+    "visco_elastic2d_forward",
+    "visco_elastic2d_backward",
+    "visco_elastic2d_backward_bs",
+    "visco_elastic2d_backward_ckpt",
+    "visco_elastic2d_backward_recursive_ckpt"
 };
-const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1 };
+const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1 };
 
 void fill_err(char* err, int cap, const char* what)
 {
@@ -247,6 +253,11 @@ void dispatch(int entry, const void* in, void* out)
         case 91: *static_cast<BackwardOutputCore*>(out) = visco_acoustic2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 92: *static_cast<BackwardOutputCore*>(out) = visco_acoustic2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 93: *static_cast<BackwardOutputCore*>(out) = visco_acoustic2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 94: *static_cast<ForwardOutputCore*>(out) = visco_elastic2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 95: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 96: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 97: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 98: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         default: SWEEP_CHECK(false, "sweep_call: no entry ", entry);
     }
 }

@@ -158,33 +158,32 @@ def elastic_velocity_substep(
     )
 
 
-def elastic_stress_substep(
-    vx, vz, sxx, szz, sxz,
-    m_vxx, m_vxz, m_vzx, m_vzz,
-    m_txxx, m_txxz, m_tzzx, m_tzzz,
-    m_txzx, m_txzz,
+def elastic_velocity_gradients(
+    vx, vz,
+    m_vxx, m_vzz,
     *,
-    lame_lambda, lame_mu, mu_xz,
-    rho_x, rho_z,
     dt, h, b, pd, pml,
     free_surface=False,
     topo_rows=None,
     fs_faces=None,
-    lame_lambda_2mu=None,
-    return_gradients=False,
 ):
-    """Stress sub-step: update ``(sxx, szz, sxz)`` from the velocity gradients (a
-    pure shear — velocities are read, not written).  Second half of
-    :func:`elastic_step_core`; reused by the boundary-saving reverse driver.
-    Returns all 15 fields with the stresses and the four velocity-derivative CPML
-    memories updated.  Post-step free-surface stress zeroing is left to the
-    caller (``Elastic.func`` / the reverse closure), matching the historic
-    layout."""
+    """Velocity gradients for the stress update: the staggered FD derivatives
+    (image-method mirrors at every active free-surface face) and the CPML
+    memories of the two NORMAL strain rates.  Shared by
+    :func:`elastic_stress_substep` and the visco-elastic stress update so the
+    stencil / FS / CPML handling exists once.
+
+    Returns ``(vx_x, vz_z, vx_z, vz_x, m_vxx, m_vzz)``: ``vx_x`` / ``vz_z``
+    CPML-corrected, the shear derivatives ``vx_z`` / ``vz_x`` raw --
+    :func:`elastic_shear_cpml` corrects them.  The split is load-bearing:
+    :func:`elastic_stress_substep` has always updated the shear memories
+    after the normal stresses, and moving them earlier reorders the graph --
+    same forward, but DASMu's compiled-eager gradients moved by ~1e-6.
+    """
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
     has_topo = free_surface and topo_rows is not None
     z_sides, x_sides = _fs_sides(fs_faces, free_surface)
-    lame_lambda_2mu = (lame_lambda + 2 * lame_mu) if lame_lambda_2mu is None else lame_lambda_2mu
     _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
         if ((z_sides or x_sides) and not has_topo) else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
@@ -217,12 +216,60 @@ def elastic_stress_substep(
                     half=True)
         vz_x = _fsd(pd, _pd2, "x_forward", vz, False, -1, x_sides, top_halo, _n_o2)
 
-    # ---- CPML accumulation + stress update -------------------------------
+    # ---- CPML accumulation (normal strain rates) --------------------------
     m_vzz = az * m_vzz + bz * vz_z
     vz_z = vz_z + m_vzz
     m_vxx = ax * m_vxx + bx * vx_x
     vx_x = vx_x + m_vxx
+    return vx_x, vz_z, vx_z, vz_x, m_vxx, m_vzz
 
+
+def elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml):
+    """CPML memories of the two shear derivatives (the half-grid profiles):
+    returns the corrected ``(vx_z, vz_x)`` and the updated ``(m_vxz, m_vzx)``.
+    Second half of :func:`elastic_velocity_gradients`."""
+    az, bz, azh, bzh, ax, bx, axh, bxh = pml
+    m_vxz = azh * m_vxz + bzh * vx_z
+    vx_z = vx_z + m_vxz
+    m_vzx = axh * m_vzx + bxh * vz_x
+    vz_x = vz_x + m_vzx
+    return vx_z, vz_x, m_vxz, m_vzx
+
+
+def elastic_stress_substep(
+    vx, vz, sxx, szz, sxz,
+    m_vxx, m_vxz, m_vzx, m_vzz,
+    m_txxx, m_txxz, m_tzzx, m_tzzz,
+    m_txzx, m_txzz,
+    *,
+    lame_lambda, lame_mu, mu_xz,
+    rho_x, rho_z,
+    dt, h, b, pd, pml,
+    free_surface=False,
+    topo_rows=None,
+    fs_faces=None,
+    lame_lambda_2mu=None,
+    return_gradients=False,
+):
+    """Stress sub-step: update ``(sxx, szz, sxz)`` from the velocity gradients (a
+    pure shear — velocities are read, not written).  Second half of
+    :func:`elastic_step_core`; reused by the boundary-saving reverse driver.
+    Returns all 15 fields with the stresses and the four velocity-derivative CPML
+    memories updated.  Post-step free-surface stress zeroing is left to the
+    caller (``Elastic.func`` / the reverse closure), matching the historic
+    layout."""
+    top_halo = pd.coes.shape[0]
+    has_topo = free_surface and topo_rows is not None
+    z_sides, x_sides = _fs_sides(fs_faces, free_surface)
+    lame_lambda_2mu = (lame_lambda + 2 * lame_mu) if lame_lambda_2mu is None else lame_lambda_2mu
+
+    vx_x, vz_z, vx_z, vz_x, m_vxx, m_vzz = elastic_velocity_gradients(
+        vx, vz, m_vxx, m_vzz,
+        dt=dt, h=h, b=b, pd=pd, pml=pml,
+        free_surface=free_surface, topo_rows=topo_rows, fs_faces=fs_faces,
+    )
+
+    # ---- Stress update -----------------------------------------------------
     sxx_pre_fs = sxx
     szz_pre_fs = szz
     szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
@@ -248,10 +295,7 @@ def elastic_stress_substep(
         for side in x_sides:
             szz = overwrite_surface_row(szz, _szz_surf, top_halo, axis=-1, side=side)
 
-    m_vxz = azh * m_vxz + bzh * vx_z
-    vx_z = vx_z + m_vxz
-    m_vzx = axh * m_vzx + bxh * vz_x
-    vz_x = vz_x + m_vzx
+    vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml)
     sxz = sxz + dt * mu_xz * (vx_z + vz_x)
 
     out = (

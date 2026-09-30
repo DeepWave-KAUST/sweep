@@ -48,6 +48,7 @@ is supported for every class.
 | `ElasticAPM` | `['vp', 'vs', 'rho']` | 2D | Alias of `Elastic` (Cao & Chen 2018 APM free surface) | ✅ |
 | `ElasticCurvilinear` | `['vp', 'vs', 'rho']` | 2D | `Elastic` on a curvilinear grid for irregular topography (`topography=`); eager only | ❌ |
 | `ElasticVRR` | `['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']` | 2D | Vector-reflectivity elastic (Soares & Sacchi 2025), momentum-stress form, no density model | ✅ |
+| `ViscoElastic` | `['vp', 'vs', 'rho', 'Qp', 'Qs']` | 2D | Nearly constant-Q visco-elastic, generalized standard linear solid (as SPECFEM2D); `vp`/`vs` given at `f_ref`, all five models differentiable | ✅ |
 | `ElasticTTI` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Rotated-staggered-grid elastic TTI | ❌ |
 | `ElasticTTISG` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 2D | Standard-staggered-grid elastic TTI | ✅ |
 | `ElasticTTISG3D` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 3D | Standard-staggered-grid elastic TTI | ✅ |
