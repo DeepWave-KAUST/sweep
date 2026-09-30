@@ -456,6 +456,16 @@ class PropTorch(torch.nn.Module):
             # called on what the CALLER passed and never on something this file
             # converted. Otherwise the new API warns about itself.
             memory = as_memory_strategy(memory)
+        elif impl == "c" and getattr(cuda_options, "memory", None) is not None:
+            # cuda_options.memory is the caller's own request too, and is read
+            # exactly like memory=. The new types keep their strategy in a
+            # ClassVar that options_to_dict() drops, so handing them down as-is
+            # left the layers below with no strategy: Ckpt()/Full() clashed
+            # with the 'boundary' default, and BoundarySaving(storage='cpu')
+            # quietly became the default gpu ring. CUDAOptions carries nothing
+            # else, so it is rebuilt from the normalised request below.
+            memory = as_memory_strategy(cuda_options.memory)
+            cuda_options = None
         _caller_request = memory
         if memory is not None and impl == "c":
             if cuda_options is not None and getattr(cuda_options, "memory", None) is not None:
