@@ -53,6 +53,14 @@ class WaveEquation:
     # (ElasticTTISG); their 5th binding slot is ``None``.
     C_HAS_RECURSIVE_CKPT = True
 
+    # Boundary saving: how far, in units of M, the IMAGING stencil reaches
+    # beyond the M cells the reverse step needs.  0 = pointwise imaging
+    # (acoustic); 1 = a divergence of a gradient (VRZ).  The propagator turns
+    # it into a sigma=0 buffer of REACH*M+1 cells between the physical box and
+    # the PML, so the boundary shell -- and the storage noise it carries -- is
+    # never read by the gradient of a physical cell.
+    BOUNDARY_BUFFER_REACH = 0
+
     # Whether this equation has a parameter-modified (APM, Cao & Chen 2018)
     # path for irregular free-surface topography.  When True, the propagator's
     # ``topography=`` accepts a 2-D air_mask + ``free_surface=False`` and

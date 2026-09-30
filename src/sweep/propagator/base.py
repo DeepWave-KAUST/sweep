@@ -51,6 +51,7 @@ class PropBase:
                  B=PROP_DEFAULTS.batch_size,
                  allow_growth=PROP_DEFAULTS.allow_growth,
                  boundary_saving_config=None,
+                 boundary_buffer=None,
                  **kwargs):
         """Base class for the Propagator
 
@@ -302,6 +303,19 @@ class PropBase:
         # explicitly thinner pad) or the mesh says it is cut.  Without a mesh
         # ``self.pad`` is left exactly as ``normalize_pad`` produced it.
         self.pad = dd_cut_pad(self.model_parallel, self.pad, self.abcn, self.ndim)
+
+        # ---- sigma=0 buffer between the physical box and the PML ------------
+        # ``self.pml_pad`` is the damping-ramp width per face (what the CPML
+        # profiles, the boundary Layout and the C side see); ``self.pad`` is
+        # the tensor pad = ramp + buffer, and drives the runtime shape, the
+        # coordinate shift and the gradient crop.  The buffer cells are plain
+        # interior cells whose gradient is cropped away, so a boundary-saving
+        # shell placed at THEIR outer edge is never read by the gradient of a
+        # physical cell: the storage-noise rim lands in the buffer.  Faces
+        # without a ramp (free surface, DD cut) get no buffer.
+        self.pml_pad = tuple(self.pad)
+        self.boundary_buffer = self._resolve_boundary_buffer(boundary_buffer, topography)
+        self.pad = tuple(p + self.boundary_buffer if p > 0 else 0 for p in self.pml_pad)
 
         self.padding_z = (self.pad[0], self.pad[1])
         self.padding = torch_pad_order(self.pad, self.ndim)
@@ -764,6 +778,41 @@ class PropBase:
 
     _INIT_ABC_KEYS = frozenset({"fd_pad", "shape", "max_vel", "pml_freq"})
 
+    def _resolve_boundary_buffer(self, requested, topography):
+        """Cells of sigma=0 buffer on every PML face; see ``BOUNDARY_BUFFER_REACH``.
+
+        ``None`` = the equation's need (REACH*M+1, 0 for a pointwise-imaging
+        equation), applied under EVERY gradient-memory strategy and impl so that
+        full, checkpoint and boundary-saving runs -- and eager vs compiled --
+        solve the same discretised problem (the buffer moves the PML outward,
+        which shifts the gradient by ~1e-2 relative on a small grid; only
+        boundary saving needs the buffer, but a mode-dependent grid would make
+        the modes disagree).  An explicit value is honoured, but a
+        boundary-saving run below the equation's need is refused: the
+        alternative is a shell narrower than the imaging stencil, i.e. the
+        outermost physical cells imaging cells that were never restored.
+        """
+        M = self.equation.so // 2
+        reach = int(getattr(self.equation, "BOUNDARY_BUFFER_REACH", 0) or 0)
+        needed = reach * M + 1 if reach > 0 else 0
+        if requested is None:
+            k = needed
+        else:
+            if isinstance(requested, bool) or int(requested) != requested or int(requested) < 0:
+                raise ValueError(f"boundary_buffer must be a non-negative int, got {requested!r}")
+            k = int(requested)
+        if k > 0 and topography is not None:
+            raise NotImplementedError(
+                "boundary_buffer (sigma=0 buffer for boundary saving) is not "
+                "supported together with topography= yet.")
+        if self._memory_strategy == "boundary" and k < needed:
+            raise ValueError(
+                f"{type(self.equation).__name__} boundary saving needs a buffer of at "
+                f"least {needed} cells (its imaging stencil reaches {reach}M beyond the "
+                f"boundary shell); got boundary_buffer={k}. Leave boundary_buffer=None "
+                "for the default, or use memory=Full()/Ckpt().")
+        return k
+
     def init_abc(self, **kwargs):
         # forward()'s residual kwargs land here on both impls, so this is the
         # one place a call-time typo (pml_freqs=...) can be caught instead of
@@ -792,7 +841,7 @@ class PropBase:
 
         abc_key = (
             self.pml_type,
-            tuple(self.pad),  # per-edge PML widths, axis-major (FS/cut faces = 0)
+            tuple(self.pml_pad),  # per-edge damping-ramp widths, axis-major (FS/cut faces = 0)
             self.equation.so,
             fd_pad,
             self._dt,

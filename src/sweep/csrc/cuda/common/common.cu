@@ -2,6 +2,8 @@
 #include "common.cuh"
 #include "context.h"
 #include "boundary/strip.cuh"
+#include "../../core/check.h"
+#include "../../core/device.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
 
@@ -395,3 +397,30 @@ __global__ void set_boundary_zeros(
         u_b[idx] = 0.f;
     }
 }
+
+__global__ void second_time_difference_kernel(
+    float* __restrict__ out, const float* __restrict__ next,
+    const float* __restrict__ now, const float* __restrict__ prev, int64_t n)
+{
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (next[i] - 2.0f * now[i]) + prev[i];
+}
+
+void second_time_difference(const Buf& out, const Buf& next, const Buf& now, const Buf& prev)
+{
+    SWEEP_CHECK(out.defined() && next.defined() && now.defined() && prev.defined(),
+                "second_time_difference expects defined buffers");
+    const int64_t n = out.numel();
+    SWEEP_CHECK(next.numel() == n && now.numel() == n && prev.numel() == n,
+                "second_time_difference expects matching numel (", n, ", ", next.numel(), ", ",
+                now.numel(), ", ", prev.numel(), ")");
+    SWEEP_CHECK(out.is_contiguous() && next.is_contiguous() && now.is_contiguous() && prev.is_contiguous(),
+                "second_time_difference expects contiguous buffers");
+    if (n == 0) return;
+    constexpr int kThreads = 256;
+    const unsigned blocks = static_cast<unsigned>((n + kThreads - 1) / kThreads);
+    second_time_difference_kernel<<<blocks, kThreads>>>(
+        out.data_ptr<float>(), next.data_ptr<float>(), now.data_ptr<float>(), prev.data_ptr<float>(), n);
+    SWEEP_CUDA_CHECK(cudaGetLastError());
+}
+

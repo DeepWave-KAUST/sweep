@@ -10,5 +10,6 @@ BackwardOutputCore backward_core(const BackwardInputCore& in);
 BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
 BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
+BackwardRunnerCorePtr backward_bs_runner_core(const BackwardInputCore& in);
 
 } // namespace acoustic_vrz3d

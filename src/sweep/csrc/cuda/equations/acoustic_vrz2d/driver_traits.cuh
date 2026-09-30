@@ -9,20 +9,20 @@
 // not listed here is the same as in acoustic2d/driver_traits.cuh):
 //   * two models, [vp, z] (make_state checks the count); State keeps z and the derived inv_z = 1/z alive as tensors beside their raw pointers;
 //   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
-//   * ADJ_WF_COUNT = 9 (u triple + psi quad + psin pair, no zeta double-buffer): rotate_adjoint_buffers rotates via swap_pml instead of swap_aux, and bind_or_alloc_adjoint allocates with double_buffer_psi = true;
+//   * ADJ_WF_COUNT = 11 (u triple + psi/zeta double-buffer): the exact CPML adjoint (acoustic_vrz2nd_adjoint_fused) writes new adjoint psi AND zeta to separate buffers, rotated with swap_aux;
 //   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
 //   * BwdWorkspace is non-empty: the time-invariant adjoint coefficients C0/Cx/Cz and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz), which AcousticVRZ.cuda_layout.backward_workspace_shapes declares in every memory mode, so the binding is required; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
 //   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
 //   * setup_ctx and init_aux_slabs are empty: no per-edge free surface, no topography, legacy full-grid CPML aux;
-//   * allt_shape = (nt, 5, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz), filled by capture_allt after the swap (rotate_buffers); the in-kernel u_thist stays disabled (false, nullptr);
-//   * save_width = M + 1 regardless of abcn; boundary save/restore offset -M (strips sit M inside the pad) instead of 0;
+//   * allt_shape = (nt, 6, B, 1, nz, nx) (u, psix, psiz, zetax, zetaz, second time difference), filled by capture_allt before the swap (rotate_buffers); the in-kernel u_thist stays disabled (false, nullptr);
+//   * save_width = M + 1 regardless of abcn; boundary save/restore offset -M instead of 0 (the imaging reach beyond that is covered by the Python-side sigma=0 buffer);
 //   * launch_step_range refuses sub-ranges (the kernels ignore ctx.x_base / x_limit), so there are no phase-split strips and no air-clear prepass;
 //   * grads = the two model gradients {grad_vp, grad_z} (grads_out slot 0, the wavelet, is unused): no grad_wavelet (accumulate_source_grad is empty), no illumination/ADCIG (rtm_out_full / rtm_out_bs return nullptr, fused_grad_ptr is nullptr, bs_rtm_tap is empty, pack_outputs sets grads only);
 //   * u_forward_ptr = the u slice u_forward.select(0, it)[0];
 //   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (add_source_signed, sign -1, straight from p.adjoint_source -- no negated copy is built);
 //   * image_step = CALCULATE_GRAD_VRZ2D_AUTO (two gradients, split scratch from the workspace; returns early without grads), no RTM kernel;
 //   * seed_reconstruction also zeroes u_next, and its set_boundary_zeros calls do not pass the cut_mask;
-//   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on the post-swap u_now (acoustic2d: NOPML -> restore -> strip-source un-injection -> band imaging -> inject -> swap; VRZ needs no un-injection -- its inject lands before the restore, so a restored strip source cell is the saved true value);
+//   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> forward.swap() -> CALCULATE_GRAD_VRZ2D_AUTO on u_prev after the swap (= U_it) (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
 //   * no ckpt/recursive hooks (section [5] is empty): backward.cu keeps the hand-written chunk/recursive checkpoint backward.
 //
 // What the skeleton ADDS for this equation (dormant on legacy calls, all
@@ -80,9 +80,9 @@ struct Driver {
     static constexpr int TANGENT_PAD = 1;
     static constexpr int CUT_MASK_BITS = 0xF;
     static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
-    // u triple + psi quad + psin pair: the VRZ adjoint rotates via swap_pml
-    // (no zeta double-buffer, unlike plain acoustic's 11).
-    static constexpr int ADJ_WF_COUNT = 9;
+    // u triple + psi/zeta double-buffer: the exact CPML adjoint writes the new
+    // adjoint psi AND zeta to separate buffers (rotated with swap_aux).
+    static constexpr int ADJ_WF_COUNT = 11;
     static constexpr int RECON_WF_COUNT = 3;
     static constexpr bool ADCIG_IN_FULL_MODES = false;   // no RTM/ADCIG kernels
     static constexpr bool HAS_FUSED_FULL_IMG = false;    // per-step grad, no lag fusion
@@ -193,6 +193,8 @@ struct Driver {
         zero_tensor_device_async(wf.psiz_t);
         zero_tensor_device_async(wf.zetax_t);
         zero_tensor_device_async(wf.zetaz_t);
+        if (wf.psixn_t.defined()) { zero_tensor_device_async(wf.psixn_t); zero_tensor_device_async(wf.psizn_t); }
+        if (wf.zetaxn_t.defined()) { zero_tensor_device_async(wf.zetaxn_t); zero_tensor_device_async(wf.zetazn_t); }
     }
 
     static BwdWorkspace make_bwd_workspace(const BackwardInputCore& p,
@@ -254,9 +256,9 @@ struct Driver {
         } else {
             SWEEP_CHECK(p.u_forward.defined() && p.u_forward.numel() > 0,
                         "AcousticVRZ backward expects saved full forward wavefields.");
-            SWEEP_CHECK(p.u_forward.dim() == 6 && p.u_forward.size(1) == 5,
+            SWEEP_CHECK(p.u_forward.dim() == 6 && p.u_forward.size(1) == 6,
                         "AcousticVRZ backward expects forward wavefields with "
-                        "shape (nt, 5, B, 1, nz, nx).");
+                        "shape (nt, 6, B, 1, nz, nx).");
         }
     }
 
@@ -281,9 +283,17 @@ struct Driver {
 
     static std::vector<int64_t> allt_shape(const eqdrv::Dims& d, int64_t nt)
     {
-        return {nt, 5, d.B, 1, d.nz, d.nx};   // u, psix, psiz, zetax, zetaz
+        // u, psix, psiz, zetax, zetaz, and slot 5 = U_{it+1} − 2U_it + U_{it−1}
+        // (the second time difference the full-store imaging uses in place
+        // of a spatial Laplacian; formed in capture_allt where all three
+        // levels are resident).
+        return {nt, 6, d.B, 1, d.nz, d.nx};
     }
 
+    // M+1 at offset -M: what the reverse step needs.  The imaging stencil
+    // (a divergence of a gradient) reaches 2M, one M past the shell -- the
+    // propagator's sigma=0 boundary buffer (BOUNDARY_BUFFER_REACH) keeps that
+    // reach inside reconstructed cells.
     static int save_width(int /*abcn*/, int M) { return M + 1; }
 
     // ===================================================================== //
@@ -354,7 +364,7 @@ struct Driver {
             s.launch_config.block,
             bs,
             save_width,
-            -s.M,     // offset: strips sit M inside the pad
+            -s.M, // offset: strips sit M inside the pad
             ctx
         );
     }
@@ -399,6 +409,10 @@ struct Driver {
         copy_tensor_cuda_async(u_allt.select(0, it).select(0, 2), wf.psiz_t);
         copy_tensor_cuda_async(u_allt.select(0, it).select(0, 3), wf.zetax_t);
         copy_tensor_cuda_async(u_allt.select(0, it).select(0, 4), wf.zetaz_t);
+        // pre-rotate: u_prev = U_{it-1}, u_now = U_it, u_next = U_{it+1}
+        // (u_next already carries the wavelet added at it).
+        second_time_difference(u_allt.select(0, it).select(0, 5),
+                               wf.u_next_t, wf.u_now_t, wf.u_prev_t);
     }
 
     static void save_last_state(EffectiveBoundarySaver& saver, Wavefield& wf)
@@ -460,7 +474,7 @@ struct Driver {
         SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                     "acoustic_vrz2d/backward requires the propagator-bound "
                     "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
-                    "adjoint_extra_nvar = 9 tensors)");
+                    "adjoint_extra_nvar = 11 tensors)");
         wf.bind(p.adjoint_wavefields, 2, true);
     }
 
@@ -469,6 +483,9 @@ struct Driver {
                              AcousticCPMLPointer cpml, BwdWorkspace& ws,
                              const float* /*grad_forward_img*/, float* /*grad_out*/)
     {
+        SWEEP_CHECK(adj_view.psixn != nullptr && adj_view.zetaxn != nullptr,
+            "VRZ exact adjoint needs the adjoint wavefield bound with psi+zeta "
+            "double-buffers (11 tensors in 2D); set cuda_layout.adjoint_extra_nvar=2.");
         ACOUSTIC_VRZ2D_ADJOINT_FUSED(
             s.order,
             s.launch_config.grid,
@@ -485,7 +502,11 @@ struct Driver {
             s.grad_ctx_x,
             s.grad_ctx_z,
             cpml,
-            ctx
+            ctx,
+            adj_view.psixn,
+            adj_view.psizn,
+            adj_view.zetaxn,
+            adj_view.zetazn
         );
     }
 
@@ -510,13 +531,31 @@ struct Driver {
 
     static void rotate_adjoint_buffers(Wavefield& wf)
     {
-        wf.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        wf.swap_aux();   // rotate u AND the psi/zeta double-buffers
     }
 
-    static void accumulate_source_grad(const State&, const SolverContext&,
-                                       Wavefield&, const BackwardInputCore&,
-                                       std::vector<Buf>&, int, int)
-    {}   // VRZ computes no grad_wavelet
+    // VRZ computes no grad_wavelet.  This slot fires right before the
+    // imaging with the same post-rotate λ, so it hosts the source-cell
+    // correction of the p_tt imaging (vrz2d_utt_source_correction): the
+    // stored second time difference contains the wavelet at the source
+    // cells and the exact adjoint must not.
+    static void accumulate_source_grad(const State& s, const SolverContext& ctx,
+                                       Wavefield& adjoint, const BackwardInputCore& p,
+                                       std::vector<Buf>& grads,
+                                       int it, int nsrc)
+    {
+        if (nsrc <= 0) return;
+        vrz2d_utt_source_correction<<<s.source_config.grid, s.source_config.block>>>(
+            grads[0].data_ptr<float>(),
+            adjoint.u_now_t.data_ptr<float>(),
+            s.vp,
+            p.forward_source.data_ptr<float>(),
+            p.forward_sources_loc.data_ptr<int>(),
+            it,
+            nsrc,
+            ctx
+        );
+    }
 
     // (also used by the ckpt/recursive imaging)
     static void image_step(const State& s, const SolverContext& ctx,
@@ -525,12 +564,19 @@ struct Driver {
                            RTMOutputCore* /*rtm_out*/, BwdWorkspace& ws)
     {
         if (grads == nullptr) return;
+        // forward_ptr is u_forward[it][0]; slot 5 (allt_shape) holds the
+        // precomputed second time difference, one slot stride further on.
+        const float* p_tt = forward_ptr
+            + 5 * (size_t)s.B * (size_t)s.nz * (size_t)s.nx;
         CALCULATE_GRAD_VRZ2D_AUTO(
             s.order,
             s.launch_config.grid,
             s.launch_config.block,
             forward_ptr,
             adjoint.u_now_t.data_ptr<float>(),
+            p_tt,
+            nullptr,
+            nullptr,
             s.vp,
             s.z,
             s.inv_z,
@@ -639,16 +685,22 @@ struct Driver {
             s.launch_config.block,
             bs,
             save_width,
-            -s.M,     // offset
+            -s.M, // offset
             ctx
         );
-        forward.swap();
+        // Image at it BEFORE the swap, where the three time levels are
+        // co-resident: u_now = U_it, u_next = U_{it-1} (just reconstructed,
+        // restored and re-sourced), u_prev = U_{it+1}.  The p_tt path forms
+        // U_{it+1} − 2U_it + U_{it−1} from them.
         CALCULATE_GRAD_VRZ2D_AUTO(
             s.order,
             s.launch_config.grid,
             s.launch_config.block,
-            forward.u_now_t.data_ptr<float>(),
+            for_view.u_now,
             adjoint.u_now_t.data_ptr<float>(),
+            nullptr,
+            for_view.u_next,
+            for_view.u_prev,
             s.vp,
             s.z,
             s.inv_z,
@@ -662,6 +714,7 @@ struct Driver {
             s.lap_ctx,
             ctx
         );
+        forward.swap();
     }
 
     static void bs_rtm_tap(const State&, const SolverContext&,

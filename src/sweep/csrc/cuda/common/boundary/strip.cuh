@@ -30,6 +30,28 @@
 // image rows.
 // ====================================================================
 
+// A saved band may be asked to reach further outward than the array allows: a
+// free-surface face has no damping pad, so only the M halo cells exist outside
+// the physical box, while an equation with an imaging buffer (VRZ,
+// BOUNDARY_BUFFER_REACH) asks for a wider reach.  Slide the band back inside
+// instead of indexing out of bounds.  No-op whenever the band already fits --
+// every face with pad >= |offset|, i.e. everything except such a free-surface
+// face.  From fix/vrz-imaging-and-shell (d972dc74), moved here so the save,
+// the restore and the strip-source un-injection keep sharing ONE band.
+__host__ __device__ __forceinline__ int bs_band_lo(int p0, int offset, int width, int n)
+{
+    int s = p0 + offset;
+    if (s + width > n) s = n - width;
+    return s < 0 ? 0 : s;
+}
+
+__host__ __device__ __forceinline__ int bs_band_hi(int p1, int offset, int width, int n)
+{
+    int e = p1 - offset;
+    if (e - width < 0) e = width;
+    return e > n ? n : e;
+}
+
 struct BsStripBands2D {
     int nx_boundary, nz_boundary;          // tangential extent of a band
     int x_t0, x_t1, z_t0, z_t1;            // tangential range [t0, t1)
@@ -49,10 +71,10 @@ __device__ __forceinline__ BsStripBands2D bs_strip_bands_2d(
     g.nz_boundary = ctx.nz_phys() + 2 * tangent_pad;
     g.x_t0 = x0 - tangent_pad;  g.x_t1 = x1 + tangent_pad;
     g.z_t0 = z0 - tangent_pad;  g.z_t1 = z1 + tangent_pad;
-    g.top_start   = z0 + offset;  g.top_end   = g.top_start + width;
-    g.bot_end     = z1 - offset;  g.bot_start = g.bot_end - width;
-    g.left_start  = x0 + offset;  g.left_end  = g.left_start + width;
-    g.right_end   = x1 - offset;  g.right_start = g.right_end - width;
+    g.top_start   = bs_band_lo(z0, offset, width, ctx.nz);  g.top_end   = g.top_start + width;
+    g.bot_end     = bs_band_hi(z1, offset, width, ctx.nz);  g.bot_start = g.bot_end - width;
+    g.left_start  = bs_band_lo(x0, offset, width, ctx.nx);  g.left_end  = g.left_start + width;
+    g.right_end   = bs_band_hi(x1, offset, width, ctx.nx);  g.right_start = g.right_end - width;
     return g;
 }
 
@@ -107,12 +129,12 @@ __device__ __forceinline__ BsStripBands3D bs_strip_bands_3d(
     g.x_t0 = x0 - tangent_pad;  g.x_t1 = x1 + tangent_pad;
     g.y_t0 = y0 - tangent_pad;  g.y_t1 = y1 + tangent_pad;
     g.z_t0 = z0 - tangent_pad;  g.z_t1 = z1 + tangent_pad;
-    g.top_start   = z0 + offset;  g.top_end   = g.top_start + width;
-    g.bot_end     = z1 - offset;  g.bot_start = g.bot_end - width;
-    g.front_start = y0 + offset;  g.front_end = g.front_start + width;
-    g.back_end    = y1 - offset;  g.back_start = g.back_end - width;
-    g.left_start  = x0 + offset;  g.left_end  = g.left_start + width;
-    g.right_end   = x1 - offset;  g.right_start = g.right_end - width;
+    g.top_start   = bs_band_lo(z0, offset, width, ctx.nz);  g.top_end   = g.top_start + width;
+    g.bot_end     = bs_band_hi(z1, offset, width, ctx.nz);  g.bot_start = g.bot_end - width;
+    g.front_start = bs_band_lo(y0, offset, width, ctx.ny);  g.front_end = g.front_start + width;
+    g.back_end    = bs_band_hi(y1, offset, width, ctx.ny);  g.back_start = g.back_end - width;
+    g.left_start  = bs_band_lo(x0, offset, width, ctx.nx);  g.left_end  = g.left_start + width;
+    g.right_end   = bs_band_hi(x1, offset, width, ctx.nx);  g.right_start = g.right_end - width;
     return g;
 }
 

@@ -35,6 +35,9 @@ RUNNER_EQUATIONS = (
     "acoustic2d", "acoustic3d", "acoustic_vrz2d", "elastic2d", "elastic3d",
     "das_mu2d", "das_mu3d", "elastic_tti_sg2d", "elastic_tti_sg3d", "elastic_vr2d",
 )
+# Backward runner only: acoustic_vrz3d's phase-aware Vrz3dBackwardBsRunner (its
+# forward keeps the per-call stepped path).
+BACKWARD_RUNNER_EQUATIONS = ("acoustic_vrz3d",)
 
 _ns = None
 
@@ -53,8 +56,11 @@ def namespace() -> dict:
         for i, (name, kind) in enumerate(_entry_table(lib)):
             ns[name] = _make_entry(lib, i, name, kind)
             ids[name] = i
-        for eq in RUNNER_EQUATIONS:
-            for suffix, cls in (("forward", ForwardRunner), ("backward_bs", BackwardRunner)):
+        runners = [(eq, ("forward", "backward_bs")) for eq in RUNNER_EQUATIONS]
+        runners += [(eq, ("backward_bs",)) for eq in BACKWARD_RUNNER_EQUATIONS]
+        for eq, suffixes in runners:
+            for suffix in suffixes:
+                cls = ForwardRunner if suffix == "forward" else BackwardRunner
                 entry = f"{eq}_{suffix}"
                 if entry not in ids:
                     raise RuntimeError(f"sweep core has no entry {entry}, needed by its stepped runner")

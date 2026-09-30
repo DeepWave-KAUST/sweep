@@ -480,6 +480,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("acoustic3d_backward_bs_runner", with_stream_backward([](const BackwardInput& in) -> BackwardRunnerPtr { return std::make_shared<ShimBackwardRunner>(ID_acoustic3d_backward_bs, in); }));
     m.def("acoustic_vrz2d_forward_runner", with_stream_forward([](const ForwardInput& in) -> ForwardRunnerPtr { return std::make_shared<ShimForwardRunner>(ID_acoustic_vrz2d_forward, in); }));
     m.def("acoustic_vrz2d_backward_bs_runner", with_stream_backward([](const BackwardInput& in) -> BackwardRunnerPtr { return std::make_shared<ShimBackwardRunner>(ID_acoustic_vrz2d_backward_bs, in); }));
+    m.def("acoustic_vrz3d_backward_bs_runner", with_stream_backward([](const BackwardInput& in) -> BackwardRunnerPtr { return std::make_shared<ShimBackwardRunner>(ID_acoustic_vrz3d_backward_bs, in); }));
     m.def("das_mu2d_forward_runner", with_stream_forward([](const ForwardInput& in) -> ForwardRunnerPtr { return std::make_shared<ShimForwardRunner>(ID_das_mu2d_forward, in); }));
     m.def("das_mu2d_backward_bs_runner", with_stream_backward([](const BackwardInput& in) -> BackwardRunnerPtr { return std::make_shared<ShimBackwardRunner>(ID_das_mu2d_backward_bs, in); }));
     m.def("das_mu3d_forward_runner", with_stream_forward([](const ForwardInput& in) -> ForwardRunnerPtr { return std::make_shared<ShimForwardRunner>(ID_das_mu3d_forward, in); }));

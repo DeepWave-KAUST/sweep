@@ -90,6 +90,19 @@ Each free face replaces its PML pad with the image-method boundary
 condition; the remaining faces stay absorbing. ``abcn`` accepts the same
 per-edge forms (a scalar, or a canonical tuple of per-face PML widths).
 
+``boundary_buffer=`` (default ``None``) puts that many sigma=0 cells between
+the physical box and the PML ramp on every absorbing face.  Boundary saving
+stores a shell ``M + 1`` cells wide, which is all the reverse time step needs;
+an equation whose gradient stencil reaches further -- ``AcousticVRZ`` and
+``AcousticVRZ3D`` take a divergence of a gradient, reach ``2M`` -- would image
+cells the shell never restored.  Such an equation declares
+``BOUNDARY_BUFFER_REACH`` and ``None`` gives it ``REACH * M + 1`` buffer cells
+under every memory strategy and backend, so full, checkpointing and boundary
+saving solve the same grid; the buffer is cropped with the pad, so shapes and
+coordinates do not change.  Equations with pointwise imaging get no buffer.
+An explicit value is honoured, but boundary saving refuses one below the
+equation's need.
+
 Support matrix:
 
 - **2-D ``Acoustic`` / ``Elastic``** — full per-edge support on the eager

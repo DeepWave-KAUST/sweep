@@ -27,7 +27,7 @@ constexpr int REPLAY_STATE_NVAR = Driver::CKPT_NVAR + 1;   // 7
 // p.checkpoint_replay (cuda_layout.checkpoint_replay_shapes): allocated by the
 // propagator next to the checkpoint snapshots, never re-zeroed.
 enum ReplaySlot : int {
-    CHUNK_FORWARD = 0   // the replayed segment's pressure, (max_segment, B, 1, nz, nx)
+    CHUNK_FORWARD = 0   // the replayed segment's pressure, (max_segment + 2, B, 1, nz, nx)
 };
 
 } // namespace
@@ -80,7 +80,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
     AcousticWavefieldTensor adjoint;
     SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vrz2d/backward_ckpt requires the propagator-bound "
-                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 9 tensors)");
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + adjoint_extra_nvar = 11 tensors: the exact CPML adjoint double-buffers psi AND zeta)");
     adjoint.bind(p.adjoint_wavefields, 2, true);
     Driver::zero_wavefield_state(adjoint);
 
@@ -195,14 +195,16 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
     }
 
     // The replayed segment's pressure history from p.checkpoint_replay
-    // (ReplaySlot above), taken once at the full max_segment rows and reused
-    // by every segment: each row the reverse pass reads was written by the
-    // replay earlier in the same segment, so it is never zeroed.  The
-    // propagator allocates it next to the checkpoint snapshots for both
-    // checkpoint modes (cuda_layout.checkpoint_replay_shapes is unconditional
-    // for this equation), so the binding is required.
+    // (ReplaySlot above), taken once at the full max_segment + 2 rows and
+    // reused by every segment: slot 0 = U_{start-1}, slot k+1 = U_{start+k},
+    // slot (end-start)+1 = U_end, so the imaging forms U_{it+1} - 2U_it +
+    // U_{it-1} from neighbouring slots.  Each row the reverse pass reads was
+    // written by the replay earlier in the same segment, so it is never
+    // zeroed.  The propagator allocates it next to the checkpoint snapshots
+    // for both checkpoint modes (cuda_layout.checkpoint_replay_shapes is
+    // unconditional for this equation), so the binding is required.
     auto chunk_forward = pool_required(p.checkpoint_replay, CHUNK_FORWARD,
-                                       {max_segment_length, N, C, nz, nx},
+                                       {max_segment_length + 2, N, C, nz, nx},
                                        "checkpoint_replay (acoustic_vrz2d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
@@ -224,6 +226,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
             checkpoint_runtime.zero_state(forward.state_tensors());
         else
             checkpoint_runtime.load(checkpoint_idx, forward.checkpoint_tensors(), forward.next_tensors());
+        copy_tensor_device_to_device_async(chunk_forward.select(0, 0), forward.u_prev_t);   // U_{start-1}
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
@@ -254,13 +257,17 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
+            // store U_it (pre-swap u_now); after the swap this buffer is U_{it+1}
+            copy_tensor_device_to_device_async(chunk_forward.select(0, it - start + 1), forward.u_now_t);
             forward.swap();
-            copy_tensor_device_to_device_async(chunk_forward.select(0, it - start), forward.u_now_t);
         }
+        copy_tensor_device_to_device_async(chunk_forward.select(0, end - start + 1), forward.u_now_t);   // U_end
 
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
+            SWEEP_CHECK(adj_view.psixn != nullptr && adj_view.zetaxn != nullptr,
+                        "VRZ exact adjoint needs psi+zeta double-buffers on the adjoint wavefield");
             ACOUSTIC_VRZ2D_ADJOINT_FUSED(
                 order,
                 launch_config.grid,
@@ -277,7 +284,11 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 grad_ctx_x,
                 grad_ctx_z,
                 cpml,
-                ctx
+                ctx,
+                adj_view.psixn,
+                adj_view.psizn,
+                adj_view.zetaxn,
+                adj_view.zetazn
             );
 
             add_source_signed<<<adj_source_config.grid, adj_source_config.block>>>(
@@ -290,14 +301,29 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
-            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+            adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
+
+            // source-cell correction of the p_tt imaging (see driver_traits)
+            vrz2d_utt_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                grad_vp.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                vp.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                ctx
+            );
 
             CALCULATE_GRAD_VRZ2D_AUTO(
                 order,
                 launch_config.grid,
                 launch_config.block,
-                chunk_forward.select(0, it - start).data_ptr<float>(),
+                chunk_forward.select(0, it - start + 1).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
+                nullptr,
+                chunk_forward.select(0, it - start).data_ptr<float>(),
+                chunk_forward.select(0, it - start + 2).data_ptr<float>(),
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),

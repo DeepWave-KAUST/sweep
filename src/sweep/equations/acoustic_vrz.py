@@ -157,6 +157,8 @@ class AcousticVRZ(SecondOrderEquation):
     
     """
     C_NAME = "acoustic_vrz2d"
+    # div(lambda*vp*grad p) in the gradient: reach 2M, one M beyond the shell.
+    BOUNDARY_BUFFER_REACH = 1
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Acoustic velocity model.", unit="m/s"),
@@ -225,11 +227,13 @@ class AcousticVRZ(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             record_shape=record_single(),
-            # chunk_forward: the replayed segment's pressure, (steps, B, 1, grid)
-            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, 1, *grid)],
-            # u, psix, psiz, zetax, zetaz; the singleton channel axis is the
-            # driver's own layout (acoustic_vrz2d allt_shape).
-            save_all_shape=lambda B, nt, grid: (nt, 5, B, 1, *grid),
+            # chunk_forward, (steps + 2, B, 1, grid): U_{start-1}, the replayed
+            # segment's pressure, U_end -- the p_tt imaging reads neighbours.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg + 2, B, 1, *grid)],
+            # u, psix, psiz, zetax, zetaz, U_{it+1}-2U_it+U_{it-1} (the p_tt
+            # imaging); the singleton channel axis is the driver's own layout
+            # (acoustic_vrz2d allt_shape).
+            save_all_shape=lambda B, nt, grid: (nt, 6, B, 1, *grid),
             # The compiled backward's scratch (acoustic_vrz2d/driver_traits.cuh
             # WorkspaceSlot): four c/e coupling grids of the split gradient and
             # the three adjoint coefficients C0/Cx/Cz -- the same 7 in every
@@ -240,6 +244,8 @@ class AcousticVRZ(SecondOrderEquation):
             # psix,psiz,zetax,zetaz (4) + psixn,psizn (2): race-free forward psi
             # double-buffer (read psi, write psi*n, swap_pml).
             pml_nvar=6,
+            # exact CPML adjoint: zeta double-buffer on the adjoint only
+            adjoint_extra_nvar=2,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
@@ -275,6 +281,7 @@ class AcousticVRZ3D(SecondOrderEquation):
     
     """
     C_NAME = "acoustic_vrz3d"
+    BOUNDARY_BUFFER_REACH = 1
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="3D acoustic velocity model.", unit="m/s"),
@@ -352,9 +359,11 @@ class AcousticVRZ3D(SecondOrderEquation):
     def cuda_layout(self):
         return CUDALayoutSpec(
             record_shape=record_single(),
-            # chunk_forward: the replayed segment's pressure, (steps, B, 1, grid)
-            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, 1, *grid)],
-            save_all_shape=history_fields(7),   # u + 3 psi + 3 zeta
+            # chunk_forward, (steps + 2, B, 1, grid): U_{start-1}, the replayed
+            # segment's pressure, U_end -- the p_tt imaging reads neighbours.
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg + 2, B, 1, *grid)],
+            # u + 3 psi + 3 zeta + U_{it+1}-2U_it+U_{it-1} (the p_tt imaging)
+            save_all_shape=history_fields(8),
             # The compiled backward's scratch (acoustic_vrz3d/backward.cu WorkspaceSlot):
             # six c/e coupling grids of the split gradient and the four adjoint
             # coefficients C0/Cx/Cy/Cz -- the same ten the DD runner binds.
@@ -364,6 +373,8 @@ class AcousticVRZ3D(SecondOrderEquation):
             # psix,psiy,psiz,zetax,zetay,zetaz (6) + psixn,psiyn,psizn (3): race-free
             # forward psi double-buffer (read psi, write psi*n, swap_pml).
             pml_nvar=9,
+            # exact CPML adjoint: zeta double-buffer on the adjoint only
+            adjoint_extra_nvar=3,
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,

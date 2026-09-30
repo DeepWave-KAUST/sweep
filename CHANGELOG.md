@@ -10,6 +10,19 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **``boundary_buffer=`` on every propagator**: sigma=0 cells between the
+  physical box and the PML ramp.  ``None`` (the default) gives an equation that
+  declares ``BOUNDARY_BUFFER_REACH`` its need, ``REACH * M + 1`` cells, under
+  every memory strategy and backend; only ``AcousticVRZ`` / ``AcousticVRZ3D``
+  declare one.  The buffer is cropped with the pad, so shapes and coordinates
+  do not change; boundary saving refuses an explicit value below the need.
+- **A persistent backward runner for ``AcousticVRZ3D``**
+  (``acoustic_vrz3d_backward_bs_runner``), phase-aware, so the domain-decomposed
+  backward no longer re-enters the per-call binding three times per step and
+  rebuilds its whole setup each time: on a production-size 3-D grid (2x2 DD,
+  4xH100) an iteration went from 240 s to 95.7 s, gradients and records
+  bit-identical.  It owns its boundary saver, so it also serves host-staged
+  boundaries.
 - **`impl='c'` talks to the prebuilt core through a pure-Python `ctypes`
   layer; after `pip install` nothing compiles.**  `sweep.backend.c` fills the
   core's C structs from each tensor's `data_ptr()`, shape, strides and dtype
@@ -185,6 +198,20 @@ and this project adheres to
   name any more.
 
 ### Changed
+- **``AcousticVRZ`` / ``AcousticVRZ3D`` gradients**: the vp gradient images
+  the second time difference ``U_{it+1} - 2U_it + U_{it-1}`` (the forward
+  identity) instead of a second spatial derivative of the stored field, so the
+  full, checkpointing and boundary-saving gradients agree to rounding; the full
+  history gains one slot (6 in 2-D, 8 in 3-D) and the checkpoint replay buffer
+  two rows.  With the default ``boundary_buffer`` the runtime grid of a VRZ
+  propagator is ``M + 1`` cells wider per absorbing face, which moves the
+  gradient near the PML by ~1e-2 relative on a small grid.  The exact CPML
+  adjoint (Fixed) makes the backward ~22% slower and adds three adjoint zeta
+  shadows (~0.1 GiB on a production-size 3-D grid).
+- **Domain decomposition**: a multi-axis mesh ships every halo field of a step
+  in ONE batched P2P across the cut axes instead of one round per axis (the
+  strips are latency-bound: a six-field shipment on a production-size 3-D grid ran at
+  6.5 GiB/s over NVLink).
 - **Boundary saving no longer re-injects a source that sits in the restore
   strip.**  In the boundary-saving reverse pass the strip cells (the M+1 cells
   inside every non-cut physical edge, i.e. physical rows 0..M under a free
@@ -342,6 +369,24 @@ and this project adheres to
   / `Ckpt(...)`.
 
 ### Fixed
+- **``AcousticVRZ`` / ``AcousticVRZ3D`` imaged the wrong time step.**  The
+  deferred history capture ran after the buffer rotation, so full and
+  checkpointing imaged ``U_{it+1}`` while boundary saving imaged ``U_{it-1}``
+  (boundary saving vs full rel 0.12); every mode now images ``U_it``
+  (4e-4).  Only VRZ used that hook.
+- **VRZ boundary saving imaged unrestored cells.**  Its gradient reaches ``2M``,
+  one ``M`` past the ``M + 1`` shell, so the outermost physical cells read what
+  the reverse step left there (up to 9x the largest full-storage gradient on a
+  small 3-D grid; 99.6% of the Marmousi residual in the outermost cell).  The
+  sigma=0 ``boundary_buffer`` moves the shell out of the stencil's reach
+  instead of widening it (peak memory 69.4 -> 54.7 GB against a ``2M + 1``
+  shell on a 3-D field-data single shot).
+- **The compiled VRZ adjoint was an approximation in the PML band** (it applied
+  the forward CPML operator to the adjoint field).  It is now the exact
+  discrete transpose, 2-D and 3-D: compiled vs eager 1.7e-7 (2-D) and 8e-7
+  (3-D) with TF32 off, finite differences to 1e-4.
+- **DD sub-groups ignored the configured NCCL timeout** and fell back to the
+  default one.
 - **`pytest test/` could never exit 0.**  `test_import_does_not_pull_optional_deps`
   asserted `mod not in sys.modules`, which is process-global: by the time it
   runs it is a statement about everything the preceding ~600 tests imported,

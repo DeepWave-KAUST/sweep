@@ -22,6 +22,11 @@ from typing import Iterable
 
 import numpy as np
 import torch
+# The eager reference runs conv3d BACKWARD in TF32 on Ampere/Hopper unless this is
+# off (forward picks a full-precision algorithm, so records do not warn): the 3-D
+# c-vs-eager rel was 0.10-0.26 with it on, 1e-3 with it off (2026-09-10).
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
 
 
 def find_repo_root() -> Path:

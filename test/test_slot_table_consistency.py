@@ -78,17 +78,21 @@ def test_first_order_families_rotate_nothing():
         assert t.u_blocks == ()
 
 
-def test_vrz_needs_no_adjoint_extra_discriminator():
-    """VRZ has no fused adjoint, so it has no adjoint-only shadow slots.
+def test_vrz_shadow_slots_follow_the_exact_adjoint():
+    """The exact CPML adjoint double-buffers zeta as well as psi (rotated
+    with swap_aux), so the VRZ tables carry acoustic's adjoint-only shadow
+    slots and the same adjoint pair sets.
 
-    The DD driver currently picks its pair set with
-    ``acoustic_adj_pairs if adjoint_extra_nvar else acoustic_psi_pairs`` -- a
-    discriminator that exists only because the pair sets were hand-written.
-    From the table it falls out.
+    The DD driver picks its pair set with
+    ``acoustic_adj_pairs if adjoint_extra_nvar else acoustic_psi_pairs``;
+    from the table it falls out.
     """
-    for t in (ST.ACOUSTIC_VRZ2D, ST.ACOUSTIC_VRZ3D):
-        assert t.adjoint_extra_nvar == 0
-        assert t.pairs(adjoint=True) == t.pairs(adjoint=False)
+    for vrz, ac, extra in ((ST.ACOUSTIC_VRZ2D, ST.ACOUSTIC2D, 2),
+                           (ST.ACOUSTIC_VRZ3D, ST.ACOUSTIC3D, 3)):
+        assert vrz.adjoint_extra_nvar == extra
+        assert vrz.pairs(adjoint=True) == ac.pairs(adjoint=True)
+        assert vrz.pairs(adjoint=False) == ac.pairs(adjoint=False)
+        assert vrz.pairs(adjoint=True) != vrz.pairs(adjoint=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -156,8 +160,8 @@ def test_dd_wavefield_counts():
         # name: (n_forward, n_adjoint, nrecon, n_velocity)
         "Acoustic": (9, 11, 3, 0),
         "Acoustic3D": (12, 15, 3, 0),
-        "AcousticVRZ": (9, 9, 3, 0),
-        "AcousticVRZ3D": (12, 12, 3, 0),
+        "AcousticVRZ": (9, 11, 3, 0),     # exact CPML adjoint: zeta shadow slots
+        "AcousticVRZ3D": (12, 15, 3, 0),
         "Elastic": (15, 15, 7, 2),
         "Elastic3D": (36, 36, 12, 3),
     }

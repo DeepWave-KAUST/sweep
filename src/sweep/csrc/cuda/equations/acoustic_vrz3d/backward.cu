@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <memory>
+#include <optional>
 
 #include "acoustic_vrz3d.h"
 #include "kernels.cuh"
@@ -28,6 +30,12 @@ void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
     zero_tensor_device_async(wf.zetax_t);
     zero_tensor_device_async(wf.zetay_t);
     zero_tensor_device_async(wf.zetaz_t);
+    if (wf.psixn_t.defined()) {
+        zero_tensor_device_async(wf.psixn_t); zero_tensor_device_async(wf.psiyn_t); zero_tensor_device_async(wf.psizn_t);
+    }
+    if (wf.zetaxn_t.defined()) {
+        zero_tensor_device_async(wf.zetaxn_t); zero_tensor_device_async(wf.zetayn_t); zero_tensor_device_async(wf.zetazn_t);
+    }
 }
 
 // The checkpoint snapshot set (u_prev, u_now, psix, psiy, psiz, zetax, zetay,
@@ -42,7 +50,7 @@ constexpr int REPLAY_STATE_NVAR = CKPT_NVAR + 1;   // 9
 // p.checkpoint_replay (cuda_layout.checkpoint_replay_shapes): allocated by the
 // propagator next to the checkpoint snapshots, never re-zeroed.
 enum ReplaySlot : int {
-    CHUNK_FORWARD = 0   // the replayed segment's pressure, (max_segment, B, 1, nz, ny, nx)
+    CHUNK_FORWARD = 0   // the replayed segment's pressure, (max_segment + 2, B, 1, nz, ny, nx)
 };
 
 // Per-backward reusable scratch for the DD (per-step) VRZ backward.  A domain-
@@ -101,7 +109,8 @@ static BufList grad_slots(const BackwardInputCore& p)
     return p.grads_out;
 }
 
-// The adjoint state: cuda_layout base_nvar 3 + pml_nvar 9 = 12 slots, bound by
+// The adjoint state: cuda_layout base_nvar 3 + pml_nvar 9 + adjoint_extra_nvar
+// 3 = 15 slots (the exact CPML adjoint double-buffers psi AND zeta), bound by
 // _c.py on every backward (_ensure_wavefield_buffers allocates them whenever
 // the forward required a gradient) and rebound by the stepped / DD drivers.
 static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
@@ -109,8 +118,12 @@ static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputC
 {
     SWEEP_CHECK(!p.adjoint_wavefields.empty(),
                 "acoustic_vrz3d/", mode, " requires the propagator-bound "
-                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 12 tensors)");
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + "
+                "adjoint_extra_nvar = 15 tensors)");
     wf.bind(p.adjoint_wavefields, 3, true);
+    SWEEP_CHECK(wf.double_buffer_psi && wf.double_buffer_aux,
+                "AcousticVRZ3D exact adjoint needs psi+zeta double-buffers on the "
+                "adjoint wavefield (15 tensors; cuda_layout.adjoint_extra_nvar=3)");
 }
 
 BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
@@ -122,8 +135,9 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
     );
     SWEEP_CHECK(in.models.size() == 2, "AcousticVRZ3D backward expects models [vp, z].");
     SWEEP_CHECK(
-        in.u_forward.dim() == 6 && in.u_forward.size(1) == 7,
-        "AcousticVRZ3D backward expects forward wavefields with shape (nt, 7, B, nz, ny, nx)."
+        in.u_forward.dim() == 6 && in.u_forward.size(1) == 8,
+        "AcousticVRZ3D backward expects forward wavefields with shape (nt, 8, B, nz, ny, nx) "
+        "(slot 7 = U_{it+1} - 2U_it + U_{it-1}, the p_tt imaging)."
     );
 
     BackwardOutputCore out;
@@ -143,6 +157,7 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
     int nx = vp.size(4);
     int B = N * C;
     int adjoint_nsrc = in.adjoint_sources_loc.size(1);
+    int forward_nsrc = in.forward_sources_loc.size(1);
     const int order = (in.M <= 4) ? static_cast<int>(2 * in.M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, in.dt, in.nt, in.M, in.abcn, in.free_surface,
@@ -218,7 +233,13 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
             grad_ctx_y,
             grad_ctx_z,
             cpml,
-            ctx
+            ctx,
+            adj_view.psixn,
+            adj_view.psiyn,
+            adj_view.psizn,
+            adj_view.zetaxn,
+            adj_view.zetayn,
+            adj_view.zetazn
         );
 
         add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
@@ -231,7 +252,19 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
+
+        // source-cell correction of the p_tt imaging (see kernels.cuh)
+        vrz3d_utt_source_correction<<<fdtd::Geom::make(forward_nsrc, B).grid, fdtd::Geom::make(forward_nsrc, B).block>>>(
+            grad_vp.data_ptr<float>(),
+            adjoint.u_now_t.data_ptr<float>(),
+            vp.data_ptr<float>(),
+            in.forward_source.data_ptr<float>(),
+            in.forward_sources_loc.data_ptr<int>(),
+            it,
+            forward_nsrc,
+            ctx
+        );
 
         CALCULATE_GRAD_VRZ3D_AUTO(
             order,
@@ -239,6 +272,9 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
             launch_config.block,
             in.u_forward.select(0, it).select(0, 0).data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
+            in.u_forward.select(0, it).select(0, 7).data_ptr<float>(),   // p_tt (slot 7)
+            nullptr,
+            nullptr,
             vp.data_ptr<float>(),
             z.data_ptr<float>(),
             inv_z.data_ptr<float>(),
@@ -261,44 +297,233 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
     return out;
 }
 
-BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
-{
-    sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
-    const auto& p = in;
-    BackwardOutputCore out;
+// ---------------------------------------------------------------------------
+// Stepped / DD backward as a PERSISTENT runner (fix/vrz-exact-cpml-adjoint
+// 735ff1ca + 8d697b64, ported onto the torch-free core).
+//
+// Under domain decomposition the driver enters this backward once per time step
+// and, for VRZ, once per PHASE -- 3 x nt entries per iteration.  Almost
+// everything the per-call function rebuilt on the way in is constant across
+// those entries: 1/z, the CPML profile binding, the boundary saver and its copy
+// stream, the launch configs and the stencil parameter blocks.  Measured on a
+// production-size 3-D grid (SWEEP_VRZ_BWD_PROF, 2026-09-11): 1.26 ms of setup
+// against 0.11 ms of actual reverse step -- 92% of the entry.
+//
+// Every equation on the shared template driver already gets this
+// (eqdrv::GenericBackwardBsRunner).  This hand-written driver cannot use it
+// because the variable-density gradient needs three driver-visible phases, so
+// the runner is written out here.  The saver and the boundary scope are
+// members, so the runner is also reusable with the boundary staged on the host.
+//
+// ``backward_bs_impl`` constructs one and runs it once, so the monolithic path
+// and the DD path execute the SAME code.
+// ---------------------------------------------------------------------------
+class Vrz3dBackwardBsRunner final : public IBackwardRunnerCore {
+public:
+    explicit Vrz3dBackwardBsRunner(const BackwardInputCore& in)
+        : p(in), disk_files_(p.boundary_disk_files.vec())
+    {
+        sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
+        setup();
+    }
 
+    int device_index() const override { return device_index_of(p.models[0]); }
+
+    BackwardOutputCore run(int bw_it_begin, int bw_it_end, int step_phase) override
+    {
+        sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
+        p.bw_it_begin = bw_it_begin;
+        p.bw_it_end = bw_it_end;
+        p.step_phase = step_phase;
+        return step();
+    }
+
+private:
+    void setup();
+    BackwardOutputCore step();
+
+    // Declaration order == construction order; destruction runs in reverse,
+    // matching the old function's stack unwind.
+    BackwardInputCore p;
+    std::vector<std::string> disk_files_;   // the boundary runtime keeps a pointer to this
+    Buf vp, z, inv_z;
+    float dx = 0.f, dy = 0.f, dz = 0.f;
+    int nx = 0, ny = 0, nz = 0, B = 0;
+    int adjoint_nsrc = 0, forward_nsrc = 0, order = 0;
+    std::optional<SolverContext> ctx_;
+    AcousticWavefieldTensor adjoint;
+    AcousticWavefieldTensor forward;
+    Buf grad_vp, grad_z;
+    Buf C0, Cx, Cy, Cz, c_x, c_y, c_z, e_x, e_y, e_z;
+    // BUILD_VRZ_ADJOINT_COEFFS once per backward: on the first segment, as the
+    // per-call function did (a persistent runner is built with bw_it_begin = -1,
+    // i.e. bw_begin() == nt; a per-call stepped segment is not the first).
+    bool coeffs_pending = false;
+    AcousticCPMLTensor cpml_tensor;
+    AcousticCPMLPointer cpml{};
+    int save_width = 0, boundary_offset = 0;
+    bool staged_boundary = false;
+    EffectiveBoundarySaver boundary_saver;
+    GeneralBoundaryPointer bs{};
+    fdtd::LaunchConfig launch_config{}, fwd_source_config{}, adj_source_config{};
+    LaplaceParam lap_ctx{};
+    GradParam grad_ctx{}, grad_ctx_x{}, grad_ctx_y{}, grad_ctx_z{};
+    std::optional<BoundaryScope> boundary_scope;
+    BoundaryRuntime* boundary_runtime = nullptr;
+    int grad_split = 0;
+};
+
+void Vrz3dBackwardBsRunner::setup()
+{
     SWEEP_CHECK(p.models.size() == 2, "AcousticVRZ3D backward_bs expects models [vp, z].");
     SWEEP_CHECK(p.u_last_two.defined() && p.u_last_two.numel() > 0,
                 "AcousticVRZ3D backward_bs expects last two wavefields.");
 
-    auto vp = p.models[0];
-    auto z = p.models[1];
-    auto inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::backward_bs_impl");
+    vp = p.models[0];
+    z = p.models[1];
+    inv_z = derived::reciprocal(p, z, "acoustic_vrz3d::backward_bs_impl");
 
-    float dx = p.spacing[0];
-    float dy = p.spacing[1];
-    float dz = p.spacing[2];
+    dx = p.spacing[0];
+    dy = p.spacing[1];
+    dz = p.spacing[2];
 
-    int N = vp.size(0);
-    int C = vp.size(1);
-    int nz = vp.size(2);
-    int ny = vp.size(3);
-    int nx = vp.size(4);
-    int B = N * C;
-    int adjoint_nsrc = p.adjoint_sources_loc.size(1);
-    int forward_nsrc = p.forward_sources_loc.size(1);
-    const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
+    const int N = vp.size(0);
+    const int C = vp.size(1);
+    nz = vp.size(2);
+    ny = vp.size(3);
+    nx = vp.size(4);
+    B = N * C;
+    adjoint_nsrc = p.adjoint_sources_loc.size(1);
+    forward_nsrc = p.forward_sources_loc.size(1);
+    order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
-                      p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
-                      dx, dy, dz};
+    ctx_.emplace(SolverContext{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
+                               p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(),
+                               dx, dy, dz});
+    SolverContext& ctx = *ctx_;
     ctx.set_cut_mask(p.cut_face_mask);   // DD cut-aware: skip cut faces in boundary reconstruction
+
+    bind_adjoint_state(adjoint, p, "backward_bs");
+
+    // Recon steps with the NOPML kernel — u triple buffer only; psi/zeta
+    // would be dead weight (use_pml=false, 3 tensors, like vrz2d/acoustic).
+    // _c.py hands these over on every boundary-saving backward
+    // (_forward_state_buffers over cp.forward_state_shapes =
+    // cuda_layout.reconstruction_nvar, slot_table.ACOUSTIC_VRZ3D.recon = 3) and
+    // the DD runner rebinds the same list.
+    wavefields_required(p.forward_wavefields, 3, vp,
+                        "acoustic_vrz3d/backward_bs reconstruction "
+                        "(cuda_layout.reconstruction_nvar)");
+    forward.bind(p.forward_wavefields, 3, false);
+
+    // Stepped/DD accumulate the gradient into these across segments
+    // (calculate_grad does +=; Python zeroes them once before segment 1).
+    const auto& gs = grad_slots(p);
+    const auto& ws = workspace_slots(p);
+    grad_vp = pool_required(gs, 1, vp, "grads_out");
+    grad_z = pool_required(gs, 2, z, "grads_out");
+    // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*) come from the
+    // pool (WorkspaceSlot above): under DD (phased) the driver halo-exchanges
+    // the c/e grids between the build (phase 2) and divergence (phase 3) steps,
+    // so they are Python-bound there, and the monolithic path binds the same
+    // ten slots. BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first
+    // segment; build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
+    // step while their halo stays at the pool's zero. Buf copies share
+    // storage, so .data_ptr() hits the bound buffer.
+    C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");
+    Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");
+    Cy = pool_required(ws, COEF_CY, vp, "adjoint_workspace");
+    Cz = pool_required(ws, COEF_CZ, vp, "adjoint_workspace");
+    c_x = pool_required(ws, C_X, vp, "adjoint_workspace");
+    c_y = pool_required(ws, C_Y, vp, "adjoint_workspace");
+    c_z = pool_required(ws, C_Z, vp, "adjoint_workspace");
+    e_x = pool_required(ws, E_X, vp, "adjoint_workspace");
+    e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
+    e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
+    coeffs_pending = (p.bw_begin() == static_cast<int>(p.nt));
+
+    cpml_tensor.bind(p.pml_vals, 3);
+    cpml = cpml_tensor.view();
+
+    // M+1 at offset -M: what the reverse step needs.  The VRZ imaging stencil
+    // (a divergence of a gradient) reaches 2M, one M past the shell; the
+    // Python-side sigma=0 boundary buffer (BOUNDARY_BUFFER_REACH) keeps that
+    // reach inside reconstructed cells, so the shell stays at M+1.
+    save_width = p.M + 1;
+    boundary_offset = -p.M;
+    staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+    // Must match Python boundary_tangent_pad (= so//2 = M for VRZ) so the FP32
+    // staging matches the persistent int8 buffers' per-step stride; see the
+    // forward.cu note.  Restore reads top_t.stride(0) cells from staging.
+    const int boundary_tangent_pad = p.M;
+    // ``bs.last_two`` is never read in the backward -- the reverse seeds come
+    // straight from ``p.u_last_two``, bound here instead of letting
+    // allocate_last_two build a full two-wavefield FP32 buffer per call.
+    const Buf& last_two_bound = p.u_last_two;
+    if (staged_boundary) {
+        boundary_saver.allocate(
+            true, 3, 1, ctx, vp, save_width, 2,
+            true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
+            last_two_bound, p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
+        );
+    } else {
+        boundary_saver.allocate(
+            true, 3, 1, ctx, vp, save_width, 2,
+            true, true, 1, {}, p.boundary_gpu, last_two_bound,
+            p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
+        );
+        if (p.boundary_gpu.empty())
+            boundary_saver.load_from_vector(p.u_boundary, vp);
+    }
+    bs = boundary_saver.view();
+
+    launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
+    fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
+    adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
+
+    lap_ctx = LaplaceParam{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
+    grad_ctx = GradParam{1, nx, nx * ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    grad_ctx_x = GradParam{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
+    grad_ctx_y = GradParam{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
+    grad_ctx_z = GradParam{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
+
+    // A Python-owned BoundarySession, when bound, keeps the copy stream and its
+    // ring events alive ACROSS calls. With session == nullptr -- every
+    // gpu-direct run, since ModelParallel only builds a session when storage !=
+    // 'gpu' -- BoundaryScope falls into its local branch.
+    boundary_scope.emplace(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Backward,
+        boundary_saver,
+        3,
+        true,
+        p.boundary_on_cpu,
+        p.boundary_on_disk,
+        p.boundary_disk_async_read,
+        p.transfer_interval,
+        p.boundary_ring_buffers,
+        disk_files_
+    );
+    boundary_runtime = &boundary_scope->runtime();
+
+    // SWEEP_VRZ_GRAD_SPLIT=1 forces the O(M) split gradient (materialise c_d/e_d,
+    // then a single-level divergence) even for order<=4, where AUTO otherwise
+    // picks the fused O(M^2) nested-stencil kernel.  The fused/split crossover is
+    // GPU-dependent (fused wins on RTX 6000 Ada; V100 prefers split — measured
+    // ~12s/iter faster at production scale), so it stays a per-run toggle.
+    grad_split = [](){ const char* e = std::getenv("SWEEP_VRZ_GRAD_SPLIT");
+                       return e ? std::atoi(e) : 0; }();
+}
+
+BackwardOutputCore Vrz3dBackwardBsRunner::step()
+{
+    SolverContext& ctx = *ctx_;
+    BackwardOutputCore out;
 
     // Stepped backward: process [bw_it_end, bw_begin()) in descending order so a
     // DD driver can halo-exchange the adjoint + reconstruction fields between
     // single reverse steps.  Defaults (bw_it_begin=-1 => nt, bw_it_end=0)
-    // reproduce the monolithic call.  Phased (overlap) backward is not ported;
-    // ModelParallel drives VRZ with the serial step-then-exchange loop.
+    // reproduce the monolithic call.
     const int it_hi = p.bw_begin();
     const int it_lo = p.bw_it_end;
     const bool first_segment = (it_hi == static_cast<int>(p.nt));
@@ -338,13 +563,6 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
         SWEEP_CHECK(!p.boundary_on_disk,
                     "AcousticVRZ3D stepped backward supports gpu-direct or cpu "
                     "boundary storage only (boundary_on_disk unsupported in v1)");
-        // The persistent runtime keeps a pointer to the saver, and this file's
-        // EffectiveBoundarySaver is a per-CALL local (the skeletons' is a runner
-        // member that outlives the segments). bind() re-points it before any use
-        // and synchronize() never touches it, so cpu staging is safe -- but the
-        // SYNCHRONOUS disk path calls saver_->load_disk_to_cpu_3d from
-        // prefetch_backward_chunk, i.e. through that pointer between calls. That
-        // is a second, independent reason disk stays refused here.
         SWEEP_CHECK(!p.boundary_on_cpu || p.cut_face_mask != 0,
                     "AcousticVRZ3D stepped backward_bs cpu boundary staging "
                     "requires a DD cut mask (cut_face_mask != 0); single-tile "
@@ -352,24 +570,10 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
                     "monolithic backward)");
     }
 
-    AcousticWavefieldTensor adjoint;
-    bind_adjoint_state(adjoint, p, "backward_bs");
     // FIRST segment only: Python zeroes the bound adjoint once before segment 1;
     // continuation segments must carry the propagated adjoint state.
     if (first_segment && do_advance)
         zero_wavefield_state_vrz3d(adjoint);
-
-    AcousticWavefieldTensor forward;
-    // Recon steps with the NOPML kernel — u triple buffer only; psi/zeta
-    // would be dead weight (use_pml=false, 3 tensors, like vrz2d/acoustic).
-    // _c.py hands these over on every boundary-saving backward
-    // (_forward_state_buffers over cp.forward_state_shapes =
-    // cuda_layout.reconstruction_nvar, slot_table.ACOUSTIC_VRZ3D.recon = 3) and
-    // the DD runner rebinds the same list.
-    wavefields_required(p.forward_wavefields, 3, vp,
-                        "acoustic_vrz3d/backward_bs reconstruction "
-                        "(cuda_layout.reconstruction_nvar)");
-    forward.bind(p.forward_wavefields, 3, false);
 
     // Seed the reverse reconstruction from the saved last two snapshots — FIRST
     // segment only; continuation segments carry the reconstruction state.
@@ -379,114 +583,18 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
         zero_tensor_device_async(forward.u_next_t);
     }
 
-    // Stepped/DD accumulate the gradient into these across segments
-    // (calculate_grad does +=; Python zeroes them once before segment 1).
-    const auto& gs = grad_slots(p);
-    const auto& ws = workspace_slots(p);
-    auto grad_vp = pool_required(gs, 1, vp, "grads_out");
-    auto grad_z = pool_required(gs, 2, z, "grads_out");
-    // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*) come from the
-    // pool (WorkspaceSlot above): under DD (phased) the driver halo-exchanges
-    // the c/e grids between the build (phase 2) and divergence (phase 3) steps,
-    // so they are Python-bound there, and the monolithic path binds the same
-    // ten slots. BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first
-    // segment; build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
-    // step while their halo stays at the pool's zero. Buf copies share
-    // storage, so .data_ptr() hits the bound buffer.
-    auto C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");
-    auto Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");
-    auto Cy = pool_required(ws, COEF_CY, vp, "adjoint_workspace");
-    auto Cz = pool_required(ws, COEF_CZ, vp, "adjoint_workspace");
-    auto c_x = pool_required(ws, C_X, vp, "adjoint_workspace");
-    auto c_y = pool_required(ws, C_Y, vp, "adjoint_workspace");
-    auto c_z = pool_required(ws, C_Z, vp, "adjoint_workspace");
-    auto e_x = pool_required(ws, E_X, vp, "adjoint_workspace");
-    auto e_y = pool_required(ws, E_Y, vp, "adjoint_workspace");
-    auto e_z = pool_required(ws, E_Z, vp, "adjoint_workspace");
-
-    AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.bind(p.pml_vals, 3);
-    auto cpml = cpml_tensor.view();
-
-    int save_width = p.M + 1;
-    int boundary_offset = -p.M;
-    EffectiveBoundarySaver boundary_saver;
-    bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
-    // Must match Python boundary_tangent_pad (= so//2 = M for VRZ) so the FP32
-    // staging matches the persistent int8 buffers' per-step stride; see the
-    // forward.cu note.  Restore reads top_t.stride(0) cells from staging.
-    const int boundary_tangent_pad = p.M;
-    // ``bs.last_two`` is never read in the backward -- the reverse seeds come
-    // straight from ``p.u_last_two``. Passing {} made allocate_last_two take its
-    // self-allocating branch and build a full two-wavefield FP32 buffer on EVERY
-    // call, in HOST memory on the staged path. Harmless for a monolithic
-    // backward, ruinous under DD/stepped, which enters once per time step: the
-    // skeleton records a production 3-D run going 1760 -> 166 s/iteration once
-    // the backward bound the tensor instead (dev 4290248 fixed the pre-template
-    // acoustic3d/backward.cu the same way; this hand-written driver never got it).
-    const Buf& last_two_bound = p.u_last_two;
-    if (staged_boundary) {
-        boundary_saver.allocate(
-            true, 3, 1, ctx, vp, save_width, 2,
-            true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            last_two_bound, p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
-        );
-    } else {
-        boundary_saver.allocate(
-            true, 3, 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, last_two_bound,
-            p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
-        );
-        if (p.boundary_gpu.empty())
-            boundary_saver.load_from_vector(p.u_boundary, vp);
-    }
-    auto bs = boundary_saver.view();
-
-    auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
-    auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
-    auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
-
-    LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx{1, nx, nx * ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
-    GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
-    GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
-
-    // A Python-owned BoundarySession, when bound, keeps the copy stream and its
-    // ring events alive ACROSS calls. Under DD every time step is a separate
-    // entry into the extension, so a per-call stream is destroyed and rebuilt
-    // nt times and no transfer can ever be in flight. With session == nullptr
-    // -- which is every gpu-direct run, since ModelParallel only builds a
-    // session when storage != 'gpu' -- BoundaryScope falls into its local branch
-    // and reproduces the AsyncCopyContext + BoundaryRuntime pair this replaces.
-    const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
-    BoundaryScope boundary_scope(
-        p.boundary_session ? p.boundary_session->impl() : nullptr,
-        BoundarySessionImpl::Phase::Backward,
-        boundary_saver,
-        3,
-        true,
-        p.boundary_on_cpu,
-        p.boundary_on_disk,
-        p.boundary_disk_async_read,
-        p.transfer_interval,
-        p.boundary_ring_buffers,
-        disk_files
-    );
-    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
     // it_hi, not nt: without it every stepped call primes the TAIL chunk instead
     // of its own, which at ring_buffers=1 stamps the tail slab over the slot the
     // current restore reads -- a wrong gradient, not a slow one.
     if (do_advance)
-        boundary_runtime.prefetch_initial_backward_chunk((int)p.nt, it_hi);
+        boundary_runtime->prefetch_initial_backward_chunk((int)p.nt, it_hi);
 
-    // Time-invariant adjoint transpose coefficients — computed ONCE per backward
-    // (first DD segment / model change) into the reused scratch, not on every
-    // single-step segment.
-    // Adjoint coeffs: monolithic builds on the first segment; phased builds ONLY in the
-    // pre-loop coeff phase (step_phase 4 -> do_coeff), after which the driver exchanges
+    // Time-invariant adjoint transpose coefficients — computed ONCE per backward.
+    // Monolithic builds on the first segment; phased builds ONLY in the pre-loop
+    // coeff phase (step_phase 4 -> do_coeff), after which the driver exchanges
     // their cut halo once and phases 1/2/3 reuse them (do_coeff false there).
-    if (do_coeff && first_segment) {
+    if (do_coeff && coeffs_pending) {
+        coeffs_pending = false;
         BUILD_VRZ_ADJOINT_COEFFS_3D(
             order,
             launch_config.grid,
@@ -503,18 +611,23 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
         );
     }
 
-    // SWEEP_VRZ_GRAD_SPLIT=1 forces the O(M) split gradient (materialise c_d/e_d,
-    // then a single-level divergence) even for order<=4, where AUTO otherwise
-    // picks the fused O(M^2) nested-stencil kernel.  The fused/split crossover is
-    // GPU-dependent (fused wins on RTX 6000 Ada; V100 prefers split — measured
-    // ~12s/iter faster at production scale), so it stays a per-run toggle.
-    const int _gradSplit = [](){ const char* e = std::getenv("SWEEP_VRZ_GRAD_SPLIT");
-                                 return e ? std::atoi(e) : 0; }();
-
     // Main loop covers [max(bw_it_end, 1), bw_begin()) in descending order; step 0
     // contributes no gradient (matches the single-GPU VRZ backward, which also
     // stops at it == 1), so the last segment (bw_it_end == 0) simply ends there.
     for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
+        // Image U_it.  forward.swap() below rotates the handles, not the
+        // storage, so this raw pointer stays on U_it (it becomes u_prev).  In a
+        // phased-DD call the advance already happened, so U_it is u_prev there.
+        const float* fwd_img = do_advance ? forward.u_now_t.data_ptr<float>()
+                                          : forward.u_prev_t.data_ptr<float>();
+        // The other two time levels the p_tt imaging needs, same raw-pointer
+        // logic: U_{it-1} is the buffer the reconstruction below writes
+        // (u_next before the advance, u_now after it); U_{it+1} is u_prev
+        // before the advance, u_next after it.
+        const float* fwd_prev = do_advance ? forward.u_next_t.data_ptr<float>()
+                                           : forward.u_now_t.data_ptr<float>();
+        const float* fwd_next = do_advance ? forward.u_prev_t.data_ptr<float>()
+                                           : forward.u_next_t.data_ptr<float>();
         if (do_advance) {
             auto adj_view = adjoint.view();
 
@@ -536,7 +649,13 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
                 grad_ctx_y,
                 grad_ctx_z,
                 cpml,
-                ctx
+                ctx,
+                adj_view.psixn,
+                adj_view.psiyn,
+                adj_view.psizn,
+                adj_view.zetaxn,
+                adj_view.zetayn,
+                adj_view.zetazn
             );
 
             add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
@@ -549,7 +668,7 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
                 ctx
             );
 
-            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+            adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
 
             auto for_view = forward.view();
 
@@ -575,7 +694,7 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
                 ctx
             );
 
-            boundary_runtime.restore_backward_3d(
+            boundary_runtime->restore_backward_3d(
                 it,
                 for_view.u_next,
                 launch_config.grid,
@@ -589,25 +708,40 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
             forward.swap();
         }
 
-        // Gradient. step_phase 0 = monolithic single-GPU (AUTO/fused; unchanged).
-        // Phased DD: build c/e (phase 2) and take their divergence (phase 3) as
+        // Gradient. step_phase 0 = monolithic single-GPU (AUTO/fused).  Phased
+        // DD: build c/e (phase 2) and take their divergence (phase 3) as
         // SEPARATE launches so the driver halo-exchanges c/e in between -- the
         // divergence then reads the neighbour's c/e at the cut seam (not zero).
         // The split CALCULATE_GRAD_VRZ3D reads c_x..e_z with a raw (guard-free)
         // stencil, so a filled halo makes the seam correct; the fused AUTO kernel
         // must NOT be used here (its accessor zeroes cut-side taps).
+        // Source-cell correction of the p_tt imaging: once per imaged step, with
+        // the same post-advance λ the gradient below uses (phase 0, or phase 3).
+        if (do_grad) {
+            vrz3d_utt_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                grad_vp.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                vp.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                ctx
+            );
+        }
         if (!phased) {
-            if (_gradSplit && (order == 2 || order == 4)) {
+            if (grad_split && (order == 2 || order == 4)) {
                 BUILD_VRZ_GRAD_FIELDS_3D(
                     order, launch_config.grid, launch_config.block,
-                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    fwd_img, adjoint.u_now_t.data_ptr<float>(),
                     vp.data_ptr<float>(), z.data_ptr<float>(),
                     c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
                     e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
                     grad_ctx, ctx);
                 CALCULATE_GRAD_VRZ3D(
                     order, launch_config.grid, launch_config.block,
-                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    fwd_img, adjoint.u_now_t.data_ptr<float>(),
+                    nullptr, fwd_prev, fwd_next,
                     c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
                     e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
                     vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
@@ -618,8 +752,11 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
                     order,
                     launch_config.grid,
                     launch_config.block,
-                    forward.u_now_t.data_ptr<float>(),
+                    fwd_img,
                     adjoint.u_now_t.data_ptr<float>(),
+                    nullptr,
+                    fwd_prev,
+                    fwd_next,
                     vp.data_ptr<float>(),
                     z.data_ptr<float>(),
                     inv_z.data_ptr<float>(),
@@ -640,7 +777,7 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
             if (do_build) {
                 BUILD_VRZ_GRAD_FIELDS_3D(
                     order, launch_config.grid, launch_config.block,
-                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    fwd_img, adjoint.u_now_t.data_ptr<float>(),
                     vp.data_ptr<float>(), z.data_ptr<float>(),
                     c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
                     e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
@@ -649,7 +786,8 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
             if (do_grad) {
                 CALCULATE_GRAD_VRZ3D(
                     order, launch_config.grid, launch_config.block,
-                    forward.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
+                    fwd_img, adjoint.u_now_t.data_ptr<float>(),
+                    nullptr, fwd_prev, fwd_next,
                     c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
                     e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
                     vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
@@ -659,11 +797,17 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
         }
 
         if (do_advance)
-            boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
+            boundary_runtime->prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
     out.grads = {grad_vp, grad_z};
     return out;
+}
+
+BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
+{
+    Vrz3dBackwardBsRunner runner(in);
+    return runner.run(in.bw_it_begin, in.bw_it_end, in.step_phase);
 }
 
 BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
@@ -791,12 +935,13 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
     }
 
     // The replayed segment's pressure history from p.checkpoint_replay
-    // (ReplaySlot above), taken once at the full max_segment rows and reused
-    // by every segment: each row the reverse pass reads was written by the
-    // replay earlier in the same segment, so it is never zeroed.  An unbound
-    // caller allocates it once per call, as before.
+    // (ReplaySlot above), taken once at the full max_segment + 2 rows and
+    // reused by every segment: slot 0 = U_{start-1}, slot k+1 = U_{start+k},
+    // slot (end-start)+1 = U_end, so the imaging forms U_{it+1} - 2U_it +
+    // U_{it-1} from neighbouring slots.  Each row the reverse pass reads was
+    // written by the replay earlier in the same segment, so it is never zeroed.
     auto chunk_forward = pool_required(p.checkpoint_replay, CHUNK_FORWARD,
-                                       {max_segment_length, N, C, nz, ny, nx},
+                                       {max_segment_length + 2, N, C, nz, ny, nx},
                                        "checkpoint_replay (acoustic_vrz3d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
@@ -834,6 +979,7 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
             checkpoint_runtime.zero_state(forward.state_tensors());
         else
             checkpoint_runtime.load(checkpoint_idx, forward.checkpoint_tensors(), forward.next_tensors());
+        copy_tensor_device_to_device_async(chunk_forward.select(0, 0), forward.u_prev_t);   // U_{start-1}
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
@@ -863,9 +1009,11 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
                 ctx
             );
 
+            // store U_it (pre-swap u_now); after the swap this buffer is U_{it+1}
+            copy_tensor_device_to_device_async(chunk_forward.select(0, it - start + 1), forward.u_now_t);
             forward.swap();
-            copy_tensor_device_to_device_async(chunk_forward.select(0, it - start), forward.u_now_t);
         }
+        copy_tensor_device_to_device_async(chunk_forward.select(0, end - start + 1), forward.u_now_t);   // U_end
 
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
@@ -888,7 +1036,13 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
                 grad_ctx_y,
                 grad_ctx_z,
                 cpml,
-                ctx
+                ctx,
+                adj_view.psixn,
+                adj_view.psiyn,
+                adj_view.psizn,
+                adj_view.zetaxn,
+                adj_view.zetayn,
+                adj_view.zetazn
             );
 
             add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
@@ -901,14 +1055,29 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
                 ctx
             );
 
-            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+            adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
+
+            // source-cell correction of the p_tt imaging (see kernels.cuh)
+            vrz3d_utt_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                grad_vp.data_ptr<float>(),
+                adjoint.u_now_t.data_ptr<float>(),
+                vp.data_ptr<float>(),
+                p.forward_source.data_ptr<float>(),
+                p.forward_sources_loc.data_ptr<int>(),
+                it,
+                forward_nsrc,
+                ctx
+            );
 
             CALCULATE_GRAD_VRZ3D_AUTO(
                 order,
                 launch_config.grid,
                 launch_config.block,
-                chunk_forward.select(0, it - start).data_ptr<float>(),
+                chunk_forward.select(0, it - start + 1).data_ptr<float>(),   // U_it
                 adjoint.u_now_t.data_ptr<float>(),
+                nullptr,
+                chunk_forward.select(0, it - start).data_ptr<float>(),       // U_{it-1}
+                chunk_forward.select(0, it - start + 2).data_ptr<float>(),   // U_{it+1}
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
                 inv_z.data_ptr<float>(),
@@ -937,6 +1106,11 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
     return backward_full_impl(in);
+}
+
+BackwardRunnerCorePtr backward_bs_runner_core(const BackwardInputCore& in)
+{
+    return std::make_shared<Vrz3dBackwardBsRunner>(in);
 }
 
 BackwardOutputCore backward_bs_core(const BackwardInputCore& in)

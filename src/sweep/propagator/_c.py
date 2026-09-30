@@ -1111,9 +1111,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.B,
             staging_interval if boundary_on_cpu else transfer_interval,
             self._image_method_active,
-            self.equation.so // 2 + 1,
+            self.equation.so // 2 * cuda_layout.boundary_save_reach + 1,
             tangent_pad=cuda_layout.boundary_tangent_pad,
-            pad=self.pad,
+            pad=self.pml_pad,   # ramp only: the C side's phys box includes the buffer
             cut_mask=getattr(self, "_dd_cut_mask", 0),
         )
 
@@ -1302,8 +1302,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         pad_i = {0: 0, 1: 2, 2: (2 if self.ndim == 2 else 4)}[caxis]
         cm = getattr(self, "_dd_cut_mask", 0) or 0
         cut_lo, cut_hi = {0: (4, 8), 1: (16, 32), 2: (1, 2)}[caxis]
-        lo = 0 if cm & cut_lo else self.pad[pad_i] + 3 * M + 1
-        hi = 0 if cm & cut_hi else self.pad[pad_i + 1] + 3 * M + 1
+        lo = 0 if cm & cut_lo else self.pml_pad[pad_i] + 3 * M + 1
+        hi = 0 if cm & cut_hi else self.pml_pad[pad_i + 1] + 3 * M + 1
         if lo + hi == 0:
             lo = 1
         if lo + hi >= n:

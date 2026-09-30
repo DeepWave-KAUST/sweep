@@ -214,14 +214,13 @@ ACOUSTIC3D = SlotTable(
     aux_storage="slab",
 )
 
-#: Variable-density VRZ shares the acoustic bind order but has NO fused adjoint,
-#: so it stops at the psi shadows -- which is exactly why ``pairs(adjoint=True)``
-#: equals ``pairs(adjoint=False)`` for it, and why the DD driver's
-#: ``adjoint_extra_nvar`` discriminator becomes unnecessary.
+#: Variable-density VRZ shares the acoustic bind order, shadow slots included:
+#: its exact CPML adjoint (acoustic_vrz{2d,3d}/kernels.cuh) double-buffers the
+#: adjoint zeta as well as psi and rotates with swap_aux, like plain acoustic.
 ACOUSTIC_VRZ2D = SlotTable(
-    slots=ACOUSTIC2D.slots[:9], recon=("u_prev", "u_now", "u_next"))
+    slots=ACOUSTIC2D.slots, recon=("u_prev", "u_now", "u_next"))
 ACOUSTIC_VRZ3D = SlotTable(
-    slots=ACOUSTIC3D.slots[:12], recon=("u_prev", "u_now", "u_next"))
+    slots=ACOUSTIC3D.slots, recon=("u_prev", "u_now", "u_next"))
 
 
 def _elastic_mem(prefixes, axes) -> list[Slot]:

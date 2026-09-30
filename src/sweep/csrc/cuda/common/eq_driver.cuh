@@ -399,9 +399,14 @@ public:
 
             Eq::record(*state, ctx, view, record, p, it, nrec);
 
-            Eq::rotate_buffers(wavefield);
-
+            // u_allt[it] must hold the wavefield AT index it.  The in-kernel
+            // capture path (acoustic2d/3d write through u_thist) already does;
+            // this deferred hook used to run after the rotation and stored
+            // U_{it+1}, shifting the imaging condition of every equation that
+            // uses it by one step.
             Eq::capture_allt(u_allt, wavefield, it);
+
+            Eq::rotate_buffers(wavefield);
 
             checkpoint_runtime->save_forward(it, static_cast<int>(p.nt),
                                              wavefield.checkpoint_tensors());

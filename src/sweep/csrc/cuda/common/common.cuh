@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include "context.h"
+#include "../../core/buf.h"
 
 // Body-force (velocity-component) sources are injected RAW into the
 // velocity field (add_source above), but the rho-gradient imaging kernels
@@ -120,6 +121,15 @@ __global__ void add_source_3d_signed(
 // the cell holds w^{it-1} - s^{it} like every other source cell.  Sources
 // outside the strips are not touched, so a configuration with none in a strip
 // is bit-identical with or without this launch.
+// out = next - 2 now + prev, elementwise: the second time difference
+// U_{it+1} - 2 U_it + U_{it-1} a full-store imaging reads in place of a
+// spatial Laplacian (AcousticVRZ's p_tt imaging).  Same rounding as the torch
+// ops it replaces (the doubling is exact).  Launched like its neighbours.
+__global__ void second_time_difference_kernel(
+    float* __restrict__ out, const float* __restrict__ next,
+    const float* __restrict__ now, const float* __restrict__ prev, int64_t n);
+void second_time_difference(const Buf& out, const Buf& next, const Buf& now, const Buf& prev);
+
 __global__ void sub_source_in_restore_strip(
     float* __restrict__ u,                 // (B, nz, nx)
     const float* __restrict__ source,      // (B, nsrc, nt)

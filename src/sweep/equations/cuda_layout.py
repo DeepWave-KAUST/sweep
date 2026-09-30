@@ -82,6 +82,12 @@ class CUDALayoutSpec:
     # tensors, forward stays base+pml.  0 = equation has no fused-adjoint path.
     adjoint_extra_nvar: int = 0
     boundary_tangent_pad: int = 0
+    # Shell width in units of M (plus one cell): what the C-side
+    # save_width/boundary_offset store.  1 = the reverse step's M.  An
+    # equation whose imaging reaches further (VRZ, 2M) keeps 1 and declares
+    # ``BOUNDARY_BUFFER_REACH`` instead: the propagator then pads a sigma=0
+    # buffer so the shell sits out of the imaging stencil's reach.
+    boundary_save_reach: int = 1
     boundary_save_nvar: int | None = None
     # Padded per-shot grids the boundary-saving backward is handed as its
     # reconstruction state (``BackwardInput.forward_wavefields``: the forward's

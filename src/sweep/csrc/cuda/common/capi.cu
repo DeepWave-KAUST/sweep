@@ -274,6 +274,7 @@ BackwardRunnerCorePtr make_backward_runner(int entry, const BackwardInputCore& i
         case 2: return acoustic2d::backward_bs_runner_core(in);
         case 7: return acoustic3d::backward_bs_runner_core(in);
         case 22: return acoustic_vrz2d::backward_bs_runner_core(in);
+        case 27: return acoustic_vrz3d::backward_bs_runner_core(in);
         case 52: return das_mu2d::backward_bs_runner_core(in);
         case 57: return das_mu3d::backward_bs_runner_core(in);
         case 62: return elastic2d::backward_bs_runner_core(in);

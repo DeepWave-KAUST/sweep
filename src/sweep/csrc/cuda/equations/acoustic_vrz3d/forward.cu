@@ -131,7 +131,10 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
     // declares save_all_shape, so cp.u_allt_shape is never None.
     Buf u_allt;
     if (p.save_all_wavefields)
-        u_allt = bound_required(p.u_allt_out, {p.nt, 7, B, nz, ny, nx},
+        // slots 0-6 = u, psix, psiy, psiz, zetax, zetay, zetaz; slot 7 =
+        // U_{it+1} - 2U_it + U_{it-1} (the second time difference the
+        // full-store imaging uses in place of a spatial Laplacian).
+        u_allt = bound_required(p.u_allt_out, {p.nt, 8, B, nz, ny, nx},
                                 "u_allt_out (acoustic_vrz3d/forward, cuda_layout.save_all_shape)");
 
     if (p.use_checkpoint)
@@ -141,6 +144,10 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
         SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D");
     }
 
+    // M+1 at offset -M: what the reverse step needs.  The VRZ imaging stencil
+    // (a divergence of a gradient) reaches 2M, one M past the shell; the
+    // Python-side sigma=0 boundary buffer (BOUNDARY_BUFFER_REACH) keeps that
+    // reach inside reconstructed cells, so the shell stays at M+1.
     int save_width = p.M + 1;
     int boundary_offset = -p.M;
     EffectiveBoundarySaver boundary_saver;
@@ -293,8 +300,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
             ctx
         );
 
-        wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
-
+        // snapshot U_it before the rotation (after it, u_now is U_{it+1})
         if (u_allt.defined()) {
             copy_tensor_cuda_async(u_allt.select(0, it).select(0, 0), wavefield.u_now_t.squeeze(1));
             copy_tensor_cuda_async(u_allt.select(0, it).select(0, 1), wavefield.psix_t.squeeze(1));
@@ -303,7 +309,14 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
             copy_tensor_cuda_async(u_allt.select(0, it).select(0, 4), wavefield.zetax_t.squeeze(1));
             copy_tensor_cuda_async(u_allt.select(0, it).select(0, 5), wavefield.zetay_t.squeeze(1));
             copy_tensor_cuda_async(u_allt.select(0, it).select(0, 6), wavefield.zetaz_t.squeeze(1));
+            // pre-rotate: u_prev = U_{it-1}, u_now = U_it, u_next = U_{it+1}
+            second_time_difference(u_allt.select(0, it).select(0, 7),
+                                   wavefield.u_next_t.squeeze(1),
+                                   wavefield.u_now_t.squeeze(1),
+                                   wavefield.u_prev_t.squeeze(1));
         }
+
+        wavefield.swap_pml();   // rotate u AND psi<->psin: race-free psi double-buffer
 
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), wavefield.checkpoint_tensors());
     }

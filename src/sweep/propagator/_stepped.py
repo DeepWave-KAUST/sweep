@@ -364,9 +364,10 @@ class SteppedBackwardRunner:
         self.k_f = 0
         # Persistent C++ runner -- same contract as the forward one: original
         # list order at construction, rotation state lives in C++; gpu-direct
-        # or host-staged boundaries (disk keeps the per-call path).  The vrz
-        # coupling schedule keeps the per-call path (its extra phases have
-        # their own semantics; the caller passes c_factory=None).
+        # or host-staged boundaries (disk keeps the per-call path).  An
+        # equation without a runner (the caller passes c_factory=None) keeps
+        # the per-call path; acoustic_vrz3d's runner also drives the vrz
+        # coupling phases (run_vrz_phase).
         self._cr = None
         if (c_factory is not None
                 and not params.boundary_on_disk):
@@ -486,11 +487,16 @@ class SteppedBackwardRunner:
         """
         if phase not in (1, 2, 3, 4):
             raise ValueError(f"phase must be 1, 2, 3 or 4, got {phase}")
-        if self._cr is not None:
-            raise RuntimeError(
-                "vrz coupling phases use the per-call path; construct the "
-                "runner with c_factory=None")
         b, e = int(bw_it_begin), int(bw_it_end)
+        if self._cr is not None:
+            if b != e + 1:
+                raise ValueError(
+                    f"run_vrz_phase drives exactly one step: got segment [{e}, {b})")
+            out = self._cr.run(b, e, int(phase))
+            if phase == 1:
+                self.k_adj += 1
+                self.k_f += 1 if e >= 1 else 0
+            return out
         if b != e + 1:
             raise ValueError(
                 f"run_vrz_phase drives exactly one step: got segment [{e}, {b})")

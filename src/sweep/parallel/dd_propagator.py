@@ -352,6 +352,9 @@ class ModelParallel:
         ppad = self.prop.padding
         self.lo = ppad[0] + self.M
         self.hi = self.lo + self.nxp
+        # z likewise: the tile's own top pad (0 under a free surface, else the
+        # PML ramp plus any sigma=0 boundary buffer) plus the stencil halo.
+        self.ztop = ppad[-2] + self.M
         if self.ndim == 3:
             self.lo_y = ppad[2] + self.M
             self.hi_y = self.lo_y + self.nyp
@@ -540,7 +543,7 @@ class ModelParallel:
         for the model-halo exchange to overwrite.  Matches the propagator's
         edge padding (np.pad(edge), proven bitwise for the NCCL checks)."""
         lo_x, hi_x = self.lo, self.hi
-        ztop = self.M if self.free_surface else self.pad
+        ztop = self.ztop
         t = torch.as_tensor(tile, device=rt.device, dtype=rt.dtype)
         nz = tile.shape[0]
         if self.ndim == 2:
@@ -1223,6 +1226,24 @@ class ModelParallel:
         fwd = L.direction == "fwd"
         seg = (lambda it: (it + 1,)) if fwd else (lambda it: (it + 1, it))
 
+        # Env-gated phase profiler.  A schedule with more than one phase per step
+        # re-enters the compiled binding once PER PHASE, and a schedule the C
+        # runner rejects (VRZ's coupling exchange) re-marshals the whole params
+        # object every time -- 3 x nt full pybind entries.  This says how much of
+        # the loop is that, versus the shipments, versus the kernels.
+        import os as _os
+        _prof = _os.environ.get("SWEEP_DD_PHASE_PROF") == "1"
+        if _prof:
+            import time as _t
+            import torch as _torch
+            _acc = {}
+
+            def _tick(key, t0):
+                _torch.cuda.synchronize()
+                _acc[key] = _acc.get(key, [0.0, 0])
+                _acc[key][0] += _t.perf_counter() - t0
+                _acc[key][1] += 1
+
         for ph in L.prologue:
             runner.run(*seg(self.nt - 1), phase=ph.step_phase, advance=ph.advances)
             for grp in ph.after:
@@ -1234,13 +1255,30 @@ class ModelParallel:
         for it in its:
             on_floor = (not fwd) and it == floor
             for ph in L.phases:
+                if _prof:
+                    import time as _t
+                    _t0 = _t.perf_counter()
                 runner.run(*seg(it), phase=ph.step_phase, advance=ph.advances)
+                if _prof:
+                    _tick(f"phase{ph.step_phase}", _t0)
                 if on_floor and ph is last and L.drop_trailing_exchange_on_floor:
                     continue
                 for grp in ph.after:
                     if grp.when is not None and not preds.get(grp.when, True):
                         continue
+                    if _prof:
+                        import time as _t
+                        _t0 = _t.perf_counter()
                     self._ship(halo, runner, grp)
+                    if _prof:
+                        _tick(f"ship@{ph.step_phase}", _t0)
+        if _prof and self.rank == 0:
+            tot = sum(v[0] for v in _acc.values())
+            print(f"[ddprof] {L.direction} loop, {len(its)} steps, total {tot:.1f}s", flush=True)
+            for k in sorted(_acc):
+                v = _acc[k]
+                print(f"[ddprof]   {k:12s} {v[0]:8.1f}s  {100*v[0]/max(tot,1e-9):5.1f}%  "
+                      f"{v[1]:7d} calls  {v[0]/max(v[1],1)*1e3:7.3f} ms/call", flush=True)
 
     def _run_dd_loop_overlapped(self, L, runner, halo):
         """Interpret a two-phase forward with the exchange on a comm stream.
@@ -1336,11 +1374,18 @@ class ModelParallel:
             # are both the table's u_blocks, which is (0,) for the rotating
             # acoustic/VRZ lists and () for elastic's fixed slots -- exactly
             # what the three branches passed by hand.
-            # The vrz coupling schedule drives extra phases the C runner's
-            # validation rejects; it keeps the per-call path.
+            # The VRZ coupling schedule drives three phases per step.  The
+            # SHARED template runner rejects step_phase != 0, so VRZ used to be
+            # forced onto the per-call path -- and that path re-entered the
+            # compiled binding 3 x nt times per iteration, rebuilding the whole
+            # setup (negated adjoint source, 1/z, the CPML upload, the boundary
+            # saver and its copy stream) on every entry: measured 1.26 ms of
+            # setup against 0.11 ms of reverse step, 179 s of a 205 s backward
+            # on a production-size 3-D grid.  acoustic_vrz3d now ships its own
+            # phase-aware persistent runner, so take whatever factory the
+            # equation exposes; an equation without one still gets None here and
+            # falls back to the per-call path unchanged.
             _, bfac = self.prop.equation._compiled_runner_factories()
-            if self._dd_coupling_nvar:
-                bfac = None
             br = SteppedBackwardRunner(
                 self.b_func, self.bp, self.L_adj, self.recon,
                 adj_pairs=self._table.pairs(adjoint=True),
@@ -1358,7 +1403,7 @@ class ModelParallel:
         # crop the runtime model grad to the physical tile interior (z is
         # FS-aware: top pad = M under free surface; cut-side x-pad grad belongs
         # to the neighbour and is dropped — proven in test_dd_*_backward).
-        ztop = self.M if self.free_surface else self.pad
+        ztop = self.ztop
         nz = self.global_shape[0]
         if self.ndim == 2:
             interior = (..., slice(ztop, ztop + nz), slice(self.lo, self.hi))
