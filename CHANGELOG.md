@@ -369,6 +369,15 @@ and this project adheres to
   / `Ckpt(...)`.
 
 ### Fixed
+- **Boundary saving held a whole forward history in the backward** for
+  ``AcousticVRZ`` / ``AcousticVRZ3D``, ``AcousticVTI1st`` / ``AcousticVTI1st3D``,
+  ``ElasticTTI2nd`` and ``DASZhao``.  Every boundary-saving backward bound a
+  per-call replay buffer of ``nt`` padded grids times one to five fields, which
+  no boundary-saving driver reads -- boundary saving still paid one to five
+  full grids per time step (notebook 17 asked for 68.6 GiB and failed on a
+  32 GB GPU).  Introduced with the Python-side allocation; the backward's own
+  allocations no longer grow with ``nt`` (nt 150 -> 450: 3-D VTI 185 -> 547 MiB
+  before, 3.2 MiB after).
 - **``AcousticVRZ`` / ``AcousticVRZ3D`` imaged the wrong time step.**  The
   deferred history capture ran after the buffer rotation, so full and
   checkpointing imaged ``U_{it+1}`` while boundary saving imaged ``U_{it-1}``
