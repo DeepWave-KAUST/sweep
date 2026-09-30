@@ -191,7 +191,8 @@ class WaveEquation:
         # putting ``_C`` on the base unconditionally would silently promote
         # every eager-only equation into the compiled set. A class that writes
         # its own ``_C`` keeps it (the curvilinear pair, whose ``_C`` raises a
-        # "use impl='eager'" NotImplementedError but still counts as declared).
+        # "use impl='eager'" NotImplementedError); without a ``C_NAME`` that
+        # stub is not a binding, see ``supports_torch_binding``.
         if cls.__dict__.get("C_NAME") and "_C" not in cls.__dict__:
             cls._C = WaveEquation._compiled_funcs
         # Skip facades / placeholders that declare neither table — they have
@@ -285,9 +286,14 @@ class WaveEquation:
 
     @classmethod
     def supports_torch_binding(cls):
-        """Return True when the equation class exposes a compiled ``_C`` binding hook."""
-        binding = getattr(cls, "_C", None)
-        return callable(binding)
+        """Return True when the equation class has compiled kernels: a
+        ``C_NAME`` (which installs ``_C``) and a callable ``_C`` hook.
+
+        A ``_C`` written by hand only to refuse ``impl='c'`` (the curvilinear
+        pair) is not a binding: counting it made ``impl=None`` pick ``'c'`` on a
+        CUDA device and then raise, instead of running eager.
+        """
+        return callable(getattr(cls, "_C", None)) and bool(getattr(cls, "C_NAME", None))
 
     @hybridmethod
     def defaults(target):
