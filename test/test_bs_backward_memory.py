@@ -7,7 +7,10 @@ per-call "transient replay" of ``cuda_layout.checkpoint_replay_shapes`` at
 seg = nt whenever an equation's declaration ignored the mode (VRZ 2-D/3-D,
 VTI first-order 2-D/3-D, ElasticTTI2nd, DASZhao) although no boundary-saving
 driver reads it -- nb17 (VRZ Marmousi) asked for 68.6 GiB and died on a 32 GB
-V100.  Acoustic, whose declaration is guarded, is the control.
+V100.  Acoustic, whose declaration is guarded, is the control.  The one
+driver whose boundary-saving backward does re-run the forward into that
+buffer, DASZhao3D (reached through a call-time boundary_saving_config),
+declares ``bs_backward_replays_forward`` and keeps it.
 
 Measured here: the backward's peak allocation above what the forward left
 behind, at two nt; its growth must stay far below one padded grid per step.
@@ -103,3 +106,26 @@ def test_bs_backward_does_not_hold_a_forward_history(case):
         f"{case[0]}: the boundary-saving backward's peak grew {grew / 2**20:.1f} MiB for "
         f"{NT_LONG - NT_SHORT} more steps -- {grew / one_history:.2f} padded grids per step; "
         f"it is holding a forward history it should rebuild")
+
+
+def test_only_the_rerunning_driver_binds_a_bs_replay():
+    """``bs_backward_replays_forward`` hands a boundary-saving backward nt
+    padded grids per call: only a driver whose backward_bs re-runs the forward
+    (das3d/backward.cu backward_bs_core -> recompute_strain_history) may set
+    it.  A new one is a deliberate edit here, not a silent default."""
+    import sweep.equations as E
+    rerun, checked = set(), 0
+    for cls in set(E.equation_classes().values()):
+        if not isinstance(cls, type) or not hasattr(cls, "cuda_layout"):
+            continue
+        try:
+            spec = cls(spatial_order=4, device="cpu", backend="torch").cuda_layout
+        except Exception:
+            continue
+        if spec is None:
+            continue
+        checked += 1
+        if spec.bs_backward_replays_forward:
+            rerun.add(cls.__name__)
+    assert checked >= 20, f"only {checked} layouts inspected -- the scan itself broke"
+    assert rerun == {"DASZhao3D"}, rerun

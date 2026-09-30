@@ -58,6 +58,13 @@ class CUDALayoutSpec:
     # snapshots, never re-zeroed: a driver writes every row it reads. None =
     # the compiled backward allocates its own.
     checkpoint_replay_shapes: Callable | None = None
+    # The boundary-saving backward RE-RUNS the forward into
+    # ``checkpoint_replay`` instead of reconstructing it from the strips
+    # (DASZhao3D, reached through a call-time boundary_saving_config): only
+    # then is ``checkpoint_replay_shapes(B, nt, grid, nt, "bs")`` bound for a
+    # bs backward.  Every other driver reconstructs and reads no replay --
+    # binding it held nt padded grids per backward (2026-09-30).
+    bs_backward_replays_forward: bool = False
     # The replay STATE a checkpoint-mode backward steps (the forward's state
     # struct: its ``base_nvar`` physical fields and the CPML memory it
     # checkpoints, in bind order -- the forward slot list without the psi

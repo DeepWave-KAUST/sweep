@@ -1165,6 +1165,7 @@ class DASZhao3D(FirstOrderEquation):
             # backward_bs calls recompute_strain_history), so the buffer is needed
             # in the bs mode as well as the checkpoint modes.
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(nt, 3, B, *grid)],
+            bs_backward_replays_forward=True,
             # ... and so is the replay state it steps: base + pml, the same list the
             # checkpoint modes bind (there is no reverse reconstruction to size here).
             bs_reconstruction_nvar=31,

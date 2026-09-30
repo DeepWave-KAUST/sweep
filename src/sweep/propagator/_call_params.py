@@ -100,6 +100,10 @@ class CompiledCallParams:
     adjoint_workspace: tuple = ()
     checkpoint_buffers: tuple = ()
     checkpoint_replay: tuple = ()
+    # The replay history a boundary-saving backward that re-runs the forward
+    # needs (cuda_layout.bs_backward_replays_forward), allocated per backward
+    # call; () for every driver that reconstructs from the strips.
+    bs_replay_shapes: tuple = ()
     last_two: torch.Tensor = None
     boundary_cpu: tuple = ()
     boundary_gpu: tuple = ()

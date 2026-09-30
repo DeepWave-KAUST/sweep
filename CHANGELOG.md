@@ -372,10 +372,13 @@ and this project adheres to
 - **Boundary saving held a whole forward history in the backward** for
   ``AcousticVRZ`` / ``AcousticVRZ3D``, ``AcousticVTI1st`` / ``AcousticVTI1st3D``,
   ``ElasticTTI2nd`` and ``DASZhao``.  Every boundary-saving backward bound a
-  per-call replay buffer of ``nt`` padded grids times one to five fields, which
-  no boundary-saving driver reads -- boundary saving still paid one to five
-  full grids per time step (notebook 17 asked for 68.6 GiB and failed on a
-  32 GB GPU).  Introduced with the Python-side allocation; the backward's own
+  per-call replay buffer of ``nt`` padded grids times one to five fields that
+  their drivers never read -- boundary saving still paid one to five full
+  grids per time step (notebook 17 asked for 68.6 GiB and failed on a 32 GB
+  GPU).  Introduced with the Python-side allocation.  Only a driver whose
+  boundary-saving backward re-runs the forward into that buffer declares
+  ``CUDALayoutSpec.bs_backward_replays_forward`` and gets it (``DASZhao3D``,
+  through a call-time ``boundary_saving_config``); every other backward's own
   allocations no longer grow with ``nt`` (nt 150 -> 450: 3-D VTI 185 -> 547 MiB
   before, 3.2 MiB after).
 - **``AcousticVRZ`` / ``AcousticVRZ3D`` imaged the wrong time step.**  The
