@@ -5,8 +5,9 @@ It used to pass ``{}``, so ``allocate_last_two`` took the self-allocating branch
 and built a fresh ``{nvar, 2, B, 1, nz, ny, nx}`` FP32 buffer on EVERY call --
 a buffer the backward never reads (its reverse seed comes from ``p.u_last_two``
 directly).  Harmless for a monolithic backward (one call); ruinous under
-DD/stepped, where the extension is entered once per time step.  On a production
-615-tooth cascade that was ~382 MB per step and ~30k steps per iteration, and
+DD/stepped, where the extension is entered once per time step.  On a
+production-size cascade that was hundreds of MB per step over tens of thousands
+of steps per iteration, and
 on the staged path the buffer lands in HOST memory: 1760 s/iteration against
 166 s once it binds ``p.u_last_two`` instead.
 
