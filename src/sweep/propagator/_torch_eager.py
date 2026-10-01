@@ -48,6 +48,21 @@ def _raise_dynamo_recompile_limit(target=32):
             setattr(cfg, name, target)
 
 
+def _compiler_failures():
+    """Exception types meaning the compiler failed, as opposed to the code it
+    compiles: a step that is wrong eagerly raises its own error and must keep
+    doing so. The names moved between torch releases, so collect what exists."""
+    found = []
+    for module, name in (("torch._dynamo.exc", "BackendCompilerFailed"),
+                         ("torch._inductor.exc", "InductorError"),
+                         ("torch._inductor.exc", "CppCompileError")):
+        try:
+            found.append(getattr(__import__(module, fromlist=[name]), name))
+        except (ImportError, AttributeError):
+            pass
+    return tuple(found)
+
+
 class _PropTorchEager(
     PropBase, torch.nn.Module, _CustomGradientMixin, _EagerBoundarySavingMixin
 ):
@@ -109,7 +124,12 @@ class _PropTorchEager(
         default cap of 8 is exhausted before Dynamo settles and it silently falls
         back to eager — bump the cap so specialization can finish (Acoustic's
         tighter step is unaffected).  Returns *fn* unchanged when compilation is
-        off.  Shared by the full-tape step and the eager boundary-saving step."""
+        off.  Shared by the full-tape step and the eager boundary-saving step.
+
+        The compiled step is wrapped so that a compiler that cannot build it
+        (Inductor's CPU backend needs g++ >= 10, for one) costs speed, not the
+        run: the step is a pure function of its arguments, so the failing call
+        is repeated uncompiled, and so is every later one."""
         if not self.use_compile or not hasattr(torch, "compile"):
             return fn
         _raise_dynamo_recompile_limit()
@@ -120,7 +140,30 @@ class _PropTorchEager(
         }
         if self.compile_backend is not None:
             compile_kwargs["backend"] = self.compile_backend
-        return torch.compile(fn, **compile_kwargs)
+        compiled = torch.compile(fn, **compile_kwargs)
+
+        def step(*args, **kwargs):
+            if not self.use_compile:
+                return fn(*args, **kwargs)
+            try:
+                return compiled(*args, **kwargs)
+            except _compiler_failures() as exc:
+                self._disable_compile(exc)
+                return fn(*args, **kwargs)
+
+        return step
+
+    def _disable_compile(self, exc):
+        """Run uncompiled from now on, and say so once."""
+        self.use_compile = False
+        reason = str(exc).strip().splitlines()
+        reason = reason[0] if reason else type(exc).__name__
+        warnings.warn(
+            f"torch.compile could not build the {type(self.equation).__name__} step on "
+            f"{self.dev} ({type(exc).__name__}: {reason[:200]}); running it uncompiled, "
+            "which is slower but gives the same result. On CPU, Inductor needs "
+            "g++ >= 10. Pass eager_options=EagerOptions(use_compile=False) to skip "
+            "the attempt.", RuntimeWarning, stacklevel=3)
 
     def _mark_compile_step_begin(self):
         if self.use_compile and self.dev is not None and "cuda" in str(self.dev):

@@ -211,10 +211,9 @@ gather: (1, 500, 64, 1) | finite: True
 `backend: c` means the compiled CUDA backend is working. If you see `device: cpu` on
 a GPU machine, torch cannot use your GPU: reinstall it with the selector above. If you
 see `device: cuda | backend: eager`, run `python -c "import sweep; sweep.precompile()"`:
-its error says why `impl='c'` is unavailable. Without a GPU, `backend: eager` is expected; if that
-fails with a C++ compile error (`torch.compile` needs g++ >= 10), pass
-`impl="eager", eager_options=EagerOptions(use_compile=False)`
-(`from sweep.propagator.options import EagerOptions`).
+its error says why `impl='c'` is unavailable. Without a GPU, `backend: eager` is expected. With
+g++ older than 10, `torch.compile` cannot build the CPU step: sweep warns and runs it uncompiled
+(slower, same result).
 
 How the core is picked, when nvcc is needed, building without a GPU and developer
 builds: [Building the CUDA core](../dev/building.md).
