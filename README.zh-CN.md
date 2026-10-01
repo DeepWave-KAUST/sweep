@@ -22,8 +22,11 @@
 ## 安装
 
 ```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # 按驱动选,见下
 pip install sweepx
 ```
+
+先装和驱动匹配的 torch:PyPI 默认的 torch 是 CUDA 13 版,要求驱动 >= 580;驱动更旧(或用 V100)就按上面装 `cu126`。[安装选择器](https://sweepx.deepwave.group/solver/getting-started/installation/)会按你的 GPU 和驱动给出具体命令。
 
 wheel 自带预编译的 CUDA core,装完就能用编译版后端(`impl='c'`),任意 PyTorch 版本都行:不需要 nvcc、不需要编译器,也没有编译步骤。只需要 NVIDIA GPU 和驱动;按你 torch 的 CUDA 版本自动选 core(CUDA 12:V100 及更新的卡;CUDA 13:T4 及更新的卡,驱动 >= 580)。eager(PyTorch)和 JAX 后端是纯 Python。
 
@@ -34,7 +37,7 @@ pip install .
 python -m sweep.build   # 可选:现在就编,而不是等第一次调用 impl='c'
 ```
 
-<sub>`sweepx`(Python >= 3.10)是 PyPI 发行名,会顺带装上 `sweep-agent`;导入用 `import sweep`。只装求解器用 `pip install sweep-solver`(Python >= 3.9)。GPU 覆盖范围、自定义 core、开发者构建等细节见[安装文档](https://sweepx.deepwave.group/solver/getting-started/installation/)。</sub>
+<sub>`sweepx`(Python >= 3.10)是 PyPI 发行名,会顺带装上 `sweep-agent`;导入用 `import sweep`。只装求解器用 `pip install sweep-solver`(Python >= 3.9)。GPU 覆盖范围、自定义 core、开发者构建等细节见[Building the CUDA core](https://sweepx.deepwave.group/solver/dev/building/)。</sub>
 
 ## Hello SWEEP
 
