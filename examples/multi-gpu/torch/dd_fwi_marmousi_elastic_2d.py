@@ -142,7 +142,7 @@ def main():
                          dev=dev, dh=dh, dt=dt, nt=nt, abcn=a.abcn,
                          source_type=[a.source_type],
                          receiver_type=["vx", "vz"],
-                         free_surface=False, pml_type="cpmls", B=1,
+                         free_surface=False, B=1,
                          use_ckpt=False,
                          boundary_saving_config={"enabled": True,
                                                  "storage": "gpu",

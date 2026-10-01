@@ -61,7 +61,6 @@ def build_solver(shape, cfg):
         abcn=cfg["abcn"],
         free_surface=cfg["free_surface"],
         use_ckpt=cfg["use_ckpt"],
-        pml_type="cpmlr",
     )
 
 

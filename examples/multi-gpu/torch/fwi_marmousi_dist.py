@@ -105,7 +105,6 @@ def build_solver(shape, dev, cfg):
         receiver_type=["h1"],
         abcn=cfg["abcn"],
         free_surface=cfg["free_surface"],
-        pml_type="cpmlr",
     )
 
     if cfg["impl"] == "eager":

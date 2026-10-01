@@ -52,7 +52,6 @@ def build_solver(shape, cfg):
         source_type=["sxx", "szz"],
         receiver_type=["vx", "vz"],
         free_surface=cfg["free_surface"],
-        pml_type="cpmls",
         use_ckpt=cfg["use_ckpt"],
         ckpt_chunks=cfg["ckpt_chunks"],
     )

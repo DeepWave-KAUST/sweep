@@ -9,6 +9,15 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+- A `pml_type` the equation was not written for is refused with a `ValueError`
+  at construction. It used to reach the kernels, which read the PML profiles
+  positionally: `Elastic` with `pml_type='cpmlr'` and `impl='c'` aborted the
+  Python process on a C assert. Each equation's options are in its new
+  `supported_pml` property (also in `Equation.defaults()`); every equation has
+  one, except `Acoustic1st`, which also takes `'spml'`. Leave `pml_type` unset.
+  The README, docs, notebooks and examples no longer pass it.
+
 ## [0.3.1] - 2026-10-01
 
 ### Added

@@ -42,6 +42,13 @@ class WaveEquation:
     # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.
     default_pml_type = "cpmlr"
 
+    @property
+    def supported_pml(self):
+        """PML formulations this equation runs with: its default alone, unless
+        a subclass offers more (``Acoustic1st`` also takes ``'spml'``). The
+        propagator refuses any other ``pml_type`` before a kernel sees it."""
+        return [self.default_pml_type]
+
     # Symbol prefix of this equation's compiled bindings in ``sweep._C``:
     # ``{C_NAME}_forward`` plus the four backward variants.  Declaring it is
     # what gives the class a ``_C()`` -- ``__init_subclass__`` installs
@@ -310,6 +317,7 @@ class WaveEquation:
              'backend': 'torch',
              'device': 'cpu',
              'default_pml_type': 'cpmlr',
+             'supported_pml': ['cpmlr'],
              'default_source_fields': ['h1'],
              'default_receiver_fields': ['h1'],
              'wavefields': ['h1', 'h2', 'psix', 'psiz', 'zetax', 'zetaz'],
@@ -340,6 +348,7 @@ class WaveEquation:
             "backend": instance.backend,
             "device": instance.device,
             "default_pml_type": instance.default_pml_type,
+            "supported_pml": list(instance.supported_pml),
             "default_source_fields": list(instance.default_source_fields),
             "default_receiver_fields": list(instance.default_receiver_fields),
             "wavefields": list(instance.wavefields),

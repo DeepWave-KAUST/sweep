@@ -105,7 +105,6 @@ def build_acoustic_solver(shape, dev, cfg):
         receiver_type=["h1"],
         abcn=cfg["abcn"],
         free_surface=cfg["free_surface"],
-        pml_type="cpmlr",
     )
 
     if cfg["impl"] == "eager":
@@ -142,7 +141,6 @@ def build_lsrtm_solver(shape, dev, cfg):
         receiver_type=["sh1"],
         abcn=cfg["abcn"],
         free_surface=cfg["free_surface"],
-        pml_type="cpmlr",
     )
 
     if cfg["impl"] == "eager":

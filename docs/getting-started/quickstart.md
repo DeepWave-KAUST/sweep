@@ -93,7 +93,7 @@ vp[50:, :] = 2000
 ```python title="propagator"
 eq   = Acoustic(spatial_order=8, device="cuda", backend="torch")
 prop = PropTorch(eq, shape=(100, 100), device="cuda", dh=10., dt=2e-3,
-                 source_type=["h1"], receiver_type=["h1"], pml_type="cpmlr")
+                 source_type=["h1"], receiver_type=["h1"])
 
 wave      = ricker(np.arange(0, 1.5, 2e-3) - 0.1, f=8)
 sources   = np.array([[50, 2]])

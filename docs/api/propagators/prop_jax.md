@@ -69,7 +69,8 @@ chosen with `memory=`; with none given it is chunk-style rematerialization.
   checkpointing.
 - `pml_type` (`str`, optional): PML formulation. `None` (default) uses
   `equation.default_pml_type` (e.g. `'cpmlr'` for `Acoustic`, `'cpmls'` for
-  `Elastic`); `'spml'` is supported by `Acoustic1st` only.
+  `Elastic`); `'spml'` is supported by `Acoustic1st` only. A value outside
+  `equation.supported_pml` raises `ValueError`; leave it unset.
 - `scan_unroll` (`int`, optional): `lax.scan` unroll factor for the time loop.
   Small, launch-bound grids can gain from 2–4 (gradients bit-identical);
   large, bandwidth-bound grids lose a few percent, so the default is `1`.
