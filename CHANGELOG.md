@@ -10,6 +10,11 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- `impl='eager'` no longer fails when `torch.compile` cannot build the step,
+  e.g. on CPU with g++ older than 10 (`InductorError: CppCompileError`, raised by
+  the first forward of a plain CPU run, since `use_compile` defaults to True).
+  The step runs uncompiled instead, with one `RuntimeWarning`; results are the
+  same. Errors raised by the step itself still propagate.
 - A `pml_type` the equation was not written for is refused with a `ValueError`
   at construction. It used to reach the kernels, which read the PML profiles
   positionally: `Elastic` with `pml_type='cpmlr'` and `impl='c'` aborted the
