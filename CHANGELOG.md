@@ -9,6 +9,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-01
+
 ### Added
 - `Full`, `BoundarySaving` and `Ckpt` are exported from `sweep.propagator`
   (only the deprecated `MemoryOptions` family was).
@@ -812,6 +814,7 @@ see the
 [GitHub commit history](https://github.com/DeepWave-KAUST/sweep/commits/dev)
 for changes prior to this entry.
 
-[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.0...dev
+[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.1...dev
+[0.3.1]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/DeepWave-KAUST/sweep/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/DeepWave-KAUST/sweep/compare/v0.1.0...v0.2.0
