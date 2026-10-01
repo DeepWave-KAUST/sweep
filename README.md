@@ -22,8 +22,14 @@
 ## Install
 
 ```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # match your driver, see below
 pip install sweepx
 ```
+
+Install a torch built for your driver first: PyPI's default torch is CUDA 13 and needs
+driver >= 580, so on an older driver (or a V100) use `cu126` as above. The
+[install selector](https://sweepx.deepwave.group/solver/getting-started/installation/)
+gives the exact command for your GPU and driver.
 
 The wheel ships prebuilt CUDA cores, so the compiled backend (`impl='c'`) works right
 after install with any PyTorch version: no nvcc, no compiler, no build step. It needs
@@ -41,8 +47,8 @@ python -m sweep.build   # optional: compile it now instead of on the first impl=
 
 <sub>`sweepx` (Python >= 3.10) is the PyPI name and also installs the `sweep-agent` companion;
 you `import sweep`. `pip install sweep-solver` installs the solver alone (Python >= 3.9).
-GPU coverage, custom cores and developer builds are covered in the
-[installation guide](https://sweepx.deepwave.group/solver/getting-started/installation/).</sub>
+GPU coverage, custom cores and developer builds are covered in
+[Building the CUDA core](https://sweepx.deepwave.group/solver/dev/building/).</sub>
 
 ## Hello SWEEP
 

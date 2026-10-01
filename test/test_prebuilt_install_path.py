@@ -1,7 +1,7 @@
 """The ahead-of-time install path, which nothing else exercises.
 
 `SWEEP_BUILD_CUDA=1 pip install -v ".[cuda]" --no-build-isolation` is the
-ahead-of-time developer install in docs/getting-started/installation.md, and it
+ahead-of-time developer install in docs/dev/building.md, and it
 produces an artifact no test had ever looked at:
 
   * the arch list it targets -- a fixed default silently overrode torch's own

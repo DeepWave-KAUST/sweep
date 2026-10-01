@@ -30,7 +30,7 @@ sm_70 on cu12, an sdist/clone install — on the first `impl="c"` use, or ahead
 of time with `python -m sweep.build`. It needs an nvcc of torch's CUDA major
 (for CUDA 12: `>= 12.4`, `>= 12.8` for Blackwell targets). A GPU older than
 sm_75 under a cu13 torch is refused rather than built for; use a cu12 torch
-there. See [Installation](../getting-started/installation.md).
+there. See [Building the CUDA core](../dev/building.md).
 
 ## User-Facing Backend Families
 
