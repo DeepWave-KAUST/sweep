@@ -36,7 +36,7 @@ there is loaded as it is and `csrc/` edits are ignored until it is rebuilt.
 `python -c "from sweep.backend.torch import binding; print(binding.diagnostics())"`
 shows which core and which shim (`ctypes` / `pybind`) a process uses.
 
-See [Installation](docs/getting-started/installation.md) for building the core
+See [Building the CUDA core](docs/dev/building.md) for building the core
 on a machine with no visible GPU (`TORCH_CUDA_ARCH_LIST` names the target).
 
 ## Branch convention

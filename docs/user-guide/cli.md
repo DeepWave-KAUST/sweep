@@ -83,7 +83,7 @@ The two right-most columns distinguish:
   with no shipped core, a card older than the shipped archs and PTX):
   `sweep.backend.torch.binding.diagnostics()["reason"]` says why, and
   `["shipped_core"]` which core, if any, fits
-  (see [Installation](../getting-started/installation.md)).
+  (see [Building the CUDA core](../dev/building.md)).
 
 ## `sweep show <Equation>`
 
