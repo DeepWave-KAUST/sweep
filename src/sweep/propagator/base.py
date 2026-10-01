@@ -120,8 +120,9 @@ class PropBase:
                 falls back to ``equation.default_pml_type``, which is the only
                 CPML formulation each equation ships. The kwarg exists for
                 advanced experiments (e.g. ``Acoustic1st`` accepts ``'spml'``
-                in addition to its default ``'cpmls'``). Possible string
-                values across the codebase: ``'cpmlr'``, ``'cpmls'``,
+                in addition to its default ``'cpmls'``). A value outside
+                ``equation.supported_pml`` raises ``ValueError``. Possible
+                string values across the codebase: ``'cpmlr'``, ``'cpmls'``,
                 ``'spml'``. Defaults to None.
             nt (int, optional): The number of time steps. Defaults to -1, which means it will be determined by the length of the source time function.
             B (int, optional): The batch size for the simulation. Defaults to 1.
@@ -152,6 +153,15 @@ class PropBase:
             # Each WaveEquation subclass declares its own default_pml_type;
             # see e.g. ElasticTTISG → 'cpmls', most acoustics → 'cpmlr'.
             pml_type = equation.default_pml_type
+        supported = getattr(equation, "supported_pml", None)
+        if supported is not None and pml_type not in supported:
+            # A kernel reads the profiles positionally, so a formulation the
+            # equation was not written for reaches it with the wrong count or
+            # layout -- the compiled elastic core aborts the process on it.
+            raise ValueError(
+                f"{type(equation).__name__} does not support pml_type={pml_type!r}; "
+                f"supported: {list(supported)}. Leave pml_type unset to use its "
+                f"default, {equation.default_pml_type!r}.")
         if getattr(self.equation, 'setup_pml', None):
             self.equation.setup_pml(pml_type)
         self.wavefield_names = equation.wavefields
