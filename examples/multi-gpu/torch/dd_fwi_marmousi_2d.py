@@ -86,7 +86,7 @@ def build_prop(shape, dev, a):
     return PropTorch(eq, backend="torch", impl="c", shape=shape, dev=dev,
                      dh=a.dh, dt=a.dt, nt=a.nt, abcn=a.abcn,
                      source_type=["h1"], receiver_type=["h1"],
-                     free_surface=True, pml_type="cpmlr", B=1, use_ckpt=False,
+                     free_surface=True, B=1, use_ckpt=False,
                      boundary_saving_config={"enabled": True, "storage": "gpu",
                                              "transfer_interval": 1,
                                              "pinned_memory": False,

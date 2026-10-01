@@ -77,7 +77,6 @@ def build_acoustic_solver(shape, cfg):
         source_type=["h1"],
         receiver_type=["h1"],
         abcn=cfg["abcn"],
-        pml_type="cpmlr",
         free_surface=cfg["free_surface"],
     )
 
@@ -92,7 +91,6 @@ def build_lsrtm_solver(shape, cfg):
         source_type=["h1"],
         receiver_type=["sh1"],
         abcn=cfg["abcn"],
-        pml_type="cpmlr",
         free_surface=cfg["free_surface"],
     )
 

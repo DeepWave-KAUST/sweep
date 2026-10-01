@@ -71,8 +71,7 @@ from sweep.propagator.options import BoundarySaving
 solver = PropTorch(
     Acoustic(spatial_order=cfg['spatial_order'], device=device),
     shape=shape, device=device, dh=cfg['dh'], dt=cfg['dt'],
-    source_type=['h1'], receiver_type=['h1'],
-    pml_type='cpmlr', impl='c',
+    source_type=['h1'], receiver_type=['h1'], impl='c',
     memory=BoundarySaving(storage='gpu'),
 )
 ```

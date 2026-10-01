@@ -56,7 +56,6 @@ def build_acoustic_solver(shape, cfg):
         free_surface=cfg["free_surface"],
         use_ckpt=cfg["use_ckpt"],
         ckpt_chunks=cfg["ckpt_chunks"],
-        pml_type="cpmlr",
     )
 
 
@@ -77,7 +76,6 @@ def build_lsrtm_solver(shape, cfg):
         free_surface=cfg["free_surface"],
         use_ckpt=cfg["use_ckpt"],
         ckpt_chunks=cfg["ckpt_chunks"],
-        pml_type="cpmlr",
     )
 
 
