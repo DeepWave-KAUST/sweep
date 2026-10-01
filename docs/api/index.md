@@ -1,6 +1,6 @@
 <div class="sweep-api">
 
-<div class="sweep-api__eyebrow">API REFERENCE · V0.3.1</div>
+<div class="sweep-api__eyebrow">API REFERENCE · V0.3.2</div>
 
 <h1 class="sweep-api__title">The whole
 <span class="sweep-hero__gradient">surface area.</span></h1>
