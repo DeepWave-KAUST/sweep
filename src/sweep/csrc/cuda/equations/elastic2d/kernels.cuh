@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../operators/staggered.cuh"
@@ -7,96 +8,36 @@
 #include "../../common/elastic.h"
 #include "../../common/elastic_free_surface.cuh"
 
-#define LAUNCH_ELASTIC_VELOCITY(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_kernel<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_VELOCITY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 
-#define LAUNCH_ELASTIC_STRESS(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_kernel<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_STRESS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_ELASTIC_VELOCITY_NOPML(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_kernel_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_kernel_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_kernel_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_VELOCITY_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_ELASTIC_STRESS_NOPML(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_kernel_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_kernel_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_kernel_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_STRESS_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_CALCULATE_GRAD_ELASTIC_BS(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) calculate_grad_elastic_bs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic_bs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic_bs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic_bs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic_bs<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_CALCULATE_GRAD_ELASTIC_BS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic_bs_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) calculate_grad_elastic_nobs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic_nobs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic_nobs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic_nobs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic_nobs<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_CALCULATE_GRAD_ELASTIC_NOBS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic_nobs_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_STRESS_ADJOINT_PREPARE(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_STRESS_ADJOINT_APPLY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_VELOCITY_ADJOINT_APPLY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
 
 // Forward velocity stencil launches with block(32,8)=256 threads.  Baseline
@@ -203,6 +144,10 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     f.vz[idx] += solver.dt * inv_rho *
         (dsxz_dx + dszz_dz);
 }
+
+using elastic_velocity_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_fn, elastic_velocity_kernel_by_order);
 
 // Forward stress stencil: same block(32,8)=256, same register/occupancy
 // regime as elastic_velocity_kernel above.  Cap at 256/block, minBlocks=8
@@ -351,32 +296,20 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
 
 }
 
+using elastic_stress_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_kernel_fn, elastic_stress_kernel_by_order);
+
 // Compact copy of the physical box's restore strips (width w* per non-cut
 // face) of vx/vz into the boundary-saving carriers: the box cells the NOPML
 // kernel below does not compute.  Launched BEFORE the reverse update.
-static __global__ void elastic_capture_strips_2d(
+// (Defined in kernels.cu: a definition here is compiled into every TU that
+// includes this header.)
+__global__ void elastic_capture_strips_2d(
     const float* __restrict__ vx, const float* __restrict__ vz,
     float* __restrict__ fvx, float* __restrict__ fvz,
     int nx, int nz, int x0, int x1, int z0, int z1,
-    int wxl, int wxh, int wzl, int wzh)
-{
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    const int b  = blockIdx.y;
-    const int bw = x1 - x0;
-    const int zi0 = z0 + wzl, zi1 = z1 - wzh;
-    const int bh = zi1 - zi0;
-    const int n_top = wzl * bw, n_bot = wzh * bw;
-    const int n_left = wxl * bh, n_right = wxh * bh;
-    int ix, iz;
-    if (t < n_top) { iz = z0 + t / bw; ix = x0 + t % bw; }
-    else if ((t -= n_top) < n_bot) { iz = zi1 + t / bw; ix = x0 + t % bw; }
-    else if ((t -= n_bot) < n_left) { ix = x0 + t % wxl; iz = zi0 + t / wxl; }
-    else if ((t -= n_left) < n_right) { ix = (x1 - wxh) + t % wxh; iz = zi0 + t / wxh; }
-    else return;
-    const int idx = b * nx * nz + iz * nx + ix;
-    fvx[idx] = vx[idx];
-    fvz[idx] = vz[idx];
-}
+    int wxl, int wxh, int wzl, int wzh);
 
 template<int Order>
 __global__ void elastic_velocity_kernel_nopml(
@@ -445,6 +378,10 @@ __global__ void elastic_velocity_kernel_nopml(
         (dsxz_dx + dszz_dz);
 }
 
+using elastic_velocity_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
+    SGradParam, SolverContext, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_nopml_fn, elastic_velocity_kernel_nopml_by_order);
+
 template<int Order>
 __global__ void elastic_stress_kernel_nopml(
     ElasticWavefieldPointer wf,
@@ -511,6 +448,10 @@ __global__ void elastic_stress_kernel_nopml(
     f.sxz[idx] -= solver.dt *
         mu_ * (dvx_dz + dvz_dx);
 }
+
+using elastic_stress_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_kernel_nopml_fn, elastic_stress_kernel_nopml_by_order);
 
 template<int Order>
 __global__ void elastic_stress_adjoint_prepare(
@@ -723,6 +664,12 @@ __global__ void elastic_stress_adjoint_prepare(
     }
 }
 
+using elastic_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
+    const float*, const float*, ElasticCPMLPointer, SolverContext, float*, float*,
+    float*, float*, SGradParam, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_prepare_fn, elastic_stress_adjoint_prepare_by_order);
+
 template<int Order>
 __global__ void elastic_stress_adjoint_apply(
     ElasticWavefieldPointer wf,
@@ -765,6 +712,10 @@ __global__ void elastic_stress_adjoint_apply(
     f.vx[idx] += dqxx_dx + dqxz_dz;
     f.vz[idx] += dqzx_dx + dqzz_dz;
 }
+
+using elastic_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_apply_fn, elastic_stress_adjoint_apply_by_order);
 
 template<int Order>
 __global__ void elastic_velocity_adjoint_prepare(
@@ -855,6 +806,10 @@ __global__ void elastic_velocity_adjoint_prepare(
     }
 }
 
+using elastic_velocity_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
+    const float*, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_prepare_fn, elastic_velocity_adjoint_prepare_by_order);
+
 template<int Order>
 __global__ void elastic_velocity_adjoint_apply(
     ElasticWavefieldPointer wf,
@@ -898,6 +853,10 @@ __global__ void elastic_velocity_adjoint_apply(
     f.szz[idx] += dpzz_dz;
     f.sxz[idx] += dpxz_dz + dpzx_dx;
 }
+
+using elastic_velocity_adjoint_apply_fn = void (*)(ElasticWavefieldPointer,
+    const float*, const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_apply_fn, elastic_velocity_adjoint_apply_by_order);
 
 
 template<int Order>
@@ -1002,6 +961,11 @@ __global__ void calculate_grad_elastic_bs(
                  grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
 }
 
+using calculate_grad_elastic_bs_fn = void (*)(ElasticWavefieldPointer,
+    ElasticWavefieldPointer, const float*, const float*, const float*, const float*,
+    const float*, float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_elastic_bs_fn, calculate_grad_elastic_bs_by_order);
+
 template<int Order>
 __global__ void calculate_grad_elastic_nobs(
 
@@ -1104,6 +1068,11 @@ __global__ void calculate_grad_elastic_nobs(
                        grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
 
 }
+
+using calculate_grad_elastic_nobs_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_elastic_nobs_fn, calculate_grad_elastic_nobs_by_order);
 
 
 // ===========================================================================
@@ -1234,6 +1203,10 @@ __global__ void elastic_velocity_kernel_apm(
     f.vz[idx] += solver.dt * inv_rho_z * (dsxz_dx + dszz_dz);
 }
 
+using elastic_velocity_kernel_apm_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const int*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_apm_fn, elastic_velocity_kernel_apm_by_order);
+
 
 template<int Order>
 __global__ void elastic_stress_kernel_apm(
@@ -1360,21 +1333,14 @@ __global__ void elastic_stress_kernel_apm(
     }
 }
 
+using elastic_stress_kernel_apm_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const int*, float*, SGradParam, ElasticCPMLPointer,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_kernel_apm_fn, elastic_stress_kernel_apm_by_order);
 
-#define LAUNCH_ELASTIC_VELOCITY_APM(order, grid, block, ...)                 \
-    do {                                                                      \
-        if      ((order) == 2) elastic_velocity_kernel_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_kernel_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
 
-#define LAUNCH_ELASTIC_STRESS_APM(order, grid, block, ...)                   \
-    do {                                                                      \
-        if      ((order) == 2) elastic_stress_kernel_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_kernel_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_ELASTIC_VELOCITY_APM(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_kernel_apm_by_order, order, grid, block, __VA_ARGS__)
+
+#define LAUNCH_ELASTIC_STRESS_APM(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_kernel_apm_by_order, order, grid, block, __VA_ARGS__)

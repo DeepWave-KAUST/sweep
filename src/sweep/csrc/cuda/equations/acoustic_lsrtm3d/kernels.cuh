@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -8,42 +9,18 @@
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
 
-#define ACOUSTIC_LSRTM3D_SINGLE(order, grid, block, ...)                             \
-    do {                                                                             \
-        if      ((order) == 2) acoustic3d_single<2><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 4) acoustic3d_single<4><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 6) acoustic3d_single<6><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 8) acoustic3d_single<8><<<grid, block>>>(__VA_ARGS__);  \
-        else                   acoustic3d_single<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define ACOUSTIC_LSRTM3D_SINGLE(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic3d_single_by_order, order, grid, block, __VA_ARGS__)
 
-#define ACOUSTIC_LSRTM3D_SINGLE_NOPML(order, grid, block, ...)                             \
-    do {                                                                                   \
-        if      ((order) == 2) acoustic3d_single_nopml<2><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 4) acoustic3d_single_nopml<4><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 6) acoustic3d_single_nopml<6><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 8) acoustic3d_single_nopml<8><<<grid, block>>>(__VA_ARGS__);  \
-        else                   acoustic3d_single_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define ACOUSTIC_LSRTM3D_SINGLE_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic3d_single_nopml_by_order, order, grid, block, __VA_ARGS__)
 
-#define ACOUSTIC_LSRTM3D_COUPLED(order, grid, block, ...)                              \
-    do {                                                                                \
-        if      ((order) == 2) acoustic_lsrtm3d_coupled<2><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 4) acoustic_lsrtm3d_coupled<4><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 6) acoustic_lsrtm3d_coupled<6><<<grid, block>>>(__VA_ARGS__);  \
-        else if ((order) == 8) acoustic_lsrtm3d_coupled<8><<<grid, block>>>(__VA_ARGS__);  \
-        else                   acoustic_lsrtm3d_coupled<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define ACOUSTIC_LSRTM3D_COUPLED(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_coupled_by_order, order, grid, block, __VA_ARGS__)
 
 // Proper-adjoint (transpose) of the scattered-field propagation: L* = lap(v^2.l).
-#define ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block, ...)                                  \
-    do {                                                                                    \
-        if      ((order) == 2) acoustic_lsrtm3d_adjoint<2><<<grid, block>>>(__VA_ARGS__);   \
-        else if ((order) == 4) acoustic_lsrtm3d_adjoint<4><<<grid, block>>>(__VA_ARGS__);   \
-        else if ((order) == 6) acoustic_lsrtm3d_adjoint<6><<<grid, block>>>(__VA_ARGS__);   \
-        else if ((order) == 8) acoustic_lsrtm3d_adjoint<8><<<grid, block>>>(__VA_ARGS__);   \
-        else                   acoustic_lsrtm3d_adjoint<-1><<<grid, block>>>(__VA_ARGS__);  \
-    } while (0)
+#define ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_adjoint_by_order, order, grid, block, __VA_ARGS__)
 
 template <int Order>
 __device__ inline float acoustic_cpml_update_3d(
@@ -167,6 +144,11 @@ __global__ void acoustic3d_single(
     }
 }
 
+using acoustic3d_single_fn = void (*)(AcousticWavefieldPointer, bool, float*,
+    const float*, LaplaceParam, GradParam, GradParam, GradParam, GradParam,
+    AcousticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic3d_single_fn, acoustic3d_single_by_order);
+
 template <int Order>
 __global__ void acoustic3d_single_nopml(
     AcousticWavefieldPointer wf,
@@ -210,22 +192,19 @@ __global__ void acoustic3d_single_nopml(
     }
 }
 
+using acoustic3d_single_nopml_fn = void (*)(AcousticWavefieldPointer, float*,
+    const float*, LaplaceParam, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic3d_single_nopml_fn, acoustic3d_single_nopml_by_order);
+
 // v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
-static __global__ void compute_v2_lambda_lsrtm3d(
+// (Defined in kernels.cu: a definition here is compiled into every TU that
+// includes this header.)
+__global__ void compute_v2_lambda_lsrtm3d(
     const float* __restrict__ vp,
     const float* __restrict__ lambda,
     float* __restrict__ v2_lambda,
     int nx, int ny, int nz, int B
-) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-    int b = iz_global / nz; int iz = iz_global % nz;
-    if (b >= B || ix >= nx || iy >= ny || iz >= nz) return;
-    int sp = nx * ny * nz; int idx = b * sp + iz * (nx * ny) + iy * nx + ix;
-    float v = vp[idx];
-    v2_lambda[idx] = v * v * lambda[idx];
-}
+);
 
 // Proper adjoint (transpose) of the lsrtm 3D scattered-field propagation:
 //   lambda_next = 2 lambda_now - lambda_pre + dt^2 * lap(v^2 * lambda_now)
@@ -283,6 +262,11 @@ __global__ void acoustic_lsrtm3d_adjoint(
     float v = vp_b[idx];
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (v * v) * dt2 * w_sum;
 }
+
+using acoustic_lsrtm3d_adjoint_fn = void (*)(AcousticWavefieldPointer, const float*,
+    const float*, LaplaceParam, GradParam, GradParam, GradParam, GradParam,
+    AcousticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_adjoint_fn, acoustic_lsrtm3d_adjoint_by_order);
 
 template <int Order>
 __global__ void acoustic_lsrtm3d_coupled(
@@ -343,6 +327,11 @@ __global__ void acoustic_lsrtm3d_coupled(
         bg_utt_b[idx] = bg_utt_val;
     }
 }
+
+using acoustic_lsrtm3d_coupled_fn = void (*)(AcousticWavefieldPointer,
+    AcousticWavefieldPointer, bool, float*, const float*, const float*, LaplaceParam,
+    GradParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_coupled_fn, acoustic_lsrtm3d_coupled_by_order);
 
 __global__ void calculate_grad_lsrtm3d_mp(
     const float* __restrict__ u_tt_bg,

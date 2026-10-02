@@ -1,12 +1,13 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 // 2-D visco-elastic (GSLS) kernels.
 //
 // The velocity half-step is Elastic's, unchanged (elastic_velocity_kernel), and
 // so are the stencil transposes of the adjoint (elastic_stress_adjoint_apply,
 // elastic_velocity_adjoint_prepare/apply): the attenuation only changes the
 // pointwise stress update, whose forward and exact transpose live here.
-// Including elastic2d/kernels.cuh is ODR-safe (templates, one definition);
-// every kernel defined in this header carries the ``visco_elastic2d_`` prefix.
+// Every kernel defined in this header carries the ``visco_elastic2d_`` prefix;
+// like elastic2d's, they are instantiated once, in this directory's kernels.cu.
 //
 // Forward stress update per cell (strain rates e = CPML-corrected dv/dx):
 //   r+_l = a_l r_l - c_l F_l(e),   F_xx = P_l (exx+ezz) - 2 M_l ezz,
@@ -28,14 +29,9 @@
 
 #define VISCO_ELASTIC2D_MAX_SLS 4
 
-#define LAUNCH_VISCO_ELASTIC2D(kernel, order, grid, block, ...)                          \
-    do {                                                                                \
-        if      ((order) == 2) kernel<2><<<grid, block>>>(__VA_ARGS__);                 \
-        else if ((order) == 4) kernel<4><<<grid, block>>>(__VA_ARGS__);                 \
-        else if ((order) == 6) kernel<6><<<grid, block>>>(__VA_ARGS__);                 \
-        else if ((order) == 8) kernel<8><<<grid, block>>>(__VA_ARGS__);                 \
-        else                   kernel<-1><<<grid, block>>>(__VA_ARGS__);                \
-    } while (0)
+// kernel<order> through its table in kernels.cu (launch/by_order.cuh).
+#define LAUNCH_VISCO_ELASTIC2D(kernel, order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(kernel##_by_order, order, grid, block, __VA_ARGS__)
 
 // Memory variables (full grid, batch-strided like the physical fields).
 struct ViscoElastic2dMemory {
@@ -256,6 +252,11 @@ __global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
         u_this[comp_stride + off] = f.vz[idx];
     }
 }
+
+using visco_elastic2d_stress_kernel_fn = void (*)(ElasticWavefieldPointer,
+    ViscoElastic2dMemory, ViscoElastic2dModel, float*, float*, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(visco_elastic2d_stress_kernel_fn, visco_elastic2d_stress_kernel_by_order);
 
 // Transpose of visco_elastic2d_stress_kernel (plus the FS traction zeroing),
 // producing the adjoint strain-rate sources q* for elastic_stress_adjoint_apply
@@ -487,3 +488,8 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
         f.m_vxz[zi] = cpml.azh[iz] * tmp_vxz;
     }
 }
+
+using visco_elastic2d_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
+    ViscoElastic2dMemory, ViscoElastic2dModel, ElasticCPMLPointer, SolverContext,
+    float*, float*, float*, float*, SGradParam, ViscoElastic2dGrad);
+SWEEP_BY_ORDER_DECL(visco_elastic2d_stress_adjoint_prepare_fn, visco_elastic2d_stress_adjoint_prepare_by_order);

@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../common/context.h"
@@ -23,43 +24,19 @@
 #define ELASTIC3D_LB_MINBLOCKS 4
 #endif
 
-#define LAUNCH_3DELASTIC_VELOCITY(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_kernel_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_kernel_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_VELOCITY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_kernel_3d_by_order, order, grid, block, __VA_ARGS__)
 
 
-#define LAUNCH_3DELASTIC_STRESS(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_kernel_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_kernel_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_STRESS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_kernel_3d_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_3DELASTIC_VELOCITY_NOPML(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_kernel_3d_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_kernel_3d_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_kernel_3d_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_kernel_3d_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_kernel_3d_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_VELOCITY_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_kernel_3d_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 
-#define LAUNCH_3DELASTIC_STRESS_NOPML(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_kernel_3d_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_kernel_3d_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_kernel_3d_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_kernel_3d_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_kernel_3d_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_STRESS_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_kernel_3d_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_3DELASTIC_VELOCITY_ADJOINT(order, grid, block, ...)                     \
     do {                                                        \
@@ -79,50 +56,20 @@
         else                   elastic_stress_adjoint_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
     } while (0)
 
-#define LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_adjoint_prepare_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_prepare_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_prepare_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_prepare_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_prepare_3d<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_adjoint_prepare_3d_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_velocity_adjoint_apply_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_apply_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_apply_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_apply_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_apply_3d<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_VELOCITY_ADJOINT_APPLY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_velocity_adjoint_apply_3d_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_adjoint_prepare_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_prepare_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_prepare_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_prepare_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_prepare_3d<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_STRESS_ADJOINT_PREPARE(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_adjoint_prepare_3d_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(order, grid, block, ...)                     \
-    do {                                                        \
-        if      ((order) == 2) elastic_stress_adjoint_apply_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_apply_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_apply_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_apply_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_apply_3d<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_STRESS_ADJOINT_APPLY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic_stress_adjoint_apply_3d_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(order, grid, block, ...)                       \
-    do {                                                        \
-        if      ((order) == 2) calculate_grad_elastic3d_bs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic3d_bs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic3d_bs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic3d_bs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic3d_bs<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic3d_bs_by_order, order, grid, block, __VA_ARGS__)
 
 template<int Order>
 __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_kernel_3d(
@@ -276,6 +223,10 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
     f.vz[idx] += solver.dt * inv_rho *
         (dsxz_dx + dsyz_dy + dszz_dz);
 }
+
+using elastic_velocity_kernel_3d_fn = void (*)(ElasticWavefieldPointer, const float*,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_3d_fn, elastic_velocity_kernel_3d_by_order);
 
 
 template<int Order>
@@ -483,36 +434,20 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
     }
 }
 
+using elastic_stress_kernel_3d_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_kernel_3d_fn, elastic_stress_kernel_3d_by_order);
+
 // 3-D twin of elastic_capture_strips_2d: the six restore slabs of the
 // physical box (x offset innermost so a warp shares memory sectors).
-static __global__ void elastic_capture_strips_3d(
+// (Defined in kernels.cu: a definition here is compiled into every TU that
+// includes this header.)
+__global__ void elastic_capture_strips_3d(
     const float* __restrict__ vx, const float* __restrict__ vy, const float* __restrict__ vz,
     float* __restrict__ fvx, float* __restrict__ fvy, float* __restrict__ fvz,
     int nx, int ny, int nz,
     int x0, int x1, int y0, int y1, int z0, int z1,
-    int wxl, int wxh, int wyl, int wyh, int wzl, int wzh)
-{
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    const int b  = blockIdx.y;
-    const int bx = x1 - x0, by = y1 - y0;
-    const int zi0 = z0 + wzl, zi1 = z1 - wzh, bzi = zi1 - zi0;
-    const int yi0 = y0 + wyl, yi1 = y1 - wyh, byi = yi1 - yi0;
-    const int n_zl = wzl * bx * by, n_zh = wzh * bx * by;
-    const int n_yl = wyl * bx * bzi, n_yh = wyh * bx * bzi;
-    const int n_xl = wxl * byi * bzi, n_xh = wxh * byi * bzi;
-    int ix, iy, iz;
-    if (t < n_zl) { iz = z0 + t / (bx * by); t %= bx * by; iy = y0 + t / bx; ix = x0 + t % bx; }
-    else if ((t -= n_zl) < n_zh) { iz = zi1 + t / (bx * by); t %= bx * by; iy = y0 + t / bx; ix = x0 + t % bx; }
-    else if ((t -= n_zh) < n_yl) { iy = y0 + t / (bx * bzi); t %= bx * bzi; iz = zi0 + t / bx; ix = x0 + t % bx; }
-    else if ((t -= n_yl) < n_yh) { iy = yi1 + t / (bx * bzi); t %= bx * bzi; iz = zi0 + t / bx; ix = x0 + t % bx; }
-    else if ((t -= n_yh) < n_xl) { ix = x0 + t % wxl; t /= wxl; iy = yi0 + t % byi; iz = zi0 + t / byi; }
-    else if ((t -= n_xl) < n_xh) { ix = (x1 - wxh) + t % wxh; t /= wxh; iy = yi0 + t % byi; iz = zi0 + t / byi; }
-    else return;
-    const int idx = b * nx * ny * nz + iz * nx * ny + iy * nx + ix;
-    fvx[idx] = vx[idx];
-    fvy[idx] = vy[idx];
-    fvz[idx] = vz[idx];
-}
+    int wxl, int wxh, int wyl, int wyh, int wzl, int wzh);
 
 template<int Order>
 __global__ void elastic_velocity_kernel_3d_nopml(
@@ -602,6 +537,10 @@ __global__ void elastic_velocity_kernel_3d_nopml(
     f.vz[idx] -= solver.dt * inv_rho *
         (dsxz_dx + dsyz_dy + dszz_dz);
 }
+
+using elastic_velocity_kernel_3d_nopml_fn = void (*)(ElasticWavefieldPointer,
+    const float*, SGradParam, SolverContext, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_3d_nopml_fn, elastic_velocity_kernel_3d_nopml_by_order);
 
 
 template<int Order>
@@ -697,6 +636,10 @@ __global__ void elastic_stress_kernel_3d_nopml(
     f.syz[idx] -= solver.dt *
         mu_ * (dvy_dz + dvz_dy);
 }
+
+using elastic_stress_kernel_3d_nopml_fn = void (*)(ElasticWavefieldPointer,
+    const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_kernel_3d_nopml_fn, elastic_stress_kernel_3d_nopml_by_order);
 
 
 // DEAD CODE: no .cu invokes this kernel's launch macro.  It still
@@ -1033,6 +976,11 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     }
 }
 
+using elastic_velocity_adjoint_prepare_3d_fn = void (*)(ElasticWavefieldPointer,
+    const float*, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
+    float*, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_prepare_3d_fn, elastic_velocity_adjoint_prepare_3d_by_order);
+
 template<int Order>
 __global__ void elastic_velocity_adjoint_apply_3d(
     ElasticWavefieldPointer wf,
@@ -1101,6 +1049,11 @@ __global__ void elastic_velocity_adjoint_apply_3d(
     f.syz[idx] += dpyz_dz + dpzy_dy;
     f.szz[idx] += dpzz_dz;
 }
+
+using elastic_velocity_adjoint_apply_3d_fn = void (*)(ElasticWavefieldPointer,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_apply_3d_fn, elastic_velocity_adjoint_apply_3d_by_order);
 
 
 // DEAD CODE: no .cu invokes this kernel's launch macro.  It still
@@ -1487,6 +1440,13 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     }
 }
 
+using elastic_stress_adjoint_prepare_3d_fn = void (*)(ElasticWavefieldPointer,
+    const float*, const float*, ElasticCPMLPointer, SolverContext, float*, float*,
+    float*, float*, float*, float*, float*, float*, float*, SGradParam, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_prepare_3d_fn, elastic_stress_adjoint_prepare_3d_by_order);
+
 template<int Order>
 __global__ void elastic_stress_adjoint_apply_3d(
     ElasticWavefieldPointer wf,
@@ -1552,6 +1512,11 @@ __global__ void elastic_stress_adjoint_apply_3d(
     f.vy[idx] += dqyx_dx + dqyy_dy + dqyz_dz;
     f.vz[idx] += dqzx_dx + dqzy_dy + dqzz_dz;
 }
+
+using elastic_stress_adjoint_apply_3d_fn = void (*)(ElasticWavefieldPointer,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_apply_3d_fn, elastic_stress_adjoint_apply_3d_by_order);
 
 
 template<int Order>
@@ -1666,6 +1631,11 @@ __global__ void calculate_grad_elastic3d_bs(
     grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
                  grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
 }
+
+using calculate_grad_elastic3d_bs_fn = void (*)(ElasticWavefieldPointer,
+    ElasticWavefieldPointer, const float*, const float*, const float*, const float*,
+    const float*, const float*, float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_elastic3d_bs_fn, calculate_grad_elastic3d_bs_by_order);
 
 
 // ===========================================================================
@@ -1830,6 +1800,11 @@ __global__ void elastic3d_velocity_kernel_apm(
     f.vy[idx] += solver.dt * iry * (dsxy_dx + dsyy_dy + dsyz_dz);
     f.vz[idx] += solver.dt * irz * (dsxz_dx + dsyz_dy + dszz_dz);
 }
+
+using elastic3d_velocity_kernel_apm_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const int*, SGradParam, ElasticCPMLPointer,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(elastic3d_velocity_kernel_apm_fn, elastic3d_velocity_kernel_apm_by_order);
 
 
 template<int Order>
@@ -2029,21 +2004,15 @@ __global__ void elastic3d_stress_kernel_apm(
     }
 }
 
+using elastic3d_stress_kernel_apm_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, const int*,
+    float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic3d_stress_kernel_apm_fn, elastic3d_stress_kernel_apm_by_order);
 
-#define LAUNCH_3DELASTIC_VELOCITY_APM(order, grid, block, ...)                 \
-    do {                                                                        \
-        if      ((order) == 2) elastic3d_velocity_kernel_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic3d_velocity_kernel_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic3d_velocity_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic3d_velocity_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic3d_velocity_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
 
-#define LAUNCH_3DELASTIC_STRESS_APM(order, grid, block, ...)                   \
-    do {                                                                        \
-        if      ((order) == 2) elastic3d_stress_kernel_apm<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic3d_stress_kernel_apm<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic3d_stress_kernel_apm<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic3d_stress_kernel_apm<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic3d_stress_kernel_apm<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define LAUNCH_3DELASTIC_VELOCITY_APM(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic3d_velocity_kernel_apm_by_order, order, grid, block, __VA_ARGS__)
+
+#define LAUNCH_3DELASTIC_STRESS_APM(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(elastic3d_stress_kernel_apm_by_order, order, grid, block, __VA_ARGS__)

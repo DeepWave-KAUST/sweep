@@ -571,7 +571,12 @@ steps 1–4 run once more at `it = 0`, followed under `compute_illumination` by
    adjoint step, the imaging kernels. To use the acoustic phase split the kernels
    must honour ranged launches via `ctx.x_base/x_limit`; to support DD they must use
    the cut-aware `in_pml` / `phys_*()` predicates (the shared P2 helpers — see
-   `gate/in_pml_equiv.cpp`).
+   `gate/in_pml_equiv.cpp`). Instantiate the kernels in `kernels.cu` only: launch
+   each order-templated kernel through a table of its specializations
+   (`launch/by_order.cuh`) rather than `kernel<N><<<>>>` in a header, and define
+   non-template kernels in `kernels.cu` behind a declaration in `kernels.cuh`. A
+   kernel a header names or defines is compiled into every translation unit that
+   includes it, called or not (every arch of the fat binary each time).
 3. **driver_traits.cuh**: copy the reference (acoustic2d or elastic2d), keep the five
    sections [1]–[5] and the call order inside each; fill in the constants; put only
    launches in the hooks, remembering that the order inside a composite hook is

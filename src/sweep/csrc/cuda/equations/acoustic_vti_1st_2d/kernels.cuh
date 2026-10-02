@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -48,34 +49,12 @@ struct VTIWavefieldPointer {
 // LAUNCH macros (compile-time order dispatch, same pattern as elastic2d)
 // ---------------------------------------------------------------------------
 
-#define LAUNCH_VTI_VELOCITY(order, grid, block, ...)                            \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::velocity_kernel<2>          \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::velocity_kernel<4>          \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::velocity_kernel<6>          \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::velocity_kernel<8>          \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::velocity_kernel<-1>         \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
+#define LAUNCH_VTI_VELOCITY(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::velocity_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 
-#define LAUNCH_VTI_STRESS(order, grid, block, ...)                              \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::stress_kernel<2>            \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::stress_kernel<4>            \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::stress_kernel<6>            \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::stress_kernel<8>            \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::stress_kernel<-1>           \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
+#define LAUNCH_VTI_STRESS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::stress_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 
 // ---------------------------------------------------------------------------
@@ -149,6 +128,10 @@ __global__ void velocity_kernel(
     f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
     f.vz[idx] += solver.dt * inv_rho_val * dsV_dz;
 }
+
+using velocity_kernel_fn = void (*)(VTIWavefieldPointer, const float*, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(velocity_kernel_fn, velocity_kernel_by_order);
 
 
 // ---------------------------------------------------------------------------
@@ -228,6 +211,10 @@ __global__ void stress_kernel(
     f.sV[idx] += solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
 }
 
+using stress_kernel_fn = void (*)(VTIWavefieldPointer, const float*, const float*,
+    const float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(stress_kernel_fn, stress_kernel_by_order);
+
 
 // ===========================================================================
 //   NO-PML kernels — used by backward_bs to **time-reverse** the saved
@@ -276,6 +263,10 @@ __global__ void velocity_kernel_nopml(
     f.vz[idx] -= solver.dt * ir * dsV_dz;
 }
 
+using velocity_kernel_nopml_fn = void (*)(VTIWavefieldPointer, const float*, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(velocity_kernel_nopml_fn, velocity_kernel_nopml_by_order);
+
 template<int Order>
 __global__ void stress_kernel_nopml(
     VTIWavefieldPointer wf,
@@ -319,34 +310,16 @@ __global__ void stress_kernel_nopml(
     f.sV[idx] -= solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
 }
 
+using stress_kernel_nopml_fn = void (*)(VTIWavefieldPointer, const float*, const float*,
+    const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(stress_kernel_nopml_fn, stress_kernel_nopml_by_order);
 
-#define LAUNCH_VTI_VELOCITY_NOPML(order, grid, block, ...)                      \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::velocity_kernel_nopml<2>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::velocity_kernel_nopml<4>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::velocity_kernel_nopml<6>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::velocity_kernel_nopml<8>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::velocity_kernel_nopml<-1>   \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
 
-#define LAUNCH_VTI_STRESS_NOPML(order, grid, block, ...)                        \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::stress_kernel_nopml<2>      \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::stress_kernel_nopml<4>      \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::stress_kernel_nopml<6>      \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::stress_kernel_nopml<8>      \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::stress_kernel_nopml<-1>     \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
+#define LAUNCH_VTI_VELOCITY_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::velocity_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
+
+#define LAUNCH_VTI_STRESS_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::stress_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 
 // ===========================================================================
@@ -501,6 +474,10 @@ __global__ void adjoint_stress_to_vel_kernel(
     a.vz[idx] += -solver.dt * dpz_dz;
 }
 
+using adjoint_stress_to_vel_kernel_fn = void (*)(VTIWavefieldPointer, const float*,
+    const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(adjoint_stress_to_vel_kernel_fn, adjoint_stress_to_vel_kernel_by_order);
+
 
 // Kernel B: λ_vx/λ_vz → contribute to λ_sH/λ_sV  (adjoint of velocity update)
 //   λsH += -dt * Db_x(inv_rho * λvx)
@@ -541,6 +518,10 @@ __global__ void adjoint_vel_to_stress_kernel(
     a.sH[idx] += -solver.dt * dqx_dx;
     a.sV[idx] += -solver.dt * dqz_dz;
 }
+
+using adjoint_vel_to_stress_kernel_fn = void (*)(VTIWavefieldPointer, const float*,
+    const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(adjoint_vel_to_stress_kernel_fn, adjoint_vel_to_stress_kernel_by_order);
 
 
 // ---------------------------------------------------------------------------
@@ -674,48 +655,20 @@ __global__ void calculate_grad_kernel(
     grho_b[idx] += vp2 * common_vp - grad_irho / (rho_v * rho_v);
 }
 
+using calculate_grad_kernel_fn = void (*)(const float*, const float*, const float*,
+    const float*, VTIWavefieldPointer, const float*, const float*, const float*,
+    const float*, float*, float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_kernel_fn, calculate_grad_kernel_by_order);
 
-#define LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(order, grid, block, ...)               \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::adjoint_stress_to_vel_kernel<2>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::adjoint_stress_to_vel_kernel<4>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::adjoint_stress_to_vel_kernel<6>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::adjoint_stress_to_vel_kernel<8>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::adjoint_stress_to_vel_kernel<-1> \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
 
-#define LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(order, grid, block, ...)               \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::adjoint_vel_to_stress_kernel<2>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::adjoint_vel_to_stress_kernel<4>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::adjoint_vel_to_stress_kernel<6>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::adjoint_vel_to_stress_kernel<8>  \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::adjoint_vel_to_stress_kernel<-1> \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
+#define LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::adjoint_stress_to_vel_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_VTI_CALC_GRAD(order, grid, block, ...)                           \
-    do {                                                                        \
-        if      ((order) == 2) acoustic_vti_1st_2d::calculate_grad_kernel<2>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 4) acoustic_vti_1st_2d::calculate_grad_kernel<4>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 6) acoustic_vti_1st_2d::calculate_grad_kernel<6>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else if ((order) == 8) acoustic_vti_1st_2d::calculate_grad_kernel<8>    \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-        else                   acoustic_vti_1st_2d::calculate_grad_kernel<-1>   \
-                                   <<<grid, block>>>(__VA_ARGS__);              \
-    } while (0)
+#define LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::adjoint_vel_to_stress_kernel_by_order, order, grid, block, __VA_ARGS__)
+
+#define LAUNCH_VTI_CALC_GRAD(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vti_1st_2d::calculate_grad_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 
 // ---------------------------------------------------------------------------

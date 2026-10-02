@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -122,14 +123,9 @@ __host__ inline float* field_ptr(const WavefieldPointer& wf, int field)
     }
 }
 
+// kernel<order> through its table in kernels.cu (launch/by_order.cuh).
 #define TTI2ND_LAUNCH(kernel, order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(kernel##_by_order, order, grid, block, __VA_ARGS__)
 
 // ---------------------------------------------------------------------------
 // Forward
@@ -201,6 +197,10 @@ __global__ void tti2nd_stress_kernel(
     szz_ws[shift + idx] = m.C13[idx] * gxux + m.C33[idx] * gzuz + m.C35[idx] * exz;
     sxz_ws[shift + idx] = m.C15[idx] * gxux + m.C35[idx] * gzuz + m.C55[idx] * exz;
 }
+
+using tti2nd_stress_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    ElasticCPMLPointer, SGradParam, SolverContext, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(tti2nd_stress_kernel_fn, tti2nd_stress_kernel_by_order);
 
 // Outer layer: stress divergence with CPML on the four backward derivatives,
 // leapfrog displacement update written to the u_next buffer.
@@ -275,6 +275,11 @@ __global__ void tti2nd_displacement_kernel(
     }
 }
 
+using tti2nd_displacement_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    const float*, const float*, const float*, float*, ElasticCPMLPointer, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(tti2nd_displacement_kernel_fn, tti2nd_displacement_kernel_by_order);
+
 // nopml stress: raw strains from u_now (no memory update) -> stress scratch.
 // Shared by the bs time-reversal replay and by the checkpoint re-forward
 // interior; identical to tti2nd_stress_kernel outside the PML band.
@@ -319,6 +324,10 @@ __global__ void tti2nd_stress_kernel_nopml(
     szz_ws[shift + idx] = m.C13[idx] * gxux + m.C33[idx] * gzuz + m.C35[idx] * exz;
     sxz_ws[shift + idx] = m.C15[idx] * gxux + m.C35[idx] * gzuz + m.C55[idx] * exz;
 }
+
+using tti2nd_stress_kernel_nopml_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    SGradParam, SolverContext, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(tti2nd_stress_kernel_nopml_fn, tti2nd_stress_kernel_nopml_by_order);
 
 // nopml time-REVERSED displacement update: with (u_now = U_t, u_pre = U_{t+1})
 // writes U_{t-1} (up to the source term the caller re-adds) into u_next.
@@ -365,6 +374,11 @@ __global__ void tti2nd_displacement_kernel_nopml_rev(
     f.ux_nxt[idx] = 2.f * f.ux[idx] - f.ux_pre[idx] + scale * (dsxx_dx + dsxz_dz);
     f.uz_nxt[idx] = 2.f * f.uz[idx] - f.uz_pre[idx] + scale * (dsxz_dx + dszz_dz);
 }
+
+using tti2nd_displacement_kernel_nopml_rev_fn = void (*)(WavefieldPointer,
+    StiffnessPointer, const float*, const float*, const float*, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(tti2nd_displacement_kernel_nopml_rev_fn, tti2nd_displacement_kernel_nopml_rev_by_order);
 
 // ---------------------------------------------------------------------------
 // Adjoint (exact discrete transpose; unsigned convention — the two spatial
@@ -439,6 +453,10 @@ __global__ void tti2nd_adjoint_div_prepare(
     f.m_sxzx[idx] = ax * tmp_sxzx;
     f.m_szzz[idx] = az * tmp_szzz;
 }
+
+using tti2nd_adjoint_div_prepare_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    ElasticCPMLPointer, SolverContext, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(tti2nd_adjoint_div_prepare_fn, tti2nd_adjoint_div_prepare_by_order);
 
 // K2: scatter q through the transposed outer derivatives into bar-sigma,
 // transpose the constitutive row into bar-strains, transpose the inner CPML
@@ -528,6 +546,11 @@ __global__ void tti2nd_adjoint_strain_prepare(
     f.m_gzuz[idx] = azh * tmp_gzuz;
 }
 
+using tti2nd_adjoint_strain_prepare_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    ElasticCPMLPointer, SGradParam, SolverContext, const float*, const float*,
+    const float*, const float*, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(tti2nd_adjoint_strain_prepare_fn, tti2nd_adjoint_strain_prepare_by_order);
+
 // K3: scatter p through the transposed inner derivatives and advance the
 // adjoint leapfrog: lam_t = 2 lam_{t+1} - lam_{t+2} + contribution, written
 // to the (recycled) u_next buffer; the host then rotates the triple buffer.
@@ -575,6 +598,10 @@ __global__ void tti2nd_adjoint_displacement_apply(
     f.ux_nxt[idx] = 2.f * f.ux[idx] - f.ux_pre[idx] + contrib_x;
     f.uz_nxt[idx] = 2.f * f.uz[idx] - f.uz_pre[idx] + contrib_z;
 }
+
+using tti2nd_adjoint_displacement_apply_fn = void (*)(WavefieldPointer, const float*,
+    const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(tti2nd_adjoint_displacement_apply_fn, tti2nd_adjoint_displacement_apply_by_order);
 
 // Imaging: the six stiffness gradients correlate bar-sigma (rebuilt from the
 // q workspace, one unsigned transpose layer => single -1 scale) with the raw
@@ -653,9 +680,17 @@ __global__ void tti2nd_calculate_grad(
     ) / m.rho[idx];
 }
 
+using tti2nd_calculate_grad_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    StiffnessGradPointer, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(tti2nd_calculate_grad_fn, tti2nd_calculate_grad_by_order);
+
 // Source-cell compensation for the rho imaging: the stored U_{t+1} contains
 // the injected wavelet S_t, which is rho-independent; add back lam*S/rho.
-static __global__ void tti2nd_rho_grad_source_correction(
+// (Defined in kernels.cu: a definition here is compiled into every TU that
+// includes this header.)
+__global__ void tti2nd_rho_grad_source_correction(
     float* __restrict__ grad_rho,
     const float* __restrict__ adj_field,   // lam_{t+1} component matching the source field
     const float* __restrict__ rho,
@@ -664,21 +699,6 @@ static __global__ void tti2nd_rho_grad_source_correction(
     int it,
     int nsrc,
     SolverContext solver
-)
-{
-    int isrc = blockIdx.x * blockDim.x + threadIdx.x;
-    int b = blockIdx.y;
-    if (isrc >= nsrc || b >= solver.B) return;
-
-    const int spatial_size = solver.nx * solver.nz;
-    const int* loc = sources_loc + (b * nsrc + isrc) * 2;
-    const int ix = loc[0];
-    const int iz = loc[1];
-    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz) return;
-
-    const int idx = b * spatial_size + iz * solver.nx + ix;
-    const float s = source[((long long)b * nsrc + isrc) * solver.nt + it];
-    atomicAdd(&grad_rho[idx], adj_field[idx] * s / rho[idx]);
-}
+);
 
 } // namespace elastic_tti_2nd2d

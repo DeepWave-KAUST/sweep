@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../operators/staggered.cuh"
@@ -21,85 +22,31 @@ namespace elastic_vr2d_kernels {
 // ---------------------------------------------------------------------------
 
 #define LAUNCH_EVR_MOMENTUM(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_momentum_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_momentum_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_momentum_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_momentum_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_momentum_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_momentum_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_STRESS(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_stress_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_stress_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_stress_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_stress_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_stress_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_stress_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_MOMENTUM_NOPML(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_momentum_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_momentum_kernel_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_momentum_kernel_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_momentum_kernel_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_momentum_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_momentum_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_STRESS_NOPML(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_stress_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_stress_kernel_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_stress_kernel_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_stress_kernel_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_stress_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_stress_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_STRESS_ADJOINT_PREPARE(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_stress_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_stress_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_stress_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_stress_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_stress_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_stress_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_STRESS_ADJOINT_APPLY(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_stress_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_stress_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_stress_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_stress_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_stress_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_stress_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_MOMENTUM_ADJOINT_PREPARE(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_momentum_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_momentum_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_momentum_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_momentum_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_momentum_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_momentum_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_EVR_MOMENTUM_ADJOINT_APPLY(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_momentum_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_momentum_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_momentum_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_momentum_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_momentum_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_momentum_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_CALCULATE_GRAD_EVR_NOBS(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::calculate_grad_evr_nobs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::calculate_grad_evr_nobs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::calculate_grad_evr_nobs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::calculate_grad_evr_nobs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::calculate_grad_evr_nobs<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::calculate_grad_evr_nobs_by_order, order, grid, block, __VA_ARGS__)
 
 // ---------------------------------------------------------------------------
 // Centered first derivatives for the cached velocity gradients
@@ -216,6 +163,10 @@ __global__ void evr_momentum_kernel(
     f.vz[idx] += solver.dt * (dsxz_dx + dszz_dz);
 }
 
+using evr_momentum_kernel_fn = void (*)(ElasticWavefieldPointer, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(evr_momentum_kernel_fn, evr_momentum_kernel_by_order);
+
 template<int Order>
 __global__ void evr_momentum_kernel_nopml(
     ElasticWavefieldPointer wf,
@@ -254,6 +205,10 @@ __global__ void evr_momentum_kernel_nopml(
     f.vx[idx] -= solver.dt * (dsxx_dx + dsxz_dz);
     f.vz[idx] -= solver.dt * (dsxz_dx + dszz_dz);
 }
+
+using evr_momentum_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(evr_momentum_kernel_nopml_fn, evr_momentum_kernel_nopml_by_order);
 
 // ---------------------------------------------------------------------------
 // Stress kernel  --  the gamma-based update (S&S 2025 Eq 24-26).
@@ -395,6 +350,11 @@ __global__ void evr_stress_kernel(
     }
 }
 
+using evr_stress_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, float*,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(evr_stress_kernel_fn, evr_stress_kernel_by_order);
+
 template<int Order>
 __global__ void evr_stress_kernel_nopml(
     ElasticWavefieldPointer wf,
@@ -468,6 +428,11 @@ __global__ void evr_stress_kernel_nopml(
     f.sxz[idx] -= solver.dt * (gamma_S_xz + gamma_S_zx);
 }
 
+using evr_stress_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, float*,
+    SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(evr_stress_kernel_nopml_fn, evr_stress_kernel_nopml_by_order);
+
 // ---------------------------------------------------------------------------
 // ADJOINT KERNELS  --  S&S 2025 EVR backward pass
 //
@@ -524,6 +489,11 @@ __global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContex
     f.szz[idx] = 0.f;
     f.sxz[idx] = 0.f;
 }
+
+// The driver launches the <0> specialization; like the launch tables, its
+// pointer is defined in kernels.cu (launch/by_order.cuh).
+using evr_adjoint_zero_top_fs_fn = void (*)(ElasticWavefieldPointer, SolverContext);
+extern evr_adjoint_zero_top_fs_fn const evr_adjoint_zero_top_fs_0;
 
 template<int Order>
 __global__ void evr_stress_adjoint_prepare(
@@ -722,6 +692,11 @@ __global__ void evr_stress_adjoint_prepare(
     f.m_vzx[idx] = axh * tmp_pzx;
 }
 
+using evr_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, SGradParam,
+    ElasticCPMLPointer, SolverContext, float*, float*, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(evr_stress_adjoint_prepare_fn, evr_stress_adjoint_prepare_by_order);
+
 template<int Order>
 __global__ void evr_stress_adjoint_apply(
     ElasticWavefieldPointer wf,
@@ -781,6 +756,11 @@ __global__ void evr_stress_adjoint_apply(
     f.vx[idx] += -(dqxx_dx + dqxz_dz) + pt_px_b[idx];   // exact transpose + pointwise
     f.vz[idx] += -(dqzz_dz + dqzx_dx) + pt_pz_b[idx];
 }
+
+using evr_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(evr_stress_adjoint_apply_fn, evr_stress_adjoint_apply_by_order);
 
 template<int Order>
 __global__ void evr_momentum_adjoint_prepare(
@@ -855,6 +835,10 @@ __global__ void evr_momentum_adjoint_prepare(
     f.m_szzz[idx] = azh * tmp_szzz;
 }
 
+using evr_momentum_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
+    ElasticCPMLPointer, SolverContext, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(evr_momentum_adjoint_prepare_fn, evr_momentum_adjoint_prepare_by_order);
+
 template<int Order>
 __global__ void evr_momentum_adjoint_apply(
     ElasticWavefieldPointer wf,
@@ -907,6 +891,10 @@ __global__ void evr_momentum_adjoint_apply(
     f.szz[idx] += -dpzz_dz;
     f.sxz[idx] += -(dpxz_dz + dpzx_dx);
 }
+
+using evr_momentum_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(evr_momentum_adjoint_apply_fn, evr_momentum_adjoint_apply_by_order);
 
 // Gradient kernel. Two-pass design (still inside one __global__ launch but
 // the chain-rule-through-central-FD requires reads of NEIGHBOURING workspace
@@ -1077,14 +1065,14 @@ __global__ void calculate_grad_evr_nobs(
     lvsz_b[idx] = L_gS_zz * Vs * pz + L_gS_zx * Vs * px;
 }
 
+using calculate_grad_evr_nobs_fn = void (*)(ElasticWavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, float*, float*, float*, float*, float*,
+    float*, float*, float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_evr_nobs_fn, calculate_grad_evr_nobs_by_order);
+
 #define LAUNCH_EVR_GRAD_CHAIN_APPLY(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_vr2d_kernels::evr_grad_chain_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_vr2d_kernels::evr_grad_chain_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_vr2d_kernels::evr_grad_chain_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_vr2d_kernels::evr_grad_chain_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_vr2d_kernels::evr_grad_chain_apply<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_grad_chain_apply_by_order, order, grid, block, __VA_ARGS__)
 
 template<int Order>
 __global__ void evr_grad_chain_apply(
@@ -1134,5 +1122,9 @@ __global__ void evr_grad_chain_apply(
     gvp_b[idx] += -(ext_vp_dx + ext_vp_dz);
     gvs_b[idx] += -(ext_vs_dx + ext_vs_dz);
 }
+
+using evr_grad_chain_apply_fn = void (*)(const float*, const float*, const float*,
+    const float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(evr_grad_chain_apply_fn, evr_grad_chain_apply_by_order);
 
 }  // namespace elastic_vr2d_kernels

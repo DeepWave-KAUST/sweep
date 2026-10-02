@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -9,32 +10,14 @@
 #include "../../operators/dim.cuh"
 #include "../../operators/staggered.cuh"
 
-#define LAUNCH_DAS3D_FIRST(order, grid, block, ...)                           \
-    do {                                                                      \
-        if      ((order) == 2) das3d_first_derivatives_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das3d_first_derivatives_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das3d_first_derivatives_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das3d_first_derivatives_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das3d_first_derivatives_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS3D_FIRST(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das3d_first_derivatives_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS3D_SECOND(order, grid, block, ...)                          \
-    do {                                                                      \
-        if      ((order) == 2) das3d_update_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das3d_update_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das3d_update_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das3d_update_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das3d_update_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS3D_SECOND(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das3d_update_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS3D_PROJECT_MODEL_GRAD(order, grid, block, ...)              \
-    do {                                                                      \
-        if      ((order) == 2) das3d_project_model_grad_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das3d_project_model_grad_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das3d_project_model_grad_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das3d_project_model_grad_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das3d_project_model_grad_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS3D_PROJECT_MODEL_GRAD(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das3d_project_model_grad_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_DAS3D_SECOND_ADJOINT(order, direction, grid, block, ...)       \
     do {                                                                      \
@@ -243,6 +226,11 @@ __global__ void das3d_first_derivatives_kernel(
     tmp_tzz_y_b[idx] = dtzz_dy + f.m_tzz_yf[idx];
 }
 
+using das3d_first_derivatives_kernel_fn = void (*)(DasWavefieldPointer3D, float*,
+    float*, float*, float*, float*, float*, float*, float*, float*, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das3d_first_derivatives_kernel_fn, das3d_first_derivatives_kernel_by_order);
+
 template<int Order>
 __global__ void das3d_update_kernel(
     DasWavefieldPointer3D wf,
@@ -401,6 +389,12 @@ __global__ void das3d_update_kernel(
     f.das54z[idx] = exx_new + eyy_new + 4.f * ezz_new;
 }
 
+using das3d_update_kernel_fn = void (*)(DasWavefieldPointer3D, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das3d_update_kernel_fn, das3d_update_kernel_by_order);
+
 template<int Order>
 __global__ void das3d_project_model_grad_kernel(
     DasWavefieldPointer3D adjoint,
@@ -522,6 +516,12 @@ __global__ void das3d_project_model_grad_kernel(
     q_dxx_tzz[idx] = dt_over_rho * (bar_exx + bar_ezz);
     q_dyy_tzz[idx] = dt_over_rho * (bar_eyy + bar_ezz);
 }
+
+using das3d_project_model_grad_kernel_fn = void (*)(DasWavefieldPointer3D, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, float*, float*, float*, float*, float*, float*, float*,
+    float*, float*, float*, float*, float*, SolverContext);
+SWEEP_BY_ORDER_DECL(das3d_project_model_grad_kernel_fn, das3d_project_model_grad_kernel_by_order);
 
 template<int Order, int Direction>
 __global__ void das3d_second_derivative_adjoint_kernel(
