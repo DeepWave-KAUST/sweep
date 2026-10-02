@@ -9,6 +9,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-02
+
 ### Added
 - **ViscoElastic: 2-D visco-elastic equation (generalized standard linear
   solid), eager and CUDA (`impl='c'`) backends.**  The rheology SPECFEM2D
@@ -866,7 +868,8 @@ see the
 [GitHub commit history](https://github.com/DeepWave-KAUST/sweep/commits/dev)
 for changes prior to this entry.
 
-[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.2...dev
+[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.3...dev
+[0.3.3]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/DeepWave-KAUST/sweep/compare/v0.2.0...v0.3.0
