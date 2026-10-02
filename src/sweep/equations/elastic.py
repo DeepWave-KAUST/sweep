@@ -106,7 +106,7 @@ class Elastic(FirstOrderEquation):
                 kernels are template-specialised only for
                 ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
                 falls through to the generic ``order = -1`` runtime path
-                (see ``src/sweep/csrc/cuda/equations/elastic2d/forward.cu``)
+                (see ``src/sweep/csrc/cuda/equations/elastic2d/kernels.cu``)
                 which is noticeably slower; the PyTorch eager path is
                 unaffected. Defaults to 4.
             device: Device for the operator's static gradient kernels.

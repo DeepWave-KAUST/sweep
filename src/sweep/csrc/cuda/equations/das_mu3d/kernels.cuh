@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 
 #include "../elastic3d/kernels.cuh"
 
@@ -8,23 +9,11 @@
 #include "../../common/elastic_free_surface.cuh"
 #include "../../operators/staggered.cuh"
 
-#define LAUNCH_DAS_MU3D_STRESS_STRAIN(order, grid, block, ...)                \
-    do {                                                                      \
-        if      ((order) == 2) das_mu3d_stress_strain_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das_mu3d_stress_strain_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das_mu3d_stress_strain_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das_mu3d_stress_strain_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das_mu3d_stress_strain_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS_MU3D_STRESS_STRAIN(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das_mu3d_stress_strain_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_DAS_MU3D_STRESS_STRAIN_ADJOINT_PREPARE(order, grid, block, ...) \
-    do {                                                                       \
-        if      ((order) == 2) das_mu3d_stress_strain_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das_mu3d_stress_strain_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das_mu3d_stress_strain_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das_mu3d_stress_strain_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das_mu3d_stress_strain_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(das_mu3d_stress_strain_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
 template<int Order>
 __global__ void das_mu3d_stress_strain_kernel(
@@ -146,6 +135,10 @@ __global__ void das_mu3d_stress_strain_kernel(
         u_this_b[2 * comp_stride + idx] = f.vz[idx];
     }
 }
+
+using das_mu3d_stress_strain_kernel_fn = void (*)(DasMuWavefieldPointer3D, const float*,
+    const float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das_mu3d_stress_strain_kernel_fn, das_mu3d_stress_strain_kernel_by_order);
 
 template<int Order>
 __global__ void das_mu3d_stress_strain_adjoint_prepare(
@@ -295,3 +288,8 @@ __global__ void das_mu3d_stress_strain_adjoint_prepare(
     f.m_vzy[idx] = ayh * tmp_vzy;
     f.m_vzz[idx] = az * tmp_vzz;
 }
+
+using das_mu3d_stress_strain_adjoint_prepare_fn = void (*)(DasMuWavefieldPointer3D,
+    const float*, const float*, ElasticCPMLPointer, SolverContext, float*, float*,
+    float*, float*, float*, float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(das_mu3d_stress_strain_adjoint_prepare_fn, das_mu3d_stress_strain_adjoint_prepare_by_order);

@@ -557,7 +557,7 @@ public:
         // grad/adjoint kernel reads them.  No-op when free_surface = false.
         // Every hand-written mode ran this immediately after the residual
         // injection, so it lives here.
-        elastic_vr2d_kernels::evr_adjoint_zero_top_fs<0>
+        elastic_vr2d_kernels::evr_adjoint_zero_top_fs_0
             <<<s.launch_config.grid, s.launch_config.block>>>(adj_view, solver);
     }
 

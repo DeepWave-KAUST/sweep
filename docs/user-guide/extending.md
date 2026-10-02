@@ -306,7 +306,7 @@ magnitude; the 19 existing equations under `src/sweep/csrc/cuda/equations/`
 | --- | --- | --- |
 | `my_scalar.h` | the `*_core` entry declarations (forward / backward variants, runner factories) | ~30 lines |
 | `driver_traits.cuh` | the equation's traits for the shared template drivers (`common/eq_driver.cuh` / `sg_driver.cuh`) | varies |
-| `kernels.cuh` / `kernels.cu` | per-step CUDA kernels (state update, gradient / imaging) | 300–1200 lines |
+| `kernels.cuh` / `kernels.cu` | per-step CUDA kernels (state update, gradient / imaging), instantiated in `kernels.cu` only and launched through its by-order tables (`launch/by_order.cuh`) | 300–1200 lines |
 | `forward.cu` | forward entry: initialisation, receiver write-out | 200–300 lines |
 | `backward.cu` | adjoint entries, parameter-gradient accumulation, RTM path | 800–1500 lines |
 

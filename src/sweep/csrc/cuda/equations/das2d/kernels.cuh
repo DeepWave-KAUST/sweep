@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -9,59 +10,23 @@
 #include "../../operators/dim.cuh"
 #include "../../operators/staggered.cuh"
 
-#define LAUNCH_DAS2D_FIRST(order, grid, block, ...)                           \
-    do {                                                                      \
-        if      ((order) == 2) das2d_first_derivatives_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das2d_first_derivatives_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das2d_first_derivatives_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das2d_first_derivatives_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das2d_first_derivatives_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS2D_FIRST(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das2d_first_derivatives_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS2D_SECOND(order, grid, block, ...)                          \
-    do {                                                                      \
-        if      ((order) == 2) das2d_update_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das2d_update_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das2d_update_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das2d_update_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das2d_update_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS2D_SECOND(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das2d_update_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS2D_FIRST_NOPML(order, grid, block, ...)                     \
-    do {                                                                      \
-        if      ((order) == 2) das2d_first_derivatives_nopml_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das2d_first_derivatives_nopml_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das2d_first_derivatives_nopml_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das2d_first_derivatives_nopml_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das2d_first_derivatives_nopml_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS2D_FIRST_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das2d_first_derivatives_nopml_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS2D_REVERSE_STRAIN_NOPML(order, grid, block, ...)            \
-    do {                                                                      \
-        if      ((order) == 2) das2d_reverse_strain_nopml_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das2d_reverse_strain_nopml_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das2d_reverse_strain_nopml_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das2d_reverse_strain_nopml_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das2d_reverse_strain_nopml_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS2D_REVERSE_STRAIN_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das2d_reverse_strain_nopml_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS2D_REVERSE_STRESS_NOPML(order, grid, block, ...)            \
-    do {                                                                      \
-        if      ((order) == 2) das2d_reverse_stress_nopml_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das2d_reverse_stress_nopml_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das2d_reverse_stress_nopml_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das2d_reverse_stress_nopml_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das2d_reverse_stress_nopml_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS2D_REVERSE_STRESS_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das2d_reverse_stress_nopml_kernel_by_order, order, grid, block, __VA_ARGS__)
 
-#define LAUNCH_DAS2D_PROJECT_MODEL_GRAD(order, grid, block, ...)              \
-    do {                                                                      \
-        if      ((order) == 2) das2d_project_model_grad_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) das2d_project_model_grad_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) das2d_project_model_grad_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) das2d_project_model_grad_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   das2d_project_model_grad_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+#define LAUNCH_DAS2D_PROJECT_MODEL_GRAD(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(das2d_project_model_grad_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_DAS2D_SECOND_ADJOINT(order, direction, grid, block, ...)       \
     do {                                                                      \
@@ -214,6 +179,10 @@ __global__ void das2d_first_derivatives_kernel(
     tmp_tzz_x_b[idx] = dtzz_dx + f.m_tzz_xf[idx];
 }
 
+using das2d_first_derivatives_kernel_fn = void (*)(DasWavefieldPointer2D, float*,
+    float*, float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_first_derivatives_kernel_fn, das2d_first_derivatives_kernel_by_order);
+
 template<int Order>
 __global__ void das2d_update_kernel(
     DasWavefieldPointer2D wf,
@@ -322,6 +291,11 @@ __global__ void das2d_update_kernel(
     f.das54z[idx] = exx_new + 4.f * ezz_new;
 }
 
+using das2d_update_kernel_fn = void (*)(DasWavefieldPointer2D, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_update_kernel_fn, das2d_update_kernel_by_order);
+
 template<int Order>
 __global__ void das2d_first_derivatives_nopml_kernel(
     DasWavefieldPointer2D wf,
@@ -362,6 +336,10 @@ __global__ void das2d_first_derivatives_nopml_kernel(
     tmp_txx_z_b[idx] = sgradient<2, Order, Z, DIFF_FORWARD>(f.txx, ix, 0, iz, grad_ctx);
     tmp_tzz_x_b[idx] = sgradient<2, Order, X, DIFF_FORWARD>(f.tzz, ix, 0, iz, grad_ctx);
 }
+
+using das2d_first_derivatives_nopml_kernel_fn = void (*)(DasWavefieldPointer2D, float*,
+    float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_first_derivatives_nopml_kernel_fn, das2d_first_derivatives_nopml_kernel_by_order);
 
 template<int Order>
 __global__ void das2d_reverse_strain_nopml_kernel(
@@ -418,6 +396,11 @@ __global__ void das2d_reverse_strain_nopml_kernel(
     f.das54z[idx] = exx_prev + 4.f * ezz_prev;
 }
 
+using das2d_reverse_strain_nopml_kernel_fn = void (*)(DasWavefieldPointer2D,
+    const float*, const float*, const float*, const float*, const float*, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_reverse_strain_nopml_kernel_fn, das2d_reverse_strain_nopml_kernel_by_order);
+
 template<int Order>
 __global__ void das2d_reverse_stress_nopml_kernel(
     DasWavefieldPointer2D wf,
@@ -459,6 +442,10 @@ __global__ void das2d_reverse_stress_nopml_kernel(
     f.txx[idx] -= solver.dt * mu_ * exx;
     f.tzz[idx] -= solver.dt * mu_ * ezz;
 }
+
+using das2d_reverse_stress_nopml_kernel_fn = void (*)(DasWavefieldPointer2D,
+    const float*, const float*, SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_reverse_stress_nopml_kernel_fn, das2d_reverse_stress_nopml_kernel_by_order);
 
 template<int Order>
 __global__ void das2d_project_model_grad_kernel(
@@ -568,6 +555,11 @@ __global__ void das2d_project_model_grad_kernel(
     q_txx[idx] = common;
     q_tzz[idx] = common;
 }
+
+using das2d_project_model_grad_kernel_fn = void (*)(DasWavefieldPointer2D, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    float*, float*, float*, float*, float*, float*, float*, SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_project_model_grad_kernel_fn, das2d_project_model_grad_kernel_by_order);
 
 template<int Order, int Direction>
 __global__ void das2d_second_derivative_adjoint_kernel(

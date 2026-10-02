@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../operators/laplace.cuh"
@@ -62,14 +63,8 @@ float fused_d_aPsi(const float* __restrict__ a, const float* __restrict__ psi,
         AProductAccessor{a, psi, a_pos, idx, psi_stride}, M, coeff, h);
 }
 
-#define ACOUSTIC2D(order, grid, block, ...)                                  \
-    do {                                                        \
-        if      ((order) == 2) acoustic2nd<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic2nd<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic2nd<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic2nd<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic2nd<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define ACOUSTIC2D(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic2nd_by_order, order, grid, block, __VA_ARGS__)
 
 
 
@@ -77,57 +72,24 @@ float fused_d_aPsi(const float* __restrict__ a, const float* __restrict__ psi,
 // FUSED exact adjoint: ONE launch, no scratch (recompute g_* inline at each tap),
 // writes next psi/zeta to SEPARATE buffers (double-buffer) -> race-free + ~forward
 // bandwidth.  Caller swaps psi/zeta via swap_aux() each step.
-#define ACOUSTIC2D_ADJOINT_FUSED(order, grid, block, ...)                                     \
-    do {                                                                                       \
-        if      ((order) == 2) acoustic2nd_adjoint_fused<2><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 4) acoustic2nd_adjoint_fused<4><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 6) acoustic2nd_adjoint_fused<6><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 8) acoustic2nd_adjoint_fused<8><<<grid, block>>>(__VA_ARGS__);     \
-        else                   acoustic2nd_adjoint_fused<-1><<<grid, block>>>(__VA_ARGS__);    \
-    } while (0)
+#define ACOUSTIC2D_ADJOINT_FUSED(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic2nd_adjoint_fused_by_order, order, grid, block, __VA_ARGS__)
 
 // Pre-pass: clear air cells (above per-column topo surface).  Launched
 // BEFORE acoustic2nd so the main kernel can early-return on air cells
 // without writing any aux field — eliminating intra-launch RAW races
 // between air-zeroing and PML stencil reads.  See sweep VTI history.
-static __global__ void acoustic2d_air_clear_kernel(
+// (Defined in kernels.cu: a definition here is compiled into every TU that
+// includes this header.)
+__global__ void acoustic2d_air_clear_kernel(
     AcousticWavefieldPointer wf,
     bool save_all_wavefields,
     float* __restrict__ u_this,
     SolverContext solver
-){
-    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-    if (ix >= solver.x_end() || iz >= solver.nz) return;
-    if (!solver.has_topo) return;
-    if (iz >= solver.topo_rows[ix]) return;
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-    f.u_next[idx] = 0.f;
-    // Aux fields live in per-axis slabs; air cells outside a slab hold an
-    // implicit zero (the FD kernel never writes them), so only clear the
-    // stored part.  Full-domain (legacy) tensors report stored() everywhere.
-    if (solver.aux_x.stored(ix)) {
-        long xi = solver.aux_idx_x2(iz, ix);
-        f.psix[xi] = 0.f; f.zetax[xi] = 0.f;
-    }
-    if (solver.aux_z.stored(iz)) {
-        long zi = solver.aux_idx_z2(iz, ix);
-        f.psiz[zi] = 0.f; f.zetaz[zi] = 0.f;
-    }
-    if (u_this) u_this[b * spatial_size + idx] = 0.f;
-}
+);
 
-#define ACOUSTIC2D_NOPML(order, grid, block, ...)                                  \
-    do {                                                        \
-        if      ((order) == 2) acoustic2nd_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic2nd_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic2nd_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic2nd_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic2nd_nopml<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define ACOUSTIC2D_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic2nd_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 template<int Order>
 __global__ void acoustic2nd(
@@ -287,6 +249,10 @@ __global__ void acoustic2nd(
     if (u_this_b != nullptr)
         u_this_b[idx] = (v * v) * (lap_x + lap_z);
 }
+
+using acoustic2nd_fn = void (*)(AcousticWavefieldPointer, bool, float*, const float*,
+    LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic2nd_fn, acoustic2nd_by_order);
 
 
 
@@ -449,6 +415,11 @@ __global__ void acoustic2nd_adjoint_fused(
     #undef GTMP_Z
 }
 
+using acoustic2nd_adjoint_fused_fn = void (*)(AcousticWavefieldPointer, const float*,
+    LaplaceParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext, float*,
+    float*, float*, float*, const float*, float*);
+SWEEP_BY_ORDER_DECL(acoustic2nd_adjoint_fused_fn, acoustic2nd_adjoint_fused_by_order);
+
 template<int Order>
 __global__ void acoustic2nd_nopml(
     AcousticWavefieldPointer wf,
@@ -534,6 +505,10 @@ __global__ void acoustic2nd_nopml(
     }
 
 }
+
+using acoustic2nd_nopml_fn = void (*)(AcousticWavefieldPointer, const float*,
+    LaplaceParam, SolverContext, const float*, float*, int);
+SWEEP_BY_ORDER_DECL(acoustic2nd_nopml_fn, acoustic2nd_nopml_by_order);
 
 __global__ void calculate_grad(
     const float* __restrict__ u_forward,  // (nt, B, nz, nx)

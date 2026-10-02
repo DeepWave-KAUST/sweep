@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -64,14 +65,12 @@ __global__ void visco_acoustic2d_carrier(
     carrier[b * spatial_size + idx] = (v * v) * (lap_x + lap_z);
 }
 
-#define VISCO_ACOUSTIC2D_CARRIER(order, grid, block, ...)                                    \
-    do {                                                                                     \
-        if      ((order) == 2) visco_acoustic2d_carrier<2><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 4) visco_acoustic2d_carrier<4><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 6) visco_acoustic2d_carrier<6><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 8) visco_acoustic2d_carrier<8><<<grid, block>>>(__VA_ARGS__);    \
-        else                   visco_acoustic2d_carrier<-1><<<grid, block>>>(__VA_ARGS__);   \
-    } while (0)
+using visco_acoustic2d_carrier_fn = void (*)(const float*, const float*, float*,
+    LaplaceParam, SolverContext);
+SWEEP_BY_ORDER_DECL(visco_acoustic2d_carrier_fn, visco_acoustic2d_carrier_by_order);
+
+#define VISCO_ACOUSTIC2D_CARRIER(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(visco_acoustic2d_carrier_by_order, order, grid, block, __VA_ARGS__)
 
 // ---------------------------------------------------------------------------
 // Host-side helpers shared by forward.cu / backward.cu (inline, header-only).

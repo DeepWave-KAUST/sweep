@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -161,85 +162,31 @@ __host__ inline float* field_ptr(const WavefieldPointer& wf, int field)
 }
 
 #define LAUNCH_ELASTIC_TTI_SG_VELOCITY(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_velocity_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_velocity_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_velocity_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_velocity_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_velocity_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_velocity_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_STRESS(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_stress_kernel<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_stress_kernel<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_stress_kernel<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_stress_kernel<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_stress_kernel<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_stress_kernel_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_VELOCITY_NOPML(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_velocity_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_velocity_kernel_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_velocity_kernel_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_velocity_kernel_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_velocity_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_velocity_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_STRESS_NOPML(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_stress_kernel_nopml<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_stress_kernel_nopml<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_stress_kernel_nopml<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_stress_kernel_nopml<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_stress_kernel_nopml<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_stress_kernel_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_PREPARE(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_stress_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_stress_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_stress_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_stress_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_stress_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_stress_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_STRESS_ADJOINT_APPLY(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_stress_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_stress_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_stress_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_stress_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_stress_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_stress_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_velocity_adjoint_prepare<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_velocity_adjoint_prepare<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_velocity_adjoint_prepare<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_velocity_adjoint_prepare<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_velocity_adjoint_prepare<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_velocity_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_ELASTIC_TTI_SG_VELOCITY_ADJOINT_APPLY(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) elastic_tti_sg_velocity_adjoint_apply<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_tti_sg_velocity_adjoint_apply<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_tti_sg_velocity_adjoint_apply<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_tti_sg_velocity_adjoint_apply<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_tti_sg_velocity_adjoint_apply<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(elastic_tti_sg_velocity_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
 #define LAUNCH_CALCULATE_GRAD_ELASTIC_TTI_SG_NOBS(order, grid, block, ...) \
-    do { \
-        if      ((order) == 2) calculate_grad_elastic_tti_sg_nobs<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) calculate_grad_elastic_tti_sg_nobs<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) calculate_grad_elastic_tti_sg_nobs<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) calculate_grad_elastic_tti_sg_nobs<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   calculate_grad_elastic_tti_sg_nobs<-1><<<grid, block>>>(__VA_ARGS__); \
-    } while (0)
+    SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic_tti_sg_nobs_by_order, order, grid, block, __VA_ARGS__)
 
 template<int Order>
 __global__ void elastic_tti_sg_velocity_kernel(
@@ -314,6 +261,10 @@ __global__ void elastic_tti_sg_velocity_kernel(
     f.vy[idx] += scale * (dsxy_dx + dsyz_dz);
     f.vz[idx] += scale * (dsxz_dx + dszz_dz);
 }
+
+using elastic_tti_sg_velocity_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_kernel_fn, elastic_tti_sg_velocity_kernel_by_order);
 
 template<int Order>
 __global__ void elastic_tti_sg_stress_kernel(
@@ -489,6 +440,10 @@ __global__ void elastic_tti_sg_stress_kernel(
     }
 }
 
+using elastic_tti_sg_stress_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_kernel_fn, elastic_tti_sg_stress_kernel_by_order);
+
 template<int Order>
 __global__ void elastic_tti_sg_velocity_kernel_nopml(
     WavefieldPointer wf,
@@ -529,6 +484,10 @@ __global__ void elastic_tti_sg_velocity_kernel_nopml(
     f.vy[idx] -= scale * (dsxy_dx + dsyz_dz);
     f.vz[idx] -= scale * (dsxz_dx + dszz_dz);
 }
+
+using elastic_tti_sg_velocity_kernel_nopml_fn = void (*)(WavefieldPointer,
+    StiffnessPointer, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_kernel_nopml_fn, elastic_tti_sg_velocity_kernel_nopml_by_order);
 
 template<int Order>
 __global__ void elastic_tti_sg_stress_kernel_nopml(
@@ -587,6 +546,10 @@ __global__ void elastic_tti_sg_stress_kernel_nopml(
         m.C46[idx] * dvy_dz + m.C36[idx] * dvz_dz
     );
 }
+
+using elastic_tti_sg_stress_kernel_nopml_fn = void (*)(WavefieldPointer,
+    StiffnessPointer, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_kernel_nopml_fn, elastic_tti_sg_stress_kernel_nopml_by_order);
 
 template<int Order>
 __global__ void elastic_tti_sg_stress_adjoint_prepare(
@@ -745,6 +708,11 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     f.m_vzz[idx] = az * tmp_vzz;
 }
 
+using elastic_tti_sg_stress_adjoint_prepare_fn = void (*)(WavefieldPointer,
+    StiffnessPointer, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
+    float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_adjoint_prepare_fn, elastic_tti_sg_stress_adjoint_prepare_by_order);
+
 template<int Order>
 __global__ void elastic_tti_sg_stress_adjoint_apply(
     WavefieldPointer wf,
@@ -789,6 +757,11 @@ __global__ void elastic_tti_sg_stress_adjoint_apply(
     f.vy[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(vyz, ix, iz, grad_ctx, solver, false);
     f.vz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(vzz, ix, iz, grad_ctx, solver, true);
 }
+
+using elastic_tti_sg_stress_adjoint_apply_fn = void (*)(WavefieldPointer, const float*,
+    const float*, const float*, const float*, const float*, const float*, SGradParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_adjoint_apply_fn, elastic_tti_sg_stress_adjoint_apply_by_order);
 
 template<int Order>
 __global__ void elastic_tti_sg_velocity_adjoint_prepare(
@@ -875,6 +848,11 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
     f.m_tzzz[idx] = azh * tmp_tzzz;
 }
 
+using elastic_tti_sg_velocity_adjoint_prepare_fn = void (*)(WavefieldPointer,
+    StiffnessPointer, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
+    float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_adjoint_prepare_fn, elastic_tti_sg_velocity_adjoint_prepare_by_order);
+
 template<int Order>
 __global__ void elastic_tti_sg_velocity_adjoint_apply(
     WavefieldPointer wf,
@@ -919,6 +897,11 @@ __global__ void elastic_tti_sg_velocity_adjoint_apply(
     f.sxz[idx] += sgradient<2, Order, X, DIFF_FORWARD>(txzx, ix, 0, iz, grad_ctx);
     f.szz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(tzzz, ix, iz, grad_ctx, solver, true);
 }
+
+using elastic_tti_sg_velocity_adjoint_apply_fn = void (*)(WavefieldPointer,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_adjoint_apply_fn, elastic_tti_sg_velocity_adjoint_apply_by_order);
 
 template<int Order>
 __global__ void calculate_grad_elastic_tti_sg_nobs(
@@ -1035,5 +1018,10 @@ __global__ void calculate_grad_elastic_tti_sg_nobs(
         a.vz[idx] * (vz[idx] - vz_next[idx])
     ) / m.rho[idx];
 }
+
+using calculate_grad_elastic_tti_sg_nobs_fn = void (*)(WavefieldPointer,
+    StiffnessPointer, StiffnessGradPointer, const float*, const float*, const float*,
+    const float*, const float*, const float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_elastic_tti_sg_nobs_fn, calculate_grad_elastic_tti_sg_nobs_by_order);
 
 }

@@ -248,3 +248,43 @@ __global__ void accumulate_source_grad_2d(
 
     grad_source[grad_idx] += u_backward[u_idx];
 }
+
+// Tables behind the order-dispatch macros in kernels.cuh (launch/by_order.cuh).
+
+SWEEP_BY_ORDER_TABLE(acoustic2nd_fn, acoustic2nd_by_order, acoustic2nd);
+SWEEP_BY_ORDER_TABLE(acoustic2nd_adjoint_fused_fn, acoustic2nd_adjoint_fused_by_order, acoustic2nd_adjoint_fused);
+SWEEP_BY_ORDER_TABLE(acoustic2nd_nopml_fn, acoustic2nd_nopml_by_order, acoustic2nd_nopml);
+
+// Pre-pass: clear air cells (above per-column topo surface).  Launched
+// BEFORE acoustic2nd so the main kernel can early-return on air cells
+// without writing any aux field — eliminating intra-launch RAW races
+// between air-zeroing and PML stencil reads.  See sweep VTI history.
+__global__ void acoustic2d_air_clear_kernel(
+    AcousticWavefieldPointer wf,
+    bool save_all_wavefields,
+    float* __restrict__ u_this,
+    SolverContext solver
+){
+    int ix = blockIdx.x * blockDim.x + threadIdx.x + solver.x_base;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.x_end() || iz >= solver.nz) return;
+    if (!solver.has_topo) return;
+    if (iz >= solver.topo_rows[ix]) return;
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+    f.u_next[idx] = 0.f;
+    // Aux fields live in per-axis slabs; air cells outside a slab hold an
+    // implicit zero (the FD kernel never writes them), so only clear the
+    // stored part.  Full-domain (legacy) tensors report stored() everywhere.
+    if (solver.aux_x.stored(ix)) {
+        long xi = solver.aux_idx_x2(iz, ix);
+        f.psix[xi] = 0.f; f.zetax[xi] = 0.f;
+    }
+    if (solver.aux_z.stored(iz)) {
+        long zi = solver.aux_idx_z2(iz, ix);
+        f.psiz[zi] = 0.f; f.zetaz[zi] = 0.f;
+    }
+    if (u_this) u_this[b * spatial_size + idx] = 0.f;
+}

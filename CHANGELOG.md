@@ -9,6 +9,21 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+- **Smaller wheel: every CUDA kernel is compiled once.**  A kernel template
+  launched from a header -- a driver hook or a `LAUNCH_*` macro -- was
+  instantiated (five stencil orders x every arch of the fat binary) in every
+  translation unit that included it, called or not: an equation's forward and
+  backward units, and every equation sharing a kernel family (`Elastic` /
+  `DASMu` / `ViscoElastic`, `Elastic3D` / `DASMu3D`, `Acoustic` /
+  `ViscoAcoustic`).  Kernels defined in headers were compiled into each
+  includer the same way.  Each family is now instantiated once, in its
+  `kernels.cu`, and launched through a table of its stencil-order
+  specializations (`launch/by_order.cuh`): the cu12 core drops from 157.3 to
+  70.8 MB, the cu13 core from 189.9 to 85.8 MB and the wheel from 93.1 to
+  42.4 MB (PyPI's per-file limit is 100 MB).  The machine code of every kernel
+  on every arch is byte-identical to 0.3.3's.
+
 ## [0.3.3] - 2026-10-02
 
 ### Added

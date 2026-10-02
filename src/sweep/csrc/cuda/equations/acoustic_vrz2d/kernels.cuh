@@ -1,4 +1,5 @@
 #pragma once
+#include "../../launch/by_order.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -65,7 +66,8 @@ __global__ void acoustic_vrz2nd_adjoint(
     SolverContext solver
 );
 
-static __global__ void build_kappa_lambda_vrz2d(
+// Defined in kernels.cu.
+__global__ void build_kappa_lambda_vrz2d(
     const float* __restrict__ lambda_now,
     const float* __restrict__ vp,
     const float* __restrict__ z,
@@ -110,23 +112,11 @@ __global__ void calculate_grad_vrz2d(
     SolverContext solver
 );
 
-#define ACOUSTIC_VRZ2D(order, grid, block, ...)                                              \
-    do {                                                                                     \
-        if      ((order) == 2) acoustic_vrz2nd<2><<<grid, block>>>(__VA_ARGS__);             \
-        else if ((order) == 4) acoustic_vrz2nd<4><<<grid, block>>>(__VA_ARGS__);             \
-        else if ((order) == 6) acoustic_vrz2nd<6><<<grid, block>>>(__VA_ARGS__);             \
-        else if ((order) == 8) acoustic_vrz2nd<8><<<grid, block>>>(__VA_ARGS__);             \
-        else                   acoustic_vrz2nd<-1><<<grid, block>>>(__VA_ARGS__);            \
-    } while (0)
+#define ACOUSTIC_VRZ2D(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vrz2nd_by_order, order, grid, block, __VA_ARGS__)
 
-#define ACOUSTIC_VRZ2D_NOPML(order, grid, block, ...)                                        \
-    do {                                                                                     \
-        if      ((order) == 2) acoustic_vrz2nd_nopml<2><<<grid, block>>>(__VA_ARGS__);      \
-        else if ((order) == 4) acoustic_vrz2nd_nopml<4><<<grid, block>>>(__VA_ARGS__);      \
-        else if ((order) == 6) acoustic_vrz2nd_nopml<6><<<grid, block>>>(__VA_ARGS__);      \
-        else if ((order) == 8) acoustic_vrz2nd_nopml<8><<<grid, block>>>(__VA_ARGS__);      \
-        else                   acoustic_vrz2nd_nopml<-1><<<grid, block>>>(__VA_ARGS__);     \
-    } while (0)
+#define ACOUSTIC_VRZ2D_NOPML(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vrz2nd_nopml_by_order, order, grid, block, __VA_ARGS__)
 
 #define ACOUSTIC_VRZ2D_ADJOINT(order, grid, block, ...)                                      \
     do {                                                                                     \
@@ -137,23 +127,11 @@ __global__ void calculate_grad_vrz2d(
         else                   acoustic_vrz2nd_adjoint<-1><<<grid, block>>>(__VA_ARGS__);    \
     } while (0)
 
-#define CALCULATE_GRAD_VRZ2D(order, grid, block, ...)                                        \
-    do {                                                                                     \
-        if      ((order) == 2) calculate_grad_vrz2d<2><<<grid, block>>>(__VA_ARGS__);        \
-        else if ((order) == 4) calculate_grad_vrz2d<4><<<grid, block>>>(__VA_ARGS__);        \
-        else if ((order) == 6) calculate_grad_vrz2d<6><<<grid, block>>>(__VA_ARGS__);        \
-        else if ((order) == 8) calculate_grad_vrz2d<8><<<grid, block>>>(__VA_ARGS__);        \
-        else                   calculate_grad_vrz2d<-1><<<grid, block>>>(__VA_ARGS__);       \
-    } while (0)
+#define CALCULATE_GRAD_VRZ2D(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(calculate_grad_vrz2d_by_order, order, grid, block, __VA_ARGS__)
 
-#define BUILD_VRZ_GRAD_FIELDS(order, grid, block, ...)                                       \
-    do {                                                                                     \
-        if      ((order) == 2) build_vrz_grad_fields<2><<<grid, block>>>(__VA_ARGS__);       \
-        else if ((order) == 4) build_vrz_grad_fields<4><<<grid, block>>>(__VA_ARGS__);       \
-        else if ((order) == 6) build_vrz_grad_fields<6><<<grid, block>>>(__VA_ARGS__);       \
-        else if ((order) == 8) build_vrz_grad_fields<8><<<grid, block>>>(__VA_ARGS__);       \
-        else                   build_vrz_grad_fields<-1><<<grid, block>>>(__VA_ARGS__);      \
-    } while (0)
+#define BUILD_VRZ_GRAD_FIELDS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(build_vrz_grad_fields_by_order, order, grid, block, __VA_ARGS__)
 
 #define BUILD_VRZ_ADJOINT_FIELDS(order, grid, block, ...)                                    \
     do {                                                                                     \
@@ -378,6 +356,11 @@ __global__ void acoustic_vrz2nd(
         u_this_b[idx] = rhs;
 }
 
+using acoustic_vrz2nd_fn = void (*)(AcousticWavefieldPointer, bool, float*,
+    const float*, const float*, const float*, LaplaceParam, GradParam, GradParam,
+    GradParam, AcousticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic_vrz2nd_fn, acoustic_vrz2nd_by_order);
+
 template<int Order>
 __global__ void acoustic_vrz2nd_nopml(
     AcousticWavefieldPointer wf,
@@ -431,6 +414,10 @@ __global__ void acoustic_vrz2nd_nopml(
 
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
 }
+
+using acoustic_vrz2nd_nopml_fn = void (*)(AcousticWavefieldPointer, const float*,
+    const float*, const float*, LaplaceParam, GradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic_vrz2nd_nopml_fn, acoustic_vrz2nd_nopml_by_order);
 
 // Pre-multiply λ by the model-only adjoint coefficients so the transpose
 // stencils in acoustic_vrz2nd_adjoint can be applied without a read-then-write
@@ -602,24 +589,6 @@ __global__ void acoustic_vrz2nd_adjoint(
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
 }
 
-static __global__ void build_kappa_lambda_vrz2d(
-    const float* __restrict__ lambda_now,
-    const float* __restrict__ vp,
-    const float* __restrict__ z,
-    float* __restrict__ kappa_lambda,
-    SolverContext solver
-) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = b * spatial_size + iz * solver.nx + ix;
-    kappa_lambda[idx] = vp[idx] * z[idx] * lambda_now[idx];
-}
-
 template<int Order>
 __global__ void build_vrz_grad_fields(
     const float* __restrict__ f_u_now,
@@ -666,6 +635,10 @@ __global__ void build_vrz_grad_fields(
     e_x[gidx] = lam_v2z * dpdx;        // λ·vp²·z·∂ₓp
     e_z[gidx] = lam_v2z * dpdz;        // λ·vp²·z·∂_z p
 }
+
+using build_vrz_grad_fields_fn = void (*)(const float*, const float*, const float*,
+    const float*, float*, float*, float*, float*, GradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(build_vrz_grad_fields_fn, build_vrz_grad_fields_by_order);
 
 // Exact discrete-adjoint gradient (reverse-mode transpose of the forward rhs
 //   rhs = vp²·∇²p + vp·(∇vp·∇p) + vp²·z·(∇(1/z)·∇p) ).
@@ -766,6 +739,12 @@ __global__ void calculate_grad_vrz2d(
     grad_z_b[idx]  += -dt2 * g_z;
 }
 
+using calculate_grad_vrz2d_fn = void (*)(const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, float*, float*, GradParam, LaplaceParam,
+    SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_vrz2d_fn, calculate_grad_vrz2d_by_order);
+
 // ===========================================================================
 // Fused backward kernels (functor recompute-at-tap, bit-exact with the split
 // prepare+apply path above).  Backward per step: build_vrz_adjoint_fields +
@@ -822,6 +801,10 @@ __global__ void build_vrz_adjoint_coeffs(
     Cx[gidx] = dbdx * kappa;     // (dx b)*kappa
     Cz[gidx] = dbdz * kappa;     // (dz b)*kappa
 }
+
+using build_vrz_adjoint_coeffs_fn = void (*)(const float*, const float*, const float*,
+    float*, float*, float*, GradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(build_vrz_adjoint_coeffs_fn, build_vrz_adjoint_coeffs_by_order);
 
 template<int Order>
 __global__ void acoustic_vrz2nd_adjoint_fused(
@@ -997,6 +980,12 @@ __global__ void acoustic_vrz2nd_adjoint_fused(
     #undef VRZ_GTMP_Z
 }
 
+using acoustic_vrz2nd_adjoint_fused_fn = void (*)(AcousticWavefieldPointer,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext,
+    float*, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(acoustic_vrz2nd_adjoint_fused_fn, acoustic_vrz2nd_adjoint_fused_by_order);
+
 // Accessor recomputing c_d = λ·vp·∂_d p  (UseE=false) or e_d = λ·vp²·z·∂_d p
 // (UseE=true) at stencil tap `off` along Dir, matching build_vrz_grad_fields.
 template<int Order, int Dir, bool UseE>
@@ -1124,11 +1113,18 @@ __global__ void calculate_grad_vrz2d_fused(
     grad_z_b[idx]  += -dt2 * g_z;
 }
 
+using calculate_grad_vrz2d_fused_fn = void (*)(const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, float*,
+    float*, GradParam, LaplaceParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_vrz2d_fused_fn, calculate_grad_vrz2d_fused_by_order);
+
 // The p_tt imaging uses U_{it+1} − 2U_it + U_{it−1}, which at a source cell
 // is dt²·rhs + S_it (add_source adds the wavelet to u_next after the step,
 // unscaled).  The exact adjoint wants dt²·rhs alone: add back the 2·λ·S/v the
 // imaging subtracted.  Same indexing as add_source.
-static __global__ void vrz2d_utt_source_correction(
+// (Defined in kernels.cu: a definition here is compiled into every TU that
+// includes this header.)
+__global__ void vrz2d_utt_source_correction(
     float* __restrict__ grad_vp,
     const float* __restrict__ lambda_now,
     const float* __restrict__ vp,
@@ -1137,46 +1133,16 @@ static __global__ void vrz2d_utt_source_correction(
     int it,
     int nsrc,
     SolverContext solver
-) {
-    int b = blockIdx.x;
-    int s = blockIdx.y * blockDim.x + threadIdx.x;
-    if (b >= solver.B || s >= nsrc) return;
-    int base = (b * nsrc + s) * 2;
-    int ix = sources_loc[base + 0];
-    int iz = sources_loc[base + 1];
-    if (ix < 0 || ix >= solver.nx || iz < 0 || iz >= solver.nz) return;
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    long long idx = (long long)b * spatial_size + (long long)iz * solver.nx + ix;
-    long long src_idx = ((long long)b * nsrc + s) * solver.nt + it;
-    atomicAdd(&grad_vp[idx], 2.0f * lambda_now[idx] * source[src_idx] / vp[idx]);
-}
+);
 
-#define BUILD_VRZ_ADJOINT_COEFFS(order, grid, block, ...)                                     \
-    do {                                                                                      \
-        if      ((order) == 2) build_vrz_adjoint_coeffs<2><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 4) build_vrz_adjoint_coeffs<4><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 6) build_vrz_adjoint_coeffs<6><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 8) build_vrz_adjoint_coeffs<8><<<grid, block>>>(__VA_ARGS__);     \
-        else                   build_vrz_adjoint_coeffs<-1><<<grid, block>>>(__VA_ARGS__);    \
-    } while (0)
+#define BUILD_VRZ_ADJOINT_COEFFS(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(build_vrz_adjoint_coeffs_by_order, order, grid, block, __VA_ARGS__)
 
-#define ACOUSTIC_VRZ2D_ADJOINT_FUSED(order, grid, block, ...)                                 \
-    do {                                                                                      \
-        if      ((order) == 2) acoustic_vrz2nd_adjoint_fused<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) acoustic_vrz2nd_adjoint_fused<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) acoustic_vrz2nd_adjoint_fused<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) acoustic_vrz2nd_adjoint_fused<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   acoustic_vrz2nd_adjoint_fused<-1><<<grid, block>>>(__VA_ARGS__);\
-    } while (0)
+#define ACOUSTIC_VRZ2D_ADJOINT_FUSED(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_vrz2nd_adjoint_fused_by_order, order, grid, block, __VA_ARGS__)
 
-#define CALCULATE_GRAD_VRZ2D_FUSED(order, grid, block, ...)                                   \
-    do {                                                                                      \
-        if      ((order) == 2) calculate_grad_vrz2d_fused<2><<<grid, block>>>(__VA_ARGS__);   \
-        else if ((order) == 4) calculate_grad_vrz2d_fused<4><<<grid, block>>>(__VA_ARGS__);   \
-        else if ((order) == 6) calculate_grad_vrz2d_fused<6><<<grid, block>>>(__VA_ARGS__);   \
-        else if ((order) == 8) calculate_grad_vrz2d_fused<8><<<grid, block>>>(__VA_ARGS__);   \
-        else                   calculate_grad_vrz2d_fused<-1><<<grid, block>>>(__VA_ARGS__);  \
-    } while (0)
+#define CALCULATE_GRAD_VRZ2D_FUSED(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(calculate_grad_vrz2d_fused_by_order, order, grid, block, __VA_ARGS__)
 
 // Gradient dispatch: the fused functor kernel recomputes ∂p at every stencil tap
 // (O(M²) per point), which beats the buffered split path only at low order.

@@ -861,7 +861,8 @@ public:
             for_view.el,
             s.models.rho.data_ptr<float>(),
             s.grad_ctx,
-            solver
+            solver,
+            nullptr, nullptr, nullptr     // no carrier capture (plain reconstruction)
         );
 
         float* field1[3] = {for_view.das.vx, for_view.das.vy, for_view.das.vz};

@@ -45,9 +45,11 @@ Three rules for a core that is going to PyPI:
   20.04 required `GLIBCXX_3.4.30` (GCC 12) and failed to load on a stock Debian 11
   or RHEL 9 with a `GLIBCXX_...` version error -- conda environments hide this,
   because they carry their own `libstdc++`.
-- **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 127 MB
-  `.so`, the cu13 list (seven SASS targets + `sm_120` PTX) a 155 MB one; compressed
-  together they make a ~76 MB wheel. PyPI's per-file limit is 100 MB. Add SASS entries sparingly and keep
+- **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 71 MB
+  `.so`, the cu13 list (seven SASS targets + `sm_120` PTX) an 86 MB one; compressed
+  together they make a ~42 MB wheel. PyPI's per-file limit is 100 MB. Every kernel is
+  compiled once (`kernels.cu` and its launch tables, see `cuda_drivers.md`); a kernel
+  named in a header would be compiled again into every includer. Add SASS entries sparingly and keep
   exactly one `+PTX` entry per core, the newest arch: each embedded PTX is another
   copy of every kernel, and a card newer than every SASS entry only ever needs the
   newest one.
