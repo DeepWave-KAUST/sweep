@@ -60,6 +60,20 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/03_fwi_multiscale.ipynb)
 
+-   ![Frequency-selection FWI](../figures/gallery/31_fwi_frequency_selection.png){ loading=lazy }
+
+    **FWI · Frequency-selection encoding**
+
+    ---
+
+    A towed-streamer survey, 129 shots every 100 m, all in one forward: each
+    shot radiates its own monochromatic frequency, the steady-window DFT
+    separates them with zero crosstalk, and a coherence misfit cancels the
+    wavelet. Multiscale 1.5–3 / 2.5–5 / 4–10 Hz, each band on its own grid
+    and time step (100 / 50 / 25 m), in plain torch on Marmousi.
+
+    [:material-notebook-outline: Open notebook](../notebooks/31_fwi_frequency_selection.ipynb)
+
 -   ![Batched local-window FWI](../figures/gallery/23_batched_local_window_fwi.png){ loading=lazy }
 
     **FWI · Batched per-shot local windows**
