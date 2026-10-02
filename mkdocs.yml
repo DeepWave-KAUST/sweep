@@ -127,6 +127,7 @@ nav:
               - Topography (irregular FS): notebooks/15_wavefield_topography.ipynb
               - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
               - Visco-acoustic · constant-Q: notebooks/29_wavefield_visco_acoustic.ipynb
+              - Visco-elastic · GSLS (Qp, Qs): notebooks/30_wavefield_visco_elastic.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
               - Acoustic VTI: notebooks/05_wavefield_vti.ipynb
@@ -170,6 +171,7 @@ nav:
           - ViscoAcoustic: api/equations/visco_acoustic.md
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md
+          - ViscoElastic: api/equations/visco_elastic.md
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md
           - ElasticTTISG3D: api/equations/elastic_tti_sg3d.md

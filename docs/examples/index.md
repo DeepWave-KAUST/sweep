@@ -271,6 +271,19 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/29_wavefield_visco_acoustic.ipynb)
 
+-   ![Wavefield visco-elastic](../figures/gallery/30_wavefield_visco_elastic.png){ loading=lazy }
+
+    **Wavefield · Visco-elastic · GSLS**
+
+    ---
+
+    `ViscoElastic`: the elastic solver plus the generalized standard linear
+    solid SPECFEM2D uses — `Qp` and `Qs` switched independently, one quadrant
+    per combination, the P/S decay checked against constant-Q theory, and why
+    dispersion and attenuation cannot be switched apart.
+
+    [:material-notebook-outline: Open notebook](../notebooks/30_wavefield_visco_elastic.ipynb)
+
 -   ![Domain decomposition](../figures/gallery/25_domain_decomposition.png){ loading=lazy }
 
     **HPC · Domain decomposition**

@@ -119,6 +119,11 @@ constexpr int ID_visco_acoustic2d_backward = 90;
 constexpr int ID_visco_acoustic2d_backward_bs = 91;
 constexpr int ID_visco_acoustic2d_backward_ckpt = 92;
 constexpr int ID_visco_acoustic2d_backward_recursive_ckpt = 93;
+constexpr int ID_visco_elastic2d_forward = 94;
+constexpr int ID_visco_elastic2d_backward = 95;
+constexpr int ID_visco_elastic2d_backward_bs = 96;
+constexpr int ID_visco_elastic2d_backward_ckpt = 97;
+constexpr int ID_visco_elastic2d_backward_recursive_ckpt = 98;
 
 [[noreturn]] void raise_core(const char* err) { throw std::runtime_error(err); }
 
@@ -325,6 +330,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("visco_acoustic2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_acoustic2d_backward_bs, in); }), "Visco-acoustic backward 2D boundary-saving (unsupported: raises)");
     m.def("visco_acoustic2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_acoustic2d_backward_ckpt, in); }), "Visco-acoustic backward 2D with checkpointing (CUDA only)");
     m.def("visco_acoustic2d_backward_recursive_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_acoustic2d_backward_recursive_ckpt, in); }), "Visco-acoustic backward 2D with recursive checkpointing (CUDA only)");
+    m.def("visco_elastic2d_forward", wrap_forward([](const ForwardInput& in) { return call_forward(ID_visco_elastic2d_forward, in); }), "Visco-elastic (GSLS) forward 2D (CUDA only)");
+    m.def("visco_elastic2d_backward", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward, in); }), "Visco-elastic backward 2D full mode (CUDA only)");
+    m.def("visco_elastic2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward_bs, in); }), "Visco-elastic backward 2D boundary-saving (unsupported: raises)");
+    m.def("visco_elastic2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward_ckpt, in); }), "Visco-elastic backward 2D with checkpointing (CUDA only)");
+    m.def("visco_elastic2d_backward_recursive_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward_recursive_ckpt, in); }), "Visco-elastic backward 2D with recursive checkpointing (CUDA only)");
 
     m.def("visco_acoustic2d_fft_workspace_bytes",
           [](int64_t B, int64_t nz, int64_t nx) { return sweep_visco_fft_workspace_bytes(B, nz, nx); },

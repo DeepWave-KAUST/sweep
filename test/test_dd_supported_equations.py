@@ -63,7 +63,7 @@ def test_vrz2d_is_stepped_but_still_refused():
 
 
 def test_unstepped_equations_are_refused_with_the_requirement():
-    for name in ("AcousticLSRTM", "DASMu", "ElasticTTISG"):
+    for name in ("AcousticLSRTM", "DASMu", "ElasticTTISG", "ViscoElastic"):
         eq = _make(name)
         with pytest.raises(NotImplementedError, match="stepped"):
             check_dd_admission(eq, eq.cuda_layout, ACOUSTIC_DD)

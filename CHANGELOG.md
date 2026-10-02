@@ -9,6 +9,42 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **ViscoElastic: 2-D visco-elastic equation (generalized standard linear
+  solid), eager and CUDA (`impl='c'`) backends.**  The rheology SPECFEM2D
+  (and so SeisFlows) uses:
+  `n_sls` Zener bodies (default 3) with relaxation times fixed by the band,
+  memory variables advanced with the trapezoidal rule, on the `Elastic`
+  staggered-grid step (shared, not copied: the velocity-gradient/CPML/free-
+  surface block of the stress sub-step is factored into
+  `elastic_velocity_gradients`; `Elastic` and `DASMu` stay bit-identical).
+  Models are `vp, vs, rho, Qp, Qs`, velocities given at the reference
+  frequency `f_ref` (SPECFEM's `READ_VELOCITIES_AT_f0`), and all five carry
+  gradients.  Each mechanism's strength is the least-squares constant-Q fit,
+  linear in the strengths (a rational function of 1/Q, evaluated elementwise
+  with an analytic backward), so Q stays within ~5% of target over the band
+  for Q >= 10 (~9% at Q = 3).  `Q = inf` reduces bit-exactly to `Elastic`.
+  The flat free surface (per edge) solves the surface normal strain rate so
+  the traction stays zero through the memory variables.
+  `ViscoElastic.unrelaxed_velocities` gives the velocities the explicit
+  update runs at, for the CFL check.  Checked against the exact 2-D
+  homogeneous Green's function (P and S spectral ratios to 2e-4 / 2e-3) and
+  against SPECFEM2D with a free surface (visco/elastic spectral ratio: median
+  deviation 0.3-2% over 4-25 Hz; time-domain misfit no larger than the
+  elastic-vs-elastic baseline).  The CUDA backend is a set of staggered-
+  skeleton traits derived from elastic2d's (`visco_elastic2d/driver_traits.cuh`,
+  a template on the mechanism count): Elastic's velocity kernel, source /
+  receiver / rho-correction plumbing and adjoint stencil transposes, plus the
+  visco stress update and its hand-derived exact adjoint (memory variables,
+  surface solve and its material derivatives) with the gradient imaging fused
+  into it in every mode.  `full`, chunk- and recursive-checkpoint backwards,
+  all three bitwise equal.  c vs eager: records and all five gradients agree
+  at the Elastic c-vs-eager floor (<= 8.8e-5 over 72 source x receiver x
+  geometry x free-surface combinations with PML, <= 1.3e-5 in a closed box,
+  surface rows included).
+  Not supported: boundary saving (default falls back to `full`), topography,
+  domain decomposition (all refused explicitly).
+
 ## [0.3.2] - 2026-10-01
 
 ### Fixed

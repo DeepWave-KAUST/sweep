@@ -59,6 +59,7 @@ from . import (
     qP_tariq,
     qP_vti,
     visco_acoustic,
+    visco_elastic,
 )
 
 # Public exports that are NOT WaveEquation subclasses, so they are not in the
