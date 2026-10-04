@@ -1,6 +1,8 @@
+import functools
+
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_plain, record_single
+from .cuda_layout import CUDALayoutSpec, history_fields, history_plain, record_single
 
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
@@ -69,11 +71,16 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
 _CKPT_REPLAY_STATE_NVAR = 7
 
 
-def _adjoint_workspace_shapes(B, nt, shape, mode):
+def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
     """The compiled backward's scratch (acoustic_lsrtm2d/backward.cu WorkspaceSlot),
     one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
-    plus the replayed step's background u_tt in the recursive-checkpoint mode.
+    plus the replayed step's background u_tt in the recursive-checkpoint mode, or
+    -- in the full and boundary-saving modes when vp needs its RWI tomographic
+    gradient (``rwi``) -- the background adjoint's own v2 scratch and its combined
+    field lambda_bg + mp*lambda_sc (differentiated in the CPML band).
     """
+    if rwi and mode in ("full", "bs"):
+        return 3 * [[B, 1, *shape]]
     n = 2 if mode == "recursive" else 1
     return n * [[B, 1, *shape]]
 
@@ -90,7 +97,12 @@ class AcousticLSRTM(SecondOrderEquation):
     receivers on the scattered field ``sh1`` — the standard layout for
     least-squares reverse-time migration.
 
-    
+    With ``impl='c'`` the gradient of ``vp`` is the reflection (RWI)
+    tomographic one of Wu & Alkhalifah (2015), terms II+III+IV, in the
+    full and boundary-saving modes.  It is computed only when ``vp``
+    requires grad -- it doubles the backward and up to doubles its
+    memory -- so an LSRTM with a fixed ``vp`` runs the reflectivity-only
+    path at the old cost.
     """
 
     C_NAME = "acoustic_lsrtm2d"
@@ -160,19 +172,31 @@ class AcousticLSRTM(SecondOrderEquation):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
 
-    @property
-    def cuda_layout(self):
+    def _layout(self, rwi):
+        """The CUDA layout of one call; ``rwi`` = vp asks for its gradient.
+
+        The RWI tomographic vp gradient (terms II+III+IV) needs the background
+        adjoint and the scattered field -- both u_tt in the full-mode history,
+        both fields boundary-saved and reconstructed in bs mode -- about twice
+        the backward time and up to twice the memory.  A call whose vp needs no
+        gradient (the classic LSRTM, mp only) gets the reflectivity-only layout
+        and the drivers run the mp-only path; they tell the two apart from what
+        is bound (history fields, reconstruction grids, last_two fields).
+        """
         return CUDALayoutSpec(
             record_shape=record_single(),
             # chunk_forward: the replayed chunk's background u_tt
             # chunk_forward, the replayed chunk's background u_tt: chunk mode only (the
             # recursive leaf images from its u_this workspace slot)
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)] if mode == "ckpt" else [],
-            backward_workspace_shapes=_adjoint_workspace_shapes,
-            bs_reconstruction_nvar=3,   # u_prev, u_now, u_next of the background field
+            backward_workspace_shapes=functools.partial(_adjoint_workspace_shapes, rwi=rwi),
+            # u_prev, u_now, u_next of the background field, then (rwi) of the scattered
+            # field: the RWI vp gradient (terms II/III/IV) correlates against it
+            bs_reconstruction_nvar=6 if rwi else 3,
             checkpoint_state_nvar=_CKPT_REPLAY_STATE_NVAR,   # one acoustic state set per replay / recursion level
             recursive_state_depth=True,
-            save_all_shape=history_plain(),   # bg_utt_all
+            # rwi: stacked [bg_utt, sc_utt] per step (sc_utt feeds term II of the vp gradient)
+            save_all_shape=history_fields(2) if rwi else history_plain(),
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,
@@ -181,8 +205,20 @@ class AcousticLSRTM(SecondOrderEquation):
             # for the race-free forward psi double-buffer -> 2*(4+2)=12.
             pml_nvar=12,
             last_two_nvar=2,
-            last_two_storage_nvar=1,
+            # rwi: 2 fields (bg + scattered) are boundary-saved so the bs backward can
+            # reconstruct the scattered field for the vp (tomographic) gradient.
+            last_two_storage_nvar=2 if rwi else 1,
             checkpoint_nvar=6,
-            boundary_save_nvar=1,
+            boundary_save_nvar=2 if rwi else 1,
         )
+
+    @property
+    def cuda_layout(self):
+        # Every model needing a gradient: the RWI layout, the widest one.
+        return self._layout(True)
+
+    def cuda_layout_for_grads(self, grad_mask):
+        """The layout of a call whose models need these gradients
+        (``grad_mask[i]``: model i requires grad; None: all of them)."""
+        return self._layout(grad_mask is None or bool(grad_mask[0]))
     
