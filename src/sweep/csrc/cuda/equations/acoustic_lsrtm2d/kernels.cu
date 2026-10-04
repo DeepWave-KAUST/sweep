@@ -120,6 +120,8 @@ __global__ void compute_v2_lambda_bg_lsrtm2d(
 // II  = <lam, B'(v) q>        (scattered field self-propagation)
 // IV  = <mu,  B'(v) p>        (background field via the second adjoint)
 // III = <lam, B'(v) p .* w>   (the singular image-point term)
+// grad_iii != nullptr keeps III apart so the caller can apply the paper's beta
+// weight (eq. 18-20); otherwise all three are summed into grad_vp.
 __global__ void calculate_grad_lsrtm_vp_utt(
     const float* __restrict__ bg_utt,
     const float* __restrict__ sc_utt,
@@ -128,6 +130,7 @@ __global__ void calculate_grad_lsrtm_vp_utt(
     const float* __restrict__ mp,
     const float* __restrict__ vp,
     float* __restrict__ grad_vp,
+    float* __restrict__ grad_iii,
     int nx, int nz, float dt
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -140,7 +143,12 @@ __global__ void calculate_grad_lsrtm_vp_utt(
     float ls  = lam_sc[o];
     float ii_iv = c * (sc_utt[o] * ls + bgu * lam_bg[o]);
     float iii   = c * (mp[o] * bgu * ls);
-    grad_vp[o] += ii_iv + iii;
+    if (grad_iii != nullptr) {
+        grad_vp[o]  += ii_iv;
+        grad_iii[o] += iii;
+    } else {
+        grad_vp[o]  += ii_iv + iii;
+    }
 }
 
 // Boundary-saving mode drives the scattered field's reverse recursion with the
@@ -167,13 +175,14 @@ __global__ void add_lsrtm_scattered_coupling_2d(
 // Boundary-saving vp gradient, from the reconstructed second differences:
 //   bg 2nd diff = dt^2 vp^2 Lap(bg) = dt^2 * bg_utt                 -> IV
 //   sc 2nd diff = dt^2 (sc_utt + mp*bg_utt)                         -> II + III
-// so the total matches the full mode.
+// so the total matches the full mode, and III is recovered separately as
+// (2/v) * mp * (bg 2nd diff) * lam_sc for the same beta split.
 __global__ void calculate_grad_lsrtm_vp_2diff_2d(
     const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
     const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
-    const float* __restrict__ vp,
-    float* __restrict__ grad_vp,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int nx, int nz
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -186,5 +195,11 @@ __global__ void calculate_grad_lsrtm_vp_2diff_2d(
     float sc2 = sc_prev[o] - 2.0f * sc_now[o] + sc_next[o];
     float ls  = lam_sc[o];
     float total = inv * (bg2 * lam_bg[o] + sc2 * ls);
-    grad_vp[o] += total;
+    if (grad_iii != nullptr) {
+        float iii = inv * (mp[o] * bg2 * ls);
+        grad_vp[o]  += total - iii;
+        grad_iii[o] += iii;
+    } else {
+        grad_vp[o]  += total;
+    }
 }

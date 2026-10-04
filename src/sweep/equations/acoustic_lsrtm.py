@@ -200,6 +200,7 @@ class AcousticLSRTM(SecondOrderEquation):
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,
+            rwi_split_iii=rwi,   # term III -> grad_split_iii_out (full / bs)
             base_nvar=6,
             # 2 wavefields (bg+sc); each: psix,psiz,zetax,zetaz (4) + psixn,psizn (2)
             # for the race-free forward psi double-buffer -> 2*(4+2)=12.

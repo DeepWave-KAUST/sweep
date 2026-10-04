@@ -398,7 +398,7 @@ void process_recursive_interval_2d(
     );
 }
 
-void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, bool rwi)
+void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, float* grad_iii, bool rwi)
 {
     auto vp = p.models[0];
     auto mp = p.models[1];
@@ -498,7 +498,7 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, bo
                 bg_utt, sc_utt,
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 mp.data_ptr<float>(), vp.data_ptr<float>(),
-                grad_vp.data_ptr<float>(),
+                grad_vp.data_ptr<float>(), grad_iii,
                 nx, nz, ctx.dt
             );
         }
@@ -522,7 +522,13 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
     auto grad_vp = pool_required(gs, 1, in.models[0], "grads_out");
     auto grad_mp = pool_required(gs, 2, in.models[1], "grads_out");
 
-    run_full_imaging(in, grad_vp, grad_mp, rwi);
+    // RWI beta split (grad_split_iii_out bound): III goes there, grad_vp keeps II+IV.
+    SWEEP_CHECK(rwi || !in.grad_split_iii_out.defined(),
+                "acoustic_lsrtm2d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
+    float* grad_iii = in.grad_split_iii_out.defined()
+        ? bound_required(in.grad_split_iii_out, in.models[0].sizes().vec(), "grad_split_iii_out").data_ptr<float>()
+        : nullptr;
+    run_full_imaging(in, grad_vp, grad_mp, grad_iii, rwi);
 
     out.grads = {grad_wavelet, grad_vp, grad_mp};
     return out;
@@ -606,6 +612,11 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         v2lbg = pool_required(p.adjoint_workspace, V2_LAMBDA_BG, vp, "adjoint_workspace");
         gbg = pool_required(p.adjoint_workspace, G_BG, vp, "adjoint_workspace");
     }
+    SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
+                "acoustic_lsrtm2d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
+    float* grad_iii = p.grad_split_iii_out.defined()
+        ? bound_required(p.grad_split_iii_out, vp.sizes().vec(), "grad_split_iii_out").data_ptr<float>()
+        : nullptr;
 
     AcousticCPMLTensor cpml_tensor;
     cpml_tensor.bind(p.pml_vals, 2);
@@ -777,8 +788,8 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
                 sc_view_iter.u_next,                    // sc[it-1]
                 bg_adjoint.u_now_t.data_ptr<float>(),   // lambda_bg(it)
                 adjoint.u_now_t.data_ptr<float>(),      // lambda_sc(it)
-                vp.data_ptr<float>(),
-                grad_vp.data_ptr<float>(),
+                mp.data_ptr<float>(), vp.data_ptr<float>(),
+                grad_vp.data_ptr<float>(), grad_iii,
                 nx, nz
             );
 

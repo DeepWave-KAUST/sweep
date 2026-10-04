@@ -629,6 +629,12 @@ void run_full_imaging(
         v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_FULL - 2, vp, "adjoint_workspace");
         gbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_FULL - 1, vp, "adjoint_workspace");
     }
+    // RWI beta split (grad_split_iii_out bound): III goes there, grad_vp keeps II+IV.
+    SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
+                "acoustic_lsrtm3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
+    float* grad_iii = p.grad_split_iii_out.defined()
+        ? bound_required(p.grad_split_iii_out, vp.sizes().vec(), "grad_split_iii_out").data_ptr<float>()
+        : nullptr;
 
     float* u_thist = nullptr;
 
@@ -706,7 +712,7 @@ void run_full_imaging(
                 bg_utt, sc_utt,
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 mp.data_ptr<float>(), vp.data_ptr<float>(),
-                grad_vp->data_ptr<float>(),
+                grad_vp->data_ptr<float>(), grad_iii,
                 B, nx, ny, nz, ctx.dt);
         }
 
@@ -805,6 +811,11 @@ void run_bs_imaging(
         v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_BS - 2, vp, "adjoint_workspace");
         gbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_BS - 1, vp, "adjoint_workspace");
     }
+    SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
+                "acoustic_lsrtm3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
+    float* grad_iii = p.grad_split_iii_out.defined()
+        ? bound_required(p.grad_split_iii_out, vp.sizes().vec(), "grad_split_iii_out").data_ptr<float>()
+        : nullptr;
 
     auto f_this = pool_required(p.adjoint_workspace, F_THIS, vp, "adjoint_workspace");
 
@@ -966,8 +977,8 @@ void run_bs_imaging(
                 sc_view.u_next,                         // sc[it-1]
                 bg_adjoint.u_now_t.data_ptr<float>(),   // lambda_bg(it)
                 adjoint.u_now_t.data_ptr<float>(),      // lambda_sc(it)
-                vp.data_ptr<float>(),
-                grad_vp->data_ptr<float>(),
+                mp.data_ptr<float>(), vp.data_ptr<float>(),
+                grad_vp->data_ptr<float>(), grad_iii,
                 B, nx, ny, nz);
         }
 

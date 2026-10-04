@@ -168,6 +168,7 @@ const int64_t kLayout[] = {
     static_cast<int64_t>(offsetof(BackwardInputCore, grads_out)),
     static_cast<int64_t>(offsetof(BackwardInputCore, illum_out)),
     static_cast<int64_t>(offsetof(BackwardInputCore, adcig_out)),
+    static_cast<int64_t>(offsetof(BackwardInputCore, grad_split_iii_out)),
     static_cast<int64_t>(offsetof(BackwardInputCore, cut_face_mask)),
     static_cast<int64_t>(offsetof(BackwardInputCore, compute_adcig)),
     static_cast<int64_t>(offsetof(BackwardInputCore, adcig_max_lag)),

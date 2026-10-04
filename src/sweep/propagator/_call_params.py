@@ -87,6 +87,8 @@ class CompiledCallParams:
     # Whether the equation's BackwardOutput.grads starts with grad_wavelet
     # (cuda_layout.grads_out_has_wavelet): decides the grads_out layout.
     grads_out_has_wavelet: bool = False
+    # (cuda_layout.rwi_split_iii): the backward can write term III to grad_split_iii_out.
+    rwi_split_iii: bool = False
     # (cuda_layout.grads_out_wavelet_written): False when the driver sizes the
     # slot but never writes it (acoustic_vrz*), so the wavelet gradient stays None.
     grads_out_wavelet_written: bool = True

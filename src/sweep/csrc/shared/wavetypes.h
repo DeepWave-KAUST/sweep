@@ -341,6 +341,13 @@ struct BackwardInput {
     // Wrapper.backward exactly when compute_adcig; returned as
     // BackwardOutput.adcig.
     torch::Tensor adcig_out;
+    // grad_split_iii_out: AcousticLSRTM / AcousticLSRTM3D only.  When bound, the
+    // RWI tomographic vp gradient is split (Wu & Alkhalifah 2015, eq. 18-20):
+    // the singular image-point term III accumulates here and grads_out[1] keeps
+    // II+IV only, so the caller can form grad_v = (II+IV) + beta*III.  Model-shaped
+    // like models[0], zeroed per backward call; unbound (the default) sums all
+    // three into grads_out[1].  Full and boundary-saving modes only.
+    torch::Tensor grad_split_iii_out;
 
     // ---- DD cut faces ----
     // Bitmask of tile faces that are interior cuts (a neighbour tile

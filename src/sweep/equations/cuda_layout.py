@@ -173,6 +173,11 @@ class CUDALayoutSpec:
     # gradients.  False keeps wavelet.grad = None there, as the pybind shim did,
     # instead of handing autograd the untouched zero buffer.
     grads_out_wavelet_written: bool = True
+    # RWI (AcousticLSRTM / AcousticLSRTM3D): the backward can split term III of the
+    # tomographic vp gradient into BackwardInput.grad_split_iii_out (full and
+    # boundary-saving modes) so the caller can apply the beta weight of Wu &
+    # Alkhalifah (2015, eq. 18-20).  Opt-in at run time with SWEEP_LSRTM_SPLIT_III=1.
+    rwi_split_iii: bool = False
     # illum_out.size() == 2 (acoustic2d/backward.cu:104, acoustic3d:128) vs
     # illum_out.empty() (elastic2d/backward.cu:310, elastic3d:532).
     #

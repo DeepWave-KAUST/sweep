@@ -344,6 +344,7 @@ __global__ void calculate_grad_lsrtm_vp_utt(
     const float* __restrict__ mp,
     const float* __restrict__ vp,
     float* __restrict__ grad_vp,
+    float* __restrict__ grad_iii,
     int nx, int nz, float dt
 );
 
@@ -360,7 +361,7 @@ __global__ void calculate_grad_lsrtm_vp_2diff_2d(
     const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
     const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
-    const float* __restrict__ vp,
-    float* __restrict__ grad_vp,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int nx, int nz
 );

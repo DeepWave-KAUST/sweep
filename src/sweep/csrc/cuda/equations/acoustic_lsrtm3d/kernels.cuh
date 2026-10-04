@@ -381,7 +381,7 @@ __global__ void calculate_grad_lsrtm3d_vp_utt(
     const float* __restrict__ bg_utt, const float* __restrict__ sc_utt,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
     const float* __restrict__ mp, const float* __restrict__ vp,
-    float* __restrict__ grad_vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int B, int nx, int ny, int nz, float dt);
 
 __global__ void add_lsrtm3d_scattered_coupling(
@@ -393,8 +393,8 @@ __global__ void calculate_grad_lsrtm3d_vp_2diff(
     const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
     const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
-    const float* __restrict__ vp,
-    float* __restrict__ grad_vp,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int B, int nx, int ny, int nz);
 
 // Defined in acoustic3d/kernels.cu and shared across translation units -- LSRTM
