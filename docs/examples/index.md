@@ -247,6 +247,20 @@ linked at the bottom of this page.
 
     [:material-notebook-outline: Open notebook](../notebooks/14_custom_gradient.ipynb)
 
+-   ![RWI velocity gradient](../figures/gallery/32_rwi_acoustic_vs_lsrtm_gradient.png){ loading=lazy }
+
+    **Reflection FWI · where the velocity gradient comes from**
+
+    ---
+
+    The RWI velocity gradient splits into a transmission half and a reflection
+    half from two equations: `Acoustic` gives term I, `AcousticLSRTM` gives
+    II+III+IV. Shows the paper's eq. 15 identity, how to weight the image-point
+    term III with the paper's beta, and the same anatomy in 3-D, where the
+    wavepath becomes a pair of tubes and the image point a Fresnel-zone patch.
+
+    [:material-notebook-outline: Open notebook](../notebooks/32_rwi_acoustic_vs_lsrtm_gradient.ipynb)
+
 -   ![Wavefield Topography](../figures/gallery/15_wavefield_topography.png){ loading=lazy }
 
     **Wavefield · irregular topography**
