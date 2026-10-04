@@ -736,6 +736,12 @@ void run_full_imaging(
 BackwardOutputCore backward_full_imaging_impl(const BackwardInputCore& p)
 {
     sweep::DeviceGuard device_guard(device_index_of(p.models[0]));
+    // Domain decomposition is boundary-saving only (the template drivers refuse the
+    // same): a stepped or cut-face call reaching the store-all path would run the
+    // whole record per call.
+    SWEEP_CHECK(p.cut_face_mask == 0 && p.bw_it_begin < 0 && p.bw_it_end == 0,
+                "acoustic_lsrtm3d full-storage backward is not stepped; domain "
+                "decomposition uses backward_bs");
     BackwardOutputCore out;
     // The history stacks [bg_utt, sc_utt] exactly when vp needs its RWI gradient
     // (cuda_layout_for_grads); otherwise this is the mp-only backward.
@@ -778,6 +784,27 @@ void run_bs_imaging(
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface, nullptr, nullptr, dx, dy, dz};
+    // DD cut-aware: CPML band + the boundary restore kernels SKIP cut faces,
+    // whose boundary buffers are numel-0 under DD.
+    ctx.set_cut_mask(p.cut_face_mask);
+
+    // Stepped backward: run the descending segment [bw_it_end, bw_it_begin) so a
+    // DD driver can exchange the halos of all FOUR carried fields (lambda_sc,
+    // lambda_bg, bg and scattered reconstruction) between single steps.  The
+    // adjoint and reconstruction lists are Python-owned and re-bound (rotated) on
+    // every call, so their state carries across segments.
+    const int it_hi = (p.bw_it_begin < 0) ? static_cast<int>(p.nt) : p.bw_it_begin;
+    const int it_lo = p.bw_it_end;
+    SWEEP_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+                "acoustic_lsrtm3d stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
+                it_lo, ", ", it_hi, ") with nt=", p.nt);
+    SWEEP_CHECK((p.cut_face_mask & ~0x3F) == 0,
+                "acoustic_lsrtm3d cut_face_mask uses bits 0..5 (x/z/y faces) only, got ", p.cut_face_mask);
+    SWEEP_CHECK(p.step_phase == 0,
+                "acoustic_lsrtm3d backward does not implement step_phase (got ", p.step_phase, ")");
+    SWEEP_CHECK(p.cut_face_mask == 0 || !p.boundary_on_disk,
+                "domain-decomposed acoustic_lsrtm3d backward_bs supports gpu/cpu boundary storage, not disk");
+    const bool first_segment = (it_hi == static_cast<int>(p.nt));
 
     AcousticWavefieldTensor adjoint;
     bind_adjoint_state(adjoint, p, "backward_bs");
@@ -798,11 +825,14 @@ void run_bs_imaging(
     if (rwi)
         forward_sc.bind(slice_wavefields(p.forward_wavefields, 3, 3), 3, /*use_pml=*/false);
     // u_last_two: [field, time(prev,now), B, nz, ny, nx]; time-reversed into the recon.
-    copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(0, 0).select(0, 1));
-    copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(0, 0).select(0, 0));
-    if (rwi) {
-        copy_tensor_cuda_async(forward_sc.u_prev_t, p.u_last_two.select(0, 1).select(0, 1));
-        copy_tensor_cuda_async(forward_sc.u_now_t, p.u_last_two.select(0, 1).select(0, 0));
+    // FIRST segment only: re-seeding mid-stream would clobber the carried state.
+    if (first_segment) {
+        copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(0, 0).select(0, 1));
+        copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(0, 0).select(0, 0));
+        if (rwi) {
+            copy_tensor_cuda_async(forward_sc.u_prev_t, p.u_last_two.select(0, 1).select(0, 1));
+            copy_tensor_cuda_async(forward_sc.u_now_t, p.u_last_two.select(0, 1).select(0, 0));
+        }
     }
     AcousticWavefieldTensor bg_adjoint;
     Buf v2lbg, gbg;
@@ -871,9 +901,9 @@ void run_bs_imaging(
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
+    boundary_runtime.prefetch_initial_backward_chunk(p.nt, it_hi);   // prime the ring for THIS segment
 
-    for (int it = p.nt - 1; it >= 1; --it) {
+    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
         auto for_view = forward.view();
         AcousticWavefieldPointer sc_view{};
         if (rwi)
@@ -1014,7 +1044,8 @@ void run_bs_imaging(
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
-    if (p.nt > 0) {
+    // it == 0 adjoint-only tail (wavelet gradient): last segment only.
+    if (it_lo == 0 && p.nt > 0) {
         auto adj_view = adjoint.view();
 
         run_lsrtm3d_adjoint_step(

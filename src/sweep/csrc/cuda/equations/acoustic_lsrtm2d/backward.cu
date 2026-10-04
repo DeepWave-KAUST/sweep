@@ -510,6 +510,12 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
 BackwardOutputCore backward_core(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    // Domain decomposition is boundary-saving only (the template drivers refuse the
+    // same): a stepped or cut-face call reaching the store-all path would run the
+    // whole record per call.
+    SWEEP_CHECK(in.cut_face_mask == 0 && in.bw_it_begin < 0 && in.bw_it_end == 0,
+                "acoustic_lsrtm2d full-storage backward is not stepped; domain "
+                "decomposition uses backward_bs");
     BackwardOutputCore out;
     SWEEP_CHECK(in.models.size() == 2, "Acoustic LSRTM 2D backward expects two models.");
 
@@ -562,6 +568,27 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
 
     SolverContext ctx{2, nx, 0, nz, B, dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DD cut-aware: CPML band, boundary restore (cut faces SKIPPED -- their
+    // buffers are numel-0 under DD) and the seed's rim-zeroing all read it.
+    ctx.set_cut_mask(p.cut_face_mask);
+
+    // Stepped backward: run the descending segment [bw_it_end, bw_it_begin) so a
+    // DD driver can exchange the halos of all FOUR carried fields (lambda_sc,
+    // lambda_bg, bg and scattered reconstruction) between single steps.  The
+    // adjoint and reconstruction lists are Python-owned and re-bound (rotated) on
+    // every call, so their state carries across segments.
+    const int it_hi = (p.bw_it_begin < 0) ? static_cast<int>(p.nt) : p.bw_it_begin;
+    const int it_lo = p.bw_it_end;
+    SWEEP_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
+                "acoustic_lsrtm2d stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
+                it_lo, ", ", it_hi, ") with nt=", p.nt);
+    SWEEP_CHECK((p.cut_face_mask & ~0xF) == 0,
+                "acoustic_lsrtm2d cut_face_mask uses bits 0..3 (x/z faces) only, got ", p.cut_face_mask);
+    SWEEP_CHECK(p.step_phase == 0,
+                "acoustic_lsrtm2d backward does not implement step_phase (got ", p.step_phase, ")");
+    SWEEP_CHECK(p.cut_face_mask == 0 || !p.boundary_on_disk,
+                "domain-decomposed acoustic_lsrtm2d backward_bs supports gpu/cpu boundary storage, not disk");
+    const bool first_segment = (it_hi == static_cast<int>(p.nt));
 
     AcousticWavefieldTensor adjoint;
     bind_adjoint_state(adjoint, p, "backward_bs");
@@ -591,11 +618,14 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         forward_sc.bind(std::vector<Buf>(p.forward_wavefields.begin() + 3,
                                          p.forward_wavefields.begin() + 6), 2, /*use_pml=*/false);
     // u_last_two: [field, time(prev,now), B, nz, nx]; time-reversed into the recon.
-    copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(0, 0).select(0, 1));
-    copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(0, 0).select(0, 0));
-    if (rwi) {
-        copy_tensor_cuda_async(forward_sc.u_prev_t, p.u_last_two.select(0, 1).select(0, 1));
-        copy_tensor_cuda_async(forward_sc.u_now_t, p.u_last_two.select(0, 1).select(0, 0));
+    // FIRST segment only: re-seeding mid-stream would clobber the carried state.
+    if (first_segment) {
+        copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(0, 0).select(0, 1));
+        copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(0, 0).select(0, 0));
+        if (rwi) {
+            copy_tensor_cuda_async(forward_sc.u_prev_t, p.u_last_two.select(0, 1).select(0, 1));
+            copy_tensor_cuda_async(forward_sc.u_now_t, p.u_last_two.select(0, 1).select(0, 0));
+        }
     }
 
     AcousticWavefieldTensor bg_adjoint;
@@ -644,15 +674,23 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
     auto fwd_source_config = fdtd::Geom::make(forward_nsrc, B);
     auto adj_source_config = fdtd::Geom::make(adjoint_nsrc, B);
 
-    auto for_view = forward.view();
-    std::vector<float*> seeded = {for_view.u_prev, for_view.u_now};
-    if (rwi) {
-        auto sc_view0 = forward_sc.view();
-        seeded.insert(seeded.end(), {sc_view0.u_prev, sc_view0.u_now});
+    // The seed's absorbing-rim zeroing is part of the seed: FIRST segment only,
+    // and with the cut mask so a DD cut face -- physical cells and the exchanged
+    // halo, not an absorbing rim -- keeps its seeded values (same as acoustic2d's
+    // seed_reconstruction).
+    if (first_segment) {
+        auto for_view = forward.view();
+        std::vector<float*> seeded = {for_view.u_prev, for_view.u_now};
+        if (rwi) {
+            auto sc_view0 = forward_sc.view();
+            seeded.insert(seeded.end(), {sc_view0.u_prev, sc_view0.u_now});
+        }
+        const int cm = ctx.cut_mask();
+        for (float* u : seeded)
+            set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
+                u, ctx.abcn + ctx.M, nx, nz,
+                ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), cm);
     }
-    for (float* u : seeded)
-        set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
-            u, ctx.abcn + ctx.M, nx, nz, ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2));
 
     LaplaceParam lap_ctx{nx, 1, M, p.lap_coes.data_ptr<float>(), dx, 0.f, dz};
     GradParam grad_ctx{1, 0, nx, M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
@@ -673,9 +711,9 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         async_copy.compute_stream,
         async_copy.copy_stream
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt);
+    boundary_runtime.prefetch_initial_backward_chunk(p.nt, it_hi);   // prime the ring for THIS segment
 
-    for (int it = p.nt - 1; it >= 1; --it) {
+    for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
         auto for_view_iter = forward.view();
         AcousticWavefieldPointer sc_view_iter{};
         if (rwi)
@@ -809,7 +847,8 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         boundary_runtime.prefetch_next_backward_chunk_if_needed(it, p.nt);
     }
 
-    if (p.nt > 0) {
+    // it == 0 adjoint-only tail: last segment only.
+    if (it_lo == 0 && p.nt > 0) {
         auto adj_view = adjoint.view();
         run_lsrtm2d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,

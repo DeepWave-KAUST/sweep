@@ -53,7 +53,7 @@ import numpy as np
 import torch
 
 from sweep.equations.slot_table import slot_table_of
-from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, VRZ_DD
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD
 from sweep.propagator._c import (_canonical_to_cuda_record,
                                  _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
@@ -408,6 +408,12 @@ class ModelParallel:
         # un-detached models; _prepare_call promotes the capture on it.
         self.bp = None
         self._need_adjoint = False
+        # Which models want a gradient (sticky union over gradient calls) and
+        # what the adjoint capture was built for.  Only consulted for an
+        # equation whose compiled layout depends on it (cuda_layout_for_grads:
+        # AcousticLSRTM binds the scattered field only for vp's RWI gradient).
+        self._grad_mask = None
+        self._capture_grad_mask = None
         self._model_dtype = None  # pinned by the first capture; see _capture
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
         # Wavefield-list geometry, derived from the equation's declared slot
@@ -427,7 +433,10 @@ class ModelParallel:
         # DECLARES: a fixed-slot layout (no rotating time-level block) is the
         # staggered first-order protocol; a divergence-form gradient needs the
         # coupling exchange; otherwise it is the plain second-order schedule.
+        # More than one rotating block is a multi-field equation (AcousticLSRTM /
+        # AcousticLSRTM3D: background + scattered), whose schedule ships every block.
         self._spec = (ELASTIC_DD if not table.u_blocks
+                      else LSRTM_DD if len(table.u_blocks) > 1
                       else VRZ_DD if self._dd_coupling_nvar else ACOUSTIC_DD)
         # Admission is DECLARED, not name-listed (see check_dd_admission).
         check_dd_admission(equation, _layout, self._spec)
@@ -669,8 +678,13 @@ class ModelParallel:
         # makes a promoted instance land in exactly the state it would have
         # reached had it been gradient-capable from its first call. None on the
         # first capture, so that one still infers from the tile as before.
+        # The probe asks for exactly the gradients the caller asked for when the
+        # compiled layout depends on them (cuda_layout_for_grads), so it binds
+        # that layout; every other equation keeps the all-models probe.
+        per_model = (self._layout_follows_grads() and self._grad_mask is not None)
         models = [torch.tensor(t, device=self.dev, dtype=self._model_dtype,
-                               requires_grad=need_adjoint) for t in tiles]
+                               requires_grad=need_adjoint and (not per_model or self._grad_mask[i]))
+                  for i, t in enumerate(tiles)]
         self._model_dtype = models[0].dtype
         # The ADJOINT probe is differentiated to grab the backward params, so it
         # needs grad MODE even when the caller has switched it off — but it only
@@ -707,6 +721,15 @@ class ModelParallel:
             impl.forward_func, impl.backward_bs_func = f_orig, b_orig
 
         self.fp, self.bp = cap["fp"], cap.get("bp")
+        # The slot table of the layout the probe bound: per call for an equation
+        # with cuda_layout_for_grads (AcousticLSRTM reconstructs 3 grids without
+        # vp's RWI gradient, 6 with it).  Before _bind_adjoint_buffers, which
+        # checks the reconstruction list against it.
+        if self._layout_follows_grads():
+            table = getattr(impl._cuda_layout(), "slots", None)
+            if table is not None and table is not self._table:
+                self._table, self._nrecon, self._role_idx = table, table.nrecon, {}
+        self._capture_grad_mask = self._grad_mask if need_adjoint else None
         # Persistent boundary-staging session.  Under DD every time step is a
         # separate call into the extension, so a per-call copy stream can never
         # keep a transfer in flight across steps -- transfer_interval /
@@ -796,6 +819,11 @@ class ModelParallel:
                     f"absent on this build — the C param bindings changed; update "
                     f"_set_geometry's field names.")
         self._captured = True
+
+    def _layout_follows_grads(self):
+        """The equation's compiled layout depends on which models want a
+        gradient (``cuda_layout_for_grads``, e.g. AcousticLSRTM's vp)."""
+        return callable(getattr(self.equation, "cuda_layout_for_grads", None))
 
     def _bind_adjoint_buffers(self):
         """Allocate + bind every adjoint-side buffer on the captured ``bp``.
@@ -1022,6 +1050,9 @@ class ModelParallel:
             # has been asked for a gradient, a later no_grad forward must not
             # downgrade it back to a forward-only capture.
             self._need_adjoint = True
+            mask = tuple(bool(m.requires_grad) for m in models)
+            self._grad_mask = (mask if self._grad_mask is None
+                               else tuple(a or b for a, b in zip(self._grad_mask, mask)))
             return _DDForward.apply(
                 self, wavelet, sources_global, receivers_global, *models)
         sg = self._prepare_call(wavelet, sources_global, receivers_global, models)
@@ -1172,6 +1203,27 @@ class ModelParallel:
             self._captured = False
             self._capture(wav, ls, lr, tiles, True)
             self._geom_key = geom_key
+        elif (self._need_adjoint and self._layout_follows_grads()
+              and self._grad_mask != self._capture_grad_mask):
+            # A model the adjoint capture took as gradient-free now wants one, and
+            # the compiled layout depends on it (AcousticLSRTM: vp's RWI gradient
+            # binds the scattered field).  Re-capture, as the promotion above.
+            if tiles is None:
+                raise RuntimeError(
+                    "ModelParallel: a model now requires grad that the capture "
+                    "did not, so it must re-capture -- pass models=[...] on this "
+                    "call (models=None reuses the old capture).")
+            self._fwd_halo = self._model_halo = self._bwd_halo = None
+            self._multi_group_cache = {}
+            self.fp, self.bp = None, None
+            self.L_fwd, self.fwd_ws, self.record = [], [], None
+            self.L_adj, self.recon = [], []
+            self.coupling, self.adj_coeffs = [], []
+            self.gbufs, self.illum = [], []
+            self.adj_ws = []
+            self._captured = False
+            self._capture(wav, ls, lr, tiles, True)
+            self._geom_key = geom_key
         elif geom_key != self._geom_key:
             # source/receiver/wavelet changed since capture (multi-shot) — swap
             # them on the captured params; fixed geometry hits the cache (no-op).
@@ -1220,7 +1272,9 @@ class ModelParallel:
 
     def _tensors(self, ref, runner):
         if ref.at is not None:
-            return (runner.at(ref.buf, ref.at),)
+            # one tensor per rotating block: exactly one for the single-field
+            # families, both fields for a multi-field equation (LSRTM)
+            return runner.at_all(ref.buf, ref.at)
         L = getattr(self, self._BUFS[ref.buf])
         if ref.roles is None:
             return tuple(L)
@@ -1426,7 +1480,9 @@ class ModelParallel:
                 self.b_func, self.bp, self.L_adj, self.recon,
                 adj_pairs=self._table.pairs(adjoint=True),
                 adj_u_blocks=self._table.u_blocks,
-                recon_u_blocks=self._table.u_blocks,
+                # by name against the recon list -- equals u_blocks for every
+                # single-field family, (0, 3) for LSRTM's 3+3 reconstruction
+                recon_u_blocks=self._table.recon_u_blocks,
                 c_factory=bfac)
             # Runtime predicates a schedule may gate a shipment on. Only the
             # elastic backward declares one; an unused key costs nothing.

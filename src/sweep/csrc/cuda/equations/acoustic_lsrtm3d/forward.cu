@@ -60,6 +60,25 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    // DD cut-aware: the CPML band (solver.in_pml_3d) shrinks to the M halo on a
+    // cut face, and the boundary save kernels SKIP cut faces -- whose boundary
+    // buffers are numel-0 under DD -- only if the mask reaches the context.
+    ctx.set_cut_mask(p.cut_face_mask);
+
+    // Stepped execution: run [it_begin, it_end) so a DD driver can exchange the
+    // halos of BOTH coupled fields between single steps.  Indexing stays absolute,
+    // so consecutive segments reproduce one full run; the wavefield list and
+    // record_out are Python-owned (bound on every call), so state carries over.
+    const int it0 = p.it_begin;
+    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+    SWEEP_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                "acoustic_lsrtm3d stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                it0, ", ", it1, ") with nt=", p.nt);
+    // No phase split here: the LSRTM DD schedule is serial (step, then exchange),
+    // so a phased call would silently run the whole step twice.
+    SWEEP_CHECK(p.step_phase == 0,
+                "acoustic_lsrtm3d forward does not implement step_phase (got ", p.step_phase,
+                "); its DD schedule must be the serial one");
 
     // The propagator binds the forward wavefield state on EVERY call -- the
     // persistent save_all pool or the per-call transient set (_c.py
@@ -162,7 +181,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
         "acoustic_lsrtm3d"
     );
 
-    for (int it = 0; it < p.nt; ++it) {
+    for (int it = it0; it < it1; ++it) {
         auto bg_view = bg.view();
         auto sc_view = sc.view();
         float* bg_utt_ptr = !bg_utt_all.defined() ? nullptr
@@ -227,7 +246,8 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), bg.checkpoint_tensors());
     }
 
-    if (p.use_boundary_saving) {
+    // last_two seeds the backward reconstruction: only once the final segment ran.
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
         // [field, time, B, nz, ny, nx]; select(1, t) would broadcast bg into both fields.
         copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), bg.u_prev_t);
         copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 1), bg.u_now_t);

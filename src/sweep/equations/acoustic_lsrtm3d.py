@@ -3,6 +3,7 @@ import functools
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, history_plain, record_single
+from .slot_table import ACOUSTIC_LSRTM3D, ACOUSTIC_LSRTM3D_MP
 
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
@@ -255,6 +256,12 @@ class AcousticLSRTM3D(SecondOrderEquation):
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,
             rwi_split_iii=rwi,   # term III -> grad_split_iii_out (full / bs)
+            # Domain decomposition: the forward and backward_bs drivers honour the
+            # stepped it_begin/it_end (bw_it_begin/bw_it_end) range and the cut-face
+            # mask, and the slot table lets ModelParallel rotate and halo-exchange
+            # BOTH coupled fields (two rotating blocks -> parallel.dd_spec.LSRTM_DD).
+            stepped=True,
+            slots=ACOUSTIC_LSRTM3D if rwi else ACOUSTIC_LSRTM3D_MP,
             base_nvar=6,
             # 2 wavefields (bg+sc); each: psix,psiy,psiz,zetax,zetay,zetaz (6) +
             # psixn,psiyn,psizn (3) for the race-free forward double-buffer -> 2*9=18.

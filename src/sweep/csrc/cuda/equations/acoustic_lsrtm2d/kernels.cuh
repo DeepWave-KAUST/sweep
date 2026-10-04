@@ -144,9 +144,18 @@ __global__ void acoustic2d_single_nopml(
     if (ix >= solver.nx || iz >= solver.nz) return;
 
     int M = (Order == -1) ? solver.M : (Order / 2);
+    // On a physical face the reconstruction starts just inside the boundary-
+    // saving restore strip (abcn + M halo + save_width = abcn + 2M + 1).  A DD
+    // CUT face has neither the abcn pad nor a restore strip -- its halo is
+    // filled by the NCCL exchange -- so the reconstruction must reach in to the
+    // M-wide halo there; the abcn-based bound would leave abcn + M + 1 physical
+    // cells beside every cut never reconstructed.  cut_mask == 0 leaves every
+    // bound exactly as before.
     int halo = solver.abcn > 0 ? solver.abcn + 2 * M + 1 : 2 * M;
     int top_halo = solver.free_surface ? 2 * M : halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    int x_lo = solver.cut_x_lo() ? M : halo, x_hi = solver.cut_x_hi() ? M : halo;
+    int z_lo = solver.cut_z_lo() ? M : top_halo, z_hi = solver.cut_z_hi() ? M : halo;
+    if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;

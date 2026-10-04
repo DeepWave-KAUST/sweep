@@ -168,9 +168,21 @@ __global__ void acoustic3d_single_nopml(
     }
 
     int m = (Order == -1) ? solver.M : (Order / 2);
+    // On a physical face the reconstruction starts just inside the boundary-
+    // saving restore strip (abcn + m halo + save_width = abcn + 2m + 1).  A DD
+    // CUT face has neither the abcn pad nor a restore strip -- its halo is
+    // filled by the NCCL exchange -- so the reconstruction must reach in to the
+    // m-wide halo there.  Keeping the abcn-based bound on a cut face skipped
+    // abcn + m + 1 PHYSICAL cells beside every cut, which were then never
+    // reconstructed and fed stale values to both tiles (DD gradients off by
+    // 10-30% while the forward record stayed bitwise).  cut_mask == 0 leaves
+    // every bound exactly as before.
     int halo = solver.abcn > 0 ? solver.abcn + 2 * m + 1 : 2 * m;
     int top_halo = solver.free_surface ? 2 * m : halo;
-    if (ix < halo || ix >= solver.nx - halo || iy < halo || iy >= solver.ny - halo || iz < top_halo || iz >= solver.nz - halo) {
+    int x_lo = solver.cut_x_lo() ? m : halo, x_hi = solver.cut_x_hi() ? m : halo;
+    int y_lo = solver.cut_y_lo() ? m : halo, y_hi = solver.cut_y_hi() ? m : halo;
+    int z_lo = solver.cut_z_lo() ? m : top_halo, z_hi = solver.cut_z_hi() ? m : halo;
+    if (ix < x_lo || ix >= solver.nx - x_hi || iy < y_lo || iy >= solver.ny - y_hi || iz < z_lo || iz >= solver.nz - z_hi) {
         return;
     }
 
