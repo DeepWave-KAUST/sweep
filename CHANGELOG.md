@@ -9,6 +9,40 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-05
+
+### Added
+- **`AcousticLSRTM` / `AcousticLSRTM3D` (`impl='c'`) return the velocity
+  gradient.**  `vp.grad` used to come back zero; the full and boundary-saving
+  backwards now compute the RWI tomographic gradient (Wu & Alkhalifah 2015,
+  terms II+III+IV): a background adjoint driven by the coupling transpose,
+  plus the scattered field (its `u_tt` stored in full mode, reconstructed in
+  boundary-saving mode).  It is paid for only when `vp` requires grad, decided
+  per call: a classic LSRTM (reflectivity only) keeps 0.3.4's buffers and
+  cost; with the vp gradient a V100 backward takes 1.5-1.8x the time and
+  1.4-2.0x the memory.  Against eager, with the reflectivity reaching the CPML
+  band: rel 2.4e-4 (2-D), 6.2e-4 (3-D).  The checkpointing modes still return
+  `vp.grad = 0`.
+- **The image-point term III on its own.**  With `SWEEP_LSRTM_SPLIT_III=1`,
+  `vp.grad` holds II+IV and `sweep.propagator.last_grad_split_iii()` returns
+  III on the model grid, for the paper's `(II+IV) + beta*III` (eq. 18-20).  The
+  core ABI gains `BackwardInput.grad_split_iii_out`: the layout probe refuses a
+  0.3.4 core under this package, and the other way round.
+- **Domain decomposition for `AcousticLSRTM` / `AcousticLSRTM3D`.**
+  `ModelParallel` rotates and halo-exchanges both fields, in the forward and
+  in the boundary-saving backward with its reconstructions; record and
+  gradients are bit-identical to one card on 4x V100, with and without the vp
+  gradient.
+
+### Documentation
+- Notebook 31: frequency-selection FWI (Tromp & Bachmann 2019) on a
+  towed-streamer Marmousi, multiscale with its own grid and time step per band.
+- Notebook 32: where the RWI velocity gradient comes from -- `Acoustic` gives
+  term I, `AcousticLSRTM` gives II+III+IV -- in 2-D and 3-D, with the beta-III
+  split and the memory modes.
+- One citation style for every notebook's Reference cell, fields checked on
+  Crossref.
+
 ## [0.3.4] - 2026-10-02
 
 ### Changed
@@ -885,7 +919,8 @@ see the
 [GitHub commit history](https://github.com/DeepWave-KAUST/sweep/commits/dev)
 for changes prior to this entry.
 
-[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.4...dev
+[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.5...dev
+[0.3.5]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.1...v0.3.2
