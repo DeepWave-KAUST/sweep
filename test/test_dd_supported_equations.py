@@ -23,11 +23,12 @@ import pytest
 
 from sweep.equations.slot_table import slot_table_of
 from sweep.parallel.dd_propagator import check_dd_admission
-from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, VRZ_DD
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD
 
 DEV = "cpu"
 
-ACCEPTED = ["Acoustic", "Acoustic3D", "AcousticVRZ3D", "Elastic", "Elastic3D"]
+ACCEPTED = ["Acoustic", "Acoustic3D", "AcousticVRZ3D", "Elastic", "Elastic3D",
+            "AcousticLSRTM", "AcousticLSRTM3D"]
 
 
 def _make(name):
@@ -39,6 +40,7 @@ def _spec_of(eq):
     table = slot_table_of(eq)
     layout = eq.cuda_layout
     return (ELASTIC_DD if not table.u_blocks
+            else LSRTM_DD if len(table.u_blocks) > 1
             else VRZ_DD if layout.dd_coupling_nvar else ACOUSTIC_DD)
 
 
@@ -63,7 +65,7 @@ def test_vrz2d_is_stepped_but_still_refused():
 
 
 def test_unstepped_equations_are_refused_with_the_requirement():
-    for name in ("AcousticLSRTM", "DASMu", "ElasticTTISG", "ViscoElastic"):
+    for name in ("DASMu", "ElasticTTISG", "ViscoElastic"):
         eq = _make(name)
         with pytest.raises(NotImplementedError, match="stepped"):
             check_dd_admission(eq, eq.cuda_layout, ACOUSTIC_DD)
@@ -117,13 +119,14 @@ def test_accepted_equations_all_resolve_to_a_schedule():
 
 def test_phase_need_is_derived_from_the_spec_not_hardcoded():
     """The dd_backward_phases requirement follows the schedule's own phase
-    numbers: the plain acoustic schedule phases nothing, the elastic and VRZ
-    schedules do."""
+    numbers: the plain acoustic and LSRTM schedules phase nothing, the elastic
+    and VRZ schedules do."""
     def needs(spec):
         bwd = spec.backward
         return any(ph.step_phase is not None
                    for ph in tuple(getattr(bwd, "prologue", ()) or ()) + tuple(bwd.phases))
 
     assert not needs(ACOUSTIC_DD)
+    assert not needs(LSRTM_DD)
     assert needs(ELASTIC_DD)
     assert needs(VRZ_DD)

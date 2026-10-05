@@ -121,6 +121,7 @@ struct BackwardInputCore {
     BufList grads_out;
     BufList illum_out;
     Buf adcig_out;
+    Buf grad_split_iii_out;
     int cut_face_mask = 0;
     int bw_begin() const { return bw_it_begin < 0 ? static_cast<int>(nt) : bw_it_begin; }
     bool bw_stepped() const { return bw_begin() < static_cast<int>(nt) || bw_it_end > 0; }

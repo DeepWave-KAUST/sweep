@@ -100,3 +100,114 @@ __global__ void compute_v2_lambda_lsrtm3d(
     float v = vp[idx];
     v2_lambda[idx] = v * v * lambda[idx];
 }
+
+// ---- RWI tomographic vp gradient (Wu & Alkhalifah 2015); 3-D twins of the
+// acoustic_lsrtm2d kernels -- see there for the derivation of each term. ----
+
+// Background adjoint lambda_bg = mu: its own propagation plus the transpose of the
+// scattered-source coupling, v2 = vp^2 * g with g = lambda_bg + mp * lambda_sc;
+// g is kept too, for the adjoint step's CPML band (its pml_field).
+__global__ void compute_v2_lambda_bg_lsrtm3d(
+    const float* __restrict__ vp,
+    const float* __restrict__ mp,
+    const float* __restrict__ lambda_bg,
+    const float* __restrict__ lambda_sc,
+    float* __restrict__ v2_lambda,
+    float* __restrict__ g,
+    int nx, int ny, int nz, int B
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / nz; int iz = iz_global % nz;
+    if (b >= B || ix >= nx || iy >= ny || iz >= nz) return;
+    int sp = nx * ny * nz; int idx = b * sp + iz * (nx * ny) + iy * nx + ix;
+    float v2 = vp[idx] * vp[idx];
+    float gi = lambda_bg[idx] + mp[idx] * lambda_sc[idx];
+    g[idx] = gi;
+    v2_lambda[idx] = v2 * gi;
+}
+
+// Full mode, from the stored second time derivatives:
+//   grad_v += (2 dt^2 / v) [ sc_utt*lam_sc (II) + bg_utt*lam_bg (IV) + mp*bg_utt*lam_sc (III) ]
+// grad_iii != nullptr keeps III apart for the paper's beta weight.
+__global__ void calculate_grad_lsrtm3d_vp_utt(
+    const float* __restrict__ bg_utt,
+    const float* __restrict__ sc_utt,
+    const float* __restrict__ lam_bg,
+    const float* __restrict__ lam_sc,
+    const float* __restrict__ mp,
+    const float* __restrict__ vp,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_iii,
+    int B, int nx, int ny, int nz, float dt
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / nz; int iz = iz_global % nz;
+    if (b >= B || ix >= nx || iy >= ny || iz >= nz) return;
+    int sp = nx * ny * nz; int o = b * sp + iz * (nx * ny) + iy * nx + ix;
+    float c   = 2.0f * dt * dt / vp[o];
+    float bgu = bg_utt[o];
+    float ls  = lam_sc[o];
+    float ii_iv = c * (sc_utt[o] * ls + bgu * lam_bg[o]);
+    float iii   = c * (mp[o] * bgu * ls);
+    if (grad_iii != nullptr) {
+        grad_vp[o]  += ii_iv;
+        grad_iii[o] += iii;
+    } else {
+        grad_vp[o]  += ii_iv + iii;
+    }
+}
+
+// Boundary-saving: the scattered reverse recursion's coupling source
+// mp * vp^2 * Lap(bg) = mp * (source-free bg second difference).  Interior only.
+__global__ void add_lsrtm3d_scattered_coupling(
+    float* __restrict__ sc_next,
+    const float* __restrict__ bg_next,
+    const float* __restrict__ bg_now,
+    const float* __restrict__ bg_prev,
+    const float* __restrict__ mp,
+    int B, int nx, int ny, int nz, int halo
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / nz; int iz = iz_global % nz;
+    if (b >= B) return;
+    if (ix < halo || ix >= nx - halo || iy < halo || iy >= ny - halo ||
+        iz < halo || iz >= nz - halo) return;
+    int sp = nx * ny * nz; int o = b * sp + iz * (nx * ny) + iy * nx + ix;
+    sc_next[o] += mp[o] * (bg_next[o] - 2.0f * bg_now[o] + bg_prev[o]);
+}
+
+// Boundary-saving vp gradient from the reconstructed second differences:
+// bg 2nd diff -> IV, sc 2nd diff -> II + III; III recovered as (2/v)*mp*bg2*lam_sc.
+__global__ void calculate_grad_lsrtm3d_vp_2diff(
+    const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
+    const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
+    const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
+    int B, int nx, int ny, int nz
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / nz; int iz = iz_global % nz;
+    if (b >= B || ix >= nx || iy >= ny || iz >= nz) return;
+    int sp = nx * ny * nz; int o = b * sp + iz * (nx * ny) + iy * nx + ix;
+    float inv = 2.0f / vp[o];
+    float bg2 = bg_prev[o] - 2.0f * bg_now[o] + bg_next[o];
+    float sc2 = sc_prev[o] - 2.0f * sc_now[o] + sc_next[o];
+    float ls  = lam_sc[o];
+    float total = inv * (bg2 * lam_bg[o] + sc2 * ls);
+    if (grad_iii != nullptr) {
+        float iii = inv * (mp[o] * bg2 * ls);
+        grad_vp[o]  += total - iii;
+        grad_iii[o] += iii;
+    } else {
+        grad_vp[o]  += total;
+    }
+}

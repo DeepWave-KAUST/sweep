@@ -59,6 +59,25 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DD cut-aware: the CPML band (solver.in_pml_2d) shrinks to the M halo on a
+    // cut face, and the boundary save kernels SKIP cut faces -- whose boundary
+    // buffers are numel-0 under DD -- only if the mask reaches the context.
+    ctx.set_cut_mask(p.cut_face_mask);
+
+    // Stepped execution: run [it_begin, it_end) so a DD driver can exchange the
+    // halos of BOTH coupled fields between single steps.  Indexing stays absolute,
+    // so consecutive segments reproduce one full run; the wavefield list and
+    // record_out are Python-owned (bound on every call), so state carries over.
+    const int it0 = p.it_begin;
+    const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
+    SWEEP_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
+                "acoustic_lsrtm2d stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                it0, ", ", it1, ") with nt=", p.nt);
+    // No phase split here: the LSRTM DD schedule is serial (step, then exchange),
+    // so a phased call would silently run the whole step twice.
+    SWEEP_CHECK(p.step_phase == 0,
+                "acoustic_lsrtm2d forward does not implement step_phase (got ", p.step_phase,
+                "); its DD schedule must be the serial one");
 
     // The propagator binds the forward wavefield state on EVERY call -- the
     // persistent save_all pool or the per-call transient set (_c.py
@@ -85,8 +104,18 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
     // declares save_all_shape, so cp.u_allt_shape is never None.
+    // rwi: vp asks for its RWI tomographic gradient (cuda_layout_for_grads), read
+    // off what the propagator bound -- the history then stacks [bg_utt, sc_utt]
+    // per step (history_fields(2); the scattered u_tt feeds term II) and bs saves
+    // both fields' boundaries (last_two holds 2 fields).  Otherwise this is the
+    // reflectivity-only forward of the classic LSRTM, exactly as before.
+    const bool rwi = p.save_all_wavefields ? p.u_allt_out.dim() == 5
+                   : (p.use_boundary_saving && p.last_two.size(0) == 2);
     Buf bg_utt_all;
-    if (p.save_all_wavefields)
+    if (p.save_all_wavefields && rwi)
+        bg_utt_all = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx},
+                                    "u_allt_out (acoustic_lsrtm2d/forward, cuda_layout.save_all_shape)");
+    else if (p.save_all_wavefields)
         bg_utt_all = bound_required(p.u_allt_out, {p.nt, B, nz, nx},
                                     "u_allt_out (acoustic_lsrtm2d/forward, cuda_layout.save_all_shape)");
 
@@ -102,12 +131,12 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
-            p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, false,
+            p.use_boundary_saving, 2, rwi ? 2 : 1, ctx, vp, save_width, 2, true, false,
             p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
-            p.use_boundary_saving, 2, 1, ctx, vp, save_width, 2, true, true,
+            p.use_boundary_saving, 2, rwi ? 2 : 1, ctx, vp, save_width, 2, true, true,
             1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     }
@@ -149,10 +178,12 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
         "acoustic_lsrtm2d"
     );
 
-    for (int it = 0; it < p.nt; ++it) {
+    for (int it = it0; it < it1; ++it) {
         auto bg_view = bg.view();
         auto sc_view = sc.view();
-        float* bg_utt_ptr = bg_utt_all.defined() ? bg_utt_all.select(0, it).data_ptr<float>() : nullptr;
+        float* bg_utt_ptr = !bg_utt_all.defined() ? nullptr
+            : (rwi ? bg_utt_all.select(0, it).select(0, 0) : bg_utt_all.select(0, it)).data_ptr<float>();
+        float* sc_utt_ptr = (bg_utt_all.defined() && rwi) ? bg_utt_all.select(0, it).select(0, 1).data_ptr<float>() : nullptr;
 
         ACOUSTIC_LSRTM2D_COUPLED(
             order,
@@ -162,6 +193,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             sc_view,
             p.save_all_wavefields,
             bg_utt_ptr,
+            sc_utt_ptr,
             vp.data_ptr<float>(),
             mp.data_ptr<float>(),
             lap_ctx,
@@ -172,18 +204,20 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             ctx
         );
 
-        if (p.use_boundary_saving) {
+        if (p.use_boundary_saving && rwi) {
+            // field 0 = background, field 1 = scattered: the bs backward reconstructs
+            // both, since terms II/III/IV of the RWI vp gradient correlate against the
+            // scattered field.
+            float* bs_fields[2] = { bg_view.u_now, sc_view.u_now };
+            for (int f = 0; f < 2; ++f) {
+                boundary_runtime.save_forward_2d_field(
+                    it, p.nt, bs_fields[f], launch_config.grid, launch_config.block,
+                    bs, save_width, 0, ctx, f, /*flush_chunk=*/f == 1);
+            }
+        } else if (p.use_boundary_saving) {
             boundary_runtime.save_forward_2d(
-                it,
-                p.nt,
-                bg_view.u_now,
-                launch_config.grid,
-                launch_config.block,
-                bs,
-                save_width,
-                0,
-                ctx
-            );
+                it, p.nt, bg_view.u_now, launch_config.grid, launch_config.block,
+                bs, save_width, 0, ctx);
         }
 
         add_source<<<source_config.grid, source_config.block>>>(
@@ -210,9 +244,15 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
         checkpoint_runtime.save_forward(it, static_cast<int>(p.nt), bg.checkpoint_tensors());
     }
 
-    if (p.use_boundary_saving) {
-        copy_tensor_cuda_async(boundary_saver.last_two.select(1, 0), bg.u_prev_t);
-        copy_tensor_cuda_async(boundary_saver.last_two.select(1, 1), bg.u_now_t);
+    // last_two seeds the backward reconstruction: only once the final segment ran.
+    if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
+        // [field, time, B, nz, nx]; select(1, t) would broadcast bg into both fields.
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), bg.u_prev_t);
+        copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 1), bg.u_now_t);
+        if (rwi) {
+            copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 0), sc.u_prev_t);
+            copy_tensor_cuda_async(boundary_saver.last_two.select(0, 1).select(0, 1), sc.u_now_t);
+        }
     }
 
     boundary_runtime.synchronize();

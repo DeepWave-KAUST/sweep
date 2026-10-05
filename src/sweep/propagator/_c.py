@@ -27,6 +27,38 @@ def _get_C():
 
 
 # ---------------------------------------------------------------------------
+# RWI: term III of the AcousticLSRTM tomographic vp gradient, split out
+# ---------------------------------------------------------------------------
+# Wu & Alkhalifah (2015) weight the singular image-point term III of the
+# reflection vp gradient on its own: grad_v = (II + IV) + beta * III.  With
+# SWEEP_LSRTM_SPLIT_III=1 the full / boundary-saving backward of an equation
+# whose cuda_layout declares rwi_split_iii writes III to a separate buffer, so
+# ``vp.grad`` holds II+IV and ``last_grad_split_iii()`` returns III on the same
+# grid (cropped exactly as EdgePadding.backward crops ``vp.grad``).
+SPLIT_III_ENV = "SWEEP_LSRTM_SPLIT_III"
+_LAST_GRAD_SPLIT_III = None
+
+
+def last_grad_split_iii():
+    """Term III of the last split LSRTM backward, on the model grid, or None.
+
+    Only populated with ``SWEEP_LSRTM_SPLIT_III=1`` on AcousticLSRTM /
+    AcousticLSRTM3D in the full or boundary-saving mode; ``vp.grad`` then holds
+    II+IV, so the paper's weighted gradient is ``vp.grad + beta * III``.
+    """
+    return _LAST_GRAD_SPLIT_III
+
+
+def _crop_like_edge_padding(t, pad):
+    """The padding adjoint EdgePadding.backward applies to ``vp.grad``: a crop."""
+    slices = [slice(None)] * t.dim()
+    for i in range(len(pad) // 2):
+        left, right = pad[2 * i], pad[2 * i + 1]
+        slices[-(i + 1)] = slice(left, -right if right > 0 else None)
+    return t[tuple(slices)]
+
+
+# ---------------------------------------------------------------------------
 # Record layout helpers
 # ---------------------------------------------------------------------------
 # The CUDA kernels write the receiver record with time innermost so each
@@ -444,6 +476,13 @@ class Wrapper(torch.autograd.Function):
             like = ctx.models[0]
             params.adcig_out = torch.zeros((2 * params.adcig_max_lag + 1, *like.shape),
                                            dtype=like.dtype, device=like.device)
+        # RWI term III, split out of grad_vp (full / bs only: the checkpoint modes
+        # carry no vp gradient for LSRTM).  Unbound unless asked for.
+        split_iii = (cp.rwi_split_iii and not ctx.use_checkpoint
+                     and os.environ.get(SPLIT_III_ENV, "") == "1")
+        if split_iii:
+            like = ctx.models[0]
+            params.grad_split_iii_out = torch.zeros(like.shape, dtype=like.dtype, device=like.device)
         params.adjoint_wavefields = [a.zero_() for a in cp.adjoint_wavefields]
         params.adjoint_workspace = list(cp.adjoint_workspace)
         params.models = [m.contiguous() for m in ctx.models]
@@ -630,6 +669,19 @@ class Wrapper(torch.autograd.Function):
         # bound it by.  A driver that declares the slot but never writes it
         # (acoustic_vrz*, grads_out_wavelet_written=False) leaves the wavelet
         # gradient None, as before.
+        if split_iii:
+            global _LAST_GRAD_SPLIT_III
+            # Undo exactly what autograd undoes for vp.grad: _model_to_cuda_batch
+            # broadcast the shared model as m[None, None].repeat(B, ...), whose
+            # adjoint sums the shots and drops the channel axis; EdgePadding's
+            # adjoint then crops.  (LSRTM has no per-shot model form --
+            # supports_batched_models is off -- so the shared form is the only one.)
+            iii = params.grad_split_iii_out
+            assert iii.dim() == len(cp.illumination_padding) // 2 + 2 and iii.shape[1] == 1, \
+                f"grad_split_iii_out has an unexpected layout {tuple(iii.shape)}"
+            _LAST_GRAD_SPLIT_III = _crop_like_edge_padding(
+                iii.sum(dim=0)[0], cp.illumination_padding).detach().clone()
+
         returned_grads = list(params.grads_out)
         wavelet_grad = None
         model_grads = returned_grads
@@ -975,6 +1027,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         return tuple(hook(self))
 
     def _cuda_layout(self):
+        # An equation whose layout depends on which models need a gradient
+        # (AcousticLSRTM: vp's RWI gradient doubles the backward) declares it per
+        # call; forward() sets the mask before anything below allocates for it.
+        for_grads = getattr(self.equation, "cuda_layout_for_grads", None)
+        if callable(for_grads):
+            return for_grads(getattr(self, "_model_grad_mask", None))
         layout = getattr(self.equation, "cuda_layout", None)
         if layout is not None:
             return layout
@@ -1096,6 +1154,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_disk_dir == disk_dir
             and self._boundary_cache_nt == (self.nt if nt_saved is None else nt_saved)
             and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
+            # the saved field count can change per call (AcousticLSRTM: 2 when vp
+            # needs its RWI gradient, else 1)
+            and getattr(self, '_boundary_cache_nvar', None) == self._boundary_nvar_key()
         ):
             return
 
@@ -1272,6 +1333,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.last_two = self.forward_allocator.zeros([last_two_shape])[0]
 
         self._boundary_cache_dtype = boundary_dtype
+        self._boundary_cache_nvar = self._boundary_nvar_key()
         self._boundary_cache_mode = boundary_storage
         self._boundary_cache_interval = transfer_interval
         self._boundary_cache_ring_buffers = ring_buffers
@@ -1496,23 +1558,28 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self._workspace_cache_nt = self.nt
             return
 
+        if has_custom_shapes:
+            workspace_shapes = custom_shapes_fn(self.B, self.nt, self.shape_cuda, mode)
+        else:
+            workspace_shapes = workspace_nvar * [[self.B, 1, *self.shape_cuda]]
+        # The slot list itself is part of the key: it can change per call with
+        # the same mode (AcousticLSRTM: vp's RWI gradient adds slots).
+        shapes_key = tuple(tuple(int(x) for x in s) for s in workspace_shapes)
         if (
             self._workspace_cache_batch is not None
             and batch_size <= self._workspace_cache_batch
             and self._workspace_cache_nt == self.nt
             and self._workspace_cache_mode == mode
+            and getattr(self, "_workspace_cache_shapes", None) == shapes_key
         ):
             return
 
         self.workspace_allocator = Allocator(self.dev)
-        if has_custom_shapes:
-            workspace_shapes = custom_shapes_fn(self.B, self.nt, self.shape_cuda, mode)
-        else:
-            workspace_shapes = workspace_nvar * [[self.B, 1, *self.shape_cuda]]
         self.adjoint_workspace = self.workspace_allocator.zeros(workspace_shapes)
         self._workspace_cache_batch = self.B
         self._workspace_cache_nt = self.nt
         self._workspace_cache_mode = mode
+        self._workspace_cache_shapes = shapes_key
 
     def _slice_adjoint_workspace_buffers(self, batch_size):
         """The pool at this call's batch. A slot's leading axis is the batch
@@ -1522,6 +1589,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if not self.adjoint_workspace:
             return ()
         return tuple(t[:batch_size] if t.dim() > 1 else t for t in self.adjoint_workspace)
+
+    def _boundary_nvar_key(self):
+        """(saved boundary fields, last_two fields) of this call's layout."""
+        layout = self._cuda_layout()
+        return (int(layout.resolved_boundary_save_nvar()),
+                int(layout.resolved_last_two_storage_nvar()))
 
     def _slice_last_two(self, batch_size):
         return self.last_two[:, :, :batch_size]
@@ -1840,6 +1913,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         requires_model_grad = any(m.requires_grad for m in models)
         requires_wavelet_grad = wavelet.requires_grad
         requires_backward = bool(requires_model_grad or requires_wavelet_grad)
+        # Which models need a gradient picks this call's layout for equations that
+        # declare cuda_layout_for_grads (see _cuda_layout); set before the buffers
+        # below are sized from it.
+        self._model_grad_mask = tuple(bool(m.requires_grad) for m in models)
         if requires_backward and self.compute_illumination:
             self.source_illumination = torch.zeros_like(unpadded_models[0])
             self.receiver_illumination = torch.zeros_like(unpadded_models[0])
@@ -2004,6 +2081,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     u_allt_shape=self._history_shape(batch_size),
                     record_shape=self._record_shape(batch_size, receivers, receiver_field_indices),
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
+                    rwi_split_iii=bool(self._cuda_layout().rwi_split_iii),
                     grads_out_wavelet_written=bool(self._cuda_layout().grads_out_wavelet_written),
                     n_grad_models=len(models) if use_apm_arg else None,
                     illum_nvar=int(self._cuda_layout().illum_nvar),

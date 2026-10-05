@@ -211,6 +211,7 @@ inline BackwardInputCore adapt_input(const BackwardInput& in, InputArena& ar)
     c.grads_out = ar.list_of(in.grads_out);
     c.illum_out = ar.list_of(in.illum_out);
     c.adcig_out = buf_of(in.adcig_out);
+    c.grad_split_iii_out = buf_of(in.grad_split_iii_out);
     c.cut_face_mask = in.cut_face_mask;
     c.compute_adcig = in.compute_adcig;
     c.adcig_max_lag = in.adcig_max_lag;

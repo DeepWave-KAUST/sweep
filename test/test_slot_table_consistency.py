@@ -105,6 +105,8 @@ DECLARED = [
     ("AcousticVRZ3D", "ACOUSTIC_VRZ3D"),
     ("Elastic", "ELASTIC2D"),
     ("Elastic3D", "ELASTIC3D"),
+    ("AcousticLSRTM3D", "ACOUSTIC_LSRTM3D"),
+    ("AcousticLSRTM", "ACOUSTIC_LSRTM2D"),
 ]
 
 
@@ -164,6 +166,10 @@ def test_dd_wavefield_counts():
         "AcousticVRZ3D": (12, 15, 3, 0),
         "Elastic": (15, 15, 7, 2),
         "Elastic3D": (36, 36, 12, 3),
+        # two coupled acoustic fields (bg + scattered), psi-only double buffer,
+        # so adjoint == forward; reconstruction is 3 + 3
+        "AcousticLSRTM3D": (24, 24, 6, 0),
+        "AcousticLSRTM": (18, 18, 6, 0),
     }
     for name, want in expected.items():
         t = getattr(E, name)(device="cpu", backend="torch").cuda_layout.slots
@@ -324,3 +330,63 @@ def test_the_local_capture_copies_that_remain_are_deliberate():
     assert local == set(keep), (
         f"the set of modules defining their own capture helper changed: "
         f"unexpected {sorted(local - set(keep))}, gone {sorted(set(keep) - local)}")
+
+
+def test_lsrtm2d_rotates_and_ships_both_fields():
+    """2-D twin of the LSRTM3D table: background 0..8, scattered 9..17, 3+3 recon."""
+    t = ST.ACOUSTIC_LSRTM2D
+    assert t.u_blocks == (0, 9)
+    assert t.recon_u_blocks == (0, 3)
+    bg = ((3, 7), (4, 8))
+    assert t.pairs(adjoint=False) == bg + tuple((a + 9, b + 9) for a, b in bg)
+    assert t.pairs(adjoint=True) == t.pairs(adjoint=False)
+
+
+def test_lsrtm3d_rotates_and_ships_both_fields():
+    """AcousticLSRTM3D is the one multi-field rotating table.
+
+    Every count the DD driver derives must cover BOTH fields: two rotating
+    blocks in the forward/adjoint list (background 0..11, scattered 12..23) and
+    two in the 3+3 reconstruction list -- which is why the reconstruction blocks
+    are resolved by name (``recon_u_blocks``) instead of reusing ``u_blocks``.
+    The scattered field's psi pairs are the background's shifted by 12.
+    """
+    t = ST.ACOUSTIC_LSRTM3D
+    assert t.u_blocks == (0, 12)
+    assert t.recon_u_blocks == (0, 3)
+    bg = ((3, 9), (4, 10), (7, 11))
+    assert t.pairs(adjoint=False) == bg + tuple((a + 12, b + 12) for a, b in bg)
+    assert t.pairs(adjoint=True) == t.pairs(adjoint=False)
+
+
+@pytest.mark.parametrize("eq_name, rwi_table, mp_table", [
+    ("AcousticLSRTM", "ACOUSTIC_LSRTM2D", "ACOUSTIC_LSRTM2D_MP"),
+    ("AcousticLSRTM3D", "ACOUSTIC_LSRTM3D", "ACOUSTIC_LSRTM3D_MP"),
+])
+def test_lsrtm_layout_follows_vp_grad(eq_name, rwi_table, mp_table):
+    """Without vp's RWI gradient the layout reconstructs the background alone:
+    the per-call table keeps the forward/adjoint geometry and drops the
+    scattered reconstruction block, so ModelParallel rotates 3 grids, not 6."""
+    import sweep.equations as eqs
+    eq = getattr(eqs, eq_name)(device="cpu", backend="torch")
+    rwi, mp = getattr(ST, rwi_table), getattr(ST, mp_table)
+    assert eq.cuda_layout.slots is rwi
+    assert eq.cuda_layout_for_grads(None).slots is rwi
+    assert eq.cuda_layout_for_grads((True, True)).slots is rwi
+    lay = eq.cuda_layout_for_grads((False, True))
+    assert lay.slots is mp
+    assert (lay.bs_reconstruction_nvar, lay.boundary_save_nvar, lay.last_two_storage_nvar) == (3, 1, 1)
+    assert mp.slots == rwi.slots and mp.u_blocks == rwi.u_blocks
+    assert mp.pairs(adjoint=True) == rwi.pairs(adjoint=True)
+    assert (mp.nrecon, mp.recon_u_blocks) == (3, (0,))
+    assert (rwi.nrecon, rwi.recon_u_blocks) == (6, (0, 3))
+
+
+def test_recon_blocks_equal_u_blocks_for_single_field_tables():
+    """``recon_u_blocks`` replaced ``u_blocks`` for the reconstruction list in the
+    DD driver; for every single-field table the two must agree, so that switch
+    changes nothing outside LSRTM."""
+    for name in dir(ST):
+        t = getattr(ST, name)
+        if isinstance(t, ST.SlotTable) and len(t.u_blocks) <= 1:
+            assert t.recon_u_blocks == t.u_blocks, name

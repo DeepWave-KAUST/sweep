@@ -168,9 +168,21 @@ __global__ void acoustic3d_single_nopml(
     }
 
     int m = (Order == -1) ? solver.M : (Order / 2);
+    // On a physical face the reconstruction starts just inside the boundary-
+    // saving restore strip (abcn + m halo + save_width = abcn + 2m + 1).  A DD
+    // CUT face has neither the abcn pad nor a restore strip -- its halo is
+    // filled by the NCCL exchange -- so the reconstruction must reach in to the
+    // m-wide halo there.  Keeping the abcn-based bound on a cut face skipped
+    // abcn + m + 1 PHYSICAL cells beside every cut, which were then never
+    // reconstructed and fed stale values to both tiles (DD gradients off by
+    // 10-30% while the forward record stayed bitwise).  cut_mask == 0 leaves
+    // every bound exactly as before.
     int halo = solver.abcn > 0 ? solver.abcn + 2 * m + 1 : 2 * m;
     int top_halo = solver.free_surface ? 2 * m : halo;
-    if (ix < halo || ix >= solver.nx - halo || iy < halo || iy >= solver.ny - halo || iz < top_halo || iz >= solver.nz - halo) {
+    int x_lo = solver.cut_x_lo() ? m : halo, x_hi = solver.cut_x_hi() ? m : halo;
+    int y_lo = solver.cut_y_lo() ? m : halo, y_hi = solver.cut_y_hi() ? m : halo;
+    int z_lo = solver.cut_z_lo() ? m : top_halo, z_hi = solver.cut_z_hi() ? m : halo;
+    if (ix < x_lo || ix >= solver.nx - x_hi || iy < y_lo || iy >= solver.ny - y_hi || iz < z_lo || iz >= solver.nz - z_hi) {
         return;
     }
 
@@ -215,6 +227,7 @@ template <int Order>
 __global__ void acoustic_lsrtm3d_adjoint(
     AcousticWavefieldPointer wf,
     const float* __restrict__ v2_lambda,
+    const float* __restrict__ pml_field,   // nullptr = wf.u_now (see the PML band below)
     const float* __restrict__ vp,
     LaplaceParam lap_ctx,
     GradParam grad_ctx,
@@ -256,15 +269,20 @@ __global__ void acoustic_lsrtm3d_adjoint(
         return;
     }
 
-    // PML band: keep the forward CPML formulation (shared lsrtm update).
+    // PML band: keep the forward CPML formulation (shared lsrtm update), on
+    // pml_field when given -- the RWI background adjoint's lambda_bg +
+    // mp*lambda_sc, whose coupling part reaches it only through v2_lambda, which
+    // this branch does not read (see acoustic_lsrtm2nd_adjoint).
+    AcousticWavefieldPointer fp = f;
+    if (pml_field) fp.u_now = const_cast<float*>(pml_field) + b * spatial_size;   // only read
     float w_sum = acoustic_cpml_update_3d<Order>(
-        f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo);
+        fp, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo);
     float v = vp_b[idx];
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (v * v) * dt2 * w_sum;
 }
 
 using acoustic_lsrtm3d_adjoint_fn = void (*)(AcousticWavefieldPointer, const float*,
-    const float*, LaplaceParam, GradParam, GradParam, GradParam, GradParam,
+    const float*, const float*, LaplaceParam, GradParam, GradParam, GradParam, GradParam,
     AcousticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_adjoint_fn, acoustic_lsrtm3d_adjoint_by_order);
 
@@ -274,6 +292,7 @@ __global__ void acoustic_lsrtm3d_coupled(
     AcousticWavefieldPointer sc,
     bool save_all_wavefields,
     float* __restrict__ bg_utt,
+    float* __restrict__ sc_utt,   // RWI: the scattered u_tt, for the tomographic vp gradient
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     LaplaceParam lap_ctx,
@@ -309,6 +328,7 @@ __global__ void acoustic_lsrtm3d_coupled(
     auto bg_f = bg.offset(b, spatial_size);
     auto sc_f = sc.offset(b, spatial_size);
     float* bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
+    float* sc_utt_b = sc_utt ? sc_utt + b * spatial_size : nullptr;
     const float* vp_b = vp + b * spatial_size;
     const float* mp_b = mp + b * spatial_size;
 
@@ -326,10 +346,13 @@ __global__ void acoustic_lsrtm3d_coupled(
     if (save_all_wavefields && bg_utt_b != nullptr) {
         bg_utt_b[idx] = bg_utt_val;
     }
+    if (save_all_wavefields && sc_utt_b != nullptr) {
+        sc_utt_b[idx] = sc_utt_val;
+    }
 }
 
 using acoustic_lsrtm3d_coupled_fn = void (*)(AcousticWavefieldPointer,
-    AcousticWavefieldPointer, bool, float*, const float*, const float*, LaplaceParam,
+    AcousticWavefieldPointer, bool, float*, float*, const float*, const float*, LaplaceParam,
     GradParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_coupled_fn, acoustic_lsrtm3d_coupled_by_order);
 
@@ -358,6 +381,33 @@ __global__ void calculate_grad_lsrtm3d_mp_utt(
     int nz,
     float dt
 );
+
+// ---- RWI tomographic vp gradient (Wu & Alkhalifah 2015) ----
+
+__global__ void compute_v2_lambda_bg_lsrtm3d(
+    const float* __restrict__ vp, const float* __restrict__ mp,
+    const float* __restrict__ lambda_bg, const float* __restrict__ lambda_sc,
+    float* __restrict__ v2_lambda, float* __restrict__ g, int nx, int ny, int nz, int B);
+
+__global__ void calculate_grad_lsrtm3d_vp_utt(
+    const float* __restrict__ bg_utt, const float* __restrict__ sc_utt,
+    const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
+    int B, int nx, int ny, int nz, float dt);
+
+__global__ void add_lsrtm3d_scattered_coupling(
+    float* __restrict__ sc_next, const float* __restrict__ bg_next,
+    const float* __restrict__ bg_now, const float* __restrict__ bg_prev,
+    const float* __restrict__ mp, int B, int nx, int ny, int nz, int halo);
+
+__global__ void calculate_grad_lsrtm3d_vp_2diff(
+    const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
+    const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
+    const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
+    int B, int nx, int ny, int nz);
 
 // Defined in acoustic3d/kernels.cu and shared across translation units -- LSRTM
 // re-declares it here rather than pulling in the whole acoustic3d header.

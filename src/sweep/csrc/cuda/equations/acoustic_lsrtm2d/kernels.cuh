@@ -144,9 +144,18 @@ __global__ void acoustic2d_single_nopml(
     if (ix >= solver.nx || iz >= solver.nz) return;
 
     int M = (Order == -1) ? solver.M : (Order / 2);
+    // On a physical face the reconstruction starts just inside the boundary-
+    // saving restore strip (abcn + M halo + save_width = abcn + 2M + 1).  A DD
+    // CUT face has neither the abcn pad nor a restore strip -- its halo is
+    // filled by the NCCL exchange -- so the reconstruction must reach in to the
+    // M-wide halo there; the abcn-based bound would leave abcn + M + 1 physical
+    // cells beside every cut never reconstructed.  cut_mask == 0 leaves every
+    // bound exactly as before.
     int halo = solver.abcn > 0 ? solver.abcn + 2 * M + 1 : 2 * M;
     int top_halo = solver.free_surface ? 2 * M : halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+    int x_lo = solver.cut_x_lo() ? M : halo, x_hi = solver.cut_x_hi() ? M : halo;
+    int z_lo = solver.cut_z_lo() ? M : top_halo, z_hi = solver.cut_z_hi() ? M : halo;
+    if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
     int spatial_size = solver.nx * solver.nz;
@@ -186,6 +195,7 @@ template <int Order>
 __global__ void acoustic_lsrtm2nd_adjoint(
     AcousticWavefieldPointer wf,
     const float* __restrict__ v2_lambda,
+    const float* __restrict__ pml_field,   // nullptr = wf.u_now (see the PML band below)
     const float* __restrict__ vp,
     LaplaceParam lap_ctx,
     GradParam grad_ctx,
@@ -222,14 +232,22 @@ __global__ void acoustic_lsrtm2nd_adjoint(
         return;
     }
 
-    // PML band: keep the forward CPML formulation (shared lsrtm update).
-    float w_sum = acoustic_cpml_update_2d<Order>(f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
+    // PML band: keep the forward CPML formulation (shared lsrtm update).  It does
+    // not read v2_lambda, so a field driven through v2_lambda by more than its own
+    // u_now -- the RWI background adjoint, v2 = vp^2*(lambda_bg + mp*lambda_sc) --
+    // passes that combined field as pml_field: the band then differentiates it
+    // (and runs the CPML memory on it) instead of u_now alone, the approximation
+    // the scattered adjoint makes for itself.  Without it the coupling is dropped
+    // wherever mp reaches into the band (edge-padded mp: vp.grad off by percents).
+    AcousticWavefieldPointer fp = f;
+    if (pml_field) fp.u_now = const_cast<float*>(pml_field) + b * spatial_size;   // only read
+    float w_sum = acoustic_cpml_update_2d<Order>(fp, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
     float v = vp_b[idx];
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (v * v) * dt2 * w_sum;
 }
 
 using acoustic_lsrtm2nd_adjoint_fn = void (*)(AcousticWavefieldPointer, const float*,
-    const float*, LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer,
+    const float*, const float*, LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer,
     SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic_lsrtm2nd_adjoint_fn, acoustic_lsrtm2nd_adjoint_by_order);
 
@@ -239,6 +257,7 @@ __global__ void acoustic_lsrtm2nd(
     AcousticWavefieldPointer sc,
     bool save_all_wavefields,
     float* __restrict__ bg_utt,
+    float* __restrict__ sc_utt,   // RWI: the scattered u_tt, for the tomographic vp gradient
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     LaplaceParam lap_ctx,
@@ -267,6 +286,7 @@ __global__ void acoustic_lsrtm2nd(
     auto bg_f = bg.offset(b, spatial_size);
     auto sc_f = sc.offset(b, spatial_size);
     float* bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
+    float* sc_utt_b = sc_utt ? sc_utt + b * spatial_size : nullptr;
     const float* vp_b = vp + b * spatial_size;
     const float* mp_b = mp + b * spatial_size;
 
@@ -282,10 +302,12 @@ __global__ void acoustic_lsrtm2nd(
 
     if (save_all_wavefields && bg_utt_b != nullptr)
         bg_utt_b[idx] = bg_utt_val;
+    if (save_all_wavefields && sc_utt_b != nullptr)
+        sc_utt_b[idx] = sc_utt_val;
 }
 
 using acoustic_lsrtm2nd_fn = void (*)(AcousticWavefieldPointer,
-    AcousticWavefieldPointer, bool, float*, const float*, const float*, LaplaceParam,
+    AcousticWavefieldPointer, bool, float*, float*, const float*, const float*, LaplaceParam,
     GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic_lsrtm2nd_fn, acoustic_lsrtm2nd_by_order);
 
@@ -309,4 +331,46 @@ __global__ void calculate_grad_lsrtm_mp_utt(
     int nx,
     int nz,
     float dt
+);
+
+// ---- RWI tomographic vp gradient (Wu & Alkhalifah 2015) ----
+
+__global__ void compute_v2_lambda_bg_lsrtm2d(
+    const float* __restrict__ vp,
+    const float* __restrict__ mp,
+    const float* __restrict__ lambda_bg,
+    const float* __restrict__ lambda_sc,
+    float* __restrict__ v2_lambda,
+    float* __restrict__ g,
+    int nx, int nz, int B
+);
+
+__global__ void calculate_grad_lsrtm_vp_utt(
+    const float* __restrict__ bg_utt,
+    const float* __restrict__ sc_utt,
+    const float* __restrict__ lam_bg,
+    const float* __restrict__ lam_sc,
+    const float* __restrict__ mp,
+    const float* __restrict__ vp,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_iii,
+    int nx, int nz, float dt
+);
+
+__global__ void add_lsrtm_scattered_coupling_2d(
+    float* __restrict__ sc_next,
+    const float* __restrict__ bg_next,
+    const float* __restrict__ bg_now,
+    const float* __restrict__ bg_prev,
+    const float* __restrict__ mp,
+    int nx, int nz, int halo
+);
+
+__global__ void calculate_grad_lsrtm_vp_2diff_2d(
+    const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
+    const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
+    const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
+    const float* __restrict__ mp, const float* __restrict__ vp,
+    float* __restrict__ grad_vp, float* __restrict__ grad_iii,
+    int nx, int nz
 );

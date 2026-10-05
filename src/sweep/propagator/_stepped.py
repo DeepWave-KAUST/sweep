@@ -118,6 +118,18 @@ def u_now_slot(steps_done: int, block_start: int = 0, block_size: int = 3) -> in
     return block_start + (steps_done + 1) % block_size
 
 
+def _role_slot(role: str, steps_done: int, block_start: int) -> int:
+    """Index (original list) of the tensor holding time ``role`` in the rotating
+    block starting at ``block_start`` after ``steps_done`` steps."""
+    if role == "u_now":
+        return u_now_slot(steps_done, block_start)
+    if role == "u_next":
+        return u_next_slot(steps_done, block_start)
+    if role == "u_prev":
+        return block_start + steps_done % 3
+    raise ValueError(f"unknown time role {role!r}")
+
+
 def u_next_slot(steps_done: int, block_start: int = 0, block_size: int = 3) -> int:
     """Index (in the ORIGINAL wavefield list) of the tensor the CURRENT step
     is writing (``u_next`` before that step's swap) after ``steps_done``
@@ -282,6 +294,18 @@ class SteppedBindingRunner:
             p.step_phase = 0
         if advance:
             self.k = int(it_end)
+
+    def at_all(self, buf: str, role: str) -> tuple:
+        """``role`` in EVERY rotating block of the forward list, in block order.
+
+        One tensor for the single-field acoustic / VRZ families (identical to
+        :meth:`at`); one per field for a multi-field equation such as
+        AcousticLSRTM3D, whose background and scattered fields both carry a
+        halo the next step's stencil reads across the cut.
+        """
+        assert buf == "fwd", f"forward runner cannot resolve {buf!r}"
+        assert self.u_blocks, "time-role resolution requires a rotating u block"
+        return tuple(self.L[_role_slot(role, self.k, b)] for b in self.u_blocks)
 
     def at(self, buf: str, role: str) -> torch.Tensor:
         """The tensor currently holding ``role`` in the forward list."""
@@ -546,6 +570,25 @@ class SteppedBackwardRunner:
         if advance:
             self.k_adj += b - e
             self.k_f += b - max(e, 1)
+
+    def at_all(self, buf: str, role: str) -> tuple:
+        """``role`` in EVERY rotating block of the adjoint / recon list.
+
+        The block starts are the ones this runner rotates (``adj_u_blocks`` /
+        ``recon_u_blocks``), so the resolution can never disagree with the
+        rotation.  One tensor per list for the single-field families; for
+        AcousticLSRTM3D both adjoints (lambda_sc, lambda_bg) and both
+        reconstructions (background, scattered).
+        """
+        if buf == "adj":
+            L, k, blocks = self.L_adj, self.k_adj, self.adj_u_blocks
+        elif buf == "recon":
+            assert self.L_recon is not None, "no reconstruction list bound"
+            L, k, blocks = self.L_recon, self.k_f, self.recon_u_blocks
+        else:
+            raise ValueError(f"backward runner cannot resolve {buf!r}")
+        assert blocks, "time-role resolution requires a rotating u block"
+        return tuple(L[_role_slot(role, k, b)] for b in blocks)
 
     def at(self, buf: str, role: str) -> torch.Tensor:
         """The tensor currently holding ``role`` in the adjoint / recon list."""

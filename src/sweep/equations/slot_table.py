@@ -152,6 +152,22 @@ class SlotTable:
         idx = [i for i, s in enumerate(self._fwd()) if s.role == "u"]
         return tuple(idx[i] for i in range(0, len(idx), U_BLOCK))
 
+    @property
+    def recon_u_blocks(self) -> tuple[int, ...]:
+        """Start indices of each rotating time-level block of the RECONSTRUCTION list.
+
+        Resolved by name against ``recon`` (as ``_role_index`` does), not taken from
+        ``u_blocks``: the two lists only line up when the equation carries ONE
+        field.  For the plain acoustic / VRZ tables this is ``(0,)`` and for the
+        elastic family ``()`` -- both equal to ``u_blocks`` -- but a two-field
+        equation (AcousticLSRTM3D: background + scattered) reconstructs 3+3
+        grids, so its blocks sit at ``(0, 3)`` while the forward list's sit at
+        ``(0, 12)``.
+        """
+        role_of = {s.name: s.role for s in self.slots}
+        idx = [i for i, n in enumerate(self.recon) if role_of.get(n) == "u"]
+        return tuple(idx[i] for i in range(0, len(idx), U_BLOCK))
+
     def pairs(self, *, adjoint: bool) -> tuple[tuple[int, int], ...]:
         """``(slot, shadow)`` index pairs the per-step swap exchanges.
 
@@ -212,6 +228,79 @@ ACOUSTIC3D = SlotTable(
     ]),
     recon=("u_prev", "u_now", "u_next"),
     aux_storage="slab",
+)
+
+
+def _acoustic2d_field(prefix: str = "") -> list[Slot]:
+    """One 2-D AcousticWavefieldTensor as AcousticLSRTM binds it: the 9-slot
+    forward list (psi double buffer, no zeta shadow), names prefixed so two fields
+    can share one table without colliding in ``pairs``' by-name lookup."""
+    p = prefix
+    return [
+        Slot(p + "u_prev", "u"), Slot(p + "u_now", "u"), Slot(p + "u_next", "u"),
+        Slot(p + "psix", "pml_psi", "x"), Slot(p + "psiz", "pml_psi", "z"),
+        Slot(p + "zetax", "pml_zeta", "x"), Slot(p + "zetaz", "pml_zeta", "z"),
+        Slot(p + "psixn", "dbuf", "x", dbuf_of=p + "psix"),
+        Slot(p + "psizn", "dbuf", "z", dbuf_of=p + "psiz"),
+    ]
+
+
+#: AcousticLSRTM (csrc/cuda/equations/acoustic_lsrtm2d): the 2-D twin of
+#: ACOUSTIC_LSRTM3D -- background in slots 0..8, scattered field in 9..17 (bound
+#: as ``bg.bind(slice(0, 9))`` / ``sc.bind(slice(9, 9))``), psi-only double
+#: buffer so the adjoint list is the forward one (lambda_sc 0..8, lambda_bg
+#: 9..17), 3+3 reconstruction, full-size aux grids.  Two rotating blocks:
+#: ``u_blocks`` ``(0, 9)``, ``recon_u_blocks`` ``(0, 3)``.
+ACOUSTIC_LSRTM2D = SlotTable(
+    slots=tuple(_acoustic2d_field() + _acoustic2d_field("sc_")),
+    recon=("u_prev", "u_now", "u_next", "sc_u_prev", "sc_u_now", "sc_u_next"),
+)
+
+#: AcousticLSRTM when vp needs no gradient (the classic LSRTM, mp only): the
+#: same forward and adjoint lists, but only the background is reconstructed --
+#: 3 grids, ``recon_u_blocks`` ``(0,)``.  The layout of each call picks the
+#: table (``AcousticLSRTM.cuda_layout_for_grads``).
+ACOUSTIC_LSRTM2D_MP = SlotTable(
+    slots=ACOUSTIC_LSRTM2D.slots,
+    recon=("u_prev", "u_now", "u_next"),
+)
+
+
+def _acoustic3d_field(prefix: str = "") -> list[Slot]:
+    """One 3-D AcousticWavefieldTensor as AcousticLSRTM3D binds it: the 12-slot
+    forward list (psi double buffer, no zeta shadow), every name prefixed so two
+    fields can share one table without colliding in ``pairs``' by-name lookup."""
+    p = prefix
+    return [
+        Slot(p + "u_prev", "u"), Slot(p + "u_now", "u"), Slot(p + "u_next", "u"),
+        Slot(p + "psix", "pml_psi", "x"), Slot(p + "psiz", "pml_psi", "z"),
+        Slot(p + "zetax", "pml_zeta", "x"), Slot(p + "zetaz", "pml_zeta", "z"),
+        Slot(p + "psiy", "pml_psi", "y"), Slot(p + "zetay", "pml_zeta", "y"),
+        Slot(p + "psixn", "dbuf", "x", dbuf_of=p + "psix"),
+        Slot(p + "psizn", "dbuf", "z", dbuf_of=p + "psiz"),
+        Slot(p + "psiyn", "dbuf", "y", dbuf_of=p + "psiy"),
+    ]
+
+
+#: AcousticLSRTM3D (csrc/cuda/equations/acoustic_lsrtm3d): TWO coupled acoustic
+#: fields in one list -- the background (slots 0..11) and the scattered field
+#: (12..23), bound as ``bg.bind(slice(0, 12))`` / ``sc.bind(slice(12, 12))``.
+#: Its own adjoint kernels double-buffer psi only, so the adjoint list is the
+#: forward one (no ``adjoint_only`` slots): the scattered adjoint lambda_sc takes
+#: 0..11 and the background adjoint lambda_bg = mu 12..23.  The boundary-saving
+#: backward reconstructs both fields, 3+3 grids.  Aux grids are full-size (the
+#: drivers declare no per-axis slabs).  Two rotating blocks, so ``u_blocks`` is
+#: ``(0, 12)`` and ``recon_u_blocks`` is ``(0, 3)``.
+ACOUSTIC_LSRTM3D = SlotTable(
+    slots=tuple(_acoustic3d_field() + _acoustic3d_field("sc_")),
+    recon=("u_prev", "u_now", "u_next", "sc_u_prev", "sc_u_now", "sc_u_next"),
+)
+
+#: AcousticLSRTM3D when vp needs no gradient: background-only reconstruction,
+#: see ACOUSTIC_LSRTM2D_MP.
+ACOUSTIC_LSRTM3D_MP = SlotTable(
+    slots=ACOUSTIC_LSRTM3D.slots,
+    recon=("u_prev", "u_now", "u_next"),
 )
 
 #: Variable-density VRZ shares the acoustic bind order, shadow slots included:

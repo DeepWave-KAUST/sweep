@@ -208,7 +208,6 @@ KNOWN_MISSING_GRADIENTS = {
     ("das_mu", "wavelet"): "impl='c' DAS-mu backward returns no source-wavelet gradient",
     ("acoustic_vrz", "wavelet"): "impl='c' VRZ backward returns no source-wavelet gradient",
     ("acoustic_lsrtm2d", "wavelet"): "impl='c' LSRTM2D backward returns no source-wavelet gradient",
-    # LSRTM inverts the reflectivity mp; vp comes back zero on the C side.
     # NOTE lsrtm3d is deliberately absent from the wavelet list: it DOES return
     # one, and it is wrong (cos -0.005, rel 4.0 vs eager) — that must stay a
     # failure, not a declared gap.
@@ -218,17 +217,26 @@ KNOWN_MISSING_GRADIENTS = {
     # epsilon, delta, rho) do match eager -- it is only the source-wavelet slot
     # that the compiled backward never fills.
     ("acoustic_vti_1st", "wavelet"): "impl='c' VTI-1st backward returns no source-wavelet gradient",
-    ("acoustic_lsrtm2d", "vp"): "impl='c' LSRTM2D backward returns no vp gradient (mp only)",
-    ("acoustic_lsrtm3d", "vp"): "impl='c' LSRTM3D backward returns no vp gradient (mp only)",
+    # LSRTM's C backward returns the RWI tomographic vp gradient (terms II+III+IV,
+    # Wu & Alkhalifah 2015) in the full and boundary-saving modes only; the
+    # checkpoint modes still return vp zero.  (reason, modes): those modes only.
+    ("acoustic_lsrtm2d", "vp"): ("impl='c' LSRTM2D checkpoint backward returns no vp gradient (mp only)",
+                                 ("ckpt_chunk", "ckpt_recursive")),
+    ("acoustic_lsrtm3d", "vp"): ("impl='c' LSRTM3D checkpoint backward returns no vp gradient (mp only)",
+                                 ("ckpt_chunk", "ckpt_recursive")),
 }
 
 
-def known_missing_gradient(case_name: str, grad_name: str) -> str | None:
+def known_missing_gradient(case_name: str, grad_name: str, mode: str | None = None) -> str | None:
     """Longest matching prefix wins, so ``acoustic_lsrtm3d`` can declare a gap
-    that ``acoustic_lsrtm`` does not."""
+    that ``acoustic_lsrtm`` does not.  A ``(reason, modes)`` entry declares the
+    gap in those modes only (``mode`` may carry a ``/<backend>`` suffix)."""
     best = None
-    for (prefix, name), reason in KNOWN_MISSING_GRADIENTS.items():
+    for (prefix, name), entry in KNOWN_MISSING_GRADIENTS.items():
+        reason, modes = (entry, None) if isinstance(entry, str) else entry
         if name != grad_name or not case_name.startswith(prefix):
+            continue
+        if modes is not None and (mode or "").split("/", 1)[0] not in modes:
             continue
         if best is None or len(prefix) > best[0]:
             best = (len(prefix), reason)
@@ -615,7 +623,7 @@ def compare_result_to_reference(
     for name, reference_grad in reference_grads.items():
         candidate_grad = candidate_grads[name]
         metrics = tensor_metrics(candidate_grad, reference_grad, eps=cosine_eps)
-        gap = known_missing_gradient(case_name, name)
+        gap = known_missing_gradient(case_name, name, mode)
         if gap is not None:
             # Declared missing on this backend. Report it in its own category so
             # the matrix keeps a usable pass/fail signal — but never drop it, and
