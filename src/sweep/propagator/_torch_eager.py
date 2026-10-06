@@ -1,4 +1,5 @@
 import warnings
+import weakref
 
 import torch
 from torch.utils.checkpoint import checkpoint as ckpt_torch
@@ -141,14 +142,22 @@ class _PropTorchEager(
         if self.compile_backend is not None:
             compile_kwargs["backend"] = self.compile_backend
         compiled = torch.compile(fn, **compile_kwargs)
+        # Weak: the step ends up inside autograd graphs (the eager boundary-
+        # saving Function keeps it in its ctx) that tensors cached on this
+        # propagator keep alive.  A strong reference closes a cycle through the
+        # C++ graph that gc cannot see, and a dropped propagator would keep its
+        # workspace and boundary ring on the device for good.
+        owner = weakref.ref(self)
 
         def step(*args, **kwargs):
-            if not self.use_compile:
+            prop = owner()
+            if prop is not None and not prop.use_compile:
                 return fn(*args, **kwargs)
             try:
                 return compiled(*args, **kwargs)
             except _compiler_failures() as exc:
-                self._disable_compile(exc)
+                if prop is not None:
+                    prop._disable_compile(exc)
                 return fn(*args, **kwargs)
 
         return step
