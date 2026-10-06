@@ -708,16 +708,17 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
     def _prepare_separable_laplace_kernels(self):
         if self.backend != 'torch':
             return self.kernel
+        from sweep.operators.torch import register_stencil
         if self.kernel.ndim == 1:
             if self.ndim == 3:
                 return (
-                    self.kernel.view(1, 1, -1, 1, 1).contiguous(),
-                    self.kernel.view(1, 1, 1, -1, 1).contiguous(),
-                    self.kernel.view(1, 1, 1, 1, -1).contiguous(),
+                    register_stencil(self.kernel.view(1, 1, -1, 1, 1).contiguous()),
+                    register_stencil(self.kernel.view(1, 1, 1, -1, 1).contiguous()),
+                    register_stencil(self.kernel.view(1, 1, 1, 1, -1).contiguous()),
                 )
             return (
-                self.kernel.view(1, 1, -1, 1).contiguous(),
-                self.kernel.view(1, 1, 1, -1).contiguous(),
+                register_stencil(self.kernel.view(1, 1, -1, 1).contiguous()),
+                register_stencil(self.kernel.view(1, 1, 1, -1).contiguous()),
             )
         return self.kernel
 
@@ -815,6 +816,10 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
             backend=self.backend, device=self.device,
         )
         self.grad_kernels = {-2: self.gkernel_z, -1: self.gkernel_x}
+        if self.backend == 'torch':
+            from sweep.operators.torch import register_stencil
+            for k in self.grad_kernels.values():
+                register_stencil(k)
 
     def init(self, shape, device='cpu', h=1.0):
         self.k, self.kx, self.kz = [to_backend(d, self.backend, device) for d in init_wavenumbers(shape, h)]

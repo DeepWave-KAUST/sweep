@@ -114,6 +114,10 @@ class RSGDerivative:
         self._kx_bwd = to(self._kx_bwd, self.backend, self.device)
         self._kz_fwd = to(self._kz_fwd, self.backend, self.device)
         self._kz_bwd = to(self._kz_bwd, self.backend, self.device)
+        if self.backend == "torch":
+            from sweep.operators.torch import register_stencil
+            for k in (self._kx_fwd, self._kx_bwd, self._kz_fwd, self._kz_bwd):
+                register_stencil(k)
 
     @staticmethod
     def _to_nchw_torch(u):
@@ -137,8 +141,12 @@ class RSGDerivative:
 
     def _conv2d_torch(self, u, kernel):
         import torch.nn.functional as F
+        from sweep.operators.torch import _apply_taps, _compiled_taps
 
         u_nchw, restore = self._to_nchw_torch(u)
+        taps = _compiled_taps(kernel)
+        if taps is not None:
+            return restore(_apply_taps(u_nchw, taps))
         out = F.conv2d(u_nchw, kernel, padding=self.L)
         return restore(out)
 

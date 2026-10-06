@@ -330,10 +330,10 @@ class AcousticVRZ3D(SecondOrderEquation):
         super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
         if backend == 'torch':
+            from sweep.operators.torch import register_stencil
             self.grad_kernels = {
-                -3: to_backend(_gradient_kernel3d(spatial_order, -3), backend=backend, device=device),
-                -2: to_backend(_gradient_kernel3d(spatial_order, -2), backend=backend, device=device),
-                -1: to_backend(_gradient_kernel3d(spatial_order, -1), backend=backend, device=device),
+                ax: register_stencil(to_backend(_gradient_kernel3d(spatial_order, ax), backend=backend, device=device))
+                for ax in (-3, -2, -1)
             }
         else:
             self.grad_kernels = None

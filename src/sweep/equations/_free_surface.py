@@ -149,13 +149,29 @@ def get_o2_pd(pd):
     FS-∩-CPML-corner instability without disturbing the interior accuracy."""
     p2 = getattr(pd, "_o2", None)
     if p2 is None:
-        from sweep.operators.general import StaggeredDerivative
-        from .utils import to_backend as _tb
+        p2 = _build_o2_pd(pd)
+    return p2
 
-        p2 = StaggeredDerivative(2, pd.device, pd.backend, ndim=pd.ndim)
-        p2.to_backend(_tb)
-        p2._spacing = pd._spacing
-        pd._o2 = p2
+
+def _outside_compile(fn):
+    import torch
+    disable = getattr(getattr(torch, "compiler", None), "disable", None)
+    return disable(fn) if disable is not None else fn
+
+
+# The twin is built on the first step, i.e. inside a compiled step.  Traced,
+# the numpy kernel assembly graph-breaks and the kernels cannot record their
+# taps (``register_stencil``), so the top band would keep the conv for good;
+# run the construction outside torch.compile instead.
+@_outside_compile
+def _build_o2_pd(pd):
+    from sweep.operators.general import StaggeredDerivative
+    from .utils import to_backend as _tb
+
+    p2 = StaggeredDerivative(2, pd.device, pd.backend, ndim=pd.ndim)
+    p2.to_backend(_tb)
+    p2._spacing = pd._spacing
+    pd._o2 = p2
     return p2
 
 
