@@ -128,7 +128,7 @@ Support matrix:
   the stiffness tensor and is not the isotropic image method these solvers
   implement. Run with ``free_surface=False`` or use an isotropic equation.
 
-See the [per-edge free surface notebook](../examples/index.md) for
+See the [per-edge free surface notebook](../notebooks/24_wavefield_per_edge_free_surface.ipynb) for
 snapshots of each configuration and a closed-box energy check.
 
 ## Implementation-specific options

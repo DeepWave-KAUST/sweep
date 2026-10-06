@@ -112,6 +112,7 @@ nav:
       - Notebooks:
           - Hello · SWEEP: notebooks/00_hello_fwi.ipynb
           - FWI:
+              - examples/fwi/index.md
               - Acoustic · Marmousi: notebooks/01_fwi_acoustic_marmousi.ipynb
               - Acoustic VRZ · FWI imaging: notebooks/17_fwi_vrz_marmousi.ipynb
               - Elastic · Marmousi: notebooks/02_fwi_elastic_marmousi.ipynb
@@ -120,8 +121,10 @@ nav:
               - Batched local windows · streamer: notebooks/23_batched_local_window_fwi.ipynb
               - 3D Overthrust: notebooks/11_fwi_acoustic_overthrust_3d.ipynb
           - NN · FWI:
+              - examples/nn-fwi/index.md
               - IFWI · SIREN: notebooks/13_ifwi_siren.ipynb
           - Wavefields:
+              - examples/wavefields/index.md
               - DAS: notebooks/04_das_zhao_vs_mu.ipynb
               - Elastic: notebooks/06_wavefield_elastic.ipynb
               - Elastic vector-reflectivity: notebooks/16_elastic_vector_reflectivity.ipynb
@@ -131,25 +134,30 @@ nav:
               - Visco-elastic · GSLS (Qp, Qs): notebooks/30_wavefield_visco_elastic.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
+              - examples/anisotropic/index.md
               - Acoustic VTI: notebooks/05_wavefield_vti.ipynb
               - Elastic TTI · rotation (2-D RSG): notebooks/10_wavefield_elastic_tti.ipynb
               - Elastic TTI · 3-D: notebooks/27_wavefield_elastic_tti_3d.ipynb
               - Elastic TTI · displacement (Oh 2020): notebooks/28_wavefield_elastic_tti_2nd.ipynb
           - Imaging:
+              - examples/imaging/index.md
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb
               - Custom gradient: notebooks/14_custom_gradient.ipynb
               - Reflection FWI · RWI gradient: notebooks/32_rwi_acoustic_vs_lsrtm_gradient.ipynb
               - ADCIG · Poynting (custom backward): notebooks/16_adcig.ipynb
               - ADCIG · space-lag (2D & 3D): notebooks/22_adcig_space_lag.ipynb
           - HPC:
+              - examples/hpc/index.md
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
               - Domain decomposition · model-parallel: notebooks/25_domain_decomposition.ipynb
               - Domain decomposition · Overthrust 3-D: notebooks/26_dd_overthrust_3d.ipynb
           - Extending:
+              - examples/extending/index.md
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
           - Sensitivity & resolution:
+              - examples/sensitivity/index.md
               - Acoustic · radiation (Vp, ρ): notebooks/20_radiation_acoustic.ipynb
               - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
       - Scripts:
