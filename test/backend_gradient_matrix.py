@@ -7,7 +7,8 @@ Run from the repository root after installing the compiled extension:
 
 The eager leg is the point of this file: it is the only backend that does not
 share code with the compiled backward, so it is the only reference that can see
-a defect in it.  ``--backends`` picks the columns.
+a defect in it.  It runs uncompiled, like the references of gate/bitgate.py and
+solver_gradient_mode_suite.py.  ``--backends`` picks the columns.
 
 The eager backend supports full mode and PyTorch chunk checkpointing. Boundary
 saving and recursive checkpointing are compiled-backend modes, so those eager
@@ -58,7 +59,7 @@ from gradient_cases import (  # noqa: E402
     run_case,
     scaled_cases,
 )
-from sweep.propagator.options import CkptOptions, CUDAOptions, MemoryOptions  # noqa: E402
+from sweep.propagator.options import CkptOptions, CUDAOptions, EagerOptions, MemoryOptions  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
 
@@ -91,6 +92,12 @@ def make_eager_solver(case: Case, mode: str, device: torch.device, config: RunCo
         B=1,
         receiver_type=case.receiver_type,
         source_type=case.source_type,
+        # Uncompiled.  Under the compiled default every case shares one
+        # step_func code object and this file runs them all in one process:
+        # from das_mu2d on, Dynamo hit its recompile limit and the rest of the
+        # column silently ran uncompiled -- a reference that changed nature
+        # halfway down the table.
+        eager_options=EagerOptions(use_compile=False),
     )
     if mode == "full":
         return PropTorch(equation, backend="eager", use_ckpt=False, **common)
