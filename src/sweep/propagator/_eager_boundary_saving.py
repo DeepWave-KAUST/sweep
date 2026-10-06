@@ -306,6 +306,15 @@ class _BoundarySaveStep(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grad_out):
         cfg = ctx.cfg
+        if cfg is None:
+            raise RuntimeError(
+                "Eager boundary saving supports one backward pass per forward: the "
+                "reconstruction has already consumed this rollout's boundary state.")
+        # Drop the per-rollout state now.  Tensors cached by the propagator keep
+        # this graph alive until its next forward, and the graph would otherwise
+        # keep the boundary ring -- and, through cfg, the propagator itself --
+        # resident with it.
+        ctx.cfg = None
         st = cfg["state"]
         func, dt, h = cfg["func"], cfg["dt"], cfg["h"]
         nwf, nm = cfg["nwf"], cfg["nm"]
