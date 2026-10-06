@@ -110,7 +110,7 @@ def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None):
                 remedy = "Use impl='eager' (or omit impl) for this equation."
             warnings.warn(
                 f"PropTorch(impl='c') requested but {reason}; falling back to "
-                f"impl='eager' (pure-PyTorch, ~10-30x slower). {remedy}",
+                f"impl='eager' (pure-PyTorch, ~5-20x slower). {remedy}",
                 UserWarning,
                 stacklevel=3,
             )

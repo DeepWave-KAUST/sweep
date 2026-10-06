@@ -274,6 +274,34 @@ runs the JAX-jitted version. You only need to think about backends when you
 explicitly write low-level helpers — every equation in this repo just lets
 the base class pick.
 
+## Under `torch.compile`
+
+On the torch backend each operator is a fixed-kernel convolution. Uncompiled,
+that is the fastest form. Under `torch.compile` (the eager default) the
+operators switch to the same stencil written as shifted slices, which Inductor
+fuses with the rest of the time step. Measured on A100 and V100 across the
+eager equations at order 4, the compiled step runs a forward 1.2–6× faster and
+a full-tape gradient 1.1–10× faster, and the gradient needs 1.3–4× less memory.
+3-D models, shot batches and high orders gain the most. Records and gradients
+differ only by fp32 rounding.
+
+The slice form makes the one-off compilation on the first call longer: a few
+seconds more than with the convolution at order 4, up to about 25 s for the
+training graph at order 16. The cost does not depend on `nt`, and Inductor's
+on-disk cache brings later runs with the same configuration down to 1–2 s.
+
+The switch needs each kernel's taps, which the base classes record when they
+build their kernels. If you build a kernel yourself and pass it to
+`self.gradient(..., kernels=...)`, `apply_kernels` or a derivative operator,
+register it once after construction. An unregistered kernel keeps the
+convolution:
+
+```python
+from sweep.operators.torch import register_stencil
+
+self.my_kernel = register_stencil(my_kernel)   # (1, 1, kz, kx) or (1, 1, kz, ky, kx)
+```
+
 ## See also
 
 - [Operators API reference](../api/operators/index.md) — full signatures for

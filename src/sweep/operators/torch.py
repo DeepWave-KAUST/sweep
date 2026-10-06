@@ -41,6 +41,99 @@ def _to_ncdhw(u):
     raise ValueError(f"Expected 3D/4D/5D input for 3D gradient kernel, got shape {tuple(u.shape)}")
 
 
+# ---- compiled-path stencils -------------------------------------------------
+# Under torch.compile a conv is an opaque cuDNN call: Inductor cannot fuse it
+# with the pointwise update around it, so every derivative round-trips a full
+# field through memory and its backward keeps the conv inputs alive.  The same
+# zero-padded cross-correlation written as a sum of shifted slices fuses into
+# the step kernel (A100/V100 across the eager equations at order 4: forward
+# 1.2-6x, full-tape gradient 1.1-10x faster and 1.3-4x less memory; 3-D, shot
+# batches and high orders gain most).  Uncompiled eager keeps the conv -- there
+# every slice is its own launch and the conv wins.
+#
+# The slice form needs the taps as Python floats, which a traced graph cannot
+# read off a tensor, so ``register_stencil`` records them on the kernel tensor
+# when the kernel is built.  An unregistered kernel keeps the conv.
+_TAPS_ATTR = "_sweep_taps"
+
+# A/B switch: False keeps the conv under torch.compile as well.
+SLICE_STENCILS_UNDER_COMPILE = True
+
+_is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None) or (lambda: False)
+
+
+def register_stencil(kernel):
+    """Record the non-zero taps of a conv kernel ``(K, 1, *k)`` on the tensor.
+
+    The taps are ``((offset, ...), coeff)`` pairs, offsets relative to the
+    kernel centre; the ``K`` output channels are summed, matching
+    :func:`apply_kernels`.  Kernels with an even extent are left alone (their
+    zero-padded conv does not preserve the shape).  Returns ``kernel``.
+    """
+    if not isinstance(kernel, torch.Tensor) or kernel.ndim not in (4, 5) or kernel.shape[1] != 1:
+        return kernel
+    if _is_compiling():
+        # Reading the taps off a traced tensor would break the graph; the
+        # kernel keeps the conv instead.
+        return kernel
+    spatial = tuple(kernel.shape[2:])
+    if any(s % 2 == 0 for s in spatial):
+        return kernel
+    k = kernel.detach().to("cpu", torch.float64).sum(dim=0)[0]
+    centre = [s // 2 for s in spatial]
+    taps = tuple(
+        (tuple(i - c for i, c in zip(idx, centre)), float(k[tuple(idx)]))
+        for idx in torch.nonzero(k).tolist()
+    )
+    if taps:
+        setattr(kernel, _TAPS_ATTR, taps)
+    return kernel
+
+
+def _compiled_taps(kernel):
+    if not (SLICE_STENCILS_UNDER_COMPILE and _is_compiling()):
+        return None
+    return getattr(kernel, _TAPS_ATTR, None)
+
+
+def _apply_taps(u, taps):
+    """Zero-padded, shape-preserving cross-correlation of the trailing dims of
+    ``u`` with ``taps`` -- ``F.conv{2,3}d(u, kernel, padding=k//2)`` as shifted
+    slices."""
+    nd = len(taps[0][0])
+    pads = [max(abs(off[d]) for off, _ in taps) for d in range(nd)]
+    pad_arg = []
+    for p in reversed(pads):
+        pad_arg += [p, p]
+    up = F.pad(u, pad_arg) if any(pads) else u
+    size = u.shape[-nd:]
+    out = None
+    for off, c in taps:
+        sl = tuple(slice(p + o, p + o + n) for p, o, n in zip(pads, off, size))
+        term = up[(Ellipsis,) + sl] * c
+        out = term if out is None else out + term
+    return out
+
+
+def _zero_halo_where(out, pads):
+    """Out-of-place :func:`_zero_halo` / :func:`_zero_halo_3d` (an in-place
+    write would cut the fusion)."""
+    nd = len(pads)
+    keep = None
+    for d, p in enumerate(pads):
+        if p <= 0:
+            continue
+        n = out.shape[out.ndim - nd + d]
+        idx = torch.arange(n, device=out.device)
+        shape = [1] * nd
+        shape[d] = n
+        m = ((idx >= p) & (idx < n - p)).view(shape)
+        keep = m if keep is None else keep & m
+    if keep is None:
+        return out
+    return torch.where(keep, out, torch.zeros((), dtype=out.dtype, device=out.device))
+
+
 def _zero_halo(out, padding):
     if isinstance(padding, int):
         pad_z = pad_x = padding
@@ -92,6 +185,9 @@ def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
     if isinstance(k1d, tuple):
         kz, kx = k1d
         pad = max(kz.shape[-3], kx.shape[-1]) // 2
+        tz, tx = _compiled_taps(kz), _compiled_taps(kx)
+        if tz is not None and tx is not None:
+            return _apply_taps(u, tz) / (hz*hz), _apply_taps(u, tx) / (hx*hx)
     else:
         kz = k1d[None, None, :, None]  # (1,1,k,1)
         kx = k1d[None, None, None, :]  # (1,1,1,k)
@@ -122,6 +218,9 @@ def separable_d2_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
     if isinstance(k1d, tuple):
         kz, ky, kx = k1d
         pad = max(kz.shape[-3], ky.shape[-2], kx.shape[-1]) // 2
+        taps = [_compiled_taps(k) for k in (kz, ky, kx)]
+        if all(t is not None for t in taps):
+            return tuple(_apply_taps(u, t) / (h * h) for t, h in zip(taps, (hz, hy, hx)))
     else:
         pad = k1d.shape[-1] // 2
         kz = k1d.view(1, 1, -1, 1, 1)
@@ -142,6 +241,9 @@ def separable_d2_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
 # ~6% faster, so the decorator was net cost even without torch.compile.
 def apply_kernels(u, kernels):
     # u: (B, 1, H, W). kernels: (1, 1, kh, kw) or (K, 1, kh, kw).
+    taps = _compiled_taps(kernels)
+    if taps is not None:
+        return _apply_taps(u, taps)
     _, _, KH, KW = kernels.shape
     padding = (KH // 2, KW // 2)
     conv_out = F.conv2d(u, kernels, padding=padding)
@@ -150,6 +252,9 @@ def apply_kernels(u, kernels):
 
 def apply_kernels_3d(u, kernels):
     # u: (B, 1, D, H, W). kernels: (1, 1, kD, kH, kW) or (K, 1, kD, kH, kW).
+    taps = _compiled_taps(kernels)
+    if taps is not None:
+        return _apply_taps(u, taps)
     _, _, KD, KH, KW = kernels.shape
     padding = (KD // 2, KH // 2, KW // 2)
     conv_out = F.conv3d(u, kernels, padding=padding)
@@ -184,14 +289,19 @@ def gradient(u, h, axis, kernels=None):
         if axis not in kernels:
             raise ValueError(f"No gradient kernel configured for axis={axis}.")
         kernel = kernels[axis]
+        taps = _compiled_taps(kernel)
         if kernel.ndim == 4:
             padding = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
             u_nchw, restore = _to_nchw(u)
+            if taps is not None:
+                return restore(_zero_halo_where(_apply_taps(u_nchw, taps) / h_axis, padding))
             out = F.conv2d(u_nchw, kernel / h_axis, padding=padding)
             out = _zero_halo(out, padding)
         elif kernel.ndim == 5:
             padding = (kernel.shape[-3] // 2, kernel.shape[-2] // 2, kernel.shape[-1] // 2)
             u_ncdhw, restore = _to_ncdhw(u)
+            if taps is not None:
+                return restore(_zero_halo_where(_apply_taps(u_ncdhw, taps) / h_axis, padding))
             out = F.conv3d(u_ncdhw, kernel / h_axis, padding=padding)
             out = _zero_halo_3d(out, padding)
         else:

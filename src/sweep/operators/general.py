@@ -5,15 +5,16 @@ from typing import Callable
 
 def _prepare_torch_kernel_bank(kernel):
     import torch
+    from sweep.operators.torch import register_stencil
 
     if not isinstance(kernel, torch.Tensor):
         return kernel
     if kernel.ndim == 3:
         # The derivative operator is linear: summing the per-offset responses is
         # equivalent to convolving once with the summed stencil.
-        return kernel.sum(dim=0, keepdim=True).flip(-1, -2).unsqueeze(1).contiguous()
+        return register_stencil(kernel.sum(dim=0, keepdim=True).flip(-1, -2).unsqueeze(1).contiguous())
     if kernel.ndim == 4:
-        return kernel.sum(dim=0, keepdim=True).flip(-1, -2, -3).unsqueeze(1).contiguous()
+        return register_stencil(kernel.sum(dim=0, keepdim=True).flip(-1, -2, -3).unsqueeze(1).contiguous())
     return kernel
 
 
