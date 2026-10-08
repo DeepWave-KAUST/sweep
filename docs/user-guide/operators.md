@@ -283,7 +283,11 @@ fuses with the rest of the time step. Measured on A100 and V100 across the
 eager equations at order 4, the compiled step runs a forward 1.2–6× faster and
 a full-tape gradient 1.1–10× faster, and the gradient needs 1.3–4× less memory.
 3-D models, shot batches and high orders gain the most. Records and gradients
-differ only by fp32 rounding.
+differ only by fp32 rounding. This holds from torch 2.2 on (tested through
+2.14): each equation's step compiles the same way on all of them. The
+exception is torch 2.3, whose Inductor has two bugs that 2.4 fixed: on GPU the
+step compiles with buffer reuse turned off, and on CPU it runs uncompiled,
+with a one-time warning.
 
 The slice form makes the one-off compilation on the first call longer: a few
 seconds more than with the convolution at order 4, up to about 25 s for the

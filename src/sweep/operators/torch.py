@@ -1,3 +1,5 @@
+import importlib
+
 import torch
 import torch.nn.functional as F
 
@@ -53,13 +55,31 @@ def _to_ncdhw(u):
 #
 # The slice form needs the taps as Python floats, which a traced graph cannot
 # read off a tensor, so ``register_stencil`` records them on the kernel tensor
-# when the kernel is built.  An unregistered kernel keeps the conv.
+# when the kernel is built.  An unregistered kernel keeps the conv: it reads the
+# class-level ``None`` below.  The read is a plain attribute access because
+# Dynamo before torch 2.5 breaks the graph on ``getattr(tensor, name, None)``,
+# and there the slices never ran.
 _TAPS_ATTR = "_sweep_taps"
+setattr(torch.Tensor, _TAPS_ATTR, None)
 
 # A/B switch: False keeps the conv under torch.compile as well.
 SLICE_STENCILS_UNDER_COMPILE = True
 
-_is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None) or (lambda: False)
+def _resolve_is_compiling(torch_mod=torch):
+    """The "is Dynamo tracing this?" probe: ``torch.compiler.is_compiling``, or
+    on older 2.x (2.1 has ``torch.compiler`` without it) ``torch._dynamo``'s.
+    Without the fallback every compile-only path -- these slice stencils, the
+    source scatter -- silently stayed off there."""
+    fn = getattr(getattr(torch_mod, "compiler", None), "is_compiling", None)
+    if fn is None:
+        try:
+            fn = getattr(importlib.import_module(torch_mod.__name__ + "._dynamo"), "is_compiling", None)
+        except ImportError:
+            fn = None
+    return fn or (lambda: False)
+
+
+_is_compiling = _resolve_is_compiling()
 
 
 def register_stencil(kernel):
@@ -91,9 +111,9 @@ def register_stencil(kernel):
 
 
 def _compiled_taps(kernel):
-    if not (SLICE_STENCILS_UNDER_COMPILE and _is_compiling()):
+    if not (SLICE_STENCILS_UNDER_COMPILE and _is_compiling()) or not isinstance(kernel, torch.Tensor):
         return None
-    return getattr(kernel, _TAPS_ATTR, None)
+    return kernel._sweep_taps   # _TAPS_ATTR, spelled out: see above
 
 
 def _apply_taps(u, taps):

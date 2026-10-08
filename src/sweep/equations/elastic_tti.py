@@ -206,6 +206,9 @@ class ElasticTTI(FirstOrderEquation):
         ModelSpec("theta", description="Tilt angle.", unit="rad"),
         ModelSpec("phi", description="Azimuth angle.", unit="rad"),
     )
+    # An int for func's arity check: Dynamo before torch 2.5 cannot take
+    # len() of the spec tuple inside the compiled step.
+    _N_RAW_MODELS = len(MODEL_SPECS)
 
     FIELD_SPECS = (
         FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in x.", supports_source=True, supports_receiver=True),
@@ -498,7 +501,7 @@ class ElasticTTI(FirstOrderEquation):
         }
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
-        if len(models) == len(self.MODEL_SPECS):
+        if len(models) == self._N_RAW_MODELS:
             models = self.prepare_models(models)
         elif len(models) != 1 + len(STIFFNESS_KEYS):
             raise ValueError(

@@ -1,11 +1,10 @@
-import os as _os
-
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from . import slot_table
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
+    FS_MOD_SXX,
     top_free_surface_derivative,
     top_free_surface_cell_derivative,
     top_free_surface_derivative_topo,
@@ -165,7 +164,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
 
     if free_surface:
-        if _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1":
+        if FS_MOD_SXX:
             # Robertsson tangential FS correction (3-D): at a z-low free surface
             # sigma_zz=0 => dvz_dz = -lambda/(lam+2mu) (dvx_dx + dvy_dy), so the
             # surface-row tangential normal stresses reduce to

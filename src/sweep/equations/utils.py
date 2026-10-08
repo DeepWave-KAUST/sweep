@@ -16,9 +16,18 @@ def to_backend(arr, backend, device=None):
         return arr.astype(np.float32)
 
 
+def is_torch_tensor(x):
+    """``isinstance(x, torch.Tensor)``.  These helpers are shared by the torch
+    and jax backends and run inside the compiled step; duck-typing a tensor
+    with ``hasattr`` breaks its graph under Dynamo before torch 2.5."""
+    import torch
+    return isinstance(x, torch.Tensor)
+
+
 def backend_concat(arrays, axis):
     first = arrays[0]
-    if hasattr(first, "device") and hasattr(first, "dtype"):
+    # Not hasattr(first, "device"): numpy >= 2 and jax arrays have one too.
+    if is_torch_tensor(first):
         import torch
 
         return torch.cat(arrays, dim=axis)
@@ -47,7 +56,7 @@ def zero_edge_halo(field, halo, axis, side="low"):
     axis = axis if axis >= 0 else ndim + axis
     n = field.shape[axis]
     band = slice(0, halo) if side == "low" else slice(n - halo, None)
-    if hasattr(field, "clone") and hasattr(field, "device") and hasattr(field, "dtype"):
+    if is_torch_tensor(field):
         out = field.clone()
         sl = [slice(None)] * ndim
         sl[axis] = band

@@ -210,7 +210,7 @@ class _CustomGradientMixin:
         sr_stencil = getattr(self.equation, "source_receiver_stencil", None)
         src = SourceTorch(src_loc, shape_wf, self.dev, source_encoding, adj=False,
                           spread_kernel=sr_stencil)
-        rec = ReceiverTorch(rec_loc, gather_kernel=sr_stencil)
+        rec = ReceiverTorch(rec_loc, gather_kernel=sr_stencil, shape=shape_wf)
 
         nt = wavelet.shape[-1]
         # Source-injection needs at least one require_grad leaf for autograd

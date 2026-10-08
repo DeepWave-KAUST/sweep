@@ -1,3 +1,4 @@
+import types
 import warnings
 import weakref
 
@@ -8,13 +9,61 @@ from torch.utils.checkpoint import checkpoint as ckpt_torch
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS
 from sweep.receivers.torch import ReceiverTorch
-from sweep.sources.torch import SourceTorch
+from sweep.sources.torch import SourceTorch, scatter_source
 from sweep.utils.torch import EdgePadding
 from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
 from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
 
 _DYNAMO_LIMIT_WARNED = False
+_NO_COMPILE_WARNED = False
+
+# Compiling inside a checkpointed forward breaks its recompute before torch 2.5
+# (see _rollout_ckpt).
+CKPT_PLAIN_WARMUP = torch.__version__ < (2, 5)
+
+# torch 2.2 keeps the table of compiled backends per thread.  When the autograd
+# thread runs a compiled step (a checkpoint recompute, the boundary-saving
+# backward), it checks every cache entry on the step's code object -- entries
+# other propagators' torch.compile left there too -- and raises KeyError on a
+# backend only the main thread knows.  There each propagator compiles its own
+# copy of the code; that gives up the reuse of an earlier propagator's graphs,
+# which other torch versions keep.
+OWN_CODE_PER_COMPILE = (2, 2) <= torch.__version__ < (2, 3)
+
+# torch 2.3's Inductor has two bugs, fixed in 2.4, that the step runs into.
+# Its buffer reuse misses that a complex result's ``.real`` still points into
+# the buffer and hands it to the next FFT's input: ViscoAcoustic's forward
+# turns to NaN, on GPU as on CPU.  Turning reuse off cures that and costs the
+# fused step no memory we could measure.  Its C++ backend also fuses a flat
+# loop into a group of loops of another shape and fails an assertion, mostly
+# while compiling the backward, where no fallback can catch it.  Nothing turns
+# that off, so on CPU the step runs uncompiled.
+INDUCTOR_23 = (2, 3) <= torch.__version__ < (2, 4)
+
+
+def _with_own_code(fn):
+    """``fn`` (or a bound method) with a fresh code object, for torch.compile
+    caches that must not be shared (see OWN_CODE_PER_COMPILE)."""
+    if isinstance(fn, types.MethodType):
+        return types.MethodType(_with_own_code(fn.__func__), fn.__self__)
+    if not isinstance(fn, types.FunctionType):
+        return fn
+    own = types.FunctionType(fn.__code__.replace(), fn.__globals__, fn.__name__,
+                             fn.__defaults__, fn.__closure__)
+    own.__kwdefaults__ = fn.__kwdefaults__
+    own.__qualname__ = fn.__qualname__
+    own.__dict__.update(fn.__dict__)
+    return own
+
+
+def _no_buffer_reuse(mode, dynamic):
+    """Inductor options for ``mode`` with buffer reuse off (see INDUCTOR_23).
+    torch.compile takes a mode or options, not both, so the mode is spelt out."""
+    from torch._inductor import list_mode_options
+    options = {} if mode in (None, "default") else dict(list_mode_options(mode, dynamic))
+    options["allow_buffer_reuse"] = False
+    return options
 
 
 def _raise_dynamo_recompile_limit(target=32):
@@ -105,14 +154,25 @@ class _PropTorchEager(
         return spacing
 
     def _build_step_func(self):
-        equation_step = self.equation.func
+        equation = self.equation
         num_wavefields = len(self.wavefield_names)
+        source_indices = tuple(self.source_indices)
 
-        def step_func(*flat_args):
+        def step_func(*flat_args, source=None):
             wavefields = flat_args[:num_wavefields]
             models = flat_args[num_wavefields:-3]
             dt, h, b = flat_args[-3:]
-            return equation_step(wavefields, models, dt, h, b)
+            # ``equation.func`` is looked up here, not bound outside: Dynamo
+            # before torch 2.4 cannot call a bound method held in a closure.
+            out = equation.func(wavefields, models, dt, h, b)
+            if source is None:
+                return out
+            # Injected inside the step, the compiled graph scatters the source
+            # straight into the field it just computed: no full-grid pass.
+            out = list(out)
+            for k in source_indices:
+                out[k] = scatter_source(out[k], *source)
+            return out
 
         return self._maybe_compile(step_func)
 
@@ -130,8 +190,18 @@ class _PropTorchEager(
         The compiled step is wrapped so that a compiler that cannot build it
         (Inductor's CPU backend needs g++ >= 10, for one) costs speed, not the
         run: the step is a pure function of its arguments, so the failing call
-        is repeated uncompiled, and so is every later one."""
-        if not self.use_compile or not hasattr(torch, "compile"):
+        is repeated uncompiled, and so is every later one.  On torch 2.3,
+        Inductor runs with buffer reuse off, and not at all on CPU
+        (INDUCTOR_23)."""
+        if not self.use_compile:
+            return fn
+        if not hasattr(torch, "compile"):
+            self._no_compile(f"torch {torch.__version__} has no torch.compile (it needs torch >= 2.0)")
+            return fn
+        inductor = self.compile_backend in (None, "inductor")
+        if INDUCTOR_23 and inductor and "cuda" not in str(self.dev):
+            self._no_compile(f"torch {torch.__version__}'s Inductor miscompiles the step on CPU "
+                             "(fixed in torch 2.4)")
             return fn
         _raise_dynamo_recompile_limit()
         compile_kwargs = {
@@ -141,7 +211,9 @@ class _PropTorchEager(
         }
         if self.compile_backend is not None:
             compile_kwargs["backend"] = self.compile_backend
-        compiled = torch.compile(fn, **compile_kwargs)
+        if INDUCTOR_23 and inductor:
+            compile_kwargs["options"] = _no_buffer_reuse(compile_kwargs.pop("mode"), self.compile_dynamic)
+        compiled = torch.compile(_with_own_code(fn) if OWN_CODE_PER_COMPILE else fn, **compile_kwargs)
         # Weak: the step ends up inside autograd graphs (the eager boundary-
         # saving Function keeps it in its ctx) that tensors cached on this
         # propagator keep alive.  A strong reference closes a cycle through the
@@ -162,6 +234,20 @@ class _PropTorchEager(
 
         return step
 
+    def _no_compile(self, why):
+        """This torch cannot compile the step (``why``): run uncompiled, and
+        say so once per process (the step is built per propagator and per
+        rollout)."""
+        global _NO_COMPILE_WARNED
+        self.use_compile = False
+        if not _NO_COMPILE_WARNED:
+            _NO_COMPILE_WARNED = True
+            warnings.warn(
+                f"{why}: the eager propagator runs uncompiled, which gives the same result but "
+                "is several times slower (3-6x measured on GPU). Pass "
+                "eager_options=EagerOptions(use_compile=False) to skip this notice.",
+                RuntimeWarning, stacklevel=4)
+
     def _disable_compile(self, exc):
         """Run uncompiled from now on, and say so once."""
         self.use_compile = False
@@ -180,9 +266,17 @@ class _PropTorchEager(
             if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
                 compiler.cudagraph_mark_step_begin()
 
-    def _compiled_step(self, wavefields, models, dt, h, b):
+    def _compiled_step(self, wavefields, models, dt, h, b, source=None):
+        """One step; ``source`` (``SourceTorch.step_args``) is injected into
+        the source fields inside it."""
         self._mark_compile_step_begin()
-        return self.step_func(*wavefields, *models, dt, h, b)
+        return self.step_func(*wavefields, *models, dt, h, b, source=source)
+
+    def _sample_receivers(self, rec, wavefield, receivers):
+        """One record column, ``(B, nrec, len(receiver_type))``."""
+        if len(self.receiver_indices) > 1:
+            return rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
+        return rec(wavefield[self.receiver_indices[0]]).view(*receivers.shape[:-1]).unsqueeze(-1)
 
     def _prepare_runtime_models(self, models):
         prepare = getattr(self.equation, "prepare_models", None)
@@ -269,31 +363,14 @@ class _PropTorchEager(
             cached.zero_()
         return cached
 
-    def _run_chunk(self, wavefield, models, dt, h, b, wavelet, nt, start_t, chunk_size, src, rec, record_shape, adj=False):
-        chunk_record = self._get_cached_tensor(
-            "chunk_record",
-            record_shape,
-            device=self.dev,
-            dtype=wavefield[0].dtype,
-        )
-        multi_receiver = len(self.receiver_indices) > 1
-        for local_i in range(chunk_size):
-            t = start_t + local_i
-            if t >= nt:
-                break
-            wavefield = list(self._compiled_step(wavefield, models, dt, h, b))
+    def _run_chunk(self, wavefield, models, dt, h, b, wavelet_steps, nt, start_t, chunk_size, src, rec, receivers, adj=False):
+        columns = []
+        for t in range(start_t, min(start_t + chunk_size, nt)):
             time = t if not adj else nt - t - 1
-            for source_idx in self.source_indices:
-                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
-            if multi_receiver:
-                sampled = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
-                chunk_record[:, local_i, :, :] = sampled
-            else:
-                receiver_idx = self.receiver_indices[0]
-                chunk_record[:, local_i, :, 0] = rec(wavefield[receiver_idx]).view(
-                    record_shape[0], record_shape[2]
-                )
-        return tuple(wavefield), chunk_record
+            wavefield = list(self._compiled_step(wavefield, models, dt, h, b,
+                                                 source=src.step_args(wavelet_steps[time])))
+            columns.append(self._sample_receivers(rec, wavefield, receivers))
+        return tuple(wavefield), torch.stack(columns, dim=1)
 
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), (
@@ -325,21 +402,41 @@ class _PropTorchEager(
         px = (rt_nx - nx) // 2
         return runtime_grid[..., pz:pz + nz, px:px + nx]
 
-    def _rollout_ckpt(self, wavefield, models, wavelet, src, rec, record,
-                      receivers, batch_size, nt, adj):
+    def _rollout_ckpt(self, wavefield, models, wavelet_steps, src, rec,
+                      receivers, nt, adj):
         """Time loop under chunk gradient checkpointing: the nt steps are split
         into ``ckpt_chunks``-sized chunks, each wrapped in ``ckpt_torch`` so its
-        activations are recomputed in backward instead of stored.  Writes the
-        receiver record in place and returns the final wavefield list.
+        activations are recomputed in backward instead of stored.  Returns
+        ``(wavefield, record)``, the record concatenated from the chunks' own
+        (see ``_rollout_full`` for why it is not written in place).
         """
         chunk_size = int(max(1, self.ckpt_chunks))
-        record_chunk_shape = (batch_size, chunk_size, receivers.shape[1], len(self.receiver_type))
-        num_chunks = (nt + chunk_size - 1) // chunk_size
         num_wavefields = len(wavefield)
         num_models = len(models)
 
-        for chunk_idx in range(num_chunks):
-            start_t = chunk_idx * chunk_size
+        chunk_records = []
+        start = 0
+        if self.use_compile and CKPT_PLAIN_WARMUP:
+            # Before torch 2.5, compiling inside a checkpointed forward saves
+            # tensors its recompute does not, and backward raises a
+            # CheckpointError.  The step recompiles only while its inputs'
+            # requires_grad settles (3 steps for every equation here), so run
+            # those steps on the plain tape.
+            runtime_models = self._prepare_runtime_models(models)
+            seen = None
+            while start < min(nt, 8):
+                flags = tuple(w.requires_grad for w in wavefield)
+                if start >= 3 and flags == seen:
+                    break
+                seen = flags
+                wavefield, column = self._run_chunk(
+                    wavefield, runtime_models, self.dt, self._equation_spacing, None,
+                    wavelet_steps, nt, start, 1, src, rec, receivers, adj=adj)
+                wavefield = list(wavefield)
+                chunk_records.append(column)
+                start += 1
+
+        for start_t in range(start, nt, chunk_size):
 
             def checkpoint_chunk(*chunk_inputs, start_t=start_t):
                 state = list(chunk_inputs[:num_wavefields])
@@ -351,23 +448,22 @@ class _PropTorchEager(
                     self.dt,
                     self._equation_spacing,
                     None,
-                    wavelet,
+                    wavelet_steps,
                     nt,
                     start_t,
                     chunk_size,
                     src,
                     rec,
-                    record_chunk_shape,
+                    receivers,
                     adj=adj,
                 )
 
             wavefield, chunk_record = ckpt_torch(checkpoint_chunk, *wavefield, *models, use_reentrant=False)
             wavefield = list(wavefield)
-            end_t = min(start_t + chunk_size, nt)
-            record[:, start_t:end_t, :, :] = chunk_record[:, : end_t - start_t, :, :]
-        return wavefield
+            chunk_records.append(chunk_record)
+        return wavefield, torch.cat(chunk_records, dim=1)
 
-    def _rollout_full(self, wavefield, runtime_models, wavelet, src, rec,
+    def _rollout_full(self, wavefield, runtime_models, wavelet_steps, src, rec,
                       receivers, nt, adj, return_wavefield, snapshots, snapshot_lookup):
         """Plain time loop recording the full autograd tape (the default path):
         PyTorch retains every step's activations and backward differentiates the
@@ -375,25 +471,17 @@ class _PropTorchEager(
         (wavefield snapshots).  Returns ``(wavefield, record)``; the snapshots,
         which are detached host copies, are still written in place.
         """
-        multi_receiver = len(self.receiver_indices) > 1
         columns = []
         for i in range(nt):
-            wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None))
             time = i if not adj else nt - i - 1
-            for source_idx in self.source_indices:
-                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
+            wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None,
+                                                 source=src.step_args(wavelet_steps[time])))
             if return_wavefield and i in snapshot_lookup:
                 snapshots[snapshot_lookup[i]] = torch.stack(
                     [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
                     0,
                 )
-            if multi_receiver:
-                columns.append(rec.sample_fields(
-                    [wavefield[idx] for idx in self.receiver_indices]))
-            else:
-                receiver_idx = self.receiver_indices[0]
-                columns.append(rec(wavefield[receiver_idx])
-                               .view(*receivers.shape[:-1]).unsqueeze(-1))
+            columns.append(self._sample_receivers(rec, wavefield, receivers))
         # One stack instead of nt in-place slice writes. Writing into a live
         # autograd tensor builds a chain of nt CopySlices nodes, and EACH of
         # them allocates a full-record buffer and copies the incoming gradient
@@ -441,6 +529,11 @@ class _PropTorchEager(
 
         shape_wavefield = (batch_size, 1) + self._runtime_shape()
         wavelet = self._as_device_tensor(wavelet, dtype=torch.float32)
+        # One contiguous view per step: the compiled step takes a step's sample
+        # as an input, and a strided one would specialize the compiled code on
+        # nt.  Unbinding once also gathers the wavelet's gradient in one stack,
+        # where a slice per step cost a full-wavelet backward per step.
+        wavelet_steps = wavelet.movedim(-1, 0).contiguous().unbind(0)
         sources = self._as_device_tensor(sources, dtype=torch.long) + self.coord_offset
         receivers = self._as_device_tensor(receivers, dtype=torch.long) + self.coord_offset
 
@@ -452,7 +545,7 @@ class _PropTorchEager(
         sr_stencil = getattr(self.equation, "source_receiver_stencil", None)
         src = SourceTorch(sources, shape_wavefield, self.dev, source_encoding, adj,
                           spread_kernel=sr_stencil)
-        rec = ReceiverTorch(receivers, gather_kernel=sr_stencil)
+        rec = ReceiverTorch(receivers, gather_kernel=sr_stencil, shape=shape_wavefield)
 
         has_aux = False
         if return_wavefield:
@@ -470,17 +563,6 @@ class _PropTorchEager(
                                     dtype=torch.float32)
         else:
             snapshots = None
-
-        # Only the paths that still fill a record in place need one allocated
-        # up front; _rollout_full stacks its own (see there).
-        record = None
-        if self.use_ckpt or getattr(self, "_eager_bs", False):
-            record = self._get_cached_tensor(
-                "record",
-                (batch_size, nt, receivers.shape[1], len(self.receiver_type)),
-                device=self.dev,
-                dtype=torch.float32,
-            )
 
         models = models if models is not None else self.parameters()
         models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
@@ -500,33 +582,29 @@ class _PropTorchEager(
         if self.use_ckpt and return_wavefield:
             raise ValueError("return_wavefield=True is not supported with chunk checkpointing in PropTorch yet.")
 
+        # Every rollout builds its record fresh (stacked, never a workspace
+        # buffer), so it is returned without a defensive copy.
         if self.use_ckpt:
-            wavefield = self._rollout_ckpt(
-                wavefield, models, wavelet, src, rec, record, receivers, batch_size, nt, adj
+            wavefield, record = self._rollout_ckpt(
+                wavefield, models, wavelet_steps, src, rec, receivers, nt, adj
             )
         elif getattr(self, "_eager_bs", False):
             if return_wavefield:
                 raise ValueError("return_wavefield is not supported with eager boundary saving.")
-            wavefield = self._rollout_eager_bs(
-                wavefield, runtime_models, wavelet, src, rec, record, receivers, nt, adj
+            wavefield, record = self._rollout_eager_bs(
+                wavefield, runtime_models, wavelet_steps, src, rec, receivers, nt, adj
             )
         else:
             wavefield, record = self._rollout_full(
-                wavefield, runtime_models, wavelet, src, rec, receivers, nt, adj,
+                wavefield, runtime_models, wavelet_steps, src, rec, receivers, nt, adj,
                 return_wavefield, snapshots, snapshot_lookup,
             )
 
         self.last_wavefields = tuple(wavefield) if self.store_last_wavefield else None
-        # The eager backend reuses internal workspace buffers across calls.
-        # Return clones so previous outputs do not alias buffers that a later
-        # forward pass will overwrite.
-        # A stacked record is already a fresh tensor; only the in-place paths
-        # hand back workspace that a later forward would overwrite.
-        record_out = record.clone() if (self.use_ckpt or getattr(self, "_eager_bs", False)) else record
         if not has_aux:
-            return record_out
+            return record
         # ``snapshots`` is allocated per call above, so it aliases no workspace
         # and needs no defensive copy.
-        return record_out, snapshots
+        return record, snapshots
 
     forward_base = forward

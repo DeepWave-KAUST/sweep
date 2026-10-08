@@ -109,6 +109,19 @@ def requires_binding(*symbols):
     return pytest.mark.skipif(True, reason=reason)
 
 
+def _has_torch_compile():
+    try:
+        import torch
+    except ImportError:
+        return False
+    return hasattr(torch, "compile")
+
+
+# torch < 2.0 has no torch.compile: the eager step runs uncompiled there, and a
+# test of the compiled step has nothing to test.
+requires_compile = pytest.mark.skipif(not _has_torch_compile(), reason="this torch has no torch.compile")
+
+
 def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
     """The sampled Ricker wavelet the suite uses, in one place.
 

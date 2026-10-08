@@ -89,6 +89,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .utils import is_torch_tensor
+
 
 # Category codes — kept as module constants for use in tests and step.
 # 0..6 are the 2-D codes (and a subset is reused by the 3-D classifier);
@@ -123,7 +125,7 @@ def classify_topography(air_mask):
         VR / OC / IC``. The function is pure numpy under the hood; if
         ``air_mask`` is a torch tensor, conversion is automatic.
     """
-    is_torch = hasattr(air_mask, "device") and hasattr(air_mask, "is_cuda")
+    is_torch = is_torch_tensor(air_mask)
     if is_torch:
         am_np = (air_mask.detach().cpu().numpy() > 0.5)
     else:
@@ -209,7 +211,7 @@ def precompute_apm_moduli(lame_lambda, lame_mu, rho, category):
       and ``λ_eff · ∂v_z/∂z = 0`` (so the cross-term drops, exactly
       the Cao 2018 modified equation).
     """
-    is_torch = hasattr(lame_lambda, "device") and hasattr(lame_lambda, "is_cuda")
+    is_torch = is_torch_tensor(lame_lambda)
     if is_torch:
         import torch
 
@@ -289,7 +291,7 @@ def zero_at_air(field, air_mask_float, *, eps=0.5):
     threshold rather than bool casting to stay differentiable under
     autograd / torch.compile.
     """
-    is_torch = hasattr(field, "device") and hasattr(field, "is_cuda")
+    is_torch = is_torch_tensor(field)
     if is_torch:
         keep = (air_mask_float < eps).to(field.dtype)
     else:
@@ -310,7 +312,7 @@ def enforce_apm_traction_bc(sxx, szz, sxz, category):
     the (i+½, j+½) corner — same tensor shape, different staggered
     interpretation) are all treated by index lookup on ``category``.
     """
-    is_torch = hasattr(sxx, "device") and hasattr(sxx, "is_cuda")
+    is_torch = is_torch_tensor(sxx)
     if is_torch:
         import torch
 
@@ -377,7 +379,7 @@ def classify_topography_3d(air_mask):
     category : numpy.ndarray of int32, shape ``(nz, ny, nx)``
         One of the codes ``INTERIOR / AIR / H / VL / VR / VF / VB / OC / IC``.
     """
-    is_torch = hasattr(air_mask, "device") and hasattr(air_mask, "is_cuda")
+    is_torch = is_torch_tensor(air_mask)
     if is_torch:
         am_np = (air_mask.detach().cpu().numpy() > 0.5)
     else:
@@ -485,7 +487,7 @@ def precompute_apm_moduli_3d(lame_lambda, lame_mu, rho, category):
             half-grid velocity node sits in air (so the velocity update
             multiplies by zero and no division by zero occurs).
     """
-    is_torch = hasattr(lame_lambda, "device") and hasattr(lame_lambda, "is_cuda")
+    is_torch = is_torch_tensor(lame_lambda)
     if is_torch:
         import torch
 
@@ -703,7 +705,7 @@ def enforce_apm_traction_bc_3d(
     OC  →  all 6 stresses zero
     AIR →  all 6 stresses zero
     """
-    is_torch = hasattr(sxx, "device") and hasattr(sxx, "is_cuda")
+    is_torch = is_torch_tensor(sxx)
     if is_torch:
         import torch
 

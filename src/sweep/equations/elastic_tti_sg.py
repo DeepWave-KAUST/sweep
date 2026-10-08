@@ -7,6 +7,7 @@ from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
 from ._registry import register_equation
+from .utils import is_torch_tensor
 
 
 def _slice_axis(u, axis, start=None, stop=None):
@@ -21,7 +22,7 @@ def _replace_axis_slice(u, axis, index, value):
     slices = [slice(None)] * u.ndim
     slices[axis] = slice(index, index + 1)
 
-    if hasattr(u, "clone") and hasattr(u, "device") and hasattr(u, "dtype"):
+    if is_torch_tensor(u):
         out = u.clone()
         out[tuple(slices)] = value
         return out
@@ -231,7 +232,7 @@ class ElasticTTISG(ElasticTTI):
         FirstOrderEquation.__init__(self, spatial_order, device, backend, ndim=2)
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
-        if len(models) == len(self.MODEL_SPECS):
+        if len(models) == self._N_RAW_MODELS:
             models = self.prepare_models(models)
         elif len(models) != 1 + len(STIFFNESS_KEYS):
             raise ValueError(

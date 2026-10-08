@@ -160,6 +160,13 @@ class ViscoAcoustic(SecondOrderEquation):
         validated against the Kjartansson power law to 0.4% over the band;
         attenuation to 2%).
     """
+    # Read in the step with getattr(..., None) and attached only sometimes.
+    # The class default keeps the read safe for Dynamo before torch 2.5,
+    # whose guard on it is a plain attribute access: on an instance without
+    # the attribute it raises, once another instance has compiled the step.
+    _D_cache = None
+    _c_kmul_cache = None
+
     supports_image_topography = True   # eager func applies the staircase
 
     C_NAME = "visco_acoustic2d"
@@ -308,13 +315,16 @@ class ViscoAcoustic(SecondOrderEquation):
         k_safe = op.where(mask, k, op.ones_like(k))
         zeros = op.zeros_like(k)
         D_k2 = k * k
-        if hasattr(gbar, 'detach'):
-            e = gbar.detach()
-        elif self.backend == 'jax':
+        # Type tests, not hasattr(gbar, 'detach'): this runs in the compiled
+        # step, and Dynamo before torch 2.5 breaks the graph on hasattr of a
+        # tensor.
+        if self.backend == 'jax':
             import jax
             e = jax.lax.stop_gradient(gbar)
-        else:
+        elif isinstance(gbar, (np.ndarray, np.generic, float, int)):
             e = gbar
+        else:
+            e = gbar.detach()
         D_frac = op.where(mask, k_safe ** (2.0 * e + 2.0), zeros)
         D_loss = op.where(mask, k_safe ** (2.0 * e + 1.0), zeros)
         grids = (D_k2, D_frac, D_loss)
