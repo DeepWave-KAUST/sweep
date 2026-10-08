@@ -17,13 +17,14 @@ import torch
 import torch.nn.functional as F
 
 import sweep.operators.torch as OPS
-from sweep.equations import Acoustic, Acoustic3D, AcousticVRZ3D, Elastic, ElasticTTI
+from sweep.equations import Acoustic, Acoustic3D, AcousticVRZ3D, Elastic, ElasticTTI, ElasticVRR, ViscoElastic
 from sweep.equations.elastic3d import Elastic as Elastic3D
 from sweep.equations.utils import to_backend
 from sweep.operators.general import StaggeredDerivative
 from sweep.operators.rsg import RSGDerivative
 from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
+from conftest import requires_compile
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,7 +35,8 @@ def _release_compiled_state():
     buffers -- alive; release them so a later test that reads the absolute
     peak memory (test_eager_boundary_saving) does not count them."""
     yield
-    torch._dynamo.reset()
+    if hasattr(torch, "_dynamo"):
+        torch._dynamo.reset()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -92,8 +94,9 @@ def test_out_of_place_halo_zeroing_matches_in_place(pads):
 def test_kernels_the_slice_form_cannot_express_stay_unregistered():
     even = OPS.register_stencil(torch.ones(1, 1, 1, 4))
     multi_in = OPS.register_stencil(torch.ones(1, 2, 1, 5))
-    assert not hasattr(even, OPS._TAPS_ATTR)
-    assert not hasattr(multi_in, OPS._TAPS_ATTR)
+    # Unregistered: the instance has no taps and reads the class-level None.
+    assert getattr(even, OPS._TAPS_ATTR) is None
+    assert getattr(multi_in, OPS._TAPS_ATTR) is None
 
 
 # ---- compiled steps --------------------------------------------------------
@@ -107,15 +110,22 @@ EQUATIONS = [
     pytest.param(Elastic, (40, 44), True, id="elastic2d_free_surface"),
     pytest.param(Elastic3D, (16, 14, 12), False, id="elastic3d"),
     pytest.param(ElasticTTI, (40, 44), False, id="elastic_tti_rsg"),
+    # Their steps read lookup tables and a per-run cache that once broke the
+    # graph on every torch.
+    pytest.param(ElasticVRR, (40, 44), False, id="elastic_vrr"),
+    pytest.param(ViscoElastic, (40, 44), True, id="visco_elastic_free_surface"),
 ]
 
 MODEL_VALUES = {"vp": 2500.0, "vs": 1400.0, "rho": 2000.0, "z": 5.0e6, "vp0": 2500.0, "vs0": 1400.0,
-                "epsilon": 0.1, "delta": 0.05, "gamma": 0.05, "theta": 0.3, "phi": 0.2}
+                "epsilon": 0.1, "delta": 0.05, "gamma": 0.05, "theta": 0.3, "phi": 0.2,
+                "Rp_x": 0.01, "Rp_z": 0.01, "Rs_x": 0.01, "Rs_z": 0.01, "Qp": 80.0, "Qs": 60.0}
 
 
-def _run(cls, shape, free_surface, use_compile, backend=None):
+def _run(cls, shape, free_surface, use_compile, backend=None, fullgraph=False, warm=False):
+    """Forward + backward; ``warm`` runs one uncompiled forward first, so the
+    lazily built pieces (the free surface's order-2 twin) exist before tracing."""
     eq = cls(spatial_order=4, device=DEV, backend="torch")
-    opts = EagerOptions(use_compile=use_compile, compile_backend=backend)
+    opts = EagerOptions(use_compile=use_compile, compile_backend=backend, compile_fullgraph=fullgraph)
     solver = PropTorch(eq, shape=shape, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=8, nt=60,
                        eager_options=opts, free_surface=free_surface)
     wavelet = torch.zeros(60, device=DEV)
@@ -129,6 +139,11 @@ def _run(cls, shape, free_surface, use_compile, backend=None):
     ramp = torch.linspace(0, 1, shape[0], device=DEV).view(-1, *([1] * (len(shape) - 1)))
     models = [(MODEL_VALUES[n] * (1 + 0.02 * ramp)).expand(shape).clone().requires_grad_(True)
               for n in eq.models]
+    if warm:
+        solver._backend_impl.use_compile = False
+        with torch.no_grad():
+            solver(wavelet, src, rec, models=models)
+        solver._backend_impl.use_compile = use_compile
     out = solver(wavelet, src, rec, models=models)
     out.square().sum().backward()
     return out.detach(), [m.grad for m in models]
@@ -142,6 +157,7 @@ def _conv_node_counter(counts):
     return backend
 
 
+@requires_compile
 @pytest.mark.parametrize("cls,shape,free_surface", EQUATIONS)
 def test_compiled_step_has_no_conv(cls, shape, free_surface, monkeypatch):
     # The counter must be able to see a conv, or "zero" proves nothing.
@@ -158,6 +174,38 @@ def test_compiled_step_has_no_conv(cls, shape, free_surface, monkeypatch):
     assert after and sum(after) == 0, f"conv left in the compiled step: {after}"
 
 
+@requires_compile
+@pytest.mark.parametrize("cls,shape,free_surface", EQUATIONS)
+def test_compiled_step_traces_whole(cls, shape, free_surface):
+    """In steady state a step is one graph (fullgraph=True raises on any
+    break).  A break splits the step's fusion; before torch 2.5 the taps lookup
+    and the free-surface switches broke it on every call, and the slices never
+    ran.  The first step may break once, to build the order-2 twin outside
+    compile, so a warm uncompiled call runs first."""
+    torch._dynamo.reset()
+    _run(cls, shape, free_surface, True, "eager", fullgraph=True, warm=True)
+
+
+@requires_compile
+def test_plain_warmup_prefix_changes_nothing(monkeypatch):
+    """Before torch 2.5 a checkpointed rollout runs its first, compiling steps
+    on the plain tape, because compiling inside the checkpoint breaks its
+    recompute.  The record and gradients must not notice."""
+    import sweep.propagator._torch_eager as TE
+    if TE.CKPT_PLAIN_WARMUP:
+        pytest.skip("this torch cannot compile inside the checkpoint at all; "
+                    "test_compiled_slices_match_uncompiled_convs covers the warm-up here")
+    runs = []
+    for warm in (False, True):
+        torch._dynamo.reset()
+        monkeypatch.setattr(TE, "CKPT_PLAIN_WARMUP", warm)
+        runs.append(_run(Acoustic, (40, 44), False, True, "aot_eager"))
+    (out0, g0), (out1, g1) = runs
+    assert torch.equal(out0, out1)
+    assert all(torch.equal(a, b) for a, b in zip(g0, g1))
+
+
+@requires_compile
 @pytest.mark.parametrize("cls,shape,free_surface", EQUATIONS)
 def test_compiled_slices_match_uncompiled_convs(cls, shape, free_surface):
     torch._dynamo.reset()

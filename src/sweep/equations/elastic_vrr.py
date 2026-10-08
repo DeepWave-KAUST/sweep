@@ -48,13 +48,14 @@ from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import (
+    FS_NEARSURF_O2,
     zero_top_row,
     fs_deriv as _fs_deriv,
     get_o2_pd as _get_o2_pd,
     near_surface_o2_count as _near_surface_o2_count,
     fs_sxx_correction as _fs_sxx_correction,
 )
-import os as _os
+from sweep.operators.torch import _is_compiling
 from sweep.scalars import fd_coefficients
 
 
@@ -72,14 +73,18 @@ from sweep.scalars import fd_coefficients
 # template order so impl='eager' and impl='c' agree.
 # ---------------------------------------------------------------------------
 
-_GRAD_COEF_CACHE: dict[int, np.ndarray] = {}
 from ._registry import register_equation
+
+# Python floats, built here: inside the compiled step Dynamo traces numpy as
+# tensors, so a numpy table read there turned every ``float(coef)`` into a
+# data-dependent graph break.
+_GRAD_COEFS = {order: tuple(float(c) for c in fd_coefficients(1, order)) for order in (2, 4, 6, 8)}
 
 
 def _grad_coefs(order):
-    if order not in _GRAD_COEF_CACHE:
-        _GRAD_COEF_CACHE[order] = np.asarray(fd_coefficients(1, order), dtype=np.float64)
-    return _GRAD_COEF_CACHE[order]
+    if order in _GRAD_COEFS:
+        return _GRAD_COEFS[order]
+    return tuple(float(c) for c in fd_coefficients(1, order))   # public helper, any order
 
 
 def _take(u, axis, start, stop):
@@ -195,7 +200,7 @@ def elastic_vr_step_core(
     top_halo = pd.coes.shape[0]
     # Near-surface order reduction (matches the shared CUDA helper, which reduces
     # these same four FS z-derivatives): order-2 image stencil in the top band.
-    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) if free_surface else 0
+    _n_o2 = _near_surface_o2_count(top_halo, FS_NEARSURF_O2) if free_surface else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
     vp2 = vp * vp
@@ -320,6 +325,11 @@ class ElasticVRR(FirstOrderEquation):
 
     
     """
+    # Read in the step with getattr(..., None) and attached only sometimes.
+    # The class default keeps the read safe for Dynamo before torch 2.5,
+    # whose guard on it is a plain attribute access: on an instance without
+    # the attribute it raises, once another instance has compiled the step.
+    _vgrad_cache = None
 
     C_NAME = "elastic_vr2d"
 
@@ -427,11 +437,20 @@ class ElasticVRR(FirstOrderEquation):
         canonical centered FD (order = :meth:`_velocity_gradient_order`).
         Re-keys on ``id(vp), id(vs), h``.
         """
-        if np.isscalar(h):
-            hz = hx = float(h)
-        else:
+        # A tuple test, not np.isscalar: inside the compiled step Dynamo
+        # traces numpy calls, and that one returns a bool it cannot trace.
+        if isinstance(h, (tuple, list)):
             hz, hx = float(h[0]), float(h[1])
+        else:
+            hz = hx = float(h)
         order = self._velocity_gradient_order()
+        if _is_compiling():
+            # Traced, the gradients fuse into the step for nearly nothing, and
+            # the id()-keyed cache below cannot be traced at all.
+            return (_centered_first_derivative(vp, hx, axis=-1, order=order),
+                    _centered_first_derivative(vp, hz, axis=-2, order=order),
+                    _centered_first_derivative(vs, hx, axis=-1, order=order),
+                    _centered_first_derivative(vs, hz, axis=-2, order=order))
         key = (id(vp), id(vs), hz, hx, order)
         cached = getattr(self, "_vgrad_cache", None)
         if cached is not None and cached[0] == key:

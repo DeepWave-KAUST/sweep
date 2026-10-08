@@ -209,6 +209,9 @@ class ElasticTTISG3D(FirstOrderEquation):
         ModelSpec("theta", description="Tilt angle.", unit="rad"),
         ModelSpec("phi", description="Azimuth angle.", unit="rad"),
     )
+    # An int for func's arity check: Dynamo before torch 2.5 cannot take
+    # len() of the spec tuple inside the compiled step.
+    _N_RAW_MODELS = len(MODEL_SPECS)
 
     FIELD_SPECS = (
         FieldSpec("vx", aliases=("velocity_x",), description="Particle velocity in the x direction.", supports_source=True, supports_receiver=True),
@@ -410,7 +413,7 @@ class ElasticTTISG3D(FirstOrderEquation):
         return out
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
-        if len(models) == len(self.MODEL_SPECS):
+        if len(models) == self._N_RAW_MODELS:
             models = self.prepare_models(models)
         elif len(models) != 1 + len(STIFFNESS_KEYS_3D):
             raise ValueError(

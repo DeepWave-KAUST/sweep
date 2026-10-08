@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from conftest import requires_compile
 from sweep.equations import Acoustic
 from sweep.propagator import BoundarySaving
 from sweep.propagator.options import EagerOptions
@@ -39,7 +40,7 @@ def _forward(solver):
     return solver(WAVELET, SRC.copy(), REC.copy(), models=[vp])
 
 
-@pytest.mark.parametrize("use_compile", [False, True], ids=["uncompiled", "compiled"])
+@pytest.mark.parametrize("use_compile", [False, pytest.param(True, marks=requires_compile)], ids=["uncompiled", "compiled"])
 def test_dropped_propagator_is_freed(use_compile):
     gc.collect()
     base = torch.cuda.memory_allocated() if DEV.type == "cuda" else 0
@@ -49,7 +50,8 @@ def test_dropped_propagator_is_freed(use_compile):
     # workspace and what the compiled step captured.
     ref = weakref.ref(solver._backend_impl)
     del solver
-    torch._dynamo.reset()
+    if hasattr(torch, "_dynamo"):
+        torch._dynamo.reset()
     gc.collect()
     assert ref() is None, "the eager propagator outlived its last reference"
     if DEV.type == "cuda":

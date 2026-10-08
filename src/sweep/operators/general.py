@@ -33,6 +33,11 @@ def _prepare_jax_kernel_bank(kernel):
 
 
 class StaggeredDerivative:
+    # Read in the step with getattr(..., None) and attached only sometimes.
+    # The class default keeps the read safe for Dynamo before torch 2.5,
+    # whose guard on it is a plain attribute access: on an instance without
+    # the attribute it raises, once another instance has compiled the step.
+    _o2 = None
 
     def __init__(self, spatial_order:int=4, device='cpu', backend='torch', ndim=2):
         self.coes = staggered_grid_coes(int(spatial_order//2))

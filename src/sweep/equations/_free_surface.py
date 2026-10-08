@@ -1,14 +1,17 @@
+import os
+
 import numpy as np
+
+from .utils import is_torch_tensor
 
 
 def _flip(u, axis):
-    module = np
-    if hasattr(u, "flip"):
-        try:
-            return u.flip((axis,))
-        except TypeError:
-            pass
-    return module.flip(u, axis=axis)
+    # A type test, not hasattr(u, "flip"): this runs inside the compiled step,
+    # and Dynamo before torch 2.5 breaks the graph on hasattr of a tensor.
+    # numpy and jax arrays take np.flip, which slices (a jax array stays one).
+    if is_torch_tensor(u):
+        return u.flip((axis,))
+    return np.flip(u, axis=axis)
 
 
 def _concat(arrays, axis):
@@ -52,7 +55,7 @@ def _slice_axis(u, axis, start=None, stop=None):
 
 
 def _zero_axis_index(u, axis, index):
-    if hasattr(u, "clone") and hasattr(u, "device") and hasattr(u, "dtype"):
+    if is_torch_tensor(u):
         axis = axis if axis >= 0 else u.ndim + axis
         out = u.clone()
         slices = [slice(None)] * u.ndim
@@ -187,6 +190,13 @@ def fs_deriv(field, full_op, o2_op, halo, odd, axis, n_o2, half=False):
         return full
     o2 = deriv(field, o2_op, halo, odd=odd, axis=axis)
     return blend_top_n(o2, full, n_o2, axis)
+
+
+# Free-surface A/B switches, read once at import: read inside the step, they
+# broke its graph on every call under Dynamo before torch 2.5, which cannot
+# inline ``os.environ.get``.  Set them before importing sweep.
+FS_NEARSURF_O2 = os.environ.get("SWEEP_FS_NEARSURF_O2", "1")
+FS_MOD_SXX = os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1"
 
 
 def near_surface_o2_count(top_halo, env_value):
@@ -513,9 +523,7 @@ def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2, topo_ro
     given, the per-column surface row along topography (``overwrite_at_topo``).
     Env-gated by ``SWEEP_FS_MOD_SXX`` (default on); returns ``sxx`` unchanged off.
     """
-    import os as _os
-
-    if _os.environ.get("SWEEP_FS_MOD_SXX", "1") != "1":
+    if not FS_MOD_SXX:
         return sxx
     sxx_surf = sxx_pre + dt * c_surf * vx_x
     if topo_rows is not None:

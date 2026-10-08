@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from conftest import requires_compile
+
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if (_SRC / "sweep").exists() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -129,6 +131,30 @@ def test_forward_runs_and_is_finite():
     d = _run(prop)
     assert d.shape == (1, NT, _geom()[2].shape[1], 1)
     assert np.isfinite(d).all()
+
+
+@requires_torch
+@requires_compile
+@pytest.mark.parametrize("dev", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    torch is None or not torch.cuda.is_available(), reason="needs a GPU"))])
+def test_compiled_forward_matches_uncompiled(dev):
+    """Regression: torch 2.3's Inductor handed the buffer an FFT's ``.real``
+    still read to the next FFT's input, so the compiled forward (no gradient
+    asked for) read overwritten spectra and turned to NaN, on GPU as on CPU."""
+    from sweep.equations import ViscoAcoustic
+    from sweep.propagator.options import EagerOptions
+    from sweep.propagator.torch import PropTorch
+
+    def run(use_compile):
+        eq = ViscoAcoustic(spatial_order=4, backend="torch", device=dev)
+        prop = PropTorch(eq, shape=(NZ, NX), dh=DH, dt=DT, dev=torch.device(dev),
+                         source_type=["h1"], receiver_type=["h1"], abcn=ABCN, impl="eager",
+                         use_ckpt=False, eager_options=EagerOptions(use_compile=use_compile))
+        return _run(prop, models=[m.to(dev) for m in _models()])
+
+    ref, out = run(False), run(True)
+    assert np.isfinite(out).all()
+    assert _rel_l2(out, ref) < 1e-4
 
 
 @requires_torch

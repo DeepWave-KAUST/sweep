@@ -30,9 +30,9 @@ no extra memory.
 
 from __future__ import annotations
 
-import os as _os
-
 from ._free_surface import (
+    FS_MOD_SXX,
+    FS_NEARSURF_O2,
     top_free_surface_derivative_topo,
     overwrite_at_topo,
     overwrite_surface_row,
@@ -100,7 +100,7 @@ def elastic_velocity_substep(
     z_sides, x_sides = _fs_sides(fs_faces, free_surface)
     # Near-surface order reduction (flat FS only): order-2 image derivative in
     # the near-surface band tames the high-order FS-∩-CPML-corner instability.
-    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
+    _n_o2 = _near_surface_o2_count(top_halo, FS_NEARSURF_O2) \
         if ((z_sides or x_sides) and not has_topo) else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
@@ -184,7 +184,7 @@ def elastic_velocity_gradients(
     top_halo = pd.coes.shape[0]
     has_topo = free_surface and topo_rows is not None
     z_sides, x_sides = _fs_sides(fs_faces, free_surface)
-    _n_o2 = _near_surface_o2_count(top_halo, _os.environ.get("SWEEP_FS_NEARSURF_O2", "1")) \
+    _n_o2 = _near_surface_o2_count(top_halo, FS_NEARSURF_O2) \
         if ((z_sides or x_sides) and not has_topo) else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
@@ -274,7 +274,7 @@ def elastic_stress_substep(
     szz_pre_fs = szz
     szz = szz + dt * (lame_lambda_2mu * vz_z + lame_lambda * vx_x)
     sxx = sxx + dt * (lame_lambda_2mu * vx_x + lame_lambda * vz_z)
-    _mod_sxx = _os.environ.get("SWEEP_FS_MOD_SXX", "1") == "1"
+    _mod_sxx = FS_MOD_SXX
     if _mod_sxx and (has_topo or z_sides):
         # Robertsson free-surface fix at a z-normal surface: surface-row sigma_xx
         # uses the modified coefficient 4 mu (lam+mu)/(lam+2mu) * d vx/dx  (from

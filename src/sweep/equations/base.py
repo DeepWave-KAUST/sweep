@@ -37,6 +37,12 @@ def init_wavenumbers(shape, h):
     return k, kx, kz
 
 class WaveEquation:
+    # Read in the step with getattr(..., None) and attached only sometimes.
+    # The class default keeps the read safe for Dynamo before torch 2.5,
+    # whose guard on it is a plain attribute access: on an instance without
+    # the attribute it raises, once another instance has compiled the step.
+    _topo_rows_runtime = None
+    _apm_air_mask_runtime = None
 
     # Default PML formulation when the propagator is not given one explicitly.
     # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.

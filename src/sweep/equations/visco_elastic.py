@@ -327,6 +327,9 @@ class ViscoElastic(FirstOrderEquation):
         self.f_band = (float(f_band[0]), float(f_band[1]))
         self.n_sls = int(n_sls)
         self.tau_sigma = gsls_relaxation_times(self.n_sls, *self.f_band)
+        # As Python floats for the step: a numpy array read there is traced as
+        # a tensor, and float() of it is a data-dependent graph break.
+        self._tau_sigma_floats = tuple(float(v) for v in self.tau_sigma)
         self.fit = GSLSFit(self.tau_sigma, *self.f_band)
         self.q_min = self.fit.min_valid_q()
         if self.n_sls != 3:
@@ -415,7 +418,7 @@ class ViscoElastic(FirstOrderEquation):
         compiled step: kept symbolic); :meth:`c_eq_aux` evaluates the same
         expressions so both backends see identical float32 weights."""
         a_l, c_l = [], []
-        for ts in (float(v) for v in self.tau_sigma):
+        for ts in self._tau_sigma_floats:
             half = 0.5 * dt / ts
             a_l.append((1.0 - half) / (1.0 + half))
             c_l.append((dt / ts) / (1.0 + half))

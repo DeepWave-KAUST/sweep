@@ -257,6 +257,9 @@ class ElasticTTI2nd(FirstOrderEquation):
         ModelSpec("eta", description="Anellipticity eta = (epsilon - delta) / (1 + 2 delta)."),
         ModelSpec("theta", description="Tilt angle of the TI symmetry axis.", unit="rad"),
     )
+    # An int for func's arity check: Dynamo before torch 2.5 cannot take
+    # len() of the spec tuple inside the compiled step.
+    _N_RAW_MODELS = len(MODEL_SPECS)
 
     FIELD_SPECS = (
         FieldSpec("ux", aliases=("displacement_x",), description="Horizontal displacement.", supports_source=True, supports_receiver=True),
@@ -395,7 +398,7 @@ class ElasticTTI2nd(FirstOrderEquation):
         return [rho, C11t, C33t, C13t, C55t, C15t, C35t]
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
-        if len(models) == len(self.MODEL_SPECS):
+        if len(models) == self._N_RAW_MODELS:
             models = self.prepare_models(models)
         elif len(models) != 1 + len(TTI2ND_STIFFNESS_KEYS):
             raise ValueError(

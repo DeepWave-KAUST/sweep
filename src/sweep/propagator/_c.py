@@ -7,6 +7,12 @@ from dataclasses import replace
 import torch
 
 import numpy as np
+
+try:
+    from torch._dynamo import disable as _dynamo_disable
+except ImportError:      # torch < 2.0: no Dynamo, nothing to keep out of a trace
+    def _dynamo_disable(fn):
+        return fn
 from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.core.arguments import validate_memory_strategy
@@ -1743,7 +1749,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             f"model or {self.ndim + 1} for a per-shot batched (B, ...) model."
         )
 
-    @torch._dynamo.disable
+    @_dynamo_disable
     def _merge_legacy_call_kwargs(self, kwargs, boundary_saving_config):
         """Fold the per-call legacy boundary keywords into the config dict.
 

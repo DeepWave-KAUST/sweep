@@ -204,6 +204,20 @@ class ReconState:
                                    dtype=_STORE_DTYPE[store_dtype], device=storage_device)
 
 
+# torch < 2.0 has no untyped_storage(); its storage() is the same buffer.
+_storage = torch.Tensor.untyped_storage if hasattr(torch.Tensor, "untyped_storage") else torch.Tensor.storage
+
+
+def _add_source(src, field, sample, inputs):
+    """``field`` with the source ``sample`` added -- in place (a scatter onto a
+    few cells) when ``field`` is a fresh step output, i.e. contiguous and
+    sharing no storage with the step's ``inputs``; out of place otherwise."""
+    ptr = _storage(field).data_ptr()
+    if field.is_contiguous() and all(_storage(t).data_ptr() != ptr for t in inputs):
+        return src.add_(field, sample)
+    return src(field, sample)
+
+
 # ---- Reverse-reconstruction drivers --------------------------------------
 # Each driver reconstructs S_i (the step's input) from ``frame`` (= S_{i+1}) using
 # forward physics ONLY — the gradient itself is autograd, in _BoundarySaveStep.
@@ -247,7 +261,7 @@ def _reconstruct_swap2nd(frame, cfg, st, step, time_index, zero):
         u_i = frame[prev_i]
         u_im1 = out[now_i]                           # reconstructed previous level
         if now_i in src_fields and src_op is not None:
-            u_im1 = src_op(u_im1, cfg["wavelet"][..., time_index])
+            u_im1 = _add_source(src_op, u_im1, cfg["wavelet"][time_index], swapped)
         S_i[now_i] = restore_step(st, step, pidx, u_i.clone())
         S_i[prev_i] = restore_step(st, prev_step, pidx, u_im1)
     return S_i
@@ -264,9 +278,9 @@ def _reconstruct_substep(frame, cfg, st, step, time_index, zero):
     frame_in = list(frame)
     src = cfg.get("src")
     if src is not None:
-        wl = cfg["wavelet"][..., time_index]
+        wl = cfg["wavelet"][time_index]
         for sidx in cfg["source_indices"]:
-            frame_in[sidx] = src(frame[sidx].clone(), -wl)
+            frame_in[sidx] = src(frame[sidx], -wl)   # out of place: frame is the saved state
     for c in cpml_idx:
         frame_in[c] = zero
     state = frame_in
@@ -281,7 +295,8 @@ def _reconstruct_substep(frame, cfg, st, step, time_index, zero):
 
 
 class _BoundarySaveStep(torch.autograd.Function):
-    """One time step ``S_out = equation.func(S_in, models)``.
+    """One time step ``S_out = equation.func(S_in, models)``, plus the source
+    ``sample`` added to the source fields.
 
     Forward stores only the boundary ring of the physical fields (no full
     frame).  Backward reconstructs ``S_in`` by reverse-time marching from
@@ -289,7 +304,7 @@ class _BoundarySaveStep(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, cfg, step, time_index, *tensors):
+    def forward(ctx, cfg, step, time_index, sample, *tensors):
         nwf, nm = cfg["nwf"], cfg["nm"]
         S_in = list(tensors[:nwf])
         models = list(tensors[nwf:nwf + nm])
@@ -298,6 +313,13 @@ class _BoundarySaveStep(torch.autograd.Function):
         st = cfg["state"]
         for pos, f in enumerate(cfg["ring_fields"]):
             save_step(st, step + 1, pos, S_out[f])
+        # The ring is saved before the source goes in, as when the source was
+        # an op after this Function; the reverse drivers re-inject it.  Inside,
+        # it is a scatter onto the fresh outputs instead of a full-grid op.
+        if sample is not None:
+            for k in cfg["source_indices"]:
+                S_out[k] = _add_source(cfg["src"], S_out[k], sample, S_in)
+            ctx.sample_shape = sample.shape
         ctx.cfg = cfg
         ctx.step = step
         ctx.time_index = time_index
@@ -352,7 +374,7 @@ class _BoundarySaveStep(torch.autograd.Function):
             check = [o.detach() for o in out_rg]
             src_op = cfg.get("src")
             if src_op is not None:
-                wl = cfg["wavelet"][..., time_index]
+                wl = cfg["wavelet"][time_index]
                 for sidx in cfg["source_indices"]:
                     check[sidx] = src_op(check[sidx], wl)
             err, assessed = _interior_consistency_error(
@@ -379,7 +401,13 @@ class _BoundarySaveStep(torch.autograd.Function):
         grad_S = list(grads[:nwf])
         grad_M_iter = iter(grads[nwf:])
         grad_M = [next(grad_M_iter) if f else None for f in model_flags]
-        return tuple([None, None, None] + grad_S + grad_M)
+        # The source is additive: grad_S passes through it unchanged, and the
+        # sample's gradient is grad_out read back at the source cells.
+        grad_sample = None
+        if ctx.needs_input_grad[3]:
+            grad_sample = sum(cfg["src"].value_grad(grad_out[k], ctx.sample_shape)
+                              for k in cfg["source_indices"])
+        return tuple([None, None, None, grad_sample] + grad_S + grad_M)
 
 
 # ---- Propagator integration -------------------------------------------
@@ -436,9 +464,9 @@ class _EagerBoundarySavingMixin:
             alternatives="impl='c' or chunk checkpointing (use_ckpt=True)",
         )
 
-    def _init_eager_bs(self, wavefield, runtime_models, wavelet, src, nt):
+    def _init_eager_bs(self, wavefield, runtime_models, wavelet_steps, src, nt):
         """Set up the per-rollout state for eager (pure-PyTorch) boundary saving
-        and return ``(state, base_cfg, multi_receiver)``.
+        and return ``(state, base_cfg)``.
 
         Builds the ring geometry, resolves the reverse driver, pre-allocates the
         reconstruction storage (CUDA-style contiguous buffers) seeded with the
@@ -446,11 +474,11 @@ class _EagerBoundarySavingMixin:
         callables, and assembles ``base_cfg`` — the part of the per-step config
         that does not change across time.  The caller passes the varying
         ``step``/``time_index`` to ``_BoundarySaveStep.apply``.  Reconstruction
-        state is per-rollout (no class globals).
+        state is per-rollout (no class globals).  ``wavelet_steps`` is
+        time-major: ``wavelet_steps[t]`` is step ``t``'s source sample.
         """
         from sweep.equations.base import SecondOrderEquation
 
-        multi_receiver = len(self.receiver_indices) > 1
         halo = self._runtime_fd_halo()
         offsets = tuple(self.abcn + halo for _ in range(self.ndim))
         shape = tuple(wavefield[0].shape)
@@ -505,7 +533,7 @@ class _EagerBoundarySavingMixin:
             "equation": self.equation, "dt": self.dt, "h": self._equation_spacing,
             "nwf": nwf, "nm": nm, "nt": nt,
             "state": state, "models": runtime_models, "src": src,
-            "source_indices": self.source_indices, "wavelet": wavelet,
+            "source_indices": self.source_indices, "wavelet": wavelet_steps,
             "reverse": reverse_mode, "ring_fields": ring_fields,
             "cpml_indices": cpml_indices, "phys_indices": phys_indices,
             "pairs": second_order_pairs, "interior_idx": interior_idx,
@@ -513,32 +541,28 @@ class _EagerBoundarySavingMixin:
             "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
             "func": bs_func, "substeps": bs_substeps,
         }
-        return state, base_cfg, multi_receiver
+        return state, base_cfg
 
-    def _rollout_eager_bs(self, wavefield, runtime_models, wavelet, src, rec,
-                          record, receivers, nt, adj):
+    def _rollout_eager_bs(self, wavefield, runtime_models, wavelet_steps, src, rec,
+                          receivers, nt, adj):
         """Time loop under eager (pure-PyTorch) boundary saving: each physics step
         is wrapped in a ``_BoundarySaveStep`` autograd.Function that stores only
-        the boundary ring (source injection + receiver sampling stay normal ops —
-        their gather/scatter backward is value-free, so no full wavefield is
+        the boundary ring and adds the source; receiver sampling stays a normal
+        op (its gather backward is value-free, so no full wavefield is
         retained).  Per-rollout setup lives in ``_init_eager_bs``; the loop passes
-        the varying step/time straight to ``_BoundarySaveStep.apply``.  Writes the
-        record in place, seeds the reconstruction with the final frame, and
-        returns the final wavefield list.
+        the varying step/time straight to ``_BoundarySaveStep.apply``.  Seeds the
+        reconstruction with the final frame and returns ``(wavefield, record)``,
+        the record stacked (see ``_rollout_full``).
         """
-        state, base_cfg, multi_receiver = self._init_eager_bs(
-            wavefield, runtime_models, wavelet, src, nt
+        state, base_cfg = self._init_eager_bs(
+            wavefield, runtime_models, wavelet_steps, src, nt
         )
+        columns = []
         for i in range(nt):
             time = i if not adj else nt - i - 1
-            wavefield = list(_BoundarySaveStep.apply(base_cfg, i, time, *wavefield, *runtime_models))
-            for source_idx in self.source_indices:
-                wavefield[source_idx] = src(wavefield[source_idx], wavelet[..., time])
-            if multi_receiver:
-                record[:, i, :, :] = rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
-            else:
-                receiver_idx = self.receiver_indices[0]
-                record[:, i, :, 0] = rec(wavefield[receiver_idx]).view(*receivers.shape[:-1])
+            wavefield = list(_BoundarySaveStep.apply(
+                base_cfg, i, time, wavelet_steps[time], *wavefield, *runtime_models))
+            columns.append(self._sample_receivers(rec, wavefield, receivers))
         # Seed the reconstruction with the final full frame (detached).
         state.frame = [w.detach() for w in wavefield]
-        return wavefield
+        return wavefield, torch.stack(columns, dim=1)

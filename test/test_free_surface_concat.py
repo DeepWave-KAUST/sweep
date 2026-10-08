@@ -92,3 +92,36 @@ def test_concat_with_cuda_compile():
 
     assert torch.isfinite(record).all(), "non-finite values in record"
     assert float(record.abs().sum()) > 0.0, "record is all-zero — propagator didn't fire"
+
+
+# ---------------------------------------------------------------------------
+# utils.backend_concat / zero_edge_halo: the same ``.device`` trap
+# ---------------------------------------------------------------------------
+
+
+def test_backend_concat_keeps_numpy_out_of_torch():
+    from sweep.equations.utils import backend_concat
+    out = backend_concat([np.ones((2, 3), np.float32), np.zeros((1, 3), np.float32)], axis=0)
+    assert isinstance(out, np.ndarray) and out.shape == (3, 3)
+
+
+def _zeroed(side):
+    ref = np.arange(24.0).reshape(4, 6)
+    ref[0 if side == "low" else -1] = 0
+    return ref
+
+
+@pytest.mark.parametrize("side", ["low", "high"])
+def test_zero_edge_halo_on_numpy(side):
+    from sweep.equations.utils import zero_edge_halo
+    np.testing.assert_array_equal(zero_edge_halo(np.arange(24.0).reshape(4, 6), 1, 0, side=side), _zeroed(side))
+
+
+@pytest.mark.parametrize("side", ["low", "high"])
+def test_zero_edge_halo_on_jax(side):
+    """jax arrays have ``.device`` (and ``.clone``): the non-torch branch must
+    rebuild them with jnp, not hand them to ``torch.cat``."""
+    jnp = pytest.importorskip("jax.numpy")
+    from sweep.equations.utils import zero_edge_halo
+    out = zero_edge_halo(jnp.arange(24.0).reshape(4, 6), 1, 0, side=side)
+    np.testing.assert_array_equal(np.asarray(out), _zeroed(side))
