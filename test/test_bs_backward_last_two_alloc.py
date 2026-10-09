@@ -8,8 +8,8 @@ directly).  Harmless for a monolithic backward (one call); ruinous under
 DD/stepped, where the extension is entered once per time step.  On a
 production-size cascade that was hundreds of MB per step over tens of thousands
 of steps per iteration, and
-on the staged path the buffer lands in HOST memory: 1760 s/iteration against
-166 s once it binds ``p.u_last_two`` instead.
+on the staged path the buffer lands in HOST memory: an iteration took about ten
+times as long as once it binds ``p.u_last_two`` instead.
 
 A value test cannot see this: the buffer is never read, so gradients were
 always bit-exact.  What the defect changes is bytes allocated per call, so that

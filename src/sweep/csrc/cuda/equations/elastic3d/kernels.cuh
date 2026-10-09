@@ -19,7 +19,7 @@
 // minBlocks=4 (64-reg cap) does NOT spill and measured: V100 stress kernel
 // 6765 -> 5887 us/step (-13%, fwd+bwd_bs -2.5%), Ada 3272 -> 3142 us (-4%),
 // velocity (already 64 regs) unchanged, outputs bit-identical on both GPUs
-// (2026-09-02, ibex 51231798 + Ada isolated worktree).  2D keeps (256,8).
+// (2026-09-02, V100 + RTX 6000 Ada isolated worktree).  2D keeps (256,8).
 #ifndef ELASTIC3D_LB_MINBLOCKS
 #define ELASTIC3D_LB_MINBLOCKS 4
 #endif

@@ -44,11 +44,11 @@ assert PY * PX == world, (PY, PX, world)
 # Keep nt large: the staging cost scales with the step count, and 140 steps
 # is too few to show a trend.
 _e = lambda k, d, f=int: f(os.environ.get(k, d))
-# The whole geometry is an env knob: only at production's boundary-bytes per
-# grid-point ratio does the measured staging cost match what production sees.
-# The original bench (48x96x48PX, order 8) is ~55 kB of boundary per step over
-# 110 k points = 0.5; production (384x518x240, order 4) is 1.66 MB over 47.5 M
-# = 0.035, a factor of 14 -- the small case AMPLIFIES the staging cost.
+# The whole geometry is an env knob: the staging cost only matches a real run
+# at a real run's boundary-bytes per grid-point ratio. The original bench
+# (48x96x48PX, order 8) is ~55 kB of boundary per step over 110 k points = 0.5;
+# a large 3-D grid at order 4 is more than ten times lower, so the small case
+# AMPLIFIES the staging cost.
 dh, dt = _e("DH", 10.0, float), _e("DT", 0.001, float)
 nt, abcn, order = _e("NT", 1200), _e("ABCN", 12), _e("ORDER", 8)
 nz = _e("MESH_NZ", 48)
@@ -114,10 +114,9 @@ P(f"tree = {os.path.dirname(os.path.dirname(__import__('sweep').__file__))}")
 P(f"mesh {PY}x{PX}  shape {shape}  nt {nt}  order {order}  abcn {abcn}  "
   f"dtype {BDTYPE}  pinned {PINNED}  world {world}")
 _cells = (shape[0] * (shape[1] // PY) * (shape[2] // PX))
-P(f"points per rank {_cells/1e6:.1f}M   (production 2-14 Hz band is 47.7M)")
+P(f"points per rank {_cells/1e6:.1f}M")
 _steps = 3 * nt   # obs forward + gradient forward + backward
-P(f"~{_steps} steps per run; production measures 27.7 ms/step -> at the same\n"
-  f"   scale one run is ~{_steps*0.0277:.0f} s")
+P(f"~{_steps} steps per run")
 
 gref, pref, tref, _ = run("gpu")
 P(f"\n{'config':>26} {'sec':>8} {'vs gpu':>8} {'peak GB':>8} {'bitex':>6} {'session.used':>13}")
