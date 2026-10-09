@@ -144,9 +144,9 @@ class FastHaloMultiGroup:
     :class:`FastHaloGroup` already collapses the FIELDS of one axis into a
     single P2P round, but the DD driver still issued one such round per cut
     axis, so a 2x2 mesh paid two waits per shipment.  These strips are
-    latency-bound, not bandwidth-bound: on a production-size 3-D grid
-    (2x2 tiles, halo 2) a six-field shipment moves 3.3 MiB and took
-    486 us -- 6.5 GiB/s on an NVLink that does 300+, i.e. the synchronisation
+    latency-bound, not bandwidth-bound: on a large 3-D grid
+    (2x2 tiles, halo 2) a six-field shipment of a few MiB ran at
+    6.5 GiB/s on an NVLink that does 300+, i.e. the synchronisation
     rounds ARE the cost, not the bytes.  Concatenating both axes' op lists
     makes it one wait.
 

@@ -513,8 +513,8 @@ class ModelParallel:
         Collapsing the fields of one axis into one isend/irecv+wait was the
         original win (the multi-field elastic protocol). On a multi-axis mesh
         one round per axis remained, and these strips are latency-bound: on a
-        production-size 3-D grid a six-field shipment is 3.3 MiB and took 486 us,
-        6.5 GiB/s on an NVLink that does 300+. So the axes are concatenated too,
+        large 3-D grid a six-field shipment of a few MiB ran at 6.5 GiB/s on an
+        NVLink that does 300+. So the axes are concatenated too,
         via :class:`FastHaloMultiGroup` — same buffers, same pack/unpack order,
         same peers, one wait. Single-axis meshes keep the previous path exactly.
         """
@@ -1469,9 +1469,9 @@ class ModelParallel:
             # forced onto the per-call path -- and that path re-entered the
             # compiled binding 3 x nt times per iteration, rebuilding the whole
             # setup (negated adjoint source, 1/z, the CPML upload, the boundary
-            # saver and its copy stream) on every entry: measured 1.26 ms of
-            # setup against 0.11 ms of reverse step, 179 s of a 205 s backward
-            # on a production-size 3-D grid.  acoustic_vrz3d now ships its own
+            # saver and its copy stream) on every entry: setup measured about
+            # ten times the reverse step, most of the backward on a large 3-D
+            # grid.  acoustic_vrz3d now ships its own
             # phase-aware persistent runner, so take whatever factory the
             # equation exposes; an equation without one still gets None here and
             # falls back to the per-call path unchanged.

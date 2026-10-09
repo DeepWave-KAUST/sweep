@@ -9,7 +9,7 @@ equal to the single-GPU run of one tile (launch with --nproc-per-node=1).
 
 The step loop queues the C++ segment and the NCCL halo exchange without
 host synchronisation; only the final step syncs. Per-step host work is the
-wavefield-list rotation (sub-microsecond, measured on KW60443).
+wavefield-list rotation (sub-microsecond, measured on an RTX 6000 Ada workstation).
 """
 
 from __future__ import annotations

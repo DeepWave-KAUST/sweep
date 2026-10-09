@@ -345,10 +345,10 @@ VRZ_DD = DDSpec(
                       (LAMBDA, RECON_U), batched=True,
                       why="phase 2 builds the coupling from the POST-exchange "
                           "lambda and p. BATCHED because these halo strips are "
-                          "latency-bound, not bandwidth-bound: on a production-size "
+                          "latency-bound, not bandwidth-bound: on a large "
                           "3-D grid (2x2 tiles, M=2) the two "
-                          "fields are 1.1 MiB of send+recv per step and took "
-                          "0.354 ms -- 3 GiB/s on an NVLink that does 300+, i.e. "
+                          "fields are about a MiB of send+recv per step and ran "
+                          "at 3 GiB/s on an NVLink that does 300+, i.e. "
                           "the round trips ARE the cost. One batched P2P per cut "
                           "axis instead of two halves them. The flag is a "
                           "statement about the wire, not the bits (see "

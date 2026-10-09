@@ -262,8 +262,8 @@ and this project adheres to
 - **A persistent backward runner for ``AcousticVRZ3D``**
   (``acoustic_vrz3d_backward_bs_runner``), phase-aware, so the domain-decomposed
   backward no longer re-enters the per-call binding three times per step and
-  rebuilds its whole setup each time: on a production-size 3-D grid (2x2 DD,
-  4xH100) an iteration went from 240 s to 95.7 s, gradients and records
+  rebuilds its whole setup each time: on a large 3-D grid (2x2 DD, 4xH100)
+  an iteration became about 2.5x faster, gradients and records
   bit-identical.  It owns its boundary saver, so it also serves host-staged
   boundaries.
 
@@ -348,10 +348,10 @@ and this project adheres to
   propagator is ``M + 1`` cells wider per absorbing face, which moves the
   gradient near the PML by ~1e-2 relative on a small grid.  The exact CPML
   adjoint (Fixed) makes the backward ~22% slower and adds three adjoint zeta
-  shadows (~0.1 GiB on a production-size 3-D grid).
+  shadows (a small fraction of the wavefield memory).
 - **Domain decomposition**: a multi-axis mesh ships every halo field of a step
   in ONE batched P2P across the cut axes instead of one round per axis (the
-  strips are latency-bound: a six-field shipment on a production-size 3-D grid ran at
+  strips are latency-bound: a six-field shipment on a large 3-D grid ran at
   6.5 GiB/s over NVLink).
 - **Boundary saving no longer re-injects a source that sits in the restore
   strip.**  In the boundary-saving reverse pass the strip cells (the M+1 cells
@@ -532,8 +532,8 @@ and this project adheres to
   the reverse step left there (up to 9x the largest full-storage gradient on a
   small 3-D grid; 99.6% of the Marmousi residual in the outermost cell).  The
   sigma=0 ``boundary_buffer`` moves the shell out of the stencil's reach
-  instead of widening it (peak memory 69.4 -> 54.7 GB against a ``2M + 1``
-  shell on a 3-D field-data single shot).
+  instead of widening it (peak memory about a fifth lower than with a
+  ``2M + 1`` shell on a 3-D single shot).
 - **2-D VRZ boundary saving started its reverse pass from a damaged state.**
   The reconstruction seed zeroed the pad ring of the two last wavefields, as
   ``Acoustic`` does (harmless there), but the VRZ restore band starts ``M``
@@ -752,7 +752,7 @@ and this project adheres to
   autograd tensor.**  That builds a chain of `nt` `CopySlices` nodes, and each
   one allocates a full-record buffer and copies the incoming gradient through
   it, so the record's own backward cost was `2 * nt * |record|` -- 64 GB per
-  shot at `nt=4000` with 500 receivers, 1.44 TB at OBN shapes.  The default
+  shot at `nt=4000` with 500 receivers, terabytes for a large node gather.  The default
   rollout collects the per-step gather and stacks once, making it
   `2 * |record|` and removing `nt` full-record allocations.  Records and
   gradients are bit-exact (`torch.equal`); the whole backward, on CPU with 500

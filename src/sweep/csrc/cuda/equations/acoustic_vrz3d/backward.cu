@@ -57,8 +57,8 @@ enum ReplaySlot : int {
 // decomposed backward drives ONE single-step backward_bs call per time step
 // (ModelParallel._run_adjoint), and the time-invariant adjoint coefficients
 // (inv_z, C0/Cx/Cy/Cz = vp², ∂b·κ) + the split-gradient scratch (c_*/e_*) were
-// being reallocated + recomputed on EVERY step — ~30 s/iter of pure waste at
-// production scale (nt≈9000).  These depend only on the model, which is fixed
+// being reallocated + recomputed on EVERY step — tens of seconds per iteration
+// of pure waste on a long 3-D run.  These depend only on the model, which is fixed
 // within a backward, so they are computed ONCE (first segment) and reused.
 // Leaked singleton: never destroyed, so no torch-tensor teardown races with CUDA
 // context shutdown at process exit.
@@ -306,8 +306,8 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
 // everything the per-call function rebuilt on the way in is constant across
 // those entries: 1/z, the CPML profile binding, the boundary saver and its copy
 // stream, the launch configs and the stencil parameter blocks.  Measured on a
-// production-size 3-D grid (SWEEP_VRZ_BWD_PROF, 2026-09-11): 1.26 ms of setup
-// against 0.11 ms of actual reverse step -- 92% of the entry.
+// large 3-D grid (SWEEP_VRZ_BWD_PROF, 2026-09-11): setup took about ten times
+// the actual reverse step -- 92% of the entry.
 //
 // Every equation on the shared template driver already gets this
 // (eqdrv::GenericBackwardBsRunner).  This hand-written driver cannot use it
@@ -510,7 +510,7 @@ void Vrz3dBackwardBsRunner::setup()
     // then a single-level divergence) even for order<=4, where AUTO otherwise
     // picks the fused O(M^2) nested-stencil kernel.  The fused/split crossover is
     // GPU-dependent (fused wins on RTX 6000 Ada; V100 prefers split — measured
-    // ~12s/iter faster at production scale), so it stays a per-run toggle.
+    // faster on a large run), so it stays a per-run toggle.
     grad_split = [](){ const char* e = std::getenv("SWEEP_VRZ_GRAD_SPLIT");
                        return e ? std::atoi(e) : 0; }();
 }

@@ -52,7 +52,7 @@ sweep datasets where                    # print the cache directory
 **re-host?** ✅ = license permits re-hosting the bytes; ➖ = fetch from official
 source only (do not vendor/re-host).
 
-**verified** ✅ = byte-verified against a real download (KW60443, 2026-07):
+**verified** ✅ = byte-verified against a real download (2026-07):
 shape, physical value range, and slice image confirmed for every entry.
 
 ¹ **hess-vti**: the SEG-Y ships vp in **ft/s** (5000–14800) and the grid in
