@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
 from ._registry import register_equation
+from ._cpml import cpml_update
 from .utils import is_torch_tensor
 
 
@@ -109,19 +112,12 @@ def step(
     dsxz_dx = pd.x_backward(sxz)
     dszz_dz = pd.z_forward(szz)
 
-    m_txxx = axh * m_txxx + bxh * dsxx_dx
-    m_txzz = az * m_txzz + bz * dsxz_dz
-    m_txyx = ax * m_txyx + bx * dsxy_dx
-    m_tyzz = az * m_tyzz + bz * dsyz_dz
-    m_txzx = ax * m_txzx + bx * dsxz_dx
-    m_tzzz = azh * m_tzzz + bzh * dszz_dz
-
-    dsxx_dx = dsxx_dx + m_txxx
-    dsxz_dz = dsxz_dz + m_txzz
-    dsxy_dx = dsxy_dx + m_txyx
-    dsyz_dz = dsyz_dz + m_tyzz
-    dsxz_dx = dsxz_dx + m_txzx
-    dszz_dz = dszz_dz + m_tzzz
+    dsxx_dx, m_txxx = cpml_update(dsxx_dx, m_txxx, axh, bxh, (sxx, pd.kxf, pd._spacing["x"]))
+    dsxz_dz, m_txzz = cpml_update(dsxz_dz, m_txzz, az, bz, (sxz, pd.kzb, pd._spacing["z"]))
+    dsxy_dx, m_txyx = cpml_update(dsxy_dx, m_txyx, ax, bx, (sxy, pd.kxb, pd._spacing["x"]))
+    dsyz_dz, m_tyzz = cpml_update(dsyz_dz, m_tyzz, az, bz, (syz, pd.kzb, pd._spacing["z"]))
+    dsxz_dx, m_txzx = cpml_update(dsxz_dx, m_txzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
+    dszz_dz, m_tzzz = cpml_update(dszz_dz, m_tzzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
 
     vx = vx + (dt / rho) * (dsxx_dx + dsxz_dz)
     vy = vy + (dt / rho) * (dsxy_dx + dsyz_dz)
@@ -135,19 +131,12 @@ def step(
     dvx_dz = pd.z_forward(vx)
     dvy_dz = pd.z_forward(vy)
 
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    m_vxz = azh * m_vxz + bzh * dvx_dz
-    m_vyx = axh * m_vyx + bxh * dvy_dx
-    m_vyz = azh * m_vyz + bzh * dvy_dz
-    m_vzx = axh * m_vzx + bxh * dvz_dx
-    m_vzz = az * m_vzz + bz * dvz_dz
-
-    dvx_dx = dvx_dx + m_vxx
-    dvx_dz = dvx_dz + m_vxz
-    dvy_dx = dvy_dx + m_vyx
-    dvy_dz = dvy_dz + m_vyz
-    dvz_dx = dvz_dx + m_vzx
-    dvz_dz = dvz_dz + m_vzz
+    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
+    dvx_dz, m_vxz = cpml_update(dvx_dz, m_vxz, azh, bzh, (vx, pd.kzf, pd._spacing["z"]))
+    dvy_dx, m_vyx = cpml_update(dvy_dx, m_vyx, axh, bxh, (vy, pd.kxf, pd._spacing["x"]))
+    dvy_dz, m_vyz = cpml_update(dvy_dz, m_vyz, azh, bzh, (vy, pd.kzf, pd._spacing["z"]))
+    dvz_dx, m_vzx = cpml_update(dvz_dx, m_vzx, axh, bxh, (vz, pd.kxf, pd._spacing["x"]))
+    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
 
     shear_xz = dvz_dx + dvx_dz
 
@@ -201,6 +190,11 @@ class ElasticTTISG(ElasticTTI):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"  # SG variant uses 8 staggered CPML profiles, not 6.
+    # The parent's fields, the CPML memories marked with their axis: this step
+    # updates them through cpml_update, so they may live in strips (the rotated-
+    # grid parent's step does not, and keeps them full-grid).
+    FIELD_SPECS = tuple(replace(s, cpml_axis=s.name[-1]) if s.name.startswith("m_") else s
+                        for s in ElasticTTI.FIELD_SPECS)
     # Axis-aligned stencils have no checkerboard null space — keep plain
     # point sources/receivers (overrides the RSG parent's smoothing stencil).
     source_receiver_stencil = None

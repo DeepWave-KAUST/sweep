@@ -74,6 +74,7 @@ from sweep.scalars import fd_coefficients
 # ---------------------------------------------------------------------------
 
 from ._registry import register_equation
+from ._cpml import cpml_update
 
 # Python floats, built here: inside the compiled step Dynamo traces numpy as
 # tensors, so a numpy table read there turned every ``float(coef)`` into a
@@ -229,14 +230,10 @@ def elastic_vr_step_core(
         dsxz_dz = pd.z_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i+1/2, j)   feeds px
 
     # ---- 2. CPML accumulation on stress derivatives ----
-    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    dsxx_dx = dsxx_dx + m_sxxx
-    m_szzz = azh * m_szzz + bzh * dszz_dz
-    dszz_dz = dszz_dz + m_szzz
-    m_sxzz = az * m_sxzz + bz * dsxz_dz
-    dsxz_dz = dsxz_dz + m_sxzz
-    m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    dsxz_dx = dsxz_dx + m_sxzx
+    dsxx_dx, m_sxxx = cpml_update(dsxx_dx, m_sxxx, axh, bxh, (sxx, pd.kxf, pd._spacing["x"]))
+    dszz_dz, m_szzz = cpml_update(dszz_dz, m_szzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
+    dsxz_dz, m_sxzz = cpml_update(dsxz_dz, m_sxzz, az, bz, (sxz, pd.kzb, pd._spacing["z"]))
+    dsxz_dx, m_sxzx = cpml_update(dsxz_dx, m_sxzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
 
     # ---- 3. Momentum update (S&S Eq. 23) -- NO division by rho ----
     # p_i = rho v_i absorbs the density, so d_t p_i = d_j sigma_ij is exact.
@@ -260,14 +257,10 @@ def elastic_vr_step_core(
     # ---- 5. CPML accumulation on momentum derivatives ----
     # Pattern from _elastic_step_core: half-grid axis uses (axh, bxh)
     # or (azh, bzh); node-centred axis uses (ax, bx) or (az, bz).
-    m_pxx = ax * m_pxx + bx * dpx_dx
-    dpx_dx = dpx_dx + m_pxx
-    m_pzz = az * m_pzz + bz * dpz_dz
-    dpz_dz = dpz_dz + m_pzz
-    m_pxz = azh * m_pxz + bzh * dpx_dz
-    dpx_dz = dpx_dz + m_pxz
-    m_pzx = axh * m_pzx + bxh * dpz_dx
-    dpz_dx = dpz_dx + m_pzx
+    dpx_dx, m_pxx = cpml_update(dpx_dx, m_pxx, ax, bx, (px, pd.kxb, pd._spacing["x"]))
+    dpz_dz, m_pzz = cpml_update(dpz_dz, m_pzz, az, bz, (pz, pd.kzb, pd._spacing["z"]))
+    dpx_dz, m_pxz = cpml_update(dpx_dz, m_pxz, azh, bzh, (px, pd.kzf, pd._spacing["z"]))
+    dpz_dx, m_pzx = cpml_update(dpz_dx, m_pzx, axh, bxh, (pz, pd.kxf, pd._spacing["x"]))
 
     # ---- 6. 8 gamma components (S&S Eq. 25-26), from updated momentum ----
     # gamma_alpha_ij = V_alpha (d_i V_alpha) p_j - 2 V_alpha^2 R_alpha_i p_j
@@ -368,25 +361,25 @@ class ElasticVRR(FirstOrderEquation):
                   description="Shear stress component.",
                   supports_source=True),
         FieldSpec("m_pxx", description="CPML memory variable for dpx/dx.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("m_pxz", description="CPML memory variable for dpx/dz.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="z"),
         FieldSpec("m_pzx", description="CPML memory variable for dpz/dx.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("m_pzz", description="CPML memory variable for dpz/dz.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="z"),
         FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("m_sxxz", description="Reserved auxiliary field (layout parity with Elastic).",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="z"),
         FieldSpec("m_szzx", description="Reserved auxiliary field (layout parity with Elastic).",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="z"),
         FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.",
-                  internal=True, boundary_related=True),
+                  internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"

@@ -1,5 +1,7 @@
 import numpy as np
 
+from ._cpml import Strips
+
 
 def to_backend(arr, backend, device=None):
     if backend == 'torch':
@@ -52,6 +54,17 @@ def zero_edge_halo(field, halo, axis, side="low"):
     """
     if halo <= 0:
         return field
+    if isinstance(field, Strips):
+        # A strip-held CPML field: the band crosses both strips, or lies within
+        # the one at that end (past it the field is zero anyway).
+        lo, hi = field.lo, field.hi
+        if axis % lo.ndim != field.axis % lo.ndim:
+            lo, hi = zero_edge_halo(lo, halo, axis, side), zero_edge_halo(hi, halo, axis, side)
+        elif side == "low":
+            lo = zero_edge_halo(lo, min(halo, field.widths[0]), axis, side)
+        else:
+            hi = zero_edge_halo(hi, min(halo, field.widths[1]), axis, side)
+        return Strips(lo, hi, *field[2:])
     ndim = len(field.shape)
     axis = axis if axis >= 0 else ndim + axis
     n = field.shape[axis]

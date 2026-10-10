@@ -231,6 +231,8 @@ def known_missing_gradient(case_name: str, grad_name: str, mode: str | None = No
     """Longest matching prefix wins, so ``acoustic_lsrtm3d`` can declare a gap
     that ``acoustic_lsrtm`` does not.  A ``(reason, modes)`` entry declares the
     gap in those modes only (``mode`` may carry a ``/<backend>`` suffix)."""
+    if (mode or "").partition("/")[2].startswith("eager"):
+        return None                      # the gaps are the compiled backward's
     best = None
     for (prefix, name), entry in KNOWN_MISSING_GRADIENTS.items():
         reason, modes = (entry, None) if isinstance(entry, str) else entry

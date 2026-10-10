@@ -8,6 +8,7 @@ from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 from .elastic_tti import ElasticTTI
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
+from ._cpml import cpml_update
 
 
 # Full 21-component Voigt upper triangle produced by the 3-D Bond rotation.
@@ -77,29 +78,20 @@ def step(
     dsyz_dy = pd.y_backward(syz)
     dszz_dz = pd.z_forward(szz)
 
-    m_szzz = azh * m_szzz + bzh * dszz_dz
-    dszz_dz = dszz_dz + m_szzz
-    m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    dsxz_dx = dsxz_dx + m_sxzx
+    dszz_dz, m_szzz = cpml_update(dszz_dz, m_szzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
+    dsxz_dx, m_sxzx = cpml_update(dsxz_dx, m_sxzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
 
-    m_sxzz = az * m_sxzz + bz * dsxz_dz
-    dsxz_dz = dsxz_dz + m_sxzz
-    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    dsxx_dx = dsxx_dx + m_sxxx
+    dsxz_dz, m_sxzz = cpml_update(dsxz_dz, m_sxzz, az, bz, (sxz, pd.kzb, pd._spacing["z"]))
+    dsxx_dx, m_sxxx = cpml_update(dsxx_dx, m_sxxx, axh, bxh, (sxx, pd.kxf, pd._spacing["x"]))
 
-    m_sxyy = ay * m_sxyy + by * dsxy_dy
-    dsxy_dy = dsxy_dy + m_sxyy
+    dsxy_dy, m_sxyy = cpml_update(dsxy_dy, m_sxyy, ay, by, (sxy, pd.kyb, pd._spacing["y"]))
 
-    m_sxyx = ax * m_sxyx + bx * dsxy_dx
-    dsxy_dx = dsxy_dx + m_sxyx
+    dsxy_dx, m_sxyx = cpml_update(dsxy_dx, m_sxyx, ax, bx, (sxy, pd.kxb, pd._spacing["x"]))
 
-    m_syyy = ayh * m_syyy + byh * dsyy_dy
-    dsyy_dy = dsyy_dy + m_syyy
-    m_syzz = az * m_syzz + bz * dsyz_dz
-    dsyz_dz = dsyz_dz + m_syzz
+    dsyy_dy, m_syyy = cpml_update(dsyy_dy, m_syyy, ayh, byh, (syy, pd.kyf, pd._spacing["y"]))
+    dsyz_dz, m_syzz = cpml_update(dsyz_dz, m_syzz, az, bz, (syz, pd.kzb, pd._spacing["z"]))
 
-    m_syzy = ay * m_syzy + by * dsyz_dy
-    dsyz_dy = dsyz_dy + m_syzy
+    dsyz_dy, m_syzy = cpml_update(dsyz_dy, m_syzy, ay, by, (syz, pd.kyb, pd._spacing["y"]))
 
     vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
     vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
@@ -117,25 +109,16 @@ def step(
     dvz_dy = pd.y_forward(vz)
     dvz_dz = pd.z_backward(vz)
 
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
-    m_vyy = ay * m_vyy + by * dvy_dy
-    dvy_dy = dvy_dy + m_vyy
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
-    m_vxz = azh * m_vxz + bzh * dvx_dz
-    dvx_dz = dvx_dz + m_vxz
-    m_vzx = axh * m_vzx + bxh * dvz_dx
-    dvz_dx = dvz_dx + m_vzx
+    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
+    dvy_dy, m_vyy = cpml_update(dvy_dy, m_vyy, ay, by, (vy, pd.kyb, pd._spacing["y"]))
+    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
+    dvx_dz, m_vxz = cpml_update(dvx_dz, m_vxz, azh, bzh, (vx, pd.kzf, pd._spacing["z"]))
+    dvz_dx, m_vzx = cpml_update(dvz_dx, m_vzx, axh, bxh, (vz, pd.kxf, pd._spacing["x"]))
 
-    m_vxy = ayh * m_vxy + byh * dvx_dy
-    dvx_dy = dvx_dy + m_vxy
-    m_vyx = axh * m_vyx + bxh * dvy_dx
-    dvy_dx = dvy_dx + m_vyx
-    m_vyz = azh * m_vyz + bzh * dvy_dz
-    dvy_dz = dvy_dz + m_vyz
-    m_vzy = ayh * m_vzy + byh * dvz_dy
-    dvz_dy = dvz_dy + m_vzy
+    dvx_dy, m_vxy = cpml_update(dvx_dy, m_vxy, ayh, byh, (vx, pd.kyf, pd._spacing["y"]))
+    dvy_dx, m_vyx = cpml_update(dvy_dx, m_vyx, axh, bxh, (vy, pd.kxf, pd._spacing["x"]))
+    dvy_dz, m_vyz = cpml_update(dvy_dz, m_vyz, azh, bzh, (vy, pd.kzf, pd._spacing["z"]))
+    dvz_dy, m_vzy = cpml_update(dvz_dy, m_vzy, ayh, byh, (vz, pd.kyf, pd._spacing["y"]))
 
     # Voigt strain rates (engineering shears).
     e1 = dvx_dx
@@ -223,24 +206,24 @@ class ElasticTTISG3D(FirstOrderEquation):
         FieldSpec("sxy", aliases=("stress_xy", "shear_xy"), description="Shear stress component.", supports_source=True),
         FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
         FieldSpec("syz", aliases=("stress_yz", "shear_yz"), description="Shear stress component.", supports_source=True),
-        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):

@@ -1,4 +1,5 @@
 import types
+import sys
 import warnings
 import weakref
 
@@ -8,6 +9,7 @@ from torch.utils.checkpoint import checkpoint as ckpt_torch
 
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS
+from sweep.equations._cpml import StripLayout
 from sweep.receivers.torch import ReceiverTorch
 from sweep.sources.torch import SourceTorch, scatter_source
 from sweep.utils.torch import EdgePadding
@@ -17,6 +19,14 @@ from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
 _DYNAMO_LIMIT_WARNED = False
 _NO_COMPILE_WARNED = False
+# Compiling the step takes seconds to minutes and prints nothing; say so once
+# per process, before the first compiled call, so a long first call does not
+# look like a hang.  stderr, not warnings: notebooks often silence warnings.
+_COMPILE_NOTICE_SHOWN = False
+_COMPILE_NOTICE = (
+    "sweep: compiling the eager time step with torch.compile; the first forward/backward "
+    "pass takes longer (seconds to a few minutes, once per grid size, cached on disk for "
+    "later runs). EagerOptions(use_compile=False) runs uncompiled instead.")
 
 # Compiling inside a checkpointed forward breaks its recompute before torch 2.5
 # (see _rollout_ckpt).
@@ -123,6 +133,7 @@ class _PropTorchEager(
         self.compile_mode = kwargs.pop("compile_mode", EAGER_DEFAULTS.compile_mode)
         self.compile_dynamic = kwargs.pop("compile_dynamic", EAGER_DEFAULTS.compile_dynamic)
         self.compile_fullgraph = kwargs.pop("compile_fullgraph", EAGER_DEFAULTS.compile_fullgraph)
+        self.cpml_strips = kwargs.pop("cpml_strips", EAGER_DEFAULTS.cpml_strips)
         torch.nn.Module.__init__(self)
         super().__init__(*args, **kwargs)
 
@@ -132,6 +143,13 @@ class _PropTorchEager(
         self.register_buffer("coord_offset", torch.tensor(coord_offset, device=self.dev, dtype=torch.long))
         self.source_indices = [self.wavefield_names.index(name) for name in self.source_type]
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
+        # CPML strips: the eager state holds a strip-held field as its two strips.
+        self._strips = StripLayout(self.equation) if self.cpml_strips else None
+        if self._strips is not None and len(self._strips) == len(self.wavefield_names):
+            self._strips = None                     # no field to strip
+        if self._strips is not None:
+            self.source_indices = [self._strips.slots(k)[0] for k in self.source_indices]
+            self.receiver_indices = [self._strips.slots(k)[0] for k in self.receiver_indices]
         self._equation_spacing = self._normalize_equation_spacing(self._grid_spacing)
         self._workspace_cache = {}
         # User-registered custom gradient / imaging conditions.
@@ -155,7 +173,8 @@ class _PropTorchEager(
 
     def _build_step_func(self):
         equation = self.equation
-        num_wavefields = len(self.wavefield_names)
+        strips = self._strips
+        num_wavefields = len(self.wavefield_names) if strips is None else len(strips)
         source_indices = tuple(self.source_indices)
 
         def step_func(*flat_args, source=None):
@@ -164,7 +183,11 @@ class _PropTorchEager(
             dt, h, b = flat_args[-3:]
             # ``equation.func`` is looked up here, not bound outside: Dynamo
             # before torch 2.4 cannot call a bound method held in a closure.
+            if strips is not None:
+                wavefields = strips.group(wavefields)
             out = equation.func(wavefields, models, dt, h, b)
+            if strips is not None:
+                out = strips.flatten(out)
             if source is None:
                 return out
             # Injected inside the step, the compiled graph scatters the source
@@ -222,9 +245,13 @@ class _PropTorchEager(
         owner = weakref.ref(self)
 
         def step(*args, **kwargs):
+            global _COMPILE_NOTICE_SHOWN
             prop = owner()
             if prop is not None and not prop.use_compile:
                 return fn(*args, **kwargs)
+            if not _COMPILE_NOTICE_SHOWN:
+                _COMPILE_NOTICE_SHOWN = True
+                print(_COMPILE_NOTICE, file=sys.stderr, flush=True)
             try:
                 return compiled(*args, **kwargs)
             except _compiler_failures() as exc:
@@ -521,6 +548,8 @@ class _PropTorchEager(
         kwargs.setdefault("fd_pad", self._runtime_fd_pad())
         kwargs.setdefault("shape", self._runtime_shape())
         self.init_abc(**kwargs)
+        if self._strips is not None:
+            self._strips.size_strips(self.equation, kwargs["shape"], self.dev)
 
         nt = wavelet.shape[-1]
         snapshot_indices = self._resolve_snapshot_times(nt, return_wavefield, snapshot_times, snapshot_interval)
@@ -548,6 +577,8 @@ class _PropTorchEager(
         rec = ReceiverTorch(receivers, gather_kernel=sr_stencil, shape=shape_wavefield)
 
         has_aux = False
+        if return_wavefield and self._strips is not None:
+            raise NotImplementedError("return_wavefield with cpml_strips: the CPML fields are strips.")
         if return_wavefield:
             has_aux = True
             snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
@@ -573,9 +604,11 @@ class _PropTorchEager(
         # so that attribute stays the raw padded model, matching the C backend.
         models = self._runtime_batch_layout(models, batch_size)
         runtime_models = self._prepare_runtime_models(models)
+        shapes = ([shape_wavefield] * len(self.wavefield_names) if self._strips is None
+                  else self._strips.shapes(shape_wavefield))
         wavefield = [
-            self._get_cached_tensor(f"wavefield:{index}", shape_wavefield, device=self.dev, dtype=torch.float32)
-            for index, _ in enumerate(self.wavefield_names)
+            self._get_cached_tensor(f"wavefield:{index}", shape, device=self.dev, dtype=torch.float32)
+            for index, shape in enumerate(shapes)
         ]
         if self.use_ckpt and self.ckpt_mode != "chunk":
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}' for PropTorch. Expected 'chunk'.")

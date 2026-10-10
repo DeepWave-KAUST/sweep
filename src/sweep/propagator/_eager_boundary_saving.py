@@ -173,17 +173,20 @@ class ReconState:
                  "ring_sizes", "total_cells", "buf", "codes", "scale", "zero")
 
     def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device,
-                 storage_device=None, compute_dtype=torch.float32):
+                 storage_device=None, compute_dtype=torch.float32, field_shapes=None):
         # ``device`` is the compute device (where the wavefields live); the ring
         # storage lives on ``storage_device`` instead (e.g. host RAM for the 'cpu'
         # offload — trading device memory for per-step H2D/D2H copies).  The zero
         # placeholder and reconstruction run on the compute device regardless.
         storage_device = device if storage_device is None else storage_device
         self.frame = None
-        # Reused read-only zero placeholder for the cpml / unpaired field slots in
-        # backward — one buffer for the whole rollout, not a per-step zeros_like.
-        # Matches the wavefield (compute) dtype so it composes with the field ops.
-        self.zero = torch.zeros(shape, dtype=compute_dtype, device=device)
+        # Reused read-only zero placeholders for the cpml / unpaired field slots in
+        # backward, one per field -- one buffer per distinct shape (CPML strips
+        # differ) for the whole rollout, not a per-step zeros_like. Matches the
+        # wavefield (compute) dtype so it composes with the field ops.
+        by_shape = {}
+        self.zero = [by_shape.setdefault(tuple(s), torch.zeros(s, dtype=compute_dtype, device=device))
+                     for s in (field_shapes or [shape])]
         self.rings = rings
         self.checked = False                         # one-time self-check latch
         self.store_dtype = store_dtype
@@ -250,13 +253,13 @@ def _reconstruct_swap2nd(frame, cfg, st, step, time_index, zero):
     pairs = cfg["pairs"]
     src_fields = set(cfg["source_indices"])
     src_op = cfg.get("src")
-    swapped = [zero] * nwf
+    swapped = list(zero)
     for now_i, prev_i in pairs:
         swapped[now_i] = frame[prev_i]               # u_i      -> now slot
         swapped[prev_i] = frame[now_i]               # u_{i+1}  -> prev slot
     out = list(func(swapped, models, dt, h, None))
     prev_step = max(step - 1, 0)
-    S_i = [zero] * nwf
+    S_i = list(zero)
     for pidx, (now_i, prev_i) in enumerate(pairs):
         u_i = frame[prev_i]
         u_im1 = out[now_i]                           # reconstructed previous level
@@ -282,13 +285,13 @@ def _reconstruct_substep(frame, cfg, st, step, time_index, zero):
         for sidx in cfg["source_indices"]:
             frame_in[sidx] = src(frame[sidx], -wl)   # out of place: frame is the saved state
     for c in cpml_idx:
-        frame_in[c] = zero
+        frame_in[c] = zero[c]
     state = frame_in
     for ss in reversed(cfg["substeps"]):
         state = ss(state, models, -dt, h)
     S_i = list(state)
     for c in cpml_idx:
-        S_i[c] = zero
+        S_i[c] = zero[c]
     for j, f in enumerate(ring_fields):
         S_i[f] = restore_step(st, step, j, S_i[f])
     return S_i
@@ -484,7 +487,7 @@ class _EagerBoundarySavingMixin:
         shape = tuple(wavefield[0].shape)
         rings = _ring_index_tuples(shape, self.ndim, offsets, halo)
         interior_idx = _interior_index_tuple(shape, self.ndim, offsets)
-        nwf = len(self.wavefield_names)
+        nwf = len(wavefield)
         nm = len(runtime_models)
         reverse_mode = self._eager_bs_reverse_mode()
 
@@ -492,6 +495,9 @@ class _EagerBoundarySavingMixin:
             k for k, name in enumerate(self.wavefield_names)
             if getattr(self._wavefield_spec_index.get(name), "boundary_related", False)
         ]
+        strips = self._strips
+        if strips is not None:
+            cpml_indices = [j for k in cpml_indices for j in strips.slots(k)]
         phys_indices = [k for k in range(nwf) if k not in cpml_indices]
         # 2nd-order wavefields are stored as consecutive (now, prev) physical
         # pairs.  swap2nd reconstructs EVERY pair — so a multi-field equation
@@ -514,7 +520,8 @@ class _EagerBoundarySavingMixin:
         storage_device = wavefield[0].device if storage_loc == "gpu" else torch.device("cpu")
         state = ReconState(nt, rings, shape, len(ring_fields), store_dtype,
                            wavefield[0].device, storage_device,
-                           compute_dtype=wavefield[0].dtype)
+                           compute_dtype=wavefield[0].dtype,
+                           field_shapes=[tuple(w.shape) for w in wavefield])
         for pos, f in enumerate(ring_fields):
             save_step(state, 0, pos, wavefield[f])
 
@@ -522,9 +529,9 @@ class _EagerBoundarySavingMixin:
         # backward.  With use_compile=True the inner step is torch.compile'd; the
         # custom autograd.Function and the time loop stay eager (Dynamo treats the
         # Function as an opaque boundary), so only the per-step kernels are fused.
-        bs_func = self._maybe_compile(self.equation.func)
+        bs_func = self._maybe_compile(self._grouped(self.equation.func))
         bs_substeps = (
-            [self._maybe_compile(ss) for ss in self.equation.interior_substeps()]
+            [self._maybe_compile(self._grouped(ss)) for ss in self.equation.interior_substeps()]
             if reverse_mode == "substep" else None
         )
 
@@ -542,6 +549,19 @@ class _EagerBoundarySavingMixin:
             "func": bs_func, "substeps": bs_substeps,
         }
         return state, base_cfg
+
+    def _grouped(self, fn):
+        """``fn(wavefields, *args)`` on the flat eager state, its strip-held
+        fields handed over grouped (CPML strips, ``StripLayout``)."""
+        strips = self._strips
+        if strips is None:
+            return fn
+        # A bound method is kept as function + object: Dynamo cannot guard on a
+        # bound method held in a closure.
+        call, obj = getattr(fn, "__func__", fn), getattr(fn, "__self__", None)
+        if obj is None:
+            return lambda wavefields, *args: strips.flatten(call(strips.group(wavefields), *args))
+        return lambda wavefields, *args: strips.flatten(call(obj, strips.group(wavefields), *args))
 
     def _rollout_eager_bs(self, wavefield, runtime_models, wavelet_steps, src, rec,
                           receivers, nt, adj):

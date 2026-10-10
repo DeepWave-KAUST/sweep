@@ -13,6 +13,7 @@ from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
 from .elastic3d import step as _elastic3d_step
 from ._elastic_step_core import elastic_stress_substep, elastic_velocity_substep
+from ._cpml import cpml_update
 
 
 def _is_torch_tensor(value):
@@ -23,32 +24,34 @@ def _zeros_like(value):
     return value * 0
 
 
-def _with_cpml(derivative, memory, a, b):
-    memory = a * memory + b * derivative
-    return derivative + memory, memory
+def _with_cpml(derivative, memory, a, b, src=None):
+    return cpml_update(derivative, memory, a, b, src)
 
 
 def _dxx_cpml(u, pd, m_xf, m_xb, ax, bx, axh, bxh):
+    h = pd._spacing["x"]
     ux = pd.x_forward(u)
-    ux, m_xf = _with_cpml(ux, m_xf, axh, bxh)
+    ux, m_xf = _with_cpml(ux, m_xf, axh, bxh, (u, pd.kxf, h))
     uxx = pd.x_backward(ux)
-    uxx, m_xb = _with_cpml(uxx, m_xb, ax, bx)
+    uxx, m_xb = _with_cpml(uxx, m_xb, ax, bx, (ux, pd.kxb, h))
     return uxx, m_xf, m_xb
 
 
 def _dyy_cpml(u, pd, m_yf, m_yb, ay, by, ayh, byh):
+    h = pd._spacing["y"]
     uy = pd.y_forward(u)
-    uy, m_yf = _with_cpml(uy, m_yf, ayh, byh)
+    uy, m_yf = _with_cpml(uy, m_yf, ayh, byh, (u, pd.kyf, h))
     uyy = pd.y_backward(uy)
-    uyy, m_yb = _with_cpml(uyy, m_yb, ay, by)
+    uyy, m_yb = _with_cpml(uyy, m_yb, ay, by, (uy, pd.kyb, h))
     return uyy, m_yf, m_yb
 
 
 def _dzz_cpml(u, pd, m_zf, m_zb, az, bz, azh, bzh):
+    h = pd._spacing["z"]
     uz = pd.z_forward(u)
-    uz, m_zf = _with_cpml(uz, m_zf, azh, bzh)
+    uz, m_zf = _with_cpml(uz, m_zf, azh, bzh, (u, pd.kzf, h))
     uzz = pd.z_backward(uz)
-    uzz, m_zb = _with_cpml(uzz, m_zb, az, bz)
+    uzz, m_zb = _with_cpml(uzz, m_zb, az, bz, (uz, pd.kzb, h))
     return uzz, m_zf, m_zb
 
 
@@ -947,14 +950,14 @@ class DASZhao(FirstOrderEquation):
         FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True, supports_receiver=True),
         FieldSpec("txx", aliases=("tau_xx",), description="Auxiliary stress-like variable tau_xx.", internal=True),
         FieldSpec("tzz", aliases=("tau_zz",), description="Auxiliary stress-like variable tau_zz.", internal=True),
-        FieldSpec("m_sxx_xf", description="CPML memory variable for forward d(sxx)/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxx_xb", description="CPML memory variable for backward d2(sxx)/dx2.", internal=True, boundary_related=True),
-        FieldSpec("m_szz_zf", description="CPML memory variable for forward d(szz)/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_szz_zb", description="CPML memory variable for backward d2(szz)/dz2.", internal=True, boundary_related=True),
-        FieldSpec("m_txx_zf", description="CPML memory variable for forward d(txx)/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_txx_zb", description="CPML memory variable for backward d2(txx)/dz2.", internal=True, boundary_related=True),
-        FieldSpec("m_tzz_xf", description="CPML memory variable for forward d(tzz)/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_tzz_xb", description="CPML memory variable for backward d2(tzz)/dx2.", internal=True, boundary_related=True),
+        FieldSpec("m_sxx_xf", description="CPML memory variable for forward d(sxx)/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxx_xb", description="CPML memory variable for backward d2(sxx)/dx2.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_szz_zf", description="CPML memory variable for forward d(szz)/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_szz_zb", description="CPML memory variable for backward d2(szz)/dz2.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txx_zf", description="CPML memory variable for forward d(txx)/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txx_zb", description="CPML memory variable for backward d2(txx)/dz2.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tzz_xf", description="CPML memory variable for forward d(tzz)/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tzz_xb", description="CPML memory variable for backward d2(tzz)/dx2.", internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("das35_t", description="35.3 degree helical-fiber axial strain-rate.", supports_receiver=True),
         FieldSpec("das54x_t", description="54.7 degree helical-fiber axial strain-rate for x-oriented core.", supports_receiver=True),
         FieldSpec("das54z_t", description="54.7 degree helical-fiber axial strain-rate for z-oriented core.", supports_receiver=True),
@@ -1079,24 +1082,24 @@ class DASZhao3D(FirstOrderEquation):
         FieldSpec("txx", aliases=("tau_xx",), description="Auxiliary stress-like variable tau_xx.", internal=True),
         FieldSpec("tyy", aliases=("tau_yy",), description="Auxiliary stress-like variable tau_yy.", internal=True),
         FieldSpec("tzz", aliases=("tau_zz",), description="Auxiliary stress-like variable tau_zz.", internal=True),
-        FieldSpec("m_sxx_xf", description="CPML memory variable for forward d(sxx)/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxx_xb", description="CPML memory variable for backward d2(sxx)/dx2.", internal=True, boundary_related=True),
-        FieldSpec("m_syy_yf", description="CPML memory variable for forward d(syy)/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syy_yb", description="CPML memory variable for backward d2(syy)/dy2.", internal=True, boundary_related=True),
-        FieldSpec("m_szz_zf", description="CPML memory variable for forward d(szz)/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_szz_zb", description="CPML memory variable for backward d2(szz)/dz2.", internal=True, boundary_related=True),
-        FieldSpec("m_txx_yf", description="CPML memory variable for forward d(txx)/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_txx_yb", description="CPML memory variable for backward d2(txx)/dy2.", internal=True, boundary_related=True),
-        FieldSpec("m_txx_zf", description="CPML memory variable for forward d(txx)/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_txx_zb", description="CPML memory variable for backward d2(txx)/dz2.", internal=True, boundary_related=True),
-        FieldSpec("m_tyy_xf", description="CPML memory variable for forward d(tyy)/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_tyy_xb", description="CPML memory variable for backward d2(tyy)/dx2.", internal=True, boundary_related=True),
-        FieldSpec("m_tyy_zf", description="CPML memory variable for forward d(tyy)/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_tyy_zb", description="CPML memory variable for backward d2(tyy)/dz2.", internal=True, boundary_related=True),
-        FieldSpec("m_tzz_xf", description="CPML memory variable for forward d(tzz)/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_tzz_xb", description="CPML memory variable for backward d2(tzz)/dx2.", internal=True, boundary_related=True),
-        FieldSpec("m_tzz_yf", description="CPML memory variable for forward d(tzz)/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_tzz_yb", description="CPML memory variable for backward d2(tzz)/dy2.", internal=True, boundary_related=True),
+        FieldSpec("m_sxx_xf", description="CPML memory variable for forward d(sxx)/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxx_xb", description="CPML memory variable for backward d2(sxx)/dx2.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_syy_yf", description="CPML memory variable for forward d(syy)/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syy_yb", description="CPML memory variable for backward d2(syy)/dy2.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_szz_zf", description="CPML memory variable for forward d(szz)/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_szz_zb", description="CPML memory variable for backward d2(szz)/dz2.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txx_yf", description="CPML memory variable for forward d(txx)/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_txx_yb", description="CPML memory variable for backward d2(txx)/dy2.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_txx_zf", description="CPML memory variable for forward d(txx)/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txx_zb", description="CPML memory variable for backward d2(txx)/dz2.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tyy_xf", description="CPML memory variable for forward d(tyy)/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tyy_xb", description="CPML memory variable for backward d2(tyy)/dx2.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tyy_zf", description="CPML memory variable for forward d(tyy)/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tyy_zb", description="CPML memory variable for backward d2(tyy)/dz2.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tzz_xf", description="CPML memory variable for forward d(tzz)/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tzz_xb", description="CPML memory variable for backward d2(tzz)/dx2.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tzz_yf", description="CPML memory variable for forward d(tzz)/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_tzz_yb", description="CPML memory variable for backward d2(tzz)/dy2.", internal=True, boundary_related=True, cpml_axis="y"),
         FieldSpec("das35_t", description="35.3 degree helical-fiber axial strain-rate.", supports_receiver=True),
         FieldSpec("das54x_t", description="54.7 degree helical-fiber axial strain-rate for x-oriented core.", supports_receiver=True),
         FieldSpec("das54y_t", description="54.7 degree helical-fiber axial strain-rate for y-oriented core.", supports_receiver=True),
@@ -1217,16 +1220,16 @@ class DASMu(FirstOrderEquation):
         FieldSpec("exx", description="Integrated normal strain in the x direction.", supports_source=True, supports_receiver=True),
         FieldSpec("ezz", description="Integrated normal strain in the z direction.", supports_source=True, supports_receiver=True),
         FieldSpec("exz", description="Integrated shear strain component.", supports_source=True, supports_receiver=True),
-        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_txxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_txxz", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True),
-        FieldSpec("m_tzzx", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True),
-        FieldSpec("m_tzzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_txzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_txxz", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tzzx", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tzzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_2d unpacks 8 profiles
@@ -1361,24 +1364,24 @@ class DASMu3D(FirstOrderEquation):
         FieldSpec("exy", description="Integrated shear strain xy component.", supports_source=True, supports_receiver=True),
         FieldSpec("exz", description="Integrated shear strain xz component.", supports_source=True, supports_receiver=True),
         FieldSpec("eyz", description="Integrated shear strain yz component.", supports_source=True, supports_receiver=True),
-        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_3d unpacks 12 profiles

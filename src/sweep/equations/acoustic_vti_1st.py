@@ -38,6 +38,7 @@ from .fields import FieldSpec, ModelSpec
 # 2-D step function
 # ---------------------------------------------------------------------------
 from ._registry import register_equation
+from ._cpml import cpml_update
 
 def step_vti_2d(
     vx, vz, sH, sV,
@@ -82,11 +83,9 @@ def step_vti_2d(
     # dsV/dz at (i, j+½) for vz
     dsV_dz = pd.z_forward(sV)
 
-    m_sHx = axh * m_sHx + bxh * dsH_dx
-    dsH_dx = dsH_dx + m_sHx
+    dsH_dx, m_sHx = cpml_update(dsH_dx, m_sHx, axh, bxh, (sH, pd.kxf, pd._spacing["x"]))
 
-    m_sVz = azh * m_sVz + bzh * dsV_dz
-    dsV_dz = dsV_dz + m_sVz
+    dsV_dz, m_sVz = cpml_update(dsV_dz, m_sVz, azh, bzh, (sV, pd.kzf, pd._spacing["z"]))
 
     vx = vx + dt * inv_rho * dsH_dx
     vz = vz + dt * inv_rho * dsV_dz
@@ -97,11 +96,9 @@ def step_vti_2d(
     # dvz/dz at cell centre (i, j)
     dvz_dz = pd.z_backward(vz)
 
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
+    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
 
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
+    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
 
     sH = sH + dt * (c11 * dvx_dx + c13 * dvz_dz)
     sV = sV + dt * (c13 * dvx_dx + c33 * dvz_dz)
@@ -150,14 +147,11 @@ def step_vti_3d(
     dsH_dy = pd.y_forward(sH)
     dsV_dz = pd.z_forward(sV)
 
-    m_sHx = axh * m_sHx + bxh * dsH_dx
-    dsH_dx = dsH_dx + m_sHx
+    dsH_dx, m_sHx = cpml_update(dsH_dx, m_sHx, axh, bxh, (sH, pd.kxf, pd._spacing["x"]))
 
-    m_sHy = ayh * m_sHy + byh * dsH_dy
-    dsH_dy = dsH_dy + m_sHy
+    dsH_dy, m_sHy = cpml_update(dsH_dy, m_sHy, ayh, byh, (sH, pd.kyf, pd._spacing["y"]))
 
-    m_sVz = azh * m_sVz + bzh * dsV_dz
-    dsV_dz = dsV_dz + m_sVz
+    dsV_dz, m_sVz = cpml_update(dsV_dz, m_sVz, azh, bzh, (sV, pd.kzf, pd._spacing["z"]))
 
     vx = vx + dt * inv_rho * dsH_dx
     vy = vy + dt * inv_rho * dsH_dy
@@ -168,14 +162,11 @@ def step_vti_3d(
     dvy_dy = pd.y_backward(vy)
     dvz_dz = pd.z_backward(vz)
 
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
+    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
 
-    m_vyy = ay * m_vyy + by * dvy_dy
-    dvy_dy = dvy_dy + m_vyy
+    dvy_dy, m_vyy = cpml_update(dvy_dy, m_vyy, ay, by, (vy, pd.kyb, pd._spacing["y"]))
 
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
+    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
 
     div_h = dvx_dx + dvy_dy
 
@@ -272,10 +263,10 @@ class AcousticVTI1st(FirstOrderEquation):
         FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in z.", supports_receiver=True),
         FieldSpec("sH", aliases=("stress_h", "sigma_H"), description="Horizontal normal stress σ_11 = σ_22.", supports_source=True, supports_receiver=True),
         FieldSpec("sV", aliases=("stress_v", "sigma_V"), description="Vertical normal stress σ_33.", supports_source=True, supports_receiver=True),
-        FieldSpec("m_sHx", description="CPML memory variable for ∂σ_H/∂x.", internal=True, boundary_related=True),
-        FieldSpec("m_sVz", description="CPML memory variable for ∂σ_V/∂z.", internal=True, boundary_related=True),
-        FieldSpec("m_vxx", description="CPML memory variable for ∂v_x/∂x.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for ∂v_z/∂z.", internal=True, boundary_related=True),
+        FieldSpec("m_sHx", description="CPML memory variable for ∂σ_H/∂x.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sVz", description="CPML memory variable for ∂σ_V/∂z.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vxx", description="CPML memory variable for ∂v_x/∂x.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzz", description="CPML memory variable for ∂v_z/∂z.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"
@@ -478,12 +469,12 @@ class AcousticVTI1st3D(FirstOrderEquation):
         FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in z.", supports_receiver=True),
         FieldSpec("sH", aliases=("stress_h", "sigma_H"), description="Horizontal normal stress σ_11 = σ_22.", supports_source=True, supports_receiver=True),
         FieldSpec("sV", aliases=("stress_v", "sigma_V"), description="Vertical normal stress σ_33.", supports_source=True, supports_receiver=True),
-        FieldSpec("m_sHx", description="CPML memory variable for ∂σ_H/∂x.", internal=True, boundary_related=True),
-        FieldSpec("m_sHy", description="CPML memory variable for ∂σ_H/∂y.", internal=True, boundary_related=True),
-        FieldSpec("m_sVz", description="CPML memory variable for ∂σ_V/∂z.", internal=True, boundary_related=True),
-        FieldSpec("m_vxx", description="CPML memory variable for ∂v_x/∂x.", internal=True, boundary_related=True),
-        FieldSpec("m_vyy", description="CPML memory variable for ∂v_y/∂y.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for ∂v_z/∂z.", internal=True, boundary_related=True),
+        FieldSpec("m_sHx", description="CPML memory variable for ∂σ_H/∂x.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sHy", description="CPML memory variable for ∂σ_H/∂y.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_sVz", description="CPML memory variable for ∂σ_V/∂z.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vxx", description="CPML memory variable for ∂v_x/∂x.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vyy", description="CPML memory variable for ∂v_y/∂y.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vzz", description="CPML memory variable for ∂v_z/∂z.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"
