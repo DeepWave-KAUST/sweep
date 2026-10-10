@@ -505,7 +505,7 @@ _MEMORY_CAPABILITIES = {
     },
     "eager": {
         "strategies": ("full", "boundary", "ckpt"),
-        "boundary_storage": ("gpu", "cpu"),   # the ring stays on device or in host RAM
+        "boundary_storage": ("gpu", "cpu", "disk"),   # the ring on device, in host RAM or in files
         "boundary_tail_steps": False,         # no truncated backward in the eager driver
         "ckpt_mode": ("chunk",),              # no recursive/binomial schedule
     },

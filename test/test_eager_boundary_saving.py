@@ -28,7 +28,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if (_SRC / "sweep").exists() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from sweep.equations import Acoustic, Acoustic3D, Acoustic1st, Elastic  # noqa: E402
+from sweep.equations import Acoustic, Acoustic3D, Acoustic1st, Elastic, Elastic3D  # noqa: E402
 from sweep.propagator.options import (  # noqa: E402
     BoundaryOptions,
     EagerOptions,
@@ -81,6 +81,8 @@ CASES = {
     "acoustic3d": dict(cls=Acoustic3D, ndim=3, st=["h1"], rt=["h1"], kind="acoustic", driver="swap2nd"),
     "acoustic1st": dict(cls=Acoustic1st, ndim=2, st=["p"], rt=["p"], kind="acoustic1st", driver="substep"),
     "elastic2d": dict(cls=Elastic, ndim=2, st=["sxx", "szz"], rt=["vx", "vz"], kind="elastic", driver="substep"),
+    "elastic3d": dict(cls=Elastic3D, ndim=3, st=["sxx", "syy", "szz"], rt=["vx", "vy", "vz"], kind="elastic",
+                      driver="substep"),
 }
 
 
@@ -206,7 +208,7 @@ def test_boundary_saving_reduces_memory(name):
     )
 
 
-@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d"])
+@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d", "elastic3d"])
 def test_free_surface_supported(name):
     """Free-surface boundary saving matches full-tape:
     * acoustic2d (2nd-order) — swap2nd reuses ``func`` (FS BC applied);
@@ -283,7 +285,7 @@ def test_first_order_requires_substeps():
         prop(wavelet, src.copy(), rec.copy(), models=m)
 
 
-@pytest.mark.parametrize("name", ["acoustic1st", "elastic2d"])
+@pytest.mark.parametrize("name", ["acoustic1st", "elastic2d", "elastic3d"])
 def test_substep_round_trip_identity(name):
     """Composing the forward sub-steps forward (+dt) then in reverse order (-dt)
     recovers the input — i.e. the reverse is the forward code driven backwards,
@@ -465,6 +467,68 @@ def test_cpu_offload_int8():
     g8 = _first_grad(_build(cfg, memory=cpu8), cfg, init_m, obs, wavelet, src, rec)
     assert torch.isfinite(g8).all()
     assert _cosine(g32, g8) > 0.999
+
+
+@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d"])
+@pytest.mark.parametrize("boundary", [
+    dict(storage="cpu", pinned_memory=False),
+    dict(storage="disk", transfer_interval=7),
+    dict(storage="disk", transfer_interval=1, ring_buffers=3),
+    dict(storage="disk", transfer_interval=7, storage_dtype="int8"),
+], ids=["cpu-pageable", "disk", "disk-1step-3slots", "disk-int8"])
+def test_offloaded_ring_matches_gpu_ring_exactly(name, boundary, tmp_path):
+    """Every ring storage returns the on-device ring's gradient bit for bit.
+    'disk' goes through page-locked slots and a background thread: chunks of 7
+    steps leave a partial last chunk (nt=64 -> 65 rows) and the reverse pass
+    reads most of them back from the files, which are gone afterwards.  Covers
+    both reverse drivers (swap2nd / substep).  cuDNN's default convolution
+    algorithms differ run to run in the last bits, hence deterministic ones."""
+    cfg = CASES[name]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    dtype = boundary.get("storage_dtype", "fp32")
+    on_gpu = MemoryOptions(strategy="boundary",
+                           boundary=BoundaryOptions(storage="gpu", storage_dtype=dtype))
+    if boundary["storage"] == "disk":
+        boundary = dict(boundary, disk_dir=str(tmp_path))
+    mem = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(**boundary))
+    with torch.backends.cudnn.flags(enabled=True, deterministic=True):
+        g_gpu = _first_grad(_build(cfg, memory=on_gpu), cfg, init_m, obs, wavelet, src, rec)
+        g = _first_grad(_build(cfg, memory=mem), cfg, init_m, obs, wavelet, src, rec)
+    assert torch.equal(g, g_gpu)
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("op", ["_pwrite", "_pread"])
+def test_disk_io_failure_raises(op, tmp_path, monkeypatch):
+    """A failed ring write or read (a full disk, say) raises.  The impl='c'
+    disk path once swallowed write errors and read the holes back as zeros: a
+    silently wrong gradient."""
+    import errno
+    import sweep.propagator._eager_boundary_saving as ebs
+
+    def fail(*args):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(ebs, op, fail)
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    disk = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(
+        storage="disk", disk_dir=str(tmp_path), transfer_interval=7))
+    with pytest.raises(OSError, match="No space"):
+        _first_grad(_build(cfg, memory=disk), cfg, init_m, obs, wavelet, src, rec)
+
+
+def test_cpu_compute_device_disk(tmp_path):
+    """On a CPU compute device 'disk' keeps the ring in a memory-mapped file."""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg, device="cpu")
+    g_ram = _first_grad(_build(cfg, memory=BOUNDARY, device="cpu"), cfg, init_m, obs,
+                        wavelet, src, rec, device="cpu")
+    disk = MemoryOptions(strategy="boundary",
+                         boundary=BoundaryOptions(storage="disk", disk_dir=str(tmp_path)))
+    g_disk = _first_grad(_build(cfg, memory=disk, device="cpu"), cfg, init_m, obs,
+                         wavelet, src, rec, device="cpu")
+    assert torch.equal(g_disk, g_ram)
+    assert not any(tmp_path.iterdir())
 
 
 def test_cpu_compute_device():

@@ -43,23 +43,18 @@ def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
     )
 
 
-def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-         m_vxx, m_vxy, m_vxz,
-         m_vyx, m_vyy, m_vyz,
-         m_vzx, m_vzy, m_vzz,
-         m_sxxx, m_szzz,
-         m_sxyx, m_sxyy,
-         m_sxzx, m_sxzz,
-            m_syyy,
-         m_syzy, m_syzz,
-         vp, vs, rho,
-         lame_lambda, lame_mu,
-         dt, h, b, pd,
-         pml=None,
-         free_surface=False,
-         topo_rows=None,
-         return_gradients=False,
-         ):
+def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                     m_vxx, m_vxy, m_vxz,
+                     m_vyx, m_vyy, m_vyz,
+                     m_vzx, m_vzy, m_vzz,
+                     m_sxxx, m_szzz,
+                     m_sxyx, m_sxyy,
+                     m_sxzx, m_sxzz,
+                     m_syyy,
+                     m_syzy, m_syzz,
+                     *, rho, dt, pd, pml, free_surface=False, topo_rows=None):
+    """First half of :func:`step`: the stress derivatives (and their CPML
+    memories), then the velocities. Returns all 27 fields, in order."""
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
 
@@ -102,6 +97,33 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
     vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
     vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
+
+    return (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+            m_vxx, m_vxy, m_vxz,
+            m_vyx, m_vyy, m_vyz,
+            m_vzx, m_vzy, m_vzz,
+            m_sxxx, m_szzz,
+            m_sxyx, m_sxyy,
+            m_sxzx, m_sxzz,
+            m_syyy,
+            m_syzy, m_syzz)
+
+
+def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                   m_vxx, m_vxy, m_vxz,
+                   m_vyx, m_vyy, m_vyz,
+                   m_vzx, m_vzy, m_vzz,
+                   m_sxxx, m_szzz,
+                   m_sxyx, m_sxyy,
+                   m_sxzx, m_sxzz,
+                   m_syyy,
+                   m_syzy, m_syzz,
+                   *, lame_lambda, lame_mu, dt, pd, pml, free_surface=False, topo_rows=None,
+                   return_gradients=False):
+    """Second half of :func:`step`: the velocity derivatives (and their CPML
+    memories), then the stresses and the free-surface rows."""
+    az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
+    top_halo = pd.coes.shape[0]
 
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
@@ -194,6 +216,41 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
         return out + ((dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
                        dvx_dz, dvz_dx, dvy_dz, dvz_dy),)
     return out
+
+
+def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+         m_vxx, m_vxy, m_vxz,
+         m_vyx, m_vyy, m_vyz,
+         m_vzx, m_vzy, m_vzz,
+         m_sxxx, m_szzz,
+         m_sxyx, m_sxyy,
+         m_sxzx, m_sxzz,
+            m_syyy,
+         m_syzy, m_syzz,
+         vp, vs, rho,
+         lame_lambda, lame_mu,
+         dt, h, b, pd,
+         pml=None,
+         free_surface=False,
+         topo_rows=None,
+         return_gradients=False,
+         ):
+    """One leapfrog step: :func:`velocity_substep`, then :func:`stress_substep`
+    (``Elastic.interior_substeps`` reuses the two halves)."""
+    fields = velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                              m_vxx, m_vxy, m_vxz,
+                              m_vyx, m_vyy, m_vyz,
+                              m_vzx, m_vzy, m_vzz,
+                              m_sxxx, m_szzz,
+                              m_sxyx, m_sxyy,
+                              m_sxzx, m_sxzz,
+                              m_syyy,
+                              m_syzy, m_syzz,
+                              rho=rho, dt=dt, pd=pd, pml=pml,
+                              free_surface=free_surface, topo_rows=topo_rows)
+    return stress_substep(*fields, lame_lambda=lame_lambda, lame_mu=lame_mu, dt=dt, pd=pd, pml=pml,
+                          free_surface=free_surface, topo_rows=topo_rows,
+                          return_gradients=return_gradients)
 
 
 def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
@@ -365,6 +422,9 @@ class Elastic(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
     supports_apm = True          # Cao & Chen 2018 3-D APM is implemented
+    # The eager boundary-saving sub-steps carry the free-surface BC (the image
+    # derivatives and the surface rows of stress_substep).
+    supports_bs_free_surface = True
     supports_image_topography = True   # eager func applies the staircase
     # supports_image_topography_c stays False: the CUDA kernels never read
     # the topo rows (topo3d_gradient_mode_suite's docstring says the same).
@@ -416,15 +476,18 @@ class Elastic(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu]
     
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    @staticmethod
+    def _moduli(models):
+        """``(vp, vs, rho, lame_lambda, lame_mu)`` from the raw or prepared models."""
         if len(models) == 5:
-            vp, vs, rho, lame_lambda, lame_mu = models
-        elif len(models) == 3:
+            return tuple(models)
+        if len(models) == 3:
             vp, vs, rho = models
-            lame_lambda = rho * (vp**2 - 2 * vs**2)
-            lame_mu = rho * vs**2
-        else:
-            raise ValueError(f"Elastic3D.func expected 3 or 5 models, got {len(models)}")
+            return vp, vs, rho, rho * (vp**2 - 2 * vs**2), rho * vs**2
+        raise ValueError(f"Elastic3D.func expected 3 or 5 models, got {len(models)}")
+
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        vp, vs, rho, lame_lambda, lame_mu = self._moduli(models)
 
         # APM dispatch: if the propagator's ``topography=`` was a 3-D air
         # mask it stored a replicate-padded runtime version on the
@@ -456,6 +519,30 @@ class Elastic(FirstOrderEquation):
             topo_rows=topo_rows,
             **kwargs,
         )
+
+    def interior_substeps(self):
+        """The leapfrog as two reversible sub-steps, REUSING the
+        ``velocity_substep`` / ``stress_substep`` that :func:`step` (and thus
+        ``func``) is built from -- no rewritten copy of the physics. Called with
+        ``pml`` zeroed (boundary saving reconstructs only the lossless interior)
+        but the free-surface BC kept, so the eager boundary-saving 'substep'
+        driver inverts the step exactly by composing the list in reverse order
+        at ``-dt``."""
+        if getattr(self, "_apm_air_mask_runtime", None) is not None:
+            raise NotImplementedError("Eager boundary saving with topo_method='apm' (Elastic3D).")
+        pd = self.pd
+        fs = bool(getattr(self, "free_surface", False))
+        topo = getattr(self, "_topo_rows_runtime", None)
+        kw = dict(pd=pd, pml=(0.0,) * 12, free_surface=fs, topo_rows=topo)
+
+        def sub_v(wf, models, dt, h):
+            return list(velocity_substep(*wf, rho=self._moduli(models)[2], dt=dt, **kw))
+
+        def sub_s(wf, models, dt, h):
+            _, _, _, lam, mu = self._moduli(models)
+            return list(stress_substep(*wf, lame_lambda=lam, lame_mu=mu, dt=dt, **kw))
+
+        return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
 
     def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
                   dt, h, b, **kwargs):

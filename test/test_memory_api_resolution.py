@@ -34,7 +34,7 @@ def _build(**kw):
 
 
 def _bs_for(impl):
-    # disk staging is impl='c' only; eager keeps the ring on gpu or host
+    # one valid boundary request per impl
     return (BoundarySaving(storage="cpu", transfer_interval=10) if impl == "c"
             else BoundarySaving(storage="gpu"))
 

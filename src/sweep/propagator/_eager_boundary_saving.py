@@ -30,6 +30,9 @@ Memory: ``O(nt * halo * perimeter)`` instead of ``O(nt * Ncells * nfields)``.
 """
 
 import math
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 
@@ -89,38 +92,245 @@ def _dequantize_fp16(codes, scale, n):
     return blocks.reshape(-1)[:n]
 
 
-def save_step(state, step, pos, field):
-    """Consolidate this field's ring slices into one flat buffer and write it into
-    the PRE-ALLOCATED per-rollout storage at ``[step, pos]`` (down-cast / int8
-    quantized to ``state.store_dtype``).  No per-step tensor allocation — the
-    persistent storage is a handful of big contiguous tensors (one ``buf`` for
-    fp32/fp16/bf16, or ``codes``+``scale`` for int8), like the CUDA boundary
-    saver — so it carries no per-tensor allocator rounding."""
-    flat = torch.cat([field[idx].reshape(-1) for idx in state.rings])
+# ---- Ring storage ---------------------------------------------------------
+# A step's saved ring -- the ring fields back to back -- is one row of a [T, n]
+# buffer per part: the values (fp32/bf16), or the codes and the FP32 block
+# scales (int8/fp16).  storage='gpu' keeps the rows on the compute device; 'cpu'
+# keeps them in page-locked host memory and 'disk' in files, both copied on a
+# side stream so the copies overlap the time steps, and fetched ahead of the
+# reverse pass.
+
+
+class _DeviceRows:
+    """Rows in one place the copies block on: the compute device, pageable host
+    memory, or a memory-mapped file."""
+
+    def __init__(self, device, rows):
+        self.device, self.rows = device, rows
+
+    def save(self, j, parts):
+        for row, part in zip(self.rows, parts):
+            row[j].copy_(part)
+
+    def load(self, j):
+        return [row[j].to(self.device) for row in self.rows]
+
+
+class _PinnedRows:
+    """Rows in page-locked host memory, copied on a side stream: ``save``
+    returns before its copy is done, and ``load`` starts copying the ``depth``
+    steps the reverse pass reads next."""
+
+    depth = 4
+
+    def __init__(self, T, parts, device):
+        self.device, self.ready = device, {}
+        self.stream = torch.cuda.Stream(device)
+        self.rows = [torch.empty((T, n), dtype=d, pin_memory=True) for n, d in parts]
+
+    def host(self, j, write=False):
+        return [row[j] for row in self.rows]
+
+    def save(self, j, parts):
+        self.stream.wait_stream(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(self.stream):
+            for row, part in zip(self.host(j, write=True), parts):
+                row.copy_(part, non_blocking=True)
+                part.record_stream(self.stream)
+        self.saved(j)
+
+    def load(self, j):
+        for k in range(j, max(j - self.depth, -1), -1):
+            if k not in self.ready:
+                rows = self.host(k)
+                with torch.cuda.stream(self.stream):
+                    got = [row.to(self.device, non_blocking=True) for row in rows]
+                    done = torch.cuda.Event()
+                    done.record()
+                self.ready[k] = got, done
+                self.loaded(k, done)
+        got, done = self.ready.pop(j)
+        stream = torch.cuda.current_stream(self.device)
+        stream.wait_event(done)
+        for g in got:
+            g.record_stream(stream)
+        return got
+
+    def saved(self, j):
+        pass
+
+    def loaded(self, j, done):
+        pass
+
+
+_STRIPES = 4    # files per part, written in parallel: a file takes one write at a time
+_IO = None
+
+
+def _io():
+    """The background threads that write and read the 'disk' rows."""
+    global _IO
+    if _IO is None:
+        _IO = ThreadPoolExecutor(_STRIPES, thread_name_prefix="sweep-bs-disk")
+    return _IO
+
+
+def _wait(futures):
+    for f in futures:
+        f.result()            # raises a failed write or read
+
+
+class _DiskRows(_PinnedRows):
+    """Rows in temporary files (already unlinked: they go with the rollout).
+    Steps pass through page-locked slots of ``interval`` steps.  Once a slot
+    is full, background threads write it out, a stripe of its rows to each
+    file; in the reverse pass they read the chunks below the current one back
+    into the slots already used."""
+
+    def __init__(self, T, parts, device, directory=None, interval=32, slots=2):
+        self.device, self.ready = device, {}
+        self.stream = torch.cuda.Stream(device)
+        self.T, self.K = T, interval
+        self.depth = min(self.depth, interval)
+        n = max(2, slots)
+        self.slots = [[torch.empty((interval, m), dtype=d, pin_memory=True) for m, d in parts]
+                      for _ in range(n)]
+        self.bytes = [[t.view(torch.uint8).numpy() for t in slot] for slot in self.slots]
+        self.files = [[tempfile.TemporaryFile(prefix="sweep_bs_", dir=directory) for _ in parts]
+                      for _ in range(_STRIPES)]
+        self.chunk = [None] * n               # the chunk each slot holds
+        self.io = [[] for _ in range(n)]      # the slot's pending writes or reads
+        self.free = [None] * n                # the slot's last copy to the device
+
+    def host(self, j, write=False):
+        c, r = divmod(j, self.K)
+        s = c % len(self.slots)
+        if self.chunk[s] != c:
+            self._take(s, c, write)
+        if not write:
+            for p in range(c - 1, max(c - len(self.slots), -1), -1):
+                if self.chunk[p % len(self.slots)] != p:
+                    self._take(p % len(self.slots), p, False)
+            _wait(self.io[s])
+        return [part[r] for part in self.slots[s]]
+
+    def _take(self, s, c, write):
+        """Hand slot ``s`` to chunk ``c``: to be filled by the forward pass once
+        its last writes are out, or read back from the files."""
+        last, free = self.io[s], self.free[s]
+        self.chunk[s] = c
+        if write:
+            _wait(last)
+            self.io[s] = []
+        else:
+            self.io[s] = self._stripes(self._read, s, c, last, free)
+
+    def saved(self, j):
+        c, r = divmod(j, self.K)
+        if r == self.K - 1 or j == self.T - 1:        # the slot is full: write it out
+            done = torch.cuda.Event()
+            done.record(self.stream)
+            s = c % len(self.slots)
+            self.io[s] = self._stripes(self._write, s, c, done)
+
+    def loaded(self, j, done):
+        self.free[j // self.K % len(self.slots)] = done
+
+    def _stripes(self, fn, s, c, *args):
+        """Run ``fn`` on each file's stripe of chunk ``c``'s rows."""
+        rows = min(self.K, self.T - c * self.K)
+        cut = [rows * k // _STRIPES for k in range(_STRIPES + 1)]
+        return [_io().submit(fn, files, s, c * self.K, cut[k], cut[k + 1], *args)
+                for k, files in enumerate(self.files) if cut[k + 1] > cut[k]]
+
+    def _write(self, files, s, row0, a, b, done):
+        done.synchronize()
+        for f, part in zip(files, self.bytes[s]):
+            _pwrite(f.fileno(), part[a:b], (row0 + a) * part.shape[1])
+
+    def _read(self, files, s, row0, a, b, last, free):
+        _wait(last)                # the slot's last writes (a failed one raises here)
+        if free is not None:
+            free.synchronize()     # the slot's copies to the device are done
+        for f, part in zip(files, self.bytes[s]):
+            _pread(f.fileno(), part[a:b], (row0 + a) * part.shape[1])
+
+
+def _pwrite(fd, data, offset):
+    view = memoryview(data).cast("B")
+    while view:
+        n = os.pwrite(fd, view, offset)
+        view, offset = view[n:], offset + n
+
+
+def _pread(fd, data, offset):
+    view = memoryview(data).cast("B")
+    while view:
+        n = os.preadv(fd, [view], offset)
+        if n == 0:
+            raise EOFError("eager boundary saving: the ring file ends early")
+        view, offset = view[n:], offset + n
+
+
+def _mapped(T, n, dtype, directory):
+    """A [T, n] host tensor kept in a temporary file (memory-mapped)."""
+    fd, path = tempfile.mkstemp(prefix="sweep_bs_", dir=directory)
+    try:
+        os.ftruncate(fd, T * n * torch.empty((), dtype=dtype).element_size())
+        return torch.from_file(path, shared=True, size=T * n, dtype=dtype).view(T, n)
+    finally:
+        os.close(fd)
+        os.unlink(path)
+
+
+def _ring_rows(storage, T, parts, device, pinned_memory=None, disk_dir=None,
+               transfer_interval=None, ring_buffers=None):
+    """The row store for ``storage`` ('gpu' | 'cpu' | 'disk'); ``parts`` lists
+    each part's (row length, dtype)."""
+    cuda = device.type == "cuda"
+    if storage == "disk":
+        if cuda:
+            return _DiskRows(T, parts, device, disk_dir, transfer_interval or 32, ring_buffers or 2)
+        return _DeviceRows(device, [_mapped(T, n, d, disk_dir) for n, d in parts])
+    if storage == "cpu" and cuda and pinned_memory is not False:
+        return _PinnedRows(T, parts, device)
+    where = device if storage == "gpu" else torch.device("cpu")
+    return _DeviceRows(device, [torch.empty((T, n), dtype=d, device=where) for n, d in parts])
+
+
+def save_step(state, step, fields):
+    """Save step ``step``'s ring of ``fields`` as one row, down-cast or
+    quantized to ``state.store_dtype``."""
+    runs = []
+    for field in fields:
+        runs += [field[idx].reshape(-1) for idx in state.rings]
+        if state.pad is not None:
+            runs.append(state.pad)
+    flat = torch.cat(runs)
     if state.store_dtype == "int8":
-        codes, scale = _quantize_int8(flat)
-        state.codes[step, pos].copy_(codes)
-        state.scale[step, pos].copy_(scale)
+        parts = _quantize_int8(flat)
     elif state.store_dtype == "fp16":
-        codes, scale = _quantize_fp16(flat)
-        state.codes[step, pos].copy_(codes)
-        state.scale[step, pos].copy_(scale)
+        parts = _quantize_fp16(flat)
     else:
-        state.buf[step, pos].copy_(flat)             # copy_ casts fp32 -> store dtype
+        parts = (flat.to(_STORE_DTYPE[state.store_dtype]),)
+    state.rows.save(step, parts)
 
 
 def restore_step(state, step, pos, field):
-    """Read the saved ring buffer at ``[step, pos]``, up-cast / dequantize to the
-    field's FP32 dtype, and split it back across ``field``'s ring slices."""
-    if state.store_dtype == "int8":
-        flat = _dequantize_int8(state.codes[step, pos], state.scale[step, pos], state.total_cells)
-    elif state.store_dtype == "fp16":
-        flat = _dequantize_fp16(state.codes[step, pos], state.scale[step, pos], state.total_cells)
-    else:
-        flat = state.buf[step, pos]
-    if flat.device != field.device:                  # offloaded ring (cpu) -> compute device
-        flat = flat.to(field.device, non_blocking=True)
-    off = 0
+    """Put field ``pos``'s saved ring at step ``step`` back into ``field``."""
+    flat = state.decoded.get(step)
+    if flat is None:
+        parts = state.rows.load(step)
+        if state.store_dtype == "int8":
+            flat = _dequantize_int8(*parts, parts[0].numel())
+        elif state.store_dtype == "fp16":
+            flat = _dequantize_fp16(*parts, parts[0].numel())
+        else:
+            flat = parts[0]
+        # The reverse pass walks down in time and reads this step and the one above.
+        state.decoded = {k: v for k, v in state.decoded.items() if k == step + 1}
+        state.decoded[step] = flat
+    off = pos * state.stride
     for idx, shp, sz in zip(state.rings, state.ring_shapes, state.ring_sizes):
         field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
         off += sz
@@ -163,22 +373,20 @@ class ReconState:
     """Per-rollout reconstruction state with PRE-ALLOCATED ring storage.
 
     Mirrors the CUDA boundary saver: the per-step boundary ring of every saved
-    field lives in ONE big contiguous buffer indexed by ``[step, ring_field]``
-    (a single ``buf`` for fp32/fp16/bf16, or ``codes``+``scale`` for int8),
-    rather than a Python list of per-step tensors — so it avoids the caching
-    allocator's 512-byte per-tensor rounding (which otherwise wastes memory on
-    the many tiny per-step int8 scale tensors)."""
+    field lives in one big contiguous buffer per part, one row per step (see
+    ``_ring_rows``), rather than a Python list of per-step tensors — so it
+    avoids the caching allocator's 512-byte per-tensor rounding (which
+    otherwise wastes memory on the many tiny per-step int8 scale tensors).
+    ``device`` is the compute device: the zero placeholders and the
+    reconstruction stay there wherever ``storage`` keeps the rows."""
 
     __slots__ = ("frame", "rings", "checked", "store_dtype", "ring_shapes",
-                 "ring_sizes", "total_cells", "buf", "codes", "scale", "zero")
+                 "ring_sizes", "stride", "pad", "rows", "decoded", "zero")
 
     def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device,
-                 storage_device=None, compute_dtype=torch.float32, field_shapes=None):
-        # ``device`` is the compute device (where the wavefields live); the ring
-        # storage lives on ``storage_device`` instead (e.g. host RAM for the 'cpu'
-        # offload — trading device memory for per-step H2D/D2H copies).  The zero
-        # placeholder and reconstruction run on the compute device regardless.
-        storage_device = device if storage_device is None else storage_device
+                 storage="gpu", compute_dtype=torch.float32, field_shapes=None,
+                 **storage_options):
+        device = torch.device(device)
         self.frame = None
         # Reused read-only zero placeholders for the cpml / unpaired field slots in
         # backward, one per field -- one buffer per distinct shape (CPML strips
@@ -192,19 +400,21 @@ class ReconState:
         self.store_dtype = store_dtype
         self.ring_shapes = [_ring_slice_shape(shape, idx) for idx in rings]
         self.ring_sizes = [math.prod(s) for s in self.ring_shapes]
-        self.total_cells = sum(self.ring_sizes)
-        T, F = nt + 1, n_ring_fields
-        self.buf = self.codes = self.scale = None
-        if store_dtype in ("int8", "fp16"):
-            # Scaled storage: per-block-normalized payload + FP32 scales
-            # (fp16 shares int8's layout — see _quantize_fp16).
+        cells = sum(self.ring_sizes)
+        # Scaled storage (int8, and fp16 sharing its layout -- see _quantize_fp16)
+        # pads each field to whole blocks, so no block's scale spans two fields.
+        scaled = store_dtype in ("int8", "fp16")
+        self.stride = -(-cells // _INT8_BLOCK) * _INT8_BLOCK if scaled else cells
+        self.pad = (torch.zeros(self.stride - cells, dtype=compute_dtype, device=device)
+                    if self.stride > cells else None)
+        n = n_ring_fields * self.stride
+        if scaled:
             payload = torch.int8 if store_dtype == "int8" else torch.float16
-            padded = ((self.total_cells + _INT8_BLOCK - 1) // _INT8_BLOCK) * _INT8_BLOCK
-            self.codes = torch.zeros((T, F, padded), dtype=payload, device=storage_device)
-            self.scale = torch.zeros((T, F, padded // _INT8_BLOCK), dtype=torch.float32, device=storage_device)
+            parts = [(n, payload), (n // _INT8_BLOCK, torch.float32)]
         else:
-            self.buf = torch.zeros((T, F, self.total_cells),
-                                   dtype=_STORE_DTYPE[store_dtype], device=storage_device)
+            parts = [(n, _STORE_DTYPE[store_dtype])]
+        self.rows = _ring_rows(storage, nt + 1, parts, device, **storage_options)
+        self.decoded = {}
 
 
 # torch < 2.0 has no untyped_storage(); its storage() is the same buffer.
@@ -313,9 +523,7 @@ class _BoundarySaveStep(torch.autograd.Function):
         models = list(tensors[nwf:nwf + nm])
         with torch.no_grad():
             S_out = list(cfg["func"](S_in, models, cfg["dt"], cfg["h"], None))
-        st = cfg["state"]
-        for pos, f in enumerate(cfg["ring_fields"]):
-            save_step(st, step + 1, pos, S_out[f])
+        save_step(cfg["state"], step + 1, [S_out[f] for f in cfg["ring_fields"]])
         # The ring is saved before the source goes in, as when the source was
         # an op after this Function; the reverse drivers re-inject it.  Inside,
         # it is a scatter onto the fresh outputs instead of a full-grid op.
@@ -423,7 +631,9 @@ class _EagerBoundarySavingMixin:
     """Eager boundary-saving methods for ``_PropTorchEager``."""
 
     def enable_eager_boundary_saving(self, flag=True, mode=None, self_check=True,
-                                     check_tol=None, storage_dtype="fp32", storage="gpu"):
+                                     check_tol=None, storage_dtype="fp32", storage="gpu",
+                                     pinned_memory=None, disk_dir=None,
+                                     transfer_interval=None, ring_buffers=None):
         """Route the eager rollout through pure-PyTorch boundary saving (see
         ``_eager_boundary_saving``) instead of the full autograd tape.  Mutually
         exclusive with ``use_ckpt``.  ``mode`` forces a reverse driver
@@ -438,17 +648,23 @@ class _EagerBoundarySavingMixin:
 
         ``storage_dtype`` ('fp32' | 'fp16' | 'bf16' | 'int8') compresses the
         per-step boundary ring only (compute and the seed frame stay FP32) —
-        same split as the CUDA path.  ``storage`` ('gpu' | 'cpu') keeps the ring
-        buffer on device or offloads it to host RAM — the ring is the dominant
-        eager-BS GPU cost, so 'cpu' trades device memory for per-step H2D/D2H
-        copies.  ``check_tol=None`` picks a tolerance that clears the storage
-        quantization floor while still catching a broken reverse (O(0.1-1)
-        error)."""
+        same split as the CUDA path.  ``storage`` ('gpu' | 'cpu' | 'disk')
+        keeps the ring on device, in host RAM or in files — the ring is the
+        dominant eager-BS GPU cost.  On a CUDA device, 'cpu' copies each step
+        into page-locked memory on a side stream, overlapping the steps
+        (``pinned_memory=False``: pageable memory, blocking copies); 'disk' goes
+        through page-locked slots of ``transfer_interval`` steps (default 32;
+        ``ring_buffers`` slots, default 2) that a background thread writes to
+        temporary files in ``disk_dir`` (default: the system temp directory)
+        and reads back ahead of the reverse pass.  ``check_tol=None`` picks a
+        tolerance that clears the storage quantization floor while still
+        catching a broken reverse (O(0.1-1) error)."""
         self._eager_bs = bool(flag)
         self._eager_bs_mode = mode
         self._eager_bs_self_check = bool(self_check)
         self._eager_bs_storage_dtype = storage_dtype
-        self._eager_bs_storage = storage
+        self._eager_bs_storage = dict(storage=storage, pinned_memory=pinned_memory, disk_dir=disk_dir,
+                                      transfer_interval=transfer_interval, ring_buffers=ring_buffers)
         if check_tol is None:
             check_tol = {"fp32": 1e-2, "fp16": 3e-2, "bf16": 6e-2, "int8": 1.5e-1}.get(storage_dtype, 1e-2)
         self._eager_bs_check_tol = float(check_tol)
@@ -516,14 +732,12 @@ class _EagerBoundarySavingMixin:
         # style), then write each step into a slice — no per-step allocation.
         # Seed step 0 with the initial frame.
         store_dtype = getattr(self, "_eager_bs_storage_dtype", "fp32")
-        storage_loc = getattr(self, "_eager_bs_storage", "gpu")
-        storage_device = wavefield[0].device if storage_loc == "gpu" else torch.device("cpu")
         state = ReconState(nt, rings, shape, len(ring_fields), store_dtype,
-                           wavefield[0].device, storage_device,
+                           wavefield[0].device,
                            compute_dtype=wavefield[0].dtype,
-                           field_shapes=[tuple(w.shape) for w in wavefield])
-        for pos, f in enumerate(ring_fields):
-            save_step(state, 0, pos, wavefield[f])
+                           field_shapes=[tuple(w.shape) for w in wavefield],
+                           **getattr(self, "_eager_bs_storage", {}))
+        save_step(state, 0, [wavefield[f] for f in ring_fields])
 
         # Per-step physics callables, built ONCE and reused across every step + in
         # backward.  With use_compile=True the inner step is torch.compile'd; the

@@ -240,8 +240,8 @@ Tail truncation has a legacy dict spelling too — `boundary_saving_config=
 | Feature | Path | Configured by |
 | --- | --- | --- |
 | Full storage (no reconstruction) | both | `Full()` |
-| Boundary saving (GPU or CPU ring; + disk on `impl="c"`) | both | `BoundarySaving(storage=..., storage_dtype=..., ...)` |
-| Asynchronous disk prefetch | `impl="c"` | `BoundarySaving(storage="disk", disk_async_read=True, ...)` |
+| Boundary saving (GPU, CPU or disk ring) | both | `BoundarySaving(storage=..., storage_dtype=..., ...)` |
+| Asynchronous disk prefetch | both (always on for `impl="eager"`) | `BoundarySaving(storage="disk", disk_async_read=True, ...)` |
 | Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundarySaving(tail_steps=...)` |
 | Chunked checkpointing | both | `Ckpt(mode="chunk", chunks=...)` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `Ckpt(mode="recursive", count=...)` |

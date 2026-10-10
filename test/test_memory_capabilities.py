@@ -54,7 +54,6 @@ def test_the_compiled_path_still_takes_tail_steps():
 
 
 @pytest.mark.parametrize("memory,match", [
-    (BoundarySaving(storage="disk", disk_dir="/tmp/x", transfer_interval=8), "storage='disk'"),
     (Ckpt(mode="recursive", count=4), "mode='recursive'"),
 ])
 def test_eager_refuses_what_it_does_not_implement(memory, match):
@@ -138,11 +137,15 @@ def _build_eager_dict(cfg, **kw):
 def test_legacy_dict_route_is_capability_checked():
     """boundary_saving_config={...} used to bypass check_memory_supported (no
     typed request -> the check no-ops): eager + tail_steps was silently
-    dropped and 'disk' silently became CPU storage."""
+    dropped and 'disk' silently became CPU storage.  Eager has disk storage
+    now; the route must deliver it, with its options."""
     with pytest.raises(NotImplementedError, match="tail_steps"):
         _build_eager_dict({"enabled": True, "tail_steps": 20})
-    with pytest.raises(NotImplementedError, match="disk"):
-        _build_eager_dict({"enabled": True, "storage": "disk"})
+    disk = _build_eager_dict({"enabled": True, "storage": "disk", "disk_dir": "/tmp/x",
+                              "transfer_interval": 8})
+    assert disk.memory_strategy == "boundary"
+    got = disk._backend_impl._eager_bs_storage
+    assert (got["storage"], got["disk_dir"], got["transfer_interval"]) == ("disk", "/tmp/x", 8)
     assert _build_eager_dict({"enabled": True, "storage": "cpu"}).memory_strategy == "boundary"
 
 

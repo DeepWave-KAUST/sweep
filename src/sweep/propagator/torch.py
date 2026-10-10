@@ -279,6 +279,10 @@ def _assert_backend_matches_strategy(backend_impl, strategy):
             "This is a bug in the option plumbing, not in the caller's arguments.")
 
 
+# Boundary options the eager ring storage takes besides storage/storage_dtype.
+_EAGER_STORAGE_OPTIONS = ("pinned_memory", "disk_dir", "transfer_interval", "ring_buffers")
+
+
 def _apply_eager_memory(backend_impl, memory):
     """Apply a ``MemoryOptions`` to an already-built eager backend.
 
@@ -304,15 +308,14 @@ def _apply_eager_memory(backend_impl, memory):
     if strategy == "boundary":
         boundary = md.get("boundary") or {}
         storage = boundary.get("storage", "gpu")
-        if storage not in ("gpu", "cpu"):
+        if storage not in ("gpu", "cpu", "disk"):
             raise ValueError(
-                "Eager boundary saving supports storage='gpu' or 'cpu' (the ring "
-                "buffer is kept on device, or offloaded to host RAM); disk staging "
-                "is available on the impl='c' path."
+                "Eager boundary saving supports storage='gpu', 'cpu' or 'disk', "
+                f"got {storage!r}."
             )
-        # storage_dtype compresses the ring (fp16/bf16/int8); storage='cpu' moves
-        # it off device.  Compute and the seed frame stay FP32 / on the compute
-        # device (same split as the CUDA path).
+        # storage_dtype compresses the ring (fp16/bf16/int8); storage='cpu'/'disk'
+        # moves it off device.  Compute and the seed frame stay FP32 / on the
+        # compute device (same split as the CUDA path).
         storage_dtype = boundary.get("storage_dtype", "fp32")
         if storage_dtype not in ("fp32", "fp16", "bf16", "int8"):
             raise ValueError(
@@ -321,7 +324,8 @@ def _apply_eager_memory(backend_impl, memory):
             )
         backend_impl._set_memory_strategy("boundary")
         backend_impl.enable_eager_boundary_saving(
-            True, storage=storage, storage_dtype=storage_dtype
+            True, storage=storage, storage_dtype=storage_dtype,
+            **{k: boundary.get(k) for k in _EAGER_STORAGE_OPTIONS}
         )
         return
 
@@ -573,6 +577,7 @@ class PropTorch(torch.nn.Module):
                     True,
                     storage=cfg.get("storage", "gpu"),
                     storage_dtype=cfg.get("storage_dtype", "fp32"),
+                    **{k: cfg.get(k) for k in _EAGER_STORAGE_OPTIONS},
                 )
         else:
             from sweep.propagator._c import _CompiledPropagator
