@@ -66,7 +66,7 @@ Pick the Python-only path when any of the following is true:
 - you are prototyping a new physics and want to iterate fast in pure Python
 - you target `backend="jax"` and run through `PropJax`
 - the eager memory modes are enough for your model sizes: `Full()`,
-  `BoundarySaving(storage="gpu" | "cpu")` or `Ckpt(mode="chunk")` (the eager
+  `BoundarySaving(storage="gpu" | "cpu" | "disk")` or `Ckpt(mode="chunk")` (the eager
   default); boundary saving of a first-order equation needs its
   `interior_substeps()`
 - you are happy with `torch.compile` (default) for speed and do not need

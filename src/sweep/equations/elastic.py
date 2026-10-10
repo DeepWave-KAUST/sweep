@@ -258,6 +258,10 @@ class Elastic(FirstOrderEquation):
         saving reconstructs only the lossless interior) but the free-surface BC
         KEPT, so the eager boundary-saving 'substep' driver inverts the step
         exactly by composing the list in reverse order at ``-dt``."""
+        if getattr(self, "_apm_air_mask_runtime", None) is not None:
+            # The APM step zeroes the air cells after the stress update, from
+            # velocities the reverse sub-step no longer has: not invertible.
+            raise NotImplementedError("Eager boundary saving with topo_method='apm' (Elastic).")
         pd = self.pd
         fs = bool(getattr(self, "free_surface", False))
         topo = getattr(self, "_topo_rows_runtime", None)

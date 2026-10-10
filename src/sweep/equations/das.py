@@ -11,7 +11,8 @@ from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
-from .elastic3d import step as _elastic3d_step
+from .elastic3d import stress_substep as _elastic3d_stress_substep
+from .elastic3d import velocity_substep as _elastic3d_velocity_substep
 from ._elastic_step_core import elastic_stress_substep, elastic_velocity_substep
 from ._cpml import cpml_update
 
@@ -482,6 +483,30 @@ class DAS(torch.nn.Module):
         return torch.stack([values[field] for field in self.receiver_type], dim=-1)
 
 
+def das_mu_velocity_substep_2d(vx, vz, sxx, szz, sxz, exx, ezz, exz, *memory, **kw):
+    """First half of :func:`step_das_mu_2d`: the shared elastic velocity
+    sub-step; the strains pass through."""
+    out = elastic_velocity_substep(vx, vz, sxx, szz, sxz, *memory, **kw)
+    return (*out[:5], exx, ezz, exz, *out[5:])
+
+
+def das_mu_stress_substep_2d(vx, vz, sxx, szz, sxz, exx, ezz, exz, *memory, dt, pd,
+                             free_surface=False, **kw):
+    """Second half of :func:`step_das_mu_2d`: the shared elastic stress
+    sub-step, the three strain integrations from the velocity gradients it
+    consumed, and the free-surface ``szz`` row."""
+    *out, (vx_x, vz_z, vx_z, vz_x) = elastic_stress_substep(
+        vx, vz, sxx, szz, sxz, *memory, dt=dt, pd=pd, free_surface=free_surface,
+        return_gradients=True, **kw)
+    vx, vz, sxx, szz, sxz = out[:5]
+    exx = exx + dt * vx_x
+    ezz = ezz + dt * vz_z
+    exz = exz + 0.5 * dt * (vx_z + vz_x)
+    if free_surface:
+        szz = zero_top_row(szz, pd.coes.shape[0], axis=-2)
+    return (vx, vz, sxx, szz, sxz, exx, ezz, exz, *out[5:])
+
+
 def step_das_mu_2d(
     vx,
     vz,
@@ -522,67 +547,45 @@ def step_das_mu_2d(
     bodies were maintained as literal copies apart from variable names and the
     staggered-parameter generality (DASMu uses the plain ``rho`` and
     ``lame_mu`` where elastic passes staggered averages, so those are forwarded
-    as-is and the arithmetic is unchanged). The post-step ``szz`` zeroing is the
-    caller's job by the sub-step contract, and happens here as before.
+    as-is and the arithmetic is unchanged). Composed as
+    :func:`das_mu_velocity_substep_2d`, then :func:`das_mu_stress_substep_2d`
+    (``DASMu.interior_substeps`` reuses the two halves).
     """
-    (vx, vz, sxx, szz, sxz,
-     m_vxx, m_vxz, m_vzx, m_vzz,
-     m_txxx, m_txxz, m_tzzx, m_tzzz,
-     m_txzx, m_txzz) = elastic_velocity_substep(
-        vx, vz, sxx, szz, sxz,
+    kw = dict(lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
+              rho_x=rho, rho_z=rho, dt=dt, h=h, b=b, pd=pd, pml=pml,
+              free_surface=free_surface, lame_lambda_2mu=lame_lambda_2mu)
+    fields = das_mu_velocity_substep_2d(
+        vx, vz, sxx, szz, sxz, exx, ezz, exz,
         m_vxx, m_vxz, m_vzx, m_vzz,
         m_txxx, m_txxz, m_tzzx, m_tzzz,
-        m_txzx, m_txzz,
-        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
-        rho_x=rho, rho_z=rho,
-        dt=dt, h=h, b=b, pd=pd, pml=pml,
-        free_surface=free_surface,
-        lame_lambda_2mu=lame_lambda_2mu,
-    )
-    *state, (vx_x, vz_z, vx_z, vz_x) = elastic_stress_substep(
-        vx, vz, sxx, szz, sxz,
-        m_vxx, m_vxz, m_vzx, m_vzz,
-        m_txxx, m_txxz, m_tzzx, m_tzzz,
-        m_txzx, m_txzz,
-        lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
-        rho_x=rho, rho_z=rho,
-        dt=dt, h=h, b=b, pd=pd, pml=pml,
-        free_surface=free_surface,
-        lame_lambda_2mu=lame_lambda_2mu,
-        return_gradients=True,
-    )
-    (vx, vz, sxx, szz, sxz,
-     m_vxx, m_vxz, m_vzx, m_vzz,
-     m_txxx, m_txxz, m_tzzx, m_tzzz,
-     m_txzx, m_txzz) = state
+        m_txzx, m_txzz, **kw)
+    return das_mu_stress_substep_2d(*fields, **kw)
 
-    exx = exx + dt * vx_x
-    ezz = ezz + dt * vz_z
-    exz = exz + 0.5 * dt * (vx_z + vz_x)
 
-    if free_surface:
-        szz = zero_top_row(szz, pd.coes.shape[0], axis=-2)
+def das_mu_velocity_substep_3d(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                               exx, eyy, ezz, exy, exz, eyz, *memory, **kw):
+    """First half of :func:`step_das_mu_3d`: the 3-D elastic velocity sub-step;
+    the strains pass through."""
+    out = _elastic3d_velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, *memory, **kw)
+    return (*out[:9], exx, eyy, ezz, exy, exz, eyz, *out[9:])
 
-    return (
-        vx,
-        vz,
-        sxx,
-        szz,
-        sxz,
-        exx,
-        ezz,
-        exz,
-        m_vxx,
-        m_vxz,
-        m_vzx,
-        m_vzz,
-        m_txxx,
-        m_txxz,
-        m_tzzx,
-        m_tzzz,
-        m_txzx,
-        m_txzz,
-    )
+
+def das_mu_stress_substep_3d(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                             exx, eyy, ezz, exy, exz, eyz, *memory, dt, **kw):
+    """Second half of :func:`step_das_mu_3d`: the 3-D elastic stress sub-step
+    and the six strain integrations from the CPML-corrected velocity gradients
+    it consumed."""
+    *out, (dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
+           dvx_dz, dvz_dx, dvy_dz, dvz_dy) = _elastic3d_stress_substep(
+        vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, *memory, dt=dt,
+        return_gradients=True, **kw)
+    exx = exx + dt * dvx_dx
+    eyy = eyy + dt * dvy_dy
+    ezz = ezz + dt * dvz_dz
+    exy = exy + 0.5 * dt * (dvx_dy + dvy_dx)
+    exz = exz + 0.5 * dt * (dvx_dz + dvz_dx)
+    eyz = eyz + 0.5 * dt * (dvy_dz + dvz_dy)
+    return (*out[:9], exx, eyy, ezz, exy, exz, eyz, *out[9:])
 
 
 def step_das_mu_3d(
@@ -635,15 +638,16 @@ def step_das_mu_3d(
 
     This IS :func:`elastic3d.step` plus six strain integrations -- the two
     bodies were maintained as ~130-line literal copies, verified statement-for-
-    statement identical before being merged (with ``topo_rows=None`` the
-    elastic free-surface helper reduces by construction to the very functions
-    this copy called). ``return_gradients=True`` hands back the CPML-corrected
-    velocity gradients the stress update consumed, which are exactly what the
-    strain-rate state integrates.
+    statement identical before being merged. Composed as
+    :func:`das_mu_velocity_substep_3d`, then :func:`das_mu_stress_substep_3d`
+    (``DASMu3D.interior_substeps`` reuses the two halves); the stress half
+    hands back the CPML-corrected velocity gradients the stress update
+    consumed, which are exactly what the strain-rate state integrates.
     """
-    *state, (dvx_dx, dvy_dy, dvz_dz, dvx_dy, dvy_dx,
-             dvx_dz, dvz_dx, dvy_dz, dvz_dy) = _elastic3d_step(
+    kw = dict(dt=dt, pd=pd, pml=pml, free_surface=free_surface)
+    fields = das_mu_velocity_substep_3d(
         vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+        exx, eyy, ezz, exy, exz, eyz,
         m_vxx, m_vxy, m_vxz,
         m_vyx, m_vyy, m_vyz,
         m_vzx, m_vzy, m_vzz,
@@ -651,66 +655,8 @@ def step_das_mu_3d(
         m_sxyx, m_sxyy,
         m_sxzx, m_sxzz,
         m_syyy,
-        m_syzy, m_syzz,
-        vp, vs, rho,
-        lame_lambda, lame_mu,
-        dt, h, b, pd,
-        pml=pml,
-        free_surface=free_surface,
-        return_gradients=True,
-    )
-    (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-     m_vxx, m_vxy, m_vxz,
-     m_vyx, m_vyy, m_vyz,
-     m_vzx, m_vzy, m_vzz,
-     m_sxxx, m_szzz,
-     m_sxyx, m_sxyy,
-     m_sxzx, m_sxzz,
-     m_syyy,
-     m_syzy, m_syzz) = state
-
-    exx = exx + dt * dvx_dx
-    eyy = eyy + dt * dvy_dy
-    ezz = ezz + dt * dvz_dz
-    exy = exy + 0.5 * dt * (dvx_dy + dvy_dx)
-    exz = exz + 0.5 * dt * (dvx_dz + dvz_dx)
-    eyz = eyz + 0.5 * dt * (dvy_dz + dvz_dy)
-
-    return (
-        vx,
-        vy,
-        vz,
-        sxx,
-        syy,
-        szz,
-        sxy,
-        sxz,
-        syz,
-        exx,
-        eyy,
-        ezz,
-        exy,
-        exz,
-        eyz,
-        m_vxx,
-        m_vxy,
-        m_vxz,
-        m_vyx,
-        m_vyy,
-        m_vyz,
-        m_vzx,
-        m_vzy,
-        m_vzz,
-        m_sxxx,
-        m_szzz,
-        m_sxyx,
-        m_sxyy,
-        m_sxzx,
-        m_sxzz,
-        m_syyy,
-        m_syzy,
-        m_syzz,
-    )
+        m_syzy, m_syzz, rho=rho, **kw)
+    return das_mu_stress_substep_3d(*fields, lame_lambda=lame_lambda, lame_mu=lame_mu, **kw)
 
 
 def step_das_zhao_2d(
@@ -1233,6 +1179,7 @@ class DASMu(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_2d unpacks 8 profiles
+    supports_bs_free_surface = True  # interior_substeps keep the free-surface rows
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 2-D Mu DAS equation operator.
@@ -1274,24 +1221,23 @@ class DASMu(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu, lame_lambda + 2 * lame_mu]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    @staticmethod
+    def _moduli(models):
+        """``(vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu)`` from the raw
+        or prepared models."""
         if len(models) == 6:
-            vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = models
-        elif len(models) == 3:
+            return tuple(models)
+        if len(models) == 3:
             vp, vs, rho = models
             lame_lambda = rho * (vp**2 - 2 * vs**2)
             lame_mu = rho * vs**2
-            lame_lambda_2mu = lame_lambda + 2 * lame_mu
-        else:
-            raise ValueError(f"DASMu.func expected 3 or 6 models, got {len(models)}")
+            return vp, vs, rho, lame_lambda, lame_mu, lame_lambda + 2 * lame_mu
+        raise ValueError(f"DASMu.func expected 3 or 6 models, got {len(models)}")
+
+    def func(self, wavefields, models, dt, h, b, **kwargs):
         return step_das_mu_2d(
             *wavefields,
-            vp,
-            vs,
-            rho,
-            lame_lambda,
-            lame_mu,
-            lame_lambda_2mu,
+            *self._moduli(models),
             dt,
             h,
             b,
@@ -1300,6 +1246,31 @@ class DASMu(FirstOrderEquation):
             free_surface=getattr(self, "free_surface", False),
             **kwargs,
         )
+
+    def interior_substeps(self):
+        """The step as two reversible sub-steps, REUSING the halves
+        :func:`step_das_mu_2d` (and thus ``func``) is built from: the
+        velocities, then the stresses with the strains (both read only the new
+        velocities). Called with ``pml`` zeroed (boundary saving reconstructs
+        only the lossless interior) but the free-surface BC kept, so the eager
+        boundary-saving 'substep' driver inverts the step exactly by composing
+        the list in reverse order at ``-dt``."""
+        pd = self.pd
+        fs = bool(getattr(self, "free_surface", False))
+
+        def kw(models, dt, h):
+            _, _, rho, lam, mu, lam2mu = self._moduli(models)
+            return dict(lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
+                        dt=dt, h=h, b=None, pd=pd, pml=(0.0,) * 8,
+                        free_surface=fs, lame_lambda_2mu=lam2mu)
+
+        def sub_v(wf, models, dt, h):
+            return list(das_mu_velocity_substep_2d(*wf, **kw(models, dt, h)))
+
+        def sub_s(wf, models, dt, h):
+            return list(das_mu_stress_substep_2d(*wf, **kw(models, dt, h)))
+
+        return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
 
     @property
     def cuda_layout(self):
@@ -1385,6 +1356,7 @@ class DASMu3D(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_3d unpacks 12 profiles
+    supports_bs_free_surface = True  # interior_substeps keep the free-surface rows
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 3-D Mu DAS equation operator.
@@ -1426,22 +1398,20 @@ class DASMu3D(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    @staticmethod
+    def _moduli(models):
+        """``(vp, vs, rho, lame_lambda, lame_mu)`` from the raw or prepared models."""
         if len(models) == 5:
-            vp, vs, rho, lame_lambda, lame_mu = models
-        elif len(models) == 3:
+            return tuple(models)
+        if len(models) == 3:
             vp, vs, rho = models
-            lame_lambda = rho * (vp**2 - 2 * vs**2)
-            lame_mu = rho * vs**2
-        else:
-            raise ValueError(f"DASMu3D.func expected 3 or 5 models, got {len(models)}")
+            return vp, vs, rho, rho * (vp**2 - 2 * vs**2), rho * vs**2
+        raise ValueError(f"DASMu3D.func expected 3 or 5 models, got {len(models)}")
+
+    def func(self, wavefields, models, dt, h, b, **kwargs):
         return step_das_mu_3d(
             *wavefields,
-            vp,
-            vs,
-            rho,
-            lame_lambda,
-            lame_mu,
+            *self._moduli(models),
             dt,
             h,
             b,
@@ -1450,6 +1420,22 @@ class DASMu3D(FirstOrderEquation):
             free_surface=getattr(self, "free_surface", False),
             **kwargs,
         )
+
+    def interior_substeps(self):
+        """The step as two reversible sub-steps, REUSING the halves
+        :func:`step_das_mu_3d` (and thus ``func``) is built from, as
+        ``Elastic3D.interior_substeps`` does: ``pml`` zeroed, the free-surface
+        BC kept, composed in reverse order at ``-dt`` by the 'substep' driver."""
+        kw = dict(pd=self.pd, pml=(0.0,) * 12, free_surface=bool(getattr(self, "free_surface", False)))
+
+        def sub_v(wf, models, dt, h):
+            return list(das_mu_velocity_substep_3d(*wf, rho=self._moduli(models)[2], dt=dt, **kw))
+
+        def sub_s(wf, models, dt, h):
+            _, _, _, lam, mu = self._moduli(models)
+            return list(das_mu_stress_substep_3d(*wf, lame_lambda=lam, lame_mu=mu, dt=dt, **kw))
+
+        return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
 
     @property
     def cuda_layout(self):

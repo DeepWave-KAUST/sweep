@@ -171,51 +171,22 @@ def compute_vector_reflectivity(vp, vs, rho, h, *, order=4, eps=1e-30):
     return Rp_x, Rp_z, Rs_x, Rs_z
 
 
-def elastic_vr_step_core(
+def vr_momentum_substep(
     px, pz, sxx, szz, sxz,
     m_pxx, m_pxz, m_pzx, m_pzz,
     m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz,
     *,
-    vp, vs,
-    Rp_x, Rp_z, Rs_x, Rs_z,
-    vp_x, vp_z, vs_x, vs_z,
-    dt, h, b, pd, pml,
+    dt, pd, pml,
     free_surface=False,
 ):
-    """One leapfrog step of the Soares & Sacchi 2025 elastic vector
-    reflectivity equation on a Virieux SSG.
-
-    No post-step BC enforcement (callers handle image-method top-row
-    zeroing). Same staggered-CPML layout as :func:`elastic_step_core`
-    -- 8 profile arrays ``(az, bz, azh, bzh, ax, bx, axh, bxh)`` --
-    so the propagator's CPML setup is reused verbatim.
-
-    For terms with mismatched stagger (``V (dV) p_j`` and ``R p_j`` --
-    cell-centred model factors multiplied by ``p_j`` at its half-grid
-    stagger), we follow the same convention as standard Elastic
-    (``mu_xz * (vx_z + vz_x)`` in :func:`elastic_step_core`): naive
-    multiplication, accepting the O(h) staggered-interpolation noise
-    that S&S 2025 Fig 2 explicitly tolerates.
-    """
+    """First half of :func:`elastic_vr_step_core`: the stress derivatives
+    (and their CPML memories), then the momenta. Returns all 15 fields."""
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
     # Near-surface order reduction (matches the shared CUDA helper, which reduces
     # these same four FS z-derivatives): order-2 image stencil in the top band.
     _n_o2 = _near_surface_o2_count(top_halo, FS_NEARSURF_O2) if free_surface else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
-
-    vp2 = vp * vp
-    vs2 = vs * vs
-
-    # IMPORTANT -- update order is momentum-FIRST, then stress, matching both
-    # standard ``Elastic`` (``_elastic_step_core`` updates velocity then
-    # stress) and the CUDA ``forward.cu`` (LAUNCH_EVR_MOMENTUM then
-    # LAUNCH_EVR_STRESS). The gamma terms must consume the JUST-UPDATED
-    # momentum p^{it}, not the incoming p^{it-1}. The two sub-step orderings
-    # give the same recorded momentum (so the forward records agree either
-    # way), but they are DIFFERENT discrete operators whose model gradients
-    # differ at O(dt) -- so eager and the CUDA adjoint only agree when both
-    # use this same order.
 
     # ---- 1. Stress spatial derivatives (from incoming stress) ----
     dsxx_dx = pd.x_forward(sxx)    # sxx (i, j)          -> (i+1/2, j)   feeds px
@@ -239,6 +210,36 @@ def elastic_vr_step_core(
     # p_i = rho v_i absorbs the density, so d_t p_i = d_j sigma_ij is exact.
     px = px + dt * (dsxx_dx + dsxz_dz)
     pz = pz + dt * (dsxz_dx + dszz_dz)
+
+    return (
+        px, pz, sxx, szz, sxz,
+        m_pxx, m_pxz, m_pzx, m_pzz,
+        m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz,
+    )
+
+
+def vr_stress_substep(
+    px, pz, sxx, szz, sxz,
+    m_pxx, m_pxz, m_pzx, m_pzz,
+    m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz,
+    *,
+    vp, vs,
+    Rp_x, Rp_z, Rs_x, Rs_z,
+    vp_x, vp_z, vs_x, vs_z,
+    dt, pd, pml,
+    free_surface=False,
+):
+    """Second half of :func:`elastic_vr_step_core`: the momentum derivatives
+    (and their CPML memories), then the stresses and the free-surface rows."""
+    az, bz, azh, bzh, ax, bx, axh, bxh = pml
+    top_halo = pd.coes.shape[0]
+    # Near-surface order reduction (matches the shared CUDA helper, which reduces
+    # these same four FS z-derivatives): order-2 image stencil in the top band.
+    _n_o2 = _near_surface_o2_count(top_halo, FS_NEARSURF_O2) if free_surface else 0
+    _pd2 = _get_o2_pd(pd) if _n_o2 else None
+
+    vp2 = vp * vp
+    vs2 = vs * vs
 
     # ---- 4. Momentum spatial derivatives (from the UPDATED momentum) ----
     # Same stagger pattern as standard Elastic. Each output lives at the
@@ -299,6 +300,60 @@ def elastic_vr_step_core(
         px, pz, sxx, szz, sxz,
         m_pxx, m_pxz, m_pzx, m_pzz,
         m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz,
+    )
+
+
+def elastic_vr_step_core(
+    px, pz, sxx, szz, sxz,
+    m_pxx, m_pxz, m_pzx, m_pzz,
+    m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz,
+    *,
+    vp, vs,
+    Rp_x, Rp_z, Rs_x, Rs_z,
+    vp_x, vp_z, vs_x, vs_z,
+    dt, h, b, pd, pml,
+    free_surface=False,
+):
+    """One leapfrog step of the Soares & Sacchi 2025 elastic vector
+    reflectivity equation on a Virieux SSG.
+
+    No post-step BC enforcement (callers handle image-method top-row
+    zeroing). Same staggered-CPML layout as :func:`elastic_step_core`
+    -- 8 profile arrays ``(az, bz, azh, bzh, ax, bx, axh, bxh)`` --
+    so the propagator's CPML setup is reused verbatim.
+
+    For terms with mismatched stagger (``V (dV) p_j`` and ``R p_j`` --
+    cell-centred model factors multiplied by ``p_j`` at its half-grid
+    stagger), we follow the same convention as standard Elastic
+    (``mu_xz * (vx_z + vz_x)`` in :func:`elastic_step_core`): naive
+    multiplication, accepting the O(h) staggered-interpolation noise
+    that S&S 2025 Fig 2 explicitly tolerates.
+
+    Composed as :func:`vr_momentum_substep`, then :func:`vr_stress_substep`
+    (``ElasticVRR.interior_substeps`` reuses the two halves).
+    """
+    # IMPORTANT -- update order is momentum-FIRST, then stress, matching both
+    # standard ``Elastic`` (``_elastic_step_core`` updates velocity then
+    # stress) and the CUDA ``forward.cu`` (LAUNCH_EVR_MOMENTUM then
+    # LAUNCH_EVR_STRESS). The gamma terms must consume the JUST-UPDATED
+    # momentum p^{it}, not the incoming p^{it-1}. The two sub-step orderings
+    # give the same recorded momentum (so the forward records agree either
+    # way), but they are DIFFERENT discrete operators whose model gradients
+    # differ at O(dt) -- so eager and the CUDA adjoint only agree when both
+    # use this same order.
+
+    fields = vr_momentum_substep(
+        px, pz, sxx, szz, sxz,
+        m_pxx, m_pxz, m_pzx, m_pzz,
+        m_sxxx, m_sxxz, m_szzx, m_szzz, m_sxzx, m_sxzz,
+        dt=dt, pd=pd, pml=pml, free_surface=free_surface,
+    )
+    return vr_stress_substep(
+        *fields,
+        vp=vp, vs=vs,
+        Rp_x=Rp_x, Rp_z=Rp_z, Rs_x=Rs_x, Rs_z=Rs_z,
+        vp_x=vp_x, vp_z=vp_z, vs_x=vs_x, vs_z=vs_z,
+        dt=dt, pd=pd, pml=pml, free_surface=free_surface,
     )
 
 
@@ -383,6 +438,7 @@ class ElasticVRR(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"
+    supports_bs_free_surface = True  # interior_substeps keep the free-surface rows
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic vector-reflectivity operator.
@@ -469,6 +525,28 @@ class ElasticVRR(FirstOrderEquation):
             free_surface=free_surface,
         )
         return out
+
+    def interior_substeps(self):
+        """The leapfrog as two reversible sub-steps, REUSING the
+        :func:`vr_momentum_substep` / :func:`vr_stress_substep` that
+        :func:`elastic_vr_step_core` (and thus ``func``) is built from. Called
+        with ``pml`` zeroed (boundary saving reconstructs only the lossless
+        interior) but the free-surface BC kept, so the eager boundary-saving
+        'substep' driver inverts the step exactly by composing the list in
+        reverse order at ``-dt``."""
+        kw = dict(pd=self.pd, pml=(0.0,) * 8, free_surface=bool(getattr(self, "free_surface", False)))
+
+        def sub_p(wf, models, dt, h):
+            return list(vr_momentum_substep(*wf, dt=dt, **kw))
+
+        def sub_s(wf, models, dt, h):
+            vp, vs, Rp_x, Rp_z, Rs_x, Rs_z = models
+            vp_x, vp_z, vs_x, vs_z = self._precompute_velocity_gradients(vp, vs, h)
+            return list(vr_stress_substep(
+                *wf, vp=vp, vs=vs, Rp_x=Rp_x, Rp_z=Rp_z, Rs_x=Rs_x, Rs_z=Rs_z,
+                vp_x=vp_x, vp_z=vp_z, vs_x=vs_x, vs_z=vs_z, dt=dt, **kw))
+
+        return [sub_p, sub_s]   # forward order; reverse = reversed(...) at -dt
 
     @property
     def cuda_layout(self):
