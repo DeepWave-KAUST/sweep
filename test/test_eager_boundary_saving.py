@@ -304,6 +304,24 @@ def test_apm_topography_is_refused(name):
         prop(wavelet, src.copy(), rec.copy(), models=m)
 
 
+@pytest.mark.parametrize("name", ["ViscoAcoustic", "AcousticVTI", "AcousticTTI"])
+def test_refused_where_the_reconstruction_spoils_the_gradient(name):
+    """``supports_boundary_saving_eager = False``: reconstructing these wavefields
+    backwards in time left the gradient several percent off (ViscoAcoustic ~5%,
+    AcousticVTI 4-10%, AcousticTTI ~2%), so a boundary request raises."""
+    from sweep.equations import _registry
+    eq = _registry.get_equation(name)(spatial_order=SO, device="cuda", backend="torch")
+    shape = _shape(2)
+    prop = PropTorch(eq, impl="eager", eager_options=EagerOptions(use_compile=False), memory=BOUNDARY,
+                     shape=shape, dev="cuda", dh=DH, dt=DT, abcn=ABCN, nt=NT, B=1)
+    vals = {"vp": 2000.0, "Q": 80.0, "omega": 30.0, "epsilon": 0.1, "delta": 0.05, "theta": 0.3}
+    m = [torch.full(shape, vals.get(n, 1.0), device="cuda", requires_grad=(i == 0))
+         for i, n in enumerate(eq.models)]
+    src, rec = _geometry(2)
+    with pytest.raises(NotImplementedError, match=f"not supported for {name}"):
+        prop(torch.tensor(ricker(NT, DT), device="cuda"), src.copy(), rec.copy(), models=m)
+
+
 def test_first_order_requires_substeps():
     """1st-order boundary saving needs an interior_substeps hook (the exact
     reverse driver); there is no approximate fallback, so the path must refuse
